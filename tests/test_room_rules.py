@@ -468,11 +468,18 @@ EVERYDAY_TOOLS = ["terminal", "read_file", "write_file", "web_search", "web_extr
                   "skill_view", "conduit_location", "conduit_calendar", "tool_search", "execute_code"]
 
 
-@pytest.mark.parametrize("session_id", ["s-home", REMOTE])
-def test_talk_only_blocks_every_tool_in_a_room_turn(host, session_id):
+@pytest.mark.parametrize("session_id, room_id", [("s-home", "room-b"), (REMOTE, "room-a")])
+def test_talk_only_blocks_every_tool_in_a_room_turn(host, session_id, room_id):
+    # Ask me first (the default) keeps Tool Search open, which reaches its tool, conduit_ask_owner (N7c).
     for tool_name in EVERYDAY_TOOLS:
-        assert _blocked(_tool(session_id, tool_name)), tool_name
+        if tool_name != "tool_search":
+            assert _blocked(_tool(session_id, tool_name)), tool_name
+    assert _tool(session_id, "tool_search") is None
+    assert _tool(session_id, "conduit_ask_owner") is None
     assert "talk" in _tool(session_id, "terminal")["message"].lower()
+    _choose(host, room_id, share="nothing")
+    for tool_name in EVERYDAY_TOOLS + ["conduit_ask_owner"]:
+        assert _blocked(_tool(session_id, tool_name)), tool_name
 
 
 @pytest.mark.parametrize("session_id, room_id", [("s-home", "room-b"), (REMOTE, "room-a")])
@@ -667,8 +674,9 @@ def test_talk_with_past_chat_search_on_reaches_search_through_tool_search(host, 
     # Told that search is the one tool here, not that there are none.
     assert _tool("s-home", "terminal")["message"] == rules.TALK_SEARCH_BLOCK
     framing = _context("s-home")
-    assert rules.TOOL_LINES["talk"] not in framing and rules.TALK_SEARCH_LINE in framing
-    _choose(host, "room-b", tools="talk", search_chats=False)
+    assert rules.TOOL_LINES["talk"] not in framing and rules.TALK_SEARCH_ASK_LINE in framing
+    # Off, and not Ask me first (whose tool Tool Search also reaches): no tools at all.
+    _choose(host, "room-b", tools="talk", search_chats=False, share="nothing")
     for tool_name in ("session_search", "tool_search", "tool_call"):
         assert _blocked(_tool("s-home", tool_name)), tool_name
 
@@ -771,7 +779,7 @@ def test_room_turn_framing_says_who_is_asking_and_not_to_answer_for_others(host,
     assert "@laifu" in home and "the user in this room is your owner" in home.lower()
     assert "Answer only for yourself" in home
     # Talk only, Ask me first and no past-chat search, said so the agent doesn't try.
-    assert "without tools" in home and "check with your owner" in home and "nothing is saved" in home.lower()
+    assert rules.TALK_ASK_LINE in home and "check with your owner" in home and "nothing is saved" in home.lower()
 
 
 def test_the_framing_follows_the_owners_choices(host, notes):

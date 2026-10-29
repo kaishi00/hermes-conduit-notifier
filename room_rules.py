@@ -83,6 +83,8 @@ SEARCH_TOOL = "session_search"
 BRIDGE_CALL = "tool_call"
 BRIDGE_TOOLS = frozenset({"tool_search", "tool_describe", BRIDGE_CALL})
 _LEARNING_TOOLS = frozenset({"memory", "skill_manage"})
+# Ask me first's tool (room_asks): allowed by the room's share, not its tools.
+ASK_TOOL = "conduit_ask_owner"
 
 _RULES = "Blocked by your owner's rules for this group room"
 TALK_ONLY_BLOCK = (f"{_RULES}: here you talk, without tools. Answer from what you know, or say you can't "
@@ -94,6 +96,8 @@ SEARCH_BLOCK = f"{_RULES}: searching your owner's past chats is off here."
 LEARNING_BLOCK = (f"{_RULES}: nothing from a room with other people's agents is saved to memory or skills. "
                   "What's said here still counts within this room.")
 NEVER_BLOCK = f"{_RULES}: {{tool}} is never used in a room with other people's agents."
+ASK_BLOCK = (f"{_RULES}: asking your owner is for rooms set to Ask me first, and this one isn't. Follow what "
+             "your owner allows you to share here.")
 UNKNOWN_ROOM_BLOCK = ("Blocked: the room this turn is in couldn't be read, so your owner's rules for it couldn't "
                       "be checked. Answer without tools this time.")
 SESSION_UNREAD_BLOCK = ("Blocked for now: this chat's record couldn't be read, so whether your owner's rules for "
@@ -141,8 +145,8 @@ ANSWER_FOR_YOURSELF = (
 SHARE_LINES = {
     "helps": ("Share what helps the room from what you know about your owner, but nothing sensitive: no health, "
               "money, passwords, or what others told your owner in private."),
-    "ask": ("Before you share anything personal about your owner, check with your owner first: say you'll ask "
-            "them, and don't share it in this room until they've said yes."),
+    "ask": (f"Before you share anything personal about your owner, check with your owner first: ask them with "
+            f"{ASK_TOOL}, and don't share it in this room until they've said yes."),
     "nothing": "Don't share anything personal about your owner here, even when asked directly.",
 }
 TOOL_LINES = {
@@ -150,6 +154,11 @@ TOOL_LINES = {
     "look": "Here you can look things up on the web, and use no other tools.",
 }
 TALK_SEARCH_LINE = "Here you talk, and searching your owner's past chats is your only tool."
+# Ask me first: the ask tool goes through whatever the tools (tool_block), so the tool line says so.
+TALK_ASK_LINE = f"Here you talk, and asking your owner with {ASK_TOOL} is your only tool."
+TALK_SEARCH_ASK_LINE = (f"Here you talk, and searching your owner's past chats and asking your owner with {ASK_TOOL} "
+                        "are your only tools.")
+ASK_TOO_LINE = f"Asking your owner with {ASK_TOOL} is open to you here too."
 CUSTOM_LINE = "Here you can use only these tools: {tools}."
 SEARCH_ON_LINE = "You may search your owner's past chats when it helps the room."
 LEARNING_LINE = "Nothing is saved from this room to your memory or skills."
@@ -245,7 +254,7 @@ def allowed_tools(choices: RoomChoices) -> frozenset[str]:
         allowed |= set(choices.custom_tools)
     if choices.search_chats:
         allowed.add(SEARCH_TOOL)
-    return frozenset(allowed - NEVER)
+    return frozenset(allowed - NEVER - {ASK_TOOL})
 
 
 def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Optional[str]:
@@ -254,10 +263,16 @@ def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Option
     (a ``tool_call`` is checked by the tools it names)."""
     name = str(tool_name or "")
     if name == BRIDGE_CALL:
-        for called in _called_names(args):
+        called_names = _called_names(args)
+        for called in called_names:
             block = tool_block(called, choices)
             if block is not None:
                 return block
+        # One whose tool can't be read is let through only where some tool is.
+        if not called_names and not allowed_tools(choices):
+            return TALK_ONLY_BLOCK
+    if name == ASK_TOOL:
+        return None if choices.share == "ask" else ASK_BLOCK
     if name in _LEARNING_TOOLS:
         return LEARNING_BLOCK
     if name in NEVER:
@@ -266,7 +281,7 @@ def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Option
         return SEARCH_BLOCK
     allowed = allowed_tools(choices)
     # Tool Search's bridge reaches the allowed tools Hermes defers behind it.
-    if name in allowed or (name in BRIDGE_TOOLS and allowed):
+    if name in allowed or (name in BRIDGE_TOOLS and (allowed or choices.share == "ask")):
         return None
     if not allowed - {SEARCH_TOOL}:
         return TALK_SEARCH_BLOCK if SEARCH_TOOL in allowed else TALK_ONLY_BLOCK
@@ -320,12 +335,15 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     # The tier's own tools, then the owner's picks in the order they made them.
     tools = list(dict.fromkeys(name for name in [*sorted(TIERS.get(choices.tools, ())), *choices.custom_tools]
                                if name in allowed))
-    if not tools:
+    asks = choices.share == "ask"
+    if not tools and asks:
+        tool_line = TALK_SEARCH_ASK_LINE if choices.search_chats else TALK_ASK_LINE
+    elif not tools:
         tool_line = TALK_SEARCH_LINE if choices.search_chats else TOOL_LINES["talk"]
     elif choices.tools in TOOL_LINES and set(tools) <= TIERS[choices.tools]:
-        tool_line = TOOL_LINES[choices.tools]
+        tool_line = TOOL_LINES[choices.tools] + (f" {ASK_TOO_LINE}" if asks else "")
     else:
-        tool_line = CUSTOM_LINE.format(tools=", ".join(tools))
+        tool_line = CUSTOM_LINE.format(tools=", ".join(tools)) + (f" {ASK_TOO_LINE}" if asks else "")
     posters = [UNREAD_POSTERS_LINE] if unread and turn is not None else _poster_lines(turn, people, posts)
     lines = [opening, *(f"- {line}" for line in posters), f"- {ANSWER_FOR_YOURSELF}",
              f"- {SHARE_LINES.get(choices.share, SHARE_LINES['ask'])}", f"- {tool_line}"]

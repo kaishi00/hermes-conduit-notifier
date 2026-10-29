@@ -16,11 +16,12 @@ from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool, phone_tool,
-               present_tool, pulse, reply_sources, review_notices, room_chats, room_cleanup, room_cutoff,
+               present_tool, pulse, reply_sources, review_notices, room_asks, room_chats, room_cleanup, room_cutoff,
                room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool, room_wakeups,
                settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
+from .present_store import PresentStore
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
 
 
@@ -134,6 +135,9 @@ def register(ctx: Any) -> None:
     # The user's rooms with other people (Linked Rooms), read for them in
     # their private chats; never in a room turn.
     room_tool.register(ctx, is_child=_is_child)
+    # Ask me first: in a room with other people's agents, the agent asks its
+    # owner's phone before it shares something personal; only room turns.
+    room_asks.register(ctx, is_child=_is_child, profile=lambda: _profile)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
@@ -291,6 +295,9 @@ def _member_room_turn(session_id: str) -> bool:
 def _post_llm_call(**kwargs: Any) -> None:
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
+    # A room turn that replied read its owner's answers (room_asks); a failed one is framed with them again.
+    _quietly(room_asks.heard, lambda: PresentStore(get_hermes_home()), session_id,
+             isinstance(response, str) and bool(response.strip()))
     if _is_child(session_id):
         return
     # The Lock Screen's end waits for on_session_end too: this hook also runs
@@ -880,6 +887,8 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     owner's name that they didn't post (room_posts.py)."""
     if not session_id:
         return None
+    # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks).
+    _quietly(room_asks.begin, session_id)
     try:
         home = get_hermes_home()
     except Exception:  # noqa: BLE001
@@ -926,7 +935,15 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
             except Exception:  # noqa: BLE001 — framed without checking its owner's lines, and told so
                 unread = True
                 _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
-    return room_rules.framing(turn, choices, people, posts, unread=unread)
+    framing = room_rules.framing(turn, choices, people, posts, unread=unread)
+    if home is not None and turn.room_id:
+        try:
+            # What the owner answered the agent's asks since (room_asks), once.
+            framing += "".join(f"\n- {line}" for line in room_asks.frame(PresentStore(home), turn.room_id,
+                                                                            session_id))
+        except Exception:  # noqa: BLE001 — the answers wait for the next turn
+            _warn_room_once("asks", "conduit_push: couldn't read the answers to session %s's asks", session_id)
+    return framing
 
 
 _room_warned: set[tuple[str, str]] = set()

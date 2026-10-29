@@ -3102,7 +3102,8 @@ for rooms with none of their own:
 - **Search my past chats**: off by default; `session_search` is blocked
   unless it's on.
 - **What it may share**: what helps, ask you first (the default) or nothing
-  personal. The agent is told, every room turn, along with who's asking (in a
+  personal. With ask you first, the agent asks your phone before it shares
+  something personal (plugin 0.118+, see Ask me first below). The agent is told, every room turn, along with who's asking (in a
   room hosted elsewhere, the room's "user" is that host's owner, not you),
   that it answers only for itself, and your private note for the room. The
   agents from elsewhere are named by their handles, or as "another agent"
@@ -3376,6 +3377,10 @@ It changes only what needs it:
   out of rooms, and their digest stays the same, until you add it here.
   Conduit's own tools (`conduit`) are never in it, nor toolsets whose every
   tool rooms never allow (memory, running code, delegation, scheduled jobs).
+  Conduit's room tools (`conduit_rooms`, with Ask me first's
+  `conduit_ask_owner`) are always in it, and aren't one of the choices: the
+  room rules let each through per room (plugin 0.118+). A ceiling saved
+  before then gets them on the next setup, which counts as a change.
   If the API server was already on, for Open WebUI say, the ceiling is also
   all that other apps using it get, and the command says so. Change the
   ceiling here, not in `hermes tools`, whose save takes `no_mcp` out and so
@@ -3840,6 +3845,45 @@ after), one read back keeps its last. In a room you host, a person's message
 whose poster can't be read just then is shown as "you or someone you've
 linked with", never as yours. A call without a chat's session id is refused
 (`no_session`).
+
+## Ask me first (plugin 0.118+)
+
+In a room with other people's agents set to ask you first (What it may
+share), your agent asks your phone before it shares something personal
+about you, with the `conduit_ask_owner` tool: `question` (what's asked and by
+whom, one line of at most 80 characters, like "Laifu asks whether you're
+free on the 22nd") and `share` (exactly what it would say, at most 500).
+Conduit shows it over everything, like a confirm prompt, with the room's
+name: Share, Say instead (you write what it says) or Don't share, by tap or,
+during a call, "share it". The call waits 30 seconds for your answer. Without
+one, the agent tells the room it'll check with you and shares nothing, and
+your answer reaches it privately, once, before its next turn in that room:
+nothing goes into the room by itself, and no turn starts for it. An ask lasts
+24 hours; one nobody answered reaches it as a no.
+
+An ask is a prompt in the profile's `conduit-present.json` that carries its
+room and the room's session. Only a Conduit that says it shows a room's asks
+(feature `room-asks` on its exchange) gets one, and only its answer counts;
+with none, the tool refuses (`no_device`) and the agent says it can't share
+that. Asks are the room's, not the chat session's, so a room session
+Hermes compacted still hears its answers. At most 3 asks wait per room (40 across rooms, all the phone shows), the
+same question with the same share while one waits returns that one (another
+share is another ask: a yes covers only what you saw, and the tool's answer
+gives it back as `share`), a room asks at most 6 times an hour and all rooms
+12, budgets of their own: other people steering a room's agent never use up
+your own confirm prompts (20 an hour, 20 waiting, all shown on the phone
+however many rooms ask). A room's answer its agent hasn't heard stays until it
+does, or for its week (the newest 10 a room, 60 across rooms). An answer
+counts as heard once the room turn the tool gave it to, or a turn framed with
+it, replies, so a turn that fails gets it again. Private chats never see
+them: `conduit_present` leaves them out of `status` and `earlier_answers`.
+When no ask is kept (no such Conduit, over these limits, or a room session
+Hermes hasn't titled yet), no answer will come, so the agent says it can't
+share that rather than that it'll check. The tool works only in a room turn with other people's
+agents set to ask you first (`not_room`, `not_ask_first`, `subagent`
+otherwise); the room rules let it through whatever the room's tools are,
+Talk only included, and keep Tool Search open for it, since Hermes may put it
+behind Tool Search.
 
 ## Capabilities (plugin 0.4+)
 

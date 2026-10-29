@@ -48,6 +48,10 @@ PLATFORM = "api_server"
 NO_MCP = "no_mcp"
 # Conduit's own tools (call the user, its settings) never run in rooms.
 OWN_TOOLSET = "conduit"
+# Conduit's room-turn tools (Ask me first, room_asks): in every ceiling, as
+# no_mcp is, never a choice. The room rules let each through per room.
+ROOMS_TOOLSET = "conduit_rooms"
+_ALWAYS = frozenset({NO_MCP, ROOMS_TOOLSET})
 # Configurable in Hermes' settings, but not a toolset a turn runs.
 SETTINGS_ONLY = frozenset({"stt"})
 # What the room choices can turn on: Look things up (web, vision, X search)
@@ -389,7 +393,7 @@ def _choices(hermes: Hermes) -> list[dict]:
     for row in hermes.toolsets():
         key, label, description = (list(row) + ["", ""])[:3]
         key = str(key)
-        if key in seen or key == OWN_TOOLSET or key == NO_MCP or key in SETTINGS_ONLY or not hermes.allowed(key):
+        if key in seen or key == OWN_TOOLSET or key in _ALWAYS or key in SETTINGS_ONLY or not hermes.allowed(key):
             continue
         if _never_used(hermes, key):
             continue
@@ -412,6 +416,8 @@ def _checked_ceiling(ceiling: Any, choices: list[dict]) -> list[str]:
         if name == OWN_TOOLSET:
             raise SetupError("bad_ceiling", "Conduit's own tools (conduit) never run in rooms, so they can't be in "
                                             "the room ceiling")
+        if name == ROOMS_TOOLSET:
+            continue  # always in it
         if name not in ids:
             raise SetupError("bad_ceiling", f"{name[:64]!r} isn't a toolset rooms can use on this Hermes; the "
                                             f"choices are {', '.join(ids)}")
@@ -517,10 +523,11 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
     saved = _strings(_at(profile_config, ("platform_toolsets", PLATFORM)))
     ours = saved is not None and NO_MCP in saved
     default = [name for name in DEFAULT_CEILING if name in {choice["id"] for choice in choices}]
-    target = asked if asked is not None else (sorted(name for name in saved if name != NO_MCP) if ours else default)
+    target = asked if asked is not None else (sorted(name for name in saved if name not in _ALWAYS) if ours
+                                              else default)
     profile_writes: dict = {}
-    if saved != sorted({*target, NO_MCP}):
-        profile_writes[f"platform_toolsets.{PLATFORM}"] = sorted({*target, NO_MCP})
+    if saved != sorted({*target, *_ALWAYS}):
+        profile_writes[f"platform_toolsets.{PLATFORM}"] = sorted({*target, *_ALWAYS})
     known = _strings(_at(profile_config, ("known_plugin_toolsets", PLATFORM)))
     want = sorted({*(known or []), *map(str, hermes.plugin_toolsets()), OWN_TOOLSET})
     if known != want:
