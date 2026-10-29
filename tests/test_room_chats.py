@@ -415,4 +415,58 @@ def test_the_routes_open_and_list_room_chats(side, monkeypatch):
     assert missing.status_code == 404
     bad = client.put(f"{BASE}/rooms/chats", json={"room_id": room_id})
     assert bad.status_code == 400
+
+    routed = api.core._plugin_package_module("room_chats")
+
+    def unreadable(*args, **kwargs):
+        raise routed.room_reading.ReadingError("unreadable", "This room's log can't be read here")
+
+    monkeypatch.setattr(routed, "_reader",
+                        lambda chat_home: type("Reader", (), {"rooms": unreadable})())
+    assert client.put(f"{BASE}/rooms/chats", json={"room_id": room_id, "chat_id": "chat-b"}).status_code == 503
     assert "room-chats" in api.capabilities.ROUTE_CAPABILITIES
+
+
+def test_a_room_whose_log_cant_be_read_is_refused_as_unreadable(side, monkeypatch):
+    room_id = started(side)
+    copied(side)
+    reading = reader(side, "laifu")
+
+    def unreadable(*args, **kwargs):
+        raise chats_module.room_reading.ReadingError("unreadable", "This room's log can't be read here")
+
+    monkeypatch.setattr(reading, "read", unreadable)
+    with pytest.raises(chats_module.ChatsError) as error:
+        chats_module.open_chat(home(side, "laifu"), room_id, "chat-a", reader=reading)
+    assert error.value.code == "unreadable"
+
+
+def test_a_broken_chats_file_is_started_over(side):
+    room_id = started(side)
+    seq = say(side, room_id, "Hi")
+    copied(side)
+    (home(side, "laifu") / chats_module.FILE_NAME).write_text("{not json", encoding="utf-8")
+
+    assert store(side, "laifu").view() == {"chats": []}
+    shown = chats_module.open_chat(home(side, "laifu"), room_id, "chat-a", reader=reader(side, "laifu"))
+    assert shown == {"room_id": room_id, "chat_id": "chat-a", "notes_seq": seq}
+
+
+def test_a_new_chat_for_a_room_doesnt_wait_out_the_old_ones_refusal(side):
+    room_id = started(side)
+    listening(side, room_id)
+    say(side, room_id, "The 22nd works.")
+    copied(side)
+    store(side, "laifu").set(room_id, "chat-a")
+    side.clock.now += chats_module.QUIET_S + 60
+    sender = Sender()
+    sender.ok = False
+    notes(side, sender).pass_once()
+    assert store(side, "laifu").tried_at(room_id) is not None
+
+    store(side, "laifu").set(room_id, "chat-b")
+    sender.ok = True
+    side.clock.now += chats_module.LOOK_S
+    notes(side, sender).pass_once()
+
+    assert [chat for chat, _, _ in sender.sent] == ["chat-a", "chat-b"]

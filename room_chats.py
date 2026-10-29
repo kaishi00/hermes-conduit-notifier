@@ -91,7 +91,12 @@ class Store:
         return next((room_id for room_id, kept in self._load()["chats"].items() if kept["chat_id"] == chat_id), None)
 
     def view(self) -> dict[str, Any]:
-        return {"chats": [_shown(room_id, kept) for room_id, kept in sorted(self._load()["chats"].items())]}
+        """The chats; none while a hand edit has broken the file, which the next write starts over."""
+        try:
+            chats = self._load()["chats"]
+        except (ValueError, RecursionError):
+            chats = {}
+        return {"chats": [_shown(room_id, kept) for room_id, kept in sorted(chats.items())]}
 
     def set(self, room_id: Any, chat_id: Any, *, notes_from: int = 0) -> dict[str, Any]:
         """The room's chat is ``chat_id`` from now on; the notes it had go on with it, and a room new here has its
@@ -102,6 +107,8 @@ class Store:
             raise ChatsError("chat_id isn't a chat's id")
         with self._locked() as state:
             kept = state["chats"].get(room_id) or {"notes_seq": max(0, notes_from), "tried_at": None}
+            if kept.get("chat_id") != chat_id:
+                kept["tried_at"] = None  # the old chat's refusal isn't the new one's
             kept["chat_id"] = chat_id
             state["chats"][room_id] = kept
             if len(state["chats"]) > MAX_CHATS:
@@ -195,18 +202,18 @@ def open_chat(home: Any, room_id: Any, chat_id: Any, *, reader: Optional[room_re
     reader = reader or _reader(home)
     if not isinstance(room_id, str) or not _ROOM_ID.fullmatch(room_id):
         raise ChatsError("room_id isn't a room's id")
-    try:
-        known = any(room["room_id"] == room_id for room in reader.rooms())
-    except room_reading.ReadingError as exc:
-        raise ChatsError(f"The rooms can't be read here ({exc.code})", "unreadable") from None
-    if not known:
-        raise ChatsError("This Hermes has no room with other people by that id", "no_room")
     store = Store(home)
-    notes_from = 0
-    if store.get(room_id) is None:
-        last = reader.last_message(room_id)
-        notes_from = 0 if last is None else last[0]
-    return store.set(room_id, chat_id, notes_from=notes_from)
+    try:
+        if not any(room["room_id"] == room_id for room in reader.rooms()):
+            raise ChatsError("This Hermes has no room with other people by that id", "no_room")
+        try:
+            kept = store.get(room_id)
+        except (ValueError, RecursionError):
+            kept = None  # a hand edit broke the file: the write starts it over
+        last = reader.last_message(room_id) if kept is None else None
+    except room_reading.ReadingError as exc:
+        raise ChatsError(f"The room can't be read here ({exc.code})", "unreadable") from None
+    return store.set(room_id, chat_id, notes_from=0 if last is None else last[0])
 
 
 class Notes:

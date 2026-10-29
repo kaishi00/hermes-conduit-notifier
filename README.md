@@ -3780,7 +3780,8 @@ it and tells this Hermes which room it's for (plugin 0.117+, capability
   `{"ok": true, "chat": {"room_id", "chat_id", "notes_seq"}}`. A room new
   to the profile's chats gets notes on what comes after its newest message
   (`notes_seq`); one it had keeps its notes where they were. Errors: 400
-  for a bad id or body, 404 for a room this Hermes doesn't have.
+  for a bad id or body, 404 for a room this Hermes doesn't have, 503 for
+  one whose log can't be read here.
 - `GET /rooms/chats`: `{"ok": true, "chats": [...]}`, each as above.
 
 A chat deleted in Hermes is forgotten when its notes come due. Each
