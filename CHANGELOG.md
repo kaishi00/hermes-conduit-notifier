@@ -20,7 +20,8 @@ checks it). The format is fixed, because Conduit reads it:
   summaries (a /btw) and the self-improvement review each sent a
   notification as if the chat had replied, with text such as
   {"replies":[...]}, and moved the chat's Lock Screen progress. Only the
-  chat's own replies notify now.
+  chat's own replies notify now. Like a subagent, they can't use Conduit's
+  tools either (notifications, calls, phone, location and the rest).
 
 ## 0.118.0 (2026-10-29)
 

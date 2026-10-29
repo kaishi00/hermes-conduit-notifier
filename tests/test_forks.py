@@ -206,3 +206,41 @@ def test_a_forks_approval_sends_nothing(hermes, marks, monkeypatch):
     _fork_run(hermes, lambda: plugin._pre_approval_request(session_id="s", session_key="s", turn_id="f",
                                                            description="rm -rf build", command="rm -rf build"))
     assert sent == []
+
+
+def test_a_fork_started_before_a_pulse_attempt_is_not_held(hermes, marks, monkeypatch):
+    # The rule for the chat's own turns (pulse._held_home_turn): only a turn that started after the attempt is held.
+    monkeypatch.setattr(plugin.pulse, "_in_flight_here", lambda session_id: [10.0**10])
+    monkeypatch.setattr(plugin, "_room_framing", lambda *args: None)
+    held = []
+
+    def hooks():
+        plugin._pre_llm_call(session_id="home", turn_id="f-early", user_message="Side question: …")
+        held.append(plugin.pulse._held_home_turn("home", "f-early"))
+        held.append(plugin.pulse._held_home_turn("home", "f-unnoted"))
+        plugin._on_session_end(session_id="home", turn_id="f-early", completed=True, failed=False, interrupted=False)
+
+    _fork_run(hermes, hooks)
+    assert held == [False, True]
+    assert ("home", "f-early") not in plugin.pulse._started, "its end forgets when it started"
+
+
+def test_a_fork_cant_use_conduits_tools(hermes, marks):
+    results = []
+    _fork_run(hermes, lambda: results.append(plugin.notify_tool._handle(
+        {"title": "Done", "body": "Your build passed."}, "s", plugin._is_child)))
+    assert results[0]["error"] == "subagent"
+    assert plugin.notify_tool._handle({"title": "Done", "body": "Your build passed."}, "", plugin._is_child)[
+        "error"] == "no_session", "outside the fork, the chat's own turn isn't refused as a subagent"
+
+
+def test_a_declined_call_note_waits_for_the_chats_next_turn(hermes, marks, tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin.calls, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "_room_framing", lambda *args: None)
+    plugin.calls._store(tmp_path).record_outcome("a1b2c3d4e5f6a1b2c3d4e5f6", ["s"], "declined", age_s=0)
+    contexts = []
+    _fork_run(hermes, lambda: contexts.append(plugin._pre_llm_call(session_id="s", turn_id="f",
+                                                                  user_message="Side question: …")))
+    assert "declined" not in str(contexts[0])
+    turn = plugin._pre_llm_call(session_id="s", turn_id="t", user_message="hi")
+    assert turn["context"].startswith("[Conduit: the user declined the phone call")

@@ -541,6 +541,10 @@ def _on_session_end(**kwargs: Any) -> None:
     # any turn with text, a failed one too): the one place a watched job's
     # failure or stop shows up, and where a held reply goes out.
     session_id = _text(kwargs.get("session_id"))
+    if forks.inside():
+        # Only when it started is forgotten, as for any turn's end (pre_llm_call).
+        _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
+        return
     if _is_child(session_id):
         return
     _end_parent_turn(session_id)
@@ -791,6 +795,10 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)
+    if forks.inside():
+        # Pulse holds a fork of its home chat as it holds the chat's turns:
+        # only one that started after its attempt (pulse._held_home_turn).
+        _quietly(pulse.note_started, session_id, kwargs.get("turn_id"))
     pulse_note = None if child else _pulse_note(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
     if pulse_note:
         # Pulse's own turn: no Lock Screen progress, and only its note.

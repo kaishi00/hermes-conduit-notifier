@@ -59,6 +59,7 @@ def _marked(method: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def _mark(fork: Any) -> None:
+    marked = False
     for name in MARKED:
         method = getattr(fork, name, None)
         if not callable(method):
@@ -68,6 +69,10 @@ def _mark(fork: Any) -> None:
         except Exception:  # noqa: BLE001 - the fork runs unmarked, as before
             logger.warning("conduit_push: couldn't mark a chat's fork; its answer may reach the phone", exc_info=True)
             return
+        marked = True
+    if not marked:
+        logger.warning("conduit_push: Hermes built a chat's fork the plugin doesn't know (%s), so it runs unmarked "
+                       "and its answer may reach the phone", type(fork).__name__)
 
 
 def _build(original: Callable[..., Any]) -> Callable[..., Any]:
@@ -100,7 +105,9 @@ def install() -> bool:
         while callable(own) and getattr(own, _GUARD_FLAG, False):
             own = getattr(own, "__wrapped__", None)
         if not callable(own):
-            logger.debug("conduit_push: this Hermes builds no chat forks")
+            # A Hermes that forks under another name would push forks again.
+            logger.warning("conduit_push: Hermes' background review has no build_cache_parity_fork, so a fork of a "
+                           "chat it builds otherwise may send pushes as the chat")
             return False
         wrapper = _build(own)
         background_review.build_cache_parity_fork = wrapper

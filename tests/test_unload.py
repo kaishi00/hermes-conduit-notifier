@@ -316,3 +316,24 @@ def test_a_hermes_without_on_unload_still_loads_the_plugin(monkeypatch, tmp_path
     ctx = _ctx([])
     del ctx.on_unload
     plugin.register(ctx)
+
+
+@pytest.fixture
+def fork_builder(monkeypatch):
+    """Hermes' fork builder, as far as the plugin's mark touches it."""
+    background_review = types.ModuleType("agent.background_review")
+    background_review.build_cache_parity_fork = lambda agent, task_cfg=None, **kwargs: (types.SimpleNamespace(), {}, False)
+    agent = types.ModuleType("agent")
+    agent.__path__ = []
+    agent.background_review = background_review
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.background_review", background_review)
+    return background_review
+
+
+def test_the_fork_mark_comes_on_and_off_with_the_plugin(fork_builder, unloaded_plugin):
+    own = fork_builder.build_cache_parity_fork.__wrapped__
+
+    unloaded_plugin()
+
+    assert fork_builder.build_cache_parity_fork is own
