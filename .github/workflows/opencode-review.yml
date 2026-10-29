@@ -1,7 +1,7 @@
 name: opencode-review
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    types: [opened, synchronize, reopened, labeled]
 concurrency:
   # Adding run-review to a fork's PR shares the PR's group with its pushes (a
   # later push supersedes that review and is reviewed itself); any other label,
