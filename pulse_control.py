@@ -684,7 +684,13 @@ def bring_up(pulse_store: Any, candidate_id: Any, home: Optional[Path] = None,
     card = pulse_store.card(card_id) if card_id is not None else None
     if card is None:
         raise Refused("invalid", field="id")
-    return pulse_learning.card_entry(card, pulse_store.done_marks([card["id"]]).get(card["id"]))
+    entry = pulse_learning.card_entry(card, pulse_store.done_marks([card["id"]]).get(card["id"]))
+    # As the feed lists it: a card from a Kanban task's worker names the task.
+    task = (pulse_followup.worker_tasks(Path(home), [card]) if home is not None else {}).get(
+        (card.get("profile") or "", card.get("chat_id") or ""))
+    if task is not None:
+        entry["kanban_task"] = task
+    return entry
 
 
 def undo(pulse_store: Any, lesson_id: Any, now: Optional[float] = None) -> bool:
