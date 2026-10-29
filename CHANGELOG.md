@@ -29,6 +29,13 @@ checks it). The format is fixed, because Conduit reads it:
   listens will leave you notes once the room goes quiet or ends. It starts
   working with the Conduit update that opens these chats.
 
+## 0.115.4 (2026-10-29)
+
+### Fixes
+- Finding a chat on an Apple Watch call could pick a tool integration's or a
+  one-shot run's session, which aren't chats. It now skips them, as the
+  iPhone does.
+
 ## 0.115.3 (2026-10-28)
 
 ### Fixes
