@@ -310,6 +310,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
                     or (_reminder_named(follows.reminders, text, entry.get("why")) if source == "reminders" else None))
         if reminder is not None and str(reminder.get("id") or ""):
             ref, source = f"{REMINDER}{_clip(str(reminder['id']), 200)}", "reminders"
+            on = _phone_due(reminder.get("due"), zone)
     if not ref and kind != report.NEXT:
         if follows is not None:
             events, upcoming = follows.events, follows.upcoming
@@ -323,7 +324,8 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
         if event is not None:
             ref = event_ref(event)
             on = _due(str(event.get("start") or "")[:10], zone)
-    due = on if ref.startswith(EVENT) else _due(entry.get("due"), zone)  # the entry's day, as its ref says
+    # An entry's day, as its ref says; a reminder's due as the phone has it.
+    due = on if ref.startswith(EVENT) or on is not None else _due(entry.get("due"), zone)
     row = {"origin": MODEL, "item_id": None, "kind": kind if kind in report.LIST_KINDS else "other",
            "profile": profile, "chat_id": chat_id, "source": source,
            "area": _choice(entry.get("area"), AREAS), "due_at": due,
@@ -419,6 +421,19 @@ def _after(value: Any, follows: Optional[report.Gathered]) -> Optional[tuple[str
 
 
 _DUE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?")
+
+
+def _phone_due(value: Any, zone: Optional[tzinfo]) -> Optional[float]:
+    """When a phone reminder is due, from its "due" as the sync keeps it
+    (an ISO time with its offset, or a day, due at its end); None for none."""
+    text = str(value or "").strip()
+    if len(text) <= 10:
+        return _due(text, zone)
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=zone or timezone.utc)).timestamp()
 
 
 def _due(value: Any, zone: Optional[tzinfo]) -> Optional[float]:

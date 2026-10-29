@@ -2877,33 +2877,40 @@ keeps it.
 
 ## A phone reminder or calendar entry comes up once (plugin 0.106.1+, calendar 0.120.2+)
 
-From plugin 0.120.2, while a card is open (on the Pulse screen, waiting
-for the morning brief, a place or a shop, or resting with Not now), the
-report and the look ahead bring up nothing else about the same thing: the
-same remembered item, phone reminder or calendar entry. Only on the day
-it's due may one more card come, once, so a deadline can't slip by behind
-an earlier card. Marking it done, putting it away or rating it not useful
-closes the card; then the rules below apply.
+Pulse brings each thing up once, and a card that's still open says it
+for as long as it's open. From plugin 0.120.2:
 
-The candidate list gives each of the phone's open reminders a key (`r1`),
-and a card about one names it. One reminder gets one card, however often
-you move it: no other card about it for a week (but once on its due day),
-and none at all, while it
-stays open, once you put its card away for good or rated it not useful
-(Not now until later lets it come back after the week). Before, moving a reminder back each morning counted as news, and
-each move could bring another card.
+- **While a card is open**, nothing else comes up about the same
+  remembered item, phone reminder or calendar entry. Open means on the
+  Pulse screen, waiting for the morning brief, a place or a shop, or
+  resting with Not now.
+- **On the day it's due** one more card may come, once: in the 24
+  hours before its due time (for a date, its whole due day), unless
+  a card about it already came in that day. A deadline can't slip by
+  behind an earlier card. A reminder's due time is the phone's, a
+  calendar entry's is its own day.
+- **Once its card is done**, a reminder or calendar entry rests for a
+  week (Not now until later lets it come back after the week). A
+  remembered item comes back as before.
+- **Put away for good or rated not useful**, a reminder or calendar entry
+  stays away while it's open.
 
-From plugin 0.120.2 a calendar entry is the same. The candidate list and
-the look ahead key the entries they list (`v1`), and a card about one names
-it, or names its title (every word of it, two or more) among the entries in
-the next two weeks, on the day the card says it's due or, with no day, when
-the title is at least half of what it says. Declined entries aren't matched.
-One entry, one occurrence of a repeating one, gets one card, and two cards
-about it in one run make one: none while its card is open, none again for a week once it's done (but
-once on its day),
-and none once you put its card away. Before, a birthday on the
-calendar could come up on several days as it got closer, and again from
-the report when the look ahead held it for a shop.
+How Pulse knows what a card is about:
+
+- **Phone reminders** (plugin 0.106.1+): the candidate list gives each
+  open reminder a key (`r1`), and a card about one names it. Before,
+  moving a reminder back each morning counted as news, and each move
+  could bring another card.
+- **Calendar entries**: the candidate list and the look ahead key the
+  entries they list (`v1`), and a card about one names it. One that
+  doesn't is matched by its title (every word of it, two or more) among
+  the entries in the next two weeks, on the day the card says it's due
+  or, with no day, when the title is at least half of what it says.
+  Declined entries aren't matched. Each occurrence of a repeating entry
+  is its own. Before, a birthday on the calendar could come up on several
+  days as it got closer, and again from the report when the look ahead
+  held it for a shop.
+- **In one run**, two cards about the same reminder or entry make one.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
 

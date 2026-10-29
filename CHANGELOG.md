@@ -20,8 +20,8 @@ checks it). The format is fixed, because Conduit reads it:
   your Pulse screen, or still waiting for the morning brief, a place or a
   shop: a birthday on your calendar on several days as it got closer, or
   something it remembers a day after the brief mentioned it. While a card
-  is open, nothing else about the same thing comes up, except once on the
-  day it's due. A calendar entry also gets one card as a phone reminder
+  is open, nothing else about the same thing comes up, except once in the
+  last 24 hours before it's due (for a date, its whole due day). A calendar entry also gets one card as a phone reminder
   does: once its card is done, none again for a week, and none once you
   put it away.
 

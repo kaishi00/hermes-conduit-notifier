@@ -190,6 +190,8 @@ class Looked:
     spots: bool = False
     # The calendar entries it lists, by key (v1...), which an "ahead" entry may name.
     events: dict[str, dict] = field(default_factory=dict)
+    # Every calendar entry it read, listed or not, which an unkeyed one may name by its title.
+    upcoming: list[dict] = field(default_factory=list)
 
 
 def context(pulse_store: store.PulseStore, home: Path, *, zone: tzinfo, now: float,
@@ -210,7 +212,8 @@ def context(pulse_store: store.PulseStore, home: Path, *, zone: tzinfo, now: flo
     deadlines = ("## Deadlines in the next two weeks, from what the phone logged\n" + "\n".join(due_by)) \
         if due_by else ""
     events: dict[str, dict] = {}
-    phone, phoned = calendar_section(home, zone, now, events)
+    upcoming: list[dict] = []
+    phone, phoned = calendar_section(home, zone, now, events, upcoming)
     listed, shown = report.remembered_lines(_remembered(pulse_store, zone, now), zone)
     started = datetime.fromtimestamp(now, zone)
     saved = held_places(pulse_store, home, now)
@@ -222,7 +225,7 @@ def context(pulse_store: store.PulseStore, home: Path, *, zone: tzinfo, now: flo
     return Looked(text="\n\n".join(section for section in sections if section), dates=keyed, due=list(due_now),
                   items={item["id"]: item for item in shown},
                   ahead=bool(coming or phoned or any(item["due_at"] is not None for item in shown)), places=saved,
-                  spots=spots.reads(pulse_store, now, home), events=events)
+                  spots=spots.reads(pulse_store, now, home), events=events, upcoming=upcoming)
 
 
 def held_places(pulse_store: store.PulseStore, home: Path, now: float) -> list[dict]:
@@ -255,12 +258,14 @@ def _date_line(key: str, entry: pulse_dates.Coming, due_now: bool, zone: tzinfo)
     return line + (f" Bring it up today: {pulse_dates.STAGE_WORDS[entry.stage]}." if due_now else "")
 
 
-def calendar_section(home: Path, zone: tzinfo, now: float,
-                     events: Optional[dict[str, dict]] = None) -> tuple[str, bool]:
+def calendar_section(home: Path, zone: tzinfo, now: float, events: Optional[dict[str, dict]] = None,
+                     upcoming: Optional[list[dict]] = None) -> tuple[str, bool]:
     """The phone's calendar for the next DAYS days, each entry with its
     day, and the open reminders due in them; and whether either has
     anything. Empty when Conduit shares neither. With ``events``, each entry
-    listed gets a key ("v1"), and ``events`` maps it to the entry."""
+    listed gets a key ("v1"), and ``events`` maps it to the entry; with
+    ``upcoming``, every entry in those days goes in it, listed or past the
+    budget, for an unkeyed pick to be matched by its title."""
     try:
         from .phone_store import PhoneStore
     except Exception:  # noqa: BLE001 — no phone store in this build
@@ -276,15 +281,19 @@ def calendar_section(home: Path, zone: tzinfo, now: float,
             if opened is not None:
                 db, device = opened
                 found, more = phone.events(db, device["id"], int(now), int(_day_end(last, zone)), limit=MAX_EVENTS)
-                lines, used = [], 0
+                lines, used, full = [], 0, False
                 for event in found:
                     if event.get("status") == "canceled" or event.get("my_status") == "declined":
                         continue
+                    if upcoming is not None and event.get("id"):
+                        upcoming.append(event)
+                    if full:
+                        continue  # past the budget: matched by its title only
                     key = f"v{len(events) + 1}" if events is not None and event.get("id") else ""
                     line = _event_line(event, key)
                     if used + len(line) > CALENDAR_BUDGET:
-                        more = True
-                        break
+                        more = full = True
+                        continue
                     if key and events is not None:
                         events[key] = event
                     lines.append(line)
@@ -390,7 +399,7 @@ def parse(reply: Any, looked: Looked, *, zone: tzinfo) -> list[dict]:
             items.add(item["id"])
             row: Optional[dict] = candidates.remembered_row(item, entry)
         else:
-            row = candidates.found_row(entry, {}, zone, events=looked.events)
+            row = candidates.found_row(entry, {}, zone, events=looked.events, upcoming=looked.upcoming)
         if row is not None:
             others.append(_held(row, entry, looked))
     return rows + others[:MAX_AHEAD]

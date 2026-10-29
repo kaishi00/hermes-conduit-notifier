@@ -5,6 +5,7 @@ calendar, the look ahead's on the Tuesday and the Thursday and the report's
 of the one held for a card shop)."""
 
 import time
+from datetime import datetime
 
 import pytest
 
@@ -88,6 +89,35 @@ def test_one_with_no_key_is_matched_by_the_title_of_an_entry_in_the_next_two_wee
 def test_a_keyed_entry_is_due_on_its_own_day_whatever_day_the_model_says():
     row = candidates.found_row({**FOUND, "event": "v1", "due": "2026-11-08"}, {}, follows=follows({"v1": KWAN}))
     assert row["ref"] == REF and row["due_at"] == candidates._due("2026-11-06", UTC)
+
+
+@pytest.mark.parametrize("due, said, at", [
+    ("2026-11-06T09:00:00+01:00", "", "2026-11-06T08:00:00+00:00"),  # its own time, whatever the model says
+    ("2026-11-06T09:00:00+01:00", "2026-11-09", "2026-11-06T08:00:00+00:00"),
+    ("2026-11-06", "", "2026-11-06T23:59:00+00:00"),  # a day: due at its end
+    ("", "2026-11-09", "2026-11-09T23:59:00+00:00"),  # none on the phone: the model's
+    ("", "", None),
+])
+def test_a_reminder_is_due_when_the_phone_says(due, said, at):
+    gathered_ = report.Gathered("x", "y", [], [], {}, UTC, {}, {},
+                                {"r1": {"id": "r_lock", "title": "Cipher lock", "due": due}})
+    row = candidates.found_row({**FOUND, "reminder": "r1", "due": said}, {}, UTC, follows=gathered_)
+    assert row["ref"] == "reminder:r_lock"
+    assert row["due_at"] == (None if at is None else datetime.fromisoformat(at).timestamp())
+
+
+def test_the_look_ahead_matches_titles_past_its_calendar_budget(live, monkeypatch):
+    looking(live)
+    many = [_event(f"e_{n}", title=f"Planning block number {n}", all_day=False, start=f"2026-10-2{n % 8}T10:00:00+01:00",
+                   end=f"2026-10-2{n % 8}T11:00:00+01:00", location=None, lat=None, lon=None, notes=None, url=None,
+                   attendees=[], availability="busy") for n in range(8)]
+    picked(live.home, events=[*many, BIRTHDAY])
+    monkeypatch.setattr(ahead, "CALENDAR_BUDGET", 60)
+    model = Model({"dates": [], "ahead": [{**SAID, "line": "Kwan Cheung Ho's birthday is Saturday 24 October."}]})
+    look(live, at(14, 6, 30), model)
+    assert "Kwan" not in model.asked[0][1].split("## Calendar")[1].split("##")[0]  # not listed
+    [row] = last_run(live)
+    assert row["ref"] == "event:e_kwan:2026-10-24"
 
 
 def test_a_title_match_keeps_the_source_the_model_gave():
