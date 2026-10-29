@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.115.4 (2026-10-29)
+
+### Fixes
+- Finding a chat on an Apple Watch call could pick a tool integration's or a
+  one-shot run's session, which aren't chats. It now skips them, as the
+  iPhone does.
+
 ## 0.115.3 (2026-10-28)
 
 ### Fixes

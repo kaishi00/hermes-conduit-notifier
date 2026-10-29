@@ -100,7 +100,7 @@ def test_find_chat_numbers_matches_and_retries_word_by_word():
     assert [q for q, _, _ in routes.queries] == ["home GPU", "home", "GPU"]
     assert {limit for _, limit, _ in routes.queries} == {5}
     assert {profile for _, _, profile in routes.queries} == {"work"}, "the grant's own profile"
-    assert routes.scopes == [{"exclude_sources": "kanban"}] * 3, "Kanban workers aren't chats (VoiceChatFinder.path)"
+    assert routes.scopes == [{"exclude_sources": "kanban,oneshot,tool"}] * 3, "Kanban workers, tool and one-shot runs aren't chats (VoiceChatFinder.path)"
     nothing = api.watch_tools.run_watch_find_chat(grant, {"query": "printer"}, routes=routes)
     assert nothing == {"ok": True, "count": 0, "chats": ""}
     assert grant.chat_matches == [], "a search that found nothing leaves no older list to read"
