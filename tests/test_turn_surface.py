@@ -239,9 +239,9 @@ def test_a_bad_report_is_refused(gateway, client):
 
 
 def test_the_plugins_watch_turns_name_the_watch(gateway):
-    jobs = api._WatchJobTransport(jobs=None)
+    jobs = api.watch_jobs._WatchJobTransport(jobs=None)
     assert gateway.turn(jobs) == surfaces.line("watch", "spoken")
-    chat = api._WatchChatTransport(chat=None)
+    chat = api.watch_local_live._WatchChatTransport(chat=None)
     assert gateway.turn(chat) == surfaces.line("watch", "spoken")
 
 

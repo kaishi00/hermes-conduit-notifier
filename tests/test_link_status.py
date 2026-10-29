@@ -54,8 +54,8 @@ def fresh(monkeypatch, tmp_path):
         module._written.clear()
         module._last_push_ok.clear()
     # The dashboard's own copy of link_status.py, loaded afresh per test.
-    monkeypatch.setattr(api, "_link_status_module", None)
-    api._link_app_noted.clear()
+    monkeypatch.setattr(api.link_status, "_link_status_module", None)
+    api.link_status._link_app_noted.clear()
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
 
 
@@ -163,12 +163,12 @@ def test_a_broken_record_never_fails_a_delivery(monkeypatch, tmp_path):
 
 @pytest.fixture()
 def route(monkeypatch, tmp_path):
-    hook = api._DesktopViewHook(api._DesktopViewStore(flush_delay=3600.0))
+    hook = api.desktop_views._DesktopViewHook(api.desktop_views._DesktopViewStore(flush_delay=3600.0))
     monkeypatch.setattr(hook, "ensure_started", lambda: None)
-    monkeypatch.setattr(api, "_desktop_view_hook", hook)
+    monkeypatch.setattr(api.desktop_views, "_desktop_view_hook", hook)
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     pairing = tmp_path / "conduit-push.json"
-    monkeypatch.setattr(api, "_pairing_state_path", lambda: pairing)
+    monkeypatch.setattr(api.core, "_pairing_state_path", lambda: pairing)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     http = TestClient(app)
@@ -205,17 +205,17 @@ def test_a_browser_request_and_the_card_itself_dont_count(route):
 
 
 def test_sightings_stay_bounded_whatever_profiles_callers_send(monkeypatch):
-    monkeypatch.setattr(api, "LIMITER_MAX_KEYS", 3)
-    note = lambda profile: api._note_app_request(types.SimpleNamespace(
+    monkeypatch.setattr(api.core, "LIMITER_MAX_KEYS", 3)
+    note = lambda profile: api.link_status._note_app_request(types.SimpleNamespace(
         url=types.SimpleNamespace(path=f"{BASE}/sessions/desktop-views"),
         headers={"user-agent": CONDUIT}, query_params={"profile": profile}))
     for profile in ("a", "b", "c", "d"):
         note(profile)
-    assert len(api._link_app_noted) == 3 and api._limiter_key("d") not in api._link_app_noted
+    assert len(api.link_status._link_app_noted) == 3 and api.core._limiter_key("d") not in api.link_status._link_app_noted
     # A sighting past the window makes room.
-    api._link_app_noted[api._limiter_key("a")] -= api.LINK_APP_RECENT_S + 1
+    api.link_status._link_app_noted[api.core._limiter_key("a")] -= api.link_status.LINK_APP_RECENT_S + 1
     note("d")
-    assert api._limiter_key("d") in api._link_app_noted and api._limiter_key("a") not in api._link_app_noted
+    assert api.core._limiter_key("d") in api.link_status._link_app_noted and api.core._limiter_key("a") not in api.link_status._link_app_noted
 
 
 def test_an_old_sighting_reads_as_idle(route, tmp_path):

@@ -38,10 +38,10 @@ def hermes_scope(monkeypatch):
 
 def test_a_full_limiter_turns_new_keys_away():
     clock = [0.0]
-    limiter = api._MintLimiter(5, 60, clock=lambda: clock[0], max_keys=2)
+    limiter = api.core._MintLimiter(5, 60, clock=lambda: clock[0], max_keys=2)
     limiter.acquire("coder")
     limiter.acquire("work")
-    with pytest.raises(api.TokenError) as refused:
+    with pytest.raises(api.core.TokenError) as refused:
         limiter.acquire("third")
     assert refused.value.status == 429
     # Known keys keep their budget, and the dashboard's own profile always fits.
@@ -54,20 +54,21 @@ def test_a_full_limiter_turns_new_keys_away():
     assert set(limiter._mints) == {"third"}
 
 
-@pytest.mark.parametrize("method, path, limiter", [
-    ("put", "/conduit-settings", "_conduit_settings_limiter"),
-    ("get", "/cron/notifications", "_cron_limiter"),
-    ("get", "/calls", "_calls_limiter"),
-    ("post", "/health/key", "_health_key_limiter"),
-    ("post", "/phone/key", "_phone_key_limiter"),
-    ("post", "/location/key", "_location_key_limiter"),
-    ("get", "/voice-tools", "_voice_tools_limiter"),
-    ("post", "/e2e", "_e2e_limiter"),
-    ("post", "/e2e/rotate", "_e2e_limiter"),
+@pytest.mark.parametrize("method, path, module, limiter", [
+    ("put", "/conduit-settings", "settings", "_conduit_settings_limiter"),
+    ("get", "/cron/notifications", "notifications", "_cron_limiter"),
+    ("get", "/calls", "hermes_calls", "_calls_limiter"),
+    ("post", "/health/key", "phone_data", "_health_key_limiter"),
+    ("post", "/phone/key", "phone_data", "_phone_key_limiter"),
+    ("post", "/location/key", "phone_data", "_location_key_limiter"),
+    ("get", "/voice-tools", "phone_data", "_voice_tools_limiter"),
+    ("post", "/e2e", "pairing", "_e2e_limiter"),
+    ("post", "/e2e/rotate", "pairing", "_e2e_limiter"),
 ])
-def test_an_unknown_profile_gets_no_rate_limit_bucket(client, hermes_scope, monkeypatch, method, path, limiter):
-    fresh = api._MintLimiter(1000, 60)
-    monkeypatch.setattr(api, limiter, fresh)
+def test_an_unknown_profile_gets_no_rate_limit_bucket(client, hermes_scope, monkeypatch, method, path, module,
+                                                      limiter):
+    fresh = api.core._MintLimiter(1000, 60)
+    monkeypatch.setattr(getattr(api, module), limiter, fresh)
     for n in range(5):
         response = getattr(client, method)(f"{BASE}{path}?profile=ghost{n}", **({} if method == "get" else {"json": {}}))
         assert response.status_code == 404, response.text
@@ -90,11 +91,11 @@ def test_a_hung_gpt_live_status_never_wedges_later_checks(client, hermes_scope, 
             release.wait(10)
         return {"available": True}
 
-    monkeypatch.setattr(api, "gpt_live_status", status)
+    monkeypatch.setattr(api.gpt_live, "gpt_live_status", status)
     # Long enough that each read is running (holding its slot) when it times out.
-    monkeypatch.setattr(api, "GPT_LIVE_REQUEST_TIMEOUT_S", 1.0)
-    monkeypatch.setattr(api, "_gpt_live_status_executor", ThreadPoolExecutor(max_workers=2))
-    monkeypatch.setattr(api, "_gpt_live_status_slots", threading.BoundedSemaphore(2))
+    monkeypatch.setattr(api.gpt_live, "GPT_LIVE_REQUEST_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(api.gpt_live, "_gpt_live_status_executor", ThreadPoolExecutor(max_workers=2))
+    monkeypatch.setattr(api.gpt_live, "_gpt_live_status_slots", threading.BoundedSemaphore(2))
     try:
         assert client.get(f"{BASE}/gpt-live/status").status_code == 504
         assert client.get(f"{BASE}/gpt-live/status").status_code == 504
@@ -104,9 +105,9 @@ def test_a_hung_gpt_live_status_never_wedges_later_checks(client, hermes_scope, 
         assert busy.status_code == 503 and busy.headers["cache-control"] == "no-store"
     finally:
         release.set()
-        api._gpt_live_status_executor.shutdown(wait=True)
+        api.gpt_live._gpt_live_status_executor.shutdown(wait=True)
     recovered = ThreadPoolExecutor(max_workers=2)
-    monkeypatch.setattr(api, "_gpt_live_status_executor", recovered)
+    monkeypatch.setattr(api.gpt_live, "_gpt_live_status_executor", recovered)
     try:
         assert client.get(f"{BASE}/gpt-live/status").json() == {"ok": True, "available": True}
     finally:
@@ -115,13 +116,13 @@ def test_a_hung_gpt_live_status_never_wedges_later_checks(client, hermes_scope, 
 
 def test_a_hung_local_live_key_rotation_times_out(client, hermes_scope, monkeypatch):
     release = threading.Event()
-    monkeypatch.setattr(api, "_local_live_start_auth", lambda: None)
-    monkeypatch.setattr(api, "_local_live_auth_state", {"ready": True})
-    monkeypatch.setattr(api, "_local_live_profile_can_carry_key", lambda profile: True)
-    monkeypatch.setattr(api, "local_live_key", lambda profile, rotate=False: release.wait(10) and "key")
-    monkeypatch.setattr(api, "SPEECH_SERVER_SETUP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api.local_live, "_local_live_start_auth", lambda: None)
+    monkeypatch.setattr(api.local_live, "_local_live_auth_state", {"ready": True})
+    monkeypatch.setattr(api.local_live, "_local_live_profile_can_carry_key", lambda profile: True)
+    monkeypatch.setattr(api.local_live, "local_live_key", lambda profile, rotate=False: release.wait(10) and "key")
+    monkeypatch.setattr(api.speech_server, "SPEECH_SERVER_SETUP_TIMEOUT_S", 0.2)
     pool = ThreadPoolExecutor(max_workers=2)
-    monkeypatch.setattr(api, "_speech_server_executor", pool)
+    monkeypatch.setattr(api.speech_server, "_speech_server_executor", pool)
     try:
         response = client.post(f"{BASE}/local-live/key")
         assert response.status_code == 504 and response.headers["cache-control"] == "no-store"
@@ -136,14 +137,14 @@ def test_a_hung_local_live_key_rotation_times_out(client, hermes_scope, monkeypa
 def test_made_up_local_live_key_profiles_never_fill_the_check_limiter():
     # The total budget bounds its live keys, so the key cap never turns a
     # real profile's first check away.
-    assert api._local_live_key_check_limiter.max_keys > api.LOCAL_LIVE_KEY_CHECK_TOTAL_LIMIT
+    assert api.local_live._local_live_key_check_limiter.max_keys > api.local_live.LOCAL_LIVE_KEY_CHECK_TOTAL_LIMIT
 
 
 def test_a_broken_scope_is_a_named_host_failure(client, monkeypatch):
     def broken(profile):
         raise RuntimeError("scope exploded")
 
-    monkeypatch.setattr(api, "_profile_scope", broken)
+    monkeypatch.setattr(api.core, "_profile_scope", broken)
     response = client.post(f"{BASE}/health/key?profile=coder", json={})
     assert response.status_code == 500 and response.headers["cache-control"] == "no-store"
     assert response.json()["detail"] == "Conduit profile check failed on the host (RuntimeError)"

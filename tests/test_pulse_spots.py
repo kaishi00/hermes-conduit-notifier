@@ -356,7 +356,7 @@ def _held_card(pulse_store, until):
 
 def test_the_ingest_reply_lists_the_shops_and_takes_what_was_walked_into(client, monkeypatch):
     woken = []
-    monkeypatch.setattr(location_api, "_wake_running_pulse", lambda: woken.append(True) or 1)
+    monkeypatch.setattr(location_api.phone_data, "_wake_running_pulse", lambda: woken.append(True) or 1)
     phone = Phone()
     phone.accept(client.post(f"{BASE}/location/key", json=phone.key_request()).json())
     now = datetime.now(timezone.utc).replace(microsecond=0)

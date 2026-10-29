@@ -243,7 +243,7 @@ def test_failures_still_push_from_a_muted_source(turn, monkeypatch):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_cron_home", lambda: tmp_path)
+    monkeypatch.setattr(api.notifications, "_cron_home", lambda: tmp_path)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -265,7 +265,7 @@ def test_a_bad_body_is_a_400(client):
 
 
 def test_watch_jobs_count_as_conduit():
-    assert sources.turn_source("desktop", api._WatchJobTransport(None)) == "conduit"
+    assert sources.turn_source("desktop", api.watch_jobs._WatchJobTransport(None)) == "conduit"
 
 
 def test_an_unreadable_file_is_not_overwritten(tmp_path, monkeypatch):

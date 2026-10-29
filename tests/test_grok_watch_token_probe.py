@@ -84,10 +84,9 @@ def test_token_reuse_is_checked_with_the_method_that_opened_the_call(monkeypatch
         pass
 
     api = types.SimpleNamespace(
-        _profile_scope=lambda profile: contextlib.nullcontext(),
-        grok_live_credentials=lambda: ("bearer", "test sign-in"),
-        grok_live_model_voice=lambda: ("grok-test", "Ara"),
-        TokenError=TokenError,
+        core=types.SimpleNamespace(_profile_scope=lambda profile: contextlib.nullcontext(), TokenError=TokenError),
+        grok_live=types.SimpleNamespace(grok_live_credentials=lambda: ("bearer", "test sign-in"),
+                                        grok_live_model_voice=lambda: ("grok-test", "Ara")),
     )
     monkeypatch.setattr(probe, "mint", lambda base, bearer, seconds: {"status": 200, "ms": 1, "token": "token"})
 

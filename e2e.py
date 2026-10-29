@@ -1,7 +1,7 @@
 """End-to-end encryption of Conduit notification content (#431).
 
 Conduit creates a per-pairing root secret on the phone and hands it to this
-profile through the dashboard connection (dashboard/plugin_api.py), so it
+profile through the dashboard connection (dashboard/api/pairing.py), so it
 never passes through the push relay or APNs. From that secret both sides
 derive separate keys with HKDF-SHA256:
 

@@ -25,10 +25,10 @@ _spec.loader.exec_module(api)
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_pairing_state_path", lambda: tmp_path / "conduit-push.json")
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    api._calls_limiter._mints.clear()
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_pairing_state_path", lambda: tmp_path / "conduit-push.json")
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    api.hermes_calls._calls_limiter._mints.clear()
     return tmp_path
 
 
@@ -123,7 +123,7 @@ def test_a_job_that_already_ended_answers_ended(paired):
     http = _http()
     _turn_calls_on(http)
     # The job's turn ended in the agent process just before Conduit hung up.
-    api._calls_store().CallStore(paired).fire("rt-1", "done")
+    api.hermes_calls._calls_store().CallStore(paired).fire("rt-1", "done")
     response = http.post(f"{BASE}/calls/watches", json={"session_ids": ["rt-1"], "title": "Job", "ended_within_s": 300})
     assert response.json() == {"ok": True, "status": "ended", "outcome": "done"}
 
@@ -134,7 +134,7 @@ def test_a_watch_held_during_the_call_is_renewed_and_released(paired):
     watch_id = http.post(f"{BASE}/calls/watches", json={"session_ids": ["rt-1"], "title": "Job", "hold_s": 180}).json()["id"]
     assert http.put(f"{BASE}/calls/watches/{watch_id}", json={"hold_s": 180}).json() == {"ok": True, "status": "watching"}
     # The job ends during the call, then the user hangs up.
-    assert api._calls_store().CallStore(paired).fire("rt-1", "failed")["status"] == "held"
+    assert api.hermes_calls._calls_store().CallStore(paired).fire("rt-1", "failed")["status"] == "held"
     released = http.put(f"{BASE}/calls/watches/{watch_id}", json={"hold_s": 0})
     assert released.json() == {"ok": True, "status": "ended", "outcome": "failed"}
     assert released.headers["cache-control"] == "no-store"
@@ -164,7 +164,7 @@ def test_a_watch_needs_session_ids(paired, body):
 def test_too_many_watches_is_429(paired):
     http = _http()
     _turn_calls_on(http)
-    store = api._calls_store().CallStore(paired)
+    store = api.hermes_calls._calls_store().CallStore(paired)
     for index in range(20):
         store.add_watch([f"s{index}"], "Job")
     response = http.post(f"{BASE}/calls/watches", json={"session_ids": ["s20"], "title": "Job"})
@@ -177,7 +177,7 @@ def test_an_unknown_watch_id_is_refused(paired):
 
 def test_the_routes_are_rate_limited(paired):
     http = _http()
-    for _ in range(api.CALLS_LIMIT):
+    for _ in range(api.hermes_calls.CALLS_LIMIT):
         assert http.get(f"{BASE}/calls").status_code == 200
     response = http.get(f"{BASE}/calls")
     assert response.status_code == 429
@@ -214,7 +214,7 @@ def test_presence_holds_calls_during_a_live_voice_call(paired):
     present = http.put(f"{BASE}/calls/presence", json={"hold_s": 90})
     assert present.json() == {"ok": True, "status": "present"}
     assert present.headers["cache-control"] == "no-store"
-    store = api._calls_store().CallStore(paired)
+    store = api.hermes_calls._calls_store().CallStore(paired)
     store.add_watch(["rt-1"], "Job")
     assert store.fire("rt-1", "done")["status"] == "busy"
     assert http.put(f"{BASE}/calls/presence", json={"hold_s": 0}).json() == {"ok": True, "status": "away"}
@@ -250,7 +250,7 @@ def test_a_declined_call_is_recorded_for_its_chat(paired):
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {"ok": True, "status": "recorded"}
     assert http.post(f"{BASE}/calls/outcomes", json=body).json() == {"ok": True, "status": "recorded"}
-    taken = api._calls_store().CallStore(home).take_outcomes("st-1")
+    taken = api.hermes_calls._calls_store().CallStore(home).take_outcomes("st-1")
     assert [(entry["outcome"], entry["reason"]) for entry in taken] == [("declined", "The deploy finished.")]
 
 
@@ -273,7 +273,7 @@ def test_a_call_reads_and_answers_what_hermes_waits_on(paired):
     home = paired
     http = _http()
     assert http.put(f"{BASE}/calls", json={"settings": {"enabled": True, "alerts": True}}).status_code == 200
-    store = api._calls_store().CallStore(home)
+    store = api.hermes_calls._calls_store().CallStore(home)
     store.note_waiting(["rt-1", "st-1"], "question", request_id="conduit-push-a", questions=[
         {"qid": "q0", "question": "Which environment?", "choices": ["staging (Recommended)", "prod"],
          "multi_select": False}])
@@ -294,7 +294,7 @@ def test_an_approval_answered_through_the_route_says_whether_hermes_took_it(pair
 
     http = _http()
     assert http.put(f"{BASE}/calls", json={"settings": {"enabled": True, "alerts": True}}).status_code == 200
-    store = api._calls_store().CallStore(paired)
+    store = api.hermes_calls._calls_store().CallStore(paired)
 
     def hermes_takes(resolved):
         def follow():
@@ -323,7 +323,7 @@ def test_an_approval_answered_through_the_route_says_whether_hermes_took_it(pair
 def test_a_malformed_call_answer_is_refused(paired, body):
     http = _http()
     assert http.put(f"{BASE}/calls", json={"settings": {"enabled": True, "alerts": True}}).status_code == 200
-    api._calls_store().CallStore(paired).note_waiting("rt-1", "question", request_id="conduit-push-a", questions=[
+    api.hermes_calls._calls_store().CallStore(paired).note_waiting("rt-1", "question", request_id="conduit-push-a", questions=[
         {"qid": "q0", "question": "Which?", "choices": ["a", "b"], "multi_select": False}])
     response = http.post(f"{BASE}/calls/waiting/answer", json=body)
     assert response.status_code == 400

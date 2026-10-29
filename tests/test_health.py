@@ -386,10 +386,10 @@ def test_subagents_cannot_read_health(home):
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_health_ingest_limiter", api._MintLimiter(1000, 60))
-    monkeypatch.setattr(api, "_health_key_limiter", api._MintLimiter(1000, 60))
-    monkeypatch.setattr(api, "_health_wipe_limiter", api._MintLimiter(1000, 60))
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.phone_data, "_health_ingest_limiter", api.core._MintLimiter(1000, 60))
+    monkeypatch.setattr(api.phone_data, "_health_key_limiter", api.core._MintLimiter(1000, 60))
+    monkeypatch.setattr(api.phone_data, "_health_wipe_limiter", api.core._MintLimiter(1000, 60))
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -432,7 +432,7 @@ def test_a_refusal_carries_the_stores_code_beside_its_message(client):
 
 
 def test_ingest_refuses_an_oversized_body(client):
-    response = client.post(f"{BASE}/health/ingest", content=b"x" * (api.HEALTH_MAX_INGEST_BODY_BYTES + 1),
+    response = client.post(f"{BASE}/health/ingest", content=b"x" * (api.phone_data.HEALTH_MAX_INGEST_BODY_BYTES + 1),
                            headers={"content-type": "application/json"})
     assert response.status_code == 413
     assert "code" not in response.json()  # not a store refusal: the body is as before

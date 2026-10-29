@@ -324,7 +324,7 @@ def test_ciphertext_cap_matches_the_relay():
 
 
 def test_client_and_dashboard_agree_on_the_kid_shape():
-    assert api._E2E_KID.pattern == e2e.KID_PATTERN.pattern
+    assert api.pairing._E2E_KID.pattern == e2e.KID_PATTERN.pattern
 
 
 def test_a_stale_write_never_replaces_a_newer_key(monkeypatch, tmp_path):
@@ -340,7 +340,7 @@ def test_a_stale_write_never_replaces_a_newer_key(monkeypatch, tmp_path):
 
 def test_client_and_dashboard_lock_the_same_file(tmp_path):
     path = tmp_path / "conduit-push.json"
-    assert client.state_lock_path(path) == api._pairing_state_lock_path(path)
+    assert client.state_lock_path(path) == api.pairing._pairing_state_lock_path(path)
 
 
 def test_an_answer_that_is_not_text_is_an_e2e_error():
@@ -426,9 +426,9 @@ def test_pending_polls_are_untouched():
 def state_file(tmp_path, monkeypatch):
     path = tmp_path / "conduit-push.json"
     path.write_text(json.dumps({"credential": "c", "installation_id": INSTALLATION, "gateway_id": GATEWAY, "relay_url": "https://relay"}))
-    monkeypatch.setattr(api, "_pairing_state_path", lambda: path)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: __import__("contextlib").nullcontext())
-    api._e2e_limiter._mints.clear()
+    monkeypatch.setattr(api.core, "_pairing_state_path", lambda: path)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: __import__("contextlib").nullcontext())
+    api.pairing._e2e_limiter._mints.clear()
     return path
 
 
@@ -494,7 +494,7 @@ def test_provisioning_needs_a_pairing(state_file):
 
 def test_provisioning_is_rate_limited(state_file):
     http = _http()
-    codes = [http.post(f"{BASE}/e2e", json=_body()).status_code for _ in range(api.E2E_LIMIT + 1)]
+    codes = [http.post(f"{BASE}/e2e", json=_body()).status_code for _ in range(api.pairing.E2E_LIMIT + 1)]
     assert codes[-1] == 429
 
 
@@ -570,9 +570,9 @@ def client_state(state_file, monkeypatch):
 
 
 def test_rotation_constants_match_the_dashboard():
-    assert api.E2E_KEY_MAX_AGE_S == e2e.KEY_MAX_AGE_S
-    assert api.E2E_PREVIOUS_KEY_GRACE_S == e2e.PREVIOUS_KEY_GRACE_S
-    assert api._E2E_TIME_FORMAT == e2e.KEY_TIME_FORMAT
+    assert api.pairing.E2E_KEY_MAX_AGE_S == e2e.KEY_MAX_AGE_S
+    assert api.pairing.E2E_PREVIOUS_KEY_GRACE_S == e2e.PREVIOUS_KEY_GRACE_S
+    assert api.pairing._E2E_TIME_FORMAT == e2e.KEY_TIME_FORMAT
 
 
 def test_a_new_key_keeps_the_old_one_for_answers(state_file):
@@ -737,9 +737,9 @@ _PQ = pytest.param(e2e.SUITE_PQ, marks=pytest.mark.skipif(
 
 
 def test_a_host_without_ml_kem_offers_x25519_only(state_file, monkeypatch):
-    monkeypatch.setattr(api, "_e2e_suites_value", None)
+    monkeypatch.setattr(api.pairing, "_e2e_suites_value", None)
     monkeypatch.setattr(e2e, "rotate_suites", lambda: [e2e.SUITE_CLASSICAL])
-    monkeypatch.setattr(api, "_e2e_module", lambda: e2e)
+    monkeypatch.setattr(api.pairing, "_e2e_module", lambda: e2e)
     http = _http()
     http.post(f"{BASE}/e2e", json=_body())
     assert http.get(f"{BASE}/e2e").json()["rotate_suites"] == [e2e.SUITE_CLASSICAL]
@@ -948,7 +948,7 @@ def test_an_inline_rotation_after_a_host_request_skips_the_overlap_when_asked(st
 def test_the_rotation_request_fits_the_route(state_file):
     request, _ = e2e.start_rotation(_keys(), installation_id=INSTALLATION, gateway_id=GATEWAY,
                                     suite=e2e.SUITE_PQ, kid_new=NEW_KID)
-    assert len(json.dumps(request).encode()) < api.E2E_MAX_BODY_BYTES
+    assert len(json.dumps(request).encode()) < api.pairing.E2E_MAX_BODY_BYTES
 
 
 def test_rotation_derivation_vector():
@@ -990,7 +990,7 @@ def test_status_still_answers_when_pruning_cannot_write(state_file, monkeypatch)
     def read_only(*_args, **_kwargs):
         raise OSError("read-only file system")
 
-    monkeypatch.setattr(api, "_save_pairing_state", read_only)
+    monkeypatch.setattr(api.pairing, "_save_pairing_state", read_only)
     response = _http().get(f"{BASE}/e2e")
     assert response.status_code == 200 and response.json()["previous_kid"] is None
 

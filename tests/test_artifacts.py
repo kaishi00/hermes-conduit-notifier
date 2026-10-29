@@ -261,7 +261,7 @@ def test_the_route_reads_the_profile_store(tmp_path, monkeypatch):
     _no_gateway(monkeypatch)
     _db(tmp_path, [("s1", "assistant", "MEDIA:/root/map.png")]).close()
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_artifacts_index", lambda: index)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     client = TestClient(app)
@@ -275,8 +275,8 @@ def test_the_route_reads_the_profile_store(tmp_path, monkeypatch):
 
 def test_a_profile_without_a_store_has_no_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path / "missing")
-    monkeypatch.setattr(api, "_artifacts_index", lambda: index)
-    assert api.list_artifacts() == {"items": [], "next_before": None}
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    assert api.workspace.list_artifacts() == {"items": [], "next_before": None}
 
 
 def test_a_newer_mention_the_filter_leaves_out_keeps_an_older_one(tmp_path, monkeypatch):
@@ -299,22 +299,22 @@ def test_the_route_turns_a_request_away_while_both_reads_run(tmp_path, monkeypat
     _no_gateway(monkeypatch)
     _db(tmp_path, [("s1", "assistant", "MEDIA:/root/map.png")]).close()
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_artifacts_index", lambda: index)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     client = TestClient(app)
-    assert api._artifacts_slots.acquire(blocking=False) and api._artifacts_slots.acquire(blocking=False)
+    assert api.workspace._artifacts_slots.acquire(blocking=False) and api.workspace._artifacts_slots.acquire(blocking=False)
     try:
         assert client.get(f"{BASE}/artifacts").status_code == 503
     finally:
-        api._artifacts_slots.release()
-        api._artifacts_slots.release()
+        api.workspace._artifacts_slots.release()
+        api.workspace._artifacts_slots.release()
     # Every finished read gave its slot back.
     for _ in range(3):
         assert client.get(f"{BASE}/artifacts").status_code == 200
-    assert api._artifacts_slots.acquire(blocking=False) and api._artifacts_slots.acquire(blocking=False)
-    api._artifacts_slots.release()
-    api._artifacts_slots.release()
+    assert api.workspace._artifacts_slots.acquire(blocking=False) and api.workspace._artifacts_slots.acquire(blocking=False)
+    api.workspace._artifacts_slots.release()
+    api.workspace._artifacts_slots.release()
 
 
 def test_one_lineage_budget_covers_every_chain(tmp_path, monkeypatch):
@@ -328,8 +328,8 @@ def test_unusable_chat_ids_list_nothing(tmp_path, monkeypatch):
     _no_gateway(monkeypatch)
     _db(tmp_path, [("s1", "assistant", "MEDIA:/root/map.png")]).close()
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_artifacts_index", lambda: index)
-    assert api.list_artifacts(session_ids=["x" * 500, "  "]) == {"items": [], "next_before": None}
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    assert api.workspace.list_artifacts(session_ids=["x" * 500, "  "]) == {"items": [], "next_before": None}
 
 
 def test_a_file_reference_in_a_code_block_is_not_an_attachment(tmp_path, monkeypatch):
@@ -424,7 +424,7 @@ def test_the_route_hides_missing_files_on_request(tmp_path, monkeypatch):
     _no_gateway(monkeypatch)
     _db(tmp_path, [("s1", "assistant", f"MEDIA:{tmp_path / 'gone.png'}")]).close()
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_artifacts_index", lambda: index)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     client = TestClient(app)

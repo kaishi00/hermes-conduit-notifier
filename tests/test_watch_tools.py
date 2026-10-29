@@ -75,12 +75,12 @@ class FakeRelay:
 
 @pytest.fixture(autouse=True)
 def fresh_grants(monkeypatch):
-    monkeypatch.setattr(api, "_watch_grants", api._WatchGrants())
-    monkeypatch.setattr(api, "_watch_grant_limiter", api._MintLimiter(1000, 60.0))
+    monkeypatch.setattr(api.watch_tools, "_watch_grants", api.watch_tools._WatchGrants())
+    monkeypatch.setattr(api.watch_tools, "_watch_grant_limiter", api.core._MintLimiter(1000, 60.0))
 
 
 def make_grant(tools=("web_search", "recall_memory"), secret=None, expires_in=600.0):
-    return api._WatchGrant(
+    return api.watch_tools._WatchGrant(
         grant_id=GRANT_ID,
         profile=None,
         tools=tuple(tools),
@@ -93,43 +93,43 @@ def make_grant(tools=("web_search", "recall_memory"), secret=None, expires_in=60
 
 def sealed_call(grant, payload, rid=None):
     rid = rid or b64u(bytes(16))
-    return {"rid": rid, **api.seal_watch_tool(grant.call_key, "call", grant.grant_id, rid, payload)}
+    return {"rid": rid, **api.watch_tools.seal_watch_tool(grant.call_key, "call", grant.grant_id, rid, payload)}
 
 
 # --- Sealing -------------------------------------------------------------------
 
 def test_a_sealed_call_opens_only_for_its_grant_call_id_and_direction():
-    keys = api.watch_tool_keys(bytes(range(32)))
+    keys = api.watch_tools.watch_tool_keys(bytes(range(32)))
     rid = "R" * 22
-    sealed = api.seal_watch_tool(keys["call"], "call", GRANT_ID, rid, {"tool": "web_search", "args": {"query": "tokyo"}})
-    assert api.open_watch_tool(keys["call"], "call", GRANT_ID, rid, sealed) == {"tool": "web_search", "args": {"query": "tokyo"}}
+    sealed = api.watch_tools.seal_watch_tool(keys["call"], "call", GRANT_ID, rid, {"tool": "web_search", "args": {"query": "tokyo"}})
+    assert api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, rid, sealed) == {"tool": "web_search", "args": {"query": "tokyo"}}
     for key, direction, grant_id, other_rid in [
         (keys["result"], "call", GRANT_ID, rid),
         (keys["call"], "result", GRANT_ID, rid),
         (keys["call"], "call", "H" * 22, rid),
         (keys["call"], "call", GRANT_ID, "S" * 22),
     ]:
-        with pytest.raises(api.WatchToolError):
-            api.open_watch_tool(key, direction, grant_id, other_rid, sealed)
+        with pytest.raises(api.watch_tools.WatchToolError):
+            api.watch_tools.open_watch_tool(key, direction, grant_id, other_rid, sealed)
     tampered = dict(sealed, ct=sealed["ct"][:-2] + ("AA" if not sealed["ct"].endswith("AA") else "BB"))
-    with pytest.raises(api.WatchToolError):
-        api.open_watch_tool(keys["call"], "call", GRANT_ID, rid, tampered)
+    with pytest.raises(api.watch_tools.WatchToolError):
+        api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, rid, tampered)
 
 
 def test_the_directions_use_separate_keys_derived_from_the_root():
-    keys = api.watch_tool_keys(bytes(range(32)))
+    keys = api.watch_tools.watch_tool_keys(bytes(range(32)))
     assert keys["call"] != keys["result"]
     assert bytes(range(32)) not in keys.values()
-    with pytest.raises(api.WatchToolError):
-        api.watch_tool_keys(b"short")
+    with pytest.raises(api.watch_tools.WatchToolError):
+        api.watch_tools.watch_tool_keys(b"short")
 
 
 def test_oversized_or_malformed_envelopes_are_refused_before_decrypting():
-    keys = api.watch_tool_keys(bytes(range(32)))
+    keys = api.watch_tools.watch_tool_keys(bytes(range(32)))
     for sealed in [None, {}, {"n": "x", "ct": "A" * 40}, {"n": "A" * 16, "ct": "not base64!"},
                    {"n": "A" * 16, "ct": "A" * 10_000}]:
-        with pytest.raises(api.WatchToolError):
-            api.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, sealed)
+        with pytest.raises(api.watch_tools.WatchToolError):
+            api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, sealed)
 
 
 # relay/src/watch-tools.mjs MAX_CALL_CT_CHARS: a sealed 4 KB call, base64url.
@@ -137,15 +137,15 @@ RELAY_MAX_CALL_CT_CHARS = 5483
 
 
 def test_the_largest_call_the_relay_takes_is_one_the_host_opens():
-    keys = api.watch_tool_keys(bytes(range(32)))
+    keys = api.watch_tools.watch_tool_keys(bytes(range(32)))
     empty = len(json.dumps({"tool": "web_search", "args": {"query": ""}}, separators=(",", ":")))
-    payload = {"tool": "web_search", "args": {"query": "x" * (api.WATCH_MAX_CALL_BYTES - empty)}}
-    sealed = api.seal_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, payload)
+    payload = {"tool": "web_search", "args": {"query": "x" * (api.watch_tools.WATCH_MAX_CALL_BYTES - empty)}}
+    sealed = api.watch_tools.seal_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, payload)
     assert len(sealed["ct"]) == RELAY_MAX_CALL_CT_CHARS
-    assert api.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, sealed) == payload
+    assert api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22, sealed) == payload
     # Anything the relay passes on is opened, not refused for its size.
-    with pytest.raises(api.WatchToolError, match="did not verify"):
-        api.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22,
+    with pytest.raises(api.watch_tools.WatchToolError, match="did not verify"):
+        api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, "R" * 22,
                             {"n": "A" * 16, "ct": "A" * RELAY_MAX_CALL_CT_CHARS})
 
 
@@ -164,14 +164,14 @@ VECTOR_RESULT = {"ok": True, "query": "weather in Tokyo", "results": [
 def test_vector_matches_the_one_conduit_checks():
     from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-    keys = api.watch_tool_keys(VECTOR_SECRET)
+    keys = api.watch_tools.watch_tool_keys(VECTOR_SECRET)
     call_ct = ChaCha20Poly1305(keys["call"]).encrypt(
-        VECTOR_NONCE, VECTOR_CALL_JSON, api.watch_tool_aad("call", VECTOR_GRANT, VECTOR_RID))
-    result = api.seal_watch_tool(keys["result"], "result", VECTOR_GRANT, VECTOR_RID, VECTOR_RESULT, nonce=VECTOR_NONCE)
+        VECTOR_NONCE, VECTOR_CALL_JSON, api.watch_tools.watch_tool_aad("call", VECTOR_GRANT, VECTOR_RID))
+    result = api.watch_tools.seal_watch_tool(keys["result"], "result", VECTOR_GRANT, VECTOR_RID, VECTOR_RESULT, nonce=VECTOR_NONCE)
     assert keys["call"].hex() == "76bee458fa181a0da7695798b6de8a0be9bf13587ecac450ff389d0094b5bbdf"
     assert keys["result"].hex() == "06499568025534ab010493728680fd7bc9216867d0012198cc6d6a9e450fc703"
     assert b64u(call_ct) == CALL_VECTOR_CT
-    assert api.open_watch_tool(keys["call"], "call", VECTOR_GRANT, VECTOR_RID,
+    assert api.watch_tools.open_watch_tool(keys["call"], "call", VECTOR_GRANT, VECTOR_RID,
                                {"n": b64u(VECTOR_NONCE), "ct": b64u(call_ct)})["tool"] == "web_search"
     assert result == {"n": "AAECAwQFBgcICQoL", "ct": RESULT_VECTOR_CT}
 
@@ -188,12 +188,12 @@ RESULT_VECTOR_CT = (
 def test_a_grant_carries_its_keys_to_the_phone_and_only_a_hash_of_the_relay_key_to_the_relay(tmp_path):
     relay = FakeRelay()
     started = []
-    grant = api.open_watch_grant({"tools": ["recall_memory", "web_search"]}, profile=None,
+    grant = api.watch_tools.open_watch_grant({"tools": ["recall_memory", "web_search"]}, profile=None,
                                  path=write_pairing(tmp_path), relay=relay, start=started.append)
     assert grant["grant_id"] == GRANT_ID
     assert grant["relay_url"] == RELAY
     assert grant["tools"] == ["web_search", "recall_memory"]
-    assert grant["max_calls"] == api.WATCH_GRANT_MAX_CALLS
+    assert grant["max_calls"] == api.watch_tools.WATCH_GRANT_MAX_CALLS
     assert len(base64.urlsafe_b64decode(grant["key"] + "=")) == 32
     assert len(grant["watch_key"]) == 43
     [request] = relay.requests
@@ -213,9 +213,9 @@ def test_a_grant_carries_its_keys_to_the_phone_and_only_a_hash_of_the_relay_key_
 
 def test_a_grant_ends_here_no_later_than_on_the_relay(tmp_path):
     relay_expiry = datetime.now(timezone.utc) + timedelta(seconds=600)
-    relay = FakeRelay([(201, {"grant_id": GRANT_ID, "expires_at": api._timestamp(relay_expiry)})])
+    relay = FakeRelay([(201, {"grant_id": GRANT_ID, "expires_at": api.gemini_qwen_live._timestamp(relay_expiry)})])
     started = []
-    grant = api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path),
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path),
                                  relay=relay, start=started.append)
     [live] = started
     assert 590 < live.expires_at - time.monotonic() <= 600
@@ -225,33 +225,33 @@ def test_a_grant_ends_here_no_later_than_on_the_relay(tmp_path):
 
 def test_the_grant_lifetime_is_capped_only_by_a_relay_time_it_can_use():
     now = datetime(2026, 10, 7, 11, 0, tzinfo=timezone.utc)
-    assert api._watch_grant_ttl("2026-10-07T11:10:00.000Z", now) == 600
-    assert api._watch_grant_ttl("2026-10-07T12:00:00Z", now) == 1800
+    assert api.watch_tools._watch_grant_ttl("2026-10-07T11:10:00.000Z", now) == 600
+    assert api.watch_tools._watch_grant_ttl("2026-10-07T12:00:00Z", now) == 1800
     for value in (None, 7, "", "soon", "2026-10-07T11:10:00", "2026-10-07T10:00:00Z"):
-        assert api._watch_grant_ttl(value, now) == 1800, value
+        assert api.watch_tools._watch_grant_ttl(value, now) == 1800, value
 
 
 def test_a_grant_whose_poller_cant_start_is_closed_on_the_relay(tmp_path, monkeypatch):
     relay = FakeRelay()
     told = []
-    monkeypatch.setattr(api, "_close_watch_grant_on_relay_later", lambda grant, relay=None: told.append(grant))
+    monkeypatch.setattr(api.watch_tools, "_close_watch_grant_on_relay_later", lambda grant, relay=None: told.append(grant))
 
     def start(grant):
         raise RuntimeError("can't start new thread")
 
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path),
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path),
                              relay=relay, start=start)
     assert err.value.status == 503
     [grant] = told
     assert grant.grant_id == GRANT_ID and grant.closed.is_set()
-    assert api._watch_grants.all() == []
+    assert api.watch_tools._watch_grants.all() == []
 
 
 def test_a_full_relay_reads_as_at_capacity_not_broken(tmp_path):
     relay = FakeRelay([(503, {"error": "watch_grant_capacity"})])
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path), relay=relay,
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path), relay=relay,
                              start=lambda g: None)
     assert (err.value.status, str(err.value)) == (503, "The push relay is at capacity for Watch tools")
 
@@ -268,20 +268,20 @@ def test_a_full_relay_reads_as_at_capacity_not_broken(tmp_path):
 ])
 def test_only_lookups_memory_and_jobs_can_be_granted(tmp_path, body, status):
     relay = FakeRelay()
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant(body, profile=None, path=write_pairing(tmp_path), relay=relay, start=lambda g: None)
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant(body, profile=None, path=write_pairing(tmp_path), relay=relay, start=lambda g: None)
     assert err.value.status == status
     assert relay.requests == []
 
 
 def test_a_grant_needs_a_paired_profile_on_an_https_relay(tmp_path):
     relay = FakeRelay()
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=tmp_path / "missing.json", relay=relay,
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=tmp_path / "missing.json", relay=relay,
                              start=lambda g: None)
     assert err.value.status == 409
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": ["web_search"]}, profile=None,
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None,
                              path=write_pairing(tmp_path, relay_url="http://relay.example"), relay=relay,
                              start=lambda g: None)
     assert err.value.status == 409
@@ -290,8 +290,8 @@ def test_a_grant_needs_a_paired_profile_on_an_https_relay(tmp_path):
 
 def test_an_older_relay_reads_as_unsupported(tmp_path):
     relay = FakeRelay([(404, {"error": "not_found"})])
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path), relay=relay,
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=write_pairing(tmp_path), relay=relay,
                              start=lambda g: None)
     assert err.value.status == 501
 
@@ -306,18 +306,18 @@ def test_a_profile_keeps_two_live_grants_and_a_third_closes_the_oldest(tmp_path,
         return relay(url, method, credential, payload, timeout)
 
     closed = threading.Event()
-    real_close = api._close_watch_grant
+    real_close = api.watch_tools._close_watch_grant
 
     def close(grant, **kwargs):
         real_close(grant, **kwargs)
         closed.set()
 
-    monkeypatch.setattr(api, "_close_watch_grant", close)
+    monkeypatch.setattr(api.watch_tools, "_close_watch_grant", close)
     path = write_pairing(tmp_path)
     for _ in range(3):
-        api.open_watch_grant({"tools": ["web_search"]}, profile=None, path=path, relay=answers, start=lambda g: None)
+        api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, path=path, relay=answers, start=lambda g: None)
     assert closed.wait(5)
-    assert {g.grant_id for g in api._watch_grants.all()} == {"B" * 22, "C" * 22}
+    assert {g.grant_id for g in api.watch_tools._watch_grants.all()} == {"B" * 22, "C" * 22}
     assert any(r["method"] == "DELETE" and r["url"].endswith("/grants/" + "A" * 22) for r in relay.requests)
 
 
@@ -326,7 +326,7 @@ def test_a_profile_keeps_two_live_grants_and_a_third_closes_the_oldest(tmp_path,
 def opened_answer(grant, relay, rid):
     [post] = [r for r in relay.requests if r["url"].endswith(f"/results/{rid}")]
     assert post["method"] == "POST"
-    return api.open_watch_tool(grant.result_key, "result", grant.grant_id, rid, post["payload"], max_bytes=64 * 1024)
+    return api.watch_tools.open_watch_tool(grant.result_key, "result", grant.grant_id, rid, post["payload"], max_bytes=64 * 1024)
 
 
 def test_a_call_runs_and_its_answer_goes_back_sealed_for_the_watch():
@@ -339,7 +339,7 @@ def test_a_call_runs_and_its_answer_goes_back_sealed_for_the_watch():
         return {"ok": True, "query": "tokyo", "results": [{"title": "T", "url": "https://t.example", "snippet": "s"}]}
 
     call = sealed_call(grant, {"tool": "web_search", "args": {"query": "tokyo"}})
-    assert api.answer_watch_call(grant, call, relay=relay, run=run) == "answered"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=relay, run=run) == "answered"
     assert ran == [{"tool": "web_search", "args": {"query": "tokyo"}}]
     assert opened_answer(grant, relay, call["rid"])["results"][0]["title"] == "T"
 
@@ -349,13 +349,13 @@ def test_a_call_not_sealed_with_the_grant_or_repeated_is_dropped_unanswered():
     other = make_grant(secret=bytes(32))
     relay = FakeRelay()
     run = lambda g, r: pytest.fail("must not run")  # noqa: E731
-    assert api.answer_watch_call(grant, sealed_call(other, {"tool": "web_search"}), relay=relay, run=run) is None
-    assert api.answer_watch_call(grant, {"rid": "short", "n": "A" * 16, "ct": "A" * 30}, relay=relay, run=run) is None
+    assert api.watch_tools.answer_watch_call(grant, sealed_call(other, {"tool": "web_search"}), relay=relay, run=run) is None
+    assert api.watch_tools.answer_watch_call(grant, {"rid": "short", "n": "A" * 16, "ct": "A" * 30}, relay=relay, run=run) is None
     assert relay.requests == []
 
     call = sealed_call(grant, {"tool": "web_search", "args": {"query": "q"}})
-    assert api.answer_watch_call(grant, call, relay=relay, run=lambda g, r: {"ok": True, "results": []}) == "answered"
-    assert api.answer_watch_call(grant, call, relay=relay, run=run) is None
+    assert api.watch_tools.answer_watch_call(grant, call, relay=relay, run=lambda g, r: {"ok": True, "results": []}) == "answered"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=relay, run=run) is None
     assert len(relay.requests) == 1
 
 
@@ -363,22 +363,22 @@ def test_a_tool_outside_the_grant_is_refused_by_the_host():
     grant = make_grant(tools=("web_search",))
     relay = FakeRelay()
     call = sealed_call(grant, {"tool": "recall_memory", "args": {"query": "q"}})
-    assert api.answer_watch_call(grant, call, relay=relay) == "answered"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=relay) == "answered"
     assert opened_answer(grant, relay, call["rid"]) == {
         "ok": False, "status": 403, "detail": "This tool isn't available to the Watch"}
     for tool in ("start_job", "cancel_job", "list_jobs"):
         call = sealed_call(grant, {"tool": tool, "args": {"instructions": "rm -rf /"}}, rid=b64u(tool.encode().ljust(16, b"x")))
-        api.answer_watch_call(grant, call, relay=relay)
+        api.watch_tools.answer_watch_call(grant, call, relay=relay)
         assert opened_answer(grant, relay, call["rid"])["status"] == 403
 
 
 def test_a_grant_answers_at_most_its_call_limit(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_GRANT_MAX_CALLS", 2)
+    monkeypatch.setattr(api.watch_tools, "WATCH_GRANT_MAX_CALLS", 2)
     grant = make_grant()
     relay = FakeRelay()
     rids = [b64u(bytes([i]) * 16) for i in range(3)]
     for rid in rids:
-        api.answer_watch_call(grant, sealed_call(grant, {"tool": "web_search", "args": {"query": "q"}}, rid=rid),
+        api.watch_tools.answer_watch_call(grant, sealed_call(grant, {"tool": "web_search", "args": {"query": "q"}}, rid=rid),
                               relay=relay, run=lambda g, r: {"ok": True, "results": []})
     assert opened_answer(grant, relay, rids[1])["ok"] is True
     assert opened_answer(grant, relay, rids[2]) == {
@@ -389,7 +389,7 @@ def test_an_answer_too_large_for_the_relay_becomes_an_error():
     grant = make_grant()
     relay = FakeRelay()
     call = sealed_call(grant, {"tool": "recall_memory", "args": {"query": "q"}})
-    api.answer_watch_call(grant, call, relay=relay, run=lambda g, r: {"ok": True, "results": "x" * 40_000})
+    api.watch_tools.answer_watch_call(grant, call, relay=relay, run=lambda g, r: {"ok": True, "results": "x" * 40_000})
     assert opened_answer(grant, relay, call["rid"]) == {
         "ok": False, "status": 502, "detail": "The answer was too large for the Watch"}
 
@@ -399,7 +399,7 @@ def test_a_closed_grant_answers_that_its_lookups_ended():
     grant.closed.set()
     relay = FakeRelay()
     call = sealed_call(grant, {"tool": "web_search", "args": {"query": "q"}})
-    api.answer_watch_call(grant, call, relay=relay, run=lambda g, r: pytest.fail("must not run"))
+    api.watch_tools.answer_watch_call(grant, call, relay=relay, run=lambda g, r: pytest.fail("must not run"))
     assert opened_answer(grant, relay, call["rid"])["status"] == 410
 
 
@@ -411,31 +411,31 @@ def test_web_search_runs_the_same_code_as_the_dashboard_route(monkeypatch):
         return json.dumps({"success": True, "data": {"web": [
             {"title": "Weather", "url": "https://example.com/w", "description": "Sunny"}]}})
 
-    monkeypatch.setattr(api, "_hermes_web_search", search)
+    monkeypatch.setattr(api.gemini_qwen_live, "_hermes_web_search", search)
     grant = make_grant()
-    answer = api.run_watch_tool(grant, {"tool": "web_search", "args": {"query": " weather  tokyo ", "limit": 3}})
+    answer = api.watch_tools.run_watch_tool(grant, {"tool": "web_search", "args": {"query": " weather  tokyo ", "limit": 3}})
     assert answer == {"ok": True, "query": "weather tokyo",
                       "results": [{"title": "Weather", "url": "https://example.com/w", "snippet": "Sunny"}]}
     assert seen == [("weather tokyo", 3)]
-    assert api.run_watch_tool(grant, {"tool": "web_search", "args": {}}) == {
+    assert api.watch_tools.run_watch_tool(grant, {"tool": "web_search", "args": {}}) == {
         "ok": False, "status": 400, "detail": "query is required"}
 
 
 def test_memory_recall_runs_the_same_code_as_the_dashboard_route(monkeypatch):
     queries = []
-    monkeypatch.setattr(api, "run_memory_recall",
+    monkeypatch.setattr(api.memory, "run_memory_recall",
                         lambda query, key, limiter_key=None: queries.append(query) or {"available": True, "results": "Likes tea"})
-    answer = api.run_watch_tool(make_grant(), {"tool": "recall_memory", "args": {"query": "drinks"}})
+    answer = api.watch_tools.run_watch_tool(make_grant(), {"tool": "recall_memory", "args": {"query": "drinks"}})
     assert answer == {"ok": True, "available": True, "results": "Likes tea"}
     assert queries == ["drinks"]
 
 
 def test_watch_args_keep_text_whole_numbers_and_known_flags_only():
-    assert api._clean_watch_args({"query": "q", "limit": 3, "flag": True, "ratio": 0.5, 4: "x"}) == {
+    assert api.watch_tools._clean_watch_args({"query": "q", "limit": 3, "flag": True, "ratio": 0.5, 4: "x"}) == {
         "query": "q", "limit": 3}
-    assert api._clean_watch_args({"instructions": "go", "joins_call": True}) == {"instructions": "go", "joins_call": True}
-    assert api._clean_watch_args({"joins_call": "yes"}) == {"joins_call": "yes"}, "text stays text"
-    assert api._clean_watch_args(["query"]) == {}
+    assert api.watch_tools._clean_watch_args({"instructions": "go", "joins_call": True}) == {"instructions": "go", "joins_call": True}
+    assert api.watch_tools._clean_watch_args({"joins_call": "yes"}) == {"joins_call": "yes"}, "text stays text"
+    assert api.watch_tools._clean_watch_args(["query"]) == {}
 
 
 class _Future:
@@ -452,9 +452,9 @@ class _Future:
 
 
 def test_a_lookup_that_outlasts_its_wait_is_cancelled(monkeypatch):
-    future = _Future(api.FutureTimeoutError())
-    monkeypatch.setattr(api, "_search_executor", types.SimpleNamespace(submit=lambda *args: future))
-    answer = api.run_watch_tool(make_grant(), {"tool": "web_search", "args": {"query": "q"}})
+    future = _Future(api.watch_tools.FutureTimeoutError())
+    monkeypatch.setattr(api.gemini_qwen_live, "_search_executor", types.SimpleNamespace(submit=lambda *args: future))
+    answer = api.watch_tools.run_watch_tool(make_grant(), {"tool": "web_search", "args": {"query": "q"}})
     assert answer == {"ok": False, "status": 504, "detail": "Web search timed out"}
     assert future.cancelled
 
@@ -467,9 +467,9 @@ def test_an_unexpected_failure_is_logged_without_its_message_at_any_level(monkey
         fail()
     except RuntimeError as error:
         future = _Future(error)
-    monkeypatch.setattr(api, "_memory_executor", types.SimpleNamespace(submit=lambda *args: future))
-    with caplog.at_level(logging.DEBUG, logger=api.logger.name):
-        answer = api.run_watch_tool(make_grant(), {"tool": "recall_memory", "args": {"query": "weather in tokyo"}})
+    monkeypatch.setattr(api.memory, "_memory_executor", types.SimpleNamespace(submit=lambda *args: future))
+    with caplog.at_level(logging.DEBUG, logger=api.core.logger.name):
+        answer = api.watch_tools.run_watch_tool(make_grant(), {"tool": "recall_memory", "args": {"query": "weather in tokyo"}})
     assert answer == {"ok": False, "status": 500, "detail": "Memory recall failed on the host (RuntimeError)"}
     assert "RuntimeError" in caplog.text
     # Debug carries where it failed, still not what it said.
@@ -481,16 +481,16 @@ def test_an_unexpected_failure_is_logged_without_its_message_at_any_level(monkey
 
 def test_the_poller_answers_each_call_and_stops_when_the_relay_closes_the_grant():
     grant = make_grant()
-    api._watch_grants.add(grant)
+    api.watch_tools._watch_grants.add(grant)
     call = sealed_call(grant, {"tool": "web_search", "args": {"query": "q"}})
     relay = FakeRelay([(200, {"calls": [call]}), (200, {"calls": []}), (410, {"error": "grant_closed"})])
     submitted = []
-    api.poll_watch_grant(grant, relay=relay, submit=submitted.append)
+    api.watch_tools.poll_watch_grant(grant, relay=relay, submit=submitted.append)
     assert len(submitted) == 1
     assert [r["method"] for r in relay.requests] == ["GET", "GET", "GET"]
     assert relay.requests[0]["url"] == f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}/calls?wait_ms=25000"
     assert grant.closed.is_set()
-    assert api._watch_grants.all() == []
+    assert api.watch_tools._watch_grants.all() == []
 
 
 def test_what_escapes_answering_a_call_is_logged_by_type(monkeypatch, caplog):
@@ -498,13 +498,13 @@ def test_what_escapes_answering_a_call_is_logged_by_type(monkeypatch, caplog):
     call = sealed_call(grant, {"tool": "web_search", "args": {"query": "q"}})
     relay = FakeRelay([(200, {"calls": [call]}), (410, {})])
     submitted = []
-    api.poll_watch_grant(grant, relay=relay, submit=submitted.append)
+    api.watch_tools.poll_watch_grant(grant, relay=relay, submit=submitted.append)
 
     def broken(grant, call, relay=None):
         raise ValueError("weather in tokyo")
 
-    monkeypatch.setattr(api, "answer_watch_call", broken)
-    with caplog.at_level(logging.DEBUG, logger=api.logger.name):
+    monkeypatch.setattr(api.watch_tools, "answer_watch_call", broken)
+    with caplog.at_level(logging.DEBUG, logger=api.core.logger.name):
         [job] = submitted
         assert job() is None
     assert "ValueError" in caplog.text
@@ -514,7 +514,7 @@ def test_what_escapes_answering_a_call_is_logged_by_type(monkeypatch, caplog):
 def test_the_poller_closes_the_grant_on_the_relay_when_it_expires_here():
     grant = make_grant(expires_in=-1)
     relay = FakeRelay()
-    api.poll_watch_grant(grant, relay=relay, submit=lambda fn: None)
+    api.watch_tools.poll_watch_grant(grant, relay=relay, submit=lambda fn: None)
     assert [(r["method"], r["url"]) for r in relay.requests] == [("DELETE", f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}")]
 
 
@@ -523,7 +523,7 @@ def test_the_poller_retries_after_a_network_failure(monkeypatch):
     relay = FakeRelay([OSError("down"), (410, {})])
     waits = []
     monkeypatch.setattr(grant.closed, "wait", lambda timeout: waits.append(timeout))
-    api.poll_watch_grant(grant, relay=relay, submit=lambda fn: None)
+    api.watch_tools.poll_watch_grant(grant, relay=relay, submit=lambda fn: None)
     assert waits == [1.0]
     assert len(relay.requests) == 2
 
@@ -532,14 +532,14 @@ def test_the_poller_retries_after_a_network_failure(monkeypatch):
 
 def test_revoke_ends_the_grant_here_at_once_and_tells_the_relay_after():
     grant = make_grant()
-    api._watch_grants.add(grant)
+    api.watch_tools._watch_grants.add(grant)
     told = []
-    assert api.revoke_watch_grant({"grant_id": GRANT_ID}, profile=None,
+    assert api.watch_tools.revoke_watch_grant({"grant_id": GRANT_ID}, profile=None,
                                   tell_relay=lambda g, relay: told.append(g)) == {"revoked": True}
     assert grant.closed.is_set()
-    assert api._watch_grants.all() == []
+    assert api.watch_tools._watch_grants.all() == []
     assert told == [grant]
-    assert api.revoke_watch_grant({"grant_id": GRANT_ID}, profile=None,
+    assert api.watch_tools.revoke_watch_grant({"grant_id": GRANT_ID}, profile=None,
                                   tell_relay=lambda g, relay: told.append(g)) == {"revoked": False}
     assert told == [grant]
 
@@ -554,7 +554,7 @@ def test_revoke_tells_the_relay_on_a_thread_of_its_own():
         delivered.set()
         return 204, {}
 
-    api._close_watch_grant_on_relay_later(grant, relay)
+    api.watch_tools._close_watch_grant_on_relay_later(grant, relay)
     assert delivered.wait(5)
     assert seen == [("DELETE", f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}", "conduit-watch-revoke")]
 
@@ -566,27 +566,27 @@ def test_without_a_thread_to_spare_a_lookup_worker_tells_the_relay(monkeypatch, 
     def no_thread(self):
         raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(api.threading.Thread, "start", no_thread)
-    monkeypatch.setattr(api, "_watch_executor", types.SimpleNamespace(submit=lambda fn, *args: fn(*args)))
-    with caplog.at_level(logging.INFO, logger=api.logger.name):
-        api._close_watch_grant_on_relay_later(grant, relay)
+    monkeypatch.setattr(api.watch_tools.threading.Thread, "start", no_thread)
+    monkeypatch.setattr(api.watch_tools, "_watch_executor", types.SimpleNamespace(submit=lambda fn, *args: fn(*args)))
+    with caplog.at_level(logging.INFO, logger=api.core.logger.name):
+        api.watch_tools._close_watch_grant_on_relay_later(grant, relay)
     assert [(r["method"], r["url"]) for r in relay.requests] == [("DELETE", f"{RELAY}/v1/watch-tools/grants/{GRANT_ID}")]
     assert "queueing it" in caplog.text
 
     def no_worker(fn, *args):
         raise RuntimeError("cannot schedule new futures after shutdown")
 
-    monkeypatch.setattr(api, "_watch_executor", types.SimpleNamespace(submit=no_worker))
-    with caplog.at_level(logging.INFO, logger=api.logger.name):
-        api._close_watch_grant_on_relay_later(grant, relay)
+    monkeypatch.setattr(api.watch_tools, "_watch_executor", types.SimpleNamespace(submit=no_worker))
+    with caplog.at_level(logging.INFO, logger=api.core.logger.name):
+        api.watch_tools._close_watch_grant_on_relay_later(grant, relay)
     assert len(relay.requests) == 1
     assert "it ends there at its expiry" in caplog.text
 
 
 def test_another_profile_cannot_revoke_a_grant():
     grant = make_grant()
-    api._watch_grants.add(grant)
-    assert api.revoke_watch_grant({"grant_id": GRANT_ID}, profile="other",
+    api.watch_tools._watch_grants.add(grant)
+    assert api.watch_tools.revoke_watch_grant({"grant_id": GRANT_ID}, profile="other",
                                   tell_relay=lambda g, relay: pytest.fail("must not close")) == {"revoked": False}
     assert not grant.closed.is_set()
 
@@ -596,15 +596,15 @@ def test_another_profile_cannot_revoke_a_grant():
 @pytest.fixture
 def told_relay(monkeypatch):
     told = []
-    monkeypatch.setattr(api, "_close_watch_grant_on_relay_later", lambda grant, relay=None: told.append(grant.grant_id))
+    monkeypatch.setattr(api.watch_tools, "_close_watch_grant_on_relay_later", lambda grant, relay=None: told.append(grant.grant_id))
     return told
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch, told_relay):
-    monkeypatch.setattr(api, "_pairing_state_path", lambda: write_pairing(tmp_path))
-    monkeypatch.setattr(api, "_relay_request", FakeRelay())
-    monkeypatch.setattr(api, "_start_watch_poller", lambda grant: None)
+    monkeypatch.setattr(api.core, "_pairing_state_path", lambda: write_pairing(tmp_path))
+    monkeypatch.setattr(api.watch_tools, "_relay_request", FakeRelay())
+    monkeypatch.setattr(api.watch_tools, "_start_watch_poller", lambda grant: None)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -629,7 +629,7 @@ def test_grant_route_refuses_other_tools(client):
 
 
 def test_capabilities_name_watch_tools():
-    assert "watch-tools" in api.ROUTE_CAPABILITIES
+    assert "watch-tools" in api.capabilities.ROUTE_CAPABILITIES
 
 
 # --- Gemini Live tokens ------------------------------------------------------
@@ -650,7 +650,7 @@ def test_live_token_is_granted_only_where_the_profile_has_a_gemini_key(tmp_path)
         def live_key():
             keys_read.append(tools)
             return key
-        return api.open_watch_grant({"tools": tools}, profile=None, path=write_pairing(tmp_path), relay=FakeRelay(),
+        return api.watch_tools.open_watch_grant({"tools": tools}, profile=None, path=write_pairing(tmp_path), relay=FakeRelay(),
                                     start=lambda g: None, live_key=live_key)
 
     assert grant(["web_search", "live_token"], "AIza-key")["tools"] == ["web_search", "live_token"]
@@ -659,7 +659,7 @@ def test_live_token_is_granted_only_where_the_profile_has_a_gemini_key(tmp_path)
     keys_read.clear()
     assert grant(["web_search"], "AIza-key")["tools"] == ["web_search"]
     assert keys_read == []
-    with pytest.raises(api.TokenError) as err:
+    with pytest.raises(api.core.TokenError) as err:
         grant(["live_token"], None)
     assert err.value.status == 503
     # The key itself never leaves the host.
@@ -670,12 +670,12 @@ def test_a_live_token_is_minted_in_the_grants_profile_and_comes_back_sealed(monk
     grant = make_grant(tools=("web_search", "live_token"))
     grant.profile = "work"
     scopes = []
-    monkeypatch.setattr(api, "_scoped_call", lambda profile, fn: (scopes.append(profile), fn())[1])
+    monkeypatch.setattr(api.watch_tools, "_scoped_call", lambda profile, fn: (scopes.append(profile), fn())[1])
     minted = []
-    monkeypatch.setattr(api, "mint_gemini_live_token", lambda **kw: (minted.append(kw), dict(TOKEN))[1])
+    monkeypatch.setattr(api.gemini_qwen_live, "mint_gemini_live_token", lambda **kw: (minted.append(kw), dict(TOKEN))[1])
     relay = FakeRelay()
     call = sealed_call(grant, {"tool": "live_token", "args": {}})
-    assert api.answer_watch_call(grant, call, relay=relay) == "answered"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=relay) == "answered"
     assert opened_answer(grant, relay, call["rid"]) == {"ok": True, **TOKEN}
     assert scopes == ["work"]
     assert minted == [{"limiter_key": grant.limiter_key}]
@@ -686,96 +686,96 @@ def test_a_live_token_is_minted_in_the_grants_profile_and_comes_back_sealed(monk
 
 def test_a_grant_mints_at_most_its_live_tokens_and_failed_mints_dont_count():
     grant = make_grant(tools=("live_token",))
-    failures = [api.TokenError(502, "Google rejected the token request (500)"), RuntimeError("boom")]
+    failures = [api.core.TokenError(502, "Google rejected the token request (500)"), RuntimeError("boom")]
 
     def mint(**kw):
         if failures:
             raise failures.pop(0)
         return dict(TOKEN)
 
-    assert api.run_watch_live_token(grant, mint=mint) == {
+    assert api.watch_tools.run_watch_live_token(grant, mint=mint) == {
         "ok": False, "status": 502, "detail": "Google rejected the token request (500)"}
-    assert api.run_watch_live_token(grant, mint=mint)["status"] == 500
+    assert api.watch_tools.run_watch_live_token(grant, mint=mint)["status"] == 500
     assert grant.live_tokens == 0
-    for _ in range(api.WATCH_LIVE_TOKENS_PER_GRANT):
-        assert api.run_watch_live_token(grant, mint=mint)["ok"] is True
-    assert api.run_watch_live_token(grant, mint=lambda **kw: pytest.fail("must not mint")) == {
+    for _ in range(api.watch_tools.WATCH_LIVE_TOKENS_PER_GRANT):
+        assert api.watch_tools.run_watch_live_token(grant, mint=mint)["ok"] is True
+    assert api.watch_tools.run_watch_live_token(grant, mint=lambda **kw: pytest.fail("must not mint")) == {
         "ok": False, "status": 429, "detail": "This call has used all its Gemini Live tokens"}
 
 
 def test_a_live_token_that_never_reaches_the_watch_doesnt_count(monkeypatch, caplog):
     grant = make_grant(tools=("live_token",))
-    monkeypatch.setattr(api, "mint_gemini_live_token", lambda **kw: dict(TOKEN))
+    monkeypatch.setattr(api.gemini_qwen_live, "mint_gemini_live_token", lambda **kw: dict(TOKEN))
     relay = FakeRelay([OSError("relay down")])
-    with caplog.at_level(logging.DEBUG, logger=api.logger.name):
-        assert api.answer_watch_call(grant, sealed_call(grant, {"tool": "live_token"}), relay=relay) == "gone"
+    with caplog.at_level(logging.DEBUG, logger=api.core.logger.name):
+        assert api.watch_tools.answer_watch_call(grant, sealed_call(grant, {"tool": "live_token"}), relay=relay) == "gone"
     assert grant.live_tokens == 0
     assert "secret-token" not in caplog.text
 
 
 def test_a_grant_without_live_token_refuses_to_mint(monkeypatch):
     grant = make_grant()
-    monkeypatch.setattr(api, "mint_gemini_live_token", lambda **kw: pytest.fail("must not mint"))
+    monkeypatch.setattr(api.gemini_qwen_live, "mint_gemini_live_token", lambda **kw: pytest.fail("must not mint"))
     relay = FakeRelay()
     call = sealed_call(grant, {"tool": "live_token"})
-    api.answer_watch_call(grant, call, relay=relay)
+    api.watch_tools.answer_watch_call(grant, call, relay=relay)
     assert opened_answer(grant, relay, call["rid"])["status"] == 403
     # Its own check too, not only the dispatcher's.
-    assert api.run_watch_live_token(grant)["status"] == 403
+    assert api.watch_tools.run_watch_live_token(grant)["status"] == 403
     assert grant.live_tokens == 0
 
 
 def test_capabilities_name_watch_live_token():
-    assert "watch-live-token" in api.ROUTE_CAPABILITIES
+    assert "watch-live-token" in api.capabilities.ROUTE_CAPABILITIES
 
 
 # --- Chats ---------------------------------------------------------------------
 
 def test_chats_are_granted_only_where_hermes_can_search_sessions(tmp_path):
     asked = ["web_search", "find_chat", "read_chat"]
-    with_routes = api.open_watch_grant({"tools": asked}, profile=None, path=write_pairing(tmp_path),
+    with_routes = api.watch_tools.open_watch_grant({"tools": asked}, profile=None, path=write_pairing(tmp_path),
                                        relay=FakeRelay(), start=lambda g: None, session_routes=lambda: object())
     assert with_routes["tools"] == ["web_search", "find_chat", "read_chat"]
-    without = api.open_watch_grant({"tools": asked}, profile=None, path=write_pairing(tmp_path),
+    without = api.watch_tools.open_watch_grant({"tools": asked}, profile=None, path=write_pairing(tmp_path),
                                    relay=FakeRelay(), start=lambda g: None, session_routes=lambda: None)
     assert without["tools"] == ["web_search"], "the Watch asks the iPhone for chats instead"
-    with pytest.raises(api.TokenError) as refused:
-        api.open_watch_grant({"tools": ["find_chat", "read_chat"]}, profile=None, path=write_pairing(tmp_path),
+    with pytest.raises(api.core.TokenError) as refused:
+        api.watch_tools.open_watch_grant({"tools": ["find_chat", "read_chat"]}, profile=None, path=write_pairing(tmp_path),
                              relay=FakeRelay(), start=lambda g: None, session_routes=lambda: None)
     assert (refused.value.status, str(refused.value)) == (501, "Searching chats needs a newer Hermes on this host")
 
 
 def test_capabilities_name_watch_chats():
-    assert "watch-chats" in api.ROUTE_CAPABILITIES
+    assert "watch-chats" in api.capabilities.ROUTE_CAPABILITIES
 
 
 # --- Answering a call from Hermes ------------------------------------------------
 
 def test_answer_call_answers_only_the_chat_its_grant_names(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    store = api._calls_store().CallStore(tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
     store.update_settings({"enabled": True, "alerts": True})
     batch = [{"qid": "q0", "question": "Which environment?", "choices": ["staging (Recommended)", "prod"],
               "multi_select": False}]
     store.note_waiting(["rt-1", "st-1"], "question", request_id="conduit-push-a", questions=batch)
     store.note_waiting("other", "question", request_id="conduit-push-b", questions=batch)
 
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": ["answer_call"]}, profile=None, path=write_pairing(tmp_path),
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": ["answer_call"]}, profile=None, path=write_pairing(tmp_path),
                              relay=FakeRelay(), start=lambda g: None)
     assert err.value.status == 400
-    opened = api.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1", "rt-1"]},
+    opened = api.watch_tools.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1", "rt-1"]},
                                   profile=None, path=write_pairing(tmp_path), relay=FakeRelay(),
                                   start=lambda g: None)
     assert opened["tools"] == ["web_search", "answer_call"]
-    grant = api._watch_grants.all()[0]
-    answer = api.run_watch_tool(grant, {"tool": "answer_call",
+    grant = api.watch_tools._watch_grants.all()[0]
+    answer = api.watch_tools.run_watch_tool(grant, {"tool": "answer_call",
                                         "args": {"answer": "the recommended one", "session_id": "other"}})
     assert answer == {"ok": True, "status": "answered", "question": 1, "answer": "staging"}
     assert store.take_answers("conduit-push-a") == {"q0": "staging (Recommended)"}
     assert store.take_answers("conduit-push-b") is None, "never another chat's question"
-    assert api.run_watch_tool(grant, {"tool": "answer_call", "args": {"answer": "1"}})["status"] == "not_waiting"
+    assert api.watch_tools.run_watch_tool(grant, {"tool": "answer_call", "args": {"answer": "1"}})["status"] == "not_waiting"
 
 
 def _hermes_takes(store, session_id, resolved=True):
@@ -796,59 +796,59 @@ def _hermes_takes(store, session_id, resolved=True):
 
 
 def test_answer_call_approves_only_when_the_watch_answers_approvals_by_voice(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    store = api._calls_store().CallStore(tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
     store.update_settings({"enabled": True, "alerts": True})
     store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
 
-    api.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1"]},
+    api.watch_tools.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1"]},
                          profile=None, path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None)
-    taps = api._watch_grants.all()[-1]
-    refused = api.run_watch_tool(taps, {"tool": "answer_call", "args": {"choice": "once"}})
+    taps = api.watch_tools._watch_grants.all()[-1]
+    refused = api.watch_tools.run_watch_tool(taps, {"tool": "answer_call", "args": {"choice": "once"}})
     assert refused["status"] == "refused"
     assert store.take_approval("st-1") is None
 
-    api.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1"],
+    api.watch_tools.open_watch_grant({"tools": ["web_search", "answer_call"], "answer_sessions": ["st-1"],
                           "answer_approvals": True},
                          profile=None, path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None)
-    voice = api._watch_grants.all()[-1]
+    voice = api.watch_tools._watch_grants.all()[-1]
     assert voice.answer_approvals
     _hermes_takes(store, "st-1")
-    assert api.run_watch_tool(voice, {"tool": "answer_call", "args": {"choice": "once"}})["status"] == "answered"
+    assert api.watch_tools.run_watch_tool(voice, {"tool": "answer_call", "args": {"choice": "once"}})["status"] == "answered"
 
 
 def test_answer_call_says_an_approval_answer_didnt_go_when_hermes_didnt_take_it(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    store = api._calls_store().CallStore(tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
     store.update_settings({"enabled": True, "alerts": True})
     grant = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=True)
 
     # Answered on its card, or timed out, before the call's answer reached it.
     store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
     _hermes_takes(store, "st-1", resolved=False)
-    missed = api.answer_watch_hermes_call(grant, {"choice": "once"})
+    missed = api.watch_tools.answer_watch_hermes_call(grant, {"choice": "once"})
     assert missed["status"] == "too_late" and "nothing was approved" in missed["message"]
     assert store.waiting_for("st-1") is None
 
     # Nothing picks it up in time: taken back, so it can't land after the
     # call said it didn't, and the user can answer again.
     store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
-    call_store = api._calls_store().CallStore
+    call_store = api.hermes_calls._calls_store().CallStore
     waits = call_store.approval_delivery
     monkeypatch.setattr(call_store, "approval_delivery",
                         lambda self, answer_id: waits(self, answer_id, wait_s=0.2, poll_s=0.01))
-    withdrawn = api.answer_watch_hermes_call(grant, {"choice": "deny"})
+    withdrawn = api.watch_tools.answer_watch_hermes_call(grant, {"choice": "deny"})
     assert withdrawn["status"] == "failed" and "nothing was denied" in withdrawn["message"]
     assert store.waiting_for("st-1")["answered"] is False
     assert store.take_approval("st-1") is None
 
 
 def test_local_live_on_the_watch_answers_the_call_from_hermes_with_the_users_words(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    store = api._calls_store().CallStore(tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
     store.update_settings({"enabled": True, "alerts": True})
     batch = [{"qid": "q0", "question": "Which environment?", "choices": ["staging (Recommended)", "prod"],
               "multi_select": False},
@@ -856,34 +856,34 @@ def test_local_live_on_the_watch_answers_the_call_from_hermes_with_the_users_wor
     store.note_waiting("st-1", "question", request_id="conduit-push-a", questions=batch)
     grant = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=False)
 
-    line = api._local_live_call_answer(grant, "the recommended one")
+    line = api.watch_local_live._local_live_call_answer(grant, "the recommended one")
     assert line.startswith("Got it: staging.")
     assert "Next: Which tests? 1: unit. 2: ui." in line
-    assert api._local_live_call_answer(grant, "which one is faster?") == \
+    assert api.watch_local_live._local_live_call_answer(grant, "which one is faster?") == \
         "I've asked Hermes. It will explain, then ask again."
     assert store.take_answers("conduit-push-a") == {"q0": "staging (Recommended)",
                                                     "q1": "Before I choose: which one is faster?"}
-    assert api._local_live_call_answer(grant, "what's the weather") is None, "nothing waits: the call's own chat"
+    assert api.watch_local_live._local_live_call_answer(grant, "what's the weather") is None, "nothing waits: the call's own chat"
 
     store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
-    assert "in Conduit on your iPhone" in api._local_live_call_answer(grant, "yes")
-    assert api._local_live_call_answer(grant, "play some music") is None
+    assert "in Conduit on your iPhone" in api.watch_local_live._local_live_call_answer(grant, "yes")
+    assert api.watch_local_live._local_live_call_answer(grant, "play some music") is None
     voice = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=True)
     _hermes_takes(store, "st-1")
-    assert api._local_live_call_answer(voice, "Yes, go ahead.") == "Approved once. Hermes runs it now."
+    assert api.watch_local_live._local_live_call_answer(voice, "Yes, go ahead.") == "Approved once. Hermes runs it now."
     store.note_waiting("st-1", "approval", description="Clear the build cache", command="rm -rf build")
     _hermes_takes(store, "st-1", resolved=False)
-    assert api._local_live_call_answer(voice, "yes") == \
+    assert api.watch_local_live._local_live_call_answer(voice, "yes") == \
         "That didn't go through: Hermes wasn't waiting on it any more. Check the chat in Conduit."
     store.note_waiting("st-1", "approval", description="Run a long script", command="x" * 2000)
-    assert api._local_live_call_answer(voice, "yes") == \
+    assert api.watch_local_live._local_live_call_answer(voice, "yes") == \
         "I can't approve that one by voice. Say no to deny it, or approve it in Conduit on your iPhone."
 
 
 def test_local_live_on_the_watch_leaves_a_forms_question_blank(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    store = api._calls_store().CallStore(tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
     store.update_settings({"enabled": True, "alerts": True})
     form = [{"qid": "q0", "question": "Leaving from?", "choices": [], "multi_select": False},
             {"qid": "q1", "question": "Total trip budget?", "choices": [], "multi_select": False},
@@ -891,19 +891,19 @@ def test_local_live_on_the_watch_leaves_a_forms_question_blank(tmp_path, monkeyp
     store.note_waiting("st-1", "question", request_id="conduit-push-f", questions=form)
     grant = types.SimpleNamespace(profile=None, answer_sessions=("st-1",), answer_approvals=False)
 
-    assert api._local_live_call_answer(grant, "Toronto") == ("Got it: Toronto. Hermes has your answer. Next: Total "
+    assert api.watch_local_live._local_live_call_answer(grant, "Toronto") == ("Got it: Toronto. Hermes has your answer. Next: Total "
                                                              "trip budget? Answer in your own words. Or say skip to "
                                                              "leave it blank.")
-    assert api._local_live_call_answer(grant, "skip") == (
+    assert api.watch_local_live._local_live_call_answer(grant, "skip") == (
         "Okay, I'll leave that blank. Next: Your kind of escape? 1: Beach. 2: City. Say the number of your choice, "
         "or answer in your own words. Or say skip to leave it blank.")
-    assert api._local_live_call_answer(grant, "the beach") == "Got it: Beach. Hermes has your answer."
+    assert api.watch_local_live._local_live_call_answer(grant, "the beach") == "Got it: Beach. Hermes has your answer."
     assert store.take_answers("conduit-push-f") == {"q0": "Toronto", "q1": "", "q2": "Beach"}
 
     # Choices only: no form, so nothing may be left blank and "skip" is an answer.
     batch = [{"qid": "q0", "question": "Which environment?", "choices": ["staging", "prod"], "multi_select": False},
              {"qid": "q1", "question": "Which tests?", "choices": ["unit", "ui"], "multi_select": False}]
     store.note_waiting("st-1", "question", request_id="conduit-push-b", questions=batch)
-    line = api._local_live_call_answer(grant, "prod")
+    line = api.watch_local_live._local_live_call_answer(grant, "prod")
     assert line.endswith("Say the number of your choice, or answer in your own words."), line
-    assert api._local_live_call_answer(grant, "skip") == "Got it: skip. Hermes has your answer."
+    assert api.watch_local_live._local_live_call_answer(grant, "skip") == "Got it: skip. Hermes has your answer."

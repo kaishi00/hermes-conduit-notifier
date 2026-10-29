@@ -1033,7 +1033,7 @@ def test_forget_on_a_hermes_that_cant_delete_a_whole_chain(hermes, monkeypatch):
 
 @pytest.fixture
 def client(hermes, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: _home(hermes, "furina"))
+    monkeypatch.setattr(api.core, "_calls_home", lambda: _home(hermes, "furina"))
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -1108,7 +1108,7 @@ def test_the_dashboard_routes_guard_it_as_they_load(hermes):
         assert hermes.rooms.disband_room is not own
         assert hermes.rooms.disband_room.__wrapped__ is own
     finally:
-        module._room_cleanup_module.uninstall()
+        module.rooms._room_cleanup_module.uninstall()
     assert hermes.rooms.disband_room is own
 
 

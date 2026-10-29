@@ -31,6 +31,37 @@ entry current.
 - Text that describes a behavior is one of its siblings: tool descriptions and
   results the models read, README.md, and the app's briefings and Settings text.
 
+## Dashboard routes
+
+Hermes loads `dashboard/plugin_api.py` by path (`dashboard/manifest.json`'s
+`api`). It only loads `dashboard/api/`, one module per feature, and lists
+them: the routes and the code behind them are in the modules
+(notifier#443). `tests/test_api_layout.py` holds these rules.
+
+- A route goes in its feature's module. A new feature gets a module of its
+  own: add it to `MODULES` in `dashboard/api/__init__.py` and to
+  plugin_api.py's list, in the same place.
+- A module takes another's names through the module: `from . import core` at
+  the top, then `core.TokenError`, never `from .core import TokenError`. So a
+  test that replaces `api.core._calls_home` replaces it for every module.
+- Every module is created before the first one runs, then they run in
+  `MODULES` order. A module's top-level statements (a base class, a default, a
+  constant made from another module's) may use only the modules above it; its
+  functions may use any of them.
+- Every route is on core's router (`router = core.router`), behind
+  `core._note_conduit_request`; no module makes a router of its own. No two
+  routes answer the same request, so the order never decides one.
+- What three or more features use goes in `core`.
+- A module stays under 150 KB, small enough for an agent or a reviewer to
+  read whole. Past that, give part of it a module of its own.
+- Tests and probes reach a name through its module:
+  `api.watch_jobs.WATCH_JOB_TOOLS`, `monkeypatch.setattr(api.core, "_calls_home", ...)`,
+  a probe's `hasattr(module.watch_audio, "_WatchAudioBridge")`.
+
+A branch that still has the single file merges main from just before the
+split, runs `python3 scripts/split_plugin_api.py write` and commits, then
+merges main: only its own changes conflict.
+
 ## Plugin version
 
 A version bump changes `plugin.yaml` and `dashboard/manifest.json` together

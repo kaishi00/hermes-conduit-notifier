@@ -43,10 +43,10 @@ class VoicePhone(Phone):
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_voice_tools_limiter", api._MintLimiter(1000, 60))
-    monkeypatch.setattr(api, "_health_ingest_limiter", api._MintLimiter(1000, 60))
-    monkeypatch.setattr(api, "_health_key_limiter", api._MintLimiter(1000, 60))
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.phone_data, "_voice_tools_limiter", api.core._MintLimiter(1000, 60))
+    monkeypatch.setattr(api.phone_data, "_health_ingest_limiter", api.core._MintLimiter(1000, 60))
+    monkeypatch.setattr(api.phone_data, "_health_key_limiter", api.core._MintLimiter(1000, 60))
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -131,7 +131,7 @@ def test_another_device_never_reads_this_ones_data(client):
     # A key registered with dashboard access alone, under an id that matches
     # the owner's device name: it has no data of its own and must get none.
     intruder = VoicePhone(device_id="ERICSIPHONE1")
-    store = health.HealthStore(api._calls_home())
+    store = health.HealthStore(api.core._calls_home())
     with store._read() as db:
         assert store.latest_device(db, "ERICSIPHONE1")[0] == DEVICE, "a name lookup would pick the owner"
         assert store.latest_device(db, "ERICSIPHONE1", exact=True) is None
@@ -166,7 +166,7 @@ def test_a_bad_action_is_an_answer_not_an_error(client):
 
 
 def test_voice_reads_are_rate_limited(client, monkeypatch):
-    monkeypatch.setattr(api, "_voice_tools_limiter", api._MintLimiter(1, 60))
+    monkeypatch.setattr(api.phone_data, "_voice_tools_limiter", api.core._MintLimiter(1, 60))
     phone = VoicePhone()
     _share(client, phone, _batch())
     _call(client, phone, {"action": "overview"})
@@ -193,13 +193,13 @@ def test_a_new_key_for_the_same_device_id_reads_none_of_the_old_data(client):
 def test_a_new_key_during_the_read_seals_nothing_to_the_old_key(client, monkeypatch, args):
     owner = VoicePhone()
     _share(client, owner, _batch())
-    tool = api._plugin_package_module("health_tool")
+    tool = api.core._plugin_package_module("health_tool")
     read = tool.voice_handle
 
     def re_keyed_meanwhile(*args, **kwargs):
         # The request opened with the owner's key; before its read, the same
         # device id registers a new key and uploads under it.
-        store = health.HealthStore(api._calls_home())
+        store = health.HealthStore(api.core._calls_home())
         replacement = VoicePhone(device_id=DEVICE)
         replacement.accept(store.register_key(replacement.key_request()))
         store.ingest(replacement.seal(_batch("batch-0002", steps=(4242, 4343))))
@@ -227,7 +227,7 @@ def test_a_failed_read_still_comes_back_sealed(client, monkeypatch):
     def broken(*_args, **_kwargs):
         raise RuntimeError("disk")
 
-    monkeypatch.setattr(api._plugin_package_module("health_tool"), "_handle", broken)
+    monkeypatch.setattr(api.core._plugin_package_module("health_tool"), "_handle", broken)
     assert _call(client, phone, {"action": "daily", "metrics": ["steps"]})["error"] == "unavailable"
 
 
@@ -235,7 +235,7 @@ def test_the_tool_name_is_sealed_into_the_request(client):
     phone = VoicePhone()
     _share(client, phone, _batch())
     envelope = phone.ask({"action": "overview"})
-    store = health.HealthStore(api._calls_home())
+    store = health.HealthStore(api.core._calls_home())
     with pytest.raises(health.HealthError) as error:
         store.open_voice_request({**envelope, "tool": "conduit_location"})
     assert error.value.code == "bad_seal"
@@ -244,7 +244,7 @@ def test_the_tool_name_is_sealed_into_the_request(client):
 
 
 def test_the_tool_list_shares_the_voice_rate_limit(client, monkeypatch):
-    monkeypatch.setattr(api, "_voice_tools_limiter", api._MintLimiter(1, 60))
+    monkeypatch.setattr(api.phone_data, "_voice_tools_limiter", api.core._MintLimiter(1, 60))
     assert client.get(f"{BASE}/voice-tools").status_code == 200
     assert client.get(f"{BASE}/voice-tools").status_code == 429
 

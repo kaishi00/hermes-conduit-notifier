@@ -88,7 +88,7 @@ class FakeGateway:
 
 
 def _hook(flush_delay=3600.0):
-    return api._DesktopViewHook(api._DesktopViewStore(flush_delay=flush_delay))
+    return api.desktop_views._DesktopViewHook(api.desktop_views._DesktopViewStore(flush_delay=flush_delay))
 
 
 @pytest.mark.parametrize("headers, expected", [
@@ -99,12 +99,12 @@ def _hook(flush_delay=3600.0):
     ({}, None),
 ])
 def test_only_browser_engine_sockets_count(headers, expected):
-    assert api.desktop_view_client(WSTransport(headers)) == expected
+    assert api.desktop_views.desktop_view_client(WSTransport(headers)) == expected
 
 
 def test_non_websocket_transports_never_count():
-    assert api.desktop_view_client(StdioTransport()) is None
-    assert api.desktop_view_client(None) is None
+    assert api.desktop_views.desktop_view_client(StdioTransport()) is None
+    assert api.desktop_views.desktop_view_client(None) is None
 
 
 def test_a_desktop_open_is_recorded_and_the_response_is_untouched(monkeypatch, tmp_path):
@@ -121,7 +121,7 @@ def test_a_desktop_open_is_recorded_and_the_response_is_untouched(monkeypatch, t
     assert set(views) == {"stored-1", "stored-2"}
     assert views["stored-1"]["client"] == "desktop"
     # Methods it doesn't watch stay as they were.
-    assert not hasattr(gateway.server._methods["session.list"], api._DESKTOP_VIEW_MARKER)
+    assert not hasattr(gateway.server._methods["session.list"], api.desktop_views._DESKTOP_VIEW_MARKER)
 
 
 def test_conduit_and_failed_opens_are_not_recorded(monkeypatch, tmp_path):
@@ -180,12 +180,12 @@ def test_a_subclass_of_the_gateway_socket_still_counts(monkeypatch, tmp_path):
 
 
 def test_header_names_are_matched_in_any_case():
-    assert api.desktop_view_client(WSTransport({"User-Agent": ELECTRON})) == "desktop"
-    assert api.desktop_view_client(WSTransport({"User-Agent": ELECTRON, "X-Conduit-Client": "conduit"})) is None
+    assert api.desktop_views.desktop_view_client(WSTransport({"User-Agent": ELECTRON})) == "desktop"
+    assert api.desktop_views.desktop_view_client(WSTransport({"User-Agent": ELECTRON, "X-Conduit-Client": "conduit"})) is None
 
 
 def test_a_socket_type_that_isnt_a_class_falls_back_to_the_name():
-    assert api.desktop_view_client(WSTransport({"user-agent": CHROME}), socket_type=(WSTransport,)) == "browser"
+    assert api.desktop_views.desktop_view_client(WSTransport({"user-agent": CHROME}), socket_type=(WSTransport,)) == "browser"
 
 
 def test_raw_header_names_are_decoded():
@@ -195,7 +195,7 @@ def test_raw_header_names_are_decoded():
 
     socket = WSTransport({})
     socket._ws = types.SimpleNamespace(headers=RawHeaders())
-    assert api.desktop_view_client(socket) == "desktop"
+    assert api.desktop_views.desktop_view_client(socket) == "desktop"
 
 
 def test_a_reloaded_socket_module_is_followed(monkeypatch, tmp_path):
@@ -212,22 +212,22 @@ def test_a_reloaded_socket_module_is_followed(monkeypatch, tmp_path):
     hook.verify()
     assert hook.socket_type is ReloadedWSTransport
     # A socket opened before the reload still counts.
-    assert api.desktop_view_client(WSTransport({"user-agent": ELECTRON}), hook.socket_type) == "desktop"
+    assert api.desktop_views.desktop_view_client(WSTransport({"user-agent": ELECTRON}), hook.socket_type) == "desktop"
 
 
 def test_an_open_at_the_same_moment_takes_the_newer_client():
-    merged = api._merge_desktop_view({"opened_at": 5.0, "seen_through": 5.0, "client": "browser"},
+    merged = api.desktop_views._merge_desktop_view({"opened_at": 5.0, "seen_through": 5.0, "client": "browser"},
                                      {"opened_at": 5.0, "seen_through": 5.0, "client": "desktop"})
     assert merged["client"] == "desktop"
 
 
 def test_a_blank_conduit_header_still_marks_conduit():
-    assert api.desktop_view_client(WSTransport({"user-agent": ELECTRON, "x-conduit-client": ""})) is None
+    assert api.desktop_views.desktop_view_client(WSTransport({"user-agent": ELECTRON, "x-conduit-client": ""})) is None
 
 
 def test_an_absurdly_nested_file_reads_as_empty(tmp_path):
-    (tmp_path / api.DESKTOP_VIEWS_FILE).write_text("[" * 100000)
-    assert api._DesktopViewStore(flush_delay=3600.0).read(tmp_path) == {}
+    (tmp_path / api.desktop_views.DESKTOP_VIEWS_FILE).write_text("[" * 100000)
+    assert api.desktop_views._DesktopViewStore(flush_delay=3600.0).read(tmp_path) == {}
 
 
 def test_reports_why_it_is_not_observing(monkeypatch, tmp_path):
@@ -244,7 +244,7 @@ def test_reports_why_it_is_not_observing(monkeypatch, tmp_path):
 
 
 def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
-    path = tmp_path / api.DESKTOP_VIEWS_FILE
+    path = tmp_path / api.desktop_views.DESKTOP_VIEWS_FILE
     path.write_text(json.dumps({"version": 1, "views": {
         "a": {"opened_at": 100.0, "seen_through": 150.0, "client": "browser"},
         "b": {"opened_at": 300.0, "seen_through": 400.0, "client": "browser"},
@@ -254,7 +254,7 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
         "negative": {"opened_at": -5, "seen_through": 1.0},
         "odd": {"opened_at": 1.0, "seen_through": 2.0, "client": 7},
     }}))
-    store = api._DesktopViewStore(flush_delay=3600.0)
+    store = api.desktop_views._DesktopViewStore(flush_delay=3600.0)
     store.record(tmp_path, "a", "desktop", 210.0, opened_at=200.0)
     store.record(tmp_path, "b", "desktop", 350.0, opened_at=250.0)
     store.flush()
@@ -269,8 +269,8 @@ def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
 
 
 def test_the_store_keeps_only_the_newest_chats(monkeypatch, tmp_path):
-    monkeypatch.setattr(api, "DESKTOP_VIEWS_MAX", 2)
-    store = api._DesktopViewStore(flush_delay=3600.0)
+    monkeypatch.setattr(api.desktop_views, "DESKTOP_VIEWS_MAX", 2)
+    store = api.desktop_views._DesktopViewStore(flush_delay=3600.0)
     for index, stored_id in enumerate(["old", "mid", "new"]):
         store.record(tmp_path, stored_id, "desktop", 100.0 + index, opened_at=100.0 + index)
     store.flush()
@@ -280,8 +280,8 @@ def test_the_store_keeps_only_the_newest_chats(monkeypatch, tmp_path):
 def test_route_returns_views_for_the_profile_home(monkeypatch, tmp_path):
     hook = _hook()
     monkeypatch.setattr(hook, "ensure_started", lambda: None)
-    monkeypatch.setattr(api, "_desktop_view_hook", hook)
-    monkeypatch.setattr(api, "_desktop_view_store", hook.store)
+    monkeypatch.setattr(api.desktop_views, "_desktop_view_hook", hook)
+    monkeypatch.setattr(api.desktop_views, "_desktop_view_store", hook.store)
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     hook.store.record(tmp_path, "a", "desktop", 120.0, opened_at=100.0)
@@ -309,8 +309,8 @@ def test_a_half_loaded_gateway_never_fails_the_route(monkeypatch, tmp_path):
         raise ValueError("wrapper loop")
 
     monkeypatch.setattr(hook, "try_install", broken)
-    monkeypatch.setattr(api, "_desktop_view_hook", hook)
-    monkeypatch.setattr(api, "_desktop_view_store", hook.store)
+    monkeypatch.setattr(api.desktop_views, "_desktop_view_hook", hook)
+    monkeypatch.setattr(api.desktop_views, "_desktop_view_store", hook.store)
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
     hook.store.record(tmp_path, "a", "desktop", 120.0, opened_at=100.0)
 
@@ -331,7 +331,7 @@ def test_a_watcher_that_cant_start_is_retried(monkeypatch):
         def start(self):
             raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(api.threading, "Thread", Unstartable)
+    monkeypatch.setattr(api.desktop_views.threading, "Thread", Unstartable)
     hook.ensure_started()
     assert hook._thread is None
 
@@ -346,7 +346,7 @@ class Clock:
 
 def test_a_chat_stays_seen_while_its_desktop_has_it_selected(monkeypatch, tmp_path):
     clock = Clock(1000.0)
-    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    monkeypatch.setattr(api.desktop_views, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
     desktop = WSTransport({"user-agent": ELECTRON})
     gateway = FakeGateway(tmp_path, desktop)
     gateway.install(monkeypatch)
@@ -375,7 +375,7 @@ def test_a_chat_stays_seen_while_its_desktop_has_it_selected(monkeypatch, tmp_pa
 
 def test_each_desktop_connection_keeps_its_own_selection(monkeypatch, tmp_path):
     clock = Clock(1000.0)
-    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    monkeypatch.setattr(api.desktop_views, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
     laptop, browser = WSTransport({"user-agent": ELECTRON}), WSTransport({"user-agent": CHROME})
     gateway = FakeGateway(tmp_path, laptop)
     gateway.install(monkeypatch)
@@ -400,8 +400,8 @@ def test_a_bad_profile_keeps_hermes_own_status(monkeypatch):
 
     hook = _hook()
     monkeypatch.setattr(hook, "ensure_started", lambda: None)
-    monkeypatch.setattr(api, "_desktop_view_hook", hook)
-    monkeypatch.setattr(api, "_profile_scope", unknown_profile)
+    monkeypatch.setattr(api.desktop_views, "_desktop_view_hook", hook)
+    monkeypatch.setattr(api.core, "_profile_scope", unknown_profile)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     response = TestClient(app).get(f"{BASE}/sessions/desktop-views", params={"profile": "nope"})
@@ -436,7 +436,7 @@ def test_coroutine_handlers_are_not_wrapped(monkeypatch, tmp_path):
 
 
 def test_a_watcher_that_gave_up_can_start_again(monkeypatch):
-    monkeypatch.setattr(api, "DESKTOP_VIEWS_INSTALL_WINDOW_S", 0.0)
+    monkeypatch.setattr(api.desktop_views, "DESKTOP_VIEWS_INSTALL_WINDOW_S", 0.0)
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     hook = _hook()
     hook._thread = threading.current_thread()
@@ -445,7 +445,7 @@ def test_a_watcher_that_gave_up_can_start_again(monkeypatch):
 
 
 def test_a_failing_install_attempt_keeps_the_watcher_restartable(monkeypatch):
-    monkeypatch.setattr(api, "DESKTOP_VIEWS_INSTALL_WINDOW_S", 0.0)
+    monkeypatch.setattr(api.desktop_views, "DESKTOP_VIEWS_INSTALL_WINDOW_S", 0.0)
     hook = _hook()
     attempts = []
 
@@ -482,7 +482,7 @@ def test_a_gateway_that_cant_name_a_sessions_profile_is_unsupported(monkeypatch,
 
 def test_a_socket_whose_state_cant_be_read_ends_its_selection(monkeypatch, tmp_path):
     clock = Clock(1000.0)
-    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    monkeypatch.setattr(api.desktop_views, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
     desktop = WSTransport({"user-agent": ELECTRON})
     del desktop.closed
     gateway = FakeGateway(tmp_path, desktop)
@@ -520,7 +520,7 @@ def test_a_gateway_without_its_websocket_transport_is_unsupported(monkeypatch, t
 
 
 def test_a_selection_end_merges_into_any_stored_entry():
-    merged = api._merge_desktop_view({"opened_at": 0.0, "seen_through": 5.0, "client": "browser"},
+    merged = api.desktop_views._merge_desktop_view({"opened_at": 0.0, "seen_through": 5.0, "client": "browser"},
                                      {"seen_through": 9.0, "client": "desktop"})
     assert merged == {"opened_at": 0.0, "seen_through": 9.0, "client": "browser"}
 
@@ -528,8 +528,8 @@ def test_a_selection_end_merges_into_any_stored_entry():
 def test_reads_are_rate_limited(monkeypatch, tmp_path):
     hook = _hook()
     monkeypatch.setattr(hook, "ensure_started", lambda: None)
-    monkeypatch.setattr(api, "_desktop_view_hook", hook)
-    monkeypatch.setattr(api, "_desktop_views_limiter", api._MintLimiter(1, 60.0, message="slow down"))
+    monkeypatch.setattr(api.desktop_views, "_desktop_view_hook", hook)
+    monkeypatch.setattr(api.desktop_views, "_desktop_views_limiter", api.core._MintLimiter(1, 60.0, message="slow down"))
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
@@ -547,7 +547,7 @@ _selected_spec.loader.exec_module(desktop_selected)
 
 def test_the_selection_is_published_for_the_turn_hooks(monkeypatch, tmp_path):
     clock = Clock(1000.0)
-    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    monkeypatch.setattr(api.desktop_views, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
     desktop = WSTransport({"user-agent": ELECTRON})
     gateway = FakeGateway(tmp_path, desktop)
     gateway.install(monkeypatch)
@@ -582,7 +582,7 @@ def test_the_selection_is_published_for_the_turn_hooks(monkeypatch, tmp_path):
 
 def test_an_unchanged_selection_is_not_rewritten_every_sweep(monkeypatch, tmp_path):
     clock = Clock(1000.0)
-    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    monkeypatch.setattr(api.desktop_views, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
     gateway = FakeGateway(tmp_path, WSTransport({"user-agent": ELECTRON}))
     gateway.install(monkeypatch)
     hook = _hook()
@@ -590,7 +590,7 @@ def test_an_unchanged_selection_is_not_rewritten_every_sweep(monkeypatch, tmp_pa
     gateway.call("session.activate", key="a")
     hook.sweep()
     writes = []
-    monkeypatch.setattr(api._desktop_selected(), "publish", lambda *args, **kwargs: writes.append(args))
+    monkeypatch.setattr(api.desktop_views._desktop_selected(), "publish", lambda *args, **kwargs: writes.append(args))
     clock.now = 1005.0
     hook.sweep()
     assert writes == []
@@ -598,13 +598,13 @@ def test_an_unchanged_selection_is_not_rewritten_every_sweep(monkeypatch, tmp_pa
 
 def test_a_failed_publish_is_retried_on_the_next_sweep(monkeypatch, tmp_path):
     clock = Clock(1000.0)
-    monkeypatch.setattr(api, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
+    monkeypatch.setattr(api.desktop_views, "time", types.SimpleNamespace(time=clock.time, monotonic=clock.time, sleep=lambda _: None))
     gateway = FakeGateway(tmp_path, WSTransport({"user-agent": ELECTRON}))
     gateway.install(monkeypatch)
     hook = _hook()
     hook.try_install()
     gateway.call("session.activate", key="a")
-    module = api._desktop_selected()
+    module = api.desktop_views._desktop_selected()
     real = module.publish
 
     def broken(*_args, **_kwargs):

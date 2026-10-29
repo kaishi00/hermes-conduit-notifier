@@ -53,7 +53,7 @@ def test_an_unreadable_file_reads_as_nothing_muted(tmp_path):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_cron_home", lambda: tmp_path)
+    monkeypatch.setattr(api.notifications, "_cron_home", lambda: tmp_path)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)

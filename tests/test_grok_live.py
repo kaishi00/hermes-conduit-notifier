@@ -57,11 +57,11 @@ def hermes(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_chat", chat)
     monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
     monkeypatch.setitem(sys.modules, "tools.xai_http", xai_http)
-    monkeypatch.setattr(api, "_grok_live_limiter", api._MintLimiter(api.GROK_LIVE_LIMIT, api.GROK_LIVE_WINDOW_S))
-    monkeypatch.setattr(api, "_grok_live_host_limiter", api._MintLimiter(api.GROK_LIVE_HOST_LIMIT, api.GROK_LIVE_WINDOW_S))
-    monkeypatch.setattr(api, "_grok_live_status_limiter", api._MintLimiter(api.GROK_LIVE_STATUS_LIMIT, api.GROK_LIVE_WINDOW_S))
-    monkeypatch.setattr(api, "_grok_live_auth_failure_limiter",
-                        api._MintLimiter(api.GROK_LIVE_AUTH_FAILURE_LIMIT, api.GROK_LIVE_WINDOW_S))
+    monkeypatch.setattr(api.grok_live, "_grok_live_limiter", api.core._MintLimiter(api.grok_live.GROK_LIVE_LIMIT, api.grok_live.GROK_LIVE_WINDOW_S))
+    monkeypatch.setattr(api.grok_live, "_grok_live_host_limiter", api.core._MintLimiter(api.grok_live.GROK_LIVE_HOST_LIMIT, api.grok_live.GROK_LIVE_WINDOW_S))
+    monkeypatch.setattr(api.grok_live, "_grok_live_status_limiter", api.core._MintLimiter(api.grok_live.GROK_LIVE_STATUS_LIMIT, api.grok_live.GROK_LIVE_WINDOW_S))
+    monkeypatch.setattr(api.grok_live, "_grok_live_auth_failure_limiter",
+                        api.core._MintLimiter(api.grok_live.GROK_LIVE_AUTH_FAILURE_LIMIT, api.grok_live.GROK_LIVE_WINDOW_S))
     return state
 
 
@@ -103,7 +103,7 @@ def xai(monkeypatch):
             raise state.error
         return state.upstream
 
-    monkeypatch.setattr(api, "_connect_xai", connect)
+    monkeypatch.setattr(api.grok_live, "_connect_xai", connect)
     return state
 
 
@@ -144,7 +144,7 @@ def test_status_reports_api_key_and_config(client, hermes):
 
 
 def test_status_model_env_override_and_bad_names_fall_back(client, hermes):
-    hermes.env[api.GROK_LIVE_MODEL_ENV_VAR] = "grok-voice-beta"
+    hermes.env[api.grok_live.GROK_LIVE_MODEL_ENV_VAR] = "grok-voice-beta"
     hermes.config = {"voice": {"grok_live": {"voice": "eve; drop"}}}
     body = client.get(f"{BASE}/grok-live/status").json()
     assert (body["model"], body["voice"]) == ("grok-voice-beta", "eve")
@@ -161,7 +161,7 @@ def test_status_never_swaps_a_failed_sign_in_for_the_billed_key(client, hermes):
     hermes.resolver_error = RuntimeError("refresh failed")
     hermes.env["XAI_API_KEY"] = "env-key"
     body = client.get(f"{BASE}/grok-live/status").json()
-    assert (body["available"], body["reason"]) == (False, api.GROK_LIVE_SIGN_IN_FAILED)
+    assert (body["available"], body["reason"]) == (False, api.grok_live.GROK_LIVE_SIGN_IN_FAILED)
     assert "refresh failed" not in json.dumps(body)
 
 
@@ -169,7 +169,7 @@ def test_socket_refuses_when_the_sign_in_fails(client, hermes, xai):
     hermes.resolver_error = RuntimeError("refresh failed")
     hermes.env["XAI_API_KEY"] = "env-key"
     closed = _close_of(client)
-    assert closed.code == api.GROK_CLOSE_NO_CREDENTIAL
+    assert closed.code == api.grok_live.GROK_CLOSE_NO_CREDENTIAL
     assert xai.connects == []
 
 
@@ -181,18 +181,18 @@ def test_socket_setup_that_hangs_closes_as_retryable(client, hermes, xai, monkey
         return hermes.credentials
 
     sys.modules["tools.xai_http"].resolve_xai_http_credentials = stuck
-    monkeypatch.setattr(api, "GROK_LIVE_SETUP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api.grok_live, "GROK_LIVE_SETUP_TIMEOUT_S", 0.2)
     try:
         closed = _close_of(client)
     finally:
         released.set()
-    assert closed.code == api.GROK_CLOSE_UNREACHABLE
+    assert closed.code == api.grok_live.GROK_CLOSE_UNREACHABLE
     assert xai.connects == []
 
 
 def test_status_has_its_own_workers():
     # A stuck socket setup holds the socket pool, never the readiness check.
-    assert api._grok_live_status_executor is not api._grok_live_executor
+    assert api.grok_live._grok_live_status_executor is not api.grok_live._grok_live_executor
 
 
 def test_status_without_hermes_resolver_uses_env_key(client, hermes, monkeypatch):
@@ -240,7 +240,7 @@ def test_socket_reports_xai_dropping_while_conduit_sends_as_retryable(client, xa
     with client.websocket_connect(f"{BASE}/grok-live/socket") as ws:
         ws.send_text("hello")
         closed = _wait_close(ws)
-    assert closed.code == api.GROK_CLOSE_UNREACHABLE
+    assert closed.code == api.grok_live.GROK_CLOSE_UNREACHABLE
 
 
 def test_resolver_with_no_sign_in_is_final_even_with_a_key_in_env(client, hermes):
@@ -249,7 +249,7 @@ def test_resolver_with_no_sign_in_is_final_even_with_a_key_in_env(client, hermes
     hermes.credentials = {"provider": "xai-oauth", "api_key": "  "}
     hermes.env["XAI_API_KEY"] = "env-key"
     body = client.get(f"{BASE}/grok-live/status").json()
-    assert (body["available"], body["reason"]) == (False, api.GROK_LIVE_NO_CREDENTIAL)
+    assert (body["available"], body["reason"]) == (False, api.grok_live.GROK_LIVE_NO_CREDENTIAL)
 
 
 def test_broken_resolver_import_is_a_failed_sign_in_not_a_missing_one(client, hermes, monkeypatch):
@@ -260,16 +260,16 @@ def test_broken_resolver_import_is_a_failed_sign_in_not_a_missing_one(client, he
     monkeypatch.setitem(sys.modules, "tools.xai_http", Broken("tools.xai_http"))
     hermes.env["XAI_API_KEY"] = "env-key"
     body = client.get(f"{BASE}/grok-live/status").json()
-    assert (body["available"], body["reason"]) == (False, api.GROK_LIVE_SIGN_IN_FAILED)
+    assert (body["available"], body["reason"]) == (False, api.grok_live.GROK_LIVE_SIGN_IN_FAILED)
 
 
 def test_host_scoping_failure_is_not_reported_as_a_missing_credential(client, xai, monkeypatch):
     def unscoped(profile):
-        raise api.TokenError(503, "This Hermes version can't resolve per-profile keys")
+        raise api.core.TokenError(503, "This Hermes version can't resolve per-profile keys")
 
-    monkeypatch.setattr(api, "_profile_scope", unscoped)
+    monkeypatch.setattr(api.core, "_profile_scope", unscoped)
     closed = _close_of(client, f"{BASE}/grok-live/socket?profile=work")
-    assert closed.code == api.GROK_CLOSE_FAILED
+    assert closed.code == api.grok_live.GROK_CLOSE_FAILED
     assert "per-profile" in closed.reason
 
 
@@ -281,9 +281,9 @@ def test_socket_forwards_xais_try_again_later(client, xai):
 
 
 def test_refused_upgrades_past_the_cap_are_turned_away_early(client, hermes, xai, monkeypatch):
-    monkeypatch.setattr(api, "_grok_live_auth_failure_limiter", api._MintLimiter(1, 60))
+    monkeypatch.setattr(api.grok_live, "_grok_live_auth_failure_limiter", api.core._MintLimiter(1, 60))
     hermes.ws_auth = False
-    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED
+    assert _close_of(client).code == api.grok_live.GROK_CLOSE_UNAUTHORIZED
     with pytest.raises(Exception):
         with client.websocket_connect(f"{BASE}/grok-live/socket") as ws:
             ws.receive()
@@ -293,32 +293,32 @@ def test_refused_upgrades_past_the_cap_are_turned_away_early(client, hermes, xai
 def test_unrecognized_resolver_result_is_refused_not_swapped_for_the_key(client, hermes, xai):
     hermes.credentials = ("oauth-token", "xai-oauth")
     hermes.env["XAI_API_KEY"] = "env-key"
-    assert _close_of(client).code == api.GROK_CLOSE_NO_CREDENTIAL
+    assert _close_of(client).code == api.grok_live.GROK_CLOSE_NO_CREDENTIAL
     assert xai.connects == []
 
 
 def test_status_is_rate_limited_across_profiles(client, monkeypatch):
-    monkeypatch.setattr(api, "_grok_live_status_limiter", api._MintLimiter(1, 60))
+    monkeypatch.setattr(api.grok_live, "_grok_live_status_limiter", api.core._MintLimiter(1, 60))
     assert client.get(f"{BASE}/grok-live/status?profile=a").status_code == 200
     assert client.get(f"{BASE}/grok-live/status?profile=b").status_code == 429
 
 
 def test_socket_starts_are_capped_across_profiles(client, xai, monkeypatch):
-    monkeypatch.setattr(api, "_grok_live_host_limiter", api._MintLimiter(1, 60))
+    monkeypatch.setattr(api.grok_live, "_grok_live_host_limiter", api.core._MintLimiter(1, 60))
     xai.upstream.release.set()
     _close_of(client, f"{BASE}/grok-live/socket?profile=a")
-    assert _close_of(client, f"{BASE}/grok-live/socket?profile=b").code == api.GROK_CLOSE_RATE_LIMITED
+    assert _close_of(client, f"{BASE}/grok-live/socket?profile=b").code == api.grok_live.GROK_CLOSE_RATE_LIMITED
 
 
 def test_close_reason_survives_unencodable_text():
-    assert api._close_reason("bad \udc80 reason").startswith("bad ")
+    assert api.grok_live._close_reason("bad \udc80 reason").startswith("bad ")
 
 
 def test_socket_never_forwards_xai_codes_that_look_like_the_plugins(client, xai):
     xai.upstream = FakeUpstream(close_code=4503, close_reason="quota")
     xai.upstream.release.set()
     closed = _close_of(client)
-    assert (closed.code, closed.reason) == (api.GROK_CLOSE_REFUSED, "xAI closed the call (4503): quota")
+    assert (closed.code, closed.reason) == (api.grok_live.GROK_CLOSE_REFUSED, "xAI closed the call (4503): quota")
 
 
 def test_socket_auth_awaits_async_checks(client, hermes, xai):
@@ -328,19 +328,19 @@ def test_socket_auth_awaits_async_checks(client, hermes, xai):
         return False
 
     chat._ws_auth_ok = denied
-    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED, "a coroutine is not a yes"
+    assert _close_of(client).code == api.grok_live.GROK_CLOSE_UNAUTHORIZED, "a coroutine is not a yes"
     assert xai.connects == []
 
 
 def test_socket_caps_open_relays_per_profile_and_frees_them(client, xai, monkeypatch):
-    monkeypatch.setattr(api, "GROK_LIVE_MAX_OPEN_PER_PROFILE", 1)
+    monkeypatch.setattr(api.grok_live, "GROK_LIVE_MAX_OPEN_PER_PROFILE", 1)
     with client.websocket_connect(f"{BASE}/grok-live/socket") as first:
         first.send_text("hello")
-        assert _close_of(client).code == api.GROK_CLOSE_RATE_LIMITED
+        assert _close_of(client).code == api.grok_live.GROK_CLOSE_RATE_LIMITED
         assert len(xai.connects) == 1
         first.send_text("finish")
         _wait_close(first)
-    assert api._grok_live_open == {}
+    assert api.grok_live._grok_live_open == {}
     xai.upstream = FakeUpstream()
     xai.upstream.release.set()
     assert _close_of(client).code == 1000, "a closed relay frees its place"
@@ -349,73 +349,73 @@ def test_socket_caps_open_relays_per_profile_and_frees_them(client, xai, monkeyp
 def test_socket_maps_a_dropped_xai_connection_to_retryable(client, xai):
     xai.upstream = FakeUpstream(close_code=1006)
     xai.upstream.release.set()
-    assert _close_of(client).code == api.GROK_CLOSE_UNREACHABLE
+    assert _close_of(client).code == api.grok_live.GROK_CLOSE_UNREACHABLE
 
 
 def test_socket_refuses_without_dashboard_auth(client, hermes, xai):
     hermes.ws_auth = False
     # Accepted first, so Conduit reads 4401 rather than a bare HTTP 403.
-    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED
+    assert _close_of(client).code == api.grok_live.GROK_CLOSE_UNAUTHORIZED
     assert xai.connects == []
     assert hermes.entered == [], "no host work before auth"
 
 
 def test_socket_refuses_a_disallowed_origin(client, hermes, xai):
     hermes.ws_allowed = False
-    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED
+    assert _close_of(client).code == api.grok_live.GROK_CLOSE_UNAUTHORIZED
     assert xai.connects == []
 
 
 def test_socket_fails_closed_without_hermes_ws_auth(client, xai, monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_chat", None)
-    assert _close_of(client).code == api.GROK_CLOSE_UNAUTHORIZED
+    assert _close_of(client).code == api.grok_live.GROK_CLOSE_UNAUTHORIZED
     assert xai.connects == []
 
 
 def test_socket_without_credentials_says_why(client, hermes, xai):
     hermes.credentials = {"provider": "xai-oauth", "api_key": ""}
     closed = _close_of(client)
-    assert closed.code == api.GROK_CLOSE_NO_CREDENTIAL
+    assert closed.code == api.grok_live.GROK_CLOSE_NO_CREDENTIAL
     assert "SuperGrok" in closed.reason
     assert len(closed.reason.encode()) <= 123
     assert xai.connects == []
 
 
 @pytest.mark.parametrize("status,code,text", [
-    (403, api.GROK_CLOSE_REFUSED, "xAI refused the SuperGrok sign-in (HTTP 403)"),
-    (429, api.GROK_CLOSE_RATE_LIMITED, "xAI is rate limiting voice (HTTP 429)"),
-    (404, api.GROK_CLOSE_REFUSED, "xAI refused the call (HTTP 404)"),
-    (503, api.GROK_CLOSE_UNREACHABLE, "xAI voice is unavailable (HTTP 503)"),
+    (403, api.grok_live.GROK_CLOSE_REFUSED, "xAI refused the SuperGrok sign-in (HTTP 403)"),
+    (429, api.grok_live.GROK_CLOSE_RATE_LIMITED, "xAI is rate limiting voice (HTTP 429)"),
+    (404, api.grok_live.GROK_CLOSE_REFUSED, "xAI refused the call (HTTP 404)"),
+    (503, api.grok_live.GROK_CLOSE_UNREACHABLE, "xAI voice is unavailable (HTTP 503)"),
 ])
 def test_socket_reports_xai_refusal(client, xai, status, code, text):
-    xai.error = api.GrokUpstreamRefused(status)
+    xai.error = api.grok_live.GrokUpstreamRefused(status)
     closed = _close_of(client)
     assert (closed.code, closed.reason) == (code, text)
 
 
 def test_socket_names_the_api_key_when_it_was_refused(client, hermes, xai):
     hermes.credentials = {"provider": "xai", "api_key": "k"}
-    xai.error = api.GrokUpstreamRefused(401)
+    xai.error = api.grok_live.GrokUpstreamRefused(401)
     assert _close_of(client).reason == "xAI refused XAI_API_KEY (HTTP 401)"
 
 
 def test_socket_unreachable_xai_never_echoes_the_error(client, xai):
     xai.error = OSError("connect to wss://api.x.ai?token=secret failed")
     closed = _close_of(client)
-    assert (closed.code, closed.reason) == (api.GROK_CLOSE_UNREACHABLE, "Could not reach xAI")
+    assert (closed.code, closed.reason) == (api.grok_live.GROK_CLOSE_UNREACHABLE, "Could not reach xAI")
 
 
 def test_socket_rate_limits_per_profile(client, xai, monkeypatch):
-    monkeypatch.setattr(api, "_grok_live_limiter", api._MintLimiter(1, 60))
+    monkeypatch.setattr(api.grok_live, "_grok_live_limiter", api.core._MintLimiter(1, 60))
     xai.upstream.release.set()
     _close_of(client)
-    assert _close_of(client).code == api.GROK_CLOSE_RATE_LIMITED
+    assert _close_of(client).code == api.grok_live.GROK_CLOSE_RATE_LIMITED
     assert len(xai.connects) == 1
 
 
 def test_socket_refuses_oversized_frames(client, xai):
     with client.websocket_connect(f"{BASE}/grok-live/socket") as ws:
-        ws.send_text("x" * (api.GROK_LIVE_MAX_CLIENT_FRAME_BYTES + 1))
+        ws.send_text("x" * (api.grok_live.GROK_LIVE_MAX_CLIENT_FRAME_BYTES + 1))
         closed = _wait_close(ws)
     assert closed.code == 1009
     assert xai.upstream.sent == []

@@ -152,11 +152,11 @@ def gateway(monkeypatch):
         return server.reply
 
     server.reply = '{"replies":[{"text":"Thanks!","p":0.8}]}'
-    monkeypatch.setattr(api, "_predict_fork_answer", fork_answer)
-    monkeypatch.setattr(api, "_predict_fast_model", lambda: {"provider": "local", "model": "glm-flash"})
-    monkeypatch.setattr(api, "_predict_limiter", api._MintLimiter(100, 60.0))
-    api._predict_counts.clear()
-    api._predict_running.clear()
+    monkeypatch.setattr(api.chats, "_predict_fork_answer", fork_answer)
+    monkeypatch.setattr(api.chats, "_predict_fast_model", lambda: {"provider": "local", "model": "glm-flash"})
+    monkeypatch.setattr(api.chats, "_predict_limiter", api.core._MintLimiter(100, 60.0))
+    api.chats._predict_counts.clear()
+    api.chats._predict_running.clear()
     server.asked = asked
     return server
 
@@ -201,7 +201,7 @@ def test_a_bad_request_is_refused(gateway, client):
 
 def test_one_prediction_at_a_time_per_chat(gateway, client):
     gateway._sessions["s1"] = {"agent": FakeAgent([])}
-    api._predict_running["s1"] = 0.0
+    api.chats._predict_running["s1"] = 0.0
     response = client.post(f"{BASE}/predict", json={"session_id": "s1", "kind": "replies"})
     assert response.status_code == 429
 
@@ -214,7 +214,7 @@ def test_a_slow_prediction_times_out_and_frees_its_chat_when_it_ends(gateway, cl
         release.wait(5)
         return '{"replies":[]}'
 
-    monkeypatch.setattr(api, "_predict_fork_answer", slow)
+    monkeypatch.setattr(api.chats, "_predict_fork_answer", slow)
     gateway._sessions["s1"] = {"agent": FakeAgent([])}
     response = client.post(f"{BASE}/predict", json={"session_id": "s1", "kind": "replies", "wait_s": 0.1})
     assert response.status_code == 504
@@ -222,17 +222,17 @@ def test_a_slow_prediction_times_out_and_frees_its_chat_when_it_ends(gateway, cl
     assert client.post(f"{BASE}/predict", json={"session_id": "s1", "kind": "replies"}).status_code == 429
     release.set()
     for _ in range(100):
-        if "s1" not in api._predict_running:
+        if "s1" not in api.chats._predict_running:
             break
         threading.Event().wait(0.02)
-    assert "s1" not in api._predict_running
-    monkeypatch.setattr(api, "_predict_fork_answer", lambda *a: gateway.reply)
+    assert "s1" not in api.chats._predict_running
+    monkeypatch.setattr(api.chats, "_predict_fork_answer", lambda *a: gateway.reply)
     assert client.post(f"{BASE}/predict", json={"session_id": "s1", "kind": "replies"}).status_code == 200
 
 
 def test_the_host_runs_only_so_many_predictions_at_once(gateway, client):
-    for n in range(api.PREDICT_MAX_RUNNING):
-        api._predict_running[f"busy{n}"] = 0.0
+    for n in range(api.chats.PREDICT_MAX_RUNNING):
+        api.chats._predict_running[f"busy{n}"] = 0.0
     gateway._sessions["s1"] = {"agent": FakeAgent([])}
     response = client.post(f"{BASE}/predict", json={"session_id": "s1", "kind": "replies"})
     assert response.status_code == 503
@@ -240,7 +240,7 @@ def test_the_host_runs_only_so_many_predictions_at_once(gateway, client):
 
 
 def test_predictions_are_limited_per_minute(gateway, client, monkeypatch):
-    monkeypatch.setattr(api, "_predict_limiter", api._MintLimiter(2, 60.0))
+    monkeypatch.setattr(api.chats, "_predict_limiter", api.core._MintLimiter(2, 60.0))
     gateway._sessions["s1"] = {"agent": FakeAgent([])}
     codes = [client.post(f"{BASE}/predict", json={"session_id": "s1", "kind": "replies"}).status_code
              for _ in range(3)]
@@ -250,8 +250,8 @@ def test_predictions_are_limited_per_minute(gateway, client, monkeypatch):
 def test_the_prediction_limit_is_one_for_the_host(gateway, client, monkeypatch):
     import contextlib
 
-    monkeypatch.setattr(api, "_predict_limiter", api._MintLimiter(2, 60.0))
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    monkeypatch.setattr(api.chats, "_predict_limiter", api.core._MintLimiter(2, 60.0))
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     gateway._sessions["s1"] = {"agent": FakeAgent([])}
     codes = [client.post(f"{BASE}/predict", params={"profile": name},
                          json={"session_id": "s1", "kind": "replies"}).status_code
@@ -273,7 +273,7 @@ def test_an_unknown_profile_keeps_its_refusal(gateway, client, monkeypatch):
     def unknown(profile):
         raise HTTPException(status_code=404, detail="Unknown profile")
 
-    monkeypatch.setattr(api, "_profile_scope", unknown)
+    monkeypatch.setattr(api.core, "_profile_scope", unknown)
     response = client.get(f"{BASE}/predict", params={"profile": "nobody"})
     assert response.status_code == 404
     assert response.headers["cache-control"] == "no-store"
