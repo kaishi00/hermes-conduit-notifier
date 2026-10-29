@@ -67,13 +67,16 @@ READ_TIMEOUT = 5.0
 READ_RETRIES, READ_RETRY_PAUSE = 3, 0.05
 
 # The tiers are allowlists (decision 9). Use my data adds the room-safe data
-# tools the owner picks; Custom adds any the owner picks. Hermes keeps every
-# turn under the profile's own toolsets either way.
+# tools (choosing it picks them: there's only free/busy so far, N8); Custom
+# adds any the owner picks. Hermes keeps every turn under the profile's own
+# toolsets either way.
 LOOK_TOOLS = frozenset({"web_search", "web_extract", "x_search", "vision_analyze"})
-# Data tools that share nothing beyond what a room needs (free/busy, in M4).
-DATA_TOOLS: frozenset[str] = frozenset()
+# Use my data's free/busy (room_free_busy): only when the owner is busy.
+FREE_BUSY_TOOL = "conduit_free_busy"
+# Data tools that share nothing beyond what a room needs.
+DATA_TOOLS: frozenset[str] = frozenset({FREE_BUSY_TOOL})
 TIERS: dict[str, frozenset[str]] = {
-    "talk": frozenset(), "look": LOOK_TOOLS, "data": LOOK_TOOLS, "custom": frozenset()}
+    "talk": frozenset(), "look": LOOK_TOOLS, "data": LOOK_TOOLS | DATA_TOOLS, "custom": frozenset()}
 SEARCH_TOOL = "session_search"
 # Tool Search's bridge lists tools and calls one by name. Hermes peels the
 # bridge before the hooks run (agent/tool_executor), so they see the tool it
@@ -160,6 +163,9 @@ TALK_SEARCH_ASK_LINE = (f"Here you talk, and searching your owner's past chats a
                         "are your only tools.")
 ASK_TOO_LINE = f"Asking your owner with {ASK_TOOL} is open to you here too."
 CUSTOM_LINE = "Here you can use only these tools: {tools}."
+# The owner chose to share busy times here, so no ask is needed for them (N8).
+FREE_BUSY_LINE = (f"{FREE_BUSY_TOOL} tells you when your owner is busy: you may share those times here without "
+                  "asking, and nothing else about their plans.")
 SEARCH_ON_LINE = "You may search your owner's past chats when it helps the room."
 LEARNING_LINE = "Nothing is saved from this room to your memory or skills."
 NOTE_LINE = "Your owner's private note for this room (follow it; never quote or mention it): {note}"
@@ -248,9 +254,7 @@ def choices_for(turn: RoomTurn, home: Any) -> RoomChoices:
 
 def allowed_tools(choices: RoomChoices) -> frozenset[str]:
     allowed = set(TIERS.get(choices.tools, frozenset()))
-    if choices.tools == "data":
-        allowed |= DATA_TOOLS & set(choices.custom_tools)
-    elif choices.tools == "custom":
+    if choices.tools == "custom":
         allowed |= set(choices.custom_tools)
     if choices.search_chats:
         allowed.add(SEARCH_TOOL)
@@ -347,6 +351,8 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     posters = [UNREAD_POSTERS_LINE] if unread and turn is not None else _poster_lines(turn, people, posts)
     lines = [opening, *(f"- {line}" for line in posters), f"- {ANSWER_FOR_YOURSELF}",
              f"- {SHARE_LINES.get(choices.share, SHARE_LINES['ask'])}", f"- {tool_line}"]
+    if FREE_BUSY_TOOL in tools:
+        lines.append(f"- {FREE_BUSY_LINE}")
     if choices.search_chats:
         lines.append(f"- {SEARCH_ON_LINE}")
     lines.append(f"- {LEARNING_LINE}")

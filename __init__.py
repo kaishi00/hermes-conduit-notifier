@@ -17,8 +17,8 @@ from hermes_constants import get_hermes_home
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool, phone_tool,
                present_tool, pulse, reply_sources, review_notices, room_asks, room_chats, room_cleanup, room_cutoff,
-               room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool, room_wakeups,
-               settings_tool, show_tool, turn_surface, voice_archive)
+               room_free_busy, room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool,
+               room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .present_store import PresentStore
@@ -138,6 +138,7 @@ def register(ctx: Any) -> None:
     # Ask me first: in a room with other people's agents, the agent asks its
     # owner's phone before it shares something personal; only room turns.
     room_asks.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    room_free_busy.register(ctx, is_child=_is_child)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001

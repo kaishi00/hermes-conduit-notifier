@@ -491,7 +491,7 @@ def test_look_things_up_allows_web_tools_only(host, session_id, room_id):
     assert _tool(session_id, "tool_search") is None
     for tool_name in ("terminal", "read_file", "browser_navigate", "conduit_location", "session_search", "memory"):
         assert _blocked(_tool(session_id, tool_name)), tool_name
-    # Use my data adds only the room-safe data tools the owner picks; none exist yet.
+    # Use my data adds only the room-safe data tools (free/busy, N8): another tool picked stays out.
     _choose(host, room_id, tools="data", custom_tools=["conduit_calendar"])
     assert _tool(session_id, "web_search") is None
     assert _blocked(_tool(session_id, "conduit_calendar"))

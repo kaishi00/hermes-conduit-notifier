@@ -1339,7 +1339,7 @@ def _link_time(at: int) -> str:
 
 def _print_room_choices(label: str, choices: Any, indent: str = "") -> None:
     tools = _ROOM_TOOLS.get(choices.tools, choices.tools)
-    if choices.custom_tools and choices.tools in ("data", "custom"):
+    if choices.custom_tools and choices.tools == "custom":
         tools += f": {', '.join(choices.custom_tools)}"
     print(f"{indent}{_printable(label)}:")
     print(f"{indent}  Can do: {_printable(tools)}")
