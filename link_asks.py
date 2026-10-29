@@ -490,7 +490,8 @@ class Asks:
         when = described({"free_on": asked}).removeprefix("free on ").removesuffix("?")
         answer: dict[str, Any] = {"status": ANSWERED, "free": not blocks, "time_zone": tz}
         if blocks and times:
-            answer["busy"] = [{"start": _clock(a, zone), "end": _clock(b, zone)} for a, b in blocks[:MAX_BUSY_SPANS]]
+            answer["busy"] = [{"start": _clock(a, zone), "end": _clock(b, zone, end=True)}
+                              for a, b in blocks[:MAX_BUSY_SPANS]]
             spans = ", ".join(f"{span['start']}-{span['end']}" for span in answer["busy"])
             more = len(blocks) - len(answer["busy"])
             answer["text"] = (f"Busy {spans} on {asked['date']} ({tz}), "
@@ -811,13 +812,15 @@ def _busy(value: Any) -> Optional[list[dict[str, str]]]:
     if not isinstance(value, list):
         return None
     spans = [{"start": span["start"], "end": span["end"]} for span in value[:MAX_BUSY_SPANS]
-             if isinstance(span, dict) and all(isinstance(span.get(key), str) and _HHMM.fullmatch(span[key])
-                                               for key in ("start", "end"))]
+             if isinstance(span, dict) and isinstance(span.get("start"), str) and _HHMM.fullmatch(span["start"])
+             and isinstance(span.get("end"), str) and (_HHMM.fullmatch(span["end"]) or span["end"] == "24:00")]
     return spans
 
 
-def _clock(epoch: int, zone: Any) -> str:
-    return datetime.fromtimestamp(epoch, zone).strftime("%H:%M")
+def _clock(epoch: int, zone: Any, *, end: bool = False) -> str:
+    """A time of the asked day, HH:MM; an ``end`` at the midnight after it is 24:00, never 00:00."""
+    shown = datetime.fromtimestamp(epoch, zone).strftime("%H:%M")
+    return "24:00" if end and shown == "00:00" else shown
 
 
 def _epoch(value: Any) -> int:

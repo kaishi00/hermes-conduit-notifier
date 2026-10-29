@@ -600,3 +600,17 @@ def test_a_store_that_cant_be_read_doesnt_say_where_it_is(pair):
     with pytest.raises(link_asks.AsksError) as refused:
         pair.asked.rules()
     assert str(pair.asked.store.path) not in str(refused.value)
+
+
+def test_a_busy_time_to_the_end_of_the_day_ends_at_24(pair, monkeypatch):
+    from datetime import datetime as moment
+    from zoneinfo import ZoneInfo
+
+    pair.share_calendar()
+    rules_for(pair, free_on="times")
+    london = ZoneInfo("Europe/London")
+    start = int(moment(2026, 10, 15, 22, 0, tzinfo=london).timestamp())
+    end = int(moment(2026, 10, 16, 0, 0, tzinfo=london).timestamp())
+    monkeypatch.setattr(phone.PhoneStore, "busy_blocks", lambda self, db, device, a, b: [(start, end)])
+    answer = pair.ask({"free_on": {"date": "2026-10-15"}})
+    assert answer["busy"] == [{"start": "22:00", "end": "24:00"}] and "Busy 22:00-24:00" in answer["answer"]
