@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import { RelayStore } from '../src/store.mjs';
-import { CrashReports, crashReportsFromEnv, signature, validateReport } from '../src/crash-reports.mjs';
+import { CrashReports, crashReportRoutes, crashReportsFromEnv, signature, validateReport } from '../src/crash-reports.mjs';
 
 const TOKEN = 'a'.repeat(40);
 
@@ -46,6 +46,11 @@ test('a report needs its build, device and a diagnostic object', () => {
   const quoted = validateReport(post({ diagnostic: { crashDiagnostics: [{ diagnosticMetaData: { exceptionReason: { composedMessage: 'hi?', arguments: ['hi?'], className: 'NSString' } } }], cpuExceptionDiagnostics: [{}] } }));
   assert.ok(!JSON.stringify(quoted).includes('hi?'), 'the relay drops exception messages itself');
   assert.equal(quoted.diagnostic.cpuExceptionDiagnostics, undefined);
+  const extra = validateReport(post({ diagnostic: { crashDiagnostics: [{ diagnosticMetaData: { pid: 42, regionFormat: 'NZ', signal: 11, osVersion: { nested: 'x' } }, callStackTree: { callStacks: [{ callStackRootFrames: [{ binaryName: 'Conduit', symbol: 'secret' }] }] } }] } }));
+  assert.deepEqual(extra.diagnostic.crashDiagnostics[0].diagnosticMetaData, { signal: 11 }, 'only named keys, and no nested values');
+  assert.ok(!JSON.stringify(extra).includes('secret'));
+  const wide = { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [{ binaryName: '€'.repeat(300_000) }] }] } }] };
+  assert.throws(() => validateReport(post({ diagnostic: wide })), /payload_too_large/, 'the cap counts bytes');
   let deep = { binaryName: 'Conduit' };
   for (let level = 0; level < 5_000; level += 1) deep = { subFrames: [deep] };
   assert.throws(() => validateReport(post({ diagnostic: { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [deep] }] } }] } })), /invalid_diagnostic/);
@@ -81,6 +86,36 @@ test('reports are kept as private files, newest kept, old ones pruned', () => {
     assert.deepEqual(reports.ids(), []);
     reports.save(validateReport(post()));
     assert.equal(new CrashReports({ directory: join(dir, 'crash-reports'), now: () => now }).list().length, 1, 'headings load back on restart');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only a valid post spends the daily budget', async () => {
+  const spent = [];
+  const routes = crashReportRoutes({
+    reports: { save: () => 'id' },
+    adminToken: TOKEN,
+    readJson: async (request) => request.body,
+    enforceRateLimit: (key) => spent.push(key.split(':')[0]),
+    clientAddress: () => '203.0.113.1',
+  });
+  const send = (body) => routes({ method: 'POST', body, headers: {} }, {}, new URL('http://relay/v1/crash-reports'), () => {});
+  await assert.rejects(send(post({ kind: 'nope' })), /invalid_kind/);
+  assert.deepEqual(spent, ['crash-report'], 'refused before the daily budget');
+  await send(post());
+  assert.deepEqual(spent, ['crash-report', 'crash-report', 'crash-report-global']);
+});
+
+test('a heading without its report is dropped on start', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'conduit-crash-'));
+  try {
+    const directory = join(dir, 'crash-reports');
+    const reports = new CrashReports({ directory });
+    const id = reports.save(validateReport(post()));
+    rmSync(join(directory, `${id}.report.json`));
+    new CrashReports({ directory });
+    assert.ok(!existsSync(join(directory, `${id}.head.json`)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

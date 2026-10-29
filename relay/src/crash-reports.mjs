@@ -39,6 +39,12 @@ export class CrashReports {
     // Each report's heading, by id, oldest first: listing never reads a
     // report's stacks. Each heading is also a small file beside its report.
     this.headings = new Map();
+    // A heading left without its report (a crash between the two writes).
+    const kept = new Set(this.ids());
+    for (const name of readdirSync(directory)) {
+      const id = name.endsWith('.head.json') ? name.slice(0, -'.head.json'.length) : null;
+      if (id && ID_PATTERN.test(id) && !kept.has(id)) this.remove(id);
+    }
     for (const id of this.ids()) {
       try {
         this.headings.set(id, JSON.parse(readFileSync(this.path(id, 'head'), 'utf8')));
@@ -132,22 +138,58 @@ export function validateReport(body) {
   const crashDiagnostics = Array.isArray(diagnostic.crashDiagnostics) ? diagnostic.crashDiagnostics : [];
   const hangDiagnostics = Array.isArray(diagnostic.hangDiagnostics) ? diagnostic.hangDiagnostics : [];
   if (!crashDiagnostics.length && !hangDiagnostics.length) throw badRequest('invalid_diagnostic');
-  // Only crashes and hangs, without an exception's message or its
-  // arguments, whatever the app sent: they can quote anything.
-  report.diagnostic = withoutMessages({ timeStampBegin: diagnostic.timeStampBegin, timeStampEnd: diagnostic.timeStampEnd, crashDiagnostics, hangDiagnostics });
+  // Only crashes and hangs, and only the keys named below, whatever the app
+  // sent: an exception's message and arguments can quote anything.
+  report.diagnostic = {
+    timeStampBegin: typeof diagnostic.timeStampBegin === 'string' ? diagnostic.timeStampBegin : undefined,
+    timeStampEnd: typeof diagnostic.timeStampEnd === 'string' ? diagnostic.timeStampEnd : undefined,
+    crashDiagnostics: crashDiagnostics.map(keptDiagnostic),
+    hangDiagnostics: hangDiagnostics.map(keptDiagnostic),
+  };
+  if (Buffer.byteLength(JSON.stringify(report.diagnostic)) > MAX_REPORT_CHARS) throw httpError(413, 'payload_too_large');
   report.signature = signature(report.diagnostic);
   return report;
 }
 
+// The keys a report keeps, level by level, as the app sends them
+// (hermes-conduit CrashReportUpload); anything else is dropped.
+const META_KEYS = new Set([
+  'appVersion', 'appBuildVersion', 'osVersion', 'deviceType', 'platformArchitecture',
+  'bundleIdentifier', 'isTestFlightApp', 'lowPowerModeEnabled',
+  'exceptionType', 'exceptionCode', 'signal', 'terminationReason', 'virtualMemoryRegionInfo', 'hangDuration',
+]);
+const EXCEPTION_KEYS = new Set(['exceptionType', 'exceptionName', 'className', 'formatString']);
+const FRAME_KEYS = new Set(['binaryUUID', 'binaryName', 'offsetIntoBinaryTextSegment', 'address', 'sampleCount']);
+
+function pick(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([key, child]) => keys.has(key) && (child === null || typeof child !== 'object')));
+}
+
+function keptDiagnostic(value) {
+  const meta = value?.diagnosticMetaData;
+  const tree = value?.callStackTree;
+  const threads = Array.isArray(tree?.callStacks) ? tree.callStacks : [];
+  return {
+    ...(typeof value?.version === 'string' ? { version: value.version } : {}),
+    diagnosticMetaData: { ...pick(meta, META_KEYS), ...(meta?.exceptionReason ? { exceptionReason: pick(meta.exceptionReason, EXCEPTION_KEYS) } : {}) },
+    callStackTree: {
+      ...(typeof tree?.callStackPerThread === 'boolean' ? { callStackPerThread: tree.callStackPerThread } : {}),
+      callStacks: threads.map((thread) => ({
+        threadAttributed: thread?.threadAttributed === true,
+        callStackRootFrames: (Array.isArray(thread?.callStackRootFrames) ? thread.callStackRootFrames : []).map((frame) => keptFrame(frame, 0)),
+      })),
+    },
+  };
+}
+
 // MetricKit's deepest stacks run to a few hundred frames; past 2,000 levels
 // a post is refused rather than overflowing the walk.
-function withoutMessages(value, depth = 0) {
+function keptFrame(frame, depth) {
   if (depth > 2_000) throw badRequest('invalid_diagnostic');
-  if (Array.isArray(value)) return value.map((child) => withoutMessages(child, depth + 1));
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value)
-    .filter(([key]) => key !== 'composedMessage' && key !== 'arguments')
-    .map(([key, child]) => [key, withoutMessages(child, depth + 1)]));
+  const kept = pick(frame, FRAME_KEYS);
+  if (Array.isArray(frame?.subFrames)) kept.subFrames = frame.subFrames.map((child) => keptFrame(child, depth + 1));
+  return kept;
 }
 
 // What groups reports of the same fault: the first crash's or hang's
@@ -227,7 +269,11 @@ export function crashReportsFromEnv(env, dataPath) {
 }
 
 function badRequest(code) {
+  return httpError(400, code);
+}
+
+function httpError(status, code) {
   const error = new Error(code);
-  error.status = 400;
+  error.status = status;
   return error;
 }
