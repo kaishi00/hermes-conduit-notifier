@@ -31,6 +31,7 @@ MODULES = (
     "hermes_calls",
     "settings",
     "linked_rooms",
+    "link_asks",
     "pulse",
     "phone_data",
     "watch_tools",

@@ -224,8 +224,9 @@ def _room_links_root() -> Path:
 def _start_room_handlers(root: Path) -> None:
     """What takes the Links' envelopes, started before the loop so an
     envelope it reads finds its handler: the bridge that carries room turns
-    (room_bridge.py), and rooms over Links (room_invites.py), whose loop also
-    starts the rooms whose service runs in this process."""
+    (room_bridge.py), rooms over Links (room_invites.py), whose loop also
+    starts the rooms whose service runs in this process, and the asks between
+    linked agents (link_asks.py)."""
     try:
         core._plugin_package_module("room_bridge").start(root)
     except Exception:  # noqa: BLE001 - the Links go on without it
@@ -236,6 +237,11 @@ def _start_room_handlers(root: Path) -> None:
     except Exception:  # noqa: BLE001 - the Links go on without them
         logger.warning("Conduit plugin: couldn't start Linked Rooms' rooms loop; a links or rooms route tries "
                        "again", exc_info=True)
+    try:
+        core._plugin_package_module("link_asks").start(root)
+    except Exception:  # noqa: BLE001 - the Links go on without them
+        logger.warning("Conduit plugin: couldn't start the asks between linked agents; a links route tries again",
+                       exc_info=True)
 
 
 def _start_room_links() -> None:

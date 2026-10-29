@@ -34,6 +34,8 @@ they run:
                           synced across devices
     linked_rooms          Linked Rooms: your agent's choices in each room,
                           links, invites, drafts, approvals and room setup
+    link_asks             Asks between linked agents: each Link's rules and
+                          the asks waiting for their owner
     pulse                 Pulse settings
     phone_data            What Conduit shares: health data and the voice tools
                           that read it, location, the Shortcuts inbox,

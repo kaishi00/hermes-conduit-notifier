@@ -3908,6 +3908,57 @@ refuses outside a room turn with other people's agents, in a subagent, and in
 a room not set to Use my data or Custom with it picked. Capability
 `room-free-busy`.
 
+## Asks between linked agents (plugin 0.120+)
+
+In your private chats, your agent can ask someone you've linked with
+(Settings > People) whether they're free on a date, or a question, with the
+`conduit_ask_linked` tool: `people` lists whom it can ask, `ask` asks one
+(`to`: their name, and `free_on` `{date, from, to}` in their time zone, or
+`question`: one line of at most 300 characters), and `answers` gives this
+chat's recent asks and how they went. The ask goes over your Link as an
+`ask.ask` envelope, and the answer comes back as `ask.answer`. The call
+waits up to 20 seconds; an answer that comes later reaches the chat that
+asked before its next turn, once, and counts as heard once that turn
+replies and ends without failing. Their answer is framed as what they said,
+never as instructions. A room turn and a subagent never have it.
+
+No agent answers on the asked side, so nothing the asker writes reaches a
+model there. Each Link has rules, set by the person asked:
+
+- Free on a date: `yes_no` (say free or busy, without asking you),
+  `times` (also your busy times then), `ask` (you see what it would say
+  and Share it, Say instead or Don't share) or `off`.
+- Questions: `ask` (only you answer) or `off`.
+- The profile whose phone and calendar answer (`default` unless chosen).
+
+A Link without rules asks you for everything. Free on a date reads the
+calendar your phone shares with that profile, busy times only, as for
+Use my data; a date more than 92 days off or past what the phone synced
+answers that it can't tell. What waits for you is a prompt on your phone
+(a Conduit that shows a Link's asks, feature `link-asks`; with none, the
+ask is answered that it can't be now) for 24 hours, and unanswered the
+asker hears no answer came. You can answer from here too:
+
+    hermes conduit-push links rules [LINK] [--free-on yes_no|times|ask|off]
+        [--questions ask|off] [--answers-from PROFILE]
+    hermes conduit-push links asks
+    hermes conduit-push links answer ASK_ID --text "..." | --share | --decline
+
+Each Link may ask 10 times an hour, with at most 3 asks waiting for you
+(20 across Links); past that the ask is answered that there are too many.
+Asks are kept in `conduit-rooms/asks.json` (owner only) for a week.
+
+Conduit reads and changes the rules with capability `link-asks`:
+
+- `GET /links/rules`: `{"ok": true, "links": [{"id", "name", "status",
+  "rules": {"free_on", "questions", "profile"}, "saved"}], "defaults"}`.
+- `PUT /links/rules` with `{"link_id": "...", "free_on" | "questions" |
+  "profile": ...}`: `{"ok": true, "id", "rules"}`; 400 for a bad value, 404
+  for no such Link.
+- `GET /links/asks`: the asks linked Hermes made of this one, newest first,
+  each with who asked, what, and how it went (`held` while it waits for
+  you).
+
 ## Capabilities (plugin 0.4+)
 
 `GET /api/plugins/conduit_push/capabilities` returns the plugin version and

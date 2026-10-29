@@ -15,7 +15,8 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
-               desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool, phone_tool,
+               desktop_selected, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity, location_tool,
+               maps_tool, notify_tool, phone_tool,
                present_tool, pulse, reply_sources, review_notices, room_asks, room_chats, room_cleanup, room_cutoff,
                room_free_busy, room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool,
                room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
@@ -139,6 +140,7 @@ def register(ctx: Any) -> None:
     # owner's phone before it shares something personal; only room turns.
     room_asks.register(ctx, is_child=_is_child, profile=lambda: _profile)
     room_free_busy.register(ctx, is_child=_is_child)
+    link_ask_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
@@ -300,6 +302,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         return
     # A room turn that replied read its owner's answers (room_asks), heard once on_session_end says it didn't fail.
     _quietly(room_asks.replied, session_id, isinstance(response, str) and bool(response.strip()))
+    _quietly(link_ask_tool.replied, session_id, isinstance(response, str) and bool(response.strip()))
     # The Lock Screen's end waits for on_session_end too: this hook also runs
     # for a failed turn, and the first end the phone gets is the one it keeps.
     started = _take_turn_start(kwargs.get("turn_id"))
@@ -545,6 +548,7 @@ def _on_session_end(**kwargs: Any) -> None:
     # A room turn's owner's answers are heard when it answered; a failed or stopped one, or one Hermes doesn't say
     # (its held reply is dropped too), is framed with them again.
     _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
+    _quietly(_link_asks_ended, session_id, answered)
     if not pulse_turn:
         # A Pulse turn never started a Live Activity, so there is none to end.
         _quietly(live_activity.reporter.turn_ended, session_id,
@@ -809,9 +813,37 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else conduit_first.note(),
         # A room's private chat is told which room it's about (room_chats).
         None if child else _room_chat_note(session_id),
+        # What linked people answered this chat's asks since (link_ask_tool), once.
+        None if child else _link_answers_note(session_id),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _link_asks_ended(session_id: str, answered: bool) -> None:
+    """A private turn's answers from linked people are heard when it answered (link_ask_tool)."""
+    link_ask_tool.ended(_LazyAsks(), session_id, answered)
+
+
+class _LazyAsks:
+    """The installation's asks, read only when a turn has answers to mark heard."""
+
+    def mark_heard(self, ask_ids: Any) -> None:
+        link_asks.Asks(room_identity.root_home(get_hermes_home())).mark_heard(ask_ids)
+
+
+def _link_answers_note(session_id: str) -> str | None:
+    try:
+        home = get_hermes_home()
+        if not (room_identity.root_home(home) / room_identity.DIRECTORY / link_asks.FILE_NAME).exists():
+            return None
+        lines = link_ask_tool.frame(link_asks.Asks(room_identity.root_home(home)), _profile, session_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn; the answers wait for the next one
+        logger.debug("conduit_push: couldn't read the answers to this chat's asks", exc_info=True)
+        return None
+    if not lines:
+        return None
+    return "Answers to your asks to linked people (conduit_ask_linked):" + "".join(f"\n- {line}" for line in lines)
 
 
 def _room_chat_note(session_id: str) -> str | None:

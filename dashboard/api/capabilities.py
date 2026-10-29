@@ -211,6 +211,10 @@ ROUTE_CAPABILITIES = (
     # PUT /rooms/choices' Use my data lets a room's agent say when you're
     # busy (conduit_free_busy), times only (Linked Rooms).
     "room-free-busy",
+    # /links/rules and /links/asks: asks between linked agents, answered by
+    # each Link's rules or its owner (link_asks), and the present store's
+    # prompts for them (Linked Rooms).
+    "link-asks",
 )
 
 
