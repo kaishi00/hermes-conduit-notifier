@@ -478,6 +478,10 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
 # hears. read_chat reads only a chat the grant's newest find_chat returned.
 
 WATCH_CHAT_RESULTS = 5
+# Rows asked of Hermes for those five (VoiceChatFinder.searchLimit): a legacy
+# worker passes the source filter and is dropped after, so a query its prompt
+# matches ("task") mustn't crowd real chats out.
+WATCH_CHAT_SEARCH_LIMIT = WATCH_CHAT_RESULTS * 3
 # VoiceChatFinder.path's exclude_sources (SessionSource.nonChatExcludedSources):
 # the sessions Hermes' own pickers hide as not conversations.
 CHAT_SEARCH_EXCLUDED_SOURCES = "kanban,oneshot,tool"
@@ -625,6 +629,8 @@ def chat_plain_snippet(raw: Any) -> str:
 
 
 def is_legacy_kanban_worker(row: Dict[str, Any]) -> bool:
+    """The app's rule, word for word: a chat whose whole first message is that
+    prompt hides too, which no one types (FEATURE_MAP, Kanban workers)."""
     source, preview = row.get("source"), row.get("preview")
     if not isinstance(source, str) or source.lower() not in LEGACY_KANBAN_WORKER_SOURCES:
         return False
@@ -834,7 +840,7 @@ def run_watch_find_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
     def search_for(words: str) -> list:
         # Its own deadline, so a stuck route frees the worker too.
         return chat_matches(asyncio.run(asyncio.wait_for(routes.search_sessions(
-            q=words, limit=WATCH_CHAT_RESULTS, profile=grant.profile, **scope), WATCH_CHAT_SEARCH_TIMEOUT_S)))
+            q=words, limit=WATCH_CHAT_SEARCH_LIMIT, profile=grant.profile, **scope), WATCH_CHAT_SEARCH_TIMEOUT_S)))
 
     matches = search_for(query)
     for word in chat_fallback_words(query) if not matches else []:
