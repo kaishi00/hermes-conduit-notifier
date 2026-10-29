@@ -177,18 +177,22 @@ function keptDiagnostic(value) {
       ...(typeof tree?.callStackPerThread === 'boolean' ? { callStackPerThread: tree.callStackPerThread } : {}),
       callStacks: threads.map((thread) => ({
         threadAttributed: thread?.threadAttributed === true,
-        callStackRootFrames: (Array.isArray(thread?.callStackRootFrames) ? thread.callStackRootFrames : []).map((frame) => keptFrame(frame, 0)),
+        callStackRootFrames: (Array.isArray(thread?.callStackRootFrames) ? thread.callStackRootFrames : []).map((frame) => keptFrame(frame, 1)),
       })),
     },
   };
 }
 
-// MetricKit's deepest stacks run to a few hundred frames; past 2,000 levels
-// a post is refused rather than overflowing the walk.
-function keptFrame(frame, depth) {
-  if (depth > 2_000) throw badRequest('invalid_diagnostic');
+// A stack that overflowed can nest thousands of frames. The relay keeps 512
+// levels (Conduit sends at most 256) and drops the deeper ones, well before
+// the walk could run out of stack on a default Node.
+export const MAX_FRAME_LEVELS = 512;
+
+function keptFrame(frame, level) {
   const kept = pick(frame, FRAME_KEYS);
-  if (Array.isArray(frame?.subFrames)) kept.subFrames = frame.subFrames.map((child) => keptFrame(child, depth + 1));
+  if (Array.isArray(frame?.subFrames) && level < MAX_FRAME_LEVELS) {
+    kept.subFrames = frame.subFrames.map((child) => keptFrame(child, level + 1));
+  }
   return kept;
 }
 

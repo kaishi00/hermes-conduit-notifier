@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import { RelayStore } from '../src/store.mjs';
-import { CrashReports, crashReportRoutes, crashReportsFromEnv, signature, validateReport } from '../src/crash-reports.mjs';
+import { CrashReports, MAX_FRAME_LEVELS, crashReportRoutes, crashReportsFromEnv, signature, validateReport } from '../src/crash-reports.mjs';
 
 const TOKEN = 'a'.repeat(40);
 
@@ -51,9 +51,22 @@ test('a report needs its build, device and a diagnostic object', () => {
   assert.ok(!JSON.stringify(extra).includes('secret'));
   const wide = { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [{ binaryName: '€'.repeat(300_000) }] }] } }] };
   assert.throws(() => validateReport(post({ diagnostic: wide })), /payload_too_large/, 'the cap counts bytes');
-  let deep = { binaryName: 'Conduit' };
-  for (let level = 0; level < 5_000; level += 1) deep = { subFrames: [deep] };
-  assert.throws(() => validateReport(post({ diagnostic: { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [deep] }] } }] } })), /invalid_diagnostic/);
+  const nested = (levels) => {
+    let frame = { binaryName: 'Conduit' };
+    for (let level = 0; level < levels; level += 1) frame = { subFrames: [frame] };
+    return { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [frame] }] } }] };
+  };
+  const levels = (report) => {
+    let count = 0;
+    let frames = report.diagnostic.crashDiagnostics[0].callStackTree.callStacks[0].callStackRootFrames;
+    while (frames?.length) {
+      count += 1;
+      frames = frames[0].subFrames;
+    }
+    return count;
+  };
+  assert.equal(levels(validateReport(post({ diagnostic: nested(255) }))), 256, 'as deep as Conduit sends, whole');
+  assert.equal(levels(validateReport(post({ diagnostic: nested(5_000) }))), MAX_FRAME_LEVELS, 'an overflowed stack keeps its first levels');
 });
 
 test('the signature follows the attributed thread, so one fault groups', () => {
