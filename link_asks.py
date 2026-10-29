@@ -350,7 +350,8 @@ class Asks:
             self.present(entry["profile"]).settle_link(entry["prompt_id"], outcome, written)
         except Exception:  # noqa: BLE001 — the answer goes all the same; the phone's prompt expires
             logger.debug("Linked Rooms couldn't settle an ask's prompt", exc_info=True)
-        self._settle(entry, _owners(entry, outcome, written))
+        if not self._settle(entry, _owners(entry, outcome, written)):
+            raise AsksError("answered", "That ask was already answered", 409)
         return _shown_received({**entry, "status": "answered"})
 
     # --- The loop ----------------------------------------------------------------------------------
@@ -512,8 +513,8 @@ class Asks:
         except Exception:  # noqa: BLE001
             logger.warning("Linked Rooms couldn't wake the phone for an ask", exc_info=True)
 
-    def _settle(self, entry: dict[str, Any], answer: dict[str, Any]) -> None:
-        """Records how an ask went and queues its answer."""
+    def _settle(self, entry: dict[str, Any], answer: dict[str, Any]) -> bool:
+        """Records how an ask went and queues its answer; False when it was already answered."""
         now = int(self.clock())
         body = {"v": VERSION, "ask_id": entry["ask_id"], "status": answer["status"],
                 "text": _text(answer.get("text"), MAX_TEXT_CHARS)}
@@ -524,10 +525,11 @@ class Asks:
             key = _received_key(entry["link"], entry["ask_id"])
             kept = state["received"].get(key)
             if kept is not None and kept.get("status") != "held":
-                return
+                return False
             state["received"][key] = {**{k: v for k, v in entry.items() if k not in ("computed",)},
                                       "status": answer["status"], "answer": body["text"], "answered_at": now}
             _queue(state, entry["link"], ANSWER, entry["ask_id"], body, now)
+        return True
 
     # --- Hermes ------------------------------------------------------------------------------------
 
@@ -545,7 +547,13 @@ class Asks:
         return self.root if profile == "default" else self.root / "profiles" / profile
 
     def _profile_exists(self, profile: str) -> bool:
-        return profile == "default" or (self.root / "profiles" / profile).is_dir()
+        """The default, or a named profile Hermes keeps: a folder under profiles/ with something that marks it one
+        (as room_invites reads them)."""
+        from . import room_invites
+
+        home = self.root / "profiles" / profile
+        return profile == "default" or (home.is_dir() and any((home / marker).exists()
+                                                              for marker in room_invites._PROFILE_MARKERS))
 
 
 # --- Where it runs -------------------------------------------------------------------------------

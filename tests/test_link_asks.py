@@ -410,9 +410,15 @@ def test_a_calendar_that_fails_to_read_answers_unavailable(pair, monkeypatch):
 
 
 def test_an_ask_for_a_deleted_profile_writes_nothing_there(pair):
-    (pair.homes["asked"] / "profiles" / "work").mkdir(parents=True)
+    import shutil
+
+    work = pair.homes["asked"] / "profiles" / "work"
+    work.mkdir(parents=True)
+    with pytest.raises(link_asks.AsksError):
+        rules_for(pair, profile="work")  # a folder, not a profile Hermes keeps
+    (work / "config.yaml").write_text("model: {}\n")
     rules_for(pair, profile="work")
-    (pair.homes["asked"] / "profiles" / "work").rmdir()
+    shutil.rmtree(work)
     opened = []
     pair.asked.present = lambda profile: opened.append(profile)
     pair.asked.phone = lambda profile: opened.append(profile)
@@ -435,3 +441,20 @@ def test_cli_answer_says_when_nothing_sends_it(cli, pair, capsys, monkeypatch):
     monkeypatch.setattr(room_links, "reading", lambda root: False)
     assert cli("answer", ask["id"], decline=True) == 0
     assert "Nothing on this Hermes reads its rooms mailbox" in capsys.readouterr().out
+
+
+def test_cli_answer_after_the_phone_answered_says_so(cli, pair, capsys):
+    pair.share_calendar()
+    pair.phone_shows_link_asks()
+    pair.ask({"free_on": {"date": "2026-10-16"}})
+    (held,) = pair.asked.held()
+    entry = next(iter(pair.asked.store.read()["received"].values()))
+
+    class PhoneAnsweredFirst:
+        """The loop collects the phone's answer while the CLI answers."""
+        def settle_link(self, *_):
+            pair.asked._settle(entry, {"status": "declined", "text": "They didn't share that."})
+
+    pair.asked.present = lambda profile: PhoneAnsweredFirst()
+    assert cli("answer", held["id"], share=True) == 1
+    assert "already answered" in capsys.readouterr().out
