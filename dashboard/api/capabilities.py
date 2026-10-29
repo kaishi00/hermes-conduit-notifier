@@ -200,6 +200,10 @@ ROUTE_CAPABILITIES = (
     # through this Hermes, and GET /rooms/people's posts on the home: who
     # wrote what (Linked Rooms).
     "room-posts",
+    # GET/PUT /rooms/chats: a room's private chat with one of your agents,
+    # told which room it's about, with notes on rooms it Listens in
+    # (Linked Rooms).
+    "room-chats",
     # ?conduit_profile= on POST /rooms/drafts and GET/POST /rooms/setup: a
     # room made for, and this Hermes set up for rooms on, any profile's, on a
     # Hermes that hosts other profiles' plugins apart (hermes-conduit#1336).

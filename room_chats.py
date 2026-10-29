@@ -66,7 +66,11 @@ _told_lock = threading.Lock()
 
 
 class ChatsError(ValueError):
-    """A room or chat id this store won't keep."""
+    """A room or chat id this store won't keep (``code`` invalid), or a room this Hermes doesn't have (no_room)."""
+
+    def __init__(self, message: str, code: str = "invalid") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class Store:
@@ -87,16 +91,24 @@ class Store:
         return next((room_id for room_id, kept in self._load()["chats"].items() if kept["chat_id"] == chat_id), None)
 
     def view(self) -> dict[str, Any]:
-        return {"chats": [_shown(room_id, kept) for room_id, kept in sorted(self._load()["chats"].items())]}
+        """The chats; none while a hand edit has broken the file, which the next write starts over."""
+        try:
+            chats = self._load()["chats"]
+        except (ValueError, RecursionError):
+            chats = {}
+        return {"chats": [_shown(room_id, kept) for room_id, kept in sorted(chats.items())]}
 
-    def set(self, room_id: Any, chat_id: Any) -> dict[str, Any]:
-        """The room's chat is ``chat_id`` from now on; the notes it had go on with it."""
+    def set(self, room_id: Any, chat_id: Any, *, notes_from: int = 0) -> dict[str, Any]:
+        """The room's chat is ``chat_id`` from now on; the notes it had go on with it, and a room new here has its
+        notes from seq ``notes_from`` on."""
         if not isinstance(room_id, str) or not _ROOM_ID.fullmatch(room_id):
             raise ChatsError("room_id isn't a room's id")
         if not isinstance(chat_id, str) or not _CHAT_ID.fullmatch(chat_id):
             raise ChatsError("chat_id isn't a chat's id")
         with self._locked() as state:
-            kept = state["chats"].get(room_id) or {"notes_seq": 0, "tried_at": None}
+            kept = state["chats"].get(room_id) or {"notes_seq": max(0, notes_from), "tried_at": None}
+            if kept.get("chat_id") != chat_id:
+                kept["tried_at"] = None  # the old chat's refusal isn't the new one's
             kept["chat_id"] = chat_id
             state["chats"][room_id] = kept
             if len(state["chats"]) > MAX_CHATS:
@@ -182,6 +194,28 @@ def note(session_id: Any, home: Any, *, reader: Optional[room_reading.Reader] = 
     return CHAT_LINE.format(name=room_name(name), room_id=room_id)
 
 
+def open_chat(home: Any, room_id: Any, chat_id: Any, *, reader: Optional[room_reading.Reader] = None) \
+        -> dict[str, Any]:
+    """Conduit's "Ask your agent about this room": ``chat_id`` is the profile at ``home``'s chat about the room
+    from now on. A room new to the profile's chats gets notes on what comes after its newest message: what was
+    said before, the chat reads when asked."""
+    reader = reader or _reader(home)
+    if not isinstance(room_id, str) or not _ROOM_ID.fullmatch(room_id):
+        raise ChatsError("room_id isn't a room's id")
+    store = Store(home)
+    try:
+        if not any(room["room_id"] == room_id for room in reader.rooms()):
+            raise ChatsError("This Hermes has no room with other people by that id", "no_room")
+        try:
+            kept = store.get(room_id)
+        except (ValueError, RecursionError):
+            kept = None  # a hand edit broke the file: the write starts it over
+        last = reader.last_message(room_id) if kept is None else None
+    except room_reading.ReadingError as exc:
+        raise ChatsError(f"The room can't be read here ({exc.code})", "unreadable") from None
+    return store.set(room_id, chat_id, notes_from=0 if last is None else last[0])
+
+
 class Notes:
     """The notes of the installation at ``root``: ``profile_home(profile)`` is a profile's home, ``send`` the
     session host's send (pulse_host.send) and ``available`` whether this process has one."""
@@ -199,6 +233,7 @@ class Notes:
             send, available = pulse_host.send, available or pulse_host.available
         self.send = send
         self.available = available or (lambda: True)
+        self.chat_exists = _chat_exists
         self._looked_at: Optional[float] = None
 
     def pass_once(self) -> None:
@@ -252,6 +287,10 @@ class Notes:
         if not self.available():
             _tell_once("notes:host", "Linked Rooms sends no room notes from this process: it has no session host")
             return
+        if not self.chat_exists(self.profile_home(profile), kept["chat_id"]):
+            store.forget_chat(kept["chat_id"])  # deleted in Hermes: Conduit opens a new one when it's asked
+            logger.info("Linked Rooms forgot room %s's chat: it's gone from Hermes", room_id)
+            return
         # A stretch a page at a time: what one read gives, so the turn reads all it's told it covers.
         page = self.reader.read(room_id, after_seq=kept["notes_seq"], limit=room_reading.MAX_LIMIT)
         until = page["messages"][-1]["seq"] if page["more_after"] and page["messages"] else last[0]
@@ -284,6 +323,26 @@ def _reader(home: Any) -> room_reading.Reader:
     from . import room_identity
 
     return room_reading.Reader(room_identity.root_home(home), home=home)
+
+
+def _chat_exists(home: Any, chat_id: str) -> bool:
+    """Whether the profile at ``home`` still has the chat; True when its sessions can't be read."""
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=Path(home) / "state.db")
+    except Exception:  # noqa: BLE001 - no session store here (tests, older Hermes)
+        return True
+    try:
+        return db.get_session(chat_id) is not None
+    except Exception:  # noqa: BLE001
+        logger.debug("Linked Rooms couldn't look up chat %s", chat_id, exc_info=True)
+        return True
+    finally:
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("Couldn't close the session store", exc_info=True)
 
 
 def _normalized(raw: Any) -> dict[str, Any]:

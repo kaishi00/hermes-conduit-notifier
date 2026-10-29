@@ -13,6 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.117.0 (2026-10-29)
+
+### Fixes
+- A room hosted elsewhere that went on after your agents were taken out of
+  it read as ended to your agent. It now says you were taken out.
+- Your agent read every agent in a room hosted elsewhere as still in it.
+  It now knows that only of your own agents.
+
+### New and improved
+- Conduit can open a private chat with one of your agents about a room, and
+  your agent's notes on a room it Listens in arrive there. Notes start from
+  the room's newest message when the chat opens.
+- A room chat you delete is forgotten, so notes stop going to it.
+
 ## 0.116.0 (2026-10-29)
 
 ### Fixes

@@ -88,18 +88,24 @@ class Reader:
         for copy in room_copies.copies(self.root):
             people = room_invites.people(self.root, copy["room_id"]) or {}
             owners = {member["member_id"]: member.get("owner") for member in people.get("members") or ()}
+            statuses = {member["member_id"]: member.get("status") for member in people.get("members") or ()}
             mine = {agent["member_id"] for agent in copy["yours"]}
             agents = []
             for member in copy["members"]:
                 owner = YOU if member["member_id"] in mine or (member["member_id"] in owners and owners[
                     member["member_id"]] is None) else _person(
                         owners.get(member["member_id"]) or member.get("owner") or copy["from"])
+                # The home's page doesn't say who's still in: this installation knows it only of its own agents.
+                status = statuses.get(member["member_id"]) if owner == YOU else None
                 agents.append({"name": _agent_name(member), "owner": owner,
-                               "in": member.get("status", "in") == "in"})
+                               "in": None if status is None else status == "in"})
+            status = {"started": "going", "left": "you left"}.get(copy["status"], "ended")
+            if copy["status"] == "ended" and copy["reason"] == "removed" and copy["state"].get("ended") is None:
+                status = "you were taken out"
             shown.append({"room_id": copy["room_id"], "name": plain(copy["name"]) or "a room",
                           "host": _person(copy["from"]),
-                          # Your agents left a room that goes on: not ended.
-                          "status": {"started": "going", "left": "you left"}.get(copy["status"], "ended"),
+                          # Your agents left a room that goes on, or were taken out of it: not ended.
+                          "status": status,
                           "reason": copy["reason"] if copy["status"] != "started" else None, "agents": agents,
                           "yours": [agent["name"] for agent in agents if agent["owner"] == YOU],
                           "you": people.get("you") or _you_in(copy), "copy": copy})
@@ -164,8 +170,7 @@ class Reader:
             end = latest if before_seq is None else min(before_seq - 1, latest)
             found, more_before = self._backward(page, end, limit)
             more_after = end < latest and bool(self._forward(page, end, latest, 1)[0])
-        messages = [named(event) for event, _ in found]
-        messages = [message for message in messages if message is not None]
+        messages = [message for message in named([event for event, _ in found]) if message is not None]
         if not keep_times:
             for message in messages:
                 del message["created_at"]
@@ -265,26 +270,29 @@ class Reader:
                 raise ReadingError("no_room" if exc.status == 404 else "unreadable", str(exc)) from None
         return page
 
-    def _hosted_names(self, room: dict[str, Any]) -> Callable[[dict[str, Any]], Optional[dict[str, Any]]]:
+    def _hosted_names(self, room: dict[str, Any]) -> Callable[[list[dict[str, Any]]], list[Optional[dict[str, Any]]]]:
         draft = room["draft"]
         members = {member["member_id"]: member for member in draft["members"]}
-        posted: dict[str, Optional[str]] = {}
 
-        def named(event: dict[str, Any]) -> Optional[dict[str, Any]]:
+        def named_all(events: list[dict[str, Any]]) -> list[Optional[dict[str, Any]]]:
+            # Who posted the page's messages, looked up at once.
+            wanted = [event["event_id"] for event in events if event["kind"] == "message.user"]
+            try:
+                links: Optional[dict[str, str]] = room_posts.by_event(self.root, room["room_id"], wanted) \
+                    if wanted else {}
+            except (sqlite3.Error, OSError):
+                links = None  # who posted them can't be read: never shown as yours, and looked up again next read
+            return [named(event, links) for event in events]
+
+        def named(event: dict[str, Any], links: Optional[dict[str, str]]) -> Optional[dict[str, Any]]:
             text = _text(event)
             if text is None:
                 return None
             if event["kind"] == "message.user":
-                if event["event_id"] not in posted:
-                    try:
-                        links = room_posts.by_event(self.root, room["room_id"], [event["event_id"]])
-                    except (sqlite3.Error, OSError):
-                        # Who posted it can't be read: never shown as yours, and looked up again next read.
-                        return _shown(event, UNSURE, text)
-                    link = links.get(event["event_id"])
-                    posted[event["event_id"]] = None if link is None else room_posts.poster(
-                        draft["links"].get(link, {}).get("name"))
-                by = posted[event["event_id"]]
+                if links is None:
+                    return _shown(event, UNSURE, text)
+                link = links.get(event["event_id"])
+                by = None if link is None else room_posts.poster(draft["links"].get(link, {}).get("name"))
                 # The home puts the name a Link's posts go under on each line; it's shown never as "you".
                 return _shown(event, YOU, text) if by is None else _shown(event, _person(by), _unnamed(text, by))
             member = members.get(event["payload"].get("member_id"))
@@ -293,9 +301,9 @@ class Reader:
             owner = "yours" if member["link"] is None else \
                 f"{_person(draft['links'][member['link']]['name'])}'s"
             return _shown(event, f"{_agent_name(member)} ({owner})", text)
-        return named
+        return named_all
 
-    def _copy_names(self, room: dict[str, Any]) -> Callable[[dict[str, Any]], Optional[dict[str, Any]]]:
+    def _copy_names(self, room: dict[str, Any]) -> Callable[[list[dict[str, Any]]], list[Optional[dict[str, Any]]]]:
         copy, host, you = room["copy"], room["host"], room.get("you")
         # A line the home says is this installation's own is shown as yours only when it's one of your posts:
         # the home is the room's authority, not you.
@@ -328,7 +336,7 @@ class Reader:
                 return _shown(event, "another agent", text)
             owner = "yours" if agent["owner"] == YOU else f"{agent['owner']}'s"
             return _shown(event, f"{agent['name']} ({owner})", text)
-        return named
+        return lambda events: [named(event) for event in events]
 
 
 # --- Helpers ---------------------------------------------------------------------------------

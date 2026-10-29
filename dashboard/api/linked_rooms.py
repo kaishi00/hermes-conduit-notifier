@@ -155,6 +155,45 @@ async def delete_room_sessions(response: Response, room_id: Optional[str] = None
                                      route="room chats")
 
 
+# A room's private chat with one of this profile's agents (room_chats.py):
+# Conduit's "Ask your agent about this room" names the chat it opened, and
+# each turn there is told which room it's about.
+
+ROOM_CHATS_MAX_BODY_BYTES = 4 * 1024
+
+
+def room_chats(action: str, room_id: Any = None, chat_id: Any = None) -> Dict[str, Any]:
+    module = core._plugin_package_module("room_chats")
+    home = Path(core._calls_home())
+    if action == "list":
+        return module.Store(home).view()
+    try:
+        return {"chat": module.open_chat(home, room_id, chat_id)}
+    except module.ChatsError as exc:
+        raise core.TokenError(404 if exc.code == "no_room" else 503 if exc.code == "unreadable" else 400, str(exc))
+
+
+@router.get("/rooms/chats")
+async def get_room_chats(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    """This profile's room chats: each room's, with the seq its notes reach."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_choices_route(profile, lambda: room_chats("list"), route="room chats")
+
+
+@router.put("/rooms/chats")
+async def put_room_chat(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    """``chat_id`` is this profile's chat about ``room_id`` from now on (the
+    latest kept). A room new to its chats gets notes on what comes after its
+    newest message; one it had keeps its notes where they were."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await core._read_json_body(request, ROOM_CHATS_MAX_BODY_BYTES)
+    if not isinstance(body, dict) or "room_id" not in body or "chat_id" not in body:
+        raise HTTPException(status_code=400, headers={"Cache-Control": "no-store"},
+                            detail="Expected {\"room_id\": ..., \"chat_id\": ...}")
+    return await _room_choices_route(profile, lambda: room_chats("open", body["room_id"], body["chat_id"]),
+                                     route="room chats")
+
+
 # Links between installations (room_links.py): invites, the Links they make
 # and the loop that reads this installation's inbox at the rooms mailbox.
 # Links belong to the installation, in its root home, so these routes take no
