@@ -369,12 +369,29 @@ def copies(root: Any) -> list[dict[str, Any]]:
     invites = room_invites.Store(root).read()["invites"]
     shown = []
     for row in _rows(path(root)):
+        invite = invites.get(f"{row['link']}/{row['room_id']}")
         try:
-            shown.append(_shown(row, invites.get(f"{row['link']}/{row['room_id']}")))
+            shown.append(_shown(row, invite))
+            if invite is not None:
+                _note_yours(path(root), row, invite)
         except (TypeError, ValueError, RecursionError, AttributeError):
             _skipped(f"copy:{row['room_id']}", "Linked Rooms skipped its copy of room %s: it can't read it",
                      row["room_id"])
     return shown
+
+
+def _note_yours(file: Path, row: sqlite3.Row, invite: dict[str, Any]) -> None:
+    """A copy kept before it noted your agents (0.115) notes them while its invite lasts: an ended room's copy
+    takes no more pages."""
+    members = json.loads(row["members_json"])
+    if all(YOURS in member for member in members):
+        return
+    try:
+        with _db_lock, closing(sqlite3.connect(file)) as conn, conn:
+            conn.execute("UPDATE conduit_room_copies SET members_json=? WHERE room_id=? AND members_json=?",
+                         (json.dumps(_marked(members, invite)), row["room_id"], row["members_json"]))
+    except sqlite3.Error:  # noted on a later read
+        pass
 
 
 def copy(root: Any, room_id: Any) -> dict[str, Any]:

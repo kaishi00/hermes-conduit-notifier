@@ -7,7 +7,7 @@ your posts), a linked person by the name their Link has here, and an agent with 
 "Furina (yours)". The lines the home prefixes with a poster's name ("Mona: ...") come without it.
 
 Only messages are read: the room's other events (turns, routes, who joined) aren't. The room tool (room_tool.py)
-is the only caller; a room turn never has it.
+and the room chats' notes (room_chats.py) read it; a room turn never has the tool.
 """
 
 from __future__ import annotations

@@ -638,3 +638,22 @@ def test_a_copy_path_with_a_question_mark_reads(copies, tmp_path):
         "latest_seq": 1, "authority": {"gateway_id": FURINA, "epoch": 1}})
 
     assert [event["seq"] for event in copies_module.log(root, "conduit-odd")["events"]] == [1]
+
+
+def test_a_copy_kept_before_it_noted_your_agents_notes_them_while_its_invite_lasts(copies):
+    import sqlite3
+
+    room_id = started(copies, links=("link1",))
+    copies.furina.pass_once()
+    file = copies_module.path(copies.tmp_path / "laifu")
+    with sqlite3.connect(file) as conn:  # as 0.115 kept it
+        [(members,)] = conn.execute("SELECT members_json FROM conduit_room_copies WHERE room_id=?", (room_id,))
+        old = [{key: value for key, value in member.items() if key != copies_module.YOURS}
+               for member in json.loads(members)]
+        conn.execute("UPDATE conduit_room_copies SET members_json=? WHERE room_id=?", (json.dumps(old), room_id))
+
+    copy_of(copies, "laifu", room_id)  # read while the invite lasts
+    with invites_module.Store(copies.tmp_path / "laifu").update() as state:
+        state["invites"].clear()
+
+    assert [agent["handle"] for agent in copy_of(copies, "laifu", room_id)["yours"]] == ["laifu"]
