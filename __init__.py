@@ -15,10 +15,10 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
-               desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool, phone_tool,
-               present_tool, pulse, reply_sources, review_notices, room_asks, room_chats, room_cleanup, room_cutoff,
-               room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool, room_wakeups,
-               settings_tool, show_tool, turn_surface, voice_archive)
+               desktop_selected, forks, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool,
+               phone_tool, present_tool, pulse, reply_sources, review_notices, room_asks, room_chats, room_cleanup,
+               room_cutoff, room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool,
+               room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .present_store import PresentStore
@@ -82,6 +82,10 @@ def register(ctx: Any) -> None:
     # An open chat's self-improvement updates follow the setting as it is
     # now, not as it was when the chat opened (review_notices).
     review_notices.install()
+    # A fork of a chat (the self-improvement review, /btw, Conduit's
+    # predictions) shares the chat's session id: its turn is never the
+    # chat's (forks).
+    forks.install()
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
@@ -293,6 +297,8 @@ def _member_room_turn(session_id: str) -> bool:
 
 
 def _post_llm_call(**kwargs: Any) -> None:
+    if forks.inside():
+        return
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
     # A room turn that replied read its owner's answers (room_asks); a failed one is framed with them again.
@@ -473,6 +479,7 @@ def _unload() -> None:
     room_cleanup.uninstall()
     room_rules.forget()
     review_notices.uninstall()
+    forks.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
     client.stop(timeout=max(0.0, deadline - time.monotonic()))
@@ -1077,8 +1084,10 @@ def _inside_delegated_child() -> bool:
 
 def _is_child(session_id: Any) -> bool:
     """Whether the session running now is a delegated child: Hermes'
-    delegation flag, else :func:`_is_child_session`."""
-    return _inside_delegated_child() or _is_child_session(session_id)
+    delegation flag, else :func:`_is_child_session`. A fork of a chat
+    (forks) counts as one: it runs under its chat's id, and nothing it does
+    is the chat's turn."""
+    return forks.inside() or _inside_delegated_child() or _is_child_session(session_id)
 
 
 def _is_child_session(session_id: Any) -> bool:
