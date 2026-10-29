@@ -217,8 +217,8 @@ iOS version and device model; never an exception's message text) to
 `POST /v1/crash-reports` on the developer's relay (`push.milim.dev`), even
 when the user's notifications use another relay. A post holds at most
 600,000 characters, and the relay keeps only the diagnostic keys it names
-(metadata codes, exception type and name, stack frames), at most 600,000
-bytes of them, so the folder stays under about 600 MB. The relay keeps each as a file under
+(metadata codes, exception type and name, stack frames, 512 levels of a
+stack), at most 600,000 bytes of them, so the folder stays under about 600 MB. The relay keeps each as a file under
 `data/crash-reports/`, at most 1,000 and for 90 days, and takes at most 10
 an hour from one address and 500 a day in all. The route takes posts from
 anyone, so a flood from many addresses can spend the day's 500 or push the
