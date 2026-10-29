@@ -24,11 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PROBE = r"""
 import json, sys
 from pathlib import Path
-try:
-    from tools.plugin_guard import scan_plugin
-except ImportError:
+import importlib.util
+if importlib.util.find_spec("tools.plugin_guard") is None:
     print(json.dumps(None))
     raise SystemExit
+from tools.plugin_guard import scan_plugin
 result = scan_plugin(Path(sys.argv[1]), source="https://github.com/kaishi00/hermes-conduit-notifier.git")
 blocking = [f"{f.severity.upper()} {f.pattern_id} {f.file}:{f.line} {f.match}"
             for f in result.findings if f.severity in ("high", "critical")]

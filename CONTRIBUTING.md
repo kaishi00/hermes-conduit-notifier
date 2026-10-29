@@ -90,9 +90,11 @@ push to main. To run them locally:
 
 `upstream/` runs the plugin against a real Hermes dashboard, so a Hermes change
 that breaks us shows up from the daily canary rather than from users
-(`.github/workflows/upstream-contract.yml`; it runs on PRs that touch
-`dashboard/` or `upstream/`, and every morning on the newest canary and
-release, opening one `upstream-break` issue per failure).
+(`.github/workflows/upstream-contract.yml`; it runs on every PR, and every
+morning on the newest canary and release, opening one `upstream-break` issue
+per failure). Every PR, because Hermes' install scan reads every file the
+plugin ships: `upstream/test_install_scan.py` fails on a finding that would
+hold the update, a README example included.
 
 - `upstream/contract.yml` lists the Hermes modules and names the plugin imports
   and the routes it serves. That part is generated: after adding a Hermes

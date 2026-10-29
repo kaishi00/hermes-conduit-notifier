@@ -12,6 +12,7 @@ watch_paths:
   - hermes_cli/web_routers/
   - hermes_cli/plugins*.py
   - tools/plugin_guard*.py
+  - tools/plugin_guard/
   - tools/skills_guard.py
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
