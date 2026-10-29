@@ -148,7 +148,7 @@ async def post_pulse_forget(request: Request, response: Response) -> Dict[str, A
 async def get_pulse_feed(response: Response, proposals: bool = False) -> Dict[str, Any]:
     """The Pulse screen: cards newest first, how many are unseen, each kind's loudness and the Pulse chat's id.
     ``proposals``: the app shows suggestion cards (kind "proposal", each with its "proposal"); without it,
-    they're left out and not counted."""
+    they're left out and not counted. A card from a Kanban task's worker has "kanban_task", the task's id."""
     response.headers["Cache-Control"] = "no-store"
     return await _pulse_route("feed", lambda control, store, home: control.feed(store, home, proposals=proposals),
                               reads_only=True)
@@ -258,7 +258,8 @@ async def post_pulse_dismiss(request: Request, response: Response) -> Dict[str, 
 async def post_pulse_acted(request: Request, response: Response) -> Dict[str, Any]:
     """{"card": n}: Do it on a follow-up or report item card. Pulse reads
     the chat Do it opened once it has answered (for a report item from no
-    chat, the other chats on its subject) and marks the card done if it got
+    chat or a card from a Kanban task's worker, the other chats on its
+    subject) and marks the card done if it got
     done: {"booked": bool}."""
     response.headers["Cache-Control"] = "no-store"
     body = await core._read_json_body(request, PULSE_MAX_BODY_BYTES)

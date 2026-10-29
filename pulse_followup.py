@@ -600,7 +600,7 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
     home_chat = report.their_home_chat(where)
     from_report = card["item_id"] is None and card["message_id"] is not None
     # A Kanban task's worker isn't a chat: Do it started a new one for its card.
-    worker = bool(worker_tasks(home, [card]))
+    worker = not from_report and card["chat_id"] != home_chat and bool(worker_tasks(home, [card]))
     own = "" if from_report or worker or card["chat_id"] == home_chat else card["chat_id"]
     try:
         # Through the chat's compression chain, like a follow-up check.
