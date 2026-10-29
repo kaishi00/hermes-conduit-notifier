@@ -541,10 +541,9 @@ def _on_session_end(**kwargs: Any) -> None:
     # that doesn't say counts it failed, as before.
     answered = (not kwargs.get("interrupted") and kwargs.get("failed") is not True
                 and (kwargs.get("completed") or kwargs.get("failed") is False))
-    # A room turn's owner's answers are heard when it answered; a failed one is framed with them again.
-    # A stopped turn didn't answer, whatever else Hermes reports.
-    told = "completed" in kwargs or "failed" in kwargs or kwargs.get("interrupted") is True
-    _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered if told else None)
+    # A room turn's owner's answers are heard when it answered; a failed or stopped one, or one Hermes doesn't say
+    # (its held reply is dropped too), is framed with them again.
+    _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
     if not pulse_turn:
         # A Pulse turn never started a Live Activity, so there is none to end.
         _quietly(live_activity.reporter.turn_ended, session_id,

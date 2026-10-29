@@ -4,8 +4,9 @@ the ``conduit_ask_owner`` tool (designs/cross-owner-agents, N7c).
 In a room set to Ask me first, the agent asks its owner's phone ("Laifu asks whether you're free on the 22nd",
 with what it would share), and waits a little for the answer: Share, Say instead (what the owner writes), or Don't
 share. Unanswered, it tells the room it'll check, and the answer reaches it privately before its next turn in that
-room (``frame``, from the turn's framing, heard once that turn replies). Asks are the room's, not the session's, so
-a compacted room session's continuation hears them too. Nothing goes into the room by itself.
+room (``frame``, from the turn's framing, heard once that turn replied and ended without failing). Asks are the
+room's, not the session's, so a compacted room session's continuation hears them too. Nothing goes into the room by
+itself.
 
 The ask is a confirm prompt in the profile's present store, so the panel, its notification and its voice yes are
 Conduit's own; only a Conduit that says it shows a room's asks gets one (present_store.ROOM_ASK_FEATURE). The tool
@@ -253,7 +254,7 @@ def replied(session_id: str, did: bool) -> None:
 
 def ended(store_for: Callable[[], PresentStore], session_id: str, answered: Optional[bool]) -> None:
     """A turn in ``session_id`` ended (on_session_end): what it was framed with or given is heard when it replied
-    and didn't fail. ``answered`` None: Hermes didn't say, so the reply decides."""
+    and didn't fail. ``answered`` None: the turn's end never came (begin), so the reply decides."""
     with _framed_lock:
         prompt_ids = _framed.pop(session_id, None)
         did = session_id in _replied

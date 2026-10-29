@@ -696,3 +696,13 @@ def test_a_stopped_turn_never_hears_its_answers_whatever_hermes_reports(room_plu
     room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Partial answer", turn_id="t1")
     room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="t1", interrupted=True)  # no completed or failed
     assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+
+
+def test_an_end_that_doesnt_say_how_the_turn_ended_frames_its_answers_again(room_plugin, store, sleeper, pushes):
+    # The push path counts such a turn failed and drops its held reply, so its answers never reached the room.
+    line = _declined(store, sleeper, pushes)
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+    room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Error: the model timed out.",
+                               turn_id="t1")
+    room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="t1")
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
