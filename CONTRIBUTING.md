@@ -58,11 +58,14 @@ them: the routes and the code behind them are in the modules
   `api.watch_jobs.WATCH_JOB_TOOLS`, `monkeypatch.setattr(api.core, "_calls_home", ...)`,
   a probe's `hasattr(module.watch_audio, "_WatchAudioBridge")`.
 
-A branch that still has the single file merges main from just before the
-split (f68d017), which doesn't have the script yet, so it takes it from main:
-`git checkout origin/main -- scripts/split_plugin_api.py`. Then it runs
-`python3 scripts/split_plugin_api.py write`, commits, and merges main: only
-its own changes conflict.
+A branch that still has the single file runs `git fetch origin`, merges main
+from just before the split (f68d017), and takes the script from the split
+itself, since f68d017 doesn't have it:
+`git checkout 824948f -- scripts/split_plugin_api.py`. Then it runs
+`python3 scripts/split_plugin_api.py write`, commits, merges the split
+(824948f), where only its own changes conflict, and then merges main.
+Merging main straight after the write would show main's later changes to
+the modules as conflicts too.
 
 ## Plugin version
 
