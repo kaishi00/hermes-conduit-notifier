@@ -240,7 +240,7 @@ class Notes:
         if last is None or last[0] <= kept["notes_seq"]:
             return
         ended = room["status"] == "ended"
-        if not ended and now - last[1] < QUIET_S:
+        if not ended and last[1] is not None and now - last[1] < QUIET_S:  # a time that can't be one: quiet
             return
         if not self.available():
             _tell_once("notes:host", "Linked Rooms sends no room notes from this process: it has no session host")

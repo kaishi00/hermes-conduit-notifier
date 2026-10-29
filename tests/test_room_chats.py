@@ -291,3 +291,17 @@ def test_a_room_whose_agents_cant_be_read_doesnt_stop_the_pass(side, caplog):
     looking.pass_once()  # doesn't raise
 
     assert any("couldn't send notes" in record.getMessage() for record in caplog.records)
+
+
+def test_a_room_whose_newest_time_cant_be_read_still_gets_notes(side):
+    room_id = started(side)
+    listening(side, room_id)
+    seq = say(side, room_id, "The 22nd works.")
+    side.log.rooms[room_id][seq - 1]["created_at"] = 1e300
+    copied(side)
+    store(side, "laifu").set(room_id, "chat-a")
+    sender = Sender()
+
+    notes(side, sender).pass_once()
+
+    assert len(sender.sent) == 1

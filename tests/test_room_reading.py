@@ -481,3 +481,36 @@ def test_who_is_who_follows_the_current_invite(side):
         state["invites"].update({f"link0/{room_id}": old, **current})
 
     assert reading_module.room_invites.people(side.tmp_path / "laifu", room_id)["home"] == "Furina"
+
+
+def test_a_link_named_you_reads_as_a_guest_in_a_room_you_host(side):
+    room_id = started(side)
+    with side.furina.store.update() as state:
+        state["drafts"][room_id]["links"]["link2"]["name"] = "you"
+    say(side, room_id, "Mona is in.", member=slot("link2", 1))
+    copied(side)
+
+    [room] = reader(side, "furina").rooms()
+    assert "you" not in [agent["owner"] for agent in room["agents"] if agent["name"] != "Furina"]
+    assert froms(reader(side, "furina").read(room_id))[-1] == ("Mona (Guest's)", "Mona is in.")
+
+
+def test_your_posts_lose_their_prefix_once_the_invite_is_forgotten(side):
+    room_id = started(side)
+    post(side, "laifu", room_id, "Count us in.", event_id="l1")
+    copied(side)
+    side.furina.disbanded(room_id)
+    copied(side)
+    with side.laifu.store.update() as state:
+        state["invites"].clear()
+
+    assert froms(reader(side, "laifu").read(room_id)) == [("you", "Count us in.")]
+
+
+def test_a_newest_message_with_a_time_out_of_range_has_no_time(side):
+    room_id = started(side)
+    seq = say(side, room_id, "Hello")
+    side.log.rooms[room_id][seq - 1]["created_at"] = 1e300
+    copied(side)
+
+    assert reader(side, "laifu").last_message(room_id) == (seq, None)

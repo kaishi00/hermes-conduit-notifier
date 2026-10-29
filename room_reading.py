@@ -13,6 +13,7 @@ is the only caller; a room turn never has it.
 from __future__ import annotations
 
 import json
+import math
 import logging
 import sqlite3
 from datetime import datetime
@@ -100,7 +101,7 @@ class Reader:
                           "status": "going" if copy["status"] == "started" else "ended",
                           "reason": copy["reason"] if copy["status"] != "started" else None, "agents": agents,
                           "yours": [agent["name"] for agent in agents if agent["owner"] == YOU],
-                          "you": people.get("you"), "copy": copy})
+                          "you": people.get("you") or _you_in(copy), "copy": copy})
         return shown
 
     def yours(self, room_id: str) -> list[str]:
@@ -113,12 +114,15 @@ class Reader:
         agents = [*invite["joined"], *(agent for agent in invite.get("gone", ()) if agent["reason"] == "disbanded")]
         return list(dict.fromkeys(agent["profile"] for agent in agents))
 
-    def last_message(self, room_id: str) -> Optional[tuple[int, float]]:
-        """The seq of the room's newest message and when it came, None for a room without one."""
+    def last_message(self, room_id: str) -> Optional[tuple[int, Optional[float]]]:
+        """The seq of the room's newest message and when it came (None when the home gave a time that can't be
+        one), None for a room without one."""
         found = self.read(room_id, limit=1, keep_times=True)
         if not found["messages"]:
             return None
-        return found["messages"][-1]["seq"], found["messages"][-1]["created_at"]
+        newest = found["messages"][-1]
+        at = newest["created_at"]
+        return newest["seq"], float(at) if newest["at"] is not None and math.isfinite(float(at)) else None
 
     @staticmethod
     def _listed(room: dict[str, Any]) -> dict[str, Any]:
@@ -286,7 +290,7 @@ class Reader:
             if member is None:
                 return _shown(event, "another agent", text)
             owner = "yours" if member["link"] is None else \
-                f"{room_posts.poster(draft['links'][member['link']]['name'])}'s"
+                f"{_person(draft['links'][member['link']]['name'])}'s"
             return _shown(event, f"{_agent_name(member)} ({owner})", text)
         return named
 
@@ -327,6 +331,14 @@ class Reader:
 
 
 # --- Helpers ---------------------------------------------------------------------------------
+
+
+def _you_in(copy: dict[str, Any]) -> Optional[str]:
+    """What the home calls this installation's owner, from the copy alone (its invite forgotten): the owner it
+    gives one of your agents."""
+    mine = {agent["member_id"] for agent in copy["yours"]}
+    return next((room_posts.poster(member["owner"]) for member in copy["members"]
+                 if member["member_id"] in mine and member.get("owner")), None)
 
 
 def _person(name: Any) -> str:
