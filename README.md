@@ -3833,8 +3833,8 @@ nothing goes into the room by itself, and no turn starts for it. An ask lasts
 An ask is a prompt in the profile's `conduit-present.json` that carries its
 room and the room's session. Only a Conduit that says it shows a room's asks
 (feature `room-asks` on its exchange) gets one, and only its answer counts;
-with none, the tool refuses (`no_device`) and the agent says it'll check
-with you. Asks are the room's, not the chat session's, so a room session
+with none, the tool refuses (`no_device`) and the agent says it can't share
+that. Asks are the room's, not the chat session's, so a room session
 Hermes compacted still hears its answers. At most 3 asks wait per room (40 across rooms, all the phone shows), the
 same question with the same share while one waits returns that one (another
 share is another ask: a yes covers only what you saw, and the tool's answer
@@ -3845,9 +3845,10 @@ however many rooms ask). A room's answer its agent hasn't heard stays until it
 does, or for its week (the newest 10 a room, 60 across rooms). An answer
 counts as heard once the room turn the tool gave it to, or a turn framed with
 it, replies, so a turn that fails gets it again. Private chats never see
-them: `conduit_present` leaves them out of `status` and `earlier_answers`. An
-ask over these limits (`too_many`, `rate_limited`) isn't kept, so the agent
-says it can't share that rather than that it'll check. The tool works only in a room turn with other people's
+them: `conduit_present` leaves them out of `status` and `earlier_answers`.
+When no ask is kept (no such Conduit, over these limits, or a room session
+Hermes hasn't titled yet), no answer will come, so the agent says it can't
+share that rather than that it'll check. The tool works only in a room turn with other people's
 agents set to ask you first (`not_room`, `not_ask_first`, `subagent`
 otherwise); the room rules let it through whatever the room's tools are,
 Talk only included, and keep Tool Search open for it, since Hermes may put it

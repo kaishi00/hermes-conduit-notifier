@@ -887,6 +887,8 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     owner's name that they didn't post (room_posts.py)."""
     if not session_id:
         return None
+    # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks).
+    _quietly(room_asks.begin, session_id)
     try:
         home = get_hermes_home()
     except Exception:  # noqa: BLE001

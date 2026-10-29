@@ -117,7 +117,8 @@ def test_no_conduit_that_can_is_refused_with_what_to_say(store, sleeper, pushes)
     exchange(store, features=())
     answer = call(store, sleeper, pushes)
     assert answer["ok"] is False and answer["error"] == "no_device"
-    assert "you'll check with your owner" in answer["note"] and "don't share" in answer["note"].lower()
+    # No ask was kept, so no answer will come: never a promise to check.
+    assert "check with your owner" not in answer["note"] and "can't share that" in answer["note"]
     assert pushes == [] and store.status() == []
 
 
@@ -273,7 +274,8 @@ def test_the_tool_refuses_outside_a_room_and_in_a_subagent(store, sleeper, pushe
     # A member's room session not titled with its room yet is still a room: never told to ask "the user" there.
     untitled = rules.RoomTurn(room_id="", side="member", with_others=True, session_id=ROOM_SESSION)
     refused = call(store, sleeper, pushes, turn=untitled)
-    assert refused["error"] == "unavailable" and "you'll check with your owner" in refused["note"]
+    assert refused["error"] == "unavailable" and "can't share that" in refused["note"]
+    assert "check with your owner" not in refused["note"]
     assert "ask the user" not in refused["note"]
     assert call(store, sleeper, pushes, is_child=lambda _: True)["error"] == "subagent"
     assert call(store, sleeper, pushes, share="helps")["error"] == "not_ask_first"
@@ -500,7 +502,7 @@ def test_an_ask_over_the_limits_never_promises_a_check(store, sleeper, pushes):
     assert "check with your owner" not in refused["note"] and "don't share" in refused["note"].lower()
 
 
-def test_a_local_member_session_hermes_hasnt_titled_says_to_check_later_quietly(store, sleeper, pushes, caplog):
+def test_a_local_member_session_hermes_hasnt_titled_is_answered_quietly(store, sleeper, pushes, caplog):
     def untitled(_session):
         raise rules.RoomStoreError("not titled yet")
 
@@ -508,7 +510,7 @@ def test_a_local_member_session_hermes_hasnt_titled_says_to_check_later_quietly(
         answer = json.loads(asks.handle(ASK, session_id=ROOM_SESSION, room_turn=untitled,
                                         choices=lambda _: room_choices.RoomChoices(), store=store,
                                         push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic))
-    assert answer["error"] == "unavailable" and "check with your owner" in answer["note"]
+    assert answer["error"] == "unavailable" and "can't share that" in answer["note"]
     assert caplog.records == []
 
 
@@ -520,3 +522,25 @@ def test_a_turn_with_nothing_to_frame_never_hears_an_earlier_turns_list(store, s
     assert asks.frame(store, "other-room", ROOM_SESSION) == []
     asks.heard(lambda: store, ROOM_SESSION, True)
     assert len(answered(store, "zoo-trip")) == 1
+
+
+def test_a_turn_that_couldnt_be_framed_never_hears_a_failed_turns_answers(store, sleeper, pushes, tmp_path,
+                                                                          monkeypatch, clock):
+    exchange(store)
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(plugin, "PresentStore", lambda home: PresentStore(home, clock=clock))
+    monkeypatch.setattr(plugin.room_rules, "choices_for", lambda turn, home: room_choices.RoomChoices())
+    monkeypatch.setattr(plugin.room_invites, "people", lambda *a, **k: None)
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session, home=None: TURN)
+    answer_while_waiting(store, sleeper, "declined")
+    assert call(store, sleeper, pushes)["status"] == "declined"
+    plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="", turn_id="t1")  # that turn failed
+
+    def unreadable(session, home=None):
+        raise rules.RoomStoreError("room store unreadable")
+
+    monkeypatch.setattr(plugin.room_rules, "room_turn", unreadable)
+    plugin._room_framing(ROOM_SESSION)
+    plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Not sure.", turn_id="t2")
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session, home=None: TURN)
+    assert f'- Your owner said no to "{QUESTION}": don\'t share it.' in plugin._room_framing(ROOM_SESSION).splitlines()
