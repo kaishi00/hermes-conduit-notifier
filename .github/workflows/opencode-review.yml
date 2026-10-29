@@ -2,13 +2,19 @@ name: opencode-review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: string
 concurrency:
   # Adding run-review to a fork's PR shares the PR's group with its pushes (a
   # later push supersedes that review and is reviewed itself); any other label,
   # or any label on an own-branch or trusted contributor's PR, gets one group
   # per run, so it can't cancel anything. The trusted list here and in the
   # plan job's if must match.
-  group: opencode-review-${{ github.event.pull_request.number }}${{ github.event.action == 'labeled' && (github.event.label.name != 'run-review' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["malaiwah"]'), github.event.pull_request.user.login)) && format('-{0}', github.run_id) || '' }}
+  group: opencode-review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}${{ github.event.action == 'labeled' && (github.event.label.name != 'run-review' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["malaiwah"]'), github.event.pull_request.user.login)) && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -16,10 +22,10 @@ jobs:
   # runner. It waits a minute first: a push in that minute cancels this run
   # (the concurrency group above) before any model is called. Then it skips
   # the review when the PR's change is the same as one a review already ran
-  # on (merging main, a rerun), and gives a PR that only touches docs and
-  # config files (Markdown, text, JSON, YAML, TOML, docs/; not .github/,
-  # opencode.json or dependency manifests) to GLM-5.3 alone. Adding run-review, or a manual run
-  # where this workflow has one, always reviews.
+  # on (a clean merge of main, a reopen), and gives a PR that only touches
+  # docs and config files (Markdown, text, JSON, YAML, TOML; not .github/,
+  # opencode.json, or manifests that declare code or dependencies) to GLM-5.3
+  # alone. A manual run, or adding run-review to a fork's PR, always reviews.
   plan:
     name: plan
     # The reviewer is an agent holding the review secrets, and a PR's title,
@@ -48,7 +54,7 @@ jobs:
       reviewers: ${{ steps.pick.outputs.reviewers }}
     steps:
       - name: Debounce (wait for rapid commits to settle)
-        if: github.event_name == 'pull_request_target'
+        if: github.event_name == 'pull_request_target' && github.event.action != 'labeled'
         run: sleep 60
       - name: Pick reviewers
         id: pick
@@ -82,8 +88,8 @@ jobs:
           base=$(jq -r .base.ref <<<"$pr")
 
           # The PR's change as the reviewers see it: its diff from where it
-          # meets the base, without hunk line numbers and blob ids, so merging
-          # main doesn't change it. Whitespace is kept (indentation is code). An
+          # meets the base, without hunk headers and blob ids, so merging main
+          # doesn't change it. Whitespace, modes and binary markers are kept. An
           # empty diff, or one too large for the compare API, never matches, so
           # that PR is reviewed.
           change_id() {
@@ -93,7 +99,7 @@ jobs:
               echo "No diff for $1 from $base, so it can't match." | tee -a "$GITHUB_STEP_SUMMARY" >&2
               return
             fi
-            grep -E '^(diff --git |[-+ ])' <<<"$diff" | sha256sum | cut -d' ' -f1
+            grep -Ev '^(index |@@)' <<<"$diff" | sha256sum | cut -d' ' -f1
           }
 
           if [ "$EVENT_NAME" = pull_request_target ] && [ "$EVENT_ACTION" != labeled ]; then
@@ -122,13 +128,15 @@ jobs:
           fi
 
           # .github/ counts as code (workflows and actions run with this repo's
-          # secrets), and so do opencode.json (the reviewers' own config) and
-          # dependency manifests. So does a file list that didn't load, so
+          # secrets), and so do opencode.json and .coderabbit.yaml (review config) and
+          # manifests that declare code, targets or dependencies. A rename
+          # counts by both names. So does a file list that didn't load, so
           # every reviewer runs.
-          files=$(gh api --paginate "$repo/pulls/$PR_NUMBER/files" --jq '.[].filename') || files=''
-          if [ -z "$files" ] \
-            || grep -Eq '(^\.github/|^opencode\.json$|(^|/)(requirements[^/]*\.txt|package(-lock)?\.json)$)' <<<"$files" \
-            || grep -Evq '(^docs/|\.(md|txt|json|ya?ml|toml)$)' <<<"$files"; then
+          files=$(gh api --paginate "$repo/pulls/$PR_NUMBER/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)') || files=''
+          code_config='^\.github/|^(opencode\.json|\.coderabbit\.ya?ml)$|(^|/)((requirements|constraints)[^/]*\.txt|package(-lock)?\.json|[^/]*lock\.ya?ml|pyproject\.toml|plugin\.yaml|manifest\.json|project[^/]*\.yml)$'
+          if [ -z "$files" ] || grep -Eq "$code_config" <<<"$files" \
+            || grep -Evq '\.(md|txt|json|ya?ml|toml)$' <<<"$files"; then
             pick "$ALL_REVIEWERS" "Reviewing with every reviewer."
           else
             docs=$(jq -c --arg r "$DOCS_REVIEWER" 'map(select(.reviewer == $r))' <<<"$ALL_REVIEWERS")
@@ -222,14 +230,35 @@ jobs:
           fi
 
           echo "$opencode_bin_dir" >> "$GITHUB_PATH"
+      # opencode reads the PR number from the event's pull_request, which a
+      # manual run's event doesn't have: give it the event a pull_request run
+      # for that PR would carry. shell: bash adds pipefail, so a gh api
+      # failure (a PR number that does not exist) fails this step instead of
+      # leaving jq an empty event file for the review step to trip over.
+      - name: Build the pull_request event for a manual run
+        id: dispatch_event
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          case "$PR_NUMBER" in
+            '' | *[!0-9]*) echo "pr_number must be a PR number, not '$PR_NUMBER'" >&2; exit 1 ;;
+          esac
+          event="$RUNNER_TEMP/pull_request_event.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+            | jq '{action: "opened", number, pull_request: ., repository: .base.repo, sender: .user}' > "$event"
+          echo "path=$event" >> "$GITHUB_OUTPUT"
       # A reviewer waiting on a permission prompt nobody can answer used to
       # hold the job for the 6-hour default; opencode.json now denies every
       # prompt it would ask, and this bounds whatever else can stall a run.
       # The slowest reviews that finished took about 26 minutes.
       - name: Run opencode review
         timeout-minutes: 40
-        run: GITHUB_EVENT_NAME=pull_request GITHUB_ACTOR=${{ github.repository_owner }} opencode github run
+        run: GITHUB_EVENT_PATH=${DISPATCH_EVENT_PATH:-$GITHUB_EVENT_PATH} GITHUB_EVENT_NAME=pull_request GITHUB_ACTOR=${{ github.repository_owner }} opencode github run
         env:
+          DISPATCH_EVENT_PATH: ${{ steps.dispatch_event.outputs.path }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           # The run's own token: this repo only, the job's permissions above,
