@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, time as day_time, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import room_identity, room_links
 
@@ -47,6 +48,8 @@ DEFAULT_RULES = {"free_on": "ask", "questions": "ask", "profile": "default"}
 MAX_QUESTION_CHARS = 300
 MAX_TEXT_CHARS = 2000
 MAX_AGENT_CHARS = 64
+# Busy times an answer carries, on both sides, so its text and its spans agree.
+MAX_BUSY_SPANS = 48
 # On the asked side: asks a Link may make an hour, and how many may wait for the owner, a Link and in all.
 PER_HOUR = 10
 WAITING_PER_LINK = 3
@@ -215,17 +218,20 @@ class Asks:
         ask = self.store.read()["sent"].get(ask_id) if isinstance(ask_id, str) else None
         return _shown_sent(ask_id, ask) if ask is not None else None
 
-    def answers_for(self, profile: str, session_id: str) -> list[dict[str, Any]]:
-        """The finished asks a chat sent that it hasn't heard, oldest first."""
+    def answers_for(self, profile: str, session_id: Any) -> list[dict[str, Any]]:
+        """The finished asks a chat sent that it hasn't heard, oldest first. ``session_id``: its session, or the
+        sessions it is (the one it continues through compactions too)."""
+        sessions = _sessions(session_id)
         found = [(ask_id, ask) for ask_id, ask in self.store.read()["sent"].items()
-                 if ask["profile"] == profile and ask["session_id"] == session_id and not ask["heard"]
+                 if ask["profile"] == profile and ask["session_id"] in sessions and not ask["heard"]
                  and ask["status"] in OUTCOMES]
         return [_shown_sent(ask_id, ask) for ask_id, ask in sorted(found, key=lambda item: item[1]["at"])]
 
-    def recent(self, profile: str, session_id: Optional[str] = None) -> list[dict[str, Any]]:
-        """A profile's asks, a chat's when ``session_id`` is given, newest first."""
+    def recent(self, profile: str, session_id: Any = None) -> list[dict[str, Any]]:
+        """A profile's asks, a chat's when ``session_id`` is given (as answers_for), newest first."""
+        sessions = None if session_id is None else _sessions(session_id)
         found = [(ask_id, ask) for ask_id, ask in self.store.read()["sent"].items() if ask["profile"] == profile
-                 and (session_id is None or ask["session_id"] == session_id)]
+                 and (sessions is None or ask["session_id"] in sessions)]
         return [_shown_sent(ask_id, ask) for ask_id, ask in sorted(found, key=lambda item: -item[1]["at"])]
 
     def mark_heard(self, ask_ids: Any) -> None:
@@ -309,8 +315,8 @@ class Asks:
         busy = _busy(body.get("busy"))
         if busy is not None:
             answer["busy"] = busy
-        if isinstance(body.get("time_zone"), str):
-            answer["time_zone"] = _line(body["time_zone"], 64)
+        if _is_zone(body.get("time_zone")):
+            answer["time_zone"] = body["time_zone"]
         with self.store.update() as state:
             ask = state["sent"].get(ask_id)
             if ask is None or ask["link"] != received.link_id or ask["status"] in OUTCOMES:
@@ -388,13 +394,17 @@ class Asks:
                     if went:
                         ask["status"] = SENT
                     else:
-                        ask.update(status=UNAVAILABLE, answer="It couldn't be sent.", answered_at=now)
+                        ask.update(status=UNAVAILABLE, answer="It couldn't be sent.", by="local", answered_at=now)
 
     def _collect(self) -> None:
         """Sends the answers the owner gave on their phone to the asks held for them."""
         for key in [key for key, entry in self.store.read()["received"].items() if entry.get("status") == "held"]:
             raw = self.store.read()["received"].get(key)
             if raw is None or raw.get("status") != "held":
+                continue
+            if not self._profile_exists(raw["profile"]):
+                # Its profile was deleted while the ask waited: nothing is written there, so it isn't made again.
+                self._settle(raw, {"status": UNAVAILABLE, "text": "They can't be asked right now."})
                 continue
             try:
                 present = self.present(raw["profile"])
@@ -418,7 +428,7 @@ class Asks:
         with self.store.update() as state:
             for ask in state["sent"].values():
                 if ask["status"] == SENT and now - ask["at"] > UNANSWERED_S:
-                    ask.update(status=UNANSWERED, answer="No answer came.", answered_at=now)
+                    ask.update(status=UNANSWERED, answer="No answer came.", by="local", answered_at=now)
             _forget_old(state, now)
 
     # --- Answering ---------------------------------------------------------------------------------
@@ -460,9 +470,11 @@ class Asks:
         when = described({"free_on": asked}).removeprefix("free on ").removesuffix("?")
         answer: dict[str, Any] = {"status": ANSWERED, "free": not blocks, "time_zone": tz}
         if blocks and times:
-            answer["busy"] = [{"start": _clock(a, zone), "end": _clock(b, zone)} for a, b in blocks]
+            answer["busy"] = [{"start": _clock(a, zone), "end": _clock(b, zone)} for a, b in blocks[:MAX_BUSY_SPANS]]
             spans = ", ".join(f"{span['start']}-{span['end']}" for span in answer["busy"])
-            answer["text"] = f"Busy {spans} on {asked['date']} ({tz}), free otherwise."
+            more = len(blocks) - len(answer["busy"])
+            answer["text"] = (f"Busy {spans} on {asked['date']} ({tz}), "
+                              + (f"and {more} more busy times; " if more else "") + "free otherwise.")
         else:
             answer["text"] = f"{'Free' if not blocks else 'Busy'} on {when}."
         stale = _stale(synced, now)
@@ -498,18 +510,17 @@ class Asks:
             except Exception:  # noqa: BLE001
                 logger.debug("Linked Rooms couldn't take back a second prompt for an ask", exc_info=True)
             return
-        self._notify(entry)
+        self._notify(entry, prompt["id"])
 
-    def _notify(self, entry: dict[str, Any]) -> None:
-        """Wakes the owner's phone for the ask (the present store's own wake). Never fails the ask."""
+    def _notify(self, entry: dict[str, Any], prompt_id: str) -> None:
+        """Wakes the owner's phone for the ask, as any prompt's wake does (room_asks._nudge). Never fails the ask."""
         try:
-            from . import client
+            from . import client, session_titles
             from .events import push_event
 
-            client.enqueue(push_event("phone.changes", identifier=f"link-ask:{entry['ask_id']}",
-                                      profile="" if entry["profile"] == "default" else entry["profile"],
-                                      title=f"{entry['name']}'s Hermes asks", body=_title(entry["asked"]),
-                                      mode="alert"))
+            client.enqueue(push_event("phone.changes", identifier=f"present:{prompt_id}", profile=entry["profile"],
+                                      profile_name=session_titles.bot_name(), title=f"{entry['name']}'s Hermes asks",
+                                      body=_title(entry["asked"]), mode="alert"))
         except Exception:  # noqa: BLE001
             logger.warning("Linked Rooms couldn't wake the phone for an ask", exc_info=True)
 
@@ -743,6 +754,21 @@ _MARKDOWN = re.compile(r"([\\`*_{}\[\]()#+!<>|~])")
 STALE_S = 6 * 3600
 
 
+def _sessions(value: Any) -> set[str]:
+    return {value} if isinstance(value, str) else {item for item in value if isinstance(item, str)}
+
+
+def _is_zone(value: Any) -> bool:
+    """A time zone's IANA name, which is all the other side's answer may say its zone is."""
+    if not isinstance(value, str) or not 0 < len(value) <= 64:
+        return False
+    try:
+        ZoneInfo(value)
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    return True
+
+
 def _plain(text: str) -> str:
     """Text shown as itself where Markdown is read: each Markdown character escaped."""
     return _MARKDOWN.sub(r"\\\1", text)
@@ -762,7 +788,7 @@ def _stale(synced: Any, now: float) -> str:
 def _busy(value: Any) -> Optional[list[dict[str, str]]]:
     if not isinstance(value, list):
         return None
-    spans = [{"start": span["start"], "end": span["end"]} for span in value[:48]
+    spans = [{"start": span["start"], "end": span["end"]} for span in value[:MAX_BUSY_SPANS]
              if isinstance(span, dict) and all(isinstance(span.get(key), str) and _HHMM.fullmatch(span[key])
                                                for key in ("start", "end"))]
     return spans

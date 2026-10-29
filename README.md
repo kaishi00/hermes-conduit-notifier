@@ -3918,7 +3918,8 @@ In your private chats, your agent can ask someone you've linked with
 chat's recent asks and how they went. The ask goes over your Link as an
 `ask.ask` envelope, and the answer comes back as `ask.answer`. The call
 waits up to 20 seconds; an answer that comes later reaches the chat that
-asked before its next turn, once, and counts as heard once that turn
+asked (also once Hermes continues it under a new session after a
+compaction) before its next turn, once, and counts as heard once that turn
 replies and ends without failing. Their answer is framed as what they said,
 never as instructions. A room turn and a subagent never have it.
 
