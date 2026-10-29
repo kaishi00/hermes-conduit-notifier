@@ -51,9 +51,13 @@ test('a report needs its build, device and a diagnostic object', () => {
   assert.ok(!JSON.stringify(extra).includes('secret'));
   const wide = { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [{ binaryName: '€'.repeat(300_000) }] }] } }] };
   assert.throws(() => validateReport(post({ diagnostic: wide })), /payload_too_large/, 'the cap counts bytes');
-  let deep = { binaryName: 'Conduit' };
-  for (let level = 0; level < 5_000; level += 1) deep = { subFrames: [deep] };
-  assert.throws(() => validateReport(post({ diagnostic: { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [deep] }] } }] } })), /invalid_diagnostic/);
+  const nested = (levels) => {
+    let frame = { binaryName: 'Conduit' };
+    for (let level = 0; level < levels; level += 1) frame = { subFrames: [frame] };
+    return { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [frame] }] } }] };
+  };
+  assert.ok(validateReport(post({ diagnostic: nested(256) })), 'as deep as Conduit sends');
+  assert.throws(() => validateReport(post({ diagnostic: nested(5_000) })), /invalid_diagnostic/);
 });
 
 test('the signature follows the attributed thread, so one fault groups', () => {

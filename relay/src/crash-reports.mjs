@@ -183,10 +183,10 @@ function keptDiagnostic(value) {
   };
 }
 
-// MetricKit's deepest stacks run to a few hundred frames; past 2,000 levels
-// a post is refused rather than overflowing the walk.
+// Conduit sends at most 256 levels of a stack; past 512 a post is refused,
+// well before the walk could run out of stack on a default Node.
 function keptFrame(frame, depth) {
-  if (depth > 2_000) throw badRequest('invalid_diagnostic');
+  if (depth > 512) throw badRequest('invalid_diagnostic');
   const kept = pick(frame, FRAME_KEYS);
   if (Array.isArray(frame?.subFrames)) kept.subFrames = frame.subFrames.map((child) => keptFrame(child, depth + 1));
   return kept;
