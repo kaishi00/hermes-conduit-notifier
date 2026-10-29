@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.118.1 (2026-10-29)
+## 0.119.1 (2026-10-29)
 
 ### Fixes
 - On some Hermes versions (0.21 among them), Conduit's predictions, step
@@ -22,6 +22,21 @@ checks it). The format is fixed, because Conduit reads it:
   {"replies":[...]}, and moved the chat's Lock Screen progress. Only the
   chat's own replies notify now. Like a subagent, they can't use Conduit's
   tools either (notifications, calls, phone, location and the rest).
+
+## 0.119.0 (2026-10-29)
+
+### New and improved
+- Use my data: in a room with other people's agents, your agent can say
+  when you're busy, from the calendar your phone shares, to find a time.
+  Only the busy times go, with your time zone and when your phone last
+  synced, never what, where or with whom.
+
+## 0.118.1 (2026-10-29)
+
+### Fixes
+- With Ask me first, your answer could be lost to the room when your
+  agent's turn failed with an error, or when a helper it started ran first.
+  It now reaches the agent's next turn in that room.
 
 ## 0.118.0 (2026-10-29)
 

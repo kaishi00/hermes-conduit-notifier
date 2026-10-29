@@ -17,7 +17,8 @@ from hermes_constants import get_hermes_home
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, live_activity, location_tool, maps_tool, notify_tool,
                phone_tool, present_tool, pulse, reply_sources, review_notices, room_asks, room_chats, room_cleanup,
-               room_cutoff, room_identity, room_invites, room_memory, room_planner, room_posts, room_rules, room_tool,
+               room_cutoff, room_free_busy, room_identity, room_invites, room_memory, room_planner, room_posts,
+               room_rules, room_tool,
                room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
@@ -142,6 +143,7 @@ def register(ctx: Any) -> None:
     # Ask me first: in a room with other people's agents, the agent asks its
     # owner's phone before it shares something personal; only room turns.
     room_asks.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    room_free_busy.register(ctx, is_child=_is_child)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
@@ -305,11 +307,10 @@ def _post_llm_call(**kwargs: Any) -> None:
         return
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
-    # A room turn that replied read its owner's answers (room_asks); a failed one is framed with them again.
-    _quietly(room_asks.heard, lambda: PresentStore(get_hermes_home()), session_id,
-             isinstance(response, str) and bool(response.strip()))
     if _is_child(session_id):
         return
+    # A room turn that replied read its owner's answers (room_asks), heard once on_session_end says it didn't fail.
+    _quietly(room_asks.replied, session_id, isinstance(response, str) and bool(response.strip()))
     # The Lock Screen's end waits for on_session_end too: this hook also runs
     # for a failed turn, and the first end the phone gets is the one it keeps.
     started = _take_turn_start(kwargs.get("turn_id"))
@@ -557,6 +558,9 @@ def _on_session_end(**kwargs: Any) -> None:
     # that doesn't say counts it failed, as before.
     answered = (not kwargs.get("interrupted") and kwargs.get("failed") is not True
                 and (kwargs.get("completed") or kwargs.get("failed") is False))
+    # A room turn's owner's answers are heard when it answered; a failed or stopped one, or one Hermes doesn't say
+    # (its held reply is dropped too), is framed with them again.
+    _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
     if not pulse_turn:
         # A Pulse turn never started a Live Activity, so there is none to end.
         _quietly(live_activity.reporter.turn_ended, session_id,
@@ -910,11 +914,12 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     owner's name that they didn't post (room_posts.py)."""
     if not session_id:
         return None
-    # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks).
-    # A fork of the chat's turn leaves the chat's turn what it was framed with.
-    fork = forks.inside()
-    if not fork:
-        _quietly(room_asks.begin, session_id)
+    # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks). A delegated
+    # child's turn is the room's agent at work, never the room's turn: it neither hears nor is framed with answers.
+    # Nor is a fork of the chat (forks), so the turn keeps the answers it was framed with.
+    child = _is_child(session_id)
+    if not child:
+        _quietly(room_asks.begin, lambda: PresentStore(get_hermes_home()), session_id)
     try:
         home = get_hermes_home()
     except Exception:  # noqa: BLE001
@@ -954,21 +959,19 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
             try:
                 posts = {"as": people["you"], "forged": room_posts.forged_for(
                     root, turn.room_id, session_id, str(people["you"]), prompt)}
-                if not fork and not room_rules.is_room_prompt(prompt):
-                    # Its lines under the owner's name can't be checked (a fork's question has none).
+                if not child and not room_rules.is_room_prompt(prompt):
+                    # Its lines under the owner's name can't be checked (a child's prompt is no room prompt).
                     _warn_room_once("prompt", "conduit_push: a turn in room %s isn't Hermes' room prompt",
                                     turn.room_id, exc_info=False)
             except Exception:  # noqa: BLE001 — framed without checking its owner's lines, and told so
                 unread = True
                 _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
     framing = room_rules.framing(turn, choices, people, posts, unread=unread)
-    if home is not None and turn.room_id:
+    if home is not None and turn.room_id and not child:
         try:
             # What the owner answered the agent's asks since (room_asks), once.
-            store = PresentStore(home)
-            lines = ([line for _, line in room_asks.answers(store, turn.room_id)] if fork
-                     else room_asks.frame(store, turn.room_id, session_id))
-            framing += "".join(f"\n- {line}" for line in lines)
+            framing += "".join(f"\n- {line}" for line in room_asks.frame(PresentStore(home), turn.room_id,
+                                                                            session_id))
         except Exception:  # noqa: BLE001 — the answers wait for the next turn
             _warn_room_once("asks", "conduit_push: couldn't read the answers to session %s's asks", session_id)
     return framing
