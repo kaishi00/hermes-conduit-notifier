@@ -158,7 +158,7 @@ const META_KEYS = new Set([
   'bundleIdentifier', 'isTestFlightApp', 'lowPowerModeEnabled',
   'exceptionType', 'exceptionCode', 'signal', 'terminationReason', 'virtualMemoryRegionInfo', 'hangDuration',
 ]);
-const EXCEPTION_KEYS = new Set(['exceptionType', 'exceptionName', 'className', 'formatString']);
+const EXCEPTION_KEYS = new Set(['exceptionType', 'exceptionName', 'className']);
 const FRAME_KEYS = new Set(['binaryUUID', 'binaryName', 'offsetIntoBinaryTextSegment', 'address', 'sampleCount']);
 
 function pick(value, keys) {

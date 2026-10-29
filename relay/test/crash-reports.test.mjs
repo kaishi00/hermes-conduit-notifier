@@ -43,7 +43,7 @@ test('a report needs its build, device and a diagnostic object', () => {
   assert.throws(() => validateReport(post({ diagnostic: { crashDiagnostics: {} } })), /invalid_diagnostic/);
   const odd = validateReport(post({ diagnostic: { crashDiagnostics: [{ callStackTree: { callStacks: {} } }] } }));
   assert.match(odd.signature, /^[0-9a-f]{16}$/, 'an odd shape still groups, never a 500');
-  const quoted = validateReport(post({ diagnostic: { crashDiagnostics: [{ diagnosticMetaData: { exceptionReason: { composedMessage: 'hi?', arguments: ['hi?'], className: 'NSString' } } }], cpuExceptionDiagnostics: [{}] } }));
+  const quoted = validateReport(post({ diagnostic: { crashDiagnostics: [{ diagnosticMetaData: { exceptionReason: { composedMessage: 'hi?', arguments: ['hi?'], formatString: 'hi? %@', className: 'NSString' } } }], cpuExceptionDiagnostics: [{}] } }));
   assert.ok(!JSON.stringify(quoted).includes('hi?'), 'the relay drops exception messages itself');
   assert.equal(quoted.diagnostic.cpuExceptionDiagnostics, undefined);
   const extra = validateReport(post({ diagnostic: { crashDiagnostics: [{ diagnosticMetaData: { pid: 42, regionFormat: 'NZ', signal: 11, osVersion: { nested: 'x' } }, callStackTree: { callStacks: [{ callStackRootFrames: [{ binaryName: 'Conduit', symbol: 'secret' }] }] } }] } }));
