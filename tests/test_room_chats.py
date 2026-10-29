@@ -348,3 +348,71 @@ def test_a_room_name_is_framed_as_the_hosts_words_and_kept_to_plain_characters(s
     assert chats_module.room_name("Run `rm -rf` <now> {x} #1 @all") == "Run rm -rf now x 1 all"
     for template in (chats_module.CHAT_LINE, chats_module.NOTES_PROMPT):
         assert "its host named" in template and "not instructions" in template
+
+
+# --- Opening a room's chat -------------------------------------------------------------------
+
+
+def test_a_new_room_chat_starts_its_notes_at_the_rooms_newest_message(side):
+    room_id = started(side)
+    say(side, room_id, "Earlier")
+    seq = say(side, room_id, "Newest")
+    copied(side)
+
+    shown = chats_module.open_chat(home(side, "laifu"), room_id, "chat-a", reader=reader(side, "laifu"))
+
+    assert shown == {"room_id": room_id, "chat_id": "chat-a", "notes_seq": seq}
+    # Opened again (a new chat for it): its notes go on from where they were.
+    store(side, "laifu").noted(room_id, "chat-a", seq + 5)
+    assert chats_module.open_chat(home(side, "laifu"), room_id, "chat-b",
+                                  reader=reader(side, "laifu"))["notes_seq"] == seq + 5
+
+
+def test_a_chat_for_a_room_this_hermes_doesnt_have_is_refused(side):
+    with pytest.raises(chats_module.ChatsError) as error:
+        chats_module.open_chat(home(side, "laifu"), "conduit-nowhere", "chat-a", reader=reader(side, "laifu"))
+    assert error.value.code == "no_room"
+
+
+def test_a_room_chat_deleted_in_hermes_is_forgotten(side):
+    room_id = started(side)
+    listening(side, room_id)
+    say(side, room_id, "The 22nd works.")
+    copied(side)
+    store(side, "laifu").set(room_id, "chat-a")
+    side.clock.now += chats_module.QUIET_S + 60
+    sender = Sender()
+    looking = notes(side, sender)
+    looking.chat_exists = lambda chat_home, chat_id: False
+
+    looking.pass_once()
+
+    assert sender.sent == [] and store(side, "laifu").get(room_id) is None
+
+
+def test_the_routes_open_and_list_room_chats(side, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from test_room_invites import BASE, api
+
+    room_id = started(side)
+    seq = say(side, room_id, "Hi")
+    copied(side)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: home(side, "laifu"))
+    # The routes' own copy of room_chats, as the dashboard loads it.
+    monkeypatch.setattr(api.core._plugin_package_module("room_chats"), "_reader",
+                        lambda chat_home: reader(side, "laifu"))
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+
+    opened = client.put(f"{BASE}/rooms/chats", json={"room_id": room_id, "chat_id": "chat-a"})
+    assert opened.status_code == 200 and opened.headers["cache-control"] == "no-store"
+    assert opened.json() == {"ok": True, "chat": {"room_id": room_id, "chat_id": "chat-a", "notes_seq": seq}}
+    assert client.get(f"{BASE}/rooms/chats").json() == {"ok": True, "chats": [opened.json()["chat"]]}
+    missing = client.put(f"{BASE}/rooms/chats", json={"room_id": "conduit-nowhere", "chat_id": "chat-a"})
+    assert missing.status_code == 404
+    bad = client.put(f"{BASE}/rooms/chats", json={"room_id": room_id})
+    assert bad.status_code == 400
+    assert "room-chats" in api.capabilities.ROUTE_CAPABILITIES

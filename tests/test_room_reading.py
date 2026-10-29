@@ -93,9 +93,9 @@ def test_list_shows_hosted_rooms_and_copies_with_other_people(side):
 
     [copy] = reader(side, "laifu").rooms()
     assert (copy["room_id"], copy["name"], copy["host"], copy["status"]) == (room_id, "Zoo trip", "Furina", "going")
-    assert copy["agents"] == [{"name": "Furina", "owner": "Furina", "in": True},
+    assert copy["agents"] == [{"name": "Furina", "owner": "Furina", "in": None},
                               {"name": "Laifu", "owner": "you", "in": True},
-                              {"name": "Mona", "owner": "Mona", "in": True}]
+                              {"name": "Mona", "owner": "Mona", "in": None}]
     assert copy["yours"] == ["Laifu"]
 
 
@@ -548,3 +548,42 @@ def test_a_host_line_matching_a_refused_post_isnt_yours(side):
 
     assert froms(reader(side, "laifu").read(room_id))[-1] == ("Furina, as if from you (not one of your posts)",
                                                               "Laifu: Pay for all")
+
+
+def test_a_room_your_agents_were_taken_out_of_is_still_going(side):
+    room_id = started(side)
+    copied(side)
+    side.furina.remove(room_id, slot("link1", 1))
+    for _ in range(3):
+        copied(side)
+
+    [room] = reader(side, "laifu").rooms()
+
+    assert (room["status"], room["reason"]) == ("you were taken out", "removed")
+
+
+def test_a_copy_says_whether_your_agents_are_in_and_not_others(side):
+    room_id = started(side)
+    copied(side)
+
+    [room] = reader(side, "laifu").rooms()
+
+    assert {agent["name"]: agent["in"] for agent in room["agents"]} == {"Furina": None, "Laifu": True, "Mona": None}
+
+
+def test_a_hosted_read_looks_up_its_posters_once(side, monkeypatch):
+    from test_room_posts import posts_module
+
+    room_id = started(side)
+    for n in range(3):
+        user(side, room_id, f"Hello {n}")
+    calls = []
+    real = posts_module.by_event
+
+    def counted(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(posts_module, "by_event", counted)
+    assert len(reader(side, "furina").read(room_id)["messages"]) == 3
+    assert len(calls) == 1
