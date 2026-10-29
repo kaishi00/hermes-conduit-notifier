@@ -1368,6 +1368,56 @@ def test_do_it_on_a_report_item_from_no_chat_leaves_pulses_chat_out_after_pulse_
     assert said.calls == [] and live.store.act(card_id)["outcome"] == ""
 
 
+def worker(live, sid="worker", *, task="t_c64b17a2", source="kanban", prompt=None, parent=None, at=None):
+    """A Kanban task's worker session, its first message the dispatcher's
+    prompt after the task's context (gateway/session_kanban.py)."""
+    live.db.session(sid=sid, title=None, pinned=0, source=source, parent=parent)
+    live.db.message("user", f"Task context...\n\nwork kanban task {task}" if prompt is None else prompt, sid=sid,
+                    at=time.time() - 7200 if at is None else at)
+    live.db.message("assistant", "Claude Code is rate limited until 21:40; I'll check the context and go on then.",
+                    sid=sid, at=(time.time() - 7200 if at is None else at) + 60)
+
+
+def test_feed_names_the_kanban_task_a_cards_chat_is_the_worker_of(live):
+    worker(live)
+    worker(live, "legacy", task="t_9f2c", source="cli", prompt=" work kanban task t_9f2c ")
+    worker(live, "typed", source="cli", prompt="work kanban task t_1 and then fix it")
+    live.db.session(sid="compressed", title=None, pinned=0, source="kanban", parent="worker")
+    live.db.message("user", "[summary of the earlier run]", sid="compressed")
+    live.db.session(sid="untold", title=None, pinned=0, source="kanban")
+    ids = {chat: found_card(live, chat_id=chat, news=f"{chat}: the task stalled", topic="follow-up")
+           for chat in ("worker", "legacy", "typed", "compressed", "untold", CHAT)}
+    entries = {card["id"]: card for card in control.feed(live.store, live.home)["cards"]}
+    assert {chat: entries[card].get("kanban_task") for chat, card in ids.items()} == {
+        "worker": "t_c64b17a2", "legacy": "t_9f2c", "typed": None, "compressed": "t_c64b17a2", "untold": "",
+        CHAT: None}
+    # Another profile's worker, in a home that can't be read, is left as it is.
+    other = live.store.add_card({"kind": "noticed", "level": "screen", "topic": "follow-up", "title": "x",
+                                 "news": "x", "profile": "gone", "chat_id": "worker", "created_at": time.time()})
+    assert "kanban_task" not in {card["id"]: card for card in control.feed(live.store, live.home)["cards"]}[other]
+
+
+def test_do_it_on_a_card_from_a_kanban_worker_reads_the_new_chat_not_the_worker(live):
+    worker(live)
+    card_id = found_card(live, chat_id="worker", news="The Claude Code reset passed; Kanban task t_c64b17a2 hasn't "
+                                                       "gone on.", topic="follow-up")
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at) is True
+    said = llm_saying(done=True, why="the task is back on the board")
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    assert said.calls == [] and live.store.act(card_id)["outcome"] == ""
+    live.db.session(sid="new", title="New conversation", pinned=0)
+    live.db.message("user", "Pulse reminded me: The Claude Code reset passed; Kanban task t_c64b17a2 hasn't gone on.",
+                    sid="new", at=acted_at + 700)
+    live.db.message("assistant", "Unblocked Kanban task t_c64b17a2; a worker picked it up again.", sid="new",
+                    at=acted_at + 720)
+    run_acts(live, said, acted_at + 2 * followup.ACT_FIRST_S)
+    [text] = said.calls
+    assert "Unblocked Kanban task t_c64b17a2" in text and "a Kanban task's worker" in text
+    assert "rate limited until 21:40" not in text.split("## Said in that chat since Do it")[1].split("##")[0]
+    assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+
+
 def run_held(live, llm, now):
     done = {}
     followup.check_held(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=now,

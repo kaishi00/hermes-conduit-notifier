@@ -250,6 +250,20 @@ def test_home_chat_is_a_started_chat_with_the_title(db, tmp_path):
     assert hermes.chat_by_id(tmp_path, "arch") is None
 
 
+def test_worker_tasks_name_the_task_of_each_kanban_worker(db, tmp_path):
+    db.session(sid="w", title=None, source="kanban")
+    db.message("user", "## Task\nShip it\n\nwork kanban task t_c64b17a2", sid="w")
+    db.session(sid="w2", title=None, source="kanban", parent="w")  # compressed: no prompt of its own
+    db.message("user", "[summary]", sid="w2")
+    db.session(sid="old", title=None, source="cli")
+    db.message("user", "work kanban task t_9f2c", sid="old")
+    db.session(sid="chat", title="Plans", source="cli")
+    db.message("user", "work kanban task t_9f2c and then tell me", sid="chat")
+    assert hermes.worker_tasks(tmp_path, ["w", "w2", "old", "chat", "missing", ""]) == {
+        "w": "t_c64b17a2", "w2": "t_c64b17a2", "old": "t_9f2c"}
+    assert hermes.worker_tasks(tmp_path, []) == {}
+
+
 def test_turn_rows_follow_the_tagged_user_row(db, tmp_path):
     db.session()
     db.message("user", "earlier")

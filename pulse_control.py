@@ -399,7 +399,9 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
     are unseen, each kind's loudness, and the Pulse chat's id ("" when
     there's none), which Conduit keeps behind the screen. ``proposals``:
     the app shows suggestion cards (pulse_proposals), each with its
-    "proposal"; an app that doesn't ask gets none, nor counts them."""
+    "proposal"; an app that doesn't ask gets none, nor counts them. A card
+    from a Kanban task's worker has "kanban_task", the task's id ("" when
+    unknown): the app shows the task, and Do it starts a new chat."""
     # Pulse off: no chat stands behind the screen, whatever is titled Pulse.
     on = home is not None and pulse_store.get("enabled")
     chat = pulse.home_chat(pulse_store, Path(home))[0] if on else None
@@ -408,9 +410,14 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
     marks = pulse_store.done_marks([card["id"] for card in cards])
     now = time.time()
     zone = pulse.report_zone(pulse_store, Path(home) if home is not None else Path("."), now)
+    # A card from a Kanban task's worker names the task (pulse_followup.worker_tasks).
+    workers = pulse_followup.worker_tasks(Path(home), cards) if home is not None else {}
     entries = []
     for card in cards:
         entry = pulse_learning.card_entry(card, marks.get(card["id"]))
+        task = workers.get((card.get("profile") or "", card.get("chat_id") or ""))
+        if task is not None:
+            entry["kanban_task"] = task
         proposal = pulse_store.proposal(card.get("proposal")) if card["kind"] == pulse_proposals.PROPOSAL else None
         if proposal is not None:
             entry["proposal"] = pulse_proposals.entry(proposal, Path(home) if home is not None else Path("."), now)
