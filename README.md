@@ -294,6 +294,8 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | GET | `/v1/rings/:id/session` | The Watch fetches it, waiting up to `?wait=20` seconds (0.11+; the ring's token as the bearer) |
 | POST | `/v1/rings/:id/control` | The phone or the Watch mutes, unmutes or ends a call the Watch answered that stays on the phone's headset (0.17+; the ring's token) |
 | GET | `/v1/rings/:id/control` | Either reads the other's change past `?after=` its last seq, waiting up to `?wait=20` seconds (0.17+; the ring's token as the bearer) |
+| POST | `/v1/crash-reports` | A crash or freeze report from Conduit, no credential (0.24+, capability `crash-reports`; see "Crash and freeze reports") |
+| GET | `/v1/crash-reports`, `/v1/crash-reports/:id` | List reports (`?build=`) or read one (`CRASH_REPORTS_TOKEN` as the bearer) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't
 reach Conduit on the iPhone. Calls and answers are sealed with a per-call key

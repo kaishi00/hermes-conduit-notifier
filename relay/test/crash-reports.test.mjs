@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { generateKeyPairSync } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +39,16 @@ test('a report needs its build, device and a diagnostic object', () => {
   assert.throws(() => validateReport(post({ os: 'iOS\n27' })), /invalid_os/);
   assert.throws(() => validateReport(post({ kind: 'oom' })), /invalid_kind/);
   assert.throws(() => validateReport(post({ diagnostic: [] })), /invalid_diagnostic/);
+  assert.throws(() => validateReport(post({ diagnostic: { cpuExceptionDiagnostics: [{}] } })), /invalid_diagnostic/);
+  assert.throws(() => validateReport(post({ diagnostic: { crashDiagnostics: {} } })), /invalid_diagnostic/);
+  const odd = validateReport(post({ diagnostic: { crashDiagnostics: [{ callStackTree: { callStacks: {} } }] } }));
+  assert.match(odd.signature, /^[0-9a-f]{16}$/, 'an odd shape still groups, never a 500');
+  const quoted = validateReport(post({ diagnostic: { crashDiagnostics: [{ diagnosticMetaData: { exceptionReason: { composedMessage: 'hi?', arguments: ['hi?'], className: 'NSString' } } }], cpuExceptionDiagnostics: [{}] } }));
+  assert.ok(!JSON.stringify(quoted).includes('hi?'), 'the relay drops exception messages itself');
+  assert.equal(quoted.diagnostic.cpuExceptionDiagnostics, undefined);
+  let deep = { binaryName: 'Conduit' };
+  for (let level = 0; level < 5_000; level += 1) deep = { subFrames: [deep] };
+  assert.throws(() => validateReport(post({ diagnostic: { crashDiagnostics: [{ callStackTree: { callStacks: [{ callStackRootFrames: [deep] }] } }] } })), /invalid_diagnostic/);
 });
 
 test('the signature follows the attributed thread, so one fault groups', () => {
@@ -156,7 +166,7 @@ test('a relay without the token takes no reports', async () => {
   try {
     assert.equal((await relay.api('/v1/crash-reports', { method: 'POST', body: post() })).status, 404);
     assert.ok(!(await relay.capabilities()).includes('crash-reports'));
-    assert.equal(existsSync(join(relay.dir, 'crash-reports')) && readdirSync(join(relay.dir, 'crash-reports')).length, false);
+    assert.ok(!existsSync(join(relay.dir, 'crash-reports')), 'no reports directory');
   } finally {
     relay.stop();
   }

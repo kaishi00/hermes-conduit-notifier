@@ -139,12 +139,15 @@ export function validateReport(body) {
   return report;
 }
 
-function withoutMessages(value) {
-  if (Array.isArray(value)) return value.map(withoutMessages);
+// MetricKit's deepest stacks run to a few hundred frames; past 2,000 levels
+// a post is refused rather than overflowing the walk.
+function withoutMessages(value, depth = 0) {
+  if (depth > 2_000) throw badRequest('invalid_diagnostic');
+  if (Array.isArray(value)) return value.map((child) => withoutMessages(child, depth + 1));
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value)
     .filter(([key]) => key !== 'composedMessage' && key !== 'arguments')
-    .map(([key, child]) => [key, withoutMessages(child)]));
+    .map(([key, child]) => [key, withoutMessages(child, depth + 1)]));
 }
 
 // What groups reports of the same fault: the first crash's or hang's
