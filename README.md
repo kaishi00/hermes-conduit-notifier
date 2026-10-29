@@ -3757,7 +3757,10 @@ you, with the `conduit_room` tool: notes, a summary, "what did Mona say about
 Saturday?", a draft of your reply. `list` gives the rooms you host with
 people you've linked and your copies of rooms they host: who hosts each, its
 agents and whose they are, and whether it's going, ended, or going on
-without your agents (`you left`). `read` gives a
+without your agents (`you left`, `you were taken out`). Each agent says
+whether it's still `in` (`true` or `false`): every agent in a room you
+host, only your own in a copy (others' are `null`, since the home's copy
+doesn't say). `read` gives a
 room's messages, the newest 100 by default (up to 200, `after_seq` or
 `before_seq` for others), each with who it's from as Conduit's room screen
 names them: "you", a person by the name their Link has here, an agent with
@@ -3769,8 +3772,19 @@ room rules never allow it), and neither does a subagent.
 
 A room can have a private chat of its own with one of your agents
 (`conduit-room-chats.json` in the profile's home, owner only). Conduit opens
-it and tells this Hermes which room it's for, through routes that come in a
-later version: until then no room has one, and nothing below happens. Each
+it and tells this Hermes which room it's for (plugin 0.117+, capability
+`room-chats`, `?profile=` like the rooms' other routes):
+
+- `PUT /rooms/chats` with `{"room_id": "...", "chat_id": "..."}`: the
+  chat is the room's from now on, the latest kept, and the answer is
+  `{"ok": true, "chat": {"room_id", "chat_id", "notes_seq"}}`. A room new
+  to the profile's chats gets notes on what comes after its newest message
+  (`notes_seq`); one it had keeps its notes where they were. Errors: 400
+  for a bad id or body, 404 for a room this Hermes doesn't have, 503 for
+  one whose log can't be read here.
+- `GET /rooms/chats`: `{"ok": true, "chats": [...]}`, each as above.
+
+A chat deleted in Hermes is forgotten when its notes come due. Each
 turn there is told which room it's about (its name as one plain line, framed
 as the host's words). In a room hosted elsewhere where an agent of yours
 Listens only, that agent writes you notes in that chat once the room has
