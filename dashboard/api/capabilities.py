@@ -208,6 +208,9 @@ ROUTE_CAPABILITIES = (
     # room made for, and this Hermes set up for rooms on, any profile's, on a
     # Hermes that hosts other profiles' plugins apart (hermes-conduit#1336).
     "room-dashboard-profiles",
+    # PUT /rooms/choices' Use my data lets a room's agent say when you're
+    # busy (conduit_free_busy), times only (Linked Rooms).
+    "room-free-busy",
 )
 
 

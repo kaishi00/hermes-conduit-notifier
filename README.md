@@ -97,7 +97,7 @@ The plugin currently emits notifications for:
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
 - room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.105+, relay 0.21+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them.
 
-A fork of a chat never notifies as the chat (plugin 0.118.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. Code in a reply's fenced block stays as written.
+A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. Code in a reply's fenced block stays as written.
 
 ### Cron runs (plugin 0.33+)
 
@@ -3082,8 +3082,9 @@ for rooms with none of their own:
 
 - **What it can do**: Talk only (no tools, the default), Look things up
   (`web_search`, `web_extract`, `x_search`, `vision_analyze`), Use my data
-  (lookups plus the room-safe data tools you pick; there are none yet) or
-  Custom (only the tools you pick). Always within the profile's own toolsets.
+  (lookups plus when you're busy, from the calendar your phone shares:
+  `conduit_free_busy`, plugin 0.119+, see Use my data below) or Custom (only
+  the tools you pick). Always within the profile's own toolsets.
   Tool Search's own tools (`tool_search`, `tool_describe`, `tool_call`) work
   whenever anything is allowed: Hermes runs the hooks on the tool `tool_call`
   reaches, by that tool's own name, so it's checked like a direct call, and a
@@ -3378,7 +3379,7 @@ It changes only what needs it:
   Conduit's own tools (`conduit`) are never in it, nor toolsets whose every
   tool rooms never allow (memory, running code, delegation, scheduled jobs).
   Conduit's room tools (`conduit_rooms`, with Ask me first's
-  `conduit_ask_owner`) are always in it, and aren't one of the choices: the
+  `conduit_ask_owner` and Use my data's `conduit_free_busy`) are always in it, and aren't one of the choices: the
   room rules let each through per room (plugin 0.118+). A ceiling saved
   before then gets them on the next setup, which counts as a change.
   If the API server was already on, for Open WebUI say, the ceiling is also
@@ -3875,7 +3876,10 @@ your own confirm prompts (20 an hour, 20 waiting, all shown on the phone
 however many rooms ask). A room's answer its agent hasn't heard stays until it
 does, or for its week (the newest 10 a room, 60 across rooms). An answer
 counts as heard once the room turn the tool gave it to, or a turn framed with
-it, replies, so a turn that fails gets it again. Private chats never see
+it, replies and ends without failing or being stopped, so a turn that fails
+(even with an error message), is stopped, or ends without Hermes saying how,
+gets it again. A subagent the room's agent delegates to never
+hears them. Private chats never see
 them: `conduit_present` leaves them out of `status` and `earlier_answers`.
 When no ask is kept (no such Conduit, over these limits, or a room session
 Hermes hasn't titled yet), no answer will come, so the agent says it can't
@@ -3884,6 +3888,25 @@ agents set to ask you first (`not_room`, `not_ask_first`, `subagent`
 otherwise); the room rules let it through whatever the room's tools are,
 Talk only included, and keep Tool Search open for it, since Hermes may put it
 behind Tool Search.
+
+## Use my data: free/busy (plugin 0.119+)
+
+In a room with other people's agents set to Use my data (What it can do),
+your agent can say when you're busy, to find a time that works, with the
+`conduit_free_busy` tool: `from` and `to`, a local date or an ISO time (`to`
+inclusive), at most 31 days a call. It reads the calendar your phone shares
+with that profile (Settings › Calendar & phone in Conduit), as of its last
+sync, and gets only the busy times: merged across your shared calendars,
+without free, cancelled or declined events, or all-day ones unless they're
+marked busy. Never a title, place, calendar, attendee or device. Sharing
+those times follows the room's share choice, as anything about you does: with
+What helps it may share them, with Ask me first it asks you before it does
+(`conduit_ask_owner`), and with Nothing personal the tool isn't one of the
+room's. Either way it shares nothing else about your plans. With no calendar
+shared (or only adds), it says it can't check your calendar there. The tool
+refuses outside a room turn with other people's agents, in a subagent, and in
+a room not set to Use my data or Custom with it picked. Capability
+`room-free-busy`.
 
 ## Capabilities (plugin 0.4+)
 

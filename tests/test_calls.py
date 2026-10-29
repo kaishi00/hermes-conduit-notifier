@@ -751,12 +751,13 @@ def test_register_adds_the_tool_and_its_skill():
                                                   "conduit_settings", "conduit_present", "conduit_show", "conduit_notify", "conduit_health",
                                                   "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar",
                                                   "conduit_phone", "conduit_contacts", "conduit_room",
-                                                  "conduit_ask_owner"]
+                                                  "conduit_ask_owner", "conduit_free_busy"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
     assert tool["schema"]["parameters"]["required"] == ["reason", "asked_by_user"]
-    # Ask me first's tool runs only in room turns, in a toolset of its own (room_asks).
-    assert all(other["toolset"] == ("conduit_rooms" if other["name"] == "conduit_ask_owner" else "conduit")
+    # The room-turn tools (room_asks, room_free_busy) are in a toolset of their own.
+    rooms = ("conduit_ask_owner", "conduit_free_busy")
+    assert all(other["toolset"] == ("conduit_rooms" if other["name"] in rooms else "conduit")
                and other["schema"]["name"] == other["name"] for other in tools)
     [(name, path), (health_name, health_path), (location_name, location_path), (calendar_name, calendar_path)] = skills
     assert location_name == "using-location" and location_path.is_file()
@@ -784,7 +785,8 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
     plugin.register(ctx)
     assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report", "conduit_settings",
                                            "conduit_present", "conduit_show", "conduit_notify", "conduit_health", "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar", "conduit_phone",
-                                           "conduit_contacts", "conduit_room", "conduit_ask_owner"]
+                                           "conduit_contacts", "conduit_room", "conduit_ask_owner",
+                                           "conduit_free_busy"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.

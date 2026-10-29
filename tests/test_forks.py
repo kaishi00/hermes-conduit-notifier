@@ -208,6 +208,17 @@ def test_a_forks_approval_sends_nothing(hermes, marks, monkeypatch):
     assert sent == []
 
 
+
+def test_a_forks_approval_response_leaves_the_chats_approval_alone(hermes, marks, monkeypatch):
+    # The chat's own approval is still open: a fork's answered approval mustn't cancel its alert or card.
+    cancelled, thinking = [], []
+    monkeypatch.setattr(plugin.calls, "cancel_alerts", lambda *args: cancelled.append(args))
+    monkeypatch.setattr(plugin.live_activity.reporter, "thinking", lambda *args: thinking.append(args))
+    _fork_run(hermes, lambda: plugin._post_approval_response(session_id="s", session_key="s", turn_id="f"))
+    assert cancelled == [] and thinking == []
+    plugin._post_approval_response(session_id="s", session_key="s", turn_id="t")
+    assert cancelled == [("s", "approval")] and thinking == [("s",)]
+
 def test_a_fork_started_before_a_pulse_attempt_is_not_held(hermes, marks, monkeypatch):
     # The rule for the chat's own turns (pulse._held_home_turn): only a turn that started after the attempt is held.
     monkeypatch.setattr(plugin.pulse, "_in_flight_here", lambda session_id: [10.0**10])
