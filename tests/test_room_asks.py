@@ -706,3 +706,24 @@ def test_an_end_that_doesnt_say_how_the_turn_ended_frames_its_answers_again(room
                                turn_id="t1")
     room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="t1")
     assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()
+
+
+def test_a_fork_of_a_room_turn_leaves_the_turn_its_answers(room_plugin, store, sleeper, pushes):
+    # The self-improvement review or a /btw of the room's chat runs under its id (forks.py).
+    line = _declined(store, sleeper, pushes)
+    assert line in room_plugin._room_framing(ROOM_SESSION).splitlines()  # the room's turn
+    # Answered while the turn runs: the turn never read it.
+    later = call(store, sleeper, pushes, {"question": "Next hour", "share": "x"})
+    exchange(store, results=[{"id": later["id"], "outcome": "declined", "via": "tap"}])
+    later_line = '- Your owner said no to "Next hour": don\'t share it.'
+    token = room_plugin.forks._in_fork.set(True)
+    try:
+        assert "said no" not in (room_plugin._room_framing(ROOM_SESSION) or ""), "a fork, like a child, isn't framed"
+        room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="Noted.", turn_id="fork")
+        room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="fork", completed=True, interrupted=False)
+    finally:
+        room_plugin.forks._in_fork.reset(token)
+    room_plugin._post_llm_call(session_id=ROOM_SESSION, assistant_response="I can't share that.", turn_id="t1")
+    room_plugin._on_session_end(session_id=ROOM_SESSION, turn_id="t1", completed=True, interrupted=False)
+    framed = (room_plugin._room_framing(ROOM_SESSION) or "").splitlines()
+    assert line not in framed and later_line in framed, "the later answer waits for the next turn"

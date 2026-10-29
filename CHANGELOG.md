@@ -20,6 +20,16 @@ checks it). The format is fixed, because Conduit reads it:
   date, or a question. Their Hermes answers by the rules they set, or they
   answer themselves; no agent reads the ask on their side.
 
+## 0.119.1 (2026-10-29)
+
+### Fixes
+- On some Hermes versions (0.21 among them), Conduit's predictions, step
+  summaries (a /btw) and the self-improvement review each sent a
+  notification as if the chat had replied, with text such as
+  {"replies":[...]}, and moved the chat's Lock Screen progress. Only the
+  chat's own replies notify now. Like a subagent, they can't use Conduit's
+  tools either (notifications, calls, phone, location and the rest).
+
 ## 0.119.0 (2026-10-29)
 
 ### New and improved
