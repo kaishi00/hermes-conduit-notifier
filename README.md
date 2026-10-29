@@ -2898,7 +2898,8 @@ for as long as it's open. From plugin 0.120.2:
 How Pulse knows what a card is about:
 
 - **Phone reminders** (plugin 0.106.1+): the candidate list gives each
-  open reminder a key (`r1`), and a card about one names it. Before,
+  open reminder a key (`r1`), and a card about one names it; from 0.120.2
+  the look ahead keys the reminders it lists too. Before,
   moving a reminder back each morning counted as news, and each move
   could bring another card.
 - **Calendar entries**: the candidate list and the look ahead key the

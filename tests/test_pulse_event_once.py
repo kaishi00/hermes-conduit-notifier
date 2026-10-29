@@ -4,6 +4,7 @@ reminder does (Eric, 2026-10-29: three cards for one birthday on the
 calendar, the look ahead's on the Tuesday and the Thursday and the report's
 of the one held for a card shop)."""
 
+import re
 import time
 from datetime import datetime
 
@@ -120,6 +121,12 @@ def test_the_look_ahead_matches_titles_past_its_calendar_budget(live, monkeypatc
     assert row["ref"] == "event:e_kwan:2026-10-24"
 
 
+def test_a_key_match_keeps_a_chat_it_names_as_its_source():
+    row = candidates.found_row({**FOUND, "event": "v1", "chat": "c1"}, {"c1": ("", "chat-1")},
+                               follows=follows({"v1": KWAN}))
+    assert (row["ref"], row["source"], row["chat_id"]) == (REF, "chat", "chat-1")
+
+
 def test_a_title_match_keeps_the_source_the_model_gave():
     row = candidates.found_row({**FOUND, "source": "chat"}, {}, follows=follows(upcoming=[KWAN]))
     assert (row["ref"], row["source"]) == (REF, "chat")
@@ -234,6 +241,12 @@ def test_two_found_about_one_entry_in_a_run_bring_it_up_once(live):
         (candidates.SKIPPED, "raised"), (candidates.SURFACED, ""), (candidates.SURFACED, ""), (candidates.SKIPPED, "raised")]
 
 
+def test_of_two_found_about_one_entry_the_picked_one_stays(live):
+    rows = [candidate(kind="date", ref=REF, value=4), candidate(kind="date", ref=REF, value=5, bring_up=False)]
+    candidates.decide(live.store, rows, now=time.time())
+    assert [row["skip"] for row in rows] == ["", "raised"]
+
+
 @pytest.mark.parametrize("more", [{"rating": "down"}, {"dismissed_at": 1.0}])
 def test_an_entry_whose_card_was_put_away_stays_away(live, more):
     now = time.time()
@@ -286,12 +299,46 @@ def test_the_look_ahead_keys_its_calendar_and_brings_an_entry_up_once(live):
     assert (row["decision"], row["skip"]) == (candidates.SKIPPED, "raised")
 
 
+def test_the_look_ahead_keys_its_reminders_and_a_pick_names_one(live):
+    looking(live)
+    picked(live.home)
+    first = Model({"dates": [], "ahead": []})
+    look(live, at(14, 6, 30), first)
+    key = re.search(r"\n- (r\d+) Buy milk \(due", first.asked[0][1]).group(1)
+    assert '"reminder" (ahead only): the key of the reminder' in first.asked[0][0]
+    model = Model({"dates": [], "ahead": [{**SAID, "kind": "reminder", "source": "reminders", "event": None,
+                                           "reminder": key, "due": "", "line": "Milk on the way home."}]})
+    look(live, at(14, 7, 30), model)
+    [row] = last_run(live)
+    assert row["ref"] == "reminder:r_milk"
+
+
 def test_the_look_ahead_lists_entries_unkeyed_where_it_cant_key_them():
     assert ahead._event_line({"title": "Kyoto"}) == "- Kyoto"
     assert ahead._event_line({"title": "Kyoto"}, "v2") == "- v2 Kyoto"
 
 
 # Remembered items ------------------------------------------------------------------
+
+def test_a_remembered_item_due_on_a_day_comes_up_once_on_that_day(live):
+    # Kept at the day's start (pulse_memory), it's due at the day's end, as a found one's day is.
+    now = time.time()
+    start = (int(now // 86400) + 5) * 86400.0  # a UTC day five days on
+    day = datetime.fromtimestamp(start, tz=UTC).date().isoformat()
+    item_id = commitment(live, due=day, due_at=start)
+    live.store.add_cards([{"kind": candidates.store.NOTICED, "item_id": item_id, "level": "screen",
+                           "title": "x", "news": "x", "why": "x", "created_at": start - 3 * 86400}])
+
+    def decided_at(when):
+        rows = [remembered(live, item_id)]
+        candidates.decide(live.store, rows, now=when)
+        return rows[0]["skip"]
+
+    assert decided_at(start - 3600) == "raised"  # the evening before
+    assert decided_at(start + 9 * 3600) == ""  # its morning
+    live.store.add_cards([{"kind": candidates.store.NOTICED, "item_id": item_id, "level": "screen",
+                           "title": "x", "news": "x", "why": "x", "created_at": start + 9 * 3600}])
+    assert decided_at(start + 15 * 3600) == "raised"  # once
 
 def remembered(live, item_id, **said):
     return candidates.remembered_row(live.store.item(item_id), {"bring_up": True, "value": 5, "line": "Renew it",

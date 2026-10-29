@@ -276,14 +276,14 @@ def remembered_row(item: dict, entry: dict) -> dict:
 
 def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzinfo] = None, *,
               follows: Optional[report.Gathered] = None, events: Optional[dict[str, dict]] = None,
-              upcoming: Sequence[dict] = ()) -> Optional[dict]:
+              upcoming: Sequence[dict] = (), reminders: Optional[dict[str, dict]] = None) -> Optional[dict]:
     """Something else the model found (``entry``) as a journal row not yet
     decided, its chat looked up by key in ``chats``; None when it gives
     nothing to say. A next step (pulse_report.NEXT) is kept only when its
     "after" names an item ``follows`` lists as done (its #number) or an
     event it lists as ended (its key): its "ref" says which, and one after
     an item points at that item's chat when it names none. Any other one
-    about an open reminder ``follows`` lists (its "reminder" key) has that
+    about an open reminder ``follows`` (or ``reminders``) lists (its "reminder" key) has that
     reminder's REMINDER ref; else one about a calendar entry, by its "event"
     key among those ``follows`` (or ``events``) lists or by the entry's
     title in what it says (``upcoming``, the next two weeks), that entry's
@@ -305,9 +305,10 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
             profile, chat_id, source = done["profile"], done["chat_id"], "chat"
         elif done is None and not where:
             source = "calendar"
-    elif follows is not None:
-        reminder = (follows.reminders.get(str(entry.get("reminder") or "").strip().lower())
-                    or (_reminder_named(follows.reminders, text, entry.get("why")) if source == "reminders" else None))
+    elif follows is not None or reminders:
+        listed_reminders = follows.reminders if follows is not None else reminders or {}
+        reminder = (listed_reminders.get(str(entry.get("reminder") or "").strip().lower())
+                    or (_reminder_named(listed_reminders, text, entry.get("why")) if source == "reminders" else None))
         if reminder is not None and str(reminder.get("id") or ""):
             ref, source = f"{REMINDER}{_clip(str(reminder['id']), 200)}", "reminders"
             on = _phone_due(reminder.get("due"), zone)
@@ -317,7 +318,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
         listed = events or {}
         event = listed.get(str(entry.get("event") or "").strip().lower())
         if event is not None:
-            source = "calendar"
+            source = source if where else "calendar"  # a chat it named stays its source
         else:  # by its title: the model's source stands
             event = _event_named([*listed.values(), *upcoming], _due(entry.get("due"), zone), zone, text,
                                  entry.get("why"))
@@ -566,32 +567,44 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
         found = (by_item.get(item, []) if item is not None else []) + (by_ref.get(ref, []) if ref else [])
         if not found:
             continue
-        if due_again(row, max(card["created_at"] for card in found), now):
+        if due_again(row, max(card["created_at"] for card in found), now, due=_due_point(pulse_store, row)):
             continue  # its day: once more
         out.append(row)
     return out
 
 
-def due_again(row: dict, last: float, now: float) -> bool:
+def _due_point(pulse_store: store.PulseStore, row: dict) -> Optional[float]:
+    """When ``row`` is due, for due_again: a remembered item due on a day
+    alone is kept at that day's start (pulse_memory), so its point is the
+    day's end, as a found one's day is (_due)."""
+    due = row.get("due_at")
+    if due is None or row["origin"] != MEMORY or row.get("item_id") is None:
+        return due
+    item = pulse_store.item(row["item_id"])
+    return due if item is None or "T" in str(item.get("due") or "") else due + 86400 - 60
+
+
+def due_again(row: dict, last: float, now: float, *, due: Optional[float] = None) -> bool:
     """Whether ``row`` may come up again though something about it came up
     lately (its last card at ``last``): in the DUE_AGAIN_S before it's due
     (a date's is that day, due at its end), once, so not if a card already
     came in them."""
-    due = row.get("due_at")
+    due = row.get("due_at") if due is None else due
     return due is not None and due - DUE_AGAIN_S <= now <= due and last < due - DUE_AGAIN_S
 
 
 def once_each(rows: Sequence[dict]) -> None:
     """One candidate per phone reminder or calendar entry in a run: two the
     model found about the same one (a birthday, a gift for it) leave the one
-    it valued most, the rest skipped as raised."""
+    it picked, then the one it valued most, the rest skipped as raised."""
     best: dict[str, dict] = {}
     for row in rows:
         ref = str(row.get("ref") or "")
         if row.get("skip") or not ref.startswith((REMINDER, EVENT)):
             continue
         kept = best.get(ref)
-        if kept is None or (row.get("value") or 0) > (kept.get("value") or 0):
+        rank = lambda candidate: (candidate.get("bring_up") is True, candidate.get("value") or 0)
+        if kept is None or rank(row) > rank(kept):
             if kept is not None:
                 kept["skip"] = "raised"
             best[ref] = row
