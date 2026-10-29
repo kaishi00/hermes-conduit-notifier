@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.119.2 (2026-10-29)
+
+### Fixes
+- After the plugin reloaded, a prediction, step summary or self-improvement
+  review could again notify as if the chat had replied. It no longer does.
+
 ## 0.119.1 (2026-10-29)
 
 ### Fixes
