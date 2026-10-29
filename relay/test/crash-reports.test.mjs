@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
+import { RelayStore } from '../src/store.mjs';
 import { CrashReports, crashReportsFromEnv, signature, validateReport } from '../src/crash-reports.mjs';
 
 const TOKEN = 'a'.repeat(40);
@@ -86,6 +87,8 @@ async function startRelay(extraEnv) {
   const keyPath = join(dir, 'apns.pem');
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   writeFileSync(keyPath, privateKey.export({ type: 'sec1', format: 'pem' }));
+  const created = new RelayStore(join(dir, 'relay.json')).createInstallation({ bundleId: 'com.milim.relay', deviceToken: 'd'.repeat(64), environment: 'production' });
+  const device = `${created.installation.id}.${created.deviceSecret}`;
   const child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
     env: {
@@ -110,7 +113,8 @@ async function startRelay(extraEnv) {
     });
     return { status: response.status, json: await response.json().catch(() => null) };
   };
-  return { api, dir, stop: () => { child.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); } };
+  const capabilities = async () => (await api('/v1/meta', { token: device })).json.capabilities;
+  return { api, capabilities, dir, stop: () => { child.kill('SIGKILL'); rmSync(dir, { recursive: true, force: true }); } };
 }
 
 test('anyone posts a report; only the token reads them', async () => {
@@ -118,6 +122,7 @@ test('anyone posts a report; only the token reads them', async () => {
   try {
     const sent = await relay.api('/v1/crash-reports', { method: 'POST', body: post() });
     assert.equal(sent.status, 201);
+    assert.ok((await relay.capabilities()).includes('crash-reports'), 'the app learns the relay takes reports');
     assert.ok(existsSync(join(relay.dir, 'crash-reports', `${sent.json.id}.report.json`)), 'kept beside the relay data');
     assert.equal((await relay.api('/v1/crash-reports', { method: 'POST', body: post({ kind: 'nope' }) })).status, 400);
     assert.equal((await relay.api('/v1/crash-reports')).status, 401);
@@ -150,6 +155,7 @@ test('a relay without the token takes no reports', async () => {
   const relay = await startRelay({});
   try {
     assert.equal((await relay.api('/v1/crash-reports', { method: 'POST', body: post() })).status, 404);
+    assert.ok(!(await relay.capabilities()).includes('crash-reports'));
     assert.equal(existsSync(join(relay.dir, 'crash-reports')) && readdirSync(join(relay.dir, 'crash-reports')).length, false);
   } finally {
     relay.stop();
