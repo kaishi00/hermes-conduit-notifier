@@ -28,11 +28,12 @@ import importlib.util
 if importlib.util.find_spec("tools.plugin_guard") is None:
     print(json.dumps(None))
     raise SystemExit
-from tools.plugin_guard import scan_plugin
+from tools.plugin_guard import scan_plugin, should_allow_plugin_install
 result = scan_plugin(Path(sys.argv[1]), source="https://github.com/kaishi00/hermes-conduit-notifier.git")
-blocking = [f"{f.severity.upper()} {f.pattern_id} {f.file}:{f.line} {f.match}"
-            for f in result.findings if f.severity in ("high", "critical")]
-print(json.dumps({"verdict": result.verdict, "blocking": blocking}))
+allowed, reason = should_allow_plugin_install(result)
+held = [f"{str(f.severity).upper()} {f.pattern_id} {f.file}:{f.line} {f.match}"
+        for f in result.findings if str(f.severity).lower() in ("high", "critical")]
+print(json.dumps({"allowed": allowed, "reason": reason, "held": held}))
 """
 
 
@@ -46,16 +47,34 @@ def _shipped_copy(dest: Path) -> Path:
     return dest
 
 
-def test_hermes_install_scan_lets_the_update_through(tmp_path):
-    plugin = _shipped_copy(tmp_path / "conduit_push")
+def _scan(plugin: Path, tmp_path: Path):
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(exist_ok=True)
     env = {"HERMES_HOME": str(home), "PATH": "/usr/bin:/bin", "NO_COLOR": "1"}
     out = subprocess.run([sys.executable, "-c", PROBE, str(plugin)], env=env, capture_output=True,
                          text=True, timeout=300, cwd=home)
     assert out.returncode == 0, out.stderr[-4000:]
-    scan = json.loads(out.stdout.strip().splitlines()[-1])
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_hermes_install_scan_lets_the_update_through(tmp_path):
+    scan = _scan(_shipped_copy(tmp_path / "conduit_push"), tmp_path)
     if scan is None:
         return  # A Hermes without the plugin scan installs anything.
-    assert not scan["blocking"], (f"Hermes' install scan says {scan['verdict']}, which holds the update; "
-                                  "reword or move these:\n" + "\n".join(scan["blocking"]))
+    # The update passes no --force, so only an outright allow lets it through.
+    assert scan["allowed"] is True, (f"Hermes' install scan: {scan['reason']}; reword or move these:\n"
+                                     + "\n".join(scan["held"]))
+
+
+def test_the_scan_holds_the_readme_that_broke_the_update(tmp_path):
+    """The check above can only pass for the right reason if the scan still holds #1500's README."""
+    plugin = tmp_path / "planted"
+    plugin.mkdir()
+    shutil.copy2(ROOT / "plugin.yaml", plugin / "plugin.yaml")
+    variable = "$CRASH_REPORTS_" + "TOKEN"
+    (plugin / "README.md").write_text(
+        "```shell\n" f'curl -H "Authorization: Bearer {variable}" "$PUBLIC_URL/v1/crash-reports"\n' "```\n")
+    scan = _scan(plugin, tmp_path)
+    if scan is None:
+        return
+    assert scan["allowed"] is not True and scan["held"], scan
