@@ -481,6 +481,22 @@ WATCH_CHAT_RESULTS = 5
 # VoiceChatFinder.path's exclude_sources (SessionSource.nonChatExcludedSources):
 # the sessions Hermes' own pickers hide as not conversations.
 CHAT_SEARCH_EXCLUDED_SOURCES = "kanban,oneshot,tool"
+# A Kanban worker Hermes stored before it tagged them `kanban`: a `cli` (or,
+# after a peer refresh, `local`) row whose preview is the dispatcher's prompt
+# (SessionSource.isLegacyKanbanWorker). The source filter misses it.
+LEGACY_KANBAN_WORKER_SOURCES = frozenset({"cli", "local"})
+LEGACY_KANBAN_WORKER_PROMPT = "work kanban task "
+
+
+def is_legacy_kanban_worker(row: Dict[str, Any]) -> bool:
+    source, preview = row.get("source"), row.get("preview")
+    if not isinstance(source, str) or source.lower() not in LEGACY_KANBAN_WORKER_SOURCES:
+        return False
+    if not isinstance(preview, str):
+        return False
+    preview = preview.strip().lower()
+    task = preview[len(LEGACY_KANBAN_WORKER_PROMPT):]
+    return preview.startswith(LEGACY_KANBAN_WORKER_PROMPT) and bool(task) and not any(c.isspace() for c in task)
 WATCH_CHAT_QUERY_CHARS = 200
 WATCH_CHAT_SNIPPET_CHARS = 160
 # Under the Watch's 35 s wait for an answer (WatchToolRelayClient).
@@ -626,7 +642,7 @@ def chat_matches(response: Any) -> list:
         return []
     seen, matches = set(), []
     for row in rows:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or is_legacy_kanban_worker(row):
             continue
         sid = (_chat_number(row.get("session_id")) or _chat_number(row.get("id")) or "").strip()
         if not sid or sid in seen:

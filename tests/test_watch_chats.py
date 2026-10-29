@@ -81,6 +81,19 @@ def test_matches_keep_hermes_order_without_markers_or_booleans():
     assert matches[3]["last_active"] is None
 
 
+def test_matches_leave_out_kanban_workers_stored_before_the_tag():
+    matches = api.watch_tools.chat_matches({"results": [
+        {"session_id": "w", "source": "cli", "preview": "work kanban task t_9f2c"},
+        {"session_id": "w2", "source": "local", "preview": " Work Kanban Task t_1 "},
+        # A chat that says more, another source, or an older host without
+        # previews is kept (SessionContentSearchTests).
+        {"session_id": "c", "source": "cli", "preview": "work kanban task t_1 and then fix it"},
+        {"session_id": "t", "source": "telegram", "preview": "work kanban task t_1"},
+        {"session_id": "o", "source": "cli"},
+    ]})
+    assert [m["session_id"] for m in matches] == ["c", "t", "o"]
+
+
 def test_summary_is_the_iphones_fenced_list():
     three_days_ago = datetime(2026, 10, 8, 18, 0).timestamp()
     matches = [{"session_id": "a", "title": "GPU setup", "snippet": "the 4090 drivers", "last_active": three_days_ago},

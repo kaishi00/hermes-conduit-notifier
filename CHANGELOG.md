@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.115.5 (2026-10-29)
+
+### Fixes
+- Finding a chat on an Apple Watch call could pick an old Kanban task's
+  worker, saved before Hermes marked them, whose only message is "work
+  kanban task" and the task's id. It now skips them, as the iPhone does.
+
 ## 0.115.4 (2026-10-29)
 
 ### Fixes
