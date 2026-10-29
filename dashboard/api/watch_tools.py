@@ -478,9 +478,18 @@ def run_watch_tool(grant: _WatchGrant, request: Dict[str, Any]) -> Dict[str, Any
 # hears. read_chat reads only a chat the grant's newest find_chat returned.
 
 WATCH_CHAT_RESULTS = 5
+# Rows asked of Hermes for those five (VoiceChatFinder.searchLimit): a legacy
+# worker passes the source filter and is dropped after, so a query its prompt
+# matches ("task") mustn't crowd real chats out.
+WATCH_CHAT_SEARCH_LIMIT = WATCH_CHAT_RESULTS * 3
 # VoiceChatFinder.path's exclude_sources (SessionSource.nonChatExcludedSources):
 # the sessions Hermes' own pickers hide as not conversations.
 CHAT_SEARCH_EXCLUDED_SOURCES = "kanban,oneshot,tool"
+# A Kanban worker Hermes stored before it tagged them `kanban`: a `cli` (or,
+# after a peer refresh, `local`) row whose preview is the dispatcher's prompt
+# (SessionSource.isLegacyKanbanWorker). The source filter misses it.
+LEGACY_KANBAN_WORKER_SOURCES = frozenset({"cli", "local"})
+LEGACY_KANBAN_WORKER_PROMPT = "work kanban task "
 WATCH_CHAT_QUERY_CHARS = 200
 WATCH_CHAT_SNIPPET_CHARS = 160
 # Under the Watch's 35 s wait for an answer (WatchToolRelayClient).
@@ -619,6 +628,19 @@ def chat_plain_snippet(raw: Any) -> str:
     return line if len(line) <= WATCH_CHAT_SNIPPET_CHARS else line[:WATCH_CHAT_SNIPPET_CHARS] + "…"
 
 
+def is_legacy_kanban_worker(row: Dict[str, Any]) -> bool:
+    """The app's rule, word for word: a chat whose whole first message is that
+    prompt hides too, which no one types (FEATURE_MAP, Kanban workers)."""
+    source, preview = row.get("source"), row.get("preview")
+    if not isinstance(source, str) or source.lower() not in LEGACY_KANBAN_WORKER_SOURCES:
+        return False
+    if not isinstance(preview, str):
+        return False
+    preview = preview.strip().lower()
+    task = preview[len(LEGACY_KANBAN_WORKER_PROMPT):]
+    return preview.startswith(LEGACY_KANBAN_WORKER_PROMPT) and bool(task) and not any(c.isspace() for c in task)
+
+
 def chat_matches(response: Any) -> list:
     """The search response's chats, in Hermes' order (VoiceChatFinder.matches)."""
     rows = response.get("results") if isinstance(response, dict) else None
@@ -626,7 +648,7 @@ def chat_matches(response: Any) -> list:
         return []
     seen, matches = set(), []
     for row in rows:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or is_legacy_kanban_worker(row):
             continue
         sid = (_chat_number(row.get("session_id")) or _chat_number(row.get("id")) or "").strip()
         if not sid or sid in seen:
@@ -818,7 +840,7 @@ def run_watch_find_chat(grant: _WatchGrant, args: Dict[str, Any], routes=None,
     def search_for(words: str) -> list:
         # Its own deadline, so a stuck route frees the worker too.
         return chat_matches(asyncio.run(asyncio.wait_for(routes.search_sessions(
-            q=words, limit=WATCH_CHAT_RESULTS, profile=grant.profile, **scope), WATCH_CHAT_SEARCH_TIMEOUT_S)))
+            q=words, limit=WATCH_CHAT_SEARCH_LIMIT, profile=grant.profile, **scope), WATCH_CHAT_SEARCH_TIMEOUT_S)))
 
     matches = search_for(query)
     for word in chat_fallback_words(query) if not matches else []:

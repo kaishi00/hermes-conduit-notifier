@@ -29,6 +29,13 @@ checks it). The format is fixed, because Conduit reads it:
   listens will leave you notes once the room goes quiet or ends. It starts
   working with the Conduit update that opens these chats.
 
+## 0.115.5 (2026-10-29)
+
+### Fixes
+- Finding a chat on an Apple Watch call could pick an old Kanban task's
+  worker, saved before Hermes marked them, whose only message is "work
+  kanban task" and the task's id. It now skips them, as the iPhone does.
+
 ## 0.115.4 (2026-10-29)
 
 ### Fixes
