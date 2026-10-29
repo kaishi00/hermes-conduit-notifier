@@ -63,6 +63,11 @@ _POSTS_TABLE = """CREATE TABLE IF NOT EXISTS conduit_room_copy_posts (
 _db_lock = threading.Lock()
 
 
+# On each member a copy keeps: its profile when it's one of this installation's agents, as its invite had them (the
+# home's own value for it is replaced), so the copy still knows its agents once the invite is forgotten.
+YOURS = "yours"
+
+
 class CopiesError(Exception):
     def __init__(self, code: str, message: str, status: int = 400) -> None:
         super().__init__(message)
@@ -325,7 +330,8 @@ class Copies:
                 with closing(sqlite3.connect(self.path)) as conn, conn:
                     conn.execute(_TABLE)
                     conn.execute("INSERT OR REPLACE INTO conduit_room_copies VALUES (?, ?, ?, ?, ?, ?)",
-                                 (room_id, received.link_id, invite["from"], json.dumps(body["members"]),
+                                 (room_id, received.link_id, invite["from"],
+                                  json.dumps(_marked(body["members"], invite)),
                                   json.dumps(body["state"]), float(self.rooms.clock())))
             except self.hermes.replica_error as exc:
                 logger.info("Linked Rooms' copy of room %s didn't take a page (%s)", room_id, exc)
@@ -619,17 +625,25 @@ def _rows(file: Path) -> list[sqlite3.Row]:
 def _shown(row: sqlite3.Row, invite: Optional[dict[str, Any]]) -> dict[str, Any]:
     """A copy as Conduit shows it, with what its invite says while this installation keeps it: your agents in it,
     and whether it goes on."""
-    state = json.loads(row["state_json"])
+    state, members = json.loads(row["state_json"]), json.loads(row["members_json"])
     if invite is not None:
         status, reason, started_at, ended_at = invite["status"], invite["reason"], invite["started_at"], \
             invite["ended_at"]
         yours = [{"member_id": agent["member_id"], "profile": agent["profile"], "handle": agent["handle"]}
                  for agent in invite["joined"]]
-    else:
-        status, reason, started_at, ended_at, yours = "ended", state.get("ended"), None, None, []
+    else:  # the invite forgotten: your agents as the copy marked them
+        status, reason, started_at, ended_at = "ended", state.get("ended"), None, None
+        yours = [{"member_id": member["member_id"], "profile": member[YOURS], "handle": member.get("handle")}
+                 for member in members if isinstance(member.get(YOURS), str)]
     if state.get("ended") is not None:
         status, reason = "ended", state["ended"]
+    members = [{key: value for key, value in member.items() if key != YOURS} for member in members]
     return {"room_id": row["room_id"], "name": row["name"], "link": row["link"], "from": row["home_name"],
-            "members": json.loads(row["members_json"]), "yours": yours, "status": status, "reason": reason,
+            "members": members, "yours": yours, "status": status, "reason": reason,
             "started_at": started_at, "ended_at": ended_at, "state": state, "last_seq": int(row["last_seq"]),
             "latest_seq": int(row["latest_seq"]), "updated_at": float(row["updated_at"])}
+
+
+def _marked(members: list[dict[str, Any]], invite: dict[str, Any]) -> list[dict[str, Any]]:
+    mine = {agent["member_id"]: agent["profile"] for agent in [*invite["joined"], *invite.get("gone", ())]}
+    return [{**member, YOURS: mine.get(member.get("member_id"))} for member in members]

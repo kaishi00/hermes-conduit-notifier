@@ -120,8 +120,9 @@ def test_a_quiet_listening_room_gets_notes_once(side):
     notes(side, sender).pass_once()
     [(chat_id, text, profile)] = sender.sent
     assert (chat_id, profile) == ("chat-a", "default")
-    assert text == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=0,
+    assert text == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=0, until=seq,
                                                     why=chats_module.QUIET_WHY)
+    assert "more_after" in text and f"through seq {seq}" in text  # a long stretch is read to its end
     assert store(side, "laifu").get(room_id)["notes_seq"] == seq
 
     side.clock.now += chats_module.QUIET_S + 60
@@ -133,7 +134,7 @@ def test_a_quiet_listening_room_gets_notes_once(side):
     side.clock.now += chats_module.QUIET_S + 60
     notes(side, sender).pass_once()
     assert sender.sent[-1][1] == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=seq,
-                                                                  why=chats_module.QUIET_WHY)
+                                                                  until=later, why=chats_module.QUIET_WHY)
     assert store(side, "laifu").get(room_id)["notes_seq"] == later
 
 
@@ -150,7 +151,7 @@ def test_an_ended_room_gets_its_last_notes(side):
     notes(side, sender).pass_once()  # ended: no need to wait
 
     [(_, text, _)] = sender.sent
-    assert text == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=0,
+    assert text == chats_module.NOTES_PROMPT.format(name="Zoo trip", room_id=room_id, after=0, until=seq,
                                                     why=chats_module.ENDED_WHY)
     assert store(side, "laifu").get(room_id)["notes_seq"] == seq
 

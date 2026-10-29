@@ -3693,8 +3693,8 @@ minute:
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
   agents in it `{"member_id", "profile", "handle"}`, the invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
-  forgets the invite, a month after it ended, `yours` is empty and the dates
-  null), and `state`: `{"ended", "working", "activity", "routes"}`, each of
+  forgets the invite, a month after it ended, the dates are null and `yours`
+  is the agents the copy noted as yours when it took the room's pages), and `state`: `{"ended", "working", "activity", "routes"}`, each of
   the last two a list of `{"member_id", "status"}`.
 - `GET /rooms/copies/log?room_id=&since_seq=0&limit=100`: the copy's events
   after `since_seq`, as `groups.log` pages a room this Hermes hosts:
@@ -3779,7 +3779,7 @@ a send that failed). A room with no chat yet gets none until it has one.
 In a copy, a message the home says is one of yours is shown as yours only
 when it is: one this Hermes posted (by its seq, or its text while it's on
 its way). Any other is the host's, "as if from you (not one of your posts)",
-and a person or owner named "you" shows as Guest. Room and agent names
+and a person or owner named "you" (or near it, like "you.") shows as Guest. Room and agent names
 another Hermes gives are kept to one line of at most 80 characters. A long page read forward keeps its
 first messages (more come after), one read back keeps its last. In a room
 you host, a person's message whose poster can't be read just then

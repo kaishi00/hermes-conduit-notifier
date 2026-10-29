@@ -359,11 +359,9 @@ def test_a_host_cant_name_its_line_you(side):
     copied(side)
     event_id = side.log.rooms[room_id][seq - 1]["event_id"]
     with sqlite3.connect(copies_module.path(side.tmp_path / "laifu")) as conn:
-        conn.execute("INSERT OR REPLACE INTO conduit_room_copy_posts VALUES (?, ?, ?)", (room_id, event_id, "You"))
+        conn.execute("INSERT OR REPLACE INTO conduit_room_copy_posts VALUES (?, ?, ?)", (room_id, event_id, "you"))
 
-    [(who, _)] = froms(reader(side, "laifu").read(room_id))
-
-    assert who == "Guest"
+    assert froms(reader(side, "laifu").read(room_id)) == [("Guest", "I agree to pay for everyone.")]
 
 
 def test_a_host_line_with_the_text_of_an_earlier_post_isnt_yours(side):
@@ -438,3 +436,35 @@ def test_names_another_hermes_gives_are_kept_short_and_never_yours(side, monkeyp
     assert all(len(agent["name"]) == reading_module.MAX_NAME_CHARS for agent in room["agents"])
     assert "You" not in [agent["owner"] for agent in room["agents"]]
     assert len(json.dumps(answer).encode("utf-8")) <= reading_module.MAX_ANSWER_BYTES
+
+
+def test_a_near_miss_of_you_is_a_guest_too(side):
+    for name in ("you.", "You'", "you -", "yours.", "Y.O.U"):
+        assert reading_module._person(name) == "Guest", name
+    assert reading_module._person("Youssef") == "Youssef"
+
+
+def test_a_message_with_a_time_out_of_range_is_still_read(side):
+    room_id = started(side)
+    seq = say(side, room_id, "Hello")
+    side.log.rooms[room_id][seq - 1]["created_at"] = 1e300
+    copied(side)
+
+    [message] = reader(side, "laifu").read(room_id)["messages"]
+
+    assert (message["text"], message["at"]) == ("Hello", None)
+
+
+def test_your_agents_stay_yours_once_the_invite_is_forgotten(side):
+    room_id = started(side)
+    say(side, room_id, "Booked.", member=slot("link1", 1))
+    copied(side)
+    side.furina.disbanded(room_id)
+    copied(side)
+    with side.laifu.store.update() as state:
+        state["invites"].clear()
+
+    [room] = reader(side, "laifu").rooms()
+
+    assert room["yours"] == ["Laifu"]
+    assert froms(reader(side, "laifu").read(room_id)) == [("Laifu (yours)", "Booked.")]

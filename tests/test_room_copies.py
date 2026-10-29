@@ -553,11 +553,13 @@ def test_the_list_says_which_agents_of_yours_are_in_it(copies):
     assert shown["yours"] == [{"member_id": slot("link1", 1), "profile": "default", "handle": "laifu"}]
     assert shown["started_at"] == int(NOW) and shown["updated_at"] == NOW
     assert (shown["reason"], shown["ended_at"]) == (None, None)
-    # Its invite forgotten a month after it ended, the copy stays, with what the copy knows.
+    # Its invite forgotten a month after it ended, the copy stays, with what the copy knows: your agents too.
     with invites_module.Store(copies.tmp_path / "laifu").update() as state:
         state["invites"].clear()
     shown = copy_of(copies, "laifu", room_id)
-    assert (shown["status"], shown["yours"], shown["from"], shown["started_at"]) == ("ended", [], "Furina", None)
+    assert (shown["status"], shown["yours"], shown["from"], shown["started_at"]) == (
+        "ended", [{"member_id": slot("link1", 1), "profile": "default", "handle": "laifu"}], "Furina", None)
+    assert all(copies_module.YOURS not in member for member in shown["members"])
 
 
 # --- Routes ---------------------------------------------------------------------------------

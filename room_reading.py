@@ -277,10 +277,11 @@ class Reader:
                         # Who posted it can't be read: never shown as yours, and looked up again next read.
                         return _shown(event, UNSURE, text)
                     link = links.get(event["event_id"])
-                    posted[event["event_id"]] = None if link is None else _person(
+                    posted[event["event_id"]] = None if link is None else room_posts.poster(
                         draft["links"].get(link, {}).get("name"))
                 by = posted[event["event_id"]]
-                return _shown(event, YOU if by is None else by, text if by is None else _unnamed(text, by))
+                # The home puts the name a Link's posts go under on each line; it's shown never as "you".
+                return _shown(event, YOU, text) if by is None else _shown(event, _person(by), _unnamed(text, by))
             member = members.get(event["payload"].get("member_id"))
             if member is None:
                 return _shown(event, "another agent", text)
@@ -310,8 +311,8 @@ class Reader:
                     return _shown(event, host, text)
                 by = post.get("by")
                 if isinstance(by, str) and by.strip():
-                    by = _person(by.strip())
-                    return _shown(event, by, _unnamed(text, by))
+                    by = room_posts.poster(by.strip())
+                    return _shown(event, _person(by), _unnamed(text, by))
                 unnamed = _unnamed(text, you) if you else text
                 if event["seq"] in own_seqs or unnamed in own_texts:
                     return _shown(event, YOU, unnamed)
@@ -331,7 +332,8 @@ class Reader:
 def _person(name: Any) -> str:
     """A person's name as a Link gives it, never one that reads as the user's ("you")."""
     shown = room_posts.poster(name)
-    return room_posts.GUEST if shown.casefold() in (YOU, "yours") else shown
+    letters = "".join(char for char in shown.casefold() if char.isalnum())
+    return room_posts.GUEST if letters in (YOU, "yours") else shown
 
 
 def _message(event: Any) -> bool:
@@ -367,7 +369,10 @@ def _shown(event: dict[str, Any], who: str, text: str) -> dict[str, Any]:
     if len(text) > MAX_TEXT_CHARS:
         text = text[:MAX_TEXT_CHARS - 1] + "…"
     at = event.get("created_at")
-    when = datetime.fromtimestamp(float(at)).astimezone().isoformat(timespec="minutes") \
-        if isinstance(at, (int, float)) else None
+    try:  # the home's to set: a time that can't be shown is left out
+        when = datetime.fromtimestamp(float(at)).astimezone().isoformat(timespec="minutes") \
+            if isinstance(at, (int, float)) else None
+    except (OverflowError, OSError, ValueError):
+        when = None
     return {"seq": event["seq"], "at": when, "from": who, "text": text,
             "created_at": float(at) if isinstance(at, (int, float)) else 0.0}
