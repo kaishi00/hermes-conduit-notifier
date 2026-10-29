@@ -309,7 +309,7 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                 if upcoming is not None:
                     upcoming += [e for e in phone.events(db, device["id"], int(now),
                                                          int(now + EVENT_MATCH_DAYS * 86400), limit=MAX_MATCHED)[0]
-                                 if e.get("id") and e.get("status") != "canceled"]
+                                 if e.get("id") and e.get("status") != "canceled" and e.get("my_status") != "declined"]
                 synced = device.get("last_seen")
                 lines = []
                 for e in found:

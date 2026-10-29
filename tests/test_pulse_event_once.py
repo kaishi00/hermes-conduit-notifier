@@ -15,7 +15,7 @@ from test_pulse_followup import commitment, live  # noqa: F401
 from test_pulse_hours import phone_home
 from test_pulse_next import UTC, candidate, candidates
 from test_pulse_reminder_once import card_for
-from test_phone import _event
+from test_phone import _batch, _event
 
 KWAN = {"id": "e_kwan", "title": "Kwan Cheung Ho’s Birthday", "start": "2026-11-06T00:00:00+00:00",
         "end": "2026-11-07T00:00:00+00:00", "all_day": True}
@@ -43,6 +43,28 @@ def test_the_list_gives_each_calendar_entry_a_key_and_reads_two_weeks_for_titles
     assert plain.events == {} and plain.upcoming == [] and "\n- Standup (" in plain.text
 
 
+def test_a_calendar_entry_past_a_cut_keeps_no_key(live):
+    phone_home(live.home)
+    now = at(14, 7)
+    whole = report.gather(live.home, live.store, home_chat_id=SID, now=now, keyed=True, room=100_000)
+    assert {"v1", "v2"} <= set(whole.events)
+    chats = len(whole.text) - whole.text.index("\n\n## Chats since")
+    cut_at = whole.text.index("\n- v2 ")
+    cut = report.gather(live.home, live.store, home_chat_id=SID, now=now, keyed=True, room=cut_at + 40 + chats)
+    assert "(cut here: no room in this report)" in cut.text
+    assert set(cut.events) == {"v1"}
+
+
+def test_a_declined_entry_is_not_matched_by_its_title(live):
+    # The list leaves it out, so the model never saw it: a chat's "optional sync notes" isn't about it.
+    events = _batch()["events"]
+    declined = _event("e_optional", title="Optional sync", start="2026-10-15T14:00:00+01:00",
+                      end="2026-10-15T15:00:00+01:00", my_status="declined", attendees=[], notes=None)
+    phone_home(live.home, events={**events, "upsert": events["upsert"] + [declined]})
+    found = report.gather(live.home, live.store, home_chat_id=SID, now=at(14, 7), keyed=True)
+    assert found.upcoming and "e_optional" not in {event["id"] for event in found.upcoming}
+
+
 @pytest.mark.parametrize("key, ref", [("v1", REF), (" V1 ", REF), ("v2", None), ("", None), (None, None)])
 def test_a_found_candidate_about_a_listed_entry_carries_it(key, ref):
     row = candidates.found_row({**FOUND, "line": "A card for the party.", "event": key}, {},
@@ -63,13 +85,31 @@ def test_one_with_no_key_is_matched_by_the_title_of_an_entry_in_the_next_two_wee
     assert row.get("ref") == ref
 
 
+def test_a_title_match_keeps_the_source_the_model_gave():
+    row = candidates.found_row({**FOUND, "source": "chat"}, {}, follows=follows(upcoming=[KWAN]))
+    assert (row["ref"], row["source"]) == (REF, "chat")
+
+
 def test_a_title_of_one_word_or_two_entries_named_match_nothing():
     standup = {"id": "e_standup", "title": "Standup", "start": "2026-10-30T09:30:00+00:00"}
     row = candidates.found_row({**FOUND, "line": "Standup moved to 10."}, {}, follows=follows(upcoming=[standup]))
     assert "ref" not in row
     party = {"id": "e_party", "title": "Kwan Cheung Ho’s Birthday", "start": "2026-11-07T19:00:00+00:00"}
-    row = candidates.found_row(FOUND, {}, follows=follows(upcoming=[KWAN, party]))
+    row = candidates.found_row({**FOUND, "due": ""}, {}, follows=follows(upcoming=[KWAN, party]))
     assert "ref" not in row
+    row = candidates.found_row(FOUND, {}, follows=follows(upcoming=[KWAN, party]))
+    assert row["ref"] == REF  # the day it's due tells them apart
+
+
+def test_a_title_inside_a_longer_line_with_no_day_matches_nothing():
+    # "Team lunch" is in the line, but the line is about something else.
+    lunch = {"id": "e_lunch", "title": "Team lunch", "start": "2026-10-30T12:00:00+00:00"}
+    line = "Ask Priya after the team lunch whether the invoice for the October work went out."
+    row = candidates.found_row({**FOUND, "line": line, "due": ""}, {}, follows=follows(upcoming=[lunch]))
+    assert "ref" not in row
+    row = candidates.found_row({**FOUND, "line": "Team lunch at noon.", "due": ""}, {},
+                               follows=follows(upcoming=[lunch]))
+    assert row["ref"] == "event:e_lunch:2026-10-30" and row["due_at"] is not None  # its day, for still_open
 
 
 def test_a_repeating_entry_is_matched_on_the_day_it_is_due():
@@ -77,9 +117,12 @@ def test_a_repeating_entry_is_matched_on_the_day_it_is_due():
     row = candidates.found_row({**FOUND, "line": "Bring your mat to yoga class.", "due": "2026-11-09"}, {},
                                follows=follows(upcoming=weekly))
     assert row["ref"] == "event:e_yoga:2026-11-09"
-    row = candidates.found_row({**FOUND, "line": "Bring your mat to yoga class.", "due": ""}, {},
+    row = candidates.found_row({**FOUND, "line": "Yoga class tonight.", "due": ""}, {},
                                follows=follows(upcoming=weekly))
     assert row["ref"] == "event:e_yoga:2026-11-02"  # the soonest
+    row = candidates.found_row({**FOUND, "line": "Bring your mat to yoga class.", "due": "2026-11-05"}, {},
+                               follows=follows(upcoming=weekly))
+    assert "ref" not in row  # not on a day it's on
 
 
 def test_a_next_step_keeps_what_it_follows():
@@ -120,6 +163,24 @@ def test_an_entry_whose_card_is_still_open_comes_up_again_only_on_its_day(live):
     rows = [candidate(kind="date", ref=REF, value=5, due_at=now + 3600)]
     candidates.decide(live.store, rows, now=now)
     assert rows[0]["skip"] == "raised"
+
+
+def test_an_entry_held_two_days_ago_still_comes_up_on_its_day(live):
+    # A look ahead on Tuesday holds a card for Thursday's dentist; Thursday's report brings it up.
+    now = time.time()
+    card_for(live, REF, created_at=now - 2 * 86400, level="moment")
+    rows = [candidate(kind="date", ref=REF, value=5, due_at=now + 3600)]
+    candidates.decide(live.store, rows, now=now)
+    assert (rows[0]["decision"], rows[0]["skip"]) == (candidates.SURFACED, "")
+
+
+def test_two_found_about_one_entry_in_a_run_bring_it_up_once(live):
+    now = time.time()
+    rows = [candidate(kind="date", ref=REF, value=4), candidate(kind="date", ref=REF, value=6),
+            candidate(kind="reminder", ref="reminder:r_lock", value=5), candidate(kind="reminder", ref="reminder:r_lock", value=5)]
+    candidates.decide(live.store, rows, now=now)
+    assert [(row["decision"], row["skip"]) for row in rows] == [
+        (candidates.SKIPPED, "raised"), (candidates.SURFACED, ""), (candidates.SURFACED, ""), (candidates.SKIPPED, "raised")]
 
 
 @pytest.mark.parametrize("more", [{"rating": "down"}, {"dismissed_at": 1.0}])

@@ -504,6 +504,11 @@ def test_the_same_seed_draws_the_same_candidates_for_everyone():
 # Since a card still open keeps anything else about its item from coming up
 # (pulse_candidates.still_open, 2026-10-29), every run brings up less and the
 # margins between runs narrow: they were set for runs that repeated.
+# Measured on seeds 0 to 39 then (median, worst): quiet's interruptions
+# 0.38 and 0.78 of the run without learning, its junk 0.12 and -0.03 lower;
+# samantha 1.22 and 0.22 more surfaced; quiet and samantha 1.33 and 0.44
+# apart surfaced, 1.22 and 0.44 in pushes, 1.67 and 0.78 when noisy. The
+# worst sit among the misses a criterion allows (SEEDS - NEED).
 
 def _margin(more: float, less: float) -> float:
     """``more`` - ``less``, to six places: window averages are sums of

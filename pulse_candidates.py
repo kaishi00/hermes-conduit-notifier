@@ -295,7 +295,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
     where = chats.get(str(entry.get("chat") or "").strip().lower())
     profile, chat_id = where or ("", "")
     source = "chat" if where else _choice(entry.get("source"), SOURCES)
-    ref = ""
+    ref, on = "", None
     if kind == report.NEXT:
         after = _after(entry.get("after"), follows)
         if after is None:
@@ -314,14 +314,21 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
         if follows is not None:
             events, upcoming = follows.events, follows.upcoming
         listed = events or {}
-        event = (listed.get(str(entry.get("event") or "").strip().lower())
-                 or _event_named([*listed.values(), *upcoming], _due(entry.get("due"), zone), zone, text,
-                                 entry.get("why")))
+        event = listed.get(str(entry.get("event") or "").strip().lower())
         if event is not None:
-            ref, source = event_ref(event), "calendar"
+            source = "calendar"
+        else:  # by its title: the model's source stands
+            event = _event_named([*listed.values(), *upcoming], _due(entry.get("due"), zone), zone, text,
+                                 entry.get("why"))
+        if event is not None:
+            ref = event_ref(event)
+            on = _due(str(event.get("start") or "")[:10], zone)
+    due = _due(entry.get("due"), zone)
+    if due is None and ref.startswith(EVENT):
+        due = on  # its day, for coming up once on it (still_open)
     row = {"origin": MODEL, "item_id": None, "kind": kind if kind in report.LIST_KINDS else "other",
            "profile": profile, "chat_id": chat_id, "source": source,
-           "area": _choice(entry.get("area"), AREAS), "due_at": _due(entry.get("due"), zone),
+           "area": _choice(entry.get("area"), AREAS), "due_at": due,
            "actionable": _flag(entry.get("actionable")), "value": _value(entry.get("value")),
            "bring_up": entry.get("bring_up") is True, "skip": _skip(entry.get("skip")), "text": text,
            "why": _clip(entry.get("why"), WHY_LIMIT), "asked": _flag(entry.get("asked"))}
@@ -340,21 +347,30 @@ def _reminder_named(reminders: dict[str, dict], *said: Any) -> Optional[dict]:
     return named[0] if len(named) == 1 else None
 
 
-def _event_named(events: Sequence[dict], due: Optional[float], zone: Optional[tzinfo], *said: Any) -> Optional[dict]:
+def _event_named(events: Sequence[dict], due: Optional[float], zone: Optional[tzinfo], line: str,
+                 *said: Any) -> Optional[dict]:
     """The one calendar entry whose title's words (at least two) are all in
-    what ``said`` says: the occurrence on the day it's due (``due``), else
-    the soonest; None for none or more than one entry."""
-    words = set(_words(" ".join(str(part or "") for part in said)))
+    the ``line`` and what else is ``said``, on the day the line is due
+    (``due``), or, when it gives no day, with the title at least half the
+    line's words; the occurrence on that day, else the soonest. None for
+    none or more than one entry."""
+    words = set(_words(" ".join(str(part or "") for part in (line, *said))))
+    day = datetime.fromtimestamp(due, zone or timezone.utc).date().isoformat() if due is not None else ""
     named: dict[str, list[dict]] = {}
     for event in events:
         title = _words(event.get("title"))
         if len(title) >= 2 and sum(map(len, title)) >= 6 and set(title) <= words and event.get("id"):
             named.setdefault(str(event["id"]), []).append(event)
+    if day:
+        named = {key: [event for event in found if str(event.get("start") or "")[:10] == day]
+                 for key, found in named.items()}
+        named = {key: found for key, found in named.items() if found}
+    else:
+        size = len(_words(line))
+        named = {key: found for key, found in named.items() if 2 * len(_words(found[0].get("title"))) >= size}
     if len(named) != 1:
         return None
-    found = sorted(next(iter(named.values())), key=lambda event: str(event.get("start") or ""))
-    day = datetime.fromtimestamp(due, zone or timezone.utc).date().isoformat() if due is not None else ""
-    return next((event for event in found if str(event.get("start") or "")[:10] == day), found[0])
+    return sorted(next(iter(named.values())), key=lambda event: str(event.get("start") or ""))[0]
 
 
 def _words(text: Any) -> list[str]:
@@ -489,10 +505,14 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
     for row in rows:
         if row.get("decision") in (None, "", UNANSWERED) and row["origin"] == MEMORY and row["item_id"] in resting:
             row.update(decision=RESTING, skip=resting[row["item_id"]])
-    raised = reminders_raised(pulse_store, [str(row.get("ref") or "") for row in rows], now)
+    recent, away = reminders_raised(pulse_store, [str(row.get("ref") or "") for row in rows], now)
     for row in rows:
-        if row.get("ref") in raised and not row.get("skip"):
+        ref = row.get("ref")
+        if row.get("skip") or not ref:
+            continue
+        if ref in away or (ref in recent and not due_again(row, recent[ref], now)):
             row["skip"] = "raised"  # moving a reminder isn't news, nor a calendar entry coming closer
+    once_each(rows)
     for row in still_open(pulse_store, rows, now):
         if not row.get("skip"):
             row["skip"] = "raised"  # its card says it still
@@ -534,19 +554,44 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
         found = (by_item.get(item, []) if item is not None else []) + (by_ref.get(ref, []) if ref else [])
         if not found:
             continue
-        due = row.get("due_at")
-        if (due is not None and abs(due - now) <= DUE_AGAIN_S
-                and all(card["created_at"] < now - DUE_AGAIN_S for card in found)):
+        if due_again(row, max(card["created_at"] for card in found), now):
             continue  # its day: once more
         out.append(row)
     return out
 
 
-def reminders_raised(pulse_store: store.PulseStore, refs: Sequence[str], now: float) -> set[str]:
+def due_again(row: dict, last: float, now: float) -> bool:
+    """Whether ``row`` may come up again though something about it came up
+    lately (its last card at ``last``): on the day it's due (DUE_AGAIN_S
+    either side), once."""
+    due = row.get("due_at")
+    return due is not None and abs(due - now) <= DUE_AGAIN_S and last < now - DUE_AGAIN_S
+
+
+def once_each(rows: Sequence[dict]) -> None:
+    """One candidate per phone reminder or calendar entry in a run: two the
+    model found about the same one (a birthday, a gift for it) leave the one
+    it valued most, the rest skipped as raised."""
+    best: dict[str, dict] = {}
+    for row in rows:
+        ref = str(row.get("ref") or "")
+        if row.get("skip") or not ref.startswith((REMINDER, EVENT)):
+            continue
+        kept = best.get(ref)
+        if kept is None or (row.get("value") or 0) > (kept.get("value") or 0):
+            if kept is not None:
+                kept["skip"] = "raised"
+            best[ref] = row
+        else:
+            row["skip"] = "raised"
+
+
+def reminders_raised(pulse_store: store.PulseStore, refs: Sequence[str],
+                     now: float) -> tuple[dict[str, float], set[str]]:
     """Which of the phone reminders and calendar entries ``refs`` (REMINDER,
-    EVENT) already had a card:
-    within REMINDER_AGAIN_S, or ever once its card was put away for good or
-    rated not useful ("wrong time" only puts it off). Those are kept in
+    EVENT) already had a card: within REMINDER_AGAIN_S (when the last one
+    came, by ref), and those that stay away, ever once a card was put away
+    for good or rated not useful ("wrong time" only puts it off). Those are kept in
     REMINDERS_AWAY on every decide, so they stay away once the journal or
     the cards drop them; one whose card is still there but no longer put
     away (rated again) is let go."""
@@ -563,9 +608,12 @@ def reminders_raised(pulse_store: store.PulseStore, refs: Sequence[str], now: fl
             break
     refs = {ref for ref in refs if ref.startswith((REMINDER, EVENT))}
     if not refs:
-        return set()
-    recent = {card["ref"] for card in pulse_store.ref_cards(sorted(refs)) if card["created_at"] >= now - REMINDER_AGAIN_S}
-    return refs & (recent | set(kept) | away)
+        return {}, set()
+    recent: dict[str, float] = {}
+    for card in pulse_store.ref_cards(sorted(refs)):
+        if card["created_at"] >= now - REMINDER_AGAIN_S:
+            recent[card["ref"]] = max(recent.get(card["ref"], 0.0), card["created_at"])
+    return recent, refs & (set(kept) | away)
 
 
 def time_cap(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> Callable[[dict], str]:

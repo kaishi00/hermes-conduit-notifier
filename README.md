@@ -2882,12 +2882,13 @@ for the morning brief, a place or a shop, or resting with Not now), the
 report and the look ahead bring up nothing else about the same thing: the
 same remembered item, phone reminder or calendar entry. Only on the day
 it's due may one more card come, once, so a deadline can't slip by behind
-an old card. Marking it done, putting it away or rating it not useful
+an earlier card. Marking it done, putting it away or rating it not useful
 closes the card; then the rules below apply.
 
 The candidate list gives each of the phone's open reminders a key (`r1`),
 and a card about one names it. One reminder gets one card, however often
-you move it: no other card about it for a week, and none at all, while it
+you move it: no other card about it for a week (but once on its due day),
+and none at all, while it
 stays open, once you put its card away for good or rated it not useful
 (Not now until later lets it come back after the week). Before, moving a reminder back each morning counted as news, and
 each move could bring another card.
@@ -2895,8 +2896,11 @@ each move could bring another card.
 From plugin 0.120.2 a calendar entry is the same. The candidate list and
 the look ahead key the entries they list (`v1`), and a card about one names
 it, or names its title (every word of it, two or more) among the entries in
-the next two weeks. One entry, one occurrence of a repeating one, gets one
-card: none while its card is open, none again for a week once it's done,
+the next two weeks, on the day the card says it's due or, with no day, when
+the title is at least half of what it says. Declined entries aren't matched.
+One entry, one occurrence of a repeating one, gets one card, and two cards
+about it in one run make one: none while its card is open, none again for a week once it's done (but
+once on its day),
 and none once you put its card away. Before, a birthday on the
 calendar could come up on several days as it got closer, and again from
 the report when the look ahead held it for a shop.
