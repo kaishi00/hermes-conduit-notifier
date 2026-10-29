@@ -284,6 +284,10 @@ class PresentStore:
                                                     "Hermes profile recently.")
                 if len(_room_waiting(state, room["id"])) >= MAX_ROOM_ASKS_WAITING:
                     raise PresentError("too_many", f"{MAX_ROOM_ASKS_WAITING} asks from this room are still waiting.")
+                # No more than the phone shows, so every ask kept is one the owner sees.
+                if sum(prompt["status"] == "waiting" and bool(prompt.get("room")) for prompt in state["prompts"]) \
+                        >= MAX_ROOM_ASKS_SHOWN:
+                    raise PresentError("too_many", f"{MAX_ROOM_ASKS_SHOWN} asks from rooms are still waiting.")
                 # A room's own budget, apart from the owner's own prompts: its agent is steered by other people.
                 recent = [at for at in state["room_asked"].get(room["id"], []) if now - at < HOUR_S]
                 if len(recent) >= ROOM_ASKS_PER_HOUR:
@@ -331,14 +335,15 @@ class PresentStore:
         is returned instead of a new one; the bool says whether it's new.
         Raises PresentError when it won't."""
         room = _room({"id": room_id, "name": room_name})
-        if room is None:
-            raise PresentError("invalid", "A room's ask needs the room.")
+        if room is None or not _session_key(session_id):
+            # A room's ask without a session it can keep would be dropped on the next read.
+            raise PresentError("invalid", "A room's ask needs the room and its session.")
         return self._keep(question, share, "Share", spoken_yes=["share it"], session_id=session_id,
                           ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
 
-    def room_answers(self, room_id: Any, *, mark: bool = True) -> list[dict[str, Any]]:
+    def room_answers(self, room_id: Any) -> list[dict[str, Any]]:
         """The answered (or expired) asks of a room its agent hasn't heard
-        yet, oldest first, marked heard unless ``mark`` is False, each with its question (``title``)
+        yet (``mark_heard``), oldest first, each with its question (``title``)
         and what it would share (``preview``). By room, not session: a
         compacted room session's continuation hears them too."""
         if not isinstance(room_id, str) or not room_id:
@@ -346,9 +351,6 @@ class PresentStore:
         with self._locked() as state:
             found = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
                      and prompt["status"] != "waiting" and not prompt["reported"]]
-            if mark:
-                for prompt in found:
-                    prompt["reported"] = True
             return [{**_shown(prompt), "preview": prompt["preview"]} for prompt in found]
 
     def mark_heard(self, prompt_ids: Any) -> None:

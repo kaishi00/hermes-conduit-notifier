@@ -81,6 +81,13 @@ def answer_while_waiting(store, sleeper, outcome, after=5.0, **result):
     sleeper.during = (after, answer)
 
 
+def answered(store, room_id, session_id="any-session"):
+    """What a turn in the room is framed with, heard as a turn that replies hears it (the plugin's path)."""
+    lines = asks.frame(store, room_id, session_id)
+    asks.heard(lambda: store, session_id, True)
+    return lines
+
+
 # --- The ask ---------------------------------------------------------------------------------
 
 
@@ -121,7 +128,7 @@ def test_the_answer_within_the_wait_comes_back(store, sleeper, pushes):
     assert answer["status"] == "confirmed" and "share exactly" in answer["note"].lower()
     assert sleeper.now < asks.WAIT_S
     # Taken: the next turn isn't told again.
-    assert asks.answered(store, "zoo-trip") == []
+    assert answered(store, "zoo-trip") == []
 
 
 def test_say_instead_returns_what_the_owner_wrote(store, sleeper, pushes):
@@ -139,7 +146,7 @@ def test_say_instead_with_no_text_reads_as_a_no(store, sleeper, pushes):
     assert answer["status"] == "declined" and "don't share" in answer["note"].lower()
     later = call(store, sleeper, pushes, {"question": "Mona asks about Sunday", "share": "Sunday works."})
     exchange(store, results=[{"id": later["id"], "outcome": "edit", "via": "tap"}])
-    assert asks.answered(store, "zoo-trip") == ['Your owner said no to "Mona asks about Sunday": don\'t share it.']
+    assert answered(store, "zoo-trip") == ['Your owner said no to "Mona asks about Sunday": don\'t share it.']
 
 
 def test_a_no_says_dont_share(store, sleeper, pushes):
@@ -161,19 +168,19 @@ def test_a_later_answer_frames_the_next_turn_once(store, sleeper, pushes, clock)
     first = call(store, sleeper, pushes)
     second = call(store, sleeper, pushes, {"question": "Mona asks for your address", "share": "12 Elm Street"})
     third = call(store, sleeper, pushes, {"question": "Laifu asks about Sunday", "share": "Sunday works."})
-    assert asks.answered(store, "zoo-trip") == []
+    assert answered(store, "zoo-trip") == []
     exchange(store, results=[
         {"id": first["id"], "outcome": "confirmed", "via": "tap"},
         {"id": second["id"], "outcome": "declined", "via": "tap"},
         {"id": third["id"], "outcome": "edit", "via": "tap", "edit_text": "Say I'll know by Friday."}])
-    lines = asks.answered(store, "zoo-trip")
+    lines = answered(store, "zoo-trip")
     assert lines == [
         f'Your owner said yes to "{QUESTION}": you may share this, and nothing more: {SHARE}',
         'Your owner said no to "Mona asks for your address": don\'t share it.',
         'Your owner answered "Laifu asks about Sunday" with: Say I\'ll know by Friday. Share only that.']
-    assert asks.answered(store, "zoo-trip") == []
+    assert answered(store, "zoo-trip") == []
     # Another room never gets them.
-    assert asks.answered(store, "other-room") == []
+    assert answered(store, "other-room") == []
 
 
 def test_a_compacted_room_session_still_hears_the_answer_and_asks_once(store, sleeper, pushes):
@@ -188,7 +195,7 @@ def test_a_compacted_room_session_still_hears_the_answer_and_asks_once(store, sl
                                    sleep=sleeper.sleep, monotonic=sleeper.monotonic))
     assert again["id"] == first["id"] and len(pushes) == 1
     exchange(store, results=[{"id": first["id"], "outcome": "declined", "via": "tap"}])
-    assert asks.answered(store, continued.room_id) == [f'Your owner said no to "{QUESTION}": don\'t share it.']
+    assert answered(store, continued.room_id) == [f'Your owner said no to "{QUESTION}": don\'t share it.']
 
 
 def test_a_rooms_asks_have_their_own_budget(store, sleeper, pushes, clock):
@@ -210,7 +217,7 @@ def test_an_expired_ask_frames_as_not_answered(store, sleeper, pushes, clock):
     exchange(store)
     call(store, sleeper, pushes)
     clock.now += 24 * 3600
-    assert asks.answered(store, "zoo-trip") == [
+    assert answered(store, "zoo-trip") == [
         f'Your owner didn\'t answer "{QUESTION}" in time: don\'t share it.']
 
 
@@ -361,7 +368,7 @@ def test_private_status_leaves_room_asks_out(store, sleeper, pushes):
     assert store.status(asked["id"]) == [] and store.cancel(asked["id"]) is None
     assert store.unreported_outcomes() == []
     # Still the room's to hear.
-    assert len(asks.answered(store, "zoo-trip")) == 1
+    assert len(answered(store, "zoo-trip")) == 1
 
 
 def test_a_room_prompt_with_a_bad_room_on_disk_is_dropped(store, sleeper, pushes, tmp_path):
@@ -412,4 +419,29 @@ def test_a_rooms_unheard_answer_outlives_later_prompts(store, sleeper, pushes, c
         prompt = _confirm(store)
         exchange(store, results=[{"id": prompt["id"], "outcome": "declined", "via": "tap"}])
         clock.now += 3600 / store_module.PER_HOUR
-    assert len(asks.answered(store, "zoo-trip")) == 1
+    assert len(answered(store, "zoo-trip")) == 1
+
+
+def test_waiting_room_asks_are_capped_across_rooms_so_each_one_shows(store, sleeper, pushes, clock):
+    exchange(store)
+    accepted = []
+    for n in range(20):
+        turn = rules.RoomTurn(room_id=f"room-{n}", side="member", with_others=True, session_id=f"room_{n:032x}")
+        for q in range(3):
+            answer = json.loads(asks.handle(
+                {"question": f"Q{q}", "share": "x"}, session_id=turn.session_id, room_turn=lambda _, turn=turn: turn,
+                choices=lambda _: room_choices.RoomChoices(), room_name=lambda _: "R", store=store,
+                push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic))
+            if answer["ok"]:
+                accepted.append(answer["id"])
+            last = answer
+        clock.now += 3600
+    assert len(accepted) == store_module.MAX_ROOM_ASKS_SHOWN and last["error"] == "too_many"
+    assert set(accepted) <= {prompt["id"] for prompt in exchange(store)["prompts"]}
+
+
+def test_an_ask_from_a_session_key_the_store_cant_keep_is_refused(store):
+    exchange(store)
+    with pytest.raises(store_module.PresentError) as refused:
+        store.ask_room(QUESTION, SHARE, room_id="zoo-trip", room_name="Zoo trip", session_id="room\n" + "x" * 600)
+    assert refused.value.code == "invalid" and exchange(store)["prompts"] == []

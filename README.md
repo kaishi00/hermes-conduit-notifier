@@ -3835,7 +3835,7 @@ room and the room's session. Only a Conduit that says it shows a room's asks
 (feature `room-asks` on its exchange) gets one, and only its answer counts;
 with none, the tool refuses (`no_device`) and the agent says it'll check
 with you. Asks are the room's, not the chat session's, so a room session
-Hermes compacted still hears its answers. At most 3 asks wait per room, the
+Hermes compacted still hears its answers. At most 3 asks wait per room (40 across rooms, all the phone shows), the
 same question with the same share while one waits returns that one (another
 share is another ask: a yes covers only what you saw, and the tool's answer
 gives it back as `share`), a room asks at most 6 times an hour and all rooms

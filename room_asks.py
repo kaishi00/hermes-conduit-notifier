@@ -4,8 +4,8 @@ the ``conduit_ask_owner`` tool (designs/cross-owner-agents, N7c).
 In a room set to Ask me first, the agent asks its owner's phone ("Laifu asks whether you're free on the 22nd",
 with what it would share), and waits a little for the answer: Share, Say instead (what the owner writes), or Don't
 share. Unanswered, it tells the room it'll check, and the answer reaches it privately before its next turn in that
-room (``answered``, from the turn's framing). Asks are the room's, not the session's, so a compacted room session's
-continuation hears them too. Nothing goes into the room by itself.
+room (``frame``, from the turn's framing, heard once that turn replies). Asks are the room's, not the session's, so
+a compacted room session's continuation hears them too. Nothing goes into the room by itself.
 
 The ask is a confirm prompt in the profile's present store, so the panel, its notification and its voice yes are
 Conduit's own; only a Conduit that says it shows a room's asks gets one (present_store.ROOM_ASK_FEATURE). The tool
@@ -209,12 +209,6 @@ def _nudge(prompt: dict[str, Any], body: str, push: Callable[[dict], None], prof
         logger.warning("conduit_push: could not wake the phone for a room's ask", exc_info=True)
 
 
-def answered(store: PresentStore, room_id: Any) -> list[str]:
-    """What the owner answered since, for a turn in the room ``room_id`` (whichever of its sessions asked): a private
-    line each, marked heard."""
-    return [line for _, line in answers(store, room_id, mark=True)]
-
-
 # Answers framed into a room session's turn, marked heard when it replies (heard).
 _framed: dict[str, list[str]] = {}
 MAX_FRAMED = 256
@@ -223,7 +217,7 @@ MAX_FRAMED = 256
 def frame(store: PresentStore, room_id: Any, session_id: str) -> list[str]:
     """The answers for a turn in ``room_id`` now starting in ``session_id``, left unheard until the turn replies, so
     a turn that fails before it reads them frames them again."""
-    found = answers(store, room_id, mark=False)
+    found = answers(store, room_id)
     if found:
         _framed.pop(session_id, None)
         _framed[session_id] = [prompt_id for prompt_id, _ in found]
@@ -239,9 +233,10 @@ def heard(store_for: Callable[[], PresentStore], session_id: str, replied: bool)
     store_for().mark_heard(_framed.pop(session_id))
 
 
-def answers(store: PresentStore, room_id: Any, *, mark: bool) -> list[tuple[str, str]]:
+def answers(store: PresentStore, room_id: Any) -> list[tuple[str, str]]:
+    """The room's answers its agent hasn't heard: each prompt's id and its private line."""
     lines = []
-    for prompt in store.room_answers(room_id, mark=mark):
+    for prompt in store.room_answers(room_id):
         question = prompt["title"]
         if prompt["status"] == "confirmed":
             lines.append((prompt["id"], f'Your owner said yes to "{question}": you may share this, and nothing more: '
