@@ -78,6 +78,8 @@ ROOM_ASKS_PER_HOUR = 6
 ROOM_ASKS_ALL_PER_HOUR = 12
 MAX_ROOM_ASKS_SHOWN = 40
 MAX_ROOM_BUDGETS = 64
+MAX_ROOM_ANSWERS_KEPT = 10
+MAX_ROOM_ANSWERS_KEPT_ALL = 60
 MAX_ROOM_ID_CHARS = 128
 MAX_ROOM_NAME_CHARS = 80
 
@@ -365,14 +367,12 @@ class PresentStore:
                     prompt["reported"] = True
 
     def room_ask(self, prompt_id: Any) -> dict[str, Any] | None:
-        """One of a room's asks as it stands; one that's answered is marked
-        heard."""
+        """One of a room's asks as it stands. An answer stays unheard until
+        the turn the tool gave it to replies (``mark_heard``)."""
         with self._locked() as state:
             prompt = _find(state, prompt_id)
             if prompt is None or not prompt.get("room"):
                 return None
-            if prompt["status"] != "waiting":
-                prompt["reported"] = True
             return {**_shown(prompt), "preview": prompt["preview"]}
 
     def show(self, title: Any, markdown: Any, *, session_id: Any = None, cards: Any = None,
@@ -673,7 +673,8 @@ def _trim_devices(state: dict[str, Any]) -> None:
 
 def _trim_prompts(state: dict[str, Any]) -> None:
     """Keeps the newest prompts; finished ones go first, those already reported before the rest, never a waiting
-    one or a room's answer its agent hasn't heard (it lasts its week)."""
+    one or a room's answer its agent hasn't heard (it lasts its week, as one of the newest unheard: _trim_unheard)."""
+    _trim_unheard(state)
     prompts = state["prompts"]
     extra = len(prompts) - MAX_PROMPTS
     if extra <= 0:
@@ -682,6 +683,24 @@ def _trim_prompts(state: dict[str, Any]) -> None:
             and not (prompt.get("room") and not prompt["reported"])]
     finished = [prompt["id"] for prompt in sorted(done, key=lambda prompt: not prompt["reported"])][:extra]
     state["prompts"] = [prompt for prompt in prompts if prompt["id"] not in finished]
+
+
+def _trim_unheard(state: dict[str, Any]) -> None:
+    """Keeps the newest MAX_ROOM_ANSWERS_KEPT answers a room's agent hasn't heard, and the newest
+    MAX_ROOM_ANSWERS_KEPT_ALL across rooms."""
+    unheard = sorted((prompt for prompt in state["prompts"] if prompt.get("room") and prompt["status"] != "waiting"
+                      and not prompt["reported"]),
+                     key=lambda prompt: prompt.get("finished_at", prompt["created_at"]), reverse=True)
+    kept: dict[str, int] = {}
+    dropped = set()
+    for prompt in unheard:
+        room_id = prompt["room"]["id"]
+        if kept.get(room_id, 0) >= MAX_ROOM_ANSWERS_KEPT or sum(kept.values()) >= MAX_ROOM_ANSWERS_KEPT_ALL:
+            dropped.add(prompt["id"])
+        else:
+            kept[room_id] = kept.get(room_id, 0) + 1
+    if dropped:
+        state["prompts"] = [prompt for prompt in state["prompts"] if prompt["id"] not in dropped]
 
 
 def _prompt(raw: Any, now: float) -> dict[str, Any] | None:

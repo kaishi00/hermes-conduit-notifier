@@ -127,7 +127,8 @@ def test_the_answer_within_the_wait_comes_back(store, sleeper, pushes):
     answer = call(store, sleeper, pushes)
     assert answer["status"] == "confirmed" and "share exactly" in answer["note"].lower()
     assert sleeper.now < asks.WAIT_S
-    # Taken: the next turn isn't told again.
+    # Heard once its turn replies: the next turn isn't told again.
+    asks.heard(lambda: store, ROOM_SESSION, True)
     assert answered(store, "zoo-trip") == []
 
 
@@ -144,6 +145,7 @@ def test_say_instead_with_no_text_reads_as_a_no(store, sleeper, pushes):
     answer_while_waiting(store, sleeper, "edit", edit_text="  ")
     answer = call(store, sleeper, pushes)
     assert answer["status"] == "declined" and "don't share" in answer["note"].lower()
+    asks.heard(lambda: store, ROOM_SESSION, True)
     later = call(store, sleeper, pushes, {"question": "Mona asks about Sunday", "share": "Sunday works."})
     exchange(store, results=[{"id": later["id"], "outcome": "edit", "via": "tap"}])
     assert answered(store, "zoo-trip") == ['Your owner said no to "Mona asks about Sunday": don\'t share it.']
@@ -445,3 +447,41 @@ def test_an_ask_from_a_session_key_the_store_cant_keep_is_refused(store):
     with pytest.raises(store_module.PresentError) as refused:
         store.ask_room(QUESTION, SHARE, room_id="zoo-trip", room_name="Zoo trip", session_id="room\n" + "x" * 600)
     assert refused.value.code == "invalid" and exchange(store)["prompts"] == []
+
+
+def test_an_answer_the_tool_returned_is_framed_again_when_its_turn_never_replied(store, sleeper, pushes):
+    exchange(store)
+    answer_while_waiting(store, sleeper, "confirmed")
+    assert call(store, sleeper, pushes)["status"] == "confirmed"
+    asks.heard(lambda: store, ROOM_SESSION, False)  # the turn failed before it replied
+    assert answered(store, "zoo-trip", ROOM_SESSION) == [
+        f'Your owner said yes to "{QUESTION}": you may share this, and nothing more: {SHARE}']
+    assert answered(store, "zoo-trip", ROOM_SESSION) == []
+
+
+def test_an_answer_the_tool_returned_is_heard_once_its_turn_replies(store, sleeper, pushes):
+    exchange(store)
+    answer_while_waiting(store, sleeper, "declined")
+    assert call(store, sleeper, pushes)["status"] == "declined"
+    asks.heard(lambda: store, ROOM_SESSION, True)
+    assert answered(store, "zoo-trip") == []
+
+
+def test_unheard_answers_keep_only_the_newest_per_room_and_across_rooms(store, sleeper, pushes, clock):
+    exchange(store)
+    per_room, total = store_module.MAX_ROOM_ANSWERS_KEPT, store_module.MAX_ROOM_ANSWERS_KEPT_ALL
+    rooms = total // per_room + 2
+    for n in range(rooms):
+        turn = rules.RoomTurn(room_id=f"room-{n}", side="member", with_others=True, session_id=f"room_{n:032x}")
+        for q in range(per_room + 2):
+            asked = json.loads(asks.handle(
+                {"question": f"Q{q}", "share": "x"}, session_id=turn.session_id, room_turn=lambda _, turn=turn: turn,
+                choices=lambda _: room_choices.RoomChoices(), room_name=lambda _: "R", store=store,
+                push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic))
+            exchange(store, results=[{"id": asked["id"], "outcome": "declined", "via": "tap"}])
+            clock.now += 3600 / store_module.ROOM_ASKS_PER_HOUR
+    kept = {f"room-{n}": len(store.room_answers(f"room-{n}")) for n in range(rooms)}
+    assert all(count <= per_room for count in kept.values()) and sum(kept.values()) == total
+    # The newest are kept: the last room keeps its newest answers, the first rooms lose theirs.
+    newest = [prompt["title"] for prompt in store.room_answers(f"room-{rooms - 1}")]
+    assert newest == [f"Q{q}" for q in range(2, per_room + 2)] and kept["room-0"] == 0

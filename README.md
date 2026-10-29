@@ -3842,10 +3842,9 @@ gives it back as `share`), a room asks at most 6 times an hour and all rooms
 12, budgets of their own: other people steering a room's agent never use up
 your own confirm prompts (20 an hour, 20 waiting, all shown on the phone
 however many rooms ask). A room's answer its agent hasn't heard stays until it
-does, or for its week. An answer counts as heard
-once a room turn framed with it replies, so a turn that fails gets it again.
-Private
-chats never see them: `conduit_present` leaves them out of `status` and
+does, or for its week (the newest 10 a room, 60 across rooms). An answer
+counts as heard once the room turn the tool gave it to, or a turn framed with
+it, replies, so a turn that fails gets it again. Private chats never see them: `conduit_present` leaves them out of `status` and
 `earlier_answers`. The tool works only in a room turn with other people's
 agents set to ask you first (`not_room`, `not_ask_first`, `subagent`
 otherwise); the room rules let it through whatever the room's tools are,

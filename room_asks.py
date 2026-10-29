@@ -175,6 +175,8 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
         prompt = _wait(store, prompt, sleep, monotonic)
     else:
         prompt = store.room_ask(prompt["id"]) or prompt
+    if prompt["status"] != "waiting":
+        _given(session, prompt["id"])
     return {"ok": True, **_with_note(prompt)}
 
 
@@ -194,7 +196,6 @@ def _wait(store: PresentStore, prompt: dict[str, Any], sleep: Callable[[float], 
         if current is None:
             return prompt
         if current["status"] != "waiting":
-            # Returned to the agent now, so its next turn isn't told again.
             return store.room_ask(prompt["id"]) or current
         prompt = current
 
@@ -209,7 +210,7 @@ def _nudge(prompt: dict[str, Any], body: str, push: Callable[[dict], None], prof
         logger.warning("conduit_push: could not wake the phone for a room's ask", exc_info=True)
 
 
-# Answers framed into a room session's turn, marked heard when it replies (heard).
+# Answers framed into a room session's turn, or given it by the tool, marked heard when it replies (heard).
 _framed: dict[str, list[str]] = {}
 MAX_FRAMED = 256
 
@@ -224,6 +225,14 @@ def frame(store: PresentStore, room_id: Any, session_id: str) -> list[str]:
         while len(_framed) > MAX_FRAMED:
             _framed.pop(next(iter(_framed)))
     return [line for _, line in found]
+
+
+def _given(session_id: str, prompt_id: str) -> None:
+    """The tool gave this turn an answer: heard once the turn replies, framed again if it doesn't."""
+    given = _framed.pop(session_id, [])
+    _framed[session_id] = given + [prompt_id] if prompt_id not in given else given
+    while len(_framed) > MAX_FRAMED:
+        _framed.pop(next(iter(_framed)))
 
 
 def heard(store_for: Callable[[], PresentStore], session_id: str, replied: bool) -> None:
