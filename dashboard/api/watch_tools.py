@@ -486,17 +486,6 @@ CHAT_SEARCH_EXCLUDED_SOURCES = "kanban,oneshot,tool"
 # (SessionSource.isLegacyKanbanWorker). The source filter misses it.
 LEGACY_KANBAN_WORKER_SOURCES = frozenset({"cli", "local"})
 LEGACY_KANBAN_WORKER_PROMPT = "work kanban task "
-
-
-def is_legacy_kanban_worker(row: Dict[str, Any]) -> bool:
-    source, preview = row.get("source"), row.get("preview")
-    if not isinstance(source, str) or source.lower() not in LEGACY_KANBAN_WORKER_SOURCES:
-        return False
-    if not isinstance(preview, str):
-        return False
-    preview = preview.strip().lower()
-    task = preview[len(LEGACY_KANBAN_WORKER_PROMPT):]
-    return preview.startswith(LEGACY_KANBAN_WORKER_PROMPT) and bool(task) and not any(c.isspace() for c in task)
 WATCH_CHAT_QUERY_CHARS = 200
 WATCH_CHAT_SNIPPET_CHARS = 160
 # Under the Watch's 35 s wait for an answer (WatchToolRelayClient).
@@ -633,6 +622,17 @@ def chat_plain_snippet(raw: Any) -> str:
     text = _chat_text(raw).replace(">>>", "").replace("<<<", "")
     line = " ".join(text.split())
     return line if len(line) <= WATCH_CHAT_SNIPPET_CHARS else line[:WATCH_CHAT_SNIPPET_CHARS] + "…"
+
+
+def is_legacy_kanban_worker(row: Dict[str, Any]) -> bool:
+    source, preview = row.get("source"), row.get("preview")
+    if not isinstance(source, str) or source.lower() not in LEGACY_KANBAN_WORKER_SOURCES:
+        return False
+    if not isinstance(preview, str):
+        return False
+    preview = preview.strip().lower()
+    task = preview[len(LEGACY_KANBAN_WORKER_PROMPT):]
+    return preview.startswith(LEGACY_KANBAN_WORKER_PROMPT) and bool(task) and not any(c.isspace() for c in task)
 
 
 def chat_matches(response: Any) -> list:
