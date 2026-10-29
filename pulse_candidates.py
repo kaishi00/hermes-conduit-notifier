@@ -323,9 +323,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
         if event is not None:
             ref = event_ref(event)
             on = _due(str(event.get("start") or "")[:10], zone)
-    due = _due(entry.get("due"), zone)
-    if due is None and ref.startswith(EVENT):
-        due = on  # its day, for coming up once on it (still_open)
+    due = on if ref.startswith(EVENT) else _due(entry.get("due"), zone)  # the entry's day, as its ref says
     row = {"origin": MODEL, "item_id": None, "kind": kind if kind in report.LIST_KINDS else "other",
            "profile": profile, "chat_id": chat_id, "source": source,
            "area": _choice(entry.get("area"), AREAS), "due_at": due,
@@ -533,8 +531,7 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     done, put away or rated not useful. That card says it still, so nothing
     makes another (Eric, 2026-10-29: "if it's still open, why are we
     repeating it?"). Only on the day it's due may one come again, once
-    (DUE_AGAIN_S either side, no card about it in that time), so a deadline
-    can't slip by behind an old card."""
+    (due_again), so a deadline can't slip by behind an earlier card."""
     about = lambda row: (row["item_id"] if row["origin"] == MEMORY and row.get("item_id") is not None else None,
                          str(row.get("ref") or "") if str(row.get("ref") or "").startswith((REMINDER, EVENT)) else "")
     keys = [about(row) for row in rows]
@@ -562,10 +559,11 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
 
 def due_again(row: dict, last: float, now: float) -> bool:
     """Whether ``row`` may come up again though something about it came up
-    lately (its last card at ``last``): on the day it's due (DUE_AGAIN_S
-    either side), once."""
+    lately (its last card at ``last``): in the DUE_AGAIN_S before it's due
+    (a date's is that day, due at its end), once, so not if a card already
+    came in them."""
     due = row.get("due_at")
-    return due is not None and abs(due - now) <= DUE_AGAIN_S and last < now - DUE_AGAIN_S
+    return due is not None and due - DUE_AGAIN_S <= now <= due and last < due - DUE_AGAIN_S
 
 
 def once_each(rows: Sequence[dict]) -> None:

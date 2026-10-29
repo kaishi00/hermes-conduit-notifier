@@ -509,6 +509,9 @@ def test_the_same_seed_draws_the_same_candidates_for_everyone():
 # samantha 1.22 and 0.22 more surfaced; quiet and samantha 1.33 and 0.44
 # apart surfaced, 1.22 and 0.44 in pushes, 1.67 and 0.78 when noisy. The
 # worst sit among the misses a criterion allows (SEEDS - NEED).
+# Without learning, quiet and samantha are at most 0.22 apart on seeds 0
+# to 19 (each of them misses the 0.5 bar), so 0.5 still takes learning, as
+# does samantha's 0.3 over her own run without it.
 
 def _margin(more: float, less: float) -> float:
     """``more`` - ``less``, to six places: window averages are sums of

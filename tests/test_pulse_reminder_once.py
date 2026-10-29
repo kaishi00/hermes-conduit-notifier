@@ -73,7 +73,7 @@ def test_a_phone_reminder_due_soon_still_comes_up_once(live):
     first = rows()
     candidates.decide(live.store, first, now=now)
     assert first[0]["floor"] and first[0]["decision"] == candidates.SURFACED
-    card_for(live, "reminder:r_lock", created_at=now - 86400)
+    card_for(live, "reminder:r_lock", created_at=now - 3600)  # that first one, in its last day
     again = rows()
     candidates.decide(live.store, again, now=now)
     assert not again[0]["floor"] and again[0]["decision"] == candidates.SKIPPED

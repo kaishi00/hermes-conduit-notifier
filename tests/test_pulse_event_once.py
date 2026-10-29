@@ -85,6 +85,11 @@ def test_one_with_no_key_is_matched_by_the_title_of_an_entry_in_the_next_two_wee
     assert row.get("ref") == ref
 
 
+def test_a_keyed_entry_is_due_on_its_own_day_whatever_day_the_model_says():
+    row = candidates.found_row({**FOUND, "event": "v1", "due": "2026-11-08"}, {}, follows=follows({"v1": KWAN}))
+    assert row["ref"] == REF and row["due_at"] == candidates._due("2026-11-06", UTC)
+
+
 def test_a_title_match_keeps_the_source_the_model_gave():
     row = candidates.found_row({**FOUND, "source": "chat"}, {}, follows=follows(upcoming=[KWAN]))
     assert (row["ref"], row["source"]) == (REF, "chat")
@@ -172,6 +177,22 @@ def test_an_entry_held_two_days_ago_still_comes_up_on_its_day(live):
     rows = [candidate(kind="date", ref=REF, value=5, due_at=now + 3600)]
     candidates.decide(live.store, rows, now=now)
     assert (rows[0]["decision"], rows[0]["skip"]) == (candidates.SURFACED, "")
+
+
+def test_the_due_day_card_comes_once_not_the_day_before_and_again_after(live):
+    # Due Thursday 09:00, a card on Monday: one more in the day before it's due, then no more.
+    due = time.time() + 30 * 86400
+    card_for(live, REF, created_at=due - 3 * 86400)
+    rows = [candidate(kind="date", ref=REF, value=5, due_at=due)]
+    candidates.decide(live.store, rows, now=due - 2 * 86400)
+    assert rows[0]["skip"] == "raised"  # Tuesday: not its day yet
+    rows = [candidate(kind="date", ref=REF, value=5, due_at=due)]
+    candidates.decide(live.store, rows, now=due - 23.5 * 3600)
+    assert rows[0]["skip"] == ""  # Wednesday 09:30
+    card_for(live, REF, created_at=due - 23.5 * 3600)
+    rows = [candidate(kind="date", ref=REF, value=5, due_at=due)]
+    candidates.decide(live.store, rows, now=due + 60)
+    assert rows[0]["skip"] == "raised"  # Thursday 09:01: that was its once
 
 
 def test_two_found_about_one_entry_in_a_run_bring_it_up_once(live):
