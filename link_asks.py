@@ -476,6 +476,8 @@ class Asks:
                 end = datetime.combine(day, day_time.fromisoformat(asked["to"]), zone) if "to" in asked \
                     else datetime.combine(day + timedelta(days=1), day_time(0, 0), zone)
                 start_s, end_s = int(start.timestamp()), int(end.timestamp())
+                # The asked day's end: its next midnight, or 01:00 where clocks go forward at midnight.
+                day_end_s = int(datetime.combine(day + timedelta(days=1), day_time(0, 0), zone).timestamp())
                 window = (_epoch(device["window_from"]), _epoch(device["window_to"]))
                 if device["window_from"] and (start_s < window[0] or end_s > window[1]):
                     return {"status": UNAVAILABLE, "text": "That date is past what their phone shares."}
@@ -490,7 +492,8 @@ class Asks:
         when = described({"free_on": asked}).removeprefix("free on ").removesuffix("?")
         answer: dict[str, Any] = {"status": ANSWERED, "free": not blocks, "time_zone": tz}
         if blocks and times:
-            answer["busy"] = [{"start": _clock(a, zone), "end": _clock(b, zone)} for a, b in blocks[:MAX_BUSY_SPANS]]
+            answer["busy"] = [{"start": _clock(a, zone), "end": "24:00" if b >= day_end_s else _clock(b, zone)}
+                              for a, b in blocks[:MAX_BUSY_SPANS]]
             spans = ", ".join(f"{span['start']}-{span['end']}" for span in answer["busy"])
             more = len(blocks) - len(answer["busy"])
             answer["text"] = (f"Busy {spans} on {asked['date']} ({tz}), "
@@ -811,12 +814,13 @@ def _busy(value: Any) -> Optional[list[dict[str, str]]]:
     if not isinstance(value, list):
         return None
     spans = [{"start": span["start"], "end": span["end"]} for span in value[:MAX_BUSY_SPANS]
-             if isinstance(span, dict) and all(isinstance(span.get(key), str) and _HHMM.fullmatch(span[key])
-                                               for key in ("start", "end"))]
+             if isinstance(span, dict) and isinstance(span.get("start"), str) and _HHMM.fullmatch(span["start"])
+             and isinstance(span.get("end"), str) and (_HHMM.fullmatch(span["end"]) or span["end"] == "24:00")]
     return spans
 
 
 def _clock(epoch: int, zone: Any) -> str:
+    """A time of the asked day, HH:MM (its end, the next day's start, is "24:00" where _free builds it)."""
     return datetime.fromtimestamp(epoch, zone).strftime("%H:%M")
 
 

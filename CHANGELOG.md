@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.120.1 (2026-10-29)
+
+### Fixes
+- When a linked person's Hermes asked whether you're free, a busy time
+  that ran to the end of the day read as ending at 00:00 (or 01:00 where
+  clocks go forward at midnight). It reads 24:00 now. A linked Hermes still
+  on 0.120.0 leaves that busy time out of what it keeps, though the answer
+  it reads still says it, until it updates.
+
 ## 0.120.0 (2026-10-29)
 
 ### New and improved

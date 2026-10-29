@@ -600,3 +600,49 @@ def test_a_store_that_cant_be_read_doesnt_say_where_it_is(pair):
     with pytest.raises(link_asks.AsksError) as refused:
         pair.asked.rules()
     assert str(pair.asked.store.path) not in str(refused.value)
+
+
+def test_a_busy_time_to_the_end_of_the_day_ends_at_24(pair, monkeypatch):
+    from datetime import datetime as moment
+    from zoneinfo import ZoneInfo
+
+    pair.share_calendar()
+    rules_for(pair, free_on="times")
+    london = ZoneInfo("Europe/London")
+    start = int(moment(2026, 10, 15, 22, 0, tzinfo=london).timestamp())
+    end = int(moment(2026, 10, 16, 0, 0, tzinfo=london).timestamp())
+    monkeypatch.setattr(phone.PhoneStore, "busy_blocks", lambda self, db, device, a, b: [(start, end)])
+    answer = pair.ask({"free_on": {"date": "2026-10-15"}})
+    assert answer["busy"] == [{"start": "22:00", "end": "24:00"}] and "Busy 22:00-24:00" in answer["answer"]
+
+
+def test_a_busy_time_to_the_end_of_the_day_ends_at_24_across_a_midnight_clock_change(pair, monkeypatch):
+    """Where clocks go forward at midnight (Santiago, Havana), the next day starts at 01:00: still 24:00."""
+    from datetime import datetime as moment, timedelta, timezone, tzinfo
+
+    import sys
+
+    phone_tool = sys.modules["conduit_push.phone_tool"]
+
+    jump = moment(2026, 10, 16, 4, 0)  # UTC: the next day's 00:00 doesn't exist, it's 01:00
+
+    class Forward(tzinfo):
+        def utcoffset(self, dt):
+            return timedelta(hours=-4 if dt.replace(tzinfo=None) < moment(2026, 10, 16, 1, 0) else -3)
+
+        def dst(self, dt):
+            return timedelta(0)
+
+        def fromutc(self, dt):
+            return dt + timedelta(hours=-4 if dt.replace(tzinfo=None) < jump else -3)
+
+    zone = Forward()
+    pair.share_calendar()
+    rules_for(pair, free_on="times")
+    monkeypatch.setattr(phone_tool, "_zone", lambda name: zone)
+    start = int(moment(2026, 10, 15, 22, 0, tzinfo=zone).timestamp())
+    end = int(moment(2026, 10, 16, 0, 0, tzinfo=zone).timestamp())
+    assert moment.fromtimestamp(end, timezone.utc).replace(tzinfo=None) == jump
+    monkeypatch.setattr(phone.PhoneStore, "busy_blocks", lambda self, db, device, a, b: [(start, min(b, end))])
+    answer = pair.ask({"free_on": {"date": "2026-10-15"}})
+    assert answer["busy"] == [{"start": "22:00", "end": "24:00"}] and "Busy 22:00-24:00" in answer["answer"]
