@@ -1418,6 +1418,20 @@ def test_do_it_on_a_card_from_a_kanban_worker_reads_the_new_chat_not_the_worker(
     assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
 
 
+def test_do_it_on_a_worker_card_whose_new_chat_never_came_gives_up_as_unsent(live):
+    """As for a card from no chat: the worker's own later rows aren't Do
+    it's chat, so a tap that started nothing comes back as unsent."""
+    worker(live)
+    card_id = found_card(live, chat_id="worker", news="Kanban task t_c64b17a2 hasn't gone on.", topic="follow-up")
+    acted_at = time.time()
+    control.acted(live.store, card_id, now=acted_at)
+    live.db.message("assistant", "Still rate limited; trying the task again later.", sid="worker", at=acted_at + 60)
+    said = llm_saying(done=True, why="")
+    run_acts(live, said, acted_at + followup.ACT_GIVE_UP_S + 1)
+    assert said.calls == [] and live.store.act(card_id)["outcome"] == "no answer"
+    assert live.store.act(card_id)["why"] == "nothing sent after Do it"
+
+
 def run_held(live, llm, now):
     done = {}
     followup.check_held(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=now,

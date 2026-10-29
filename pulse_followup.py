@@ -599,7 +599,9 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
         raise ChatUnreadable(f"no profile named {card['profile']!r} any more")
     home_chat = report.their_home_chat(where)
     from_report = card["item_id"] is None and card["message_id"] is not None
-    # A Kanban task's worker isn't a chat: Do it started a new one for its card.
+    # A Kanban task's worker isn't a chat: Do it started a new one for its card,
+    # read as for a card from no chat, from when it turns up (Do it's message
+    # carries the card's words, so the later section finds it).
     worker = not from_report and card["chat_id"] != home_chat and bool(worker_tasks(home, [card]))
     own = "" if from_report or worker or card["chat_id"] == home_chat else card["chat_id"]
     try:
