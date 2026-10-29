@@ -558,7 +558,7 @@ def test_the_list_says_which_agents_of_yours_are_in_it(copies):
         state["invites"].clear()
     shown = copy_of(copies, "laifu", room_id)
     assert (shown["status"], shown["yours"], shown["from"], shown["started_at"]) == (
-        "ended", [{"member_id": slot("link1", 1), "profile": "default", "handle": "laifu"}], "Furina", None)
+        "left", [{"member_id": slot("link1", 1), "profile": "default", "handle": "laifu"}], "Furina", None)
     assert all(copies_module.YOURS not in member for member in shown["members"])
 
 
@@ -657,3 +657,16 @@ def test_a_copy_kept_before_it_noted_your_agents_notes_them_while_its_invite_las
         state["invites"].clear()
 
     assert [agent["handle"] for agent in copy_of(copies, "laifu", room_id)["yours"]] == ["laifu"]
+
+
+def test_a_copy_your_agents_left_stays_left_once_its_invite_is_forgotten(copies):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    copies.laifu.leave("link1", room_id, None)
+    copies.furina.pass_once()
+    with invites_module.Store(copies.tmp_path / "laifu").update() as state:
+        state["invites"].clear()
+
+    shown = copy_of(copies, "laifu", room_id)
+
+    assert (shown["status"], shown["reason"]) == ("left", "left")

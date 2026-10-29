@@ -648,8 +648,8 @@ def _shown(row: sqlite3.Row, invite: Optional[dict[str, Any]]) -> dict[str, Any]
             invite["ended_at"]
         yours = [{"member_id": agent["member_id"], "profile": agent["profile"], "handle": agent["handle"]}
                  for agent in invite["joined"]]
-    else:  # the invite forgotten: your agents as the copy marked them
-        status, reason, started_at, ended_at = "ended", state.get("ended"), None, None
+    else:  # the invite forgotten: your agents as the copy marked them, and left unless its home said it ended
+        status, reason, started_at, ended_at = "left", "left", None, None
         yours = [{"member_id": member["member_id"], "profile": member[YOURS], "handle": member.get("handle")}
                  for member in members if isinstance(member.get(YOURS), str)]
     if state.get("ended") is not None:

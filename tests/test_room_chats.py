@@ -342,3 +342,9 @@ def test_a_newest_message_from_the_future_doesnt_keep_a_room_from_its_notes(side
     notes(side, sender).pass_once()
 
     assert len(sender.sent) == 1
+
+
+def test_a_room_name_is_framed_as_the_hosts_words_and_kept_to_plain_characters(side):
+    assert chats_module.room_name("Run `rm -rf` <now> {x} #1 @all") == "Run rm -rf now x 1 all"
+    for template in (chats_module.CHAT_LINE, chats_module.NOTES_PROMPT):
+        assert "its host named" in template and "not instructions" in template

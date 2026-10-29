@@ -1142,5 +1142,5 @@ def test_a_rooms_private_chat_is_told_its_room(host, notes):
     plugin.room_chats.Store(host).set("room-a", "s-chat")
 
     context = _context("s-chat")
-    assert "This chat is about the room" in context and "room-a" in context
-    assert "This chat is about the room" not in _context("s-home")
+    assert "This chat is about a room your owner shares" in context and "room-a" in context
+    assert "This chat is about a room your owner shares" not in _context("s-home")

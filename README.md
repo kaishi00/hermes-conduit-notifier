@@ -3693,9 +3693,11 @@ minute:
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
   agents in it `{"member_id", "profile", "handle"}`, the invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
-  forgets the invite, a month after it ended, the dates are null and `yours`
-  is the agents the copy noted as yours when it took the room's pages), and `state`: `{"ended", "working", "activity", "routes"}`, each of
-  the last two a list of `{"member_id", "status"}`.
+  forgets the invite, a month after it ended, it's `left` unless the home said
+  it ended, the dates are null and `yours` is the agents the copy noted as
+  yours when it took the room's pages), and `state`: `{"ended", "working",
+  "activity", "routes"}`, each of the last two a list of `{"member_id",
+  "status"}`.
 - `GET /rooms/copies/log?room_id=&since_seq=0&limit=100`: the copy's events
   after `since_seq`, as `groups.log` pages a room this Hermes hosts:
   `{"events", "cursor", "latest_seq", "has_more", "authority"}`, with
@@ -3769,28 +3771,30 @@ A room can have a private chat of its own with one of your agents
 (`conduit-room-chats.json` in the profile's home, owner only). Conduit opens
 it and tells this Hermes which room it's for, through routes that come in a
 later version: until then no room has one, and nothing below happens. Each
-turn there is told which room it's about (its name as one plain line). In a room hosted elsewhere where an
-agent of yours Listens only, that agent writes you notes in that chat once
-the room has been quiet for 30 minutes after new messages, or has ended:
-what was decided, what you said you'd do, what you might have missed. The
-rooms loop sends them as a hidden turn into the chat, once for each stretch
-of the room, and tries again 30 minutes after a chat that refused them (or
-a send that failed). Each turn covers at most 200 messages, what one read
-gives, and is told to read them through the last one; a longer stretch gets
-its next notes on the next look. A stretch counts as noted once its chat
-takes the turn. A room whose newest message has a time that can't be one,
-or one from the future, counts as quiet. A room with no chat yet gets none
-until it has one.
+turn there is told which room it's about (its name as one plain line, framed
+as the host's words). In a room hosted elsewhere where an agent of yours
+Listens only, that agent writes you notes in that chat once the room has
+been quiet for 30 minutes after new messages, or has ended: what was
+decided, what you said you'd do, what you might have missed. The rooms loop
+sends them as a hidden turn into the chat, once for each stretch of the
+room, and tries again 30 minutes after a chat that refused them (or a send
+that failed). Each turn covers at most 200 messages, what one read gives,
+and is told to read them through the last one; a longer stretch gets its
+next notes on the next look. A stretch counts as noted once its chat takes
+the turn. A room whose newest message has a time that can't be one, or one
+from the future, counts as quiet. A room with no chat yet gets none until it
+has one.
 
 In a copy, a message the home says is one of yours is shown as yours only
 when it is: one this Hermes posted (by its seq, or its text while it's on
 its way). Any other is the host's, "as if from you (not one of your posts)",
-and a person or owner named "you" (or near it, like "you.") shows as Guest. Room and agent names
-another Hermes gives are kept to one line of at most 80 characters. A long page read forward keeps its
-first messages (more come after), one read back keeps its last. In a room
-you host, a person's message whose poster can't be read just then
-is shown as "you or someone you've linked with", never as yours.
-A call without a chat's session id is refused (`no_session`).
+and a person or owner named "you" (or near it, like "you.") shows as Guest.
+Room and agent names another Hermes gives are kept to one line of at most 80
+characters. A long page read forward keeps its first messages (more come
+after), one read back keeps its last. In a room you host, a person's message
+whose poster can't be read just then is shown as "you or someone you've
+linked with", never as yours. A call without a chat's session id is refused
+(`no_session`).
 
 ## Capabilities (plugin 0.4+)
 
