@@ -4,6 +4,7 @@ import importlib.util
 import json
 import pathlib
 import queue
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -32,7 +33,7 @@ def _load_plugin_api():
 
 
 api = _load_plugin_api()
-_queue_voice_call_end = api._queue_voice_call_end
+_queue_voice_call_end = api.voice_calls._queue_voice_call_end
 
 _active_profile = contextvars.ContextVar("active_profile", default=None)
 
@@ -130,13 +131,16 @@ class FakeSessionDB:
         self.store.messages[session_id].extend(dict(message) for message in messages)
         return len(messages)
 
+    def get_messages(self, session_id, **kwargs):
+        return list(self.store.messages.get(session_id, []))
+
 
 @pytest.fixture
 def hermes(monkeypatch, tmp_path):
-    monkeypatch.setattr(api, "_voice_write_limiter",
-                        api._MintLimiter(api.VOICE_WRITE_LIMIT, api.VOICE_WRITE_WINDOW_S))
-    monkeypatch.setattr(api, "_voice_read_limiter",
-                        api._MintLimiter(api.VOICE_READ_LIMIT, api.VOICE_WRITE_WINDOW_S))
+    monkeypatch.setattr(api.voice_calls, "_voice_write_limiter",
+                        api.core._MintLimiter(api.voice_calls.VOICE_WRITE_LIMIT, api.voice_calls.VOICE_WRITE_WINDOW_S))
+    monkeypatch.setattr(api.voice_calls, "_voice_read_limiter",
+                        api.core._MintLimiter(api.voice_calls.VOICE_READ_LIMIT, api.voice_calls.VOICE_WRITE_WINDOW_S))
     FakeSessionDB.stores = {}
     entered = []
     # A save that stores new turns ends its call; these tests record that
@@ -146,7 +150,7 @@ def hermes(monkeypatch, tmp_path):
     def queue_end(*args, chat_call=False):
         ends.append((*args, "chat") if chat_call else args)
 
-    monkeypatch.setattr(api, "_queue_voice_call_end", queue_end)
+    monkeypatch.setattr(api.voice_calls, "_queue_voice_call_end", queue_end)
 
     def home():
         return tmp_path / (_active_profile.get() or "default")
@@ -209,7 +213,7 @@ def test_first_save_creates_a_desktop_session_without_a_model(client, hermes):
     # The source is the agent's platform and the model is restored on resume:
     # a saved call must look exactly like a Conduit chat.
     assert row["source"] == "desktop" and row["model"] is None
-    assert row["end_reason"] == api.VOICE_END_REASON
+    assert row["end_reason"] == api.voice_calls.VOICE_END_REASON
     assert [m["content"] for m in store.messages[body["session_id"]]] == ["hi", "hello"]
     assert store.messages[body["session_id"]][0]["timestamp"] == 1_780_000_000
     assert store.titles[body["session_id"]] == "Voice call"
@@ -241,7 +245,7 @@ def test_a_standalone_call_is_auto_archived_when_it_ends(client, hermes, monkeyp
     session_id = save(client, engine=engine, turns=turns(("user", "hi"), ("assistant", "hello"))).json()["session_id"]
     row = hermes.stores["default"].sessions[session_id]
     assert row["archived"] == 1 and row["auto_archived"] == 1
-    assert row["end_reason"] == api.VOICE_END_REASON
+    assert row["end_reason"] == api.voice_calls.VOICE_END_REASON
 
 
 def test_a_resumed_call_leaves_the_archive_flag_as_the_user_left_it(client, hermes, monkeypatch):
@@ -257,7 +261,7 @@ def test_a_retried_create_archives_a_row_its_first_attempt_left_unfinished(clien
     first = save(client, turns=turns(("user", "hi"))).json()
     store = hermes.stores["default"]
     assert "archived" not in store.sessions[first["session_id"]]
-    store.meta[api.VOICE_TAGS_KEY] = "{}"  # the first attempt died before tagging, so before archiving
+    store.meta[api.voice_calls.VOICE_TAGS_KEY] = "{}"  # the first attempt died before tagging, so before archiving
     _archives_like_hermes(monkeypatch)
     again = save(client, turns=turns(("user", "hi"))).json()
     assert again["session_id"] == first["session_id"] and not again["created"]
@@ -298,8 +302,8 @@ def test_the_hook_reads_the_tags_the_routes_write():
     spec = importlib.util.spec_from_file_location("conduit_voice_archive_keys", ROOT / "voice_archive.py")
     voice_archive = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(voice_archive)
-    assert voice_archive.VOICE_TAGS_KEY == api.VOICE_TAGS_KEY
-    assert voice_archive.ARCHIVED_KINDS == api.VOICE_TAG_KINDS - {"job"}
+    assert voice_archive.VOICE_TAGS_KEY == api.voice_calls.VOICE_TAGS_KEY
+    assert voice_archive.ARCHIVED_KINDS == api.voice_calls.VOICE_TAG_KINDS
 
 
 def test_a_classic_voice_chat_is_archived_when_its_call_ends(client, hermes, monkeypatch):
@@ -389,10 +393,10 @@ def test_a_retried_create_finishes_a_row_the_first_attempt_left_untagged(client,
     store = hermes.stores["default"]
     # As if the first attempt died after writing turns, before end and tag.
     store.sessions[first]["end_reason"] = None
-    store.meta[api.VOICE_TAGS_KEY] = "{}"
+    store.meta[api.voice_calls.VOICE_TAGS_KEY] = "{}"
     again = save(client, turns=turns(("user", "a"))).json()
     assert again["session_id"] == first
-    assert store.sessions[first]["end_reason"] == api.VOICE_END_REASON
+    assert store.sessions[first]["end_reason"] == api.voice_calls.VOICE_END_REASON
     assert client.get(f"{BASE}/voice/tags").json()["tags"][first]["kind"] == "call"
 
 
@@ -407,12 +411,12 @@ def test_a_title_failure_never_costs_the_transcript(client, hermes, monkeypatch)
 
 
 def test_pruning_a_deleted_rows_tag_clears_its_meta(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "VOICE_MAX_TAGS", 1)
+    monkeypatch.setattr(api.voice_calls, "VOICE_MAX_TAGS", 1)
     call = save(client, turns=turns(("user", "a"))).json()["session_id"]
     store = hermes.stores["default"]
     del store.sessions[call]
     client.post(f"{BASE}/voice/tags", json={"session_id": "s_new", "kind": "job"})
-    assert not store.meta.get(api.VOICE_CALLS_KEY.format(session_id=call))
+    assert not store.meta.get(api.voice_calls.VOICE_CALLS_KEY.format(session_id=call))
 
 
 def test_a_saved_calls_tag_cant_be_replaced(client, hermes):
@@ -422,13 +426,13 @@ def test_a_saved_calls_tag_cant_be_replaced(client, hermes):
 
 
 def test_reads_are_rate_limited_before_anything_runs(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_voice_read_limiter", api._MintLimiter(1, 60.0))
+    monkeypatch.setattr(api.voice_calls, "_voice_read_limiter", api.core._MintLimiter(1, 60.0))
     assert client.get(f"{BASE}/voice/tags").status_code == 200
     assert client.get(f"{BASE}/voice/tags").status_code == 429
 
 
 def test_made_up_profile_names_share_one_voice_budget(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_voice_read_limiter", api._MintLimiter(2, 60.0))
+    monkeypatch.setattr(api.voice_calls, "_voice_read_limiter", api.core._MintLimiter(2, 60.0))
     assert client.get(f"{BASE}/voice/tags?profile=x1").status_code != 429
     assert client.get(f"{BASE}/voice/tags?profile=x2").status_code != 429
     assert client.get(f"{BASE}/voice/tags?profile=x3").status_code == 429
@@ -438,9 +442,9 @@ def test_a_discarded_create_forgets_its_call(client, hermes, monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(api, "_set_voice_tag", broken)
+    monkeypatch.setattr(api.voice_calls, "_set_voice_tag", broken)
     save(client, turns=turns(("user", "a")))
-    assert __import__("json").loads(hermes.stores["default"].meta.get(api.VOICE_CREATED_KEY) or "{}") == {}
+    assert __import__("json").loads(hermes.stores["default"].meta.get(api.voice_calls.VOICE_CREATED_KEY) or "{}") == {}
 
 
 def test_summaries_need_a_voice_row_and_string_text(client, hermes):
@@ -457,8 +461,8 @@ def test_a_gone_row_leaves_no_voice_meta(client, hermes):
     store = hermes.stores["default"]
     del store.sessions[call]
     assert save(client, session_id=call, turns=turns(("user", "b"), start=1)).status_code == 422
-    assert not store.meta.get(api.VOICE_CALLS_KEY.format(session_id=call))
-    assert not store.meta.get(api.VOICE_SUMMARY_KEY.format(session_id=call))
+    assert not store.meta.get(api.voice_calls.VOICE_CALLS_KEY.format(session_id=call))
+    assert not store.meta.get(api.voice_calls.VOICE_SUMMARY_KEY.format(session_id=call))
 
 
 def test_a_repeated_index_in_one_save_is_written_once(client, hermes):
@@ -468,11 +472,11 @@ def test_a_repeated_index_in_one_save_is_written_once(client, hermes):
 
 
 def test_only_the_most_recent_calls_are_remembered(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "VOICE_MAX_CALLS", 2)
+    monkeypatch.setattr(api.voice_calls, "VOICE_MAX_CALLS", 2)
     session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
     for call in ("call-2", "call-3"):
         save(client, session_id=session_id, call_id=call, turns=turns(("user", call)))
-    calls = hermes.stores["default"].meta[api.VOICE_CALLS_KEY.format(session_id=session_id)]
+    calls = hermes.stores["default"].meta[api.voice_calls.VOICE_CALLS_KEY.format(session_id=session_id)]
     assert __import__("json").loads(calls) == {"call-2": 0, "call-3": 0}
 
 
@@ -496,7 +500,7 @@ def test_a_failed_create_leaves_no_row_behind(client, hermes, monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(api, "_set_voice_tag", broken)
+    monkeypatch.setattr(api.voice_calls, "_set_voice_tag", broken)
     assert save(client, title="Voice call", turns=turns(("user", "a"))).status_code == 500
     store = hermes.stores["default"]
     assert store.sessions == {} and store.messages == {} and store.titles == {}
@@ -570,14 +574,14 @@ def test_compression_in_flight_is_409_and_a_compacted_row_is_422(client, hermes)
 def test_saved_rows_are_ended_and_still_take_appends(client, hermes):
     session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
     store = hermes.stores["default"]
-    assert store.sessions[session_id]["end_reason"] == api.VOICE_END_REASON
+    assert store.sessions[session_id]["end_reason"] == api.voice_calls.VOICE_END_REASON
     later = save(client, session_id=session_id, turns=turns(("assistant", "b"), start=1))
     assert later.status_code == 200 and later.json()["appended"] == 1
-    assert store.sessions[session_id]["end_reason"] == api.VOICE_END_REASON
+    assert store.sessions[session_id]["end_reason"] == api.voice_calls.VOICE_END_REASON
 
 
 def test_writes_are_rate_limited_per_profile(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_voice_write_limiter", api._MintLimiter(2, 60.0))
+    monkeypatch.setattr(api.voice_calls, "_voice_write_limiter", api.core._MintLimiter(2, 60.0))
     assert save(client, turns=turns(("user", "a"))).status_code == 200
     assert save(client, call_id="call-2", turns=turns(("user", "b"))).status_code == 200
     assert save(client, call_id="call-3", turns=turns(("user", "c"))).status_code == 429
@@ -616,7 +620,7 @@ def test_only_classic_and_job_tags_can_be_set_directly(client, hermes, kind):
 
 
 def test_tags_prune_deleted_sessions_when_over_the_cap(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "VOICE_MAX_TAGS", 2)
+    monkeypatch.setattr(api.voice_calls, "VOICE_MAX_TAGS", 2)
     live = save(client, turns=turns(("user", "a"))).json()["session_id"]
     client.post(f"{BASE}/voice/tags", json={"session_id": "deleted_1", "kind": "job"})
     client.post(f"{BASE}/voice/tags", json={"session_id": "deleted_2", "kind": "job"})
@@ -625,7 +629,7 @@ def test_tags_prune_deleted_sessions_when_over_the_cap(client, hermes, monkeypat
 
 
 def test_the_tag_being_written_survives_the_cap(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "VOICE_MAX_TAGS", 1)
+    monkeypatch.setattr(api.voice_calls, "VOICE_MAX_TAGS", 1)
     save(client, turns=turns(("user", "a")))
     assert client.post(f"{BASE}/voice/tags", json={"session_id": "not_saved_yet", "kind": "classic"}).status_code == 200
     assert client.get(f"{BASE}/voice/tags").json()["tags"] == {"not_saved_yet": {"kind": "classic"}}
@@ -651,7 +655,7 @@ def test_reads_work_on_a_store_without_the_write_helpers(client, hermes, monkeyp
 
 def test_unreadable_tags_start_over(client, hermes):
     save(client, turns=turns(("user", "a")))
-    hermes.stores["default"].meta[api.VOICE_TAGS_KEY] = "{not json"
+    hermes.stores["default"].meta[api.voice_calls.VOICE_TAGS_KEY] = "{not json"
     assert client.get(f"{BASE}/voice/tags").json()["tags"] == {}
 
 
@@ -696,7 +700,7 @@ def test_an_attached_call_makes_no_session_and_leaves_the_chat_alone(client, her
     assert body["ok"] and body["session_id"] is None and body["chat_id"] == "chat-1" and body["written"] == 2
     assert set(store.sessions) == {"chat-1"}
     assert store.messages["chat-1"] == [{"role": "user", "content": "daily brief"}]
-    assert api.VOICE_TAGS_KEY not in store.meta
+    assert api.voice_calls.VOICE_TAGS_KEY not in store.meta
     listed = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1"}).json()["calls"]
     assert listed == [{"call_id": "call-1", "engine": "gemini-live"}], "a listing carries no turns"
     calls = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1", "call_id": "call-1"}).json()["calls"]
@@ -775,7 +779,7 @@ def test_a_stored_call_missing_from_the_list_is_listed_again(client, hermes):
 
 def test_a_chat_call_is_bounded(client, hermes, monkeypatch):
     chat(hermes)
-    monkeypatch.setattr(api, "VOICE_MAX_CHAT_CALL_TURNS", 2)
+    monkeypatch.setattr(api.voice_calls, "VOICE_MAX_CHAT_CALL_TURNS", 2)
     save(client, chat_id="chat-1", turns=turns(("user", "a"), ("assistant", "b")))
     assert save(client, chat_id="chat-1", turns=turns(("user", "c"), start=2)).status_code == 413
 
@@ -832,7 +836,7 @@ def test_a_gone_chat_lists_no_calls(client, hermes):
 
 def test_a_full_chat_list_forgets_its_oldest_call(client, hermes, monkeypatch):
     store = chat(hermes)
-    monkeypatch.setattr(api, "VOICE_MAX_CHAT_CALLS", 2)
+    monkeypatch.setattr(api.voice_calls, "VOICE_MAX_CHAT_CALLS", 2)
     for call_id in ("call-1", "call-2", "call-3"):
         save(client, chat_id="chat-1", call_id=call_id, turns=turns(("user", call_id)))
     assert json.loads(store.meta["conduit.voice.chat_calls:chat-1"]) == ["call-2", "call-3"]
@@ -840,7 +844,7 @@ def test_a_full_chat_list_forgets_its_oldest_call(client, hermes, monkeypatch):
 
 
 def test_an_attached_call_ends_without_ending_the_chat(hermes, lifecycle):
-    api._run_voice_call_end(None, "chat-1", "gpt-live", CALL, chat_call=True)
+    api.voice_calls._run_voice_call_end(None, "chat-1", "gpt-live", CALL, chat_call=True)
     assert [event[0] for event in lifecycle.events] == [
         "initialize", "sync_turn", "flush_pending", "shutdown"], "the chat's memory session goes on"
     assert lifecycle.events[0][2] == "chat-1"
@@ -871,7 +875,7 @@ def _lose_the_watermark(hermes, session_id, before):
     """What a save that died after its append, before its watermark write,
     leaves behind: the turns stored, the watermark and the end not."""
     meta = hermes.stores["default"].meta
-    key = api.VOICE_CALLS_KEY.format(session_id=session_id)
+    key = api.voice_calls.VOICE_CALLS_KEY.format(session_id=session_id)
     if before is None:
         meta.pop(key, None)
     else:
@@ -882,7 +886,7 @@ def _lose_the_watermark(hermes, session_id, before):
 def test_a_retry_after_a_lost_watermark_doesnt_store_its_turns_twice(client, hermes):
     session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
     meta = hermes.stores["default"].meta
-    before = meta[api.VOICE_CALLS_KEY.format(session_id=session_id)]
+    before = meta[api.voice_calls.VOICE_CALLS_KEY.format(session_id=session_id)]
     second = turns(("user", "b"), ("assistant", "c"), start=1)
     save(client, session_id=session_id, turns=second)
     _lose_the_watermark(hermes, session_id, before)
@@ -892,7 +896,7 @@ def test_a_retry_after_a_lost_watermark_doesnt_store_its_turns_twice(client, her
                               "skipped": 2, "created": False}
     stored = hermes.stores["default"].messages[session_id]
     assert [m["content"] for m in stored] == ["a", "b", "c"]
-    assert json.loads(meta[api.VOICE_CALLS_KEY.format(session_id=session_id)]) == {"call-1": 2}
+    assert json.loads(meta[api.voice_calls.VOICE_CALLS_KEY.format(session_id=session_id)]) == {"call-1": 2}
     # The attempt that stored them died before its end: the retry ends the call.
     assert [[m["content"] for m in end[3]] for end in hermes.ends] == [["b", "c"]]
     # And the next save continues after them.
@@ -903,7 +907,7 @@ def test_a_retry_carrying_more_turns_appends_only_the_new_ones(client, hermes):
     # The attempt that died stored turn 1; the retry also carries turn 2 (the
     # outbox merged a later flush into it).
     session_id = save(client, turns=turns(("user", "a"))).json()["session_id"]
-    before = hermes.stores["default"].meta[api.VOICE_CALLS_KEY.format(session_id=session_id)]
+    before = hermes.stores["default"].meta[api.voice_calls.VOICE_CALLS_KEY.format(session_id=session_id)]
     stored = hermes.stores["default"].messages[session_id]
     stored.append({"role": "user", "content": "b", "timestamp": 1_780_000_000,
                    "platform_message_id": "conduit-voice:call-1:1"})
@@ -969,7 +973,7 @@ def test_exchanges_pair_what_the_user_said_with_the_reply():
         ("user", "Thanks"), ("assistant", "Anytime."),
         ("user", "One more thing"),  # hung up before the answer
     )]
-    assert api._voice_exchanges(messages) == [
+    assert api.voice_calls._voice_exchanges(messages) == [
         ("What's the weather\nin Paris?", "Sunny.\nStarted a background job: forecast."),
         ("Thanks", "Anytime."),
     ]
@@ -1052,8 +1056,8 @@ def lifecycle(hermes, monkeypatch):
     monkeypatch.setitem(sys.modules, "agent.memory_manager", manager)
     state = types.SimpleNamespace(events=events, config={"memory": {"provider": "honcho"}},
                                   provider=EndProvider(events))
-    monkeypatch.setattr(api, "_hermes_memory_config", lambda: state.config)
-    monkeypatch.setattr(api, "_hermes_load_memory_provider", lambda name: state.provider)
+    monkeypatch.setattr(api.memory, "_hermes_memory_config", lambda: state.config)
+    monkeypatch.setattr(api.memory, "_hermes_load_memory_provider", lambda name: state.provider)
     return state
 
 
@@ -1062,7 +1066,7 @@ CALL = [{"role": "user", "content": "remind me to call mum", "timestamp": 1.0},
 
 
 def test_a_call_ends_like_a_desktop_chat(hermes, lifecycle):
-    api._run_voice_call_end("coder", "s_call", "gemini-live", CALL)
+    api.voice_calls._run_voice_call_end("coder", "s_call", "gemini-live", CALL)
     hook = {"session_id": "s_call", "platform": "desktop", "reason": "voice_call_ended"}
     events = lifecycle.events
     assert events[0] == ("on_session_end", "coder",
@@ -1075,7 +1079,7 @@ def test_a_call_ends_like_a_desktop_chat(hermes, lifecycle):
     assert kwargs["hermes_home"].endswith("coder")
     assert events[2:] == [
         ("sync_turn", "remind me to call mum", "Will do.", "s_call"),
-        ("flush_pending", api.VOICE_END_FLUSH_TIMEOUT_S),
+        ("flush_pending", api.voice_calls.VOICE_END_FLUSH_TIMEOUT_S),
         ("provider on_session_end", [{"role": "user", "content": "remind me to call mum"},
                                      {"role": "assistant", "content": "Will do."}]),
         ("shutdown",),
@@ -1085,20 +1089,20 @@ def test_a_call_ends_like_a_desktop_chat(hermes, lifecycle):
 
 def test_the_provider_gets_the_rows_title(client, hermes, lifecycle):
     session_id = save(client, title="Groceries", turns=turns(("user", "a"), ("assistant", "b"))).json()["session_id"]
-    api._run_voice_call_end(None, session_id, "gemini-live", CALL)
+    api.voice_calls._run_voice_call_end(None, session_id, "gemini-live", CALL)
     kwargs = next(event for event in lifecycle.events if event[0] == "initialize")[3]
     assert kwargs["session_title"] == "Groceries" and kwargs["session_title_source"] == "user"
 
 
 def test_without_an_external_provider_only_the_hooks_fire(hermes, lifecycle):
     lifecycle.config = {"memory": {"provider": "builtin"}}
-    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    api.voice_calls._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert [event[0] for event in lifecycle.events] == ["on_session_end", "on_session_finalize"]
 
 
 def test_an_unavailable_provider_is_left_alone(hermes, lifecycle):
     lifecycle.provider.available = False
-    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    api.voice_calls._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert [event[0] for event in lifecycle.events] == ["on_session_end", "on_session_finalize"]
 
 
@@ -1112,7 +1116,7 @@ def test_a_failing_step_doesnt_stop_the_others(hermes, lifecycle, monkeypatch):
         raise RuntimeError("honcho down")
 
     monkeypatch.setattr(lifecycle.provider, "sync_turn", broken_sync)
-    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    api.voice_calls._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     # The memory write stopped at sync_turn but still shut its provider down.
     assert [event[0] for event in lifecycle.events] == ["initialize", "shutdown", "on_session_finalize"]
 
@@ -1122,15 +1126,15 @@ def test_an_older_hermes_calls_the_plugin_hooks_directly(hermes, monkeypatch):
     plugins = types.ModuleType("hermes_cli.plugins")
     plugins.invoke_hook = lambda name, **kwargs: events.append(name)
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
-    monkeypatch.setattr(api, "_hermes_memory_config", lambda: {})
-    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    monkeypatch.setattr(api.memory, "_hermes_memory_config", lambda: {})
+    api.voice_calls._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert events == ["on_session_end", "on_session_finalize"]
 
 
 def test_a_hermes_without_any_of_it_ends_quietly(hermes, caplog):
     # No lifecycle, plugin or memory modules: nothing to call, nothing to warn about.
     with caplog.at_level("DEBUG"):
-        api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+        api.voice_calls._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert [r.message for r in caplog.records if r.levelname == "WARNING"] == []
     assert any("this Hermes has no" in r.message for r in caplog.records)
 
@@ -1144,26 +1148,26 @@ def test_a_wedged_end_is_abandoned(hermes, lifecycle, monkeypatch):
         finished.set()
 
     monkeypatch.setattr(sys.modules["hermes_cli.lifecycle"], "invoke_hook", wedged)
-    monkeypatch.setattr(api, "_voice_end_abandoned", {})
-    monkeypatch.setattr(api, "VOICE_END_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(api.voice_calls, "_voice_end_abandoned", {})
+    monkeypatch.setattr(api.voice_calls, "VOICE_END_TIMEOUT_S", 0.05)
     started = time.monotonic()
-    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    api.voice_calls._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert time.monotonic() - started < 2
-    assert api._voice_end_abandoned == {"": 1}
+    assert api.voice_calls._voice_end_abandoned == {"": 1}
     release.set()
     # Once it finishes it no longer counts as stuck.
     assert finished.wait(5)
     deadline = time.monotonic() + 5
-    while api._voice_end_abandoned and time.monotonic() < deadline:
+    while api.voice_calls._voice_end_abandoned and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert api._voice_end_abandoned == {}
+    assert api.voice_calls._voice_end_abandoned == {}
 
 
 def test_a_profile_with_stuck_ends_skips_its_next_calls_only(hermes, lifecycle, monkeypatch):
-    monkeypatch.setattr(api, "_voice_end_abandoned", {"coder": api.VOICE_END_MAX_ABANDONED})
-    api._run_voice_call_end("coder", "s_coder", "gpt-live", CALL)
+    monkeypatch.setattr(api.voice_calls, "_voice_end_abandoned", {"coder": api.voice_calls.VOICE_END_MAX_ABANDONED})
+    api.voice_calls._run_voice_call_end("coder", "s_coder", "gpt-live", CALL)
     assert lifecycle.events == []
-    api._run_voice_call_end("writer", "s_writer", "gpt-live", CALL)
+    api.voice_calls._run_voice_call_end("writer", "s_writer", "gpt-live", CALL)
     assert ("on_session_finalize", "writer",
             {"session_id": "s_writer", "platform": "desktop", "reason": "voice_call_ended"}) in lifecycle.events
 
@@ -1177,29 +1181,29 @@ def test_a_saved_call_ends_in_the_background(client, hermes, lifecycle, monkeypa
         finalized.set()
 
     monkeypatch.setattr(sys.modules["hermes_cli.lifecycle"], "finalize_session", finalize_and_signal)
-    monkeypatch.setattr(api, "_queue_voice_call_end", _queue_voice_call_end)
+    monkeypatch.setattr(api.voice_calls, "_queue_voice_call_end", _queue_voice_call_end)
     session_id = client.post(f"{BASE}/voice/sessions?profile=coder", json={
         "engine": "grok-live", "call_id": "c", "turns": turns(("user", "hi"), ("assistant", "hello"))}).json()["session_id"]
     assert finalized.wait(5)
     # Let the worker finish the job (its count drops after the hooks) so no
     # other test sees it.
     deadline = time.monotonic() + 5
-    while api._voice_end_pending and time.monotonic() < deadline:
+    while api.voice_calls._voice_end_pending and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert api._voice_end_pending == 0
+    assert api.voice_calls._voice_end_pending == 0
     assert ("on_session_finalize", "coder",
             {"session_id": session_id, "platform": "desktop", "reason": "voice_call_ended"}) in lifecycle.events
     assert ("sync_turn", "hi", "hello", session_id) in lifecycle.events
 
 
 def test_ends_past_the_backlog_are_skipped(hermes, monkeypatch):
-    monkeypatch.setattr(api, "_voice_end_pending", 0)
-    monkeypatch.setattr(api, "_voice_end_jobs", queue.SimpleQueue())
-    monkeypatch.setattr(api, "VOICE_END_MAX_PENDING", 0)
+    monkeypatch.setattr(api.voice_calls, "_voice_end_pending", 0)
+    monkeypatch.setattr(api.voice_calls, "_voice_end_jobs", queue.SimpleQueue())
+    monkeypatch.setattr(api.voice_calls, "VOICE_END_MAX_PENDING", 0)
     ran = []
-    monkeypatch.setattr(api, "_run_voice_call_end", lambda *args: ran.append(args))
+    monkeypatch.setattr(api.voice_calls, "_run_voice_call_end", lambda *args: ran.append(args))
     _queue_voice_call_end(None, "s_call", "gpt-live", CALL)
-    assert ran == [] and api._voice_end_pending == 0 and api._voice_end_jobs.empty()
+    assert ran == [] and api.voice_calls._voice_end_pending == 0 and api.voice_calls._voice_end_jobs.empty()
 
 
 def test_an_end_that_cant_be_queued_holds_no_slot(hermes, monkeypatch):
@@ -1207,10 +1211,10 @@ def test_an_end_that_cant_be_queued_holds_no_slot(hermes, monkeypatch):
         def put(self, job):
             raise MemoryError
 
-    monkeypatch.setattr(api, "_voice_end_pending", 0)
-    monkeypatch.setattr(api, "_voice_end_jobs", Full())
+    monkeypatch.setattr(api.voice_calls, "_voice_end_pending", 0)
+    monkeypatch.setattr(api.voice_calls, "_voice_end_jobs", Full())
     _queue_voice_call_end(None, "s_call", "gpt-live", CALL)
-    assert api._voice_end_pending == 0
+    assert api.voice_calls._voice_end_pending == 0
 
 
 def test_a_provider_that_fails_to_start_is_still_shut_down(hermes, lifecycle, monkeypatch):
@@ -1218,7 +1222,7 @@ def test_a_provider_that_fails_to_start_is_still_shut_down(hermes, lifecycle, mo
         raise RuntimeError("honcho unreachable")
 
     monkeypatch.setattr(lifecycle.provider, "initialize", broken)
-    api._run_voice_call_end(None, "s_call", "gpt-live", CALL)
+    api.voice_calls._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert [event[0] for event in lifecycle.events] == ["on_session_end", "shutdown", "on_session_finalize"]
 
 
@@ -1226,8 +1230,8 @@ def test_a_queueing_failure_never_fails_a_stored_save(client, hermes, monkeypatc
     def broken(*args):
         raise RuntimeError("queue gone")
 
-    monkeypatch.setattr(api, "_queue_voice_call_end", _queue_voice_call_end)
-    monkeypatch.setattr(api, "_enqueue_voice_call_end", broken)
+    monkeypatch.setattr(api.voice_calls, "_queue_voice_call_end", _queue_voice_call_end)
+    monkeypatch.setattr(api.voice_calls, "_enqueue_voice_call_end", broken)
     assert save(client, turns=turns(("user", "a"))).status_code == 200
 
 
@@ -1241,9 +1245,9 @@ def test_the_end_runs_after_the_store_is_closed_under_the_save_lock(hermes, monk
 
     monkeypatch.setattr(FakeSessionDB, "__init__", tracked)
     seen = []
-    api.save_voice_turns({"call_id": "c", "engine": "gemini-live", "turns": turns(("user", "a"))},
+    api.voice_calls.save_voice_turns({"call_id": "c", "engine": "gemini-live", "turns": turns(("user", "a"))},
                          on_end=lambda *args: seen.append((all(db.closed for db in opened),
-                                                           api._voice_lock().locked())))
+                                                           api.voice_calls._voice_lock().locked())))
     assert seen == [(True, True)]
 
 
@@ -1280,3 +1284,160 @@ def test_only_assistant_turns_carry_cards(client, hermes):
     save(client, chat_id="chat-1", turns=shown)
     [call] = client.get(f"{BASE}/voice/chat-calls", params={"chat_id": "chat-1", "call_id": "call-1"}).json()["calls"]
     assert "cards" not in call["turns"][0]
+
+
+# --- Voice jobs leave Desktop's list once answered ------------------------------
+
+JOB_PROMPT = "[Background job started from a Conduit voice conversation. Nobody is watching.]\n\nCheck the GPU box"
+
+
+def test_a_job_tagged_after_hermes_answered_it_is_archived(client, hermes, monkeypatch):
+    # A live call tags its jobs when it ends; the job may be done by then.
+    _archives_like_hermes(monkeypatch)
+    store = chat(hermes, "done")
+    store.messages["done"] = [{"role": "user", "content": JOB_PROMPT}, {"role": "assistant", "content": "Idle."}]
+    chat(hermes, "running").messages["running"] = [{"role": "user", "content": JOB_PROMPT}]
+    store.messages["typed"] = [{"role": "user", "content": JOB_PROMPT}, {"role": "assistant", "content": "Idle."},
+                               {"role": "user", "content": "now the NAS"}, {"role": "assistant", "content": "Full."}]
+    store.sessions["typed"] = {"id": "typed", "end_reason": None}
+    for session_id in ("done", "running", "typed"):
+        assert client.post(f"{BASE}/voice/tags", json={"session_id": session_id, "kind": "job",
+                                                        "parent_id": "call-1"}).status_code == 200
+    assert store.sessions["done"]["archived"] == 1 and store.sessions["done"]["auto_archived"] == 1
+    assert "archived" not in store.sessions["running"] and "archived" not in store.sessions["typed"]
+    # A Classic chat is archived only when its call ends, through /voice/archive.
+    classic = chat(hermes, "classic")
+    classic.messages["classic"] = [{"role": "user", "content": "(voice) hi"}, {"role": "assistant", "content": "hi"}]
+    client.post(f"{BASE}/voice/tags", json={"session_id": "classic", "kind": "classic"})
+    assert "archived" not in store.sessions["classic"]
+
+
+def test_a_failed_job_archive_still_stores_the_tag(client, hermes, monkeypatch):
+    _archives_like_hermes(monkeypatch, fail=True)
+    store = chat(hermes, "done")
+    store.messages["done"] = [{"role": "user", "content": JOB_PROMPT}, {"role": "assistant", "content": "Idle."}]
+    assert client.post(f"{BASE}/voice/tags", json={"session_id": "done", "kind": "job"}).status_code == 200
+    assert client.get(f"{BASE}/voice/tags").json()["tags"]["done"] == {"kind": "job"}
+
+
+# --- Every chat's kept calls, for every device -----------------------------------
+
+
+def test_the_tags_answer_lists_every_chats_calls(client, hermes):
+    chat(hermes)
+    chat(hermes, "chat-2")
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == []
+    save(client, chat_id="chat-1", turns=turns(("user", "a"), ("assistant", "b")))
+    save(client, chat_id="chat-2", call_id="call-2", engine="gpt-live", turns=turns(("user", "c")))
+    # A reconnect continues call-1: it keeps its place, to its new last turn.
+    save(client, chat_id="chat-1", turns=[{"index": 2, "role": "user", "text": "d", "at": 1_780_000_002}])
+    listed = client.get(f"{BASE}/voice/tags").json()["chat_calls"]
+    assert listed == [
+        {"call_id": "call-1", "chat_id": "chat-1", "engine": "gemini-live",
+         "started_at": 1_780_000_000, "ended_at": 1_780_000_002},
+        {"call_id": "call-2", "chat_id": "chat-2", "engine": "gpt-live",
+         "started_at": 1_780_000_000, "ended_at": 1_780_000_000},
+    ]
+
+
+def test_calls_a_chat_forgot_or_lost_leave_the_list(client, hermes, monkeypatch):
+    store = chat(hermes)
+    chat(hermes, "chat-2")
+    monkeypatch.setattr(api.voice_calls, "VOICE_MAX_CHAT_CALLS", 2)
+    for call_id in ("call-1", "call-2", "call-3"):
+        save(client, chat_id="chat-1", call_id=call_id, turns=turns(("user", call_id)))
+    save(client, chat_id="chat-2", call_id="call-4", turns=turns(("user", "x")))
+    listed = lambda: [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]]
+    assert listed() == ["call-2", "call-3", "call-4"]
+    del store.sessions["chat-1"]
+    assert save(client, chat_id="chat-1", call_id="call-5", turns=turns(("user", "y"))).status_code == 422
+    assert listed() == ["call-4"]
+
+
+def test_the_list_is_bounded_and_its_entries_checked(client, hermes, monkeypatch):
+    store = chat(hermes)
+    monkeypatch.setattr(api.voice_calls, "VOICE_MAX_CHAT_CALL_INDEX", 2)
+    for call_id in ("call-1", "call-2", "call-3"):
+        save(client, chat_id="chat-1", call_id=call_id, turns=turns(("user", call_id)))
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-2", "call-3"]
+    store.meta[api.voice_calls.VOICE_CHAT_CALL_INDEX_KEY] = json.dumps([{"call_id": "ok", "chat_id": "chat-1"}, {"call_id": 3},
+                                                            {"call_id": "x", "chat_id": "chat-1", "started_at": True}])
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == [
+        {"call_id": "ok", "chat_id": "chat-1"}, {"call_id": "x", "chat_id": "chat-1"}]
+
+
+def test_a_host_whose_calls_predate_the_list_reads_them_once(client, hermes, tmp_path):
+    # Saved by an older plugin: the calls are in state_meta, the list isn't.
+    home = tmp_path / "default"
+    home.mkdir(exist_ok=True)
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.executemany("INSERT INTO state_meta VALUES (?, ?)", [
+        ("conduit.voice.chat_call:late", json.dumps({"chat_id": "chat-1", "engine": "grok-live", "turns": [
+            {"role": "user", "content": "a", "timestamp": 1_780_000_100},
+            {"role": "assistant", "content": "b", "timestamp": 1_780_000_160}]})),
+        ("conduit.voice.chat_call:early", json.dumps({"chat_id": "chat-2", "engine": "gpt-live", "turns": [
+            {"role": "user", "content": "c", "timestamp": 1_780_000_000}]})),
+        ("conduit.voice.chat_call:gone", ""),
+        ("conduit.voice.chat_calls:chat-1", json.dumps(["late"])),
+        ("conduit.voice.chat_callXlookalike", json.dumps({"chat_id": "chat-3", "turns": []})),
+    ])
+    conn.commit()
+    conn.close()
+    store = chat(hermes)
+    chat(hermes, "chat-2")
+    both = [
+        {"call_id": "early", "chat_id": "chat-2", "engine": "gpt-live",
+         "started_at": 1_780_000_000, "ended_at": 1_780_000_000},
+        {"call_id": "late", "chat_id": "chat-1", "engine": "grok-live",
+         "started_at": 1_780_000_100, "ended_at": 1_780_000_160},
+    ]
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == both
+    assert len(json.loads(store.meta[api.voice_calls.VOICE_CHAT_CALL_INDEX_KEY])) == 2, "kept from then on"
+    # An unreadable list is read from the calls again, not emptied.
+    store.meta[api.voice_calls.VOICE_CHAT_CALL_INDEX_KEY] = "not json"
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == both
+    assert len(json.loads(store.meta[api.voice_calls.VOICE_CHAT_CALL_INDEX_KEY])) == 2
+
+
+def test_a_failed_read_of_the_older_calls_is_tried_again(client, hermes, monkeypatch):
+    store = chat(hermes)
+    disk = [None]
+    monkeypatch.setattr(api.voice_calls, "_chat_calls_on_disk", lambda: disk[0])
+    assert client.get(f"{BASE}/voice/tags").json()["chat_calls"] == []
+    # A save meanwhile doesn't start the list without them either.
+    save(client, chat_id="chat-1", call_id="call-2", turns=turns(("user", "b")))
+    assert api.voice_calls.VOICE_CHAT_CALL_INDEX_KEY not in store.meta
+    disk[0] = [{"call_id": "call-1", "chat_id": "chat-1"}, {"call_id": "call-2", "chat_id": "chat-1"}]
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-1", "call-2"]
+    assert api.voice_calls.VOICE_CHAT_CALL_INDEX_KEY in store.meta
+
+
+def test_a_failed_backfill_write_still_answers(client, hermes, monkeypatch):
+    store = chat(hermes)
+    store.set_meta = lambda key, value: (_ for _ in ()).throw(RuntimeError("locked"))
+    monkeypatch.setattr(api.voice_calls, "_chat_calls_on_disk", lambda: [{"call_id": "call-1", "chat_id": "chat-1"}])
+    answer = client.get(f"{BASE}/voice/tags")
+    assert answer.status_code == 200
+    assert answer.json()["chat_calls"] == [{"call_id": "call-1", "chat_id": "chat-1"}]
+
+
+def test_a_chat_deleted_in_desktop_leaves_the_list_when_asked(client, hermes):
+    store = chat(hermes)
+    chat(hermes, "chat-2")
+    save(client, chat_id="chat-1", turns=turns(("user", "a")))
+    save(client, chat_id="chat-2", call_id="call-2", turns=turns(("user", "b")))
+    del store.sessions["chat-1"]  # no save reaches it again
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-2"]
+    assert [e["call_id"] for e in json.loads(store.meta[api.voice_calls.VOICE_CHAT_CALL_INDEX_KEY])] == ["call-2"]
+    assert store.meta[api.voice_calls.VOICE_CHAT_CALL_KEY.format(call_id="call-1")] == ""
+
+
+def test_a_call_whose_list_write_failed_is_listed_on_the_retry(client, hermes, monkeypatch):
+    store = chat(hermes)
+    real = api.voice_calls._index_chat_call
+    monkeypatch.setattr(api.voice_calls, "_index_chat_call", lambda *a: (_ for _ in ()).throw(RuntimeError("locked")))
+    assert save(client, chat_id="chat-1", turns=turns(("user", "a"))).status_code >= 500
+    monkeypatch.setattr(api.voice_calls, "_index_chat_call", real)
+    assert save(client, chat_id="chat-1", turns=turns(("user", "a"))).json()["appended"] == 0
+    assert [e["call_id"] for e in client.get(f"{BASE}/voice/tags").json()["chat_calls"]] == ["call-1"]

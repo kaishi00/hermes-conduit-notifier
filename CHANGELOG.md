@@ -13,6 +13,176 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.120.1 (2026-10-29)
+
+### Fixes
+- When a linked person's Hermes asked whether you're free, a busy time
+  that ran to the end of the day read as ending at 00:00 (or 01:00 where
+  clocks go forward at midnight). It reads 24:00 now. A linked Hermes still
+  on 0.120.0 leaves that busy time out of what it keeps, though the answer
+  it reads still says it, until it updates.
+
+## 0.120.0 (2026-10-29)
+
+### New and improved
+- Your agent can ask someone you've linked with whether they're free on a
+  date, or a question. Their Hermes answers by the rules they set, or they
+  answer themselves; no agent reads the ask on their side.
+
+## 0.119.2 (2026-10-29)
+
+### Fixes
+- After the plugin reloaded, a prediction, step summary or self-improvement
+  review could again notify as if the chat had replied. It no longer does.
+
+## 0.119.1 (2026-10-29)
+
+### Fixes
+- On some Hermes versions (0.21 among them), Conduit's predictions, step
+  summaries (a /btw) and the self-improvement review each sent a
+  notification as if the chat had replied, with text such as
+  {"replies":[...]}, and moved the chat's Lock Screen progress. Only the
+  chat's own replies notify now. Like a subagent, they can't use Conduit's
+  tools either (notifications, calls, phone, location and the rest).
+
+## 0.119.0 (2026-10-29)
+
+### New and improved
+- Use my data: in a room with other people's agents, your agent can say
+  when you're busy, from the calendar your phone shares, to find a time.
+  Only the busy times go, with your time zone and when your phone last
+  synced, never what, where or with whom.
+
+## 0.118.1 (2026-10-29)
+
+### Fixes
+- With Ask me first, your answer could be lost to the room when your
+  agent's turn failed with an error, or when a helper it started ran first.
+  It now reaches the agent's next turn in that room.
+
+## 0.118.0 (2026-10-29)
+
+### New and improved
+- Ask me first: in a room with other people's agents, your agent asks your
+  phone before it shares something personal about you. Share, say what it
+  should say instead, or don't share; an answer that comes later reaches it
+  before its next turn in that room. Needs a Conduit that shows a room's asks.
+
+## 0.117.1 (2026-10-29)
+
+### Fixes
+- Do it on a Pulse card that came from a Kanban task's worker opened the
+  worker's chat, which can't be continued. It now starts a new chat about
+  the task, and Conduit shows the task where the chat was.
+
+## 0.117.0 (2026-10-29)
+
+### Fixes
+- A room hosted elsewhere that went on after your agents were taken out of
+  it read as ended to your agent. It now says you were taken out.
+- Your agent read every agent in a room hosted elsewhere as still in it.
+  It now knows that only of your own agents.
+
+### New and improved
+- Conduit can open a private chat with one of your agents about a room, and
+  your agent's notes on a room it Listens in arrive there. Notes start from
+  the room's newest message when the chat opens.
+- A room chat you delete is forgotten, so notes stop going to it.
+
+## 0.116.0 (2026-10-29)
+
+### Fixes
+- Deleting your copy of a room you're still in lost what you'd posted
+  there, so your agents took your earlier messages for the host's. It's
+  now refused until you leave, and a room this Hermes hosts can't be
+  deleted as a copy.
+- Rooms you rejoined over a new link listed your posts from the old one.
+
+### New and improved
+- Your agents can read your rooms with other people for you in your
+  private chats: notes, a summary, what someone said, a draft reply.
+- Groundwork for a room's own private chat, where an agent that only
+  listens will leave you notes once the room goes quiet or ends. It starts
+  working with the Conduit update that opens these chats.
+
+## 0.115.5 (2026-10-29)
+
+### Fixes
+- Finding a chat on an Apple Watch call could pick an old Kanban task's
+  worker, saved before Hermes marked them, whose only message is "work
+  kanban task" and the task's id. It now skips them, as the iPhone does.
+
+## 0.115.4 (2026-10-29)
+
+### Fixes
+- Finding a chat on an Apple Watch call could pick a tool integration's or a
+  one-shot run's session, which aren't chats. It now skips them, as the
+  iPhone does.
+
+## 0.115.3 (2026-10-28)
+
+### Fixes
+- Notifications called the main bot "Default" when it has no name, in its
+  Bot Chat's title and in the relay's plain copy, while Conduit calls it
+  Hermes. They now say Hermes (push relay 0.23.2).
+
+## 0.115.2 (2026-10-28)
+
+### Fixes
+- A Bot Chat's notifications named a bot that has no name by its profile id
+  in lowercase, while Conduit shows it capitalized. They now match, and the
+  relay's plain copy names an unnamed profile the same way (push relay
+  0.23.1).
+
+## 0.115.1 (2026-10-28)
+
+### Fixes
+- A message you spoke (a voice call, CarPlay, the Apple Watch) could be
+  answered with a sound file Hermes made itself, which the call then read
+  out as a file path. Hermes is now told the answer is heard, so it replies
+  in words. A file you ask for still comes as before.
+
+## 0.115.0 (2026-10-28)
+
+### Fixes
+- A room's copy with one damaged entry couldn't be read at all.
+
+### New and improved
+- In a room someone else hosts that your agents are in, you can post too,
+  through your own Hermes. Your agents can tell your messages from ones the
+  host wrote under your name.
+
+## 0.114.0 (2026-10-28)
+
+### New and improved
+- Voice jobs no longer pile up in Hermes Desktop's chat list: once Hermes
+  has answered one, it's archived like a finished call, and typing into it
+  brings it back. Conduit still lists it under its call.
+- Calls kept with a chat now show on every device: each one's chat is
+  listed under Voice in Conduit and shows its call cards, not only on the
+  phone that made the call.
+
+## 0.113.0 (2026-10-28)
+
+### Fixes
+- After moving to a new iPhone, calls from Hermes rang only the Apple Watch,
+  as a call for the old iPhone, and answering there gave no voice. Pairing a
+  profile with the new iPhone now moves the Watch's ring there too (needs
+  push relay 0.23).
+
+### New and improved
+- The host's log says where each call from Hermes went: the iPhone, the
+  iPhone and its Apple Watch, or a notification when the relay couldn't ring
+  the iPhone.
+
+## 0.112.0 (2026-10-28)
+
+### New and improved
+- Hermes can write the notification a reply sends, with a heading and a
+  sentence on the result, when you asked to be told something is done or a
+  scheduled job reports. Conduit shows it with Show in notifications on Full
+  previews.
+
 ## 0.111.0 (2026-10-28)
 
 ### New and improved

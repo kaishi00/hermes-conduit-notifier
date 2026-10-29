@@ -125,7 +125,15 @@ def client():
 def test_the_line_names_the_surface_and_how_it_was_entered():
     assert surfaces.line("watch", "spoken") == (
         "[Conduit: this message came from the user's Apple Watch, spoken. "
-        "Its screen is small: keep the answer short, with no tables.]")
+        "Its screen is small: keep the answer short, with no tables. " + surfaces.SPOKEN_HINT + "]")
+    # A voice call's turn: its reply is read aloud, so the agent makes no
+    # audio of its own (a farm Local voice call read a MEDIA: path out).
+    assert surfaces.line("iphone", "spoken") == (
+        "[Conduit: this message came from the user's iPhone, spoken. " + surfaces.SPOKEN_HINT + "]")
+    assert surfaces.SPOKEN_HINT not in surfaces.line("iphone", "typed")
+    # Only audio the agent makes is ruled out: a file the user asks for in a
+    # spoken message still goes.
+    assert "text_to_speech" in surfaces.SPOKEN_HINT and "asks for is still fine" in surfaces.SPOKEN_HINT
     assert surfaces.line("ipad", "typed") == (
         "[Conduit: this message came from the user's iPad, typed. When you need several details only the user can "
         "give (like dates or a budget), ask them in one clarify call with open questions: Conduit shows it as a "
@@ -231,9 +239,9 @@ def test_a_bad_report_is_refused(gateway, client):
 
 
 def test_the_plugins_watch_turns_name_the_watch(gateway):
-    jobs = api._WatchJobTransport(jobs=None)
+    jobs = api.watch_jobs._WatchJobTransport(jobs=None)
     assert gateway.turn(jobs) == surfaces.line("watch", "spoken")
-    chat = api._WatchChatTransport(chat=None)
+    chat = api.watch_local_live._WatchChatTransport(chat=None)
     assert gateway.turn(chat) == surfaces.line("watch", "spoken")
 
 

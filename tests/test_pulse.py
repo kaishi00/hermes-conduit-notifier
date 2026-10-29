@@ -250,6 +250,24 @@ def test_home_chat_is_a_started_chat_with_the_title(db, tmp_path):
     assert hermes.chat_by_id(tmp_path, "arch") is None
 
 
+def test_worker_tasks_name_the_task_of_each_kanban_worker(db, tmp_path):
+    db.session(sid="w", title=None, source="kanban")
+    db.message("user", "## Task\nShip it\n\nwork kanban task t_c64b17a2", sid="w")
+    db.session(sid="w2", title=None, source="kanban", parent="w")  # compressed: no prompt of its own
+    db.message("user", "[summary]", sid="w2")
+    db.session(sid="old", title=None, source="cli")
+    db.message("user", "work kanban task t_9f2c", sid="old")
+    db.session(sid="chat", title="Plans", source="cli")
+    db.message("user", "work kanban task t_9f2c and then tell me", sid="chat")
+    db.session(sid="old2", title=None, source="local")
+    db.message("user", "work kanban task t_1", sid="old2")
+    db.session(sid="long", title=None, source="cli")  # a person's long message ending in the prompt
+    db.message("user", "x" * 400 + "\nwork kanban task t_2", sid="long")
+    assert hermes.worker_tasks(tmp_path, ["w", "w2", "old", "old2", "long", "chat", "missing", ""]) == {
+        "w": "t_c64b17a2", "w2": "t_c64b17a2", "old": "t_9f2c", "old2": "t_1"}
+    assert hermes.worker_tasks(tmp_path, []) == {}
+
+
 def test_turn_rows_follow_the_tagged_user_row(db, tmp_path):
     db.session()
     db.message("user", "earlier")
@@ -2775,10 +2793,10 @@ def test_pulse_routes(remembering, db, monkeypatch):
     store_.set("home_session_key", SID)
     home = store_.path.parent
     modules = {"pulse_control": control, "pulse": pulse}
-    monkeypatch.setattr(api, "_plugin_package_module", lambda name: modules[name])
-    monkeypatch.setattr(api, "_calls_home", lambda: home)
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: modules[name])
+    monkeypatch.setattr(api.core, "_calls_home", lambda: home)
     # More requests than the minute's limit allows, which this test doesn't test.
-    monkeypatch.setattr(api, "_pulse_limiter", api._MintLimiter(1000, api.PULSE_WINDOW_S, message="limit"))
+    monkeypatch.setattr(api.pulse, "_pulse_limiter", api.core._MintLimiter(1000, api.pulse.PULSE_WINDOW_S, message="limit"))
     app = fastapi.FastAPI()
     app.include_router(api.router, prefix="/api/plugins/conduit_push")
     http = TestClient(app)
@@ -2841,7 +2859,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
         "followup": "screen", "deadline": "brief", "next": "brief"}
     assert http.put(f"{base}/levels", json={"kind": "followup", "level": "loud"}).status_code == 400
     # What learning holds, reset; what the reports left out, and one brought up.
-    assert "pulse_explains" in api.ROUTE_CAPABILITIES
+    assert "pulse_explains" in api.capabilities.ROUTE_CAPABILITIES
     assert [entry["scope"] for entry in http.get(f"{base}/learned").json()["preferences"]] != []
     reset = http.post(f"{base}/learned/reset", json={"scope": "kind", "value": "followup"}).json()
     assert reset["reset"]["what"] == "reset" and reset["preferences"] == []
@@ -2859,13 +2877,13 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.post(f"{base}/left_out/bring_up", json={"id": str(left)}).json()["detail"] == {
         "code": "invalid", "field": "id"}
     assert http.post(f"{base}/left_out/bring_up", json=[left]).status_code == 400
-    assert "pulse" in api.ROUTE_CAPABILITIES and "pulse_feed" in api.ROUTE_CAPABILITIES
-    assert "pulse_daily_brief" in api.ROUTE_CAPABILITIES  # Settings > Pulse says the brief comes every day
+    assert "pulse" in api.capabilities.ROUTE_CAPABILITIES and "pulse_feed" in api.capabilities.ROUTE_CAPABILITIES
+    assert "pulse_daily_brief" in api.capabilities.ROUTE_CAPABILITIES  # Settings > Pulse says the brief comes every day
     # A report item Pulse found on its own takes Do it and Done too.
-    assert "pulse_found_actions" in api.ROUTE_CAPABILITIES
-    assert "pulse_note" in api.ROUTE_CAPABILITIES  # Settings > Pulse shows the note to Pulse
+    assert "pulse_found_actions" in api.capabilities.ROUTE_CAPABILITIES
+    assert "pulse_note" in api.capabilities.ROUTE_CAPABILITIES  # Settings > Pulse shows the note to Pulse
     # Quiet times: weekdays, and a spell until the end of today or a day.
-    assert "pulse_quiet" in api.ROUTE_CAPABILITIES
+    assert "pulse_quiet" in api.capabilities.ROUTE_CAPABILITIES
     hushed = http.put(base, json={"quiet_days": [6, 5], "quiet_until": "today"}).json()
     assert hushed["quiet_days"] == [5, 6] and hushed["quiet_until"] > time.time() and hushed["quiet_now"] == "until"
     assert hushed["quiet_ends_at"] >= hushed["quiet_until"]
@@ -2882,7 +2900,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
     assert http.post(f"{base}/done", json={"card": found, "done": True}).json()["changed"] is True
     assert http.post(f"{base}/acted", json={"card": found}).json()["booked"] is False  # done already
     # Not now until later today, tomorrow or next week: the card comes back then.
-    assert "pulse_rest" in api.ROUTE_CAPABILITIES
+    assert "pulse_rest" in api.capabilities.ROUTE_CAPABILITIES
     rested = store_.add_card({"kind": "noticed", "level": "screen", "topic": "date", "news": "Dentist Friday",
                               "created_at": DAY})
     put_off = http.post(f"{base}/dismiss", json={"card": rested, "dismissed": True, "until": "tomorrow"}).json()
@@ -2897,7 +2915,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
         "ok": True, "changed": True, "rest_until": None}
     # The night: two times, or none. Wrong time puts a card away until a better time, and one that pushed
     # closes that part of the day to pushes of its kind.
-    assert "pulse_hours" in api.ROUTE_CAPABILITIES
+    assert "pulse_hours" in api.capabilities.ROUTE_CAPABILITIES
     night = http.put(base, json={"night": ["22:30", "6:45"]}).json()
     assert night["night"] == ["22:30", "06:45"] and isinstance(night["night_now"], bool)
     feed = http.get(f"{base}/feed").json()
@@ -2912,7 +2930,7 @@ def test_pulse_routes(remembering, db, monkeypatch):
     # A host that never turned Pulse on is answered without a file left behind.
     fresh = home / "fresh"
     fresh.mkdir()
-    monkeypatch.setattr(api, "_calls_home", lambda: fresh)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: fresh)
     got = http.get(base)
     assert got.status_code == 200 and got.json()["enabled"] is False
     assert http.get(f"{base}/memory").json()["items"] == []

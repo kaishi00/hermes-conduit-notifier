@@ -4,8 +4,11 @@ name: Upstream contract
 # Hermes change that breaks us shows up before Conduit users meet it
 # (hermes-conduit#1336 was in the canary five days before the release).
 #
-# - Pull requests that touch the plugin's dashboard routes or the contract:
-#   the latest Hermes release. A failure fails the check; no issue.
+# - Every pull request: the latest Hermes release. A failure fails the check;
+#   no issue. Every PR, not just the dashboard's, because Hermes' install scan
+#   reads every file the plugin ships, READMEs and the relay included, and one
+#   high finding holds the update on every host (test_install_scan.py,
+#   hermes-conduit#1500).
 # - Daily, after Hermes cuts its canary (~07:00 UTC): the newest canary and
 #   the newest release. A failure opens or updates an `upstream-break` issue,
 #   one per test and failure signature (upstream/report.py), so a known
@@ -14,10 +17,6 @@ name: Upstream contract
 
 on:
   pull_request:
-    paths:
-      - "dashboard/**"
-      - "upstream/**"
-      - ".github/workflows/upstream-contract.yml"
   schedule:
     - cron: "0 8 * * *"
   workflow_dispatch:

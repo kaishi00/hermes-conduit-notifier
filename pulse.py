@@ -566,6 +566,12 @@ def home_chat_busy(session_id: str) -> bool:
     return bool(times)
 
 
+def note_started(session_id: str, turn_id: Any) -> None:
+    """When a turn of ``session_id`` started, for one whose note pre_llm_call
+    doesn't ask for (a fork of the chat, forks.py)."""
+    _note_started(session_id, turn_id)
+
+
 def _note_started(session_id: str, turn_id: Any) -> None:
     if not isinstance(turn_id, str) or not turn_id:
         return

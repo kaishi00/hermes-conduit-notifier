@@ -1702,7 +1702,7 @@ def test_a_links_file_with_an_outbox_item_missing_what_it_needs_is_refused(home,
 def routes(tmp_path, monkeypatch):
     """Each installation's links routes, as its dashboard serves them, with
     its loop driven by hand (``poll``) rather than in a thread."""
-    dashboard_links = api._plugin_package_module("room_links")
+    dashboard_links = api.core._plugin_package_module("room_links")
     loops, current = {}, {}
 
     def start(root):
@@ -1712,10 +1712,10 @@ def routes(tmp_path, monkeypatch):
         return loop
 
     monkeypatch.setattr(dashboard_links, "start", start)
-    monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: None)
-    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", lambda root: None)
-    monkeypatch.setattr(api, "_calls_home", lambda: current["home"])
-    monkeypatch.setattr(api._room_links_limiter, "_mints", {})
+    monkeypatch.setattr(api.core._plugin_package_module("room_bridge"), "start", lambda root: None)
+    monkeypatch.setattr(api.core._plugin_package_module("room_invites"), "start", lambda root: None)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: current["home"])
+    monkeypatch.setattr(api.linked_rooms._room_links_limiter, "_mints", {})
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     client = TestClient(app)
@@ -1797,7 +1797,7 @@ def test_routes_refuse_a_body_that_isnt_an_object(routes, path):
 def test_links_routes_answer_sixty_requests_a_minute(routes, monkeypatch):
     # A screen waiting on a Link's confirmation asks every few seconds.
     now = [1000.0]
-    monkeypatch.setattr(api._room_links_limiter, "clock", lambda: now[0])
+    monkeypatch.setattr(api.linked_rooms._room_links_limiter, "clock", lambda: now[0])
     eric = routes("eric")
     for _ in range(60):
         assert eric.call("GET", "/rooms/links").status_code == 200
@@ -1805,12 +1805,12 @@ def test_links_routes_answer_sixty_requests_a_minute(routes, monkeypatch):
     refused = eric.call("POST", "/rooms/links/invites", json={"name": "Eric"})
     assert refused.status_code == 429 and refused.headers["cache-control"] == "no-store"
     assert refused.json()["detail"] == "Too many link requests; try again shortly"
-    now[0] += api.ROOM_CHOICES_WINDOW_S
+    now[0] += api.linked_rooms.ROOM_CHOICES_WINDOW_S
     assert eric.call("GET", "/rooms/links").status_code == 200
 
 
 def test_links_routes_that_wait_on_the_mailbox_have_their_own_threads_and_time(routes, monkeypatch):
-    dashboard_links = api._plugin_package_module("room_links")
+    dashboard_links = api.core._plugin_package_module("room_links")
     threads, go_on = {}, threading.Event()
 
     def invite(self, name):
@@ -1824,7 +1824,7 @@ def test_links_routes_that_wait_on_the_mailbox_have_their_own_threads_and_time(r
 
     monkeypatch.setattr(dashboard_links.Links, "invite", invite)
     monkeypatch.setattr(dashboard_links.Links, "view", view)
-    monkeypatch.setattr(api, "ROOM_LINKS_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api.linked_rooms, "ROOM_LINKS_TIMEOUT_S", 0.2)
     eric = routes("eric")
     try:
         slow = eric.call("POST", "/rooms/links/invites", json={"name": "Eric"})
@@ -1840,10 +1840,10 @@ def test_links_routes_that_wait_on_the_mailbox_have_their_own_threads_and_time(r
 
 def test_requests_waiting_for_the_links_threads_count_toward_the_limit(routes, monkeypatch):
     monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", "http://127.0.0.1:9")
-    monkeypatch.setattr(api._room_links_limiter, "clock", lambda: 1000.0)
-    monkeypatch.setattr(api, "ROOM_LINKS_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(api.linked_rooms._room_links_limiter, "clock", lambda: 1000.0)
+    monkeypatch.setattr(api.linked_rooms, "ROOM_LINKS_TIMEOUT_S", 0.05)
     pool, go_on = concurrent.futures.ThreadPoolExecutor(max_workers=1), threading.Event()
-    monkeypatch.setattr(api, "_room_links_executor", pool)
+    monkeypatch.setattr(api.linked_rooms, "_room_links_executor", pool)
     pool.submit(go_on.wait, 10)  # its one thread waits on a mailbox that doesn't answer
     eric = routes("eric")
     try:
@@ -1858,7 +1858,7 @@ def test_requests_waiting_for_the_links_threads_count_toward_the_limit(routes, m
 
 
 def test_the_identity_route_refuses_a_word_list_that_cant_be_read(routes, monkeypatch):
-    dashboard_identity = api._plugin_package_module("room_identity")
+    dashboard_identity = api.core._plugin_package_module("room_identity")
     eric = routes("eric")
     dashboard_identity.load_or_create(eric.root)
 
@@ -1881,7 +1881,7 @@ def test_unlinking_or_cancelling_what_isnt_there_says_so(routes):
 
 
 def test_links_routes_start_the_installations_loop_and_wake_it(tmp_path, monkeypatch):
-    dashboard_links = api._plugin_package_module("room_links")
+    dashboard_links = api.core._plugin_package_module("room_links")
     seen = []
 
     class Loop:
@@ -1889,10 +1889,10 @@ def test_links_routes_start_the_installations_loop_and_wake_it(tmp_path, monkeyp
             seen.append("woken")
 
     monkeypatch.setattr(dashboard_links, "start", lambda root: seen.append(root) or Loop())
-    monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: seen.append(("bridge", root)))
-    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", lambda root: seen.append(("rooms", root)))
+    monkeypatch.setattr(api.core._plugin_package_module("room_bridge"), "start", lambda root: seen.append(("bridge", root)))
+    monkeypatch.setattr(api.core._plugin_package_module("room_invites"), "start", lambda root: seen.append(("rooms", root)))
     (tmp_path / "profiles" / "work").mkdir(parents=True)
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path / "profiles" / "work")
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path / "profiles" / "work")
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
 
@@ -1903,14 +1903,14 @@ def test_links_routes_start_the_installations_loop_and_wake_it(tmp_path, monkeyp
 
 def test_the_loop_starts_where_the_dashboard_loads_the_routes(monkeypatch):
     started = []
-    monkeypatch.setattr(api._plugin_package_module("room_links"), "start", lambda root: started.append("loop"))
-    monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: started.append("bridge"))
-    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", lambda root: started.append("rooms"))
+    monkeypatch.setattr(api.core._plugin_package_module("room_links"), "start", lambda root: started.append("loop"))
+    monkeypatch.setattr(api.core._plugin_package_module("room_bridge"), "start", lambda root: started.append("bridge"))
+    monkeypatch.setattr(api.core._plugin_package_module("room_invites"), "start", lambda root: started.append("rooms"))
 
-    api._start_room_links()
+    api.linked_rooms._start_room_links()
     assert started == []  # tests, or a plugin host process: no dashboard here
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", types.ModuleType("hermes_cli.web_server"))
-    api._start_room_links()
+    api.linked_rooms._start_room_links()
     assert started == ["bridge", "rooms", "loop"]
 
 
@@ -1924,15 +1924,15 @@ def test_a_bridge_that_wont_start_leaves_the_links_running(tmp_path, monkeypatch
     def refuse(root):
         raise OSError("no")
 
-    monkeypatch.setattr(api._plugin_package_module("room_links"), "start", lambda root: started.append("loop") or Loop())
-    monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", refuse)
-    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", lambda root: started.append("rooms"))
+    monkeypatch.setattr(api.core._plugin_package_module("room_links"), "start", lambda root: started.append("loop") or Loop())
+    monkeypatch.setattr(api.core._plugin_package_module("room_bridge"), "start", refuse)
+    monkeypatch.setattr(api.core._plugin_package_module("room_invites"), "start", lambda root: started.append("rooms"))
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", types.ModuleType("hermes_cli.web_server"))
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
 
-    api._start_room_links()
+    api.linked_rooms._start_room_links()
     assert TestClient(app).get(f"{BASE}/rooms/links").status_code == 200
 
     assert started == ["rooms", "loop", "rooms", "loop", "woken"]
@@ -1945,13 +1945,13 @@ def test_rooms_that_wont_start_leave_the_bridge_and_the_links_running(tmp_path, 
     def refuse(root):
         raise OSError("no")
 
-    monkeypatch.setattr(api._plugin_package_module("room_links"), "start", lambda root: started.append("loop"))
-    monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: started.append("bridge"))
-    monkeypatch.setattr(api._plugin_package_module("room_invites"), "start", refuse)
+    monkeypatch.setattr(api.core._plugin_package_module("room_links"), "start", lambda root: started.append("loop"))
+    monkeypatch.setattr(api.core._plugin_package_module("room_bridge"), "start", lambda root: started.append("bridge"))
+    monkeypatch.setattr(api.core._plugin_package_module("room_invites"), "start", refuse)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", types.ModuleType("hermes_cli.web_server"))
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
 
-    api._start_room_links()
+    api.linked_rooms._start_room_links()
 
     assert started == ["bridge", "loop"]
     assert len([record for record in caplog.records if "rooms loop" in record.getMessage()]) == 1

@@ -1881,9 +1881,9 @@ def test_people_says_whos_who_in_a_room_on_each_side(rooms):
     mona = {"member_id": slot("link2", 1), "handle": "mona", "display_name": "Mona", "status": "in"}
 
     assert invites_module.people(rooms.tmp_path / "furina", room_id) == {"room_id": room_id, "home": None, "members": [
-        {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}]}
+        {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}], "posts": []}
     assert invites_module.people(rooms.tmp_path / "laifu", room_id) == {"room_id": room_id, "home": "Furina",
-                                                                        "members": [
+                                                                        "you": "Laifu", "members": [
         {**furina, "owner": "Furina"}, {**laifu, "owner": None}, {**mona, "owner": "Mona"}]}
     assert invites_module.people(rooms.tmp_path / "furina", "conduit-other") is None
     assert invites_module.people(rooms.tmp_path / "nobody", room_id) is None
@@ -1986,8 +1986,8 @@ def routes(rooms, monkeypatch):
     """Furina's, Laifu's and Mona's rooms routes as each one's dashboard serves them (its own copy of the
     plugin), over the same mailbox and fakes, with the rooms loop driven by hand. ``call(name, ...)`` asks
     that installation's dashboard."""
-    dashboard = api._plugin_package_module("room_invites")
-    joins, starts = api._plugin_package_module("room_join"), api._plugin_package_module("room_start")
+    dashboard = api.core._plugin_package_module("room_invites")
+    joins, starts = api.core._plugin_package_module("room_join"), api.core._plugin_package_module("room_start")
     running, current = {}, {}
     for name in ("furina", "laifu", "mona"):
         root = rooms.tmp_path / name
@@ -2000,10 +2000,10 @@ def routes(rooms, monkeypatch):
         running[str(root)] = rooms.wire.sides[name] = side
         setattr(rooms, name, side)
     monkeypatch.setattr(dashboard, "start", lambda root: running[str(root)])
-    monkeypatch.setattr(api._plugin_package_module("room_bridge"), "start", lambda root: None)
-    monkeypatch.setattr(api._plugin_package_module("room_links"), "start", lambda root: Loop())
-    monkeypatch.setattr(api, "_calls_home", lambda: current["home"])
-    monkeypatch.setattr(api._room_invites_limiter, "_mints", {})
+    monkeypatch.setattr(api.core._plugin_package_module("room_bridge"), "start", lambda root: None)
+    monkeypatch.setattr(api.core._plugin_package_module("room_links"), "start", lambda root: Loop())
+    monkeypatch.setattr(api.core, "_calls_home", lambda: current["home"])
+    monkeypatch.setattr(api.linked_rooms._room_invites_limiter, "_mints", {})
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     client = TestClient(app)
@@ -2020,14 +2020,14 @@ def routes(rooms, monkeypatch):
 def test_rooms_routes_answer_sixty_requests_a_minute(routes, monkeypatch):
     # Conduit's rooms screen asks for the drafts and the invites every few seconds.
     now = [1000.0]
-    monkeypatch.setattr(api._room_invites_limiter, "clock", lambda: now[0])
+    monkeypatch.setattr(api.linked_rooms._room_invites_limiter, "clock", lambda: now[0])
     for n in range(60):
         assert routes.call("furina", "GET", "/rooms/drafts" if n % 2 else "/rooms/invites").status_code == 200
 
     refused = routes.call("furina", "GET", "/rooms/drafts")
     assert refused.status_code == 429 and refused.headers["cache-control"] == "no-store"
     assert refused.json()["detail"] == "Too many room requests; try again shortly"
-    now[0] += api.ROOM_CHOICES_WINDOW_S
+    now[0] += api.linked_rooms.ROOM_CHOICES_WINDOW_S
     assert routes.call("furina", "GET", "/rooms/drafts").status_code == 200
 
 
@@ -2224,7 +2224,7 @@ def test_a_draft_made_where_the_dashboard_runs_in_the_gateway_is_the_requests_su
     monkeypatch.setitem(__import__("sys").modules, "hermes_cli.web_server_sessions", sessions)
     routes.app.state.session_authority = object()
     scoped = []
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
 
     made = routes.call("furina", "POST", "/rooms/drafts", params={"profile": "work"},
                        json={"name": "Zoo trip", "agents": [{**FURINAS, "profile": "work"}], "links": ["link1"]})
@@ -2252,7 +2252,7 @@ def _drafts_for(routes, monkeypatch, work):
     sessions._session_mutation_context = context
     monkeypatch.setitem(__import__("sys").modules, "hermes_cli.web_server_sessions", sessions)
     routes.app.state.session_authority = object()
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
     return asked, scoped
 
 

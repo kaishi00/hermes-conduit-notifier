@@ -110,7 +110,7 @@ def _entries(home: Path):
 
 
 def _take(home, ids, registry=None, marker=None):
-    return api.take_over_session(ids, registry=registry or FakeRegistry(home), turn_marker=marker or FakeTurnMarker(),
+    return api.chats.take_over_session(ids, registry=registry or FakeRegistry(home), turn_marker=marker or FakeTurnMarker(),
                                  home=home, own_pid=OWN_PID)
 
 
@@ -246,7 +246,7 @@ def test_a_lock_that_is_not_a_context_manager_is_unsupported(tmp_path):
     _seed(tmp_path, [_entry("chat")])
     registry = FakeRegistry(tmp_path)
     registry._FileLock = lambda path: None
-    with pytest.raises(api.TokenError) as raised:
+    with pytest.raises(api.core.TokenError) as raised:
         _take(tmp_path, ["chat"], registry=registry)
     assert raised.value.status == 501
     assert _entries(tmp_path) == [_entry("chat")]
@@ -254,7 +254,7 @@ def test_a_lock_that_is_not_a_context_manager_is_unsupported(tmp_path):
 
 def test_an_unreadable_registry_is_never_guessed(tmp_path):
     _seed(tmp_path, [_entry("chat")])
-    with pytest.raises(api.TokenError) as raised:
+    with pytest.raises(api.core.TokenError) as raised:
         _take(tmp_path, ["chat"], registry=FakeRegistry(tmp_path, unreadable=True))
     assert raised.value.status == 503
     assert _entries(tmp_path) == [_entry("chat")]
@@ -265,9 +265,9 @@ def test_an_unreadable_registry_is_never_guessed(tmp_path):
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
-    api._takeover_limiter = api._MintLimiter(api.TAKEOVER_LIMIT, api.TAKEOVER_WINDOW_S)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    monkeypatch.setattr(api, "_takeover_modules", lambda: (FakeRegistry(tmp_path), FakeTurnMarker()))
+    api.chats._takeover_limiter = api.core._MintLimiter(api.chats.TAKEOVER_LIMIT, api.chats.TAKEOVER_WINDOW_S)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    monkeypatch.setattr(api.chats, "_takeover_modules", lambda: (FakeRegistry(tmp_path), FakeTurnMarker()))
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
@@ -291,9 +291,9 @@ def test_route_rejects_bad_ids(client, body):
 
 def test_route_reports_an_unsupported_hermes(monkeypatch, client):
     def missing():
-        raise api.TokenError(501, "This Hermes version has no chat ownership registry")
+        raise api.core.TokenError(501, "This Hermes version has no chat ownership registry")
 
-    monkeypatch.setattr(api, "_takeover_modules", missing)
+    monkeypatch.setattr(api.chats, "_takeover_modules", missing)
     assert client.post(f"{BASE}/sessions/takeover", json={"session_ids": ["chat"]}).status_code == 501
 
 
@@ -329,7 +329,7 @@ _MARKER = {"read_turn_marker": lambda home, key: None, "marker_writer_state": la
 
 def test_probe_accepts_the_expected_shape(monkeypatch):
     registry, marker = _install(monkeypatch, _REGISTRY, _MARKER)
-    assert api._takeover_modules() == (registry, marker)
+    assert api.chats._takeover_modules() == (registry, marker)
 
 
 @pytest.mark.parametrize("registry_attrs, marker_attrs", [
@@ -342,8 +342,8 @@ def test_probe_accepts_the_expected_shape(monkeypatch):
 ])
 def test_probe_refuses_a_different_shape(monkeypatch, registry_attrs, marker_attrs):
     _install(monkeypatch, registry_attrs, marker_attrs)
-    with pytest.raises(api.TokenError) as raised:
-        api._takeover_modules()
+    with pytest.raises(api.core.TokenError) as raised:
+        api.chats._takeover_modules()
     assert raised.value.status == 501
 
 
@@ -377,8 +377,8 @@ def test_an_abandoned_takeover_writes_nothing(tmp_path):
     _seed(tmp_path, [_entry("chat")])
     abandoned = threading.Event()
     abandoned.set()
-    with pytest.raises(api.TokenError) as raised:
-        api.take_over_session(["chat"], registry=FakeRegistry(tmp_path), turn_marker=FakeTurnMarker(),
+    with pytest.raises(api.core.TokenError) as raised:
+        api.chats.take_over_session(["chat"], registry=FakeRegistry(tmp_path), turn_marker=FakeTurnMarker(),
                               home=tmp_path, own_pid=OWN_PID, abandoned=abandoned)
     assert raised.value.status == 504
     assert _entries(tmp_path) == [_entry("chat")]
@@ -395,16 +395,16 @@ def test_a_takeover_abandoned_while_deciding_writes_nothing(tmp_path):
             abandoned.set()
             return None
 
-    with pytest.raises(api.TokenError):
-        api.take_over_session(["chat"], registry=FakeRegistry(tmp_path), turn_marker=AbandonDuringRead(),
+    with pytest.raises(api.core.TokenError):
+        api.chats.take_over_session(["chat"], registry=FakeRegistry(tmp_path), turn_marker=AbandonDuringRead(),
                               home=tmp_path, own_pid=OWN_PID, abandoned=abandoned)
     assert _entries(tmp_path) == [_entry("chat")]
 
 
 def test_a_hermes_without_its_home_helper_is_unsupported(monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_constants", types.ModuleType("hermes_constants"))
-    with pytest.raises(api.TokenError) as raised:
-        api._takeover_home()
+    with pytest.raises(api.core.TokenError) as raised:
+        api.chats._takeover_home()
     assert raised.value.status == 501
 
 

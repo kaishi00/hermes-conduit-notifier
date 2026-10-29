@@ -496,21 +496,33 @@ def test_a_home_without_the_log_reader_sends_nothing(copies, caplog):
     assert sum("can't send copies" in record.message for record in caplog.records) == 1
 
 
-def test_forget_deletes_a_copy(copies):
+def test_forget_deletes_a_copy_once_the_room_is_over(copies):
     room_id = started(copies, links=("link1",))
     copies.furina.pass_once()
 
+    # Still in it: its posts and their framing need it (leave first).
+    with pytest.raises(copies_module.CopiesError) as refused:
+        copies_module.forget(copies.tmp_path / "laifu", room_id)
+    assert (refused.value.code, refused.value.status) == ("still_in", 409)
+    assert copy_of(copies, "laifu", room_id)["last_seq"] == 1
+
+    copies.furina.disbanded(room_id)
+    for _ in range(3):
+        copies.furina.pass_once()
+        copies.laifu.pass_once()
     assert copies_module.forget(copies.tmp_path / "laifu", room_id) == {"room_id": room_id, "forgotten": True}
 
     assert copies_module.copies(copies.tmp_path / "laifu") == []
     assert copies_module.forget(copies.tmp_path / "laifu", room_id) == {"room_id": room_id, "forgotten": False}
-    # The next page has a gap there; its answer says the copy holds nothing, and the home starts it again.
-    say(copies, room_id, "Still there?")
+
+
+def test_forget_refuses_a_room_this_hermes_hosts(copies):
+    room_id = started(copies, links=("link1",))
     copies.furina.pass_once()
-    assert copies_module.copies(copies.tmp_path / "laifu") == []
-    assert _sent(copies, "room.copied")[-1][1]["seq"] == 0
-    copies.furina.pass_once()
-    assert copy_of(copies, "laifu", room_id)["last_seq"] == 2
+
+    with pytest.raises(copies_module.CopiesError) as refused:
+        copies_module.forget(copies.tmp_path / "furina", room_id)
+    assert (refused.value.code, refused.value.status) == ("hosted", 409)
 
 
 def test_the_log_reads_a_page_at_a_time(copies):
@@ -541,11 +553,13 @@ def test_the_list_says_which_agents_of_yours_are_in_it(copies):
     assert shown["yours"] == [{"member_id": slot("link1", 1), "profile": "default", "handle": "laifu"}]
     assert shown["started_at"] == int(NOW) and shown["updated_at"] == NOW
     assert (shown["reason"], shown["ended_at"]) == (None, None)
-    # Its invite forgotten a month after it ended, the copy stays, with what the copy knows.
+    # Its invite forgotten a month after it ended, the copy stays, with what the copy knows: your agents too.
     with invites_module.Store(copies.tmp_path / "laifu").update() as state:
         state["invites"].clear()
     shown = copy_of(copies, "laifu", room_id)
-    assert (shown["status"], shown["yours"], shown["from"], shown["started_at"]) == ("ended", [], "Furina", None)
+    assert (shown["status"], shown["yours"], shown["from"], shown["started_at"]) == (
+        "left", [{"member_id": slot("link1", 1), "profile": "default", "handle": "laifu"}], "Furina", None)
+    assert all(copies_module.YOURS not in member for member in shown["members"])
 
 
 # --- Routes ---------------------------------------------------------------------------------
@@ -553,8 +567,8 @@ def test_the_list_says_which_agents_of_yours_are_in_it(copies):
 
 @pytest.fixture
 def client(copies, monkeypatch):
-    monkeypatch.setattr(api, "_room_links_root", lambda: copies.tmp_path / "laifu")
-    monkeypatch.setattr(api, "_start_room_handlers", lambda root: None)
+    monkeypatch.setattr(api.linked_rooms, "_room_links_root", lambda: copies.tmp_path / "laifu")
+    monkeypatch.setattr(api.linked_rooms, "_start_room_handlers", lambda root: None)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)
@@ -572,10 +586,16 @@ def test_the_routes_list_read_and_forget_copies(copies, client):
     assert read.json()["ok"] and texts(read.json()) == ["Hi"]
     missing = client.get(f"{BASE}/rooms/copies/log", params={"room_id": "conduit-other"})
     assert (missing.status_code, missing.json()["code"]) == (404, "no_copy")
+    refused = client.delete(f"{BASE}/rooms/copies", params={"room_id": room_id})
+    assert (refused.status_code, refused.json()["code"]) == (409, "still_in")
+    copies.furina.disbanded(room_id)
+    for _ in range(3):
+        copies.furina.pass_once()
+        copies.laifu.pass_once()
     gone = client.delete(f"{BASE}/rooms/copies", params={"room_id": room_id})
     assert gone.json() == {"ok": True, "room_id": room_id, "forgotten": True}
     assert client.get(f"{BASE}/rooms/copies").json()["copies"] == []
-    assert "room-copies" in api.ROUTE_CAPABILITIES
+    assert "room-copies" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def test_the_cli_lists_copies(copies, capsys):
@@ -593,12 +613,60 @@ def test_the_cli_lists_copies(copies, capsys):
     assert cli._room_copies("conduit-other", copies.tmp_path / "laifu") == 1
 
 
-def test_the_cli_says_so_when_a_copy_is_unreadable(copies, capsys):
-    room_id = started(copies, links=("link1",))
+def test_a_corrupt_copy_row_is_skipped(copies, caplog):
+    first = started(copies, links=("link1",))
+    second = started(copies, links=("link1",))
+    say(copies, second, "Saturday?")
     copies.furina.pass_once()
     with sqlite3.connect(copies_module.path(copies.tmp_path / "laifu")) as conn:
-        conn.execute("UPDATE conduit_room_copies SET state_json='{' WHERE room_id=?", (room_id,))
-    cli = _load("conduit_push.cli", ROOT / "cli.py")
+        conn.execute("UPDATE conduit_room_copies SET state_json='{' WHERE room_id=?", (first,))
+        conn.execute("UPDATE hosted_room_replica_events SET payload_json='{' WHERE room_id=? AND seq=1", (second,))
 
-    assert cli._room_copies("", copies.tmp_path / "laifu") == 1
-    assert "Couldn't show them" in capsys.readouterr().out
+    assert [each["room_id"] for each in copies_module.copies(copies.tmp_path / "laifu")] == [second]
+    assert [event["seq"] for event in log_of(copies, "laifu", second)["events"]] == [2]
+    assert log_of(copies, "laifu", second)["cursor"] == 2
+    assert "skipped its copy of room" in caplog.text and "skipped an event of room" in caplog.text
+
+
+def test_a_copy_path_with_a_question_mark_reads(copies, tmp_path):
+    root = tmp_path / "odd?home#1"
+    file = copies_module.path(root)
+    file.parent.mkdir(parents=True)
+    ingest_page(file, room_id="conduit-odd", room_name="Odd", members=[], page={
+        "events": [{"seq": 1, "event_id": "e1", "kind": "room.created", "actor": {"kind": "system", "id": "x"},
+                    "authority_epoch": 1, "payload": {}, "created_at": NOW}],
+        "latest_seq": 1, "authority": {"gateway_id": FURINA, "epoch": 1}})
+
+    assert [event["seq"] for event in copies_module.log(root, "conduit-odd")["events"]] == [1]
+
+
+def test_a_copy_kept_before_it_noted_your_agents_notes_them_while_its_invite_lasts(copies):
+    import sqlite3
+
+    room_id = started(copies, links=("link1",))
+    copies.furina.pass_once()
+    file = copies_module.path(copies.tmp_path / "laifu")
+    with sqlite3.connect(file) as conn:  # as 0.115 kept it
+        [(members,)] = conn.execute("SELECT members_json FROM conduit_room_copies WHERE room_id=?", (room_id,))
+        old = [{key: value for key, value in member.items() if key != copies_module.YOURS}
+               for member in json.loads(members)]
+        conn.execute("UPDATE conduit_room_copies SET members_json=? WHERE room_id=?", (json.dumps(old), room_id))
+
+    copy_of(copies, "laifu", room_id)  # read while the invite lasts
+    with invites_module.Store(copies.tmp_path / "laifu").update() as state:
+        state["invites"].clear()
+
+    assert [agent["handle"] for agent in copy_of(copies, "laifu", room_id)["yours"]] == ["laifu"]
+
+
+def test_a_copy_your_agents_left_stays_left_once_its_invite_is_forgotten(copies):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    copies.laifu.leave("link1", room_id, None)
+    copies.furina.pass_once()
+    with invites_module.Store(copies.tmp_path / "laifu").update() as state:
+        state["invites"].clear()
+
+    shown = copy_of(copies, "laifu", room_id)
+
+    assert (shown["status"], shown["reason"]) == ("left", "left")

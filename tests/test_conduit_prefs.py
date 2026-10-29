@@ -171,7 +171,7 @@ def test_the_file_is_private(tmp_path):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)

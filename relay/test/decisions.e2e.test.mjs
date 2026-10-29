@@ -784,7 +784,7 @@ test('a phone with a PushKit token gets a call as a VoIP push and can stop ringi
   try {
     assert.deepEqual(await register('nope'), { status: 400, json: { error: 'invalid_voip_token' } });
     assert.equal((await register('9'.repeat(64))).json.installation.voip, true);
-    assert.deepEqual(await send('call:000000000000000000000011'), { status: 202, json: { accepted: true, delivered: true, rang: true } });
+    assert.deepEqual(await send('call:000000000000000000000011'), { status: 202, json: { accepted: true, delivered: true, rang: true, watch: false } });
     assert.equal((await register(null)).json.installation.voip, false, 'null stops it ringing');
     assert.deepEqual(await send('call:000000000000000000000012'), { status: 202, json: { accepted: true, delivered: true } });
     const meta = await api(base, '/v1/meta', { credential: device });
@@ -864,7 +864,7 @@ test('a paired Watch rings too, and whichever device answers stops the other', a
     const meta = await api(base, '/v1/meta', { credential: device });
     assert.ok(meta.json.capabilities.includes('watch-calls'));
 
-    assert.deepEqual(await send('call:000000000000000000000031'), { status: 202, json: { accepted: true, delivered: true, rang: true } });
+    assert.deepEqual(await send('call:000000000000000000000031'), { status: 202, json: { accepted: true, delivered: true, rang: true, watch: true } });
     const [phone, watch] = captured();
     assert.equal(phone.deviceToken, '9'.repeat(64));
     assert.equal(phone.notification.topic, 'com.milim.relay.voip');
@@ -968,7 +968,7 @@ for (const [failure, forgotten] of [['Unregistered', true], ['DeviceTokenNotForT
         credential: `${created.installation.id}.${claim.gatewayId}.${claim.gatewaySecret}`,
         body: { type: 'call.requested', event_id: 'call:000000000000000000000041', session_id: 'st-1', call: { id: '000000000000000000000041', kind: 'done', session_ids: ['st-1'] } },
       });
-      assert.deepEqual(response, { status: 202, json: { accepted: true, delivered: true, rang: true } });
+      assert.deepEqual(response, { status: 202, json: { accepted: true, delivered: true, rang: true, watch: true } });
       const current = await api(base, `/v1/installations/${created.installation.id}`, { method: 'PUT', credential: `${created.installation.id}.${created.deviceSecret}`, body: {} });
       // A wrong APNS_WATCH_TOPIC must not cost every Watch its token.
       assert.equal(current.json.installation.watch_voip, !forgotten);

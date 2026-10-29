@@ -15,12 +15,14 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
-               desktop_selected, health_tool, inbox_tool, live_activity, location_tool, maps_tool, phone_tool,
-               present_tool, pulse, reply_sources, review_notices, room_cleanup, room_cutoff, room_identity,
-               room_invites, room_memory, room_planner, room_rules, room_wakeups, settings_tool, show_tool,
-               turn_surface, voice_archive)
+               desktop_selected, forks, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity,
+               location_tool, maps_tool, notify_tool, phone_tool, present_tool, pulse, reply_sources, review_notices,
+               room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
+               room_memory, room_planner, room_posts, room_rules, room_tool,
+               room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
+from .present_store import PresentStore
 from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
 
 
@@ -81,6 +83,10 @@ def register(ctx: Any) -> None:
     # An open chat's self-improvement updates follow the setting as it is
     # now, not as it was when the chat opened (review_notices).
     review_notices.install()
+    # A fork of a chat (the self-improvement review, /btw, Conduit's
+    # predictions) shares the chat's session id: its turn is never the
+    # chat's (forks).
+    forks.install()
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
@@ -112,6 +118,9 @@ def register(ctx: Any) -> None:
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
     show_tool.register(ctx, is_child=_is_child)
+    # Hermes writes the title and body of the push its turn sends when it
+    # ends, for a result the user asked to be told about (#1415).
+    notify_tool.register(ctx, is_child=_is_child)
     # Health data Conduit shares from Apple Health, read-only, with its skill.
     health_tool.register(ctx, is_child=_is_child,
                          skill_path=Path(__file__).resolve().parent / "skills" / health_tool.SKILL_NAME / "SKILL.md")
@@ -128,6 +137,14 @@ def register(ctx: Any) -> None:
     # changes the phone applies (the user approves them there), and the skill.
     phone_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
                         skill_path=Path(__file__).resolve().parent / "skills" / phone_tool.SKILL_NAME / "SKILL.md")
+    # The user's rooms with other people (Linked Rooms), read for them in
+    # their private chats; never in a room turn.
+    room_tool.register(ctx, is_child=_is_child)
+    # Ask me first: in a room with other people's agents, the agent asks its
+    # owner's phone before it shares something personal; only room turns.
+    room_asks.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    room_free_busy.register(ctx, is_child=_is_child)
+    link_ask_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
@@ -193,15 +210,19 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     block = _room_tool_block(kwargs)
     if block is not None:
         return block
-    if _is_child(kwargs.get("session_id")):
+    child = _is_child(kwargs.get("session_id"))
+    fork = forks.inside()
+    if child and not fork:
         return None
     # A Pulse turn may only look things up (pulse_tools). Fails closed:
     # Hermes blocks the call when this hook raises, so the check is outside
-    # _quietly.
+    # _quietly. A fork of the chat is held by it like any turn of the chat.
     block = pulse.pre_tool_call(_text(kwargs.get("session_id")), kwargs.get("turn_id"), kwargs.get("tool_name"),
                                 kwargs.get("args"))
     if block is not None:
         return block
+    if child:
+        return None  # a fork: nothing on the Lock Screen, and no question of the chat's
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
     if kwargs.get("tool_name") != "clarify":
         return
@@ -283,10 +304,15 @@ def _member_room_turn(session_id: str) -> bool:
 
 
 def _post_llm_call(**kwargs: Any) -> None:
+    if forks.inside():
+        return
     session_id = _text(kwargs.get("session_id"))
     response = kwargs.get("assistant_response")
     if _is_child(session_id):
         return
+    # A room turn that replied read its owner's answers (room_asks), heard once on_session_end says it didn't fail.
+    _quietly(room_asks.replied, session_id, isinstance(response, str) and bool(response.strip()))
+    _quietly(link_ask_tool.replied, session_id, isinstance(response, str) and bool(response.strip()))
     # The Lock Screen's end waits for on_session_end too: this hook also runs
     # for a failed turn, and the first end the phone gets is the one it keeps.
     started = _take_turn_start(kwargs.get("turn_id"))
@@ -300,9 +326,16 @@ def _post_llm_call(**kwargs: Any) -> None:
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
              or _member_room_turn(session_id))
     chat_title = "" if quiet or pulse_turn else _session_title(session_id)
+    # What the turn wrote for its push with conduit_notify, taken whatever
+    # happens so it never rides a later turn's reply.
+    headline = notify_tool.take(session_id, kwargs.get("turn_id"))
     # A Pulse push is titled by what it brings, not by Pulse's hidden chat.
-    copy = (pulse.push_copy(session_id, kwargs.get("turn_id"), response) if pulse_turn and not quiet
-            else {"title": chat_title, "title_label": "response.ready", "body": response})
+    if pulse_turn and not quiet:
+        copy = pulse.push_copy(session_id, kwargs.get("turn_id"), response)
+    elif headline and not pulse_turn:
+        copy = {"title": headline[0], "title_label": "response.ready", "body": headline[1], "headline": headline[0]}
+    else:
+        copy = {"title": chat_title, "title_label": "response.ready", "body": response}
     ready = None if quiet else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
@@ -313,6 +346,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         title_label=copy["title_label"],
         session_title=chat_title,
         body=plain_text(copy["body"]),
+        headline=copy.get("headline", ""),
         count=copy.get("count"),
         level=copy.get("level"),
         private=copy.get("private") is True,
@@ -452,6 +486,7 @@ def _unload() -> None:
     room_cleanup.uninstall()
     room_rules.forget()
     review_notices.uninstall()
+    forks.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
     client.stop(timeout=max(0.0, deadline - time.monotonic()))
@@ -509,10 +544,15 @@ def _on_session_end(**kwargs: Any) -> None:
     # any turn with text, a failed one too): the one place a watched job's
     # failure or stop shows up, and where a held reply goes out.
     session_id = _text(kwargs.get("session_id"))
+    if forks.inside():
+        # Only when it started is forgotten, as for any turn's end (pre_llm_call).
+        _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
+        return
     if _is_child(session_id):
         return
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
+    notify_tool.drop(session_id)
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
@@ -520,6 +560,10 @@ def _on_session_end(**kwargs: Any) -> None:
     # that doesn't say counts it failed, as before.
     answered = (not kwargs.get("interrupted") and kwargs.get("failed") is not True
                 and (kwargs.get("completed") or kwargs.get("failed") is False))
+    # A room turn's owner's answers are heard when it answered; a failed or stopped one, or one Hermes doesn't say
+    # (its held reply is dropped too), is framed with them again.
+    _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
+    _quietly(_link_asks_ended, session_id, answered)
     if not pulse_turn:
         # A Pulse turn never started a Live Activity, so there is none to end.
         _quietly(live_activity.reporter.turn_ended, session_id,
@@ -527,6 +571,12 @@ def _on_session_end(**kwargs: Any) -> None:
     if answered:
         if not _settle_ready(session_id, kwargs.get("turn_id"), "done"):
             calls.turn_ended(session_id, "done", profile=_profile, fallback=None)
+        # A voice job's chat leaves Desktop's list once Hermes has answered
+        # what voice asked there (hermes-conduit#1124).
+        try:
+            voice_archive.archive_answered_job(get_hermes_home(), session_id)
+        except Exception:  # noqa: BLE001 — a hook must never break the turn
+            logger.debug("conduit_push: voice job archive check failed", exc_info=True)
         return
     _settle_ready(session_id, kwargs.get("turn_id"), "dropped")
     if kwargs.get("interrupted"):
@@ -560,7 +610,9 @@ def _on_session_end(**kwargs: Any) -> None:
 
 
 def _pre_approval_request(**kwargs: Any) -> None:
-    if kwargs.get("surface") == "smart":
+    # A fork's approval isn't the chat's to ask: Hermes denies it for the
+    # review, and the predict route refuses every tool.
+    if kwargs.get("surface") == "smart" or forks.inside():
         return
     session_id = _text(kwargs.get("session_key"))
     description = _text(kwargs.get("description"))
@@ -613,6 +665,8 @@ def _pre_approval_request(**kwargs: Any) -> None:
 
 
 def _post_approval_response(**kwargs: Any) -> None:
+    if forks.inside():
+        return  # a fork's answer is no answer to the chat's approval (_pre_approval_request)
     session_key = _text(kwargs.get("session_key"))
     calls.cancel_alerts(session_key or _text(kwargs.get("session_id")), "approval")
     _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)
@@ -750,6 +804,10 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)
+    if forks.inside():
+        # Pulse holds a fork of its home chat as it holds the chat's turns:
+        # only one that started after its attempt (pulse._held_home_turn).
+        _quietly(pulse.note_started, session_id, kwargs.get("turn_id"))
     pulse_note = None if child else _pulse_note(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
     if pulse_note:
         # Pulse's own turn: no Lock Screen progress, and only its note.
@@ -767,7 +825,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
             logger.debug("conduit_push: voice chat un-archive check failed", exc_info=True)
     # A room with other people's agents gets its owner's rules and nothing
     # else: the notes below carry the owner's own data and calls.
-    room_framing = _room_framing(session_id, kwargs.get("platform"))
+    room_framing = _room_framing(session_id, kwargs.get("platform"), kwargs.get("user_message"))
     if room_framing:
         return {"context": room_framing}
     notes = [
@@ -776,9 +834,47 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _voice_persona_note(kwargs.get("conversation_history")),
         # Subagents can't use the shared data (each tool refuses them).
         None if child else conduit_first.note(),
+        # A room's private chat is told which room it's about (room_chats).
+        None if child else _room_chat_note(session_id),
+        # What linked people answered this chat's asks since (link_ask_tool), once.
+        None if child else _link_answers_note(session_id),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _link_asks_ended(session_id: str, answered: bool) -> None:
+    """A private turn's answers from linked people are heard when it answered (link_ask_tool)."""
+    link_ask_tool.ended(_LazyAsks(), session_id, answered)
+
+
+class _LazyAsks:
+    """The installation's asks, read only when a turn has answers to mark heard."""
+
+    def mark_heard(self, ask_ids: Any) -> None:
+        link_asks.Asks(room_identity.root_home(get_hermes_home())).mark_heard(ask_ids)
+
+
+def _link_answers_note(session_id: str) -> str | None:
+    try:
+        home = get_hermes_home()
+        if not (room_identity.root_home(home) / room_identity.DIRECTORY / link_asks.FILE_NAME).exists():
+            return None
+        lines = link_ask_tool.frame(link_asks.Asks(room_identity.root_home(home)), _profile, session_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn; the answers wait for the next one
+        logger.debug("conduit_push: couldn't read the answers to this chat's asks", exc_info=True)
+        return None
+    if not lines:
+        return None
+    return "Answers to your asks to linked people (conduit_ask_linked):" + "".join(f"\n- {line}" for line in lines)
+
+
+def _room_chat_note(session_id: str) -> str | None:
+    try:
+        return room_chats.note(session_id, get_hermes_home())
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: room chat note failed", exc_info=True)
+        return None
 
 
 def _transform_tool_result(**kwargs: Any) -> str | None:
@@ -842,11 +938,19 @@ def _in_room_with_others(session_id: str, platform: Any = None) -> bool:
     return turn is not None and turn.with_others
 
 
-def _room_framing(session_id: str, platform: Any = None) -> str | None:
+def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> str | None:
     """Who's asking and what the owner allows, for a turn in a room with
-    other people's agents (room_rules.py); None for any other turn."""
+    other people's agents (room_rules.py); None for any other turn. On a
+    member's Hermes, the turn's ``prompt`` is checked for lines under its
+    owner's name that they didn't post (room_posts.py)."""
     if not session_id:
         return None
+    # A turn starts: only what this turn is framed with or given is heard when it replies (room_asks). A delegated
+    # child's turn is the room's agent at work, never the room's turn: it neither hears nor is framed with answers.
+    # Nor is a fork of the chat (forks), so the turn keeps the answers it was framed with.
+    child = _is_child(session_id)
+    if not child:
+        _quietly(room_asks.begin, lambda: PresentStore(get_hermes_home()), session_id)
     try:
         home = get_hermes_home()
     except Exception:  # noqa: BLE001
@@ -869,13 +973,49 @@ def _room_framing(session_id: str, platform: Any = None) -> str | None:
         choices = room_rules.choices_for(turn, home)
     except Exception:  # noqa: BLE001 — the tools stay blocked; the careful defaults frame the turn
         choices = room_rules.RoomChoices()
-    people = None
+    people, posts, unread = None, None, False
+    if turn.side == "member" and not turn.room_id:
+        # Hermes titles a member's session with its room in a second write: until then who's who can't be read.
+        unread = True
+        _warn_room_once("title", "conduit_push: room session %s isn't titled with its room yet; its framing says "
+                                 "the user's lines may be anyone's", session_id, exc_info=False)
     if turn.room_id and home is not None:
+        root = room_identity.root_home(home)
         try:
-            people = room_invites.people(room_identity.root_home(home), turn.room_id)
-        except Exception:  # noqa: BLE001 — framed without owners' names
-            logger.debug("conduit_push: couldn't read who's who in room %s", turn.room_id, exc_info=True)
-    return room_rules.framing(turn, choices, people)
+            people = room_invites.people(root, turn.room_id, strict=True)
+        except Exception:  # noqa: BLE001 — framed without owners' names, and told the user's lines may be anyone's
+            unread = True
+            _warn_room_once("people", "conduit_push: couldn't read who's who in room %s", turn.room_id)
+        if turn.side == "member" and people is not None and people.get("you"):
+            try:
+                posts = {"as": people["you"], "forged": room_posts.forged_for(
+                    root, turn.room_id, session_id, str(people["you"]), prompt)}
+                if not child and not room_rules.is_room_prompt(prompt):
+                    # Its lines under the owner's name can't be checked (a child's prompt is no room prompt).
+                    _warn_room_once("prompt", "conduit_push: a turn in room %s isn't Hermes' room prompt",
+                                    turn.room_id, exc_info=False)
+            except Exception:  # noqa: BLE001 — framed without checking its owner's lines, and told so
+                unread = True
+                _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
+    framing = room_rules.framing(turn, choices, people, posts, unread=unread)
+    if home is not None and turn.room_id and not child:
+        try:
+            # What the owner answered the agent's asks since (room_asks), once.
+            framing += "".join(f"\n- {line}" for line in room_asks.frame(PresentStore(home), turn.room_id,
+                                                                            session_id))
+        except Exception:  # noqa: BLE001 — the answers wait for the next turn
+            _warn_room_once("asks", "conduit_push: couldn't read the answers to session %s's asks", session_id)
+    return framing
+
+
+_room_warned: set[tuple[str, str]] = set()
+
+
+def _warn_room_once(what: str, message: str, room_id: str, exc_info: bool = True) -> None:
+    """Logs what a room's framing couldn't read at warning the first time, then at debug."""
+    level = logging.DEBUG if (what, room_id) in _room_warned else logging.WARNING
+    _room_warned.add((what, room_id))
+    logger.log(level, message, room_id, exc_info=exc_info)
 
 
 def _room_platform(platform: Any) -> bool:
@@ -999,8 +1139,10 @@ def _inside_delegated_child() -> bool:
 
 def _is_child(session_id: Any) -> bool:
     """Whether the session running now is a delegated child: Hermes'
-    delegation flag, else :func:`_is_child_session`."""
-    return _inside_delegated_child() or _is_child_session(session_id)
+    delegation flag, else :func:`_is_child_session`. A fork of a chat
+    (forks) counts as one: it runs under its chat's id, and nothing it does
+    is the chat's turn."""
+    return forks.inside() or _inside_delegated_child() or _is_child_session(session_id)
 
 
 def _is_child_session(session_id: Any) -> bool:

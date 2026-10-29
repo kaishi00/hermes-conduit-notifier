@@ -193,8 +193,8 @@ def test_a_bot_chat_push_is_titled_with_its_bot(sent, monkeypatch):
     monkeypatch.setitem(FakeSessionDB.titles, "bot", "Bot Chat")
     homes = iter([pathlib.Path("/h/.hermes/profiles/scout"), pathlib.Path("/h/.hermes")])
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: next(homes))
-    assert titles.title("bot") == "scout"
-    assert titles.title("bot") == "default"
+    assert titles.title("bot") == "Scout", "an unnamed bot by its id, capitalized as Conduit shows it"
+    assert titles.title("bot") == "Hermes", "an unnamed main bot by Conduit's name for it"
 
 
 def test_a_bot_chat_push_is_titled_with_the_name_the_bots_list_shows(sent, monkeypatch, tmp_path):
@@ -212,12 +212,16 @@ def test_a_bot_chat_push_is_titled_with_the_name_the_bots_list_shows(sent, monke
     titles._cache.clear()
     titles._names.clear()
     meta.write_text("description: x\n", encoding="utf-8")
-    assert titles.title("bot") == "default"
+    assert titles.title("bot") == "Hermes"
     assert titles.bot_name() == "", "an unnamed bot sends no name"
     titles._cache.clear()
     titles._names.clear()
+    meta.write_text("display_name: default\n", encoding="utf-8")
+    assert titles.title("bot") == "Hermes", "a name that is only the id names it no more than the id"
+    titles._cache.clear()
+    titles._names.clear()
     meta.write_text(": not yaml [", encoding="utf-8")
-    assert titles.title("bot") == "default"
+    assert titles.title("bot") == "Hermes"
     # A chat that isn't a Bot Chat keeps its own title.
     assert titles.title("s1") == "Infra"
 

@@ -34,7 +34,7 @@ from hermes_constants import get_hermes_home
 
 from . import e2e, link_status
 from .events import PLUGIN_VERSION, redact_event
-from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url
+from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url, replaced_pairing_query
 
 
 DEFAULT_RELAY_URL = "https://push.milim.dev"
@@ -69,7 +69,7 @@ def load_state() -> dict[str, Any] | None:
 
 
 def state_lock_path(path: Path) -> Path:
-    # dashboard/plugin_api.py locks the same file (_pairing_state_lock_path);
+    # dashboard/api/pairing.py locks the same file (_pairing_state_lock_path);
     # tests/test_e2e.py checks the two stay identical.
     return path.with_name(f".{path.name}.lock")
 
@@ -238,11 +238,11 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
         if previous.get("redact_key"):
             state["redact_key"] = previous["redact_key"]
         _write_state(state, path)
-    _revoke_replaced(previous, state["credential"])
+    _revoke_replaced(previous, state["credential"], state)
     return state
 
 
-def _revoke_replaced(previous: dict[str, Any], credential: str) -> None:
+def _revoke_replaced(previous: dict[str, Any], credential: str, current: dict[str, Any]) -> None:
     """Best-effort revoke of the credential a re-pair replaced: the relay
     mints a new gateway per claim, so the old one would stay live and take
     one of the phone's gateway slots (#250). The new pairing works either way."""
@@ -251,7 +251,8 @@ def _revoke_replaced(previous: dict[str, Any], credential: str) -> None:
         return
     try:
         url = check_request_url(f"{str(previous.get('relay_url') or '').rstrip('/')}/v1/gateways/current")
-        request_json(url, method="DELETE", credential=old, timeout=5.0)
+        # Checked without the query, which is ours (request_json refuses any).
+        _request(url + replaced_pairing_query(previous, current), method="DELETE", credential=old, timeout=5.0)
     except RelayRejected as error:
         if error.status != 401:
             logger.info("Conduit relay did not revoke the replaced pairing: %s", error)
@@ -917,7 +918,7 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
                 logger.info("Conduit notification for %s not sent: the relay doesn't take it yet",
                             event.get("type", "event"))
                 return False
-            _send(event, state, timeout=timeout)
+            answer = _send(event, state, timeout=timeout)
         except Exception as error:
             if delay is not None and _worth_retrying(error) and clock() - started + delay <= RETRY_BUDGET:
                 logger.info("Conduit notification delivery for %s will be retried: %s", event.get("type", "event"), error)

@@ -109,7 +109,7 @@ def paired(tmp_path, monkeypatch):
     path = tmp_path / "conduit-push.json"
     monkeypatch.setattr(client, "state_path", lambda: path)
     monkeypatch.setattr(cli, "load_state", client.load_state)
-    monkeypatch.setattr(api, "_pairing_state_path", lambda: path)
+    monkeypatch.setattr(api.core, "_pairing_state_path", lambda: path)
     # Retries without the real waits.
     monkeypatch.setattr(client, "RETRY_DELAYS", (0.01, 0.01, 0.01), raising=False)
     client._refusals.clear()
@@ -219,7 +219,7 @@ def test_a_relay_401_is_recorded_for_status_and_keeps_the_pairing(paired, capsys
     state = client.load_state()
     assert state["relay_rejected_at"]
     assert state["credential"] == "inst.gw.secret" and state["redact_key"] == "k" * 64
-    assert api.e2e_status()["relay_rejected"] is True
+    assert api.pairing.e2e_status()["relay_rejected"] is True
     assert cli.dispatch(types.SimpleNamespace(conduit_push_action="status")) == 0
     assert "relay refused this pairing's credential" in capsys.readouterr().out
 
@@ -229,7 +229,7 @@ def test_a_relay_401_is_recorded_for_status_and_keeps_the_pairing(paired, capsys
     _deliver(_event())
 
     assert "relay_rejected_at" not in client.load_state()
-    assert api.e2e_status()["relay_rejected"] is False
+    assert api.pairing.e2e_status()["relay_rejected"] is False
     assert cli.dispatch(types.SimpleNamespace(conduit_push_action="status")) == 0
     assert "relay refused" not in capsys.readouterr().out
 
@@ -337,7 +337,7 @@ def test_a_bare_403_says_the_host_is_blocked_not_to_pair_again(paired, capsys):
 
     state = client.load_state()
     assert state["relay_blocked_at"] and "relay_rejected_at" not in state
-    assert api.e2e_status()["relay_blocked"] is True and api.e2e_status()["relay_rejected"] is False
+    assert api.pairing.e2e_status()["relay_blocked"] is True and api.pairing.e2e_status()["relay_rejected"] is False
     assert cli.dispatch(types.SimpleNamespace(conduit_push_action="status")) == 0
     out = capsys.readouterr().out
     assert "empty 403" in out and "Pairing again won't help" in out and "ask whoever runs the relay" in out
@@ -347,7 +347,7 @@ def test_a_bare_403_says_the_host_is_blocked_not_to_pair_again(paired, capsys):
     _deliver(_event())
 
     assert "relay_blocked_at" not in client.load_state()
-    assert api.e2e_status()["relay_blocked"] is False
+    assert api.pairing.e2e_status()["relay_blocked"] is False
     assert cli.dispatch(types.SimpleNamespace(conduit_push_action="status")) == 0
     assert "empty 403" not in capsys.readouterr().out
 
@@ -437,8 +437,8 @@ def test_the_test_command_records_what_it_saw(paired, monkeypatch):
 
 def test_a_bom_before_the_relays_json_is_not_a_block():
     assert client.looks_like_json_object(b'\xef\xbb\xbf{"error":"forbidden"}')
-    assert api._looks_like_json_object(b' \xef\xbb\xbf{"error"')
-    assert not client.looks_like_json_object(b"") and not api._looks_like_json_object(b"<html>")
+    assert api.pairing._looks_like_json_object(b' \xef\xbb\xbf{"error"')
+    assert not client.looks_like_json_object(b"") and not api.pairing._looks_like_json_object(b"<html>")
 
 
 def test_the_newest_kind_of_refusal_replaces_the_other(paired, capsys):

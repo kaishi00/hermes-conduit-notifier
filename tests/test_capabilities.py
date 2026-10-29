@@ -33,7 +33,7 @@ def test_capabilities_report_the_manifest_version_and_route_features():
     body = response.json()
     manifest = re.search(r"^version:\s*(\S+)", (ROOT / "plugin.yaml").read_text(), re.M).group(1)
     assert body == {"ok": True, "version": manifest, "loaded_version": manifest, "restart_needed": False,
-                    "boot_id": api.BOOT_ID, "capabilities": list(api.ROUTE_CAPABILITIES)}
+                    "boot_id": api.capabilities.BOOT_ID, "capabilities": list(api.capabilities.ROUTE_CAPABILITIES)}
     assert "session-takeover" in body["capabilities"]
     # The dashboard manifest must carry the same version the route reports.
     assert json.loads((ROOT / "dashboard" / "manifest.json").read_text())["version"] == manifest
@@ -141,22 +141,27 @@ def test_every_capability_names_a_served_route_family():
         "room-leave": "/rooms/leave",
         "room-approvals": "/rooms/approvals",
         "room-copies": "/rooms/copies",
+        "room-posts": "/rooms/copies/messages",
+        "room-chats": "/rooms/chats",
         # ?conduit_profile= on the rooms routes that need the dashboard process, the setup's first.
         "room-dashboard-profiles": "/rooms/setup",
+        # Use my data's free/busy, set in the choices.
+        "room-free-busy": "/rooms/choices",
+        "link-asks": "/links/rules",
     }
-    assert set(prefixes) == set(api.ROUTE_CAPABILITIES)
+    assert set(prefixes) == set(api.capabilities.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():
         assert any(path.startswith(prefix) for path in paths), capability
 
 
 def test_an_unreadable_manifest_reports_no_version(monkeypatch):
-    monkeypatch.setattr(api.os.path, "dirname", lambda path: "/nonexistent")
-    assert api._plugin_version() is None
+    monkeypatch.setattr(api.capabilities.os.path, "dirname", lambda path: "/nonexistent")
+    assert api.capabilities._plugin_version() is None
 
 
 def test_a_newer_version_on_disk_reads_as_restart_needed(monkeypatch):
-    monkeypatch.setattr(api, "_plugin_version", lambda: "99.0.0")
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: "99.0.0")
     body = _client().get(f"{BASE}/capabilities").json()
     assert body["version"] == "99.0.0"
-    assert body["loaded_version"] == api.LOADED_VERSION != "99.0.0"
+    assert body["loaded_version"] == api.capabilities.LOADED_VERSION != "99.0.0"
     assert body["restart_needed"] is True

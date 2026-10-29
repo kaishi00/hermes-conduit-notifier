@@ -31,6 +31,42 @@ entry current.
 - Text that describes a behavior is one of its siblings: tool descriptions and
   results the models read, README.md, and the app's briefings and Settings text.
 
+## Dashboard routes
+
+Hermes loads `dashboard/plugin_api.py` by path (`dashboard/manifest.json`'s
+`api`). It only loads `dashboard/api/`, one module per feature, and lists
+them: the routes and the code behind them are in the modules
+(notifier#443). `tests/test_api_layout.py` holds these rules.
+
+- A route goes in its feature's module. A new feature gets a module of its
+  own: add it to `MODULES` in `dashboard/api/__init__.py` and to
+  plugin_api.py's list, in the same place.
+- A module takes another's names through the module: `from . import core` at
+  the top, then `core.TokenError`, never `from .core import TokenError`. So a
+  test that replaces `api.core._calls_home` replaces it for every module.
+- Every module is created before the first one runs, then they run in
+  `MODULES` order. A module's top-level statements (a base class, a default, a
+  constant made from another module's) may use only the modules above it; its
+  functions may use any of them.
+- Every route is on core's router (`router = core.router`), behind
+  `core._note_conduit_request`; no module makes a router of its own. No two
+  routes answer the same request, so the order never decides one.
+- What three or more features use goes in `core`.
+- A module stays under 150 KB, small enough for an agent or a reviewer to
+  read whole. Past that, give part of it a module of its own.
+- Tests and probes reach a name through its module:
+  `api.watch_jobs.WATCH_JOB_TOOLS`, `monkeypatch.setattr(api.core, "_calls_home", ...)`,
+  a probe's `hasattr(module.watch_audio, "_WatchAudioBridge")`.
+
+A branch that still has the single file runs `git fetch origin`, merges main
+from just before the split (f68d017), and takes the script from the split
+itself, since f68d017 doesn't have it:
+`git checkout 824948f -- scripts/split_plugin_api.py`. Then it runs
+`python3 scripts/split_plugin_api.py write`, commits, merges the split
+(824948f), where only its own changes conflict, and then merges main.
+Merging main straight after the write would show main's later changes to
+the modules as conflicts too.
+
 ## Plugin version
 
 A version bump changes `plugin.yaml` and `dashboard/manifest.json` together
@@ -54,9 +90,11 @@ push to main. To run them locally:
 
 `upstream/` runs the plugin against a real Hermes dashboard, so a Hermes change
 that breaks us shows up from the daily canary rather than from users
-(`.github/workflows/upstream-contract.yml`; it runs on PRs that touch
-`dashboard/` or `upstream/`, and every morning on the newest canary and
-release, opening one `upstream-break` issue per failure).
+(`.github/workflows/upstream-contract.yml`; it runs on every PR, and every
+morning on the newest canary and release, opening one `upstream-break` issue
+per failure). Every PR, because Hermes' install scan reads every file the
+plugin ships: `upstream/test_install_scan.py` fails on a finding that would
+hold the update, a README example included.
 
 - `upstream/contract.yml` lists the Hermes modules and names the plugin imports
   and the routes it serves. That part is generated: after adding a Hermes

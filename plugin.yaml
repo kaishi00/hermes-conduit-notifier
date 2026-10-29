@@ -1,6 +1,6 @@
 name: conduit_push
 manifest_version: 1
-version: 0.111.0
+version: 0.120.1
 description: "Send Hermes lifecycle notifications to Conduit devices."
 author: Hermes Conduit
 kind: standalone
@@ -29,6 +29,7 @@ provides_tools:
   - conduit_settings
   - conduit_present
   - conduit_show
+  - conduit_notify
   - conduit_health
   - conduit_inbox
   - conduit_location
@@ -36,5 +37,9 @@ provides_tools:
   - conduit_calendar
   - conduit_phone
   - conduit_contacts
+  - conduit_room
+  - conduit_ask_owner
+  - conduit_free_busy
+  - conduit_ask_linked
 provides_middleware:
   - tool_execution

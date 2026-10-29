@@ -11,6 +11,9 @@ watch_paths:
   - hermes_cli/web_server*.py
   - hermes_cli/web_routers/
   - hermes_cli/plugins*.py
+  - tools/plugin_guard*.py
+  - tools/plugin_guard/
+  - tools/skills_guard.py
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
   - hermes_cli/config*.py
@@ -54,6 +57,11 @@ notes:
     gateway.hosted_room_replicas.ingest_page (its ReplicaError refusals answered with what the copy
     holds), both loaded with importlib, so module_paths doesn't list them. Without them, no pages
     go and no copies are kept, with one log line.
+  Linked Rooms posts: >-
+    Posting in rooms other people host (feature map: "Linked Rooms"). The home names each post's
+    event with gateway.hosted_rooms.user_event_id (loaded with importlib) and posts it with the
+    running room service's HostedRoomService.send(room_id=, event_id=, payload={thread_id, text}),
+    as the room's user. Without them, every post is answered unavailable.
   workspace files: >-
     The Folder tab in Conduit's Artifacts (feature map: "Workspace files"). /workspace/* reads a
     profile's SSH workspace through hermes_cli.web_routers.files._fs_backend (and the adapter's
@@ -61,6 +69,10 @@ notes:
     hermes_cli.web_server_files._agent_fs_path, keeps a locked or hosted install's roots inside
     the folder _managed_files_policy names, and keeps out what _is_sensitive_path keeps out of
     Hermes' own file routes.
+  plugin install scan: >-
+    Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
+    every shipped file before an install or update; one high finding makes it caution, which the
+    update can't confirm, so hosts stay on the old version (hermes-conduit#1500).
 
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
@@ -249,7 +261,7 @@ module_paths:
   - tools/xai_http
   - tui_gateway
 
-# The plugin's routes under /api/plugins/conduit_push/, from dashboard/plugin_api.py.
+# The plugin's routes under /api/plugins/conduit_push/, from dashboard/.
 routes:
   - GET /artifacts
   - GET /calls
@@ -288,6 +300,9 @@ routes:
   - POST /inbox/list
   - GET /inbox/status
   - POST /inbox/wipe
+  - GET /links/asks
+  - GET /links/rules
+  - PUT /links/rules
   - POST /local-live/key
   - WS /local-live/socket
   - GET /local-live/status
@@ -350,11 +365,15 @@ routes:
   - PUT /room-images/{room_id}
   - GET /rooms/approvals
   - POST /rooms/approvals/answer
+  - GET /rooms/chats
+  - PUT /rooms/chats
   - GET /rooms/choices
   - PUT /rooms/choices
   - DELETE /rooms/copies
   - GET /rooms/copies
   - GET /rooms/copies/log
+  - GET /rooms/copies/messages
+  - POST /rooms/copies/messages
   - GET /rooms/defaults
   - PUT /rooms/defaults
   - DELETE /rooms/drafts

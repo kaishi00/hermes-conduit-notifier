@@ -1,7 +1,7 @@
 """End-to-end encryption of Conduit notification content (#431).
 
 Conduit creates a per-pairing root secret on the phone and hands it to this
-profile through the dashboard connection (dashboard/plugin_api.py), so it
+profile through the dashboard connection (dashboard/api/pairing.py), so it
 never passes through the push relay or APNs. From that secret both sides
 derive separate keys with HKDF-SHA256:
 
@@ -65,7 +65,7 @@ MAX_CT_CHARS = 2600
 # Fields that carry content. Everything else on an event stays visible to the
 # relay because it routes on it.
 INNER_FIELDS = ("title", "body", "session_id", "profile", "profile_name", "gateway", "stored_session_id", "decision", "call",
-                "locate", "maps", "title_label", "session_title", "count", "private", "room")
+                "locate", "maps", "title_label", "session_title", "headline", "count", "private", "room")
 # How much a reply push may interrupt (events.PUSH_LEVELS): routing beside the envelope.
 _PUSH_LEVELS = ("passive", "active", "time-sensitive")
 

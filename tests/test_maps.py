@@ -367,9 +367,9 @@ def test_a_phone_error_reads_plainly(home, monkeypatch):
 
 @pytest.fixture()
 def http(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     for name in ("_location_ingest_limiter", "_location_key_limiter", "_location_maps_limiter"):
-        monkeypatch.setattr(api, name, api._MintLimiter(1000, 60))
+        monkeypatch.setattr(api.phone_data, name, api.core._MintLimiter(1000, 60))
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)

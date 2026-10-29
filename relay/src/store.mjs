@@ -28,6 +28,8 @@ const defaultPreferences = Object.freeze({
   // is easy to miss; default on, with its own opt-out.
   attention_sound: true,
   show_previews: false,
+  // With previews off, still name the chat in the title (#1415).
+  show_chat_names: false,
   // Dedicated opt-out for structured decision content (answerable approval
   // cards) in the push payload. Deliberately independent of show_previews:
   // the feature's audience is exactly the approval-gate crowd, so cards
@@ -212,7 +214,7 @@ export class RelayStore {
     if (this.dirty) this.save();
   }
 
-  createInstallation({ bundleId, deviceToken, voipToken, watchVoipToken, locationToken, environment, preferences }) {
+  createInstallation({ bundleId, deviceToken, voipToken, watchVoipToken, wantedWatchVoipToken, locationToken, environment, preferences }) {
     this.assertInstallationCapacity();
     const id = randomUUID();
     const deviceSecret = randomBytes(32).toString('base64url');
@@ -227,6 +229,9 @@ export class RelayStore {
       // The paired Apple Watch's own PushKit token: a call rings there too
       // (rings.mjs). Absent without a Watch app that rings.
       ...(watchVoipToken ? { watchVoipToken } : {}),
+      // A Watch token another phone's installation still holds (see
+      // setWantedWatchVoipToken).
+      ...(wantedWatchVoipToken ? { wantedWatchVoipToken } : {}),
       // The phone's location push token: Hermes can ask it for a fresh
       // location (the phone answers its own host, never through here).
       ...(locationToken ? { locationToken } : {}),
@@ -358,8 +363,10 @@ export class RelayStore {
     installation.deviceToken = deviceToken;
     if (voipToken) installation.voipToken = voipToken;
     else delete installation.voipToken;
-    if (watchVoipToken) installation.watchVoipToken = watchVoipToken;
-    else delete installation.watchVoipToken;
+    if (watchVoipToken) {
+      installation.watchVoipToken = watchVoipToken;
+      delete installation.wantedWatchVoipToken;
+    } else delete installation.watchVoipToken;
     if (locationToken) installation.locationToken = locationToken;
     else delete installation.locationToken;
     installation.preferences = preferences;
@@ -394,6 +401,47 @@ export class RelayStore {
   clearLocationToken(id, token) {
     if (this.data.installations[id]?.locationToken !== token) return null;
     return this.updateInstallation(id, { locationToken: null });
+  }
+
+  // A Watch PushKit token this installation asked for while another active
+  // installation held it: the Watch moved here from that phone (or it is
+  // someone else's leaked token, which is why it isn't simply taken).
+  // Remembered so the pairing that moves here from that phone can bring it
+  // along (gatewayRevoked). null forgets it.
+  setWantedWatchVoipToken(id, token) {
+    const installation = this.data.installations[id];
+    if (!installation || (installation.wantedWatchVoipToken ?? null) === (token ?? null)) return;
+    if (token) installation.wantedWatchVoipToken = token;
+    else delete installation.wantedWatchVoipToken;
+    this.save();
+  }
+
+  // A host revoked one of `fromId`'s pairings, after pairing that profile
+  // with `replacedById` (null when it didn't say: an unpair, or an older
+  // plugin). The Watch rings for the phone it is paired with, so its token
+  // moves with the pairing when that installation asked for this very
+  // token; an installation the pairing moved away from that is left with
+  // none lets it go anyway, since nothing can ring it any more, and the
+  // phone that wants it takes it with its next registration update. An
+  // unpair keeps it, so pairing the same phone again rings the Watch too.
+  // 'moved', 'released' or null.
+  gatewayRevoked(fromId, replacedById) {
+    const from = this.data.installations[fromId];
+    const token = from?.watchVoipToken;
+    if (!token) return null;
+    const to = replacedById && replacedById !== fromId ? this.data.installations[replacedById] : undefined;
+    const moves = Boolean(to?.active && to.wantedWatchVoipToken === token);
+    if (!moves && (!to || Object.keys(from.gateways ?? {}).length > 0)) return null;
+    const now = new Date().toISOString();
+    delete from.watchVoipToken;
+    from.updatedAt = now;
+    if (moves) {
+      to.watchVoipToken = token;
+      delete to.wantedWatchVoipToken;
+      to.updatedAt = now;
+    }
+    this.save();
+    return moves ? 'moved' : 'released';
   }
 
   // The same for the Watch's PushKit token: the phone still rings.
@@ -900,6 +948,8 @@ function publicInstallation(installation) {
     preferences: installation.preferences,
     voip: Boolean(installation.voipToken),
     watch_voip: Boolean(installation.watchVoipToken),
+    // The Watch token it sent is held by another phone's installation.
+    ...(!installation.watchVoipToken && installation.wantedWatchVoipToken ? { watch_voip_elsewhere: true } : {}),
     location: Boolean(installation.locationToken),
     updated_at: installation.updatedAt,
   };

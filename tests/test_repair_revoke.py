@@ -47,14 +47,14 @@ def relay_calls(monkeypatch):
         calls.append((url, method, credential))
         return 204, {}
 
-    monkeypatch.setattr(api, "_relay_request", relay_request)
+    monkeypatch.setattr(api.watch_tools, "_relay_request", relay_request)
     # Runs the revoke inline, so it is checked without waiting.
-    monkeypatch.setattr(api, "_start_revoke_thread", lambda target: target())
+    monkeypatch.setattr(api.pairing, "_start_revoke_thread", lambda target: target())
     return calls
 
 
 def _pair(path, **body):
-    return api.pair_profile({"pairing_code": CODE, **body}, path=path, claim=lambda relay, code, name: dict(NEW))
+    return api.pairing.pair_profile({"pairing_code": CODE, **body}, path=path, claim=lambda relay, code, name: dict(NEW))
 
 
 def test_re_pairing_revokes_the_replaced_credential_at_its_relay(tmp_path, relay_calls):
@@ -77,9 +77,9 @@ def test_the_revoke_runs_on_its_own_daemon_thread(tmp_path, monkeypatch):
         def start(self):
             self.target()
 
-    monkeypatch.setattr(api, "_relay_request", lambda url, method, credential, payload, timeout:
+    monkeypatch.setattr(api.watch_tools, "_relay_request", lambda url, method, credential, payload, timeout:
                         calls.append((method, credential)) or (204, {}))
-    monkeypatch.setattr(api.threading, "Thread", Thread)
+    monkeypatch.setattr(api.watch_tools.threading, "Thread", Thread)
     path = tmp_path / "s.json"
     path.write_text(json.dumps({"credential": "inst-1.gw-1.old", "relay_url": "https://relay.example"}))
     _pair(path)
@@ -103,8 +103,8 @@ def test_a_failed_revoke_leaves_the_new_pairing_working(tmp_path, monkeypatch):
     def relay_request(*args):
         raise OSError("down")
 
-    monkeypatch.setattr(api, "_relay_request", relay_request)
-    monkeypatch.setattr(api, "_start_revoke_thread", lambda target: target())
+    monkeypatch.setattr(api.watch_tools, "_relay_request", relay_request)
+    monkeypatch.setattr(api.pairing, "_start_revoke_thread", lambda target: target())
     path = tmp_path / "s.json"
     path.write_text(json.dumps({"credential": "inst-1.gw-1.old", "relay_url": "https://relay.example"}))
     assert _pair(path)["paired"] is True
@@ -115,7 +115,7 @@ def test_no_thread_to_revoke_with_leaves_the_pairing_saved(tmp_path, monkeypatch
     def no_thread(target):
         raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(api, "_start_revoke_thread", no_thread)
+    monkeypatch.setattr(api.pairing, "_start_revoke_thread", no_thread)
     path = tmp_path / "s.json"
     path.write_text(json.dumps({"credential": "inst-1.gw-1.old", "relay_url": "https://relay.example"}))
     assert _pair(path)["paired"] is True
@@ -131,35 +131,35 @@ def test_a_loopback_revoke_skips_the_proxy(monkeypatch):
 
         def open(self, request, timeout):
             used.append(self.name)
-            raise api.urllib.error.HTTPError(request.full_url, 401, "u", {}, io.BytesIO(b"{}"))
+            raise api.watch_tools.urllib.error.HTTPError(request.full_url, 401, "u", {}, io.BytesIO(b"{}"))
 
-    monkeypatch.setattr(api, "_relay_opener", Opener("proxied"))
-    monkeypatch.setattr(api, "_direct_relay_opener", Opener("direct"))
-    api._relay_request("http://127.0.0.1:8787/v1/gateways/current", "DELETE", "c", None, 1)
-    api._relay_request("https://relay.example/v1/gateways/current", "DELETE", "c", None, 1)
+    monkeypatch.setattr(api.watch_tools, "_relay_opener", Opener("proxied"))
+    monkeypatch.setattr(api.watch_tools, "_direct_relay_opener", Opener("direct"))
+    api.watch_tools._relay_request("http://127.0.0.1:8787/v1/gateways/current", "DELETE", "c", None, 1)
+    api.watch_tools._relay_request("https://relay.example/v1/gateways/current", "DELETE", "c", None, 1)
     assert used == ["direct", "proxied"]
 
 
 def test_a_full_gateway_list_is_not_called_rate_limiting(monkeypatch):
     def fake_open(request, timeout):
-        raise api.urllib.error.HTTPError(request.full_url, 429, "Too Many", {},
+        raise api.watch_tools.urllib.error.HTTPError(request.full_url, 429, "Too Many", {},
                                          io.BytesIO(b'{"error":"gateway_limit_reached"}'))
 
-    monkeypatch.setattr(api._relay_opener, "open", fake_open)
-    with pytest.raises(api.TokenError) as raised:
-        api._claim_pairing("https://relay.example", CODE, "n")
+    monkeypatch.setattr(api.watch_tools._relay_opener, "open", fake_open)
+    with pytest.raises(api.core.TokenError) as raised:
+        api.pairing._claim_pairing("https://relay.example", CODE, "n")
     assert raised.value.status == 409
     assert "too many pairings" in str(raised.value) and "Notifications" in str(raised.value)
 
 
 def test_a_rate_limited_claim_still_says_try_again(monkeypatch):
     def fake_open(request, timeout):
-        raise api.urllib.error.HTTPError(request.full_url, 429, "Too Many", {},
+        raise api.watch_tools.urllib.error.HTTPError(request.full_url, 429, "Too Many", {},
                                          io.BytesIO(b'{"error":"rate_limited"}'))
 
-    monkeypatch.setattr(api._relay_opener, "open", fake_open)
-    with pytest.raises(api.TokenError) as raised:
-        api._claim_pairing("https://relay.example", CODE, "n")
+    monkeypatch.setattr(api.watch_tools._relay_opener, "open", fake_open)
+    with pytest.raises(api.core.TokenError) as raised:
+        api.pairing._claim_pairing("https://relay.example", CODE, "n")
     assert raised.value.status == 429
 
 
@@ -213,3 +213,44 @@ def test_the_cli_names_the_way_out_of_a_full_gateway_list(monkeypatch, capsys):
     assert cli.dispatch(args) == 1
     out = capsys.readouterr().out
     assert "gateway_limit_reached" in out and "turn notifications off and on" in out.lower()
+
+
+OLD_PHONE = "11111111-1111-4111-8111-111111111111"
+NEW_PHONE = "22222222-2222-4222-8222-222222222222"
+
+
+def test_a_re_pair_to_another_phone_names_it_so_the_watch_follows(tmp_path, relay_calls):
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"credential": f"{OLD_PHONE}.gw-1.old", "installation_id": OLD_PHONE,
+                                "relay_url": "https://relay.example"}))
+    api.pairing.pair_profile({"pairing_code": CODE}, path=path,
+                     claim=lambda relay, code, name: {**NEW, "installation_id": NEW_PHONE})
+    assert relay_calls == [(f"https://relay.example/v1/gateways/current?replaced_by={NEW_PHONE}", "DELETE",
+                            f"{OLD_PHONE}.gw-1.old")]
+
+
+def test_the_cli_re_pair_names_the_new_phone_too(monkeypatch, tmp_path):
+    path, calls = _client_requests(monkeypatch, tmp_path, {"credential": f"{OLD_PHONE}.gw-1.old",
+                                                           "installation_id": OLD_PHONE,
+                                                           "relay_url": "https://relay.example"})
+    monkeypatch.setattr(client, "_request", lambda url, *, method, payload=None, credential="", timeout:
+                        calls.append((url, method, credential)) or
+                        ({**NEW, "installation_id": NEW_PHONE} if method == "POST" else {}))
+    client.claim_pairing(CODE, "https://relay.example", "box")
+    assert calls[1] == (f"https://relay.example/v1/gateways/current?replaced_by={NEW_PHONE}", "DELETE",
+                        f"{OLD_PHONE}.gw-1.old")
+
+
+@pytest.mark.parametrize("previous, current", [
+    # The same phone re-paired: nothing moves.
+    ({"installation_id": NEW_PHONE, "relay_url": "https://relay.example"},
+     {"installation_id": NEW_PHONE, "relay_url": "https://relay.example"}),
+    # Another relay never learns this one's installations.
+    ({"installation_id": OLD_PHONE, "relay_url": "https://old.example"},
+     {"installation_id": NEW_PHONE, "relay_url": "https://relay.example"}),
+    # Not an installation id.
+    ({"installation_id": OLD_PHONE, "relay_url": "https://relay.example"},
+     {"installation_id": "x&y=1", "relay_url": "https://relay.example"}),
+])
+def test_the_new_phone_is_named_only_when_it_is_another_on_the_same_relay(previous, current):
+    assert api.pairing._relay_urls().replaced_pairing_query(previous, current) == ""

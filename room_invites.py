@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import tempfile
 import threading
 import time
@@ -34,8 +35,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_start,
-               session_titles)
+from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_posts,
+               room_start, session_titles)
 from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
 GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
-KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS)
+KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -124,12 +125,14 @@ class Rooms:
     """The rooms over Links of the installation at ``root``: ``send`` is Links.send, ``link(link_id)`` the Link
     as Links.get shows it, ``profile_home(profile)`` a profile's home, ``joiner`` the member's Hermes calls
     (room_join.Joiner), ``starter`` the home's (room_start.Starter), ``notify(invite)`` what tells the phone
-    about a new invite (notify_invite) and ``copier`` Hermes' calls for the rooms' copies (room_copies.Hermes)."""
+    about a new invite (notify_invite), ``copier`` Hermes' calls for the rooms' copies (room_copies.Hermes) and
+    ``poster`` those for posts in them (room_posts.Hermes)."""
 
     def __init__(self, root: Any, *, send: Optional[Callable[..., Any]] = None,
                  link: Optional[Callable[[str], Optional[dict]]] = None, clock: Callable[[], float] = time.time,
                  profile_home: Optional[Callable[[str], Path]] = None, joiner: Any = None,
-                 starter: Any = None, notify: Optional[Callable[[dict], None]] = None, copier: Any = None) -> None:
+                 starter: Any = None, notify: Optional[Callable[[dict], None]] = None, copier: Any = None,
+                 poster: Any = None) -> None:
         self.root = Path(root)
         self.store = Store(self.root)
         links = None if send is not None and link is not None else room_links.Links(self.root)
@@ -144,6 +147,8 @@ class Rooms:
         # Until when a profile's renewals wait for its API server, which didn't answer (R16).
         self._api_waits: dict[str, int] = {}
         self.copies = room_copies.Copies(self, hermes=copier)
+        self.posts = room_posts.Posts(self, hermes=poster)
+        self._notes: Any = None
 
     # --- The home's drafts ---------------------------------------------------------
 
@@ -415,7 +420,8 @@ class Rooms:
         """An envelope from a Link, as the Link's loop hands it over."""
         handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
                    LEAVE: self.on_leave, ENDED: self.on_ended, room_copies.PAGE: self.copies.on_page,
-                   room_copies.COPIED: self.copies.on_copied}.get(received.kind)
+                   room_copies.COPIED: self.copies.on_copied, room_posts.POST: self.posts.on_post,
+                   room_posts.POSTED: self.posts.on_posted}.get(received.kind)
         if handler is not None:
             handler(received)
 
@@ -904,10 +910,10 @@ class Rooms:
 
     def pass_once(self) -> None:
         """What the rooms loop does each time it looks: the envelopes still to go, this installation's agents'
-        fresh grants, then the drafts ready to start and the route changes in started rooms, and the started
-        rooms' copies for the people in them (room_copies). An installation that
-        never had a room over a Link has nothing to look at, but where the dashboard runs in the gateway, the loop
-        holds the drafts from the CLI from its first pass (room_start's claim)."""
+        fresh grants, then the drafts ready to start and the route changes in started rooms, the started rooms'
+        copies for the people in them (room_copies), and the notes on rooms elsewhere (room_chats). An installation
+        that never had a room over a Link has nothing to look at, but where the dashboard runs in the gateway, the
+        loop holds the drafts from the CLI from its first pass (room_start's claim)."""
         if self.starter is not None:
             self.starter.claim()
         if not self.store.path.exists():
@@ -920,19 +926,31 @@ class Rooms:
             self._start_ready()
             self.copies.send_pages()
         self.flush()
+        # Notes in the private chats of the rooms elsewhere your agents only listen in (room_chats).
+        self.notes.pass_once()
+
+    @property
+    def notes(self) -> Any:
+        if self._notes is None:
+            from . import room_chats
+
+            self._notes = room_chats.Notes(self.root, profile_home=self.profile_home, clock=self.clock)
+        return self._notes
 
     def _settle(self) -> None:
         """What time has ended: a draft that lapsed ends and says so; a join whose room never started is
         undone once word of it can't come any more (its invite's time and the mailbox's hold); what ended a
-        month ago is forgotten. Started rooms are kept until they end (left, removed, disbanded)."""
+        month ago is forgotten, with who the home posted for in it. Started rooms are kept until they end (left,
+        removed, disbanded)."""
         now = int(self.clock())
-        leaving = []
+        leaving, forgotten = [], []
         with self.store.update() as state:
             for room_id, draft in list(state["drafts"].items()):
                 if draft["status"] == "waiting" and now >= draft["expires_at"]:
                     self._end(state, room_id, "lapsed", now)
                 elif draft["status"] == "ended" and draft["ended_at"] + KEPT_S < now:
                     del state["drafts"][room_id]
+                    forgotten.append(room_id)
             for invite in state["invites"].values():
                 if invite["status"] == "joined" and now >= invite["expires_at"] + LASTS_S:
                     leaving.extend((invite["link"], agent) for agent in invite["joined"])
@@ -940,6 +958,12 @@ class Rooms:
             _forget_old(state, now)
         for link_id, agent in leaving:
             self._leave(link_id, agent)
+        for room_id in forgotten:
+            try:
+                room_posts.forget(self.root, room_id)
+            except (sqlite3.Error, OSError) as exc:
+                logger.warning("Linked Rooms couldn't forget who posted in room %s (%s)", room_id,
+                               type(exc).__name__)
 
     # --- Helpers -------------------------------------------------------------------------
 
@@ -1061,32 +1085,52 @@ def invites(root: Any) -> list[dict[str, Any]]:
     return _viewer(root).invites()
 
 
-def people(root: Any, room_id: Any) -> Optional[dict[str, Any]]:
+def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, Any]]:
     """Who's who in a started room over Links that this installation hosts or has agents in (plan ruling 8):
     ``home``, the host's owner as this installation's Link names them (None when it's this one), and each
     member with its owner's name (None for this installation's own) and its ``status``: in, or left or removed
     (R10; on a member's Hermes, only its own agents' are known). A member's Hermes keeps answering for a room it
     left or that ended, whose hidden chats it keeps, with each member as it was when it ended (the invite says how
-    it ended). None for any other room."""
+    it ended). On the home, ``posts``: the room's latest posts the plugin made for linked people (room_posts), each
+    event id and seq with who it's ``by``; on a member's Hermes, ``you``: what the home calls this installation's
+    owner, the name their posts carry there. None for any other room, and for any while rooms.json can't be
+    read, unless ``strict``, when that raises RoomsError."""
     try:
         state = Store(root).read()
     except RoomsError:
+        if strict:
+            raise
         return None
     draft = state["drafts"].get(room_id) if isinstance(room_id, str) else None
     if draft is not None and draft["status"] == "started":
-        return {"room_id": room_id, "home": None, "members": _members(draft)}
-    for invite in state["invites"].values():
-        if invite["room_id"] == room_id and invite["status"] in ("started", "left", "ended") \
-                and invite["members"] is not None:
-            gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
-            mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
-            return {"room_id": room_id, "home": invite["from"], "members": [
-                {"member_id": member["member_id"], "handle": member["handle"],
-                 "display_name": member["display_name"],
-                 "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],
-                 "status": gone[member["member_id"]] if gone.get(member["member_id"]) in ("left", "removed")
-                 else "in"}
-                for member in invite["members"]]}
+        names = {link_id: room_posts.poster(person["name"]) for link_id, person in draft["links"].items()}
+        try:
+            latest = room_posts.latest(root, room_id)
+        except (sqlite3.Error, OSError) as exc:
+            if strict:
+                raise
+            # Who's who still shows; whose each post was waits for posts.db.
+            logger.warning("Linked Rooms couldn't read who posted in room %s (%s)", room_id, type(exc).__name__)
+            latest = []
+        return {"room_id": room_id, "home": None, "members": _members(draft), "posts": [
+            {"event_id": each["event_id"], "seq": each["seq"], "by": names.get(each["link"], room_posts.GUEST)}
+            for each in latest]}
+    # The invite the room is on now: a re-join over a new Link has its own, beside the old one's.
+    invite = room_posts.current_invite([invite for invite in state["invites"].values()
+                                        if invite["status"] in ("started", "left", "ended")], room_id)
+    if invite is not None:
+        gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
+        mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
+        # What the home calls this installation's owner: the name its posts carry there.
+        you = next((room_posts.poster(member["owner"]) for member in invite["members"]
+                    if member["member_id"] in mine), None)
+        return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
+            {"member_id": member["member_id"], "handle": member["handle"],
+             "display_name": member["display_name"],
+             "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],
+             "status": gone[member["member_id"]] if gone.get(member["member_id"]) in ("left", "removed")
+             else "in"}
+            for member in invite["members"]]}
     return None
 
 

@@ -97,7 +97,7 @@ The plugin currently emits notifications for:
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
 - room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.105+, relay 0.21+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them.
 
-An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. Code in a reply's fenced block stays as written.
+A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. Code in a reply's fenced block stays as written.
 
 ### Cron runs (plugin 0.33+)
 
@@ -110,9 +110,11 @@ The plugin tells a cron run by its task id (`cron:<job id>:…`) or its classic 
 
 Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-032)).
 
-Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile name), so you can tell which bot replied. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. With previews off the title is not shown; `redact on` or end-to-end encryption keeps it from reaching the relay.
+Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile id capitalized, and Hermes for the main bot), so you can tell which bot replied. Conduit shows a name you gave the main bot on the phone instead. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. How much shows is Conduit's Settings > Notifications > Show in notifications: Generic shows neither the title nor the text, Chat names shows the session's title and the profile without Hermes' words, and Full previews shows both, with the profile as the subtitle. `redact on` or end-to-end encryption keeps the title from reaching the relay.
 
-The iOS app controls which categories are enabled, whether notification previews are shown, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
+Hermes can write a reply's notification itself with the `conduit_notify` tool (plugin 0.112+), when you asked to be told something is done or a scheduled job reports: a title of a few words and a sentence or two, sent instead of the reply's opening when the turn ends. It sends no push of its own, so the turn still sends one, under the same settings, and a reply that sends none (`[SILENT]`, a muted job) sends none with it. The title rides as `headline`, sealed with the rest, and Conduit shows it only with Full previews; Chat names and Generic never show it.
+
+The iOS app controls which categories are enabled, how much a notification shows, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
 
 ## Privacy and security
 
@@ -176,6 +178,7 @@ The plugin sends relay credentials only over HTTPS with a trusted certificate (p
 | `.env` | APNs key ID, team ID, topic, public URL | Yes |
 | `secrets/*.p8` | Apple Push Notification signing key | Yes |
 | `data/relay.json` | Installation records, gateway credentials | Yes |
+| `data/crash-reports/` | Crash and freeze reports testers sent | Yes |
 
 See [`relay/deploy/.env.example`](relay/deploy/.env.example) for all required environment variables.
 
@@ -204,6 +207,35 @@ pairing codes and parked decisions): an inactive installation can never be
 used again, since its credential no longer authenticates and its hosts'
 events are refused. Only a relay full of active installations refuses new
 ones.
+
+### Crash and freeze reports
+
+After Conduit crashes or freezes, iOS hands it a MetricKit diagnostic on the
+next launch, and Conduit asks the user once whether to send it. Send posts
+the diagnostic (call stacks, exception and termination codes, version, build,
+iOS version and device model; never an exception's message text) to
+`POST /v1/crash-reports` on the developer's relay (`push.milim.dev`), even
+when the user's notifications use another relay. A post holds at most
+600,000 characters, and the relay keeps only the diagnostic keys it names
+(metadata codes, exception type and name, stack frames, 512 levels of a
+stack), at most 600,000 bytes of them, so the folder stays under about 600 MB. The relay keeps each as a file under
+`data/crash-reports/`, at most 1,000 and for 90 days, and takes at most 10
+an hour from one address and 500 a day in all. The route takes posts from
+anyone, so a flood from many addresses can spend the day's 500 or push the
+oldest reports past the 1,000; the stacks are what matter, and a crash that
+keeps happening comes back. It takes reports only when
+`CRASH_REPORTS_TOKEN` (32 characters or more; a shorter one leaves reports
+off) is set in `.env`; the same token reads them, in place of `<token>`:
+
+```shell
+curl -H "Authorization: Bearer <token>" "$PUBLIC_URL/v1/crash-reports?build=236"
+curl -H "Authorization: Bearer <token>" "$PUBLIC_URL/v1/crash-reports/<id>"
+```
+
+The list gives each report's id, build, device, kind and `signature`, a hash
+of its exception codes and top frames, so reports of one fault group. The
+stacks are unsymbolicated MetricKit frames (binary name and offset); match
+them to the build's dSYM with `atos`.
 
 For offline reclamation, `storage:prune-inactive` previews the number of
 eligible records by default. It removes only installations that have been
@@ -250,7 +282,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
 | POST | `/v1/events` | Deliver a notification event; a reply's `level` (`passive`, `active` or `time-sensitive`) sets its interruption level (0.20+, capability `push-levels`) |
-| DELETE | `/v1/gateways/current` | Revoke a gateway credential |
+| DELETE | `/v1/gateways/current` | Revoke a gateway credential; `?replaced_by=<installation id>` names the phone a re-pair moved it to, so the Apple Watch's ring follows (0.23+) |
 | PUT / DELETE | `/v1/installations/:id/live-activities` | Register (`push_token`, `session_ids`) or remove (`push_token`) the Live Activity the phone started for a chat (0.15+) |
 | POST | `/v1/live-activity` | Report a running turn's progress (`session_id`, `state`, optional `end`); answers `tracked` (gateway side, 0.15+) |
 | POST | `/v1/watch-tools/grants` | Open a Watch tool grant for one call (gateway side) |
@@ -265,6 +297,8 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | GET | `/v1/rings/:id/session` | The Watch fetches it, waiting up to `?wait=20` seconds (0.11+; the ring's token as the bearer) |
 | POST | `/v1/rings/:id/control` | The phone or the Watch mutes, unmutes or ends a call the Watch answered that stays on the phone's headset (0.17+; the ring's token) |
 | GET | `/v1/rings/:id/control` | Either reads the other's change past `?after=` its last seq, waiting up to `?wait=20` seconds (0.17+; the ring's token as the bearer) |
+| POST | `/v1/crash-reports` | A crash or freeze report from Conduit, no credential (0.24+, capability `crash-reports`; see "Crash and freeze reports") |
+| GET | `/v1/crash-reports`, `/v1/crash-reports/:id` | List reports (`?build=`) or read one (`CRASH_REPORTS_TOKEN` as the bearer) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't
 reach Conduit on the iPhone. Calls and answers are sealed with a per-call key
@@ -364,6 +398,16 @@ tokens can't be challenged this way, so a registration or update naming one
 that another active installation already holds is accepted without it: a
 registration gets none (`voip`, `watch_voip` or `location` comes back
 `false`), and an update keeps the token the installation had.
+
+A Watch moves to a new iPhone with its PushKit token, which the old phone's
+installation still holds (0.23+). The new installation's answer says
+`watch_voip_elsewhere: true`, and the relay remembers the token it asked for.
+When the host pairs a profile with the new phone, the plugin (0.113+) revokes
+the old pairing with `?replaced_by=<new installation>`, and the Watch token
+moves there if that installation asked for that very token. An old phone a
+re-pair leaves with no pairing lets its Watch token go anyway (nothing can
+ring it), and the phone that wants it takes it with its next update; an
+unpair keeps it, so pairing the same phone again rings the Watch too.
 
 A challenge answers `400 invalid_device_token` when APNs refuses the token,
 so it shows whether a token is currently live for the app. The nonce never
@@ -1207,7 +1251,7 @@ start the agent or call a model. A resumed call appends to the same session.
 | --- | --- | --- |
 | POST | `/api/plugins/conduit_push/voice/sessions` with `{call_id, engine, session_id?, chat_id?, title?, turns: [{index, role, text, at?}]}` | `{ok, session_id, chat_id?, written, appended, created}` |
 | GET | `/api/plugins/conduit_push/voice/chat-calls?chat_id=[&call_id=]` | `{ok, chat_id, calls: [{call_id, engine, turns?: [{role, text, at}]}]}` |
-| GET | `/api/plugins/conduit_push/voice/tags` | `{ok, tags: {session_id: {kind, engine?, archived?, parent_id?, parent_title?}}}` |
+| GET | `/api/plugins/conduit_push/voice/tags` | `{ok, tags: {session_id: {kind, engine?, archived?, parent_id?, parent_title?}}, chat_calls: [{call_id, chat_id, engine?, started_at?, ended_at?}]}` |
 | POST | `/api/plugins/conduit_push/voice/tags` with `{session_id, kind: classic or job, parent_id?, parent_title?}` | `{ok, session_id, kind, ...}` |
 | POST | `/api/plugins/conduit_push/voice/archive` with `{session_id}` | `{ok, session_id, archived}` |
 | GET | `/api/plugins/conduit_push/voice/summary?session_id=` | `{ok, available, text, covers}` |
@@ -1232,7 +1276,12 @@ start the agent or call a model. A resumed call appends to the same session.
   the same index rules, and the chat's own messages are never touched;
   `session_id` comes back null and `created` false (no session is made).
   `voice/chat-calls` lists them for the chat; turns come only for the one
-  call named by `call_id`.
+  call named by `call_id`. `voice/tags` also lists every chat's kept calls
+  (`chat_calls`, the latest 300, oldest first, with each call's first and
+  last turn's time), so each device files those chats under Voice and draws
+  their call cards; a host whose calls predate the list (or whose list is
+  unreadable) reads it from the calls themselves. A chat deleted in Desktop
+  leaves the list, and its calls are cleared, the next time it's asked for.
   A chat keeps its latest 50 calls of at most 2000 turns each.
   When the call ends it is written to the memory provider under the chat's
   session, but no session-end hooks fire: the chat goes on. A chat that no
@@ -1253,8 +1302,17 @@ start the agent or call a model. A resumed call appends to the same session.
   already archived chat is left as it is (`archived: false`), and any other
   session gets 422. Such a chat may still be open when its call ends, so
   nothing reopens it: the next turn run in a voice chat archived this way
-  (a call row or a Classic chat) un-archives it from the `pre_llm_call`
-  hook, the way Hermes' reopen does.
+  (a call row, a Classic chat or a voice job's chat) un-archives it from the
+  `pre_llm_call` hook, the way Hermes' reopen does.
+- A voice job's chat (tagged `job`) is archived the same way once Hermes has
+  answered what voice asked there: at the end of the turn, or when Conduit
+  tags it after its call ended. Only while every request in it came from
+  voice: a job's prompt, the Watch's next request, or words marked
+  `(voice) `, as Conduit and the Watch send a job's corrections. A turn
+  typed into it brings it back for good, and a pinned, archived, running or
+  unanswered one stays as it is. The chat an unattached call took for its
+  first request is the call's chat, never tagged a job (on the phone or
+  the Watch), and stays listed.
 - A create is idempotent per `call_id`: a retried first save whose response
   was lost continues the row it made instead of starting a second one.
 - Appends and summaries go only to rows saved as voice calls; any other
@@ -1486,7 +1544,10 @@ message's turn gets one line of context, for example
 `[Conduit: this message came from CarPlay in the user's car, spoken. They are likely driving: …]`.
 A message typed on an iPhone, iPad, Mac or Vision Pro adds that several
 details only the user can give go in one clarify call with open questions,
-which Conduit shows as a form they may leave partly blank (0.82+).
+which Conduit shows as a form they may leave partly blank (0.82+). A spoken
+message adds that the answer is heard: Hermes says it in words, not with
+`text_to_speech` or a sound file of its own, which a voice would read out as
+a file path; a file the user asks for still goes (0.115.1+).
 
 - `POST /api/plugins/conduit_push/turn-surface` with
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
@@ -1826,7 +1887,9 @@ and the dashboard routes under one file lock, so they survive restarts:
   (APNs refusing or unreachable, a call with no chat to open) sends the usual
   "Hermes wants to talk" notification instead, and a PushKit token APNs calls
   gone is forgotten until the phone registers a new one. The
-  relay answers `rang: true` when APNs took the VoIP push. Calls carry a `reason` of up to
+  relay answers `rang: true` when APNs took the VoIP push, with `watch: true`
+  when the ring was sent to the Watch too (0.23+); the plugin logs where each call went
+  (0.113+). Calls carry a `reason` of up to
   200 characters (dropped with previews off, like the title), and the kinds
   `approval` and `question` besides how a job ended.
 
@@ -2675,7 +2738,7 @@ and she loved Kyoto"):
   what each arrival or departure brought up; `pulse status` and `pulse
   ahead` count the look ahead's picks held for a place.
 
-## Pulse watches shops you walk past (plugin 0.111+)
+## Pulse watches shops you walk past (plugin 0.112+)
 
 With Where you are on, Conduit sharing location in the background at
 Precise (a shop's name and how far you were from it say as much as a
@@ -2749,7 +2812,7 @@ keeps it.
 - **Active**: the rest, the morning brief included.
 - **Private reminders.** A push about someone's birthday or anniversary, or
   whose words are about a gift, a surprise, health or money (English words),
-  says only "Pulse has something for you." whatever Show previews says, so
+  says only "Pulse has something for you." whatever Show in notifications says, so
   its words never leave this host in a push; its card shows everything. On
   by default: Hide private reminders on the Lock Screen in Conduit's
   Settings > Pulse, `hermes conduit-push pulse private on|off`, or `PUT
@@ -2969,7 +3032,7 @@ relay key. The host still opens no inbound route.
   root, so the relay can neither read nor forge one. The Watch speaks each
   engine's own events, as the phone does, and its tools and jobs go through
   the grant's lookups. The wire format, keys and control messages are
-  described where they're built (`dashboard/plugin_api.py`, "Watch audio").
+  described where they're built (`dashboard/api/watch_audio.py`).
 - **GPT-Live** runs WebRTC in a small helper process
   (`dashboard/watch_audio_helper.py`) under a Python that has `aiortc`. The
   plugin does the SDP exchange with the Codex sign-in itself, so the
@@ -3020,8 +3083,9 @@ for rooms with none of their own:
 
 - **What it can do**: Talk only (no tools, the default), Look things up
   (`web_search`, `web_extract`, `x_search`, `vision_analyze`), Use my data
-  (lookups plus the room-safe data tools you pick; there are none yet) or
-  Custom (only the tools you pick). Always within the profile's own toolsets.
+  (lookups plus when you're busy, from the calendar your phone shares:
+  `conduit_free_busy`, plugin 0.119+, see Use my data below) or Custom (only
+  the tools you pick). Always within the profile's own toolsets.
   Tool Search's own tools (`tool_search`, `tool_describe`, `tool_call`) work
   whenever anything is allowed: Hermes runs the hooks on the tool `tool_call`
   reaches, by that tool's own name, so it's checked like a direct call, and a
@@ -3040,7 +3104,8 @@ for rooms with none of their own:
 - **Search my past chats**: off by default; `session_search` is blocked
   unless it's on.
 - **What it may share**: what helps, ask you first (the default) or nothing
-  personal. The agent is told, every room turn, along with who's asking (in a
+  personal. With ask you first, the agent asks your phone before it shares
+  something personal (plugin 0.118+, see Ask me first below). The agent is told, every room turn, along with who's asking (in a
   room hosted elsewhere, the room's "user" is that host's owner, not you),
   that it answers only for itself, and your private note for the room. The
   agents from elsewhere are named by their handles, or as "another agent"
@@ -3314,6 +3379,10 @@ It changes only what needs it:
   out of rooms, and their digest stays the same, until you add it here.
   Conduit's own tools (`conduit`) are never in it, nor toolsets whose every
   tool rooms never allow (memory, running code, delegation, scheduled jobs).
+  Conduit's room tools (`conduit_rooms`, with Ask me first's
+  `conduit_ask_owner` and Use my data's `conduit_free_busy`) are always in it, and aren't one of the choices: the
+  room rules let each through per room (plugin 0.118+). A ceiling saved
+  before then gets them on the next setup, which counts as a change.
   If the API server was already on, for Open WebUI say, the ceiling is also
   all that other apps using it get, and the command says so. Change the
   ceiling here, not in `hermes tools`, whose save takes `no_mcp` out and so
@@ -3591,7 +3660,11 @@ installation's):
   member's `status` `in`, `left` or `removed` (on a member's Hermes, only
   for its own agents). A member's Hermes answers for a room its agents left,
   or that ended, too, with each member as it was when it ended
-  (`GET /rooms/invites` says how it ended).
+  (`GET /rooms/invites` says how it ended). With `room-posts` (plugin
+  0.115+), the home adds `posts`, the room's latest 500 posts it made for
+  linked people, each `{"event_id", "seq", "by"}` with `by` their name as
+  your Link calls them, and a member's Hermes adds `you`, the name the home
+  gives you (the one your posts carry there).
 
 Taking agents out goes through these, behind the `room-leave` capability
 (plugin 0.94+):
@@ -3658,18 +3731,237 @@ minute:
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
   agents in it `{"member_id", "profile", "handle"}`, the invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
-  forgets the invite, a month after it ended, `yours` is empty and the dates
-  null), and `state`: `{"ended", "working", "activity", "routes"}`, each of
-  the last two a list of `{"member_id", "status"}`.
+  forgets the invite, a month after it ended, it's `left` unless the home said
+  it ended, the dates are null and `yours` is the agents the copy noted as
+  yours when it took the room's pages), and `state`: `{"ended", "working",
+  "activity", "routes"}`, each of the last two a list of `{"member_id",
+  "status"}`.
 - `GET /rooms/copies/log?room_id=&since_seq=0&limit=100`: the copy's events
   after `since_seq`, as `groups.log` pages a room this Hermes hosts:
   `{"events", "cursor", "latest_seq", "has_more", "authority"}`, with
   `latest_seq` what the copy holds. `limit` is 1 to 500.
-- `DELETE /rooms/copies?room_id=`: `{"room_id", "forgotten"}`. A page the home
-  sends later starts the copy again from its first event.
+- `DELETE /rooms/copies?room_id=`: `{"room_id", "forgotten"}`, once the room
+  is over for you (you left it, were taken out, or it ended), with what you
+  posted there. While an agent of yours is still in it, it's refused with
+  `still_in` (409: your posts there frame your agents' turns, so leave
+  first), and a room this Hermes hosts with `hosted` (409, plugin 0.116+).
 
-They're refused with `bad_room`, `bad_since` or `bad_limit` (400) and
-`no_copy` (404).
+They're refused with `bad_room`, `bad_since` or `bad_limit` (400),
+`no_copy` (404) and `unreadable` (503, the rooms can't be read now). A copy or an event this Hermes can't read is left out, and
+its log says so once.
+
+People whose agents are in a room someone else hosts post in it from their
+own Conduit, through their own Hermes, which sends the post to the room's
+home over the Link that invited it. The home posts it in the room as the
+room's user, as Conduit's own messages are, with every line of it starting
+with the person's name as its Link calls them (`Mona: `, or `Guest: ` for a
+Link without a name, or with one that has anything but letters, digits,
+spaces and `.'&-`), so the home's agents can tell it from their owner's.
+It takes a post only from someone with an agent still in the room, of at
+most 16,000 bytes (and 64 KB with its lines named), and 60 an hour from each
+person in each room; any kind of line break starts a named line. Both sides
+keep what they need in `conduit-rooms/posts.db` (owner only): the home, who
+each post was for, which its pages to the copies carry (an event the plugin
+posted gets `"post": {"by": "Mona"}` in `GET /rooms/copies/log`, with `by`
+null for your own); your Hermes, what you posted and how it went. Your agents
+in the room are told which of the lines under your name you sent, so a
+message with a line under your name that you didn't send, anywhere in it and
+whoever it shows as, is named as the host's. Each of your posts answers for
+one message in each agent's turns, so the host saying it again later is the
+host's too. When who's who in the room or
+what was posted can't be read, the agents are told any of the user's lines
+may be someone else's. These are behind the
+`room-posts` capability (plugin 0.115+), within the rooms routes' 60 a
+minute:
+
+- `POST /rooms/copies/messages` with `{"room_id", "event_id", "text"}`:
+  `{"message": {"event_id", "text", "status", "seq", "error",
+  "created_at"}}`, `status` `sending` until the home answers. `event_id` is
+  your retry key (1 to 64 letters, digits and `._:-`): the same one again is
+  the same post, and one the home refused, or that's had no answer for ten
+  minutes, goes again (the home posts it once). It's refused with
+  `bad_room`, `bad_event_id`, `bad_text`, `empty` or `too_long` (400),
+  `not_in` (409, none of your agents is in that room) or `event_id_taken`
+  (409, another post has it).
+- `GET /rooms/copies/messages?room_id=`: `{"messages": [...]}`, what you
+  posted there, oldest first, each `status` `sending`, `posted` (with the
+  room's `seq`) or `refused` (with its `error`: `ended`, `not_in`,
+  `too_long`, `too_many`, `unavailable` or `bad_post`).
+
+## Your agent works on a room for you (plugin 0.116+)
+
+In your private chats, your agents can read your rooms with other people for
+you, with the `conduit_room` tool: notes, a summary, "what did Mona say about
+Saturday?", a draft of your reply. `list` gives the rooms you host with
+people you've linked and your copies of rooms they host: who hosts each, its
+agents and whose they are, and whether it's going, ended, or going on
+without your agents (`you left`, `you were taken out`). Each agent says
+whether it's still `in` (`true` or `false`): every agent in a room you
+host, only your own in a copy (others' are `null`, since the home's copy
+doesn't say). `read` gives a
+room's messages, the newest 100 by default (up to 200, `after_seq` or
+`before_seq` for others), each with who it's from as Conduit's room screen
+names them: "you", a person by the name their Link has here, an agent with
+its owner ("Laifu (Mona's)", "Furina (yours)"). Long messages are cut at
+4,000 characters and an answer stays under 64 KB. It reads what this Hermes
+keeps (the room's log, or its copy) and sends nothing to the room. A room
+turn never has it (the API server keeps the `conduit` tools out, and the
+room rules never allow it), and neither does a subagent.
+
+A room can have a private chat of its own with one of your agents
+(`conduit-room-chats.json` in the profile's home, owner only). Conduit opens
+it and tells this Hermes which room it's for (plugin 0.117+, capability
+`room-chats`, `?profile=` like the rooms' other routes):
+
+- `PUT /rooms/chats` with `{"room_id": "...", "chat_id": "..."}`: the
+  chat is the room's from now on, the latest kept, and the answer is
+  `{"ok": true, "chat": {"room_id", "chat_id", "notes_seq"}}`. A room new
+  to the profile's chats gets notes on what comes after its newest message
+  (`notes_seq`); one it had keeps its notes where they were. Errors: 400
+  for a bad id or body, 404 for a room this Hermes doesn't have, 503 for
+  one whose log can't be read here.
+- `GET /rooms/chats`: `{"ok": true, "chats": [...]}`, each as above.
+
+A chat deleted in Hermes is forgotten when its notes come due. Each
+turn there is told which room it's about (its name as one plain line, framed
+as the host's words). In a room hosted elsewhere where an agent of yours
+Listens only, that agent writes you notes in that chat once the room has
+been quiet for 30 minutes after new messages, or has ended: what was
+decided, what you said you'd do, what you might have missed. The rooms loop
+sends them as a hidden turn into the chat, once for each stretch of the
+room, and tries again 30 minutes after a chat that refused them (or a send
+that failed). Each turn covers at most 200 messages, what one read gives,
+and is told to read them through the last one; a longer stretch gets its
+next notes on the next look. A stretch counts as noted once its chat takes
+the turn. A room whose newest message has a time that can't be one, or one
+from the future, counts as quiet. A room with no chat yet gets none until it
+has one.
+
+In a copy, a message the home says is one of yours is shown as yours only
+when it is: one this Hermes posted (by its seq, or its text while it's on
+its way). Any other is the host's, "as if from you (not one of your posts)",
+and a person or owner named "you" (or near it, like "you.") shows as Guest.
+Room and agent names another Hermes gives are kept to one line of at most 80
+characters. A long page read forward keeps its first messages (more come
+after), one read back keeps its last. In a room you host, a person's message
+whose poster can't be read just then is shown as "you or someone you've
+linked with", never as yours. A call without a chat's session id is refused
+(`no_session`).
+
+## Ask me first (plugin 0.118+)
+
+In a room with other people's agents set to ask you first (What it may
+share), your agent asks your phone before it shares something personal
+about you, with the `conduit_ask_owner` tool: `question` (what's asked and by
+whom, one line of at most 80 characters, like "Laifu asks whether you're
+free on the 22nd") and `share` (exactly what it would say, at most 500).
+Conduit shows it over everything, like a confirm prompt, with the room's
+name: Share, Say instead (you write what it says) or Don't share, by tap or,
+during a call, "share it". The call waits 30 seconds for your answer. Without
+one, the agent tells the room it'll check with you and shares nothing, and
+your answer reaches it privately, once, before its next turn in that room:
+nothing goes into the room by itself, and no turn starts for it. An ask lasts
+24 hours; one nobody answered reaches it as a no.
+
+An ask is a prompt in the profile's `conduit-present.json` that carries its
+room and the room's session. Only a Conduit that says it shows a room's asks
+(feature `room-asks` on its exchange) gets one, and only its answer counts;
+with none, the tool refuses (`no_device`) and the agent says it can't share
+that. Asks are the room's, not the chat session's, so a room session
+Hermes compacted still hears its answers. At most 3 asks wait per room (40 across rooms, all the phone shows), the
+same question with the same share while one waits returns that one (another
+share is another ask: a yes covers only what you saw, and the tool's answer
+gives it back as `share`), a room asks at most 6 times an hour and all rooms
+12, budgets of their own: other people steering a room's agent never use up
+your own confirm prompts (20 an hour, 20 waiting, all shown on the phone
+however many rooms ask). A room's answer its agent hasn't heard stays until it
+does, or for its week (the newest 10 a room, 60 across rooms). An answer
+counts as heard once the room turn the tool gave it to, or a turn framed with
+it, replies and ends without failing or being stopped, so a turn that fails
+(even with an error message), is stopped, or ends without Hermes saying how,
+gets it again. A subagent the room's agent delegates to never
+hears them. Private chats never see
+them: `conduit_present` leaves them out of `status` and `earlier_answers`.
+When no ask is kept (no such Conduit, over these limits, or a room session
+Hermes hasn't titled yet), no answer will come, so the agent says it can't
+share that rather than that it'll check. The tool works only in a room turn with other people's
+agents set to ask you first (`not_room`, `not_ask_first`, `subagent`
+otherwise); the room rules let it through whatever the room's tools are,
+Talk only included, and keep Tool Search open for it, since Hermes may put it
+behind Tool Search.
+
+## Use my data: free/busy (plugin 0.119+)
+
+In a room with other people's agents set to Use my data (What it can do),
+your agent can say when you're busy, to find a time that works, with the
+`conduit_free_busy` tool: `from` and `to`, a local date or an ISO time (`to`
+inclusive), at most 31 days a call. It reads the calendar your phone shares
+with that profile (Settings › Calendar & phone in Conduit), as of its last
+sync, and gets only the busy times: merged across your shared calendars,
+without free, cancelled or declined events, or all-day ones unless they're
+marked busy. Never a title, place, calendar, attendee or device. Sharing
+those times follows the room's share choice, as anything about you does: with
+What helps it may share them, with Ask me first it asks you before it does
+(`conduit_ask_owner`), and with Nothing personal the tool isn't one of the
+room's. Either way it shares nothing else about your plans. With no calendar
+shared (or only adds), it says it can't check your calendar there. The tool
+refuses outside a room turn with other people's agents, in a subagent, and in
+a room not set to Use my data or Custom with it picked. Capability
+`room-free-busy`.
+
+## Asks between linked agents (plugin 0.120+)
+
+In your private chats, your agent can ask someone you've linked with
+(Settings > People) whether they're free on a date, or a question, with the
+`conduit_ask_linked` tool: `people` lists whom it can ask, `ask` asks one
+(`to`: their name, and `free_on` `{date, from, to}` in their time zone, or
+`question`: one line of at most 300 characters), and `answers` gives this
+chat's recent asks and how they went. The ask goes over your Link as an
+`ask.ask` envelope, and the answer comes back as `ask.answer`. The call
+waits up to 20 seconds; an answer that comes later reaches the chat that
+asked (also once Hermes continues it under a new session after a
+compaction) before its next turn, once, and counts as heard once that turn
+replies and ends without failing. Their answer is framed as what they said,
+never as instructions. A room turn and a subagent never have it.
+
+No agent answers on the asked side, so nothing the asker writes reaches a
+model there. Each Link has rules, set by the person asked:
+
+- Free on a date: `yes_no` (say free or busy, without asking you),
+  `times` (also your busy times then), `ask` (you see what it would say
+  and Share it, Say instead or Don't share) or `off`.
+- Questions: `ask` (only you answer) or `off`.
+- The profile whose phone and calendar answer (`default` unless chosen).
+
+A Link without rules asks you for everything. Free on a date reads the
+calendar your phone shares with that profile, busy times only, as for
+Use my data; a date more than 92 days off or past what the phone synced
+answers that it can't tell; an answer from a phone that last shared its
+calendar more than 6 hours ago says how long ago. What waits for you is a prompt on your phone
+(a Conduit that shows a Link's asks, feature `link-asks`; with none, the
+ask is answered that it can't be now) for 24 hours, and unanswered the
+asker hears no answer came. You can answer from here too:
+
+    hermes conduit-push links rules [LINK] [--free-on yes_no|times|ask|off]
+        [--questions ask|off] [--answers-from PROFILE]
+    hermes conduit-push links asks
+    hermes conduit-push links answer ASK_ID --text "..." | --share | --decline
+
+Each Link may ask 10 times an hour, with at most 3 asks waiting for you
+(20 across Links); past that the ask is answered that there are too many.
+They wait on your phone with a room's asks, within the same 40 it shows.
+Asks are kept in `conduit-rooms/asks.json` (owner only) for a week.
+
+Conduit reads and changes the rules with capability `link-asks`:
+
+- `GET /links/rules`: `{"ok": true, "links": [{"id", "name", "status",
+  "rules": {"free_on", "questions", "profile"}, "saved"}], "defaults"}`.
+- `PUT /links/rules` with `{"link_id": "...", "free_on" | "questions" |
+  "profile": ...}`: `{"ok": true, "id", "rules"}`; 400 for a bad value, 404
+  for no such Link.
+- `GET /links/asks`: the asks linked Hermes made of this one, newest first,
+  each with who asked, what, and how it went (`held` while it waits for
+  you).
 
 ## Capabilities (plugin 0.4+)
 

@@ -1,5 +1,5 @@
 """Dropping another process's claim on a chat (Hermes' active-session
-registry), shared by the dashboard's takeover route (dashboard/plugin_api.py,
+registry), shared by the dashboard's takeover route (dashboard/api/chats.py,
 which explains the rules) and Pulse, which takes over its own chat when Hermes
 Desktop holds it (pulse_host.py).
 

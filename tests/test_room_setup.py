@@ -496,11 +496,11 @@ def test_the_ceiling_is_saved_with_mcp_and_plugins_kept_out(hermes):
     after = _apply(hermes, ceiling=["web", "terminal"])
 
     config = _yaml(hermes.root / "config.yaml")
-    assert config["platform_toolsets"] == {"api_server": ["no_mcp", "terminal", "web"], "cli": ["hermes-cli"]}
+    assert config["platform_toolsets"] == {"api_server": ["conduit_rooms", "no_mcp", "terminal", "web"], "cli": ["hermes-cli"]}
     assert config["known_plugin_toolsets"] == {"api_server": ["a2a", "conduit", "spotify"], "cli": ["a2a"]}
     assert config["known_builtin_toolsets"]["api_server"] == sorted(BUILTIN)
     assert after["ceiling"] == ["terminal", "web"]
-    assert after["policy"]["enabled_toolsets"] == ["bot_room", "terminal", "web"]
+    assert after["policy"]["enabled_toolsets"] == ["bot_room", "conduit_rooms", "terminal", "web"]
     assert {"ceiling", "plugin_tools"} <= set(after["changed"])
 
 
@@ -513,7 +513,7 @@ def test_conduits_own_tools_are_known_even_when_hermes_lists_no_plugins(hermes):
 def test_the_default_ceiling_is_what_room_choices_can_use(hermes):
     assert _state(hermes)["ceiling"] == ["session_search", "vision", "web", "x_search"]
     _apply(hermes)
-    assert _ceiling(hermes) == ["no_mcp", "session_search", "vision", "web", "x_search"]
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "session_search", "vision", "web", "x_search"]
 
 
 def test_a_default_hermes_doesnt_offer_is_left_out(hermes):
@@ -521,11 +521,28 @@ def test_a_default_hermes_doesnt_offer_is_left_out(hermes):
     assert _state(hermes)["ceiling"] == ["session_search", "vision", "web"]
 
 
+def test_setup_always_keeps_conduit_rooms_in_the_ceiling(hermes):
+    # Ask me first is the default share, so its tool (conduit_rooms) is always there; the choices gate it per room.
+    after = _apply(hermes, ceiling=["web"])
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
+    assert after["ceiling"] == ["web"] and after["policy"]["enabled_toolsets"] == ["bot_room", "conduit_rooms", "web"]
+    assert "conduit_rooms" not in [choice["id"] for choice in after["choices"]]
+    assert _apply(hermes, ceiling=["web", "conduit_rooms"])["changed"] == []
+    # A ceiling the setup saved before it had the toolset gets it on the next setup.
+    config = _yaml(hermes.root / "config.yaml")
+    config["platform_toolsets"]["api_server"] = ["no_mcp", "web"]
+    _write(hermes.root / "config.yaml", config)
+    state = _state(hermes)
+    assert "ceiling" in state["needs"] and state["ceiling"] == ["web"]
+    _apply(hermes)
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
+
+
 def test_a_saved_ceiling_stays_when_none_is_given(hermes):
     _apply(hermes, ceiling=["web"])
     assert _state(hermes)["ceiling"] == ["web"]
     after = _apply(hermes)
-    assert _ceiling(hermes) == ["no_mcp", "web"]
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
     assert "ceiling" not in after["changed"]
 
 
@@ -539,7 +556,7 @@ def test_a_saved_ceiling_naming_a_toolset_hermes_no_longer_has_is_kept(hermes):
 
     after = _apply(hermes)
     assert after["changed"] == ["approvals"]
-    assert _ceiling(hermes) == ["a2a", "no_mcp", "web"]
+    assert _ceiling(hermes) == ["a2a", "conduit_rooms", "no_mcp", "web"]
 
 
 def test_a_ceiling_saved_by_hand_is_replaced_by_the_default(hermes):
@@ -551,8 +568,8 @@ def test_a_ceiling_saved_by_hand_is_replaced_by_the_default(hermes):
 
 def test_an_empty_ceiling_is_talk_only(hermes):
     after = _apply(hermes, ceiling=[])
-    assert _ceiling(hermes) == ["no_mcp"]
-    assert after["ceiling"] == [] and after["policy"]["enabled_toolsets"] == ["bot_room"]
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp"]
+    assert after["ceiling"] == [] and after["policy"]["enabled_toolsets"] == ["bot_room", "conduit_rooms"]
 
 
 @pytest.mark.parametrize("ceiling", [["conduit"], ["web", "web2"], ["stt"], ["discord"], ["no_mcp"], "web",
@@ -574,7 +591,7 @@ def test_conduits_refusal_says_its_tools_stay_out(hermes):
 
 def test_a_plugin_toolset_can_be_in_the_ceiling(hermes):
     after = _apply(hermes, ceiling=["a2a", "web"])
-    assert _ceiling(hermes) == ["a2a", "no_mcp", "web"]
+    assert _ceiling(hermes) == ["a2a", "conduit_rooms", "no_mcp", "web"]
     assert after["ceiling"] == ["a2a", "web"]
 
 
@@ -679,7 +696,7 @@ def test_a_named_profile_gets_its_own_ceiling_and_the_roots_api_server(hermes):
     after = _apply(hermes, "laifu", ceiling=["web"])
 
     laifu = _yaml(hermes.home("laifu") / "config.yaml")
-    assert laifu["platform_toolsets"] == {"api_server": ["no_mcp", "web"]}
+    assert laifu["platform_toolsets"] == {"api_server": ["conduit_rooms", "no_mcp", "web"]}
     assert laifu["approvals"] == {"mode": "manual"}
     # The root keeps its own ceiling and approvals; it gets the API server.
     assert _yaml(hermes.root / "config.yaml") == {"approvals": {"mode": "off"},
@@ -819,7 +836,7 @@ def test_one_setup_at_a_time(hermes):
     release.set()
     first.join(5)
     other.join(5)
-    assert _ceiling(hermes) == ["no_mcp", "web"]
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
 
 
 def test_the_policy_is_null_when_hermes_cant_read_it(hermes, caplog):
@@ -874,11 +891,11 @@ class Restarts:
 
 @pytest.fixture
 def client(hermes, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: hermes.root)
-    monkeypatch.setattr(api, "_room_setup", lambda: setup)
-    monkeypatch.setattr(api, "_room_setup_hermes", lambda module: hermes.adapter())
-    monkeypatch.setattr(api, "_room_setup_limiter", api._MintLimiter(100, 600.0))
-    monkeypatch.setattr(api, "_room_setup_read_limiter", api._MintLimiter(100, 60.0))
+    monkeypatch.setattr(api.core, "_calls_home", lambda: hermes.root)
+    monkeypatch.setattr(api.linked_rooms, "_room_setup", lambda: setup)
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_hermes", lambda module: hermes.adapter())
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_limiter", api.core._MintLimiter(100, 600.0))
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_read_limiter", api.core._MintLimiter(100, 60.0))
     restarts = Restarts()
     gateway = types.ModuleType("hermes_cli.web_server_gateway")
     gateway.live_session_refusal = restarts.live_session_refusal
@@ -973,23 +990,23 @@ def test_a_restart_that_fails_says_so_without_its_error(client, hermes, monkeypa
 
     monkeypatch.setattr(sys.modules["hermes_cli.web_server_gateway"], "_restart_gateway_after", fails)
     response = client.post(f"{BASE}/rooms/setup", json={})
-    assert response.json()["restart"] == {"started": False, "busy": False, "error": api._ROOM_SETUP_RESTART_FAILED}
+    assert response.json()["restart"] == {"started": False, "busy": False, "error": api.linked_rooms._ROOM_SETUP_RESTART_FAILED}
     assert "hermes-agent" not in response.text
 
 
 def test_the_setup_route_takes_a_profile(client, hermes, monkeypatch):
     seen = []
-    real = api._profile_scope
+    real = api.core._profile_scope
 
     def scope(profile):
         seen.append(profile)
         return real(None)
 
-    monkeypatch.setattr(api, "_profile_scope", scope)
-    monkeypatch.setattr(api, "_calls_home", lambda: hermes.home("laifu"))
+    monkeypatch.setattr(api.core, "_profile_scope", scope)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: hermes.home("laifu"))
     body = client.post(f"{BASE}/rooms/setup", params={"profile": "laifu"}, json={"ceiling": ["web"]}).json()
     assert body["profile"] == "laifu" and "laifu" in seen
-    assert _ceiling(hermes, "laifu") == ["no_mcp", "web"]
+    assert _ceiling(hermes, "laifu") == ["conduit_rooms", "no_mcp", "web"]
 
 
 # Hermes 0.22.3+ sends ?profile= for a profile the dashboard didn't start with
@@ -998,20 +1015,20 @@ def test_the_setup_route_takes_a_profile(client, hermes, monkeypatch):
 
 def test_the_setup_route_takes_another_profile_as_conduit_profile(client, hermes, monkeypatch):
     seen = []
-    real = api._profile_scope
+    real = api.core._profile_scope
 
     def scope(profile):
         seen.append(profile)
         return real(None)
 
-    monkeypatch.setattr(api, "_profile_scope", scope)
-    monkeypatch.setattr(api, "_calls_home", lambda: hermes.home("laifu"))
+    monkeypatch.setattr(api.core, "_profile_scope", scope)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: hermes.home("laifu"))
     read = client.get(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"})
     assert read.status_code == 200 and read.json()["profile"] == "laifu"
     body = client.post(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"}, json={"ceiling": ["web"]}).json()
     assert body["profile"] == "laifu" and body["restart"] == {"started": True, "busy": False, "error": None}
     assert seen and set(seen) == {"laifu"}
-    assert _ceiling(hermes, "laifu") == ["no_mcp", "web"]
+    assert _ceiling(hermes, "laifu") == ["conduit_rooms", "no_mcp", "web"]
     assert client.restarts.asked == [("refusal", "default", "restart"), ("after", "default")]
 
 
@@ -1023,7 +1040,7 @@ def test_a_setup_in_a_plugin_host_saves_but_never_restarts_the_gateway(client, h
     monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
     body = client.post(f"{BASE}/rooms/setup", json={"interrupt": interrupt}).json()
     assert body["ok"] and "api_server_key" in body["changed"]
-    assert body["restart"] == {"started": False, "busy": False, "error": api._ROOM_SETUP_HOST_RESTART}
+    assert body["restart"] == {"started": False, "busy": False, "error": api.linked_rooms._ROOM_SETUP_HOST_RESTART}
     assert client.restarts.asked == []
     assert "API_SERVER_KEY" in _env(hermes.root / ".env")
 
@@ -1042,11 +1059,11 @@ def test_the_setup_route_refuses_conduit_profile_where_the_profile_turned_the_pl
     dashboard = types.ModuleType("hermes_cli.web_server_dashboard")
 
     async def refused(name):
-        return name == api.PLUGIN_NAME
+        return name == api.core.PLUGIN_NAME
 
     dashboard._plugin_api_request_refused = refused
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", dashboard)
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     response = getattr(client, method)(f"{BASE}/rooms/setup", params={"conduit_profile": "laifu"},
                                        **({"json": {}} if method == "post" else {}))
     assert response.status_code == 404 and response.headers["cache-control"] == "no-store"
@@ -1059,8 +1076,8 @@ def test_the_dashboard_writes_each_homes_env_in_its_own_profiles_scope(hermes, m
     loaded = {}
     monkeypatch.setattr(setup.Hermes, "load", classmethod(lambda cls, env_scope=None: loaded.update(scope=env_scope)))
     seen = []
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: seen.append(profile))
-    api._room_setup_hermes(setup)
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: seen.append(profile))
+    api.linked_rooms._room_setup_hermes(setup)
     loaded["scope"](hermes.root)
     loaded["scope"](hermes.home("laifu"))
     assert seen == ["default", "laifu"]
@@ -1094,13 +1111,13 @@ def test_the_setup_route_on_a_hermes_without_the_calls_answers_501(client, monke
     def unsupported(module):
         raise module.SetupError("unsupported", "This Hermes can't be set up for Linked Rooms here", 501)
 
-    monkeypatch.setattr(api, "_room_setup_hermes", unsupported)
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_hermes", unsupported)
     response = client.get(f"{BASE}/rooms/setup")
     assert response.status_code == 501 and response.json()["code"] == "unsupported"
 
 
 def test_setup_changes_are_limited(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_room_setup_limiter", api._MintLimiter(2, 600.0, message="Too many setup changes"))
+    monkeypatch.setattr(api.linked_rooms, "_room_setup_limiter", api.core._MintLimiter(2, 600.0, message="Too many setup changes"))
     assert client.post(f"{BASE}/rooms/setup", json={"ceiling": ["web"]}).status_code == 200
     assert client.post(f"{BASE}/rooms/setup", json={"ceiling": ["web"]}).status_code == 200
     assert client.post(f"{BASE}/rooms/setup", json={"ceiling": ["web"]}).status_code == 429
@@ -1170,7 +1187,7 @@ def test_cli_setup_with_yes_and_no_restart(cli, hermes, monkeypatch, capsys):
     assert cli.dispatch(_setup_args(ceiling="web,terminal", yes=True, no_restart=True)) == 0
     said = capsys.readouterr().out
     assert "hermes gateway restart" in said and cli.ran == []
-    assert _ceiling(hermes) == ["no_mcp", "terminal", "web"]
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "terminal", "web"]
 
 
 def test_cli_setup_says_the_api_server_was_already_in_use(cli, hermes, monkeypatch, capsys):
@@ -1201,7 +1218,7 @@ def test_cli_setup_says_a_changed_ceiling_stops_the_agent_in_rooms_already_start
     assert ("then stops answering in rooms already started with other people's agents, which hold it to the "
             "tools it had when they started. New rooms use these.") in said
     assert said.index("already started") < said.index("Saved.")
-    assert _ceiling(hermes) == ["no_mcp", "web"]
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
 
     hermes.serve(live=False)
     assert cli.dispatch(_setup_args(ceiling="web,vision", yes=True, no_restart=True)) == 0

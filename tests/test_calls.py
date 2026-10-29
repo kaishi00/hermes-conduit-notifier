@@ -226,6 +226,26 @@ def test_a_duplicate_after_a_dropped_connection_counts_as_sent(home, fake, sleep
     assert fake.enqueued == []
 
 
+@pytest.mark.parametrize("answer, said", [
+    ({"accepted": True, "delivered": True, "rang": True, "watch": True}, "rang the paired iPhone, and sent the ring to its Apple Watch (the relay's log says if Apple refused it)"),
+    ({"accepted": True, "duplicate": True}, "already sent"),
+    ({"accepted": True, "delivered": True, "rang": True, "watch": False}, "rang the paired iPhone; no Apple Watch rings for it"),
+    ({"accepted": True, "delivered": True, "rang": True}, "rang the paired iPhone"),
+    ({"accepted": True, "delivered": True}, "sent as a \"Hermes wants to talk\" notification"),
+    ({"accepted": True, "delivered": False}, "not sent"),
+])
+def test_the_host_log_says_where_a_call_went(answer, said):
+    assert calls.call_delivery(answer).startswith(said)
+
+
+def test_a_delivered_call_logs_where_it_rang(home, fake, caplog):
+    fake.answers = [{"accepted": True, "delivered": True, "rang": True, "watch": False}]
+    _watch(home, "rt-1")
+    with caplog.at_level("INFO"):
+        calls.turn_ended("rt-1", "done", profile="default", fallback=READY)
+    assert "Conduit call request: rang the paired iPhone; no Apple Watch rings for it" in caplog.text
+
+
 def test_relay_errors_carry_their_status_and_a_bounded_detail(monkeypatch):
     import io
     import urllib.error
@@ -728,13 +748,17 @@ def test_register_adds_the_tool_and_its_skill():
                                 register_skill=lambda name, path: skills.append((name, path)))
     plugin.register(ctx)
     assert [tool["name"] for tool in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report",
-                                                  "conduit_settings", "conduit_present", "conduit_show", "conduit_health",
+                                                  "conduit_settings", "conduit_present", "conduit_show", "conduit_notify", "conduit_health",
                                                   "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar",
-                                                  "conduit_phone", "conduit_contacts"]
+                                                  "conduit_phone", "conduit_contacts", "conduit_room",
+                                                  "conduit_ask_owner", "conduit_free_busy", "conduit_ask_linked"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
     assert tool["schema"]["parameters"]["required"] == ["reason", "asked_by_user"]
-    assert all(other["toolset"] == "conduit" and other["schema"]["name"] == other["name"] for other in tools)
+    # The room-turn tools (room_asks, room_free_busy) are in a toolset of their own.
+    rooms = ("conduit_ask_owner", "conduit_free_busy")
+    assert all(other["toolset"] == ("conduit_rooms" if other["name"] in rooms else "conduit")
+               and other["schema"]["name"] == other["name"] for other in tools)
     [(name, path), (health_name, health_path), (location_name, location_path), (calendar_name, calendar_path)] = skills
     assert location_name == "using-location" and location_path.is_file()
     assert name == "calling-the-user" and path.is_file()
@@ -760,8 +784,9 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
                                 register_cli_command=lambda **kwargs: None, register_tool=register_tool)
     plugin.register(ctx)
     assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report", "conduit_settings",
-                                           "conduit_present", "conduit_show", "conduit_health", "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar", "conduit_phone",
-                                           "conduit_contacts"]
+                                           "conduit_present", "conduit_show", "conduit_notify", "conduit_health", "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar", "conduit_phone",
+                                           "conduit_contacts", "conduit_room", "conduit_ask_owner",
+                                           "conduit_free_busy", "conduit_ask_linked"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.

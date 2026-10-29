@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { ApnsClient } from './apns.mjs';
+import { CRASH_REPORTS_CAPABILITY, crashReportRoutes, crashReportsFromEnv } from './crash-reports.mjs';
 import { SWEEP_INTERVAL_MS } from './event-ledger.mjs';
 import { limitsFromEnv } from './limits.mjs';
 import { LIVE_ACTIVITIES_CAPABILITY, LiveActivities, validateRegistration, validateReport, validateToken } from './live-activities.mjs';
@@ -21,9 +22,9 @@ const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WAT
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    return { version: String(pkg.version || 'unknown'), capabilities: RELAY_CAPABILITIES };
+    return { version: String(pkg.version || 'unknown'), capabilities: [...RELAY_CAPABILITIES] };
   } catch {
-    return { version: 'unknown', capabilities: RELAY_CAPABILITIES };
+    return { version: 'unknown', capabilities: [...RELAY_CAPABILITIES] };
   }
 })();
 
@@ -33,6 +34,7 @@ let apns;
 let limits;
 let apnsSend;
 let watchTools;
+let crashReports;
 let watchGrants;
 let rings;
 let liveActivities;
@@ -192,6 +194,14 @@ function main() {
     clientAddress,
     socketOptions: config.watchAudioIdleMs ? { idleMs: config.watchAudioIdleMs } : {},
   });
+  // Testers' crash and freeze reports (crash-reports.mjs), on a relay
+  // with CRASH_REPORTS_TOKEN only.
+  const crashReportStore = crashReportsFromEnv(process.env, config.dataPath);
+  if (crashReportStore.reports) {
+    RELAY_INFO.capabilities.push(CRASH_REPORTS_CAPABILITY);
+    setInterval(() => crashReportStore.reports.prune(), 86_400_000).unref();
+  }
+  crashReports = crashReportRoutes({ ...crashReportStore, readJson, enforceRateLimit, clientAddress });
   watchTools = watchToolRoutes({
     grants: watchGrants,
     readJson,
@@ -403,9 +413,11 @@ async function route(request, response) {
     // their tokens are its own, and they're retired once this one exists.
     const sameDeviceToken = proven ? deviceToken : undefined;
     voipToken = unclaimedToken('voipToken', voipToken, undefined, sameDeviceToken) ?? undefined;
+    const askedWatchVoipToken = watchVoipToken;
     watchVoipToken = unclaimedToken('watchVoipToken', watchVoipToken, undefined, sameDeviceToken) ?? undefined;
+    const wantedWatchVoipToken = askedWatchVoipToken && !watchVoipToken ? askedWatchVoipToken : undefined;
     locationToken = unclaimedToken('locationToken', locationToken, undefined, sameDeviceToken) ?? undefined;
-    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, watchVoipToken, locationToken, environment: body.environment, preferences: body.preferences });
+    const created = store.createInstallation({ bundleId: body.bundle_id, deviceToken, voipToken, watchVoipToken, wantedWatchVoipToken, locationToken, environment: body.environment, preferences: body.preferences });
     if (proven) retireOtherInstallations(deviceToken, created.installation.id);
     return sendJson(response, 201, {
       installation: created.installation,
@@ -445,6 +457,11 @@ async function route(request, response) {
     } else {
       changes = changesFor();
       if (store.wouldUpdateInstallation(installation.id, changes)) enforceDeviceChangeBudget();
+    }
+    // A Watch token left out is remembered, so the pairing that moves here
+    // from the phone holding it brings it along (store.gatewayRevoked).
+    if (watchVoipToken !== undefined) {
+      store.setWantedWatchVoipToken(installation.id, watchVoipToken && changes.watchVoipToken === undefined ? watchVoipToken : null);
     }
     const updated = store.updateInstallation(installation.id, changes);
     if (proven) retireOtherInstallations(deviceToken, installation.id);
@@ -938,6 +955,11 @@ async function route(request, response) {
     enforceRevocationBudget();
     store.removeGateway(credential.installationId, credential.gatewayId);
     watchGrants.closeOwned(credential.installationId, credential.gatewayId, 'revoked');
+    // A host that paired this profile with another phone names it, so the
+    // Watch's ring can follow the pairing there (a new iPhone, same Watch).
+    const replacedBy = url.searchParams.get('replaced_by');
+    const watch = store.gatewayRevoked(credential.installationId, /^[0-9a-f-]{36}$/i.test(replacedBy ?? '') ? replacedBy.toLowerCase() : null);
+    if (watch) console.log(JSON.stringify({ level: 'info', message: `watch voip token ${watch} with a revoked pairing` }));
     response.writeHead(204).end();
     return;
   }
@@ -981,6 +1003,8 @@ async function route(request, response) {
   // Wrist-down tools for a Watch call: a sealed rendezvous between the
   // Watch and its host (watch-tools.mjs).
   if (await watchTools(request, response, url)) return;
+
+  if (await crashReports(request, response, url, sendJson)) return;
 
   sendJson(response, 404, { error: 'not_found' });
 }
@@ -1083,10 +1107,19 @@ function notificationFor(event, preferences, gateway = undefined) {
     gatewayId ? createHash('sha256').update(`${gatewayId}:${seed}`).digest('hex').slice(0, 16) : undefined;
   if (event.e2e) return encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, scopeToken });
   const generic = genericCopy(event.type);
-  const title = preferences.show_previews && event.title ? event.title : generic.title;
+  // Chat names (#1415) joins the chat's title to the generic one, as
+  // Conduit's NotificationCopy.chatNames does, over the generic body: none
+  // of Hermes' words, and never the plugin's own title, which may quote a
+  // tool's prompt.
+  const title = preferences.show_previews && event.title ? event.title
+    : preferences.show_chat_names && event.sessionTitle ? chatNamesTitle(generic.title, event)
+      : generic.title;
   // Keep previews private by default, while still making notifications from
   // different profiles and sessions distinguishable in Notification Center.
   const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event);
+  // With the reply as the body, the profile moves to the subtitle, as
+  // Conduit's own copy shows it.
+  const subtitle = preferences.show_previews && event.body ? profileLine(event, title) : '';
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
   // Approval, clarify and call pushes wait on the user, so they chime by
   // default: `!== false` keeps installations whose stored preferences predate
@@ -1133,7 +1166,7 @@ function notificationFor(event, preferences, gateway = undefined) {
     : undefined;
   const bodyConduit = { ...routing, ...(decision ? { decision } : {}), ...(call ? { call } : {}), ...(room ? { room } : {}) };
   const aps = {
-    alert: { title, body },
+    alert: { title, ...(subtitle ? { subtitle } : {}), body },
     ...(sound ? { sound: 'default' } : {}),
     ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
     ...(event.type === 'phone.changes' ? { category: PHONE_CHANGE_CATEGORY } : {}),
@@ -1253,8 +1286,11 @@ async function deliverEvent(response, installation, event, gateway) {
   if (event.type === 'phone.changes' && event.mode === 'background') return sendPhoneBackground(response, installation, event, gateway);
   // A phone that can ring gets the call as a VoIP push; anything that stops
   // it ringing sends the usual notification below instead.
+  // `watch`: the paired Watch is rung too (read before its push can clear
+  // a refused token). Hosts log where a call rang.
+  const watch = Boolean(installation.watchVoipToken);
   if (event.type === 'call.requested' && installation.voipToken && await ring(installation, event, gateway)) {
-    return sendJson(response, 202, { accepted: true, delivered: true, rang: true });
+    return sendJson(response, 202, { accepted: true, delivered: true, rang: true, watch });
   }
   const notification = notificationFor(event, installation.preferences, gateway);
   let result;
@@ -1440,10 +1476,40 @@ function levelAps(event) {
 }
 
 function notificationContext(message, event) {
-  const profile = String(event.profileName || event.profile || '').trim();
+  const profile = profileName(event);
   const sessionId = String(event.sessionId ?? '').trim();
   const details = [profile && `Profile: ${profile}`, sessionId && `Session: ${shortSessionId(sessionId)}`].filter(Boolean);
   return details.length ? `${message}\n${details.join(' · ')}` : message;
+}
+
+function chatNamesTitle(genericTitle, event) {
+  return event.type === 'response.ready' ? event.sessionTitle : `${genericTitle} · ${event.sessionTitle}`;
+}
+
+// Which profile a push came from, as Conduit's NotificationCopy.profileLine
+// says it: the bot's name, else the id capitalized, nothing for an unnamed default
+// profile or when the title already ends with it (a Bot Chat's).
+function profileLine(event, title) {
+  const unnamedDefault = !profileGivenName(event) && String(event.profile || '').trim().toLowerCase() === 'default';
+  const name = unnamedDefault ? '' : profileName(event);
+  const shown = String(title || '').trim().toLowerCase();
+  const lower = name.toLowerCase();
+  if (!name || shown === lower || shown.endsWith(` · ${lower}`)) return '';
+  return name;
+}
+
+// A profile as Conduit names it: its bot's name, else its id capitalized, and
+// Hermes for the main one. A name that is only the id names it no more than
+// the id.
+function profileName(event) {
+  const id = String(event.profile || '').trim();
+  if (profileGivenName(event)) return profileGivenName(event);
+  return id.toLowerCase() === 'default' ? 'Hermes' : id.slice(0, 1).toUpperCase() + id.slice(1);
+}
+
+function profileGivenName(event) {
+  const named = String(event.profileName || '').trim();
+  return named === String(event.profile || '').trim() ? '' : named;
 }
 
 function shortSessionId(sessionId) {
@@ -1513,6 +1579,8 @@ function validateEvent(body) {
     profile: cleanText(body.profile, 80),
     // The bot's name as Conduit's Bots list shows it, when Hermes gave it one.
     profileName: cleanText(body.profile_name, 64),
+    // The chat's title, for Chat names (#1415).
+    sessionTitle: cleanText(body.session_title, 120),
     gateway: cleanIdentifier(body.gateway, 80),
     pluginVersion: cleanIdentifier(body.plugin_version, 40),
     pluginCapabilities: validCapabilities(body.plugin_capabilities),

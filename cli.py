@@ -152,10 +152,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     rooms.add_argument("--no-restart", dest="no_restart", action="store_true",
                        help="for setup: don't restart the gateway; say how to")
     rooms.add_argument("--tools", choices=["talk", "look", "data", "custom"],
-                       help="talk: no tools; look: web lookups; data: lookups and the data tools you pick; "
+                       help="talk: no tools; look: web lookups; data: lookups and when you're busy (free/busy); "
                             "custom: only the tools you pick")
     rooms.add_argument("--tool", action="append", default=None, metavar="NAME",
-                       help="a tool to allow with --tools custom or data; repeat it for more (replaces the list)")
+                       help="a tool to allow with --tools custom; repeat it for more (replaces the list)")
     rooms.add_argument("--share", choices=["helps", "ask", "nothing"],
                        help="what it may share about you: what helps, ask you first, or nothing personal")
     rooms.add_argument("--search", choices=["on", "off"], help="whether it may search your past chats")
@@ -166,15 +166,27 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     links = commands.add_parser(
         "links",
         help="Links between this Hermes and other people's, for rooms with their agents: make an invite, "
-             "preview or accept one, list them, remove a Link or cancel an invite",
+             "preview or accept one, list them, remove a Link or cancel an invite; and what a linked person's "
+             "Hermes may ask yours (rules), the asks it sent (asks), and answering one (answer)",
     )
-    links.add_argument("links_action", choices=["invite", "preview", "accept", "list", "remove", "cancel"])
+    links.add_argument("links_action", choices=["invite", "preview", "accept", "list", "remove", "cancel", "rules",
+                                                "asks", "answer"])
     links.add_argument("target", nargs="?", default="",
-                       help="for preview and accept: the invite's conduit://link/ URL; for remove: the Link's id; "
-                            "for cancel: the invite's id")
+                       help="for preview and accept: the invite's conduit://link/ URL; for remove and rules: the "
+                            "Link's id; for cancel: the invite's id; for answer: the ask's id")
     links.add_argument("--name", default="",
                        help="for invite: who the other person sees it's from; for accept: who they see linked")
     links.add_argument("--yes", action="store_true", help="for remove: unlink without asking first")
+    links.add_argument("--free-on", dest="free_on", choices=list(_ASK_FREE_ON),
+                       help="for rules: when their Hermes asks whether you're free, say free or busy (yes_no), "
+                            "also your busy times (times), ask you (ask), or refuse (off)")
+    links.add_argument("--questions", choices=list(_ASK_QUESTIONS),
+                       help="for rules: when their Hermes asks a question, ask you (ask) or refuse (off)")
+    links.add_argument("--answers-from", dest="answers_from", metavar="PROFILE",
+                       help="for rules: the profile whose phone and calendar answer their asks")
+    links.add_argument("--text", help="for answer: your answer, in your words")
+    links.add_argument("--share", action="store_true", help="for answer: say what the calendar shows")
+    links.add_argument("--decline", action="store_true", help="for answer: don't answer it")
     parser.set_defaults(func=dispatch)
 
 
@@ -871,6 +883,8 @@ def _links(args: argparse.Namespace) -> int:
     from . import room_identity, room_links
 
     action = args.links_action
+    if action in ("rules", "asks", "answer"):
+        return _link_asks_command(args, room_identity.root_home(get_hermes_home()))
     target = str(getattr(args, "target", "") or "").strip()
     name = str(getattr(args, "name", "") or "").strip()
     if action in _LINKS_USAGE and not target:
@@ -936,6 +950,83 @@ def _links(args: argparse.Namespace) -> int:
         else:
             print("Cancelled the invite: it can't be accepted now.")
     except (room_links.LinkError, OSError) as error:
+        print(f"Couldn't {verb}: {error}")
+        return 1
+    return 0
+
+
+# What a linked person's Hermes may ask this one (link_asks), as the CLI names them.
+_ASK_FREE_ON = {"yes_no": "says free or busy", "times": "says your busy times", "ask": "asks you", "off": "off"}
+_ASK_QUESTIONS = {"ask": "ask you", "off": "off"}
+_ASK_STATUS = {"held": "waits for you", "answered": "answered", "declined": "declined", "not_allowed": "refused",
+               "too_many": "too many", "unavailable": "couldn't be answered", "unanswered": "not answered",
+               "bad_ask": "unreadable"}
+
+
+def _link_asks_for(root: Path) -> Any:
+    from . import link_asks
+
+    return link_asks.Asks(root)
+
+
+def _link_asks_command(args: argparse.Namespace, root: Path) -> int:
+    """What linked people's Hermes may ask this one, and answering their asks (link_asks): asks reach the owner on
+    their phone, and here too."""
+    from . import link_asks
+
+    action = args.links_action
+    target = str(getattr(args, "target", "") or "").strip()
+    asks = _link_asks_for(root)
+    try:
+        if action == "rules":
+            changes = {key: value for key, value in (("free_on", getattr(args, "free_on", None)),
+                                                     ("questions", getattr(args, "questions", None)),
+                                                     ("profile", getattr(args, "answers_from", None)))
+                       if value is not None}
+            verb = "change the rules" if changes else "show the rules"
+            if changes:
+                if not target:
+                    print("Usage: hermes conduit-push links rules <Link id> [--free-on ...] [--questions ...] "
+                          "[--answers-from PROFILE] (links rules shows them)")
+                    return 2
+                asks.set_rules(target, changes)
+            shown = [link for link in asks.rules()["links"] if not target or link["id"] == target]
+            if not shown:
+                print("No Links yet." if not target else f"No Link {_printable(target)} on this Hermes.")
+                return 0 if not target else 1
+            for link in shown:
+                rules = link["rules"]
+                print(f"{_printable(link['name'])}: free on {_ASK_FREE_ON[rules['free_on']]}, questions "
+                      f"{_ASK_QUESTIONS[rules['questions']]}, answers from {rules['profile']} (Link {link['id']})")
+        elif action == "asks":
+            verb = "list the asks"
+            found = asks.received()
+            if not found:
+                print("No asks from linked people.")
+                return 0
+            for ask in found:
+                agent = f" ({_printable(ask['agent'])})" if ask.get("agent") else ""
+                print(f"{_printable(ask['from'])}'s Hermes{agent} asks: {_printable(link_asks.described(ask['asked']))}"
+                      f", {_ASK_STATUS.get(ask['status'], ask['status'])} (ask {ask['id']})")
+                if ask["status"] == "held" and ask.get("share"):
+                    print(f"  Your calendar says: {_printable(ask['share'])}")
+                if ask.get("answer"):
+                    print(f"  Answer: {_printable(ask['answer'])}")
+        else:
+            verb = "answer it"
+            text = str(getattr(args, "text", "") or "").strip()
+            share, decline = bool(getattr(args, "share", False)), bool(getattr(args, "decline", False))
+            if not target or [bool(text), share, decline].count(True) != 1:
+                print("Usage: hermes conduit-push links answer <ask id> --text \"...\" | --share | --decline "
+                      "(links asks shows them)")
+                return 2
+            answered = asks.answer_held(target, text=text or None, share=share, decline=decline)
+            print(f"Answered {_printable(answered['from'])}." if not decline
+                  else f"Declined {_printable(answered['from'])}'s ask.")
+            from . import room_links
+
+            _say_if_nothing_reads(room_links, root, "the answer waits here")
+    except (link_asks.AsksError, OSError) as error:
         print(f"Couldn't {verb}: {error}")
         return 1
     return 0
@@ -1339,7 +1430,7 @@ def _link_time(at: int) -> str:
 
 def _print_room_choices(label: str, choices: Any, indent: str = "") -> None:
     tools = _ROOM_TOOLS.get(choices.tools, choices.tools)
-    if choices.custom_tools and choices.tools in ("data", "custom"):
+    if choices.custom_tools and choices.tools == "custom":
         tools += f": {', '.join(choices.custom_tools)}"
     print(f"{indent}{_printable(label)}:")
     print(f"{indent}  Can do: {_printable(tools)}")

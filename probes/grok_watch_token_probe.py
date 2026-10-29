@@ -64,8 +64,10 @@ def load_plugin_api():
     except Exception as exc:
         sys.exit(f"Could not load {path} ({exc.__class__.__name__}: {str(exc)[:120]}); "
                  "run the probe with the Python Hermes itself uses")
-    missing = [name for name in ("_profile_scope", "grok_live_credentials", "grok_live_model_voice", "TokenError")
-               if not hasattr(module, name)]
+    missing = [f"{part}.{name}" for part, name in (("core", "_profile_scope"), ("core", "TokenError"),
+                                                   ("grok_live", "grok_live_credentials"),
+                                                   ("grok_live", "grok_live_model_voice"))
+               if not hasattr(getattr(module, part), name)]
     if missing:
         sys.exit(f"This plugin checkout lacks {', '.join(missing)}; update the checkout")
     return module
@@ -73,7 +75,7 @@ def load_plugin_api():
 
 def scoped(api, profile: Optional[str], fn, *args, **kwargs):
     """`fn` under the Hermes profile the dashboard would use for `?profile=`."""
-    with api._profile_scope(profile):
+    with api.core._profile_scope(profile):
         return fn(*args, **kwargs)
 
 
@@ -269,11 +271,11 @@ async def run(args, api) -> Dict[str, Any]:
     t0 = time.monotonic()
     summary: Dict[str, Any] = {}
     try:
-        bearer, auth = await asyncio.to_thread(scoped, api, args.profile, api.grok_live_credentials)
-        model, voice = await asyncio.to_thread(scoped, api, args.profile, api.grok_live_model_voice)
+        bearer, auth = await asyncio.to_thread(scoped, api, args.profile, api.grok_live.grok_live_credentials)
+        model, voice = await asyncio.to_thread(scoped, api, args.profile, api.grok_live.grok_live_model_voice)
     except Exception as exc:
         # TokenError texts are the plugin's own user-facing messages.
-        summary["error"] = str(exc)[:200] if isinstance(exc, api.TokenError) else exc.__class__.__name__
+        summary["error"] = str(exc)[:200] if isinstance(exc, api.core.TokenError) else exc.__class__.__name__
         return summary
     summary.update(auth=auth, model=model, voice=voice, expires_requested_s=args.expires)
     mark(t0, f"xAI sign-in: {auth}")

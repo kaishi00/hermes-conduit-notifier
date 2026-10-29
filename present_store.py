@@ -67,6 +67,28 @@ MAPS_MODES = ("driving", "walking", "transit", "cycling")
 NAVIGATE_FEATURE = "maps-navigate"
 MAX_MAPS_TO_CHARS = 200
 MAX_FEATURES = 16
+# A room's ask (room_asks, Ask me first): an agent in a room with other
+# people's agents asks its owner before it shares something. Only a Conduit
+# that says it shows them gets one, and only its answer counts: another would
+# show it as a plain confirm, whose Edit opens the room's hidden session.
+ROOM_ASK_FEATURE = "room-asks"
+ROOM_ASK_TTL_MINUTES = 24 * 60
+MAX_ROOM_ASKS_WAITING = 3
+ROOM_ASKS_PER_HOUR = 6
+ROOM_ASKS_ALL_PER_HOUR = 12
+MAX_ROOM_ASKS_SHOWN = 40
+MAX_ROOM_BUDGETS = 64
+MAX_ROOM_ANSWERS_KEPT = 10
+MAX_ROOM_ANSWERS_KEPT_ALL = 60
+MAX_ROOM_ID_CHARS = 128
+MAX_ROOM_NAME_CHARS = 80
+# A Link's ask (link_asks, N9): a linked person's Hermes asks this one, and its
+# owner answers. Only a Conduit that says it shows them gets one, and only its
+# answer counts. ``link.share`` says whether there's an answer to share (a
+# question has none: only Say instead and Don't share). It waits with a room's
+# asks, under their caps; link_asks keeps each Link's budget.
+LINK_ASK_FEATURE = "link-asks"
+MAX_LINK_ID_CHARS = 48
 
 MAX_TITLE_CHARS = 80
 MAX_PREVIEW_CHARS = 2000
@@ -175,8 +197,15 @@ class PresentStore:
             for result in results:
                 _take_result(state, installation, device["features"], result, now)
             # The newest, within a cap only a hand-edited store can exceed.
-            waiting = [_public(prompt) for prompt in state["prompts"] if prompt["status"] == "waiting"
-                       and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])][-MAX_WAITING:]
+            shown = [prompt for prompt in state["prompts"] if prompt["status"] == "waiting"
+                     and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])
+                     and (not prompt.get("room") or ROOM_ASK_FEATURE in device["features"])
+                     and (not prompt.get("link") or LINK_ASK_FEATURE in device["features"])]
+            # Each the newest within its own cap: a room's or a Link's asks never push the owner's own prompts off
+            # the phone.
+            kept = {prompt["id"] for prompt in [prompt for prompt in shown if not _elsewhere(prompt)][-MAX_WAITING:]
+                    + [prompt for prompt in shown if _elsewhere(prompt)][-MAX_ROOM_ASKS_SHOWN:]}
+            waiting = [_public(prompt) for prompt in shown if prompt["id"] in kept]
             # Expired cards leave the file; the rest go only to a phone that
             # shows them.
             state["cards"] = [card for card in state["cards"] if now < card["expires_at"]]
@@ -218,6 +247,16 @@ class PresentStore:
                 session_id: Any = None, ttl_minutes: Any = None, maps: Any = None) -> dict[str, Any]:
         """Keeps a confirm prompt for the phone. Raises PresentError when it
         won't."""
+        return self._keep(title, preview, action_label, spoken_yes=spoken_yes, session_id=session_id,
+                          ttl_minutes=ttl_minutes, maps=maps)[0]
+
+    def _keep(self, title: Any, preview: Any, action_label: Any = None, *, spoken_yes: Any = None,
+              session_id: Any = None, ttl_minutes: Any = None, maps: Any = None,
+              room: dict[str, str] | None = None, link: dict[str, Any] | None = None
+              ) -> tuple[dict[str, Any], bool]:
+        """A prompt kept for the phone, and whether it's new: a room's ask
+        whose question is still waiting in that room is returned instead.
+        Everything is checked and kept under one lock."""
         clean_title = _line(title, MAX_TITLE_CHARS + 1)
         if not clean_title:
             raise PresentError("no_title", "Give a short title, like \"Send to Mei?\".")
@@ -247,13 +286,46 @@ class PresentStore:
                 raise PresentError("invalid", "maps is {to, mode} with a place and a travel mode.")
         with self._locked() as state:
             now = self.clock()
-            if not state["devices"]:
+            if room is not None:
+                same = _room_waiting(state, room["id"], clean_title, clean_preview)
+                if same is not None:
+                    return _shown(same), False
+                if not any(ROOM_ASK_FEATURE in device.get("features", []) and now - device["seen_at"]
+                           < CARD_DEVICE_RECENT_S for device in state["devices"].values()):
+                    raise PresentError("no_device", "No Conduit that shows a room's asks has connected to this "
+                                                    "Hermes profile recently.")
+                if len(_room_waiting(state, room["id"])) >= MAX_ROOM_ASKS_WAITING:
+                    raise PresentError("too_many", f"{MAX_ROOM_ASKS_WAITING} asks from this room are still waiting.")
+                # No more than the phone shows, so every ask kept is one the owner sees.
+                if sum(prompt["status"] == "waiting" and _elsewhere(prompt) for prompt in state["prompts"]) \
+                        >= MAX_ROOM_ASKS_SHOWN:
+                    raise PresentError("too_many", f"{MAX_ROOM_ASKS_SHOWN} asks from rooms are still waiting.")
+                # A room's own budget, apart from the owner's own prompts: its agent is steered by other people.
+                recent = [at for at in state["room_asked"].get(room["id"], []) if now - at < HOUR_S]
+                if len(recent) >= ROOM_ASKS_PER_HOUR:
+                    raise PresentError("rate_limited", f"This room asked {ROOM_ASKS_PER_HOUR} times this hour.")
+                if sum(now - at < HOUR_S for times in state["room_asked"].values() for at in times) \
+                        >= ROOM_ASKS_ALL_PER_HOUR:
+                    raise PresentError("rate_limited", f"Rooms asked {ROOM_ASKS_ALL_PER_HOUR} times this hour.")
+            elif link is not None:
+                if not any(LINK_ASK_FEATURE in device.get("features", []) and now - device["seen_at"]
+                           < CARD_DEVICE_RECENT_S for device in state["devices"].values()):
+                    raise PresentError("no_device", "No Conduit that shows a Link's asks has connected to this "
+                                                    "Hermes profile recently.")
+                if sum(prompt["status"] == "waiting" and _elsewhere(prompt) for prompt in state["prompts"]) \
+                        >= MAX_ROOM_ASKS_SHOWN:
+                    raise PresentError("too_many", f"{MAX_ROOM_ASKS_SHOWN} asks are still waiting.")
+            elif not state["devices"]:
                 raise PresentError("no_device", "No Conduit that shows confirm prompts has connected to this "
                                                 "Hermes profile yet.")
-            recent = [at for at in state["asked"] if now - at < HOUR_S]
-            if len(recent) >= PER_HOUR:
-                raise PresentError("rate_limited", "Too many confirm prompts this hour. Ask the user in chat instead.")
-            if sum(prompt["status"] == "waiting" for prompt in state["prompts"]) >= MAX_WAITING:
+            else:
+                recent = [at for at in state["asked"] if now - at < HOUR_S]
+                if len(recent) >= PER_HOUR:
+                    raise PresentError("rate_limited", "Too many confirm prompts this hour. Ask the user in chat "
+                                                       "instead.")
+            # A room's asks have their own caps, so they never crowd out the owner's own prompts.
+            if room is None and link is None and sum(prompt["status"] == "waiting" and not _elsewhere(prompt)
+                                                     for prompt in state["prompts"]) >= MAX_WAITING:
                 raise PresentError("too_many", "Too many prompts are still waiting. Cancel ones you no longer need.")
             created = int(now)
             prompt = {
@@ -264,10 +336,99 @@ class PresentStore:
             }
             if navigate is not None:
                 prompt["maps"] = navigate
+            if room is not None:
+                prompt["room"] = room
+            if link is not None:
+                prompt["link"] = link
             state["prompts"].append(prompt)
             _trim_prompts(state)
-            state["asked"] = (recent + [now])[-PER_HOUR:]
-            return _shown(prompt)
+            if room is not None:
+                state["room_asked"][room["id"]] = (recent + [now])[-ROOM_ASKS_PER_HOUR:]
+            elif link is None:
+                state["asked"] = (recent + [now])[-PER_HOUR:]
+            return _shown(prompt), True
+
+    def ask_room(self, question: Any, share: Any, *, room_id: Any, room_name: Any, session_id: Any
+                 ) -> tuple[dict[str, Any], bool]:
+        """Keeps a room's ask (room_asks) for a Conduit that shows them: the
+        question as its title, what would be shared as its preview. Asks are
+        the room's (one profile has one agent in a room), so the same
+        question still waiting in the room, whichever of its sessions asked,
+        is returned instead of a new one; the bool says whether it's new.
+        Raises PresentError when it won't."""
+        room = _room({"id": room_id, "name": room_name})
+        if room is None or not _session_key(session_id):
+            # A room's ask without a session it can keep would be dropped on the next read.
+            raise PresentError("invalid", "A room's ask needs the room and its session.")
+        return self._keep(question, share, "Share", spoken_yes=["share it"], session_id=session_id,
+                          ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
+
+    def ask_link(self, title: Any, preview: Any, *, link: Any, ttl_minutes: Any = ROOM_ASK_TTL_MINUTES
+                 ) -> dict[str, Any]:
+        """Keeps a Link's ask (link_asks) for a Conduit that shows them: what's asked as its title, what would be
+        shared (or the question) as its preview. Raises PresentError when it won't. Its Share answers only when
+        ``link.share``: Conduit shows it only then, and a question's is refused (_take_result)."""
+        kept = _link(link)
+        if kept is None:
+            raise PresentError("invalid", "A Link's ask needs the Link.")
+        spoken = ["share it"] if kept["share"] else None
+        return self._keep(title, preview, "Share", spoken_yes=spoken, ttl_minutes=ttl_minutes, link=kept)[0]
+
+    def link_ask(self, prompt_id: Any) -> dict[str, Any] | None:
+        """One of the Links' asks as it stands, with what the owner wrote (``edit_text``)."""
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is None or not prompt.get("link"):
+                return None
+            return {**_shown(prompt), "preview": prompt["preview"], "link": prompt["link"]}
+
+    def settle_link(self, prompt_id: Any, outcome: str, edit_text: str = "") -> bool:
+        """The owner answered a Link's ask elsewhere (the CLI): its prompt leaves the phone, answered that way.
+        False only when it was answered already (on the phone)."""
+        if outcome not in OUTCOMES:
+            raise PresentError("invalid", "outcome is confirmed, declined or edit")
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is None or not prompt.get("link"):
+                return True
+            if prompt["status"] != "waiting":
+                return False
+            prompt.update(status=outcome, via="tap", finished_at=int(self.clock()), reported=True)
+            if outcome == "edit" and edit_text:
+                prompt["edit_text"] = _text(edit_text, MAX_EDIT_TEXT_CHARS)
+            return True
+
+    def room_answers(self, room_id: Any) -> list[dict[str, Any]]:
+        """The answered (or expired) asks of a room its agent hasn't heard
+        yet (``mark_heard``), oldest first, each with its question (``title``)
+        and what it would share (``preview``). By room, not session: a
+        compacted room session's continuation hears them too."""
+        if not isinstance(room_id, str) or not room_id:
+            return []
+        with self._locked() as state:
+            found = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
+                     and prompt["status"] != "waiting" and not prompt["reported"]]
+            return [{**_shown(prompt), "preview": prompt["preview"]} for prompt in found]
+
+    def mark_heard(self, prompt_ids: Any) -> None:
+        """Marks a room's answered asks heard (its turn read them), or a Link's sent back."""
+        ids = {prompt_id for prompt_id in prompt_ids if isinstance(prompt_id, str)} if isinstance(
+            prompt_ids, (list, tuple, set)) else set()
+        if not ids:
+            return
+        with self._locked() as state:
+            for prompt in state["prompts"]:
+                if prompt["id"] in ids and _elsewhere(prompt) and prompt["status"] != "waiting":
+                    prompt["reported"] = True
+
+    def room_ask(self, prompt_id: Any) -> dict[str, Any] | None:
+        """One of a room's asks as it stands. An answer stays unheard until
+        the turn the tool gave it to replies (``mark_heard``)."""
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is None or not prompt.get("room"):
+                return None
+            return {**_shown(prompt), "preview": prompt["preview"]}
 
     def show(self, title: Any, markdown: Any, *, session_id: Any = None, cards: Any = None,
              markdown_is_fallback: bool = False) -> dict[str, Any]:
@@ -322,12 +483,13 @@ class PresentStore:
         every outcome the agent hasn't seen. Outcomes returned are marked
         reported."""
         with self._locked() as state:
+            # A room's asks are its agent's (room_asks), a Link's its owner's (link_asks), never a private chat's.
             if prompt_id is not None:
                 prompt = _find(state, prompt_id)
-                found = [prompt] if prompt else []
+                found = [prompt] if prompt and not _elsewhere(prompt) else []
             else:
-                found = [prompt for prompt in state["prompts"]
-                         if prompt["status"] == "waiting" or not prompt["reported"]]
+                found = [prompt for prompt in state["prompts"] if not _elsewhere(prompt)
+                         and (prompt["status"] == "waiting" or not prompt["reported"])]
             shown = [_shown(prompt) for prompt in found]
             for prompt in found:
                 if prompt["status"] != "waiting":
@@ -337,7 +499,8 @@ class PresentStore:
     def unreported_outcomes(self) -> list[dict[str, Any]]:
         """Outcomes the agent hasn't seen yet, oldest first, marked seen."""
         with self._locked() as state:
-            found = [prompt for prompt in state["prompts"] if prompt["status"] != "waiting" and not prompt["reported"]]
+            found = [prompt for prompt in state["prompts"] if prompt["status"] != "waiting" and not prompt["reported"]
+                     and not _elsewhere(prompt)]
             for prompt in found:
                 prompt["reported"] = True
             return [_shown(prompt) for prompt in found]
@@ -347,7 +510,7 @@ class PresentStore:
         answered one keeps its answer), or None when there's no such prompt."""
         with self._locked() as state:
             prompt = _find(state, prompt_id)
-            if prompt is None:
+            if prompt is None or _elsewhere(prompt):
                 return None
             if prompt["status"] == "waiting":
                 prompt.update(status="cancelled", finished_at=int(self.clock()))
@@ -472,7 +635,48 @@ def _public(prompt: dict[str, Any]) -> dict[str, Any]:
     public = {key: prompt[key] for key in _PUBLIC}
     if prompt.get("maps"):
         public["maps"] = prompt["maps"]
+    if prompt.get("room"):
+        public["room"] = prompt["room"]
+    if prompt.get("link"):
+        public["link"] = prompt["link"]
     return public
+
+
+def _room_waiting(state: dict[str, Any], room_id: str, title: str | None = None, preview: str | None = None) -> Any:
+    """A room's waiting asks, or the one asking ``title`` (case-folded) to share exactly ``preview``, or None: a
+    yes covers only the share the owner saw."""
+    waiting = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
+               and prompt["status"] == "waiting"]
+    if title is None:
+        return waiting
+    return next((prompt for prompt in waiting if prompt["title"].casefold() == title.casefold()
+                 and prompt["preview"] == preview), None)
+
+
+def _room(value: Any) -> dict[str, str] | None:
+    """A room's ask's room: its id and name, on one line each."""
+    if not isinstance(value, dict) or not isinstance(value.get("id"), str):
+        return None
+    room_id = value["id"].strip()
+    if not room_id or len(room_id) > MAX_ROOM_ID_CHARS or _SESSION_KEY_CONTROL.search(room_id):
+        return None
+    return {"id": room_id, "name": _line(value.get("name"), MAX_ROOM_NAME_CHARS) or "a room"}
+
+
+def _link(value: Any) -> dict[str, Any] | None:
+    """A Link's ask's Link: its id, name and whether there's an answer to share."""
+    if not isinstance(value, dict) or not isinstance(value.get("id"), str) or not isinstance(value.get("share"), bool):
+        return None
+    link_id = value["id"].strip()
+    if not link_id or len(link_id) > MAX_LINK_ID_CHARS or _SESSION_KEY_CONTROL.search(link_id):
+        return None
+    return {"id": link_id, "name": _line(value.get("name"), MAX_ROOM_NAME_CHARS) or "Someone",
+            "share": value["share"]}
+
+
+def _elsewhere(prompt: dict[str, Any]) -> bool:
+    """Whether a prompt is a room's or a Link's ask, which never reaches a private chat."""
+    return bool(prompt.get("room") or prompt.get("link"))
 
 
 def _maps(value: Any) -> dict[str, str] | None:
@@ -520,6 +724,13 @@ def _take_result(state: dict[str, Any], installation: str, features: list[str], 
     # one that gets it).
     if prompt.get("maps") and NAVIGATE_FEATURE not in features:
         return
+    if prompt.get("room") and ROOM_ASK_FEATURE not in features:
+        return
+    if prompt.get("link") and LINK_ASK_FEATURE not in features:
+        return
+    # Nothing to share on a question: only Say instead or Don't share.
+    if prompt.get("link") and outcome == "confirmed" and not prompt["link"]["share"]:
+        return
     # Conduit opens Maps by itself, and only as a yes to a Go prompt.
     if via == "auto" and (outcome != "confirmed" or not prompt.get("maps")):
         return
@@ -539,13 +750,35 @@ def _trim_devices(state: dict[str, Any]) -> None:
 
 
 def _trim_prompts(state: dict[str, Any]) -> None:
-    """Keeps the newest prompts; finished ones go first, never a waiting one."""
+    """Keeps the newest prompts; finished ones go first, those already reported before the rest, never a waiting
+    one or a room's answer its agent hasn't heard (it lasts its week, as one of the newest unheard: _trim_unheard)."""
+    _trim_unheard(state)
     prompts = state["prompts"]
     extra = len(prompts) - MAX_PROMPTS
     if extra <= 0:
         return
-    finished = [prompt["id"] for prompt in prompts if prompt["status"] != "waiting"][:extra]
+    done = [prompt for prompt in prompts if prompt["status"] != "waiting"
+            and not (_elsewhere(prompt) and not prompt["reported"])]
+    finished = [prompt["id"] for prompt in sorted(done, key=lambda prompt: not prompt["reported"])][:extra]
     state["prompts"] = [prompt for prompt in prompts if prompt["id"] not in finished]
+
+
+def _trim_unheard(state: dict[str, Any]) -> None:
+    """Keeps the newest MAX_ROOM_ANSWERS_KEPT answers a room's agent hasn't heard, and the newest
+    MAX_ROOM_ANSWERS_KEPT_ALL across rooms."""
+    unheard = sorted((prompt for prompt in state["prompts"] if _elsewhere(prompt) and prompt["status"] != "waiting"
+                      and not prompt["reported"]),
+                     key=lambda prompt: prompt.get("finished_at", prompt["created_at"]), reverse=True)
+    kept: dict[str, int] = {}
+    dropped = set()
+    for prompt in unheard:
+        room_id = prompt["room"]["id"] if prompt.get("room") else f"link:{prompt['link']['id']}"
+        if kept.get(room_id, 0) >= MAX_ROOM_ANSWERS_KEPT or sum(kept.values()) >= MAX_ROOM_ANSWERS_KEPT_ALL:
+            dropped.add(prompt["id"])
+        else:
+            kept[room_id] = kept.get(room_id, 0) + 1
+    if dropped:
+        state["prompts"] = [prompt for prompt in state["prompts"] if prompt["id"] not in dropped]
 
 
 def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
@@ -576,6 +809,17 @@ def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
         navigate = _maps(raw.get("maps"))
         if navigate is not None:
             prompt["maps"] = navigate
+    if raw.get("room") is not None:
+        # One whose room can't be read is dropped, not kept as a plain prompt a private chat would hear.
+        room = _room(raw["room"])
+        if room is None or not prompt["session_id"]:
+            return None
+        prompt["room"] = room
+    if raw.get("link") is not None:
+        link = _link(raw["link"])
+        if link is None:
+            return None
+        prompt["link"] = link
     if raw.get("via") in VIAS:
         prompt["via"] = raw["via"]
     edit_text = _text(raw.get("edit_text"), MAX_EDIT_TEXT_CHARS)
@@ -598,8 +842,8 @@ def _prompt(raw: Any, now: float) -> dict[str, Any] | None:
 def _normalized(raw: Any, now: float) -> dict[str, Any]:
     """A well-formed state from whatever is on disk, with waiting prompts past
     their time expired and old entries dropped."""
-    state: dict[str, Any] = {"version": VERSION, "devices": {}, "prompts": [], "asked": [], "cards": [],
-                             "shown": []}
+    state: dict[str, Any] = {"version": VERSION, "devices": {}, "prompts": [], "asked": [], "room_asked": {},
+                             "cards": [], "shown": []}
     if not isinstance(raw, dict):
         return state
     devices = raw.get("devices")
@@ -625,6 +869,16 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
     if isinstance(asked, list):
         state["asked"] = [at for at in asked if isinstance(at, (int, float)) and not isinstance(at, bool)
                           and now - at < HOUR_S][-PER_HOUR:]
+    room_asked = raw.get("room_asked")
+    budgets = {}
+    for room_id, times in room_asked.items() if isinstance(room_asked, dict) else ():
+        kept = sorted(at for at in times if isinstance(at, (int, float)) and not isinstance(at, bool)
+                      and now - at < HOUR_S)[-ROOM_ASKS_PER_HOUR:] if isinstance(times, list) else []
+        if isinstance(room_id, str) and _room({"id": room_id}) is not None and kept:
+            budgets[room_id] = kept
+    # The rooms that asked most recently.
+    for room_id in sorted(budgets, key=lambda room: budgets[room][-1])[-MAX_ROOM_BUDGETS:]:
+        state["room_asked"][room_id] = budgets[room_id]
     cards = raw.get("cards")
     card_ids: set[str] = set()
     for item in cards if isinstance(cards, list) else []:

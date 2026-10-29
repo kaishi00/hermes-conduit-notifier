@@ -35,16 +35,16 @@ def test_manifest_mounts_the_api_under_the_plugin_name():
 
 
 def test_status_reports_missing_key_without_calling_google():
-    assert api.gemini_live_status(env()) == {"available": False, "reason": "no_api_key", "model": "gemini-3.8-live"}
+    assert api.gemini_qwen_live.gemini_live_status(env()) == {"available": False, "reason": "no_api_key", "model": "gemini-3.8-live"}
 
 
 def test_status_accepts_google_api_key_and_model_override():
-    status = api.gemini_live_status(env(GOOGLE_API_KEY="g-key", CONDUIT_GEMINI_LIVE_MODEL="models/gemini-4-live"))
+    status = api.gemini_qwen_live.gemini_live_status(env(GOOGLE_API_KEY="g-key", CONDUIT_GEMINI_LIVE_MODEL="models/gemini-4-live"))
     assert status == {"available": True, "model": "gemini-4-live"}
 
 
 def test_gemini_key_wins_over_google_key():
-    assert api.resolve_api_key(env(GEMINI_API_KEY=" gem ", GOOGLE_API_KEY="goog")) == "gem"
+    assert api.gemini_qwen_live.resolve_api_key(env(GEMINI_API_KEY=" gem ", GOOGLE_API_KEY="goog")) == "gem"
 
 
 def test_token_is_single_use_model_locked_and_short_lived():
@@ -54,7 +54,7 @@ def test_token_is_single_use_model_locked_and_short_lived():
         calls.append((url, key, body))
         return {"name": "auth_tokens/abc123"}
 
-    result = api.mint_gemini_live_token(env(GEMINI_API_KEY="secret"), post, now=NOW)
+    result = api.gemini_qwen_live.mint_gemini_live_token(env(GEMINI_API_KEY="secret"), post, now=NOW)
 
     url, key, body = calls[0]
     assert url == "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
@@ -78,22 +78,22 @@ def test_token_is_single_use_model_locked_and_short_lived():
 
 
 def test_token_without_key_is_a_503():
-    with pytest.raises(api.TokenError) as raised:
-        api.mint_gemini_live_token(env(), lambda *_: pytest.fail("must not call Google"), now=NOW)
+    with pytest.raises(api.core.TokenError) as raised:
+        api.gemini_qwen_live.mint_gemini_live_token(env(), lambda *_: pytest.fail("must not call Google"), now=NOW)
     assert raised.value.status == 503
 
 
 def test_token_response_without_a_name_is_a_502():
-    with pytest.raises(api.TokenError) as raised:
-        api.mint_gemini_live_token(env(GEMINI_API_KEY="secret"), lambda *_: {"error": "nope"}, now=NOW)
+    with pytest.raises(api.core.TokenError) as raised:
+        api.gemini_qwen_live.mint_gemini_live_token(env(GEMINI_API_KEY="secret"), lambda *_: {"error": "nope"}, now=NOW)
     assert raised.value.status == 502
 
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setattr(api, "_env_value", lambda key: {"GEMINI_API_KEY": "secret"}.get(key))
-    monkeypatch.setattr(api, "_post_json", lambda url, key, body: {"name": "auth_tokens/xyz"})
-    monkeypatch.setattr(api, "_mint_limiter", api._MintLimiter(api.MINT_LIMIT, api.MINT_WINDOW_S))
+    monkeypatch.setattr(api.gemini_qwen_live, "_env_value", lambda key: {"GEMINI_API_KEY": "secret"}.get(key))
+    monkeypatch.setattr(api.gemini_qwen_live, "_post_json", lambda url, key, body: {"name": "auth_tokens/xyz"})
+    monkeypatch.setattr(api.gemini_qwen_live, "_mint_limiter", api.core._MintLimiter(api.gemini_qwen_live.MINT_LIMIT, api.gemini_qwen_live.MINT_WINDOW_S))
     app = FastAPI()
     app.include_router(api.router, prefix="/api/plugins/conduit_push")
     return TestClient(app)
@@ -123,16 +123,16 @@ def test_requested_profile_fails_closed_when_it_cannot_be_scoped(client):
 
 
 def test_token_route_rate_limits_per_profile(client, monkeypatch):
-    monkeypatch.setattr(api, "_mint_limiter", api._MintLimiter(2, 60.0))
+    monkeypatch.setattr(api.gemini_qwen_live, "_mint_limiter", api.core._MintLimiter(2, 60.0))
     codes = [client.post("/api/plugins/conduit_push/gemini-live/token").status_code for _ in range(3)]
     assert codes == [200, 200, 429]
 
 
 def test_mint_limiter_frees_slots_after_the_window():
     now = [0.0]
-    limiter = api._MintLimiter(1, 60.0, clock=lambda: now[0])
+    limiter = api.core._MintLimiter(1, 60.0, clock=lambda: now[0])
     limiter.acquire("default")
-    with pytest.raises(api.TokenError) as raised:
+    with pytest.raises(api.core.TokenError) as raised:
         limiter.acquire("default")
     assert raised.value.status == 429
     limiter.acquire("coder")
@@ -142,10 +142,10 @@ def test_mint_limiter_frees_slots_after_the_window():
 
 
 def test_requests_that_never_reach_google_do_not_use_the_mint_budget(client, monkeypatch):
-    monkeypatch.setattr(api, "_mint_limiter", api._MintLimiter(1, 60.0))
+    monkeypatch.setattr(api.gemini_qwen_live, "_mint_limiter", api.core._MintLimiter(1, 60.0))
     for _ in range(3):
         assert client.post("/api/plugins/conduit_push/gemini-live/token?profile=nope").status_code == 503
-    assert api._mint_limiter._mints == {}
+    assert api.gemini_qwen_live._mint_limiter._mints == {}
     assert client.post("/api/plugins/conduit_push/gemini-live/token").status_code == 200
 
 
@@ -157,20 +157,20 @@ def test_google_http_error_becomes_a_502_without_the_key(monkeypatch):
         body = io.BytesIO(json.dumps({"error": {"message": "API key not valid"}}).encode())
         raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, body)
 
-    monkeypatch.setattr(api._opener, "open", fail)
-    with pytest.raises(api.TokenError) as raised:
-        api._post_json(api.token_url("v1alpha"), "secret", {})
+    monkeypatch.setattr(api.gemini_qwen_live._opener, "open", fail)
+    with pytest.raises(api.core.TokenError) as raised:
+        api.gemini_qwen_live._post_json(api.gemini_qwen_live.token_url("v1alpha"), "secret", {})
     assert raised.value.status == 502
     assert "API key not valid" in str(raised.value)
     assert "secret" not in str(raised.value)
 
 
 def test_redirects_are_not_followed():
-    assert api._NoRedirect().redirect_request(None, None, 302, "Found", {}, "https://evil.example") is None
+    assert api.gemini_qwen_live._NoRedirect().redirect_request(None, None, 302, "Found", {}, "https://evil.example") is None
 
 
 def test_token_route_maps_failures_to_http_status(client, monkeypatch):
-    monkeypatch.setattr(api, "_env_value", lambda key: None)
+    monkeypatch.setattr(api.gemini_qwen_live, "_env_value", lambda key: None)
     response = client.post("/api/plugins/conduit_push/gemini-live/token")
     assert response.status_code == 503
     assert "GEMINI_API_KEY" in response.json()["detail"]
@@ -178,7 +178,7 @@ def test_token_route_maps_failures_to_http_status(client, monkeypatch):
 
 def test_api_version_override_moves_both_urls():
     calls = []
-    result = api.mint_gemini_live_token(
+    result = api.gemini_qwen_live.mint_gemini_live_token(
         env(GEMINI_API_KEY="secret", CONDUIT_GEMINI_LIVE_API_VERSION="v1beta"),
         lambda url, key, body: calls.append(url) or {"name": "auth_tokens/t"}, now=NOW)
     assert calls == ["https://generativelanguage.googleapis.com/v1beta/auth_tokens"]
@@ -186,13 +186,13 @@ def test_api_version_override_moves_both_urls():
 
 
 def test_unknown_api_version_falls_back_to_v1alpha():
-    assert api.resolve_api_version(env(CONDUIT_GEMINI_LIVE_API_VERSION="../evil")) == "v1alpha"
+    assert api.gemini_qwen_live.resolve_api_version(env(CONDUIT_GEMINI_LIVE_API_VERSION="../evil")) == "v1alpha"
 
 
 def test_token_reports_the_window_google_granted():
     granted = {"name": "auth_tokens/t", "expireTime": "2026-09-27T12:20:00Z",
                "newSessionExpireTime": "2026-09-27T12:00:30Z"}
-    result = api.mint_gemini_live_token(env(GEMINI_API_KEY="secret"), lambda *_: granted, now=NOW)
+    result = api.gemini_qwen_live.mint_gemini_live_token(env(GEMINI_API_KEY="secret"), lambda *_: granted, now=NOW)
     assert result["expires_at"] == "2026-09-27T12:20:00Z"
     assert result["new_session_expires_at"] == "2026-09-27T12:00:30Z"
 
@@ -203,9 +203,9 @@ def test_network_errors_return_a_generic_message(monkeypatch):
     def fail(request, timeout):
         raise urllib.error.URLError("proxy.internal:3128 refused")
 
-    monkeypatch.setattr(api._opener, "open", fail)
-    with pytest.raises(api.TokenError) as raised:
-        api._post_json(api.token_url("v1alpha"), "secret", {})
+    monkeypatch.setattr(api.gemini_qwen_live._opener, "open", fail)
+    with pytest.raises(api.core.TokenError) as raised:
+        api.gemini_qwen_live._post_json(api.gemini_qwen_live.token_url("v1alpha"), "secret", {})
     assert raised.value.status == 502
     assert str(raised.value) == "Could not reach Google"
 
@@ -239,7 +239,7 @@ def test_unexpected_host_errors_name_the_failure(client, monkeypatch):
     def boom(key):
         raise RuntimeError("secret scope exploded at /home/eric")
 
-    monkeypatch.setattr(api, "_env_value", boom)
+    monkeypatch.setattr(api.gemini_qwen_live, "_env_value", boom)
     response = client.get("/api/plugins/conduit_push/gemini-live/status")
     assert response.status_code == 500
     assert response.json()["detail"] == "Gemini Live status failed on the host (RuntimeError)"
@@ -269,8 +269,8 @@ def test_hermes_http_errors_for_bad_profiles_pass_through(client, monkeypatch):
 
 
 def test_current_profile_aliases_share_one_mint_budget():
-    assert {api._limiter_key(p) for p in (None, "", " ", "current", "Current")} == {""}
-    assert api._limiter_key(" coder ") == "coder"
+    assert {api.core._limiter_key(p) for p in (None, "", " ", "current", "Current")} == {""}
+    assert api.core._limiter_key(" coder ") == "coder"
 
 
 def test_hermes_without_the_scope_helper_fails_closed_for_named_profiles(client, monkeypatch):
