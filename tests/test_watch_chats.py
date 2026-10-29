@@ -42,7 +42,7 @@ class FakeRoutes:
     async def search_sessions(self, q="", limit=20, profile=None, **kwargs):
         self.queries.append((q, limit, profile))
         self.scopes.append(kwargs)
-        return {"results": self.searches.get(q, [])}
+        return {"results": self.searches.get(q, [])[:limit]}
 
     async def get_session_messages(self, session_id, profile=None, limit=None, offset=0, order=None,
                                    include_compacted=False, inline_images=True):
@@ -81,6 +81,28 @@ def test_matches_keep_hermes_order_without_markers_or_booleans():
     assert matches[3]["last_active"] is None
 
 
+def test_matches_leave_out_kanban_workers_stored_before_the_tag():
+    matches = api.watch_tools.chat_matches({"results": [
+        {"session_id": "w", "source": "cli", "preview": "work kanban task t_9f2c"},
+        {"session_id": "w2", "source": "local", "preview": " Work Kanban Task t_1 "},
+        # A chat that says more, another source, or an older host without
+        # previews is kept (SessionContentSearchTests).
+        {"session_id": "c", "source": "cli", "preview": "work kanban task t_1 and then fix it"},
+        {"session_id": "t", "source": "telegram", "preview": "work kanban task t_1"},
+        {"session_id": "o", "source": "cli"},
+    ]})
+    assert [m["session_id"] for m in matches] == ["c", "t", "o"]
+
+
+def test_find_chat_keeps_five_real_chats_behind_legacy_workers():
+    workers = [{"session_id": f"w{i}", "source": "cli", "preview": f"work kanban task t_{i}"} for i in range(6)]
+    chats = [{"session_id": f"c{i}", "title": f"Task list {i}"} for i in range(7)]
+    grant = make_grant()
+    found = api.watch_tools.run_watch_find_chat(grant, {"query": "task"}, routes=FakeRoutes({"task": workers + chats}), now=NOW)
+    assert found["count"] == 5
+    assert [m["session_id"] for m in grant.chat_matches] == ["c0", "c1", "c2", "c3", "c4"]
+
+
 def test_summary_is_the_iphones_fenced_list():
     three_days_ago = datetime(2026, 10, 8, 18, 0).timestamp()
     matches = [{"session_id": "a", "title": "GPU setup", "snippet": "the 4090 drivers", "last_active": three_days_ago},
@@ -98,7 +120,7 @@ def test_find_chat_numbers_matches_and_retries_word_by_word():
     found = api.watch_tools.run_watch_find_chat(grant, {"query": "home GPU"}, routes=routes, now=NOW)
     assert found == {"ok": True, "count": 1, "chats": api.watch_tools.chat_summary(grant.chat_matches, NOW)}
     assert [q for q, _, _ in routes.queries] == ["home GPU", "home", "GPU"]
-    assert {limit for _, limit, _ in routes.queries} == {5}
+    assert {limit for _, limit, _ in routes.queries} == {15}, "three times the five it keeps (VoiceChatFinder.searchLimit)"
     assert {profile for _, _, profile in routes.queries} == {"work"}, "the grant's own profile"
     assert routes.scopes == [{"exclude_sources": "kanban,oneshot,tool"}] * 3, "Kanban workers, tool and one-shot runs aren't chats (VoiceChatFinder.path)"
     nothing = api.watch_tools.run_watch_find_chat(grant, {"query": "printer"}, routes=routes)
