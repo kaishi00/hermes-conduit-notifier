@@ -257,7 +257,7 @@ def test_a_remembered_item_rated_no_meanwhile_rests_whatever_the_model_said(live
     now = time.time()
     item_id = commitment(live, due="2026-10-30", due_at=now + 3600)  # due within the day: a floor
     [card] = live.store.add_cards([{"kind": store.NOTICED, "item_id": item_id, "level": "screen", "title": "x",
-                                    "news": "x", "why": "x", "created_at": now - 60}])
+                                    "news": "x", "why": "x", "created_at": now - 2 * 86400}])  # before its day
     learning.rate(live.store, card, "down", now=now - 30)
 
     def answered():

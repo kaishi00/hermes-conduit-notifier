@@ -2176,6 +2176,29 @@ class PulseStore:
                 f"WHERE candidates.ref IN ({','.join('?' * len(refs))})", refs).fetchall()
         return [dict(row) for row in rows]
 
+    def open_cards_about(self, item_ids: Sequence[int], refs: Sequence[str], kinds: Sequence[str]) -> list[dict]:
+        """The cards of ``kinds`` about any of ``item_ids`` (the card's item)
+        or ``refs`` (its candidate's) that are still open: not marked done,
+        not put away for good (one resting with Not now comes back) and not
+        rated not useful ("wrong time" only puts it off). Each with its
+        candidate's ``ref`` (None for none)."""
+        item_ids = list(dict.fromkeys(item_ids))
+        refs = [ref for ref in dict.fromkeys(refs) if ref]
+        if not (item_ids or refs) or not kinds:
+            return []
+        about = " OR ".join(clause for clause in (
+            f"cards.item_id IN ({','.join('?' * len(item_ids))})" if item_ids else "",
+            f"candidates.ref IN ({','.join('?' * len(refs))})" if refs else "") if clause)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT cards.*, candidates.ref AS ref FROM cards LEFT JOIN candidates ON candidates.card_id=cards.id "
+                f"WHERE ({about}) AND cards.kind IN ({','.join('?' * len(kinds))}) "
+                "AND cards.id NOT IN (SELECT card_id FROM card_done) "
+                "AND (cards.dismissed_at IS NULL OR cards.rest_until IS NOT NULL) "
+                "AND NOT (coalesce(cards.rating, '')='down' AND coalesce(cards.reason, '')!='wrong_time')",
+                (*item_ids, *refs, *kinds)).fetchall()
+        return [dict(row) for row in rows]
+
     def away_refs(self, prefix: str) -> set[str]:
         """The refs starting with ``prefix`` whose candidates made a card the
         user put away for good (dismissed with no rest) or rated not

@@ -100,10 +100,18 @@ def decided(live, now, ref="reminder:r_lock"):
 
 def test_a_reminder_moved_back_each_day_comes_up_once_a_week(live):
     now = time.time()
-    card_for(live, "reminder:r_lock", created_at=now - 2 * 86400)
+    card_id = card_for(live, "reminder:r_lock", created_at=now - 2 * 86400)
+    live.store.mark_done(card_id, None, closed_by="user", now=now - 86400)  # its card done, the reminder still open
     assert decided(live, now) == [(candidates.SKIPPED, "raised"), (candidates.SURFACED, "")]
     # A week on, if it's still open, once more.
     assert decided(live, now + candidates.REMINDER_AGAIN_S) == [(candidates.SURFACED, "")] * 2
+
+
+def test_a_reminder_whose_card_is_still_open_doesnt_come_up_again(live):
+    # Eric, 2026-10-29: "if it's still open, why are we repeating it?"
+    now = time.time()
+    card_for(live, "reminder:r_lock", created_at=now - 20 * 86400)
+    assert decided(live, now)[0] == (candidates.SKIPPED, "raised")
 
 
 @pytest.mark.parametrize("more", [{"rating": "down"}, {"dismissed_at": 1.0}])
@@ -113,11 +121,12 @@ def test_a_reminder_whose_card_was_put_away_or_not_useful_stays_away(live, more)
     assert decided(live, now)[0] == (candidates.SKIPPED, "raised")
 
 
-def test_a_reminder_put_off_until_later_can_come_back_after_the_week(live):
+def test_a_reminder_put_off_until_later_comes_back_as_its_own_card(live):
+    # Not now brings the card itself back: no other card about it meanwhile, nor after.
     now = time.time()
     card_for(live, "reminder:r_lock", created_at=now - 30 * 86400, dismissed_at=now - 30 * 86400,
              rest_until=now - 29 * 86400)
-    assert decided(live, now)[0] == (candidates.SURFACED, "")
+    assert decided(live, now)[0] == (candidates.SKIPPED, "raised")
 
 
 def test_a_reminder_put_away_stays_away_once_the_journal_and_cards_drop_it(live):
@@ -162,11 +171,11 @@ def test_a_report_about_other_things_still_keeps_a_put_away_reminder(live):
     assert decided(live, now + 90 * 86400)[0] == (candidates.SKIPPED, "raised")
 
 
-def test_a_reminder_rated_wrong_time_comes_back_after_the_week(live):
+def test_a_reminder_rated_wrong_time_comes_back_as_its_own_card(live):
     now = time.time()
     card_for(live, "reminder:r_lock", created_at=now - 30 * 86400, rating="down", reason="wrong_time",
              dismissed_at=now - 30 * 86400, rest_until=now - 29 * 86400)
-    assert decided(live, now)[0] == (candidates.SURFACED, "")
+    assert decided(live, now)[0] == (candidates.SKIPPED, "raised")
 
 
 def test_a_reminder_rated_useful_again_is_let_go(live):
@@ -175,4 +184,5 @@ def test_a_reminder_rated_useful_again_is_let_go(live):
     assert decided(live, now)[0] == (candidates.SKIPPED, "raised")
     with sqlite3.connect(live.store.path) as conn:
         conn.execute("UPDATE cards SET rating='up' WHERE id=?", (card_id,))
+    live.store.mark_done(card_id, None, closed_by="user", now=now - 19 * 86400)
     assert decided(live, now)[0] == (candidates.SURFACED, "")
