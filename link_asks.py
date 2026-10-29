@@ -354,8 +354,12 @@ class Asks:
         outcome = "edit" if written else "confirmed" if share else "declined"
         try:
             # A profile deleted while the ask waited has no prompt to settle, and isn't made again.
-            if self._profile_exists(entry["profile"]):
-                self.present(entry["profile"]).settle_link(entry["prompt_id"], outcome, written)
+            if self._profile_exists(entry["profile"]) \
+                    and not self.present(entry["profile"]).settle_link(entry["prompt_id"], outcome, written):
+                # Answered on the phone first: that answer stands, and the loop sends it.
+                raise AsksError("answered", "That ask was already answered on the phone", 409)
+        except AsksError:
+            raise
         except Exception:  # noqa: BLE001 — the answer goes all the same; the phone's prompt expires
             logger.debug("Linked Rooms couldn't settle an ask's prompt", exc_info=True)
         if not self._settle(entry, _owners(entry, outcome, written)):
@@ -378,6 +382,8 @@ class Asks:
         now = int(self.clock())
         for item in self.store.read()["outbox"]:
             gone, went = item["until"] <= now, False
+            if not gone and item.get("next_at", 0) > now:
+                continue
             if not gone:
                 try:
                     self.send(item["link"], item["kind"], item["body"], message_id=item["id"])
@@ -386,6 +392,7 @@ class Asks:
                     if exc.code != "not_linked":
                         logger.info("Linked Rooms will send an %s over Link %s later (%s)", item["kind"],
                                     item["link"], exc.code)
+                        self._later(item, now)
                         continue
                     gone = True
             with self.store.update() as state:
@@ -397,6 +404,14 @@ class Asks:
                         ask["status"] = SENT
                     else:
                         ask.update(status=UNAVAILABLE, answer="It couldn't be sent.", by="local", answered_at=now)
+
+    def _later(self, item: dict[str, Any], now: int) -> None:
+        """An envelope the mailbox didn't take is tried again later each time, up to MAX_BACKOFF_S apart."""
+        with self.store.update() as state:
+            for other in state["outbox"]:
+                if (other["id"], other["link"]) == (item["id"], item["link"]):
+                    tries = int(other.get("tries", 0))
+                    other.update(tries=tries + 1, next_at=now + min(MAX_BACKOFF_S, IDLE_S * 2 ** tries))
 
     def _collect(self) -> None:
         """Sends the answers the owner gave on their phone to the asks held for them."""
@@ -411,8 +426,10 @@ class Asks:
             try:
                 present = self.present(raw["profile"])
                 prompt = present.link_ask(raw["prompt_id"])
-            except Exception:  # noqa: BLE001 — looked at again on the next pass
+            except Exception:  # noqa: BLE001 — looked at again on the next pass, until the ask would have run out
                 logger.debug("Linked Rooms couldn't read an ask's prompt", exc_info=True)
+                if self.clock() - raw["at"] > ASK_TTL_MINUTES * 60 + HOUR_S:
+                    self._settle(raw, {"status": UNANSWERED, "text": "Not answered."})
                 continue
             if prompt is None:
                 self._settle(raw, {"status": UNANSWERED, "text": "Not answered."})
@@ -630,13 +647,15 @@ class Store:
         except FileNotFoundError:
             return _empty()
         except OSError as exc:
-            raise AsksError("unreadable", f"Couldn't read {self.path} ({exc.strerror or exc})", 500) from None
+            logger.warning("Linked Rooms couldn't read %s (%s)", self.path, exc.strerror or exc)
+            raise AsksError("unreadable", "Couldn't read the asks", 500) from None
         try:
             state = json.loads(raw)
         except (ValueError, RecursionError):
             state = None
         if not _well_formed(state):
-            raise AsksError("unreadable", f"{self.path} isn't an asks file this plugin wrote", 500)
+            logger.warning("Linked Rooms: %s isn't an asks file this plugin wrote", self.path)
+            raise AsksError("unreadable", "The asks file isn't one this plugin wrote", 500)
         return state
 
     @contextmanager

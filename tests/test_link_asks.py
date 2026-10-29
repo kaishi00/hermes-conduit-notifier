@@ -258,6 +258,7 @@ def test_an_ask_waits_while_the_mailbox_is_down(pair):
     ask = pair.ask({"question": "Is Mona coming?"})
     assert ask["status"] == "sending"
     pair.down = False
+    pair.clock.now += link_asks.IDLE_S  # tried again once its wait is up
     pair.asker.flush()
     pair.asked.flush()
     assert pair.asker.sent(ask["id"])["status"] == "not_allowed"
@@ -540,3 +541,62 @@ def test_cli_answer_for_a_deleted_profile_writes_nothing_there(cli, pair, capsys
     assert cli("answer", held["id"], text="Yes, after six.") == 0
     pair.asked.flush()
     assert pair.asker.sent(ask["id"])["answer"] == "Yes, after six." and opened == []
+
+
+def test_a_down_mailbox_is_tried_again_less_and_less_often(pair):
+    rules_for(pair, questions="off")
+    tries = []
+
+    def down(*_, **__):
+        tries.append(pair.clock.now)
+        raise room_links.LinkError("unreachable", "the mailbox is down", 503)
+
+    real, pair.asker.send = pair.asker.send, down
+    ask = pair.asker.ask(LAIFU, {"question": "Coming?"}, profile="default", session_id="s1", agent="Furina")
+    for _ in range(30):
+        pair.asker.flush()
+        pair.clock.now += link_asks.IDLE_S
+    assert 3 <= len(tries) <= 7
+    pair.asker.send = real
+    pair.clock.now += link_asks.MAX_BACKOFF_S
+    pair.asker.flush()
+    pair.asked.flush()
+    assert pair.asker.sent(ask["id"])["status"] == "not_allowed"
+
+
+def test_a_held_ask_whose_prompt_cant_be_read_ends_unanswered(pair):
+    pair.phone_shows_link_asks()
+    ask = pair.ask({"question": "Is Mona coming?"})
+
+    class Unreadable:
+        def link_ask(self, *_):
+            raise OSError("permission denied")
+
+    pair.asked.present = lambda profile: Unreadable()
+    pair.settle()
+    assert pair.asked.held()
+    pair.clock.now += link_asks.ASK_TTL_MINUTES * 60 + 7200
+    pair.settle()
+    pair.asked.flush()
+    assert not pair.asked.held() and pair.asker.sent(ask["id"])["status"] == "unanswered"
+
+
+def test_cli_answer_after_a_tap_on_the_phone_keeps_the_tap(cli, pair, capsys):
+    pair.phone_shows_link_asks()
+    ask = pair.ask({"question": "Is Mona coming?"})
+    prompt = [p for p in pair.phone_shows_link_asks()["prompts"] if p.get("link")][0]
+    pair.present().exchange({"installation_id": "phone-0001", "features": ["link-asks"],
+                             "results": [{"id": prompt["id"], "outcome": "declined"}]})
+    assert cli("answer", pair.asked.held()[0]["id"], text="Yes!") == 1
+    assert "already answered" in capsys.readouterr().out
+    pair.settle()
+    pair.asked.flush()
+    assert pair.asker.sent(ask["id"])["status"] == "declined"
+
+
+def test_a_store_that_cant_be_read_doesnt_say_where_it_is(pair):
+    pair.asked.store.path.parent.mkdir(parents=True, exist_ok=True)
+    pair.asked.store.path.write_text("not json")
+    with pytest.raises(link_asks.AsksError) as refused:
+        pair.asked.rules()
+    assert str(pair.asked.store.path) not in str(refused.value)

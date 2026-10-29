@@ -381,17 +381,21 @@ class PresentStore:
                 return None
             return {**_shown(prompt), "preview": prompt["preview"], "link": prompt["link"]}
 
-    def settle_link(self, prompt_id: Any, outcome: str, edit_text: str = "") -> None:
-        """The owner answered a Link's ask elsewhere (the CLI): its prompt leaves the phone, answered that way."""
+    def settle_link(self, prompt_id: Any, outcome: str, edit_text: str = "") -> bool:
+        """The owner answered a Link's ask elsewhere (the CLI): its prompt leaves the phone, answered that way.
+        False only when it was answered already (on the phone)."""
         if outcome not in OUTCOMES:
             raise PresentError("invalid", "outcome is confirmed, declined or edit")
         with self._locked() as state:
             prompt = _find(state, prompt_id)
-            if prompt is None or not prompt.get("link") or prompt["status"] != "waiting":
-                return
+            if prompt is None or not prompt.get("link"):
+                return True
+            if prompt["status"] != "waiting":
+                return False
             prompt.update(status=outcome, via="tap", finished_at=int(self.clock()), reported=True)
             if outcome == "edit" and edit_text:
                 prompt["edit_text"] = _text(edit_text, MAX_EDIT_TEXT_CHARS)
+            return True
 
     def room_answers(self, room_id: Any) -> list[dict[str, Any]]:
         """The answered (or expired) asks of a room its agent hasn't heard
