@@ -366,7 +366,8 @@ class PresentStore:
     def ask_link(self, title: Any, preview: Any, *, link: Any, ttl_minutes: Any = ROOM_ASK_TTL_MINUTES
                  ) -> dict[str, Any]:
         """Keeps a Link's ask (link_asks) for a Conduit that shows them: what's asked as its title, what would be
-        shared (or the question) as its preview. Raises PresentError when it won't."""
+        shared (or the question) as its preview. Raises PresentError when it won't. Its Share answers only when
+        ``link.share``: Conduit shows it only then, and a question's is refused (_take_result)."""
         kept = _link(link)
         if kept is None:
             raise PresentError("invalid", "A Link's ask needs the Link.")

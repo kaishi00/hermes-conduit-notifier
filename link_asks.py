@@ -361,7 +361,8 @@ class Asks:
         except AsksError:
             raise
         except Exception:  # noqa: BLE001 — the answer goes all the same; the phone's prompt expires
-            logger.debug("Linked Rooms couldn't settle an ask's prompt", exc_info=True)
+            logger.warning("Linked Rooms couldn't take an answered ask off the phone; it shows until it runs out",
+                           exc_info=True)
         if not self._settle(entry, _owners(entry, outcome, written)):
             raise AsksError("answered", "That ask was already answered", 409)
         return _shown_received({**entry, "status": "answered"})
