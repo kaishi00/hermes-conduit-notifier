@@ -27,12 +27,12 @@ from typing import Callable, Optional
 logger = logging.getLogger(__name__)
 
 STATE_DB = "state.db"
-# Kept in step with dashboard/plugin_api.py.
+# Kept in step with dashboard/api/voice_calls.py.
 VOICE_TAGS_KEY = "conduit.voice.tags"
 ARCHIVED_KINDS = frozenset({"call", "classic", "job"})
 # How a request voice sent reads at its start: a job's first prompt and the
 # Watch's later ones (Conduit's VoiceBackgroundJobSupervisor.jobPrompt,
-# dashboard/plugin_api.py's WATCH_JOB_PROMPT and WATCH_JOB_NEXT_PROMPT), and
+# dashboard/api/watch_jobs.py's WATCH_JOB_PROMPT and WATCH_JOB_NEXT_PROMPT), and
 # a call's words in a chat or a job ("(voice) ", threadTurnText).
 _VOICE_REQUEST_RE = re.compile(
     r"^\s*(?:\[Background job started from a Conduit voice conversation\."

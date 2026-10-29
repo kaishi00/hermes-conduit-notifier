@@ -303,20 +303,20 @@ def test_the_sweeper_stops_once_a_newer_one_takes_over(monkeypatch):
     api = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(api)
     monkeypatch.setattr(claims, "SWEEP_S", 0.01)
-    monkeypatch.setattr(api, "_plugin_package_module", lambda name: claims)
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: claims)
     passes = []
     monkeypatch.setattr(claims, "sweep", lambda server, home: passes.append(server) or 0)
-    monkeypatch.delitem(sys.__dict__, api._CLAIMS_SWEEPER, raising=False)
-    api._ensure_claims_sweeper()
-    token = sys.__dict__[api._CLAIMS_SWEEPER]
-    api._ensure_claims_sweeper()  # already running: no second one
-    assert sys.__dict__[api._CLAIMS_SWEEPER] is token
+    monkeypatch.delitem(sys.__dict__, api.chats._CLAIMS_SWEEPER, raising=False)
+    api.chats._ensure_claims_sweeper()
+    token = sys.__dict__[api.chats._CLAIMS_SWEEPER]
+    api.chats._ensure_claims_sweeper()  # already running: no second one
+    assert sys.__dict__[api.chats._CLAIMS_SWEEPER] is token
     worker = next(t for t in threading.enumerate() if t.name == "conduit-idle-claims" and t.is_alive())
     deadline = time.monotonic() + 5
     while not passes and time.monotonic() < deadline:
         time.sleep(0.01)
     assert passes
-    sys.__dict__[api._CLAIMS_SWEEPER] = object()  # a reloaded copy took over
+    sys.__dict__[api.chats._CLAIMS_SWEEPER] = object()  # a reloaded copy took over
     worker.join(5)
     assert not worker.is_alive()
 

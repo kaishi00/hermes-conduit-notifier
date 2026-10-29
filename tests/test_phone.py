@@ -1323,9 +1323,9 @@ def test_mode_rides_beside_the_envelope_and_through_redaction():
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     for name in ("_phone_ingest_limiter", "_phone_key_limiter", "_phone_wipe_limiter", "_phone_exchange_limiter"):
-        monkeypatch.setattr(api, name, api._MintLimiter(1000, 60))
+        monkeypatch.setattr(api.phone_data, name, api.core._MintLimiter(1000, 60))
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return types.SimpleNamespace(http=TestClient(app), home=tmp_path)
@@ -1360,15 +1360,15 @@ def test_routes_round_trip(client):
 
 
 def test_body_caps(client):
-    for route, cap in (("ingest", api.PHONE_MAX_INGEST_BODY_BYTES), ("exchange", api.PHONE_MAX_EXCHANGE_BODY_BYTES),
-                       ("key", api.PHONE_MAX_KEY_BODY_BYTES)):
+    for route, cap in (("ingest", api.phone_data.PHONE_MAX_INGEST_BODY_BYTES), ("exchange", api.phone_data.PHONE_MAX_EXCHANGE_BODY_BYTES),
+                       ("key", api.phone_data.PHONE_MAX_KEY_BODY_BYTES)):
         response = client.http.post(f"{BASE}/phone/{route}", content=b"x" * (cap + 1),
                                     headers={"content-type": "application/json"})
         assert response.status_code == 413, route
 
 
 def test_the_rate_limit_answers_429(client, monkeypatch):
-    monkeypatch.setattr(api, "_phone_exchange_limiter", api._MintLimiter(1, 60))
+    monkeypatch.setattr(api.phone_data, "_phone_exchange_limiter", api.core._MintLimiter(1, 60))
     handset = Phone()
     handset.accept(client.http.post(f"{BASE}/phone/key", json=handset.key_request()).json())
     client.http.post(f"{BASE}/phone/exchange", json=handset.exchange_request())
@@ -1461,7 +1461,7 @@ def test_voice_reads_never_reach_another_device(client):
                                         ("conduit_phone", {"action": "status"})])
 def test_a_new_key_during_the_read_seals_nothing_to_the_old_key(client, monkeypatch, name, args):
     owner = _route_shared(client)
-    tool = api._plugin_package_module("phone_tool")
+    tool = api.core._plugin_package_module("phone_tool")
     read = tool.voice_handle
 
     def re_keyed_meanwhile(*args, **kwargs):
@@ -1578,7 +1578,7 @@ def test_voice_never_takes_another_device_by_name(client):
 
 def test_a_broken_calendar_store_leaves_health_listed(client, monkeypatch):
     _route_shared(client)
-    real = api._plugin_package_module
+    real = api.core._plugin_package_module
     health = real("health_tool")
     # Some phone shares health, so its tool is listed.
     monkeypatch.setattr(health.HealthStore, "overview", lambda self, only=None: {"devices": [{"id": "phone-installation-3"}]})
@@ -1588,7 +1588,7 @@ def test_a_broken_calendar_store_leaves_health_listed(client, monkeypatch):
             raise RuntimeError("boom")
         return real(name)
 
-    monkeypatch.setattr(api, "_plugin_package_module", broken)
+    monkeypatch.setattr(api.core, "_plugin_package_module", broken)
     response = client.http.get(f"{BASE}/voice-tools")
     assert response.status_code == 200
     assert [tool["name"] for tool in response.json()["tools"]] == [health.TOOL_NAME]
@@ -1596,7 +1596,7 @@ def test_a_broken_calendar_store_leaves_health_listed(client, monkeypatch):
 
 def test_a_broken_health_store_leaves_the_calendar_listed(client, monkeypatch):
     _route_shared(client)
-    health = api._plugin_package_module("health_tool")
+    health = api.core._plugin_package_module("health_tool")
 
     def broken(self):
         raise RuntimeError("boom")

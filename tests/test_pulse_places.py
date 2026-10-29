@@ -718,7 +718,7 @@ def test_status_says_whether_pulse_reads_where_you_are(live):
 
 def test_the_ingest_route_tells_pulse_and_a_wipe_forgets_what_it_kept(client, monkeypatch):
     woken = []
-    monkeypatch.setattr(location_api, "_wake_running_pulse", lambda: woken.append(True) or 1)
+    monkeypatch.setattr(location_api.phone_data, "_wake_running_pulse", lambda: woken.append(True) or 1)
     phone = Phone()
     phone.accept(client.post(f"{BASE}/location/key", json=phone.key_request()).json())
     at = datetime.now(timezone.utc).replace(microsecond=0)
@@ -746,8 +746,8 @@ def test_a_profile_that_reads_this_location_hears_its_arrivals_and_a_wipe_reache
     _paired(client.home)
     _paired(work)
     _paired(client.home / "profiles" / "personal", "installation-2")  # another phone: not this location
-    monkeypatch.setattr(location_api, "_calls_home", lambda: work)
-    monkeypatch.setattr(location_api, "_wake_running_pulse", lambda: 1)
+    monkeypatch.setattr(location_api.core, "_calls_home", lambda: work)
+    monkeypatch.setattr(location_api.phone_data, "_wake_running_pulse", lambda: 1)
     stores = []
     for home in (work, client.home, client.home / "profiles" / "personal"):
         stores.append(store.open_store(home))

@@ -219,8 +219,8 @@ def test_an_unreadable_hold_lets_the_push_through(turn, monkeypatch):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_cron_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_on_screen_limiter", api._MintLimiter(api.ON_SCREEN_LIMIT, api.ON_SCREEN_WINDOW_S))
+    monkeypatch.setattr(api.notifications, "_cron_home", lambda: tmp_path)
+    monkeypatch.setattr(api.notifications, "_on_screen_limiter", api.core._MintLimiter(api.notifications.ON_SCREEN_LIMIT, api.notifications.ON_SCREEN_WINDOW_S))
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     test_client = TestClient(app)

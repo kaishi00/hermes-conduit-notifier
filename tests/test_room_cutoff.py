@@ -549,4 +549,4 @@ def test_the_dashboard_routes_guard_it_as_they_load(hermes, monkeypatch):
 
     assert runtime_class._transport_for is not own
     assert runtime_class._transport_for.__wrapped__ is own
-    module._room_cutoff_module.uninstall()
+    module.rooms._room_cutoff_module.uninstall()

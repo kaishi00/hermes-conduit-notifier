@@ -113,11 +113,11 @@ def hermes(monkeypatch, tmp_path):
         "hermes_cli.dashboard_auth.token_auth": token_auth,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr(api, "_speech_server_limiter",
-                        api._MintLimiter(api.SPEECH_SERVER_LIMIT, api.SPEECH_SERVER_WINDOW_S))
-    monkeypatch.setattr(api, "_local_live_auth_state", {"ready": True, "reason": None, "started": True})
-    monkeypatch.setattr(api, "_local_live_calls", {})
-    monkeypatch.setattr(api, "_local_live_last_request", {})
+    monkeypatch.setattr(api.speech_server, "_speech_server_limiter",
+                        api.core._MintLimiter(api.speech_server.SPEECH_SERVER_LIMIT, api.speech_server.SPEECH_SERVER_WINDOW_S))
+    monkeypatch.setattr(api.local_live, "_local_live_auth_state", {"ready": True, "reason": None, "started": True})
+    monkeypatch.setattr(api.local_live, "_local_live_calls", {})
+    monkeypatch.setattr(api.local_live, "_local_live_last_request", {})
     state.home = home
     return state
 
@@ -155,7 +155,7 @@ def server(monkeypatch):
     async def connect(url, headers):
         return state.upstream
 
-    monkeypatch.setattr(api, "_connect_speech_server", connect)
+    monkeypatch.setattr(api.speech_server, "_connect_speech_server", connect)
     return state
 
 
@@ -166,10 +166,10 @@ def client(hermes, server):
     @app.middleware("http")
     async def token_seam(request: Request, call_next):
         # Hermes' token-auth seam, as far as Local Live needs it.
-        if request.url.path in hermes.token_routes or request.url.path in api.LOCAL_LIVE_TOKEN_PATHS:
+        if request.url.path in hermes.token_routes or request.url.path in api.local_live.LOCAL_LIVE_TOKEN_PATHS:
             auth = request.headers.get("authorization", "")
             token = auth.split(" ", 1)[1] if auth.lower().startswith("bearer ") else ""
-            provider = hermes.providers.get(api.LOCAL_LIVE_PROVIDER_NAME) or api._local_live_provider()
+            provider = hermes.providers.get(api.local_live.LOCAL_LIVE_PROVIDER_NAME) or api.local_live._local_live_provider()
             principal = provider.verify_token(token=token)
             if principal is not None:
                 request.state.token_principal = principal
@@ -182,7 +182,7 @@ def client(hermes, server):
 
 def _key(hermes, profile=None):
     with hermes_scope(hermes, profile):
-        return api.local_live_key(profile)
+        return api.local_live.local_live_key(profile)
 
 
 @contextlib.contextmanager
@@ -218,15 +218,15 @@ def test_key_is_made_once_kept_private_and_names_its_profile(hermes):
     assert key.startswith("cll1.")
     assert _key(hermes, "work") == key
     with hermes_scope(hermes, "work"):
-        stored = api._local_live_key_path()
+        stored = api.local_live._local_live_key_path()
     assert json.loads(stored.read_text())["api_key"] == key
     assert stat_mode(stored) == 0o600
-    assert api.local_live_profile_for_key(key) == "work"
+    assert api.local_live.local_live_profile_for_key(key) == "work"
 
 
 def test_a_mixed_case_profiles_key_verifies_in_that_profile(hermes):
     key = _key(hermes, "Work")
-    assert api.local_live_profile_for_key(key) == "Work"
+    assert api.local_live.local_live_profile_for_key(key) == "Work"
 
 
 def stat_mode(path):
@@ -235,12 +235,12 @@ def stat_mode(path):
 
 def test_default_profile_key_and_rotation(hermes):
     key = _key(hermes)
-    assert api.local_live_profile_for_key(key) == ""
+    assert api.local_live.local_live_profile_for_key(key) == ""
     with hermes_scope(hermes, None):
-        rotated = api.local_live_key(None, rotate=True)
+        rotated = api.local_live.local_live_key(None, rotate=True)
     assert rotated != key
-    assert api.local_live_profile_for_key(key) is None
-    assert api.local_live_profile_for_key(rotated) == ""
+    assert api.local_live.local_live_profile_for_key(key) is None
+    assert api.local_live.local_live_profile_for_key(rotated) == ""
 
 
 # Two dashboard processes on one HERMES_HOME (`hermes dashboard` and the
@@ -259,8 +259,8 @@ _FIRST_KEY_WORKER = textwrap.dedent("""
     def slow(n):
         time.sleep(0.5)
         return token_urlsafe(n)
-    api.secrets = types.SimpleNamespace(token_urlsafe=slow)
-    print(api.local_live_key(None))
+    api.local_live.secrets = types.SimpleNamespace(token_urlsafe=slow)
+    print(api.local_live.local_live_key(None))
 """)
 
 
@@ -276,7 +276,7 @@ def test_two_processes_making_the_first_key_at_once_hand_out_the_same_one(tmp_pa
         out, err = process.communicate(timeout=60)
         assert process.returncode == 0, err
         keys.append(out.strip().splitlines()[-1])
-    stored = json.loads((home / api.LOCAL_LIVE_FILE).read_text())["api_key"]
+    stored = json.loads((home / api.local_live.LOCAL_LIVE_FILE).read_text())["api_key"]
     # Only the key on disk verifies, so both must have handed out that one.
     assert keys == [stored, stored]
 
@@ -285,20 +285,20 @@ def test_two_processes_making_the_first_key_at_once_hand_out_the_same_one(tmp_pa
                                    "cll1.-." + "a" * 600])
 def test_malformed_or_unknown_keys_name_no_profile(hermes, token):
     _key(hermes, "work")
-    assert api.local_live_profile_for_key(token) is None
+    assert api.local_live.local_live_profile_for_key(token) is None
 
 
 def test_another_profiles_key_with_this_profiles_name_is_refused(hermes):
     work = _key(hermes, "work")
     _key(hermes, "home")
-    forged = ".".join(["cll1", api._local_live_profile_part("home"), work.split(".")[2]])
-    assert api.local_live_profile_for_key(forged) is None
+    forged = ".".join(["cll1", api.local_live._local_live_profile_part("home"), work.split(".")[2]])
+    assert api.local_live.local_live_profile_for_key(forged) is None
 
 
 # --- Auth seam -------------------------------------------------------------------
 
 def test_provider_is_token_only(hermes):
-    provider = api._local_live_provider()
+    provider = api.local_live._local_live_provider()
     key = _key(hermes, "work")
     assert provider.supports_token and not provider.supports_session
     assert provider.verify_token(token=key).principal == "local-live:work"
@@ -316,35 +316,35 @@ def _dashboard(monkeypatch, auth_required):
 
 def test_registers_key_and_routes_on_a_loopback_dashboard(hermes, monkeypatch):
     _dashboard(monkeypatch, auth_required=False)
-    api._local_live_auth_state.update(ready=False)
-    api._local_live_register_auth()
-    assert api._local_live_auth_state["ready"]
-    assert api.LOCAL_LIVE_PROVIDER_NAME in hermes.providers
-    assert hermes.token_routes == set(api.LOCAL_LIVE_TOKEN_PATHS)
+    api.local_live._local_live_auth_state.update(ready=False)
+    api.local_live._local_live_register_auth()
+    assert api.local_live._local_live_auth_state["ready"]
+    assert api.local_live.LOCAL_LIVE_PROVIDER_NAME in hermes.providers
+    assert hermes.token_routes == set(api.local_live.LOCAL_LIVE_TOKEN_PATHS)
 
 
 def test_stays_off_when_a_public_dashboard_has_nothing_else_to_sign_in_with(hermes, monkeypatch):
     # Registered alone, the key would pass for the sign-in a public bind needs.
     _dashboard(monkeypatch, auth_required=True)
-    api._local_live_auth_state.update(ready=False)
-    api._local_live_register_auth()
-    assert not api._local_live_auth_state["ready"]
+    api.local_live._local_live_auth_state.update(ready=False)
+    api.local_live._local_live_register_auth()
+    assert not api.local_live._local_live_auth_state["ready"]
     assert hermes.providers == {} and hermes.token_routes == set()
 
 
 def test_registers_beside_a_public_dashboards_sign_in(hermes, monkeypatch):
     _dashboard(monkeypatch, auth_required=True)
     hermes.providers["basic"] = types.SimpleNamespace(name="basic")
-    api._local_live_auth_state.update(ready=False)
-    api._local_live_register_auth()
-    assert api._local_live_auth_state["ready"]
+    api.local_live._local_live_auth_state.update(ready=False)
+    api.local_live._local_live_register_auth()
+    assert api.local_live._local_live_auth_state["ready"]
 
 
 def test_without_the_seam_local_live_says_why(hermes, monkeypatch):
     monkeypatch.setitem(sys.modules, "hermes_cli.dashboard_auth", None)
-    api._local_live_auth_state.update(ready=False)
-    api._local_live_register_auth()
-    assert api._local_live_auth_state["reason"] == api.LOCAL_LIVE_UNAVAILABLE
+    api.local_live._local_live_auth_state.update(ready=False)
+    api.local_live._local_live_register_auth()
+    assert api.local_live._local_live_auth_state["reason"] == api.local_live.LOCAL_LIVE_UNAVAILABLE
 
 
 # --- Status ------------------------------------------------------------------------
@@ -353,22 +353,22 @@ def test_status_gives_the_model_address_and_key(client, hermes):
     body = client.get(f"{BASE}/local-live/status?profile=work").json()
     assert body["available"] is True
     assert body["model_path"] == "/api/plugins/conduit_push/local-live/v1"
-    assert api.local_live_profile_for_key(body["api_key"]) == "work"
+    assert api.local_live.local_live_profile_for_key(body["api_key"]) == "work"
     assert body["in_call"] is False
 
 
 def test_status_without_the_seam_has_no_key(client, hermes):
-    api._local_live_auth_state.update(ready=False, reason=api.LOCAL_LIVE_UNAVAILABLE)
+    api.local_live._local_live_auth_state.update(ready=False, reason=api.local_live.LOCAL_LIVE_UNAVAILABLE)
     body = client.get(f"{BASE}/local-live/status").json()
     assert body["available"] is False
     assert body["api_key"] is None
-    assert body["reason"] == api.LOCAL_LIVE_UNAVAILABLE
+    assert body["reason"] == api.local_live.LOCAL_LIVE_UNAVAILABLE
 
 
 def test_key_rotation_route(client, hermes):
     old = client.get(f"{BASE}/local-live/status").json()["api_key"]
     new = client.post(f"{BASE}/local-live/key").json()["api_key"]
-    assert new != old and api.local_live_profile_for_key(old) is None
+    assert new != old and api.local_live.local_live_profile_for_key(old) is None
 
 
 # --- Turns -----------------------------------------------------------------------
@@ -389,11 +389,11 @@ def test_without_a_call_the_server_still_gets_an_answer(client, hermes):
     # the server from starting.
     headers = {"Authorization": f"Bearer {_key(hermes)}"}
     body = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion(), headers=headers).json()
-    assert body["choices"][0]["message"]["content"] == api.LOCAL_LIVE_NO_CALL_REPLY
+    assert body["choices"][0]["message"]["content"] == api.local_live.LOCAL_LIVE_NO_CALL_REPLY
     assert client.get(f"{BASE}/local-live/status").json()["last_request_at"] is not None
     streamed = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion(stream=True), headers=headers)
     assert streamed.headers["content-type"].startswith("text/event-stream")
-    assert _sse_text(streamed.text) == api.LOCAL_LIVE_NO_CALL_REPLY
+    assert _sse_text(streamed.text) == api.local_live.LOCAL_LIVE_NO_CALL_REPLY
     assert streamed.text.rstrip().endswith("data: [DONE]")
 
 
@@ -432,7 +432,7 @@ def test_a_turn_for_another_profile_isnt_sent_to_this_call(client, hermes):
     with client.websocket_connect(f"{BASE}/local-live/socket?profile=work") as ws:
         body = client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion(), headers=headers).json()
         ws.send_text("finish")
-    assert body["choices"][0]["message"]["content"] == api.LOCAL_LIVE_NO_CALL_REPLY
+    assert body["choices"][0]["message"]["content"] == api.local_live.LOCAL_LIVE_NO_CALL_REPLY
 
 
 def test_a_new_turn_cancels_the_one_before(client, hermes):
@@ -465,15 +465,15 @@ def test_a_phone_error_ends_the_turn(client, hermes):
 
 
 def test_turn_text_is_the_newest_user_message():
-    assert api._local_live_user_text(_completion("  hello\n  there ")) == "hello there"
+    assert api.local_live._local_live_user_text(_completion("  hello\n  there ")) == "hello there"
     parts = {"messages": [{"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "image_url"},
                                                         {"type": "input_text", "text": "b"}]}]}
-    assert api._local_live_user_text(parts) == "a b"
-    assert api._local_live_user_text({"messages": [{"role": "system", "content": "x"}]}) == ""
+    assert api.local_live._local_live_user_text(parts) == "a b"
+    assert api.local_live._local_live_user_text({"messages": [{"role": "system", "content": "x"}]}) == ""
 
 
 def test_capability_is_advertised():
-    assert "local-live" in api.ROUTE_CAPABILITIES
+    assert "local-live" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def test_a_speak_socket_has_its_text_read_back_unchanged(client, hermes, server):
@@ -519,7 +519,7 @@ def test_speak_and_live_sockets_on_one_profile_each_get_their_own_requests(clien
 
 
 def test_a_turns_reply_is_capped(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "LOCAL_LIVE_MAX_REPLY_CHARS", 10)
+    monkeypatch.setattr(api.local_live, "LOCAL_LIVE_MAX_REPLY_CHARS", 10)
     headers = {"Authorization": f"Bearer {_key(hermes)}"}
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
         thread, result = _ask_in_background(client, headers, _completion())
@@ -533,14 +533,14 @@ def test_a_turns_reply_is_capped(client, hermes, monkeypatch):
 
 
 def test_auth_start_retries_once_the_dashboard_is_imported(monkeypatch):
-    monkeypatch.setitem(api._local_live_auth_state, "started", False)
+    monkeypatch.setitem(api.local_live._local_live_auth_state, "started", False)
     monkeypatch.delitem(sys.modules, "hermes_cli.web_server", raising=False)
-    api._local_live_start_auth()
-    assert api._local_live_auth_state["started"] is False
+    api.local_live._local_live_start_auth()
+    assert api.local_live._local_live_auth_state["started"] is False
 
 
 def test_a_runaway_voice_server_is_rate_limited(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_local_live_limiter", api._MintLimiter(2, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_limiter", api.core._MintLimiter(2, 60.0, message="Too many"))
     headers = {"Authorization": f"Bearer {_key(hermes)}"}
     codes = [client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion(), headers=headers).status_code
              for _ in range(3)]
@@ -548,7 +548,7 @@ def test_a_runaway_voice_server_is_rate_limited(client, hermes, monkeypatch):
 
 
 def test_models_route_counts_against_the_rate_limit(client, hermes, monkeypatch):
-    monkeypatch.setattr(api, "_local_live_limiter", api._MintLimiter(1, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_limiter", api.core._MintLimiter(1, 60.0, message="Too many"))
     headers = {"Authorization": f"Bearer {_key(hermes)}"}
     codes = [client.get(f"{BASE}/local-live/v1/models", headers=headers).status_code for _ in range(2)]
     assert codes == [200, 429]
@@ -556,45 +556,45 @@ def test_models_route_counts_against_the_rate_limit(client, hermes, monkeypatch)
 
 def test_non_text_message_content_is_no_turn():
     body = {"messages": [{"role": "user", "content": {"text": "hi"}}]}
-    assert api._local_live_user_text(body) == ""
+    assert api.local_live._local_live_user_text(body) == ""
     parts = {"messages": [{"role": "user", "content": [{"type": "text", "text": 5}, {"type": "text", "text": "hi"}]}]}
-    assert api._local_live_user_text(parts) == "hi"
+    assert api.local_live._local_live_user_text(parts) == "hi"
 
 
 def test_a_flood_of_wrong_keys_stops_reading_files(monkeypatch):
-    monkeypatch.setattr(api, "_local_live_key_check_limiter", api._MintLimiter(2, 60.0, message="Too many"))
-    monkeypatch.setattr(api, "_local_live_key_check_total_limiter", api._MintLimiter(100, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_key_check_limiter", api.core._MintLimiter(2, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_key_check_total_limiter", api.core._MintLimiter(100, 60.0, message="Too many"))
     checked = []
-    monkeypatch.setattr(api, "_local_live_check_key", lambda token: checked.append(token))
+    monkeypatch.setattr(api.local_live, "_local_live_check_key", lambda token: checked.append(token))
     for n in range(4):
-        assert api.local_live_profile_for_key(f"cll1.-.wrong{n}") is None
+        assert api.local_live.local_live_profile_for_key(f"cll1.-.wrong{n}") is None
     assert len(checked) == 2
 
 
 def test_a_verify_racing_a_rotation_does_not_cache_the_old_key(monkeypatch):
-    monkeypatch.setattr(api, "_local_live_verified", {})
+    monkeypatch.setattr(api.local_live, "_local_live_verified", {})
 
     def check_during_rotation(token):
-        monkeypatch.setattr(api, "_local_live_key_generation", api._local_live_key_generation + 1)
+        monkeypatch.setattr(api.local_live, "_local_live_key_generation", api.local_live._local_live_key_generation + 1)
         return "work"
 
-    monkeypatch.setattr(api, "_local_live_check_key", check_during_rotation)
-    assert api.local_live_profile_for_key("cll1.d29yaw.old") == "work"
-    assert "cll1.d29yaw.old" not in api._local_live_verified
+    monkeypatch.setattr(api.local_live, "_local_live_check_key", check_during_rotation)
+    assert api.local_live.local_live_profile_for_key("cll1.d29yaw.old") == "work"
+    assert "cll1.d29yaw.old" not in api.local_live._local_live_verified
 
 
 def test_malformed_keys_spend_no_checks_and_one_profile_cant_lock_out_another(monkeypatch):
-    monkeypatch.setattr(api, "_local_live_key_check_limiter", api._MintLimiter(2, 60.0, message="Too many"))
-    monkeypatch.setattr(api, "_local_live_key_check_total_limiter", api._MintLimiter(100, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_key_check_limiter", api.core._MintLimiter(2, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_key_check_total_limiter", api.core._MintLimiter(100, 60.0, message="Too many"))
     checked = []
-    monkeypatch.setattr(api, "_local_live_check_key", lambda token: checked.append(token))
+    monkeypatch.setattr(api.local_live, "_local_live_check_key", lambda token: checked.append(token))
     for n in range(5):
-        assert api.local_live_profile_for_key(f"garbage{n}") is None
+        assert api.local_live.local_live_profile_for_key(f"garbage{n}") is None
     assert checked == []
     for n in range(3):
-        api.local_live_profile_for_key(f"cll1.-.wrong{n}")
+        api.local_live.local_live_profile_for_key(f"cll1.-.wrong{n}")
     work = "cll1." + base64.urlsafe_b64encode(b"work").decode().rstrip("=") + ".wrong"
-    api.local_live_profile_for_key(work)
+    api.local_live.local_live_profile_for_key(work)
     assert len(checked) == 3 and checked[-1] == work
 
 
@@ -602,84 +602,84 @@ def test_an_unforeseen_error_starting_auth_retries_with_a_true_reason(monkeypatc
     def broken():
         raise RuntimeError("registry broke")
 
-    monkeypatch.setattr(api, "_local_live_register_auth", broken)
-    monkeypatch.setattr(api, "_local_live_auth_state", {**api._local_live_auth_state, "started": True})
-    api._local_live_register_auth_thread()
-    assert api._local_live_auth_state["started"] is False
-    assert "RuntimeError" in api._local_live_auth_state["reason"]
+    monkeypatch.setattr(api.local_live, "_local_live_register_auth", broken)
+    monkeypatch.setattr(api.local_live, "_local_live_auth_state", {**api.local_live._local_live_auth_state, "started": True})
+    api.local_live._local_live_register_auth_thread()
+    assert api.local_live._local_live_auth_state["started"] is False
+    assert "RuntimeError" in api.local_live._local_live_auth_state["reason"]
 
 
 def test_the_total_key_check_budget_backs_up_every_profile(monkeypatch):
-    monkeypatch.setattr(api, "_local_live_key_check_limiter", api._MintLimiter(100, 60.0, message="Too many"))
-    monkeypatch.setattr(api, "_local_live_key_check_total_limiter", api._MintLimiter(2, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_key_check_limiter", api.core._MintLimiter(100, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_key_check_total_limiter", api.core._MintLimiter(2, 60.0, message="Too many"))
     checked = []
-    monkeypatch.setattr(api, "_local_live_check_key", lambda token: checked.append(token))
+    monkeypatch.setattr(api.local_live, "_local_live_check_key", lambda token: checked.append(token))
     for name in (b"a", b"b", b"c"):
-        api.local_live_profile_for_key("cll1." + base64.urlsafe_b64encode(name).decode().rstrip("=") + ".wrong")
+        api.local_live.local_live_profile_for_key("cll1." + base64.urlsafe_b64encode(name).decode().rstrip("=") + ".wrong")
     assert len(checked) == 2
-    assert api.local_live_profile_for_key(None) is None
+    assert api.local_live.local_live_profile_for_key(None) is None
 
 
 def test_wrong_keys_spending_a_profiles_budget_dont_lock_out_its_right_key(hermes, monkeypatch):
-    monkeypatch.setattr(api, "_local_live_verified", {})
-    monkeypatch.setattr(api, "_local_live_known", {})
-    monkeypatch.setattr(api, "_local_live_key_check_limiter", api._MintLimiter(2, 60.0, message="Too many"))
-    monkeypatch.setattr(api, "_local_live_key_check_total_limiter", api._MintLimiter(100, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_verified", {})
+    monkeypatch.setattr(api.local_live, "_local_live_known", {})
+    monkeypatch.setattr(api.local_live, "_local_live_key_check_limiter", api.core._MintLimiter(2, 60.0, message="Too many"))
+    monkeypatch.setattr(api.local_live, "_local_live_key_check_total_limiter", api.core._MintLimiter(100, 60.0, message="Too many"))
     key = _key(hermes, "work")
-    assert api.local_live_profile_for_key(key) == "work"
+    assert api.local_live.local_live_profile_for_key(key) == "work"
     wrong = ".".join(key.split(".")[:2] + ["wrong"])
     for _ in range(5):
-        assert api.local_live_profile_for_key(wrong) is None
+        assert api.local_live.local_live_profile_for_key(wrong) is None
     # The 30 s cache has expired: the right key still gets in, the wrong one doesn't.
-    api._local_live_verified.clear()
-    assert api.local_live_profile_for_key(key) == "work"
-    api._local_live_verified.clear()
-    assert api.local_live_profile_for_key(wrong) is None
+    api.local_live._local_live_verified.clear()
+    assert api.local_live.local_live_profile_for_key(key) == "work"
+    api.local_live._local_live_verified.clear()
+    assert api.local_live.local_live_profile_for_key(wrong) is None
 
 
 def test_a_rotation_by_another_process_retires_the_remembered_key(hermes, monkeypatch):
-    monkeypatch.setattr(api, "_local_live_verified", {})
-    monkeypatch.setattr(api, "_local_live_known", {})
+    monkeypatch.setattr(api.local_live, "_local_live_verified", {})
+    monkeypatch.setattr(api.local_live, "_local_live_known", {})
     key = _key(hermes, "work")
-    assert api.local_live_profile_for_key(key) == "work"
+    assert api.local_live.local_live_profile_for_key(key) == "work"
     # Another dashboard process replaces the file; this one's counter never moves.
     with hermes_scope(hermes, "work"):
-        path = hermes.home() / api.LOCAL_LIVE_FILE
+        path = hermes.home() / api.local_live.LOCAL_LIVE_FILE
     rotated = ".".join(key.split(".")[:2] + ["rotated"])
     replacement = path.with_name("replacement")
     replacement.write_text(json.dumps({"version": 1, "api_key": rotated}))
     os.replace(replacement, path)
-    api._local_live_verified.clear()
-    assert api.local_live_profile_for_key(key) is None
-    assert api.local_live_profile_for_key(rotated) == "work"
+    api.local_live._local_live_verified.clear()
+    assert api.local_live.local_live_profile_for_key(key) is None
+    assert api.local_live.local_live_profile_for_key(rotated) == "work"
 
 
 def test_a_rotation_racing_the_remembered_key_sends_it_the_long_way(monkeypatch):
-    monkeypatch.setattr(api, "_local_live_verified", {})
+    monkeypatch.setattr(api.local_live, "_local_live_verified", {})
     calls = []
 
     def known_until_rotated(token, profile):
         calls.append(token)
         if len(calls) > 1:
             return False
-        monkeypatch.setattr(api, "_local_live_key_generation", api._local_live_key_generation + 1)
+        monkeypatch.setattr(api.local_live, "_local_live_key_generation", api.local_live._local_live_key_generation + 1)
         return True
 
-    monkeypatch.setattr(api, "_local_live_is_known", known_until_rotated)
-    monkeypatch.setattr(api, "_local_live_check_key", lambda token: None)
-    assert api.local_live_profile_for_key("cll1.-.old") is None
-    assert api._local_live_verified == {}
+    monkeypatch.setattr(api.local_live, "_local_live_is_known", known_until_rotated)
+    monkeypatch.setattr(api.local_live, "_local_live_check_key", lambda token: None)
+    assert api.local_live.local_live_profile_for_key("cll1.-.old") is None
+    assert api.local_live._local_live_verified == {}
 
 
 def test_a_rotation_here_retires_the_remembered_key(hermes, monkeypatch):
-    monkeypatch.setattr(api, "_local_live_verified", {})
-    monkeypatch.setattr(api, "_local_live_known", {})
+    monkeypatch.setattr(api.local_live, "_local_live_verified", {})
+    monkeypatch.setattr(api.local_live, "_local_live_known", {})
     key = _key(hermes, "work")
-    assert api.local_live_profile_for_key(key) == "work"
+    assert api.local_live.local_live_profile_for_key(key) == "work"
     with hermes_scope(hermes, "work"):
-        api.local_live_key("work", rotate=True)
-    assert "work" not in api._local_live_known
-    assert api.local_live_profile_for_key(key) is None
+        api.local_live.local_live_key("work", rotate=True)
+    assert "work" not in api.local_live._local_live_known
+    assert api.local_live.local_live_profile_for_key(key) is None
 
 
 # --- Read-back speech servers ---------------------------------------------------
@@ -736,7 +736,7 @@ class ReadBackUpstream:
         return [frame for frame in self.sent if isinstance(frame, dict) and frame.get("type") == "response.create"]
 
     def spoken(self):
-        return [api._local_live_item_words(frame["response"]["input"][0]) for frame in self.creates()]
+        return [api.local_live_read_back._local_live_item_words(frame["response"]["input"][0]) for frame in self.creates()]
 
     async def send(self, frame):
         if frame == "finish":
@@ -746,7 +746,7 @@ class ReadBackUpstream:
         self.sent.append(event)
         kind = event.get("type")
         if kind == "session.update":
-            detection = api._local_live_turn_detection(event)
+            detection = api.local_live_read_back._local_live_turn_detection(event)
             if detection is not None and self.refuses:
                 self.push({"type": "error", "error": {"type": "invalid_request_error",
                                                       "code": "realtime_live_unavailable",
@@ -763,7 +763,7 @@ class ReadBackUpstream:
                 return
             self.count += 1
             rid = f"resp{self.count}"
-            text = api._local_live_item_words((event.get("response") or {}).get("input", [None])[0]) or ""
+            text = api.local_live_read_back._local_live_item_words((event.get("response") or {}).get("input", [None])[0]) or ""
             if self.unstarted:
                 self.held = (rid, text)
                 return
@@ -1043,48 +1043,48 @@ def test_a_server_that_doesnt_read_back_ends_the_call(client, hermes, server):
         with pytest.raises(WebSocketDisconnect) as closed:
             while True:
                 ws.receive_text()
-    assert closed.value.code == api.SPEECH_SERVER_CLOSE_REFUSED
-    assert closed.value.reason == api.LOCAL_LIVE_NOT_READ_BACK
+    assert closed.value.code == api.speech_server.SPEECH_SERVER_CLOSE_REFUSED
+    assert closed.value.reason == api.local_live_read_back.LOCAL_LIVE_NOT_READ_BACK
     assert len(upstream.creates()) == 2
 
 
 def test_read_back_sentences_start_early_and_join_short_ones():
     clock = [0.0]
-    sentences = api._ReadBackSentences(lambda: clock[0])
+    sentences = api.local_live_read_back._ReadBackSentences(lambda: clock[0])
     assert sentences.feed("Yes. ") == ["Yes."]
     assert sentences.feed("It is. Short. ") == []
     assert sentences.feed("And this one is long enough to go on its own. ") == \
         ["It is. Short. And this one is long enough to go on its own."]
     assert sentences.feed("Waiting for the rest") == []
-    clock[0] = api.LOCAL_LIVE_READ_BACK_FLUSH_S + 1
+    clock[0] = api.local_live_read_back.LOCAL_LIVE_READ_BACK_FLUSH_S + 1
     assert sentences.tick() == ["Waiting for the"]
     assert sentences.finish() == ["rest"]
-    long = api._ReadBackSentences()
+    long = api.local_live_read_back._ReadBackSentences()
     out = long.feed("word " * 120)
-    assert out and all(len(sentence) <= api.LOCAL_LIVE_READ_BACK_MAX_SENTENCE_CHARS for sentence in out)
-    assert api._ReadBackSentences().feed("It costs 3.50 today. ") == ["It costs 3.50 today."]
+    assert out and all(len(sentence) <= api.local_live_read_back.LOCAL_LIVE_READ_BACK_MAX_SENTENCE_CHARS for sentence in out)
+    assert api.local_live_read_back._ReadBackSentences().feed("It costs 3.50 today. ") == ["It costs 3.50 today."]
 
 
 def test_read_back_is_checked_only_on_sentences_that_can_tell():
-    assert api._local_live_read_back_matches("Hello there, how are you today?", "Hello there, how are you today?")
-    assert api._local_live_read_back_matches("Something else entirely here now", "Hello there, how are you today?") \
+    assert api.local_live_read_back._local_live_read_back_matches("Hello there, how are you today?", "Hello there, how are you today?")
+    assert api.local_live_read_back._local_live_read_back_matches("Something else entirely here now", "Hello there, how are you today?") \
         is False
-    assert api._local_live_read_back_matches("Hi.", "Hi there.") is None
-    assert api._local_live_read_back_matches("twenty one degrees and sunny out", "21 degrees and sunny out") is None
+    assert api.local_live_read_back._local_live_read_back_matches("Hi.", "Hi there.") is None
+    assert api.local_live_read_back._local_live_read_back_matches("twenty one degrees and sunny out", "21 degrees and sunny out") is None
 
 
 def test_only_a_refusal_of_automatic_responses_turns_read_back_on():
-    assert api._local_live_refuses_live({"type": "error", "error": {"code": "realtime_live_unavailable"}})
-    assert api._local_live_refuses_live({"type": "error", "error": {
+    assert api.local_live_read_back._local_live_refuses_live({"type": "error", "error": {"code": "realtime_live_unavailable"}})
+    assert api.local_live_read_back._local_live_refuses_live({"type": "error", "error": {
         "param": "session.audio.input.turn_detection.create_response"}})
-    assert not api._local_live_refuses_live({"type": "error", "error": {"code": "invalid_api_key"}})
+    assert not api.local_live_read_back._local_live_refuses_live({"type": "error", "error": {"code": "invalid_api_key"}})
     legacy = {"type": "session.update", "session": {"turn_detection": {"type": "server_vad"}}}
-    changed, interrupts = api._local_live_read_back_update(legacy)
+    changed, interrupts = api.local_live_read_back._local_live_read_back_update(legacy)
     assert changed["session"]["turn_detection"] == {"type": "server_vad", "create_response": False,
                                                     "interrupt_response": False}
     assert interrupts and legacy["session"]["turn_detection"] == {"type": "server_vad"}
     off = {"type": "session.update", "session": {"turn_detection": {"create_response": False}}}
-    assert api._local_live_turn_detection(off) is None
+    assert api.local_live_read_back._local_live_turn_detection(off) is None
 
 
 def _say(ws, turn, *deltas, done=True):
@@ -1143,7 +1143,7 @@ def test_new_words_while_the_reply_speaks_start_a_new_turn(client, hermes, serve
 
 
 def test_a_cancel_the_server_drops_silently_holds_the_next_reply_only_briefly(client, hermes, server, monkeypatch):
-    monkeypatch.setattr(api, "LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(api.local_live_read_back, "LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S", 0.2)
     server.upstream = upstream = ReadBackUpstream()
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
         _ready(ws, upstream)
@@ -1184,7 +1184,7 @@ def test_a_busy_server_gets_the_sentence_again_once_free(client, hermes, server)
 
 
 def test_a_long_sentence_still_playing_isnt_given_up_on(client, hermes, server, monkeypatch):
-    monkeypatch.setattr(api, "LOCAL_LIVE_READ_BACK_RESPONSE_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(api.local_live_read_back, "LOCAL_LIVE_READ_BACK_RESPONSE_TIMEOUT_S", 0.3)
     server.upstream = upstream = ReadBackUpstream()
     upstream.stream_s = 1.0
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
@@ -1201,8 +1201,8 @@ def test_a_long_sentence_still_playing_isnt_given_up_on(client, hermes, server, 
 
 
 def test_a_sentence_never_passes_the_cap():
-    out = api._ReadBackSentences().feed("Ok. " + "word " * 200 + "end. ")
-    assert out[0] == "Ok." and all(len(sentence) <= api.LOCAL_LIVE_READ_BACK_MAX_SENTENCE_CHARS for sentence in out)
+    out = api.local_live_read_back._ReadBackSentences().feed("Ok. " + "word " * 200 + "end. ")
+    assert out[0] == "Ok." and all(len(sentence) <= api.local_live_read_back.LOCAL_LIVE_READ_BACK_MAX_SENTENCE_CHARS for sentence in out)
     assert " ".join(out) == " ".join(("Ok. " + "word " * 200 + "end.").split())
 
 
@@ -1210,8 +1210,8 @@ def test_both_turn_detection_blocks_turn_automatic_responses_off():
     both = {"type": "session.update", "session": {"turn_detection": {"type": "server_vad"},
                                                   "audio": {"input": {"turn_detection": {"type": "server_vad",
                                                                                          "interrupt_response": False}}}}}
-    changed, interrupts = api._local_live_read_back_update(both)
-    assert api._local_live_turn_detections(changed) == [] and interrupts is False
+    changed, interrupts = api.local_live_read_back._local_live_read_back_update(both)
+    assert api.local_live_read_back._local_live_turn_detections(changed) == [] and interrupts is False
 
 
 def test_speech_before_the_reply_says_anything_holds_it_until_the_words_are_in(client, hermes, server):
@@ -1319,16 +1319,16 @@ def test_status_reports_the_fast_model(client, hermes, front):
 
 
 def test_the_fast_models_address():
-    assert api.local_live_front_model_url("http://10.1.10.52:8080/v1") == "http://10.1.10.52:8080/v1/chat/completions"
-    assert api.local_live_front_model_url("https://api.example.com/v1/") == \
+    assert api.local_live_agent.local_live_front_model_url("http://10.1.10.52:8080/v1") == "http://10.1.10.52:8080/v1/chat/completions"
+    assert api.local_live_agent.local_live_front_model_url("https://api.example.com/v1/") == \
         "https://api.example.com/v1/chat/completions"
-    assert api.local_live_front_model_url("box.lan:11434/v1/chat/completions") == \
+    assert api.local_live_agent.local_live_front_model_url("box.lan:11434/v1/chat/completions") == \
         "http://box.lan:11434/v1/chat/completions"
     for bad in ("", "http://api.example.com/v1", "ftp://box/v1", "http://user:pw@box/v1"):
-        with pytest.raises(api.TokenError):
-            api.local_live_front_model_url(bad)
-    with pytest.raises(api.TokenError, match="model name"):
-        api.local_live_front_model_target({"base_url": "http://box.lan/v1"})
+        with pytest.raises(api.core.TokenError):
+            api.local_live_agent.local_live_front_model_url(bad)
+    with pytest.raises(api.core.TokenError, match="model name"):
+        api.local_live_agent.local_live_front_model_target({"base_url": "http://box.lan/v1"})
 
 
 def test_agent_mode_answers_with_the_fast_model_not_a_hermes_turn(client, hermes, server, front):
@@ -1353,7 +1353,7 @@ def test_agent_mode_answers_with_the_fast_model_not_a_hermes_turn(client, hermes
 
 
 def test_a_fast_model_that_never_stops_is_cut_off(client, hermes, front, monkeypatch):
-    monkeypatch.setattr(api, "LOCAL_LIVE_MAX_REPLY_CHARS", 10)
+    monkeypatch.setattr(api.local_live, "LOCAL_LIVE_MAX_REPLY_CHARS", 10)
     front.answers = [[{"content": "abcdef"}, {"content": "ghijkl"}, {"content": "mnop"}]]
     headers = {"Authorization": f"Bearer {_key(hermes)}"}
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
@@ -1366,8 +1366,8 @@ def test_a_fast_model_that_never_stops_is_cut_off(client, hermes, front, monkeyp
 
 def test_plain_http_fast_models_skip_proxies():
     # An empty ProxyHandler opens nothing, so the opener has no proxy route at all.
-    assert not any(isinstance(handler, api.urllib.request.ProxyHandler)
-                   for handler in api._local_live_front_direct_opener.handlers)
+    assert not any(isinstance(handler, api.gemini_qwen_live.urllib.request.ProxyHandler)
+                   for handler in api.local_live_agent._local_live_front_direct_opener.handlers)
 
 
 def test_a_tool_call_runs_on_the_phone_and_the_model_goes_on(client, hermes, front):
@@ -1442,7 +1442,7 @@ def test_a_fast_model_that_is_down_hands_the_utterance_to_hermes(client, hermes,
         thread.join(10)
         ws.send_text("finish")
     assert result["response"].json()["choices"][0]["message"]["content"] == \
-        api.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY + " Hi from Hermes."
+        api.local_live_agent.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY + " Hi from Hermes."
 
 
 def test_a_server_without_tool_support_is_asked_again_without_tools(client, hermes, front):
@@ -1494,7 +1494,7 @@ def test_an_answer_nobody_waits_for_is_handed_back_as_late(client, hermes):
 
 
 def test_tool_calls_the_user_talked_over_get_stand_in_results():
-    agent = api._LocalLiveAgent("Be brief.", [])
+    agent = api.local_live_agent._LocalLiveAgent("Be brief.", [])
     agent.history = [{"role": "user", "content": "a"},
                      {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}, {"id": "c2"}]},
                      {"role": "tool", "tool_call_id": "c1", "content": "done"},
@@ -1506,8 +1506,8 @@ def test_tool_calls_the_user_talked_over_get_stand_in_results():
 
 
 def test_history_stays_bounded_and_starts_with_the_user(monkeypatch):
-    monkeypatch.setattr(api, "LOCAL_LIVE_AGENT_MAX_HISTORY", 3)
-    agent = api._LocalLiveAgent("", [])
+    monkeypatch.setattr(api.local_live_agent, "LOCAL_LIVE_AGENT_MAX_HISTORY", 3)
+    agent = api.local_live_agent._LocalLiveAgent("", [])
     agent._append({"role": "user", "content": "1"})
     agent._append({"role": "assistant", "content": "", "tool_calls": [{"id": "c"}]})
     agent._append({"role": "tool", "tool_call_id": "c", "content": "x"})
@@ -1516,13 +1516,13 @@ def test_history_stays_bounded_and_starts_with_the_user(monkeypatch):
 
 
 def test_a_reconnect_mid_request_leaves_no_unanswered_user_message(monkeypatch):
-    agent = api._LocalLiveAgent("", [])
+    agent = api.local_live_agent._LocalLiveAgent("", [])
 
     async def stream(target, messages, tools):
         agent.close()  # the phone reconnected while the model was thinking
         yield "text", "too late"
 
-    monkeypatch.setattr(api, "_local_live_front_stream", stream)
+    monkeypatch.setattr(api.local_live_agent, "_local_live_front_stream", stream)
 
     async def run():
         return [piece async for piece in agent.reply(None, "Hello", ("http://box/v1", "m", ""))]
@@ -1532,7 +1532,7 @@ def test_a_reconnect_mid_request_leaves_no_unanswered_user_message(monkeypatch):
 
 
 def test_thinking_is_never_spoken():
-    think = api._ThinkFilter()
+    think = api.local_live_agent._ThinkFilter()
     out = "".join(think.feed(piece) for piece in ["Hel", "lo <th", "ink>secret", " stuff</thi", "nk> there", "<"])
     assert out + think.flush() == "Hello  there<"
 
@@ -1545,10 +1545,10 @@ def test_thinking_is_never_spoken():
 
 def test_conduit_profile_status_and_key_are_that_profiles(client, hermes):
     body = client.get(f"{BASE}/local-live/status?conduit_profile=work").json()
-    assert api.local_live_profile_for_key(body["api_key"]) == "work"
+    assert api.local_live.local_live_profile_for_key(body["api_key"]) == "work"
     new = client.post(f"{BASE}/local-live/key?conduit_profile=work").json()["api_key"]
-    assert api.local_live_profile_for_key(new) == "work"
-    assert api.local_live_profile_for_key(body["api_key"]) is None
+    assert api.local_live.local_live_profile_for_key(new) == "work"
+    assert api.local_live.local_live_profile_for_key(body["api_key"]) is None
 
 
 def test_conduit_profile_call_takes_that_profiles_turns(client, hermes, server):
@@ -1567,7 +1567,7 @@ def test_conduit_profile_is_refused_where_the_profile_turned_the_plugin_off(clie
     dashboard = types.ModuleType("hermes_cli.web_server_dashboard")
 
     async def refused(name):
-        assert name == api.PLUGIN_NAME
+        assert name == api.core.PLUGIN_NAME
         return hermes.profile == "off"
 
     dashboard._plugin_api_request_refused = refused
@@ -1577,7 +1577,7 @@ def test_conduit_profile_is_refused_where_the_profile_turned_the_plugin_off(clie
     with client.websocket_connect(f"{BASE}/speech-server/socket?conduit_profile=off") as ws:
         while (message := ws.receive())["type"] != "websocket.close":
             pass
-    assert message["code"] == api.SPEECH_SERVER_CLOSE_REFUSED
+    assert message["code"] == api.speech_server.SPEECH_SERVER_CLOSE_REFUSED
 
 
 def test_a_failing_consent_check_closes_the_socket_as_retryable(client, hermes, monkeypatch):
@@ -1593,7 +1593,7 @@ def test_a_failing_consent_check_closes_the_socket_as_retryable(client, hermes, 
     with client.websocket_connect(f"{BASE}/speech-server/socket?conduit_profile=work") as ws:
         while (message := ws.receive())["type"] != "websocket.close":
             pass
-    assert message["code"] == api.SPEECH_SERVER_CLOSE_FAILED
+    assert message["code"] == api.speech_server.SPEECH_SERVER_CLOSE_FAILED
 
 
 def test_conduit_profile_must_match_profile(client, hermes):
@@ -1604,32 +1604,32 @@ def test_conduit_profile_must_match_profile(client, hermes):
 
 
 def test_conduit_profile_takes_a_desktop_ticket_only_for_its_own_profile(hermes, monkeypatch, tmp_path):
-    monkeypatch.setattr(api, "_profile_dir", lambda name: tmp_path / name)
-    monkeypatch.setattr(api, "_plugin_refused_on", lambda name: asyncio.sleep(0, False))
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(api.core, "_plugin_refused_on", lambda name: asyncio.sleep(0, False))
     state = types.SimpleNamespace(native_http_principal={"profile_id": str(tmp_path / "work")})
     own = types.SimpleNamespace(query_params={"conduit_profile": "work"}, state=state)
-    assert asyncio.run(api._conduit_route_profile(own, None)) == "work"
+    assert asyncio.run(api.core._conduit_route_profile(own, None)) == "work"
     for name, principal in (("home", state.native_http_principal), ("work", {})):
         conn = types.SimpleNamespace(query_params={"conduit_profile": name},
                                      state=types.SimpleNamespace(native_http_principal=principal))
-        with pytest.raises(api.HTTPException) as refused:
-            asyncio.run(api._conduit_route_profile(conn, None))
+        with pytest.raises(api.local_live.HTTPException) as refused:
+            asyncio.run(api.core._conduit_route_profile(conn, None))
         assert refused.value.status_code == 403
     conn = own
     without = types.SimpleNamespace(query_params={}, state=conn.state)
-    assert asyncio.run(api._conduit_route_profile(without, "home")) == "home"
+    assert asyncio.run(api.core._conduit_route_profile(without, "home")) == "home"
 
 
 def test_dashboard_profiles_is_a_capability():
-    assert "dashboard-profiles" in api.ROUTE_CAPABILITIES
+    assert "dashboard-profiles" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def test_in_a_plugin_host_local_live_says_so(hermes, monkeypatch):
     monkeypatch.delitem(sys.modules, "hermes_cli.web_server", raising=False)
     monkeypatch.setitem(sys.modules, "hermes_cli.plugin_host_child", types.ModuleType("hermes_cli.plugin_host_child"))
-    api._local_live_auth_state.update(ready=False, started=False)
-    api._local_live_start_auth()
-    assert api._local_live_auth_state["reason"] == api.LOCAL_LIVE_PLUGIN_HOST_REASON
+    api.local_live._local_live_auth_state.update(ready=False, started=False)
+    api.local_live._local_live_start_auth()
+    assert api.local_live._local_live_auth_state["reason"] == api.local_live.LOCAL_LIVE_PLUGIN_HOST_REASON
 
 
 @pytest.mark.parametrize("method,route", [

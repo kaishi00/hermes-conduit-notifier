@@ -70,7 +70,8 @@ def titled(prefix: str, key: Any) -> str:
 
 def bot_name() -> str:
     """The name this profile's bot has in Hermes, as the Bots list shows it,
-    or "" when it has none (the Bots list shows its profile id). Cached like
+    or "" when it has none (the Bots list shows its profile id, and Hermes
+    for the main bot). Cached like
     titles, so a turn's several pushes read profile.yaml once."""
     home = _home()
     if home is None:
@@ -87,14 +88,22 @@ def bot_name() -> str:
     return value
 
 
+# Conduit's name for a main bot nobody named (AppState.profileDisplayName).
+MAIN_BOT_NAME = "Hermes"
+
+
 def _bot_name(home: Any) -> str:
     """The name Conduit shows for the bot a Hermes home belongs to: the name
-    it was given, else its profile id capitalized. A name that is only the id
-    names it no more than the id (Conduit's BotProfile.displayLabel)."""
+    it was given, else its profile id capitalized, and "Hermes" for the main
+    one. A name that is only the id names it no more than the id (Conduit's
+    BotProfile.displayLabel). A name given the main bot in Conduit stays on
+    the phone, so the push says Hermes and the phone swaps the name in."""
     given = _given_name(home)
     profile = _profile_of(home)
     if given and given != profile:
         return given
+    if profile.lower() == "default":
+        return MAIN_BOT_NAME
     return profile[:1].upper() + profile[1:]
 
 

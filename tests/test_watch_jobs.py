@@ -117,34 +117,34 @@ class FakeDB:
 
 @pytest.fixture(autouse=True)
 def fresh(monkeypatch):
-    monkeypatch.setattr(api, "_watch_grants", api._WatchGrants())
-    monkeypatch.setattr(api, "_watch_grant_limiter", api._MintLimiter(1000, 60.0))
+    monkeypatch.setattr(api.watch_tools, "_watch_grants", api.watch_tools._WatchGrants())
+    monkeypatch.setattr(api.watch_tools, "_watch_grant_limiter", api.core._MintLimiter(1000, 60.0))
     meta = {}
-    monkeypatch.setattr(api, "_open_voice_db", lambda needs=None: FakeDB(meta))
-    monkeypatch.setattr(api, "_voice_lock", lambda: threading.Lock())
-    monkeypatch.setattr(api, "_watch_job_numbers", api.itertools.count(1))
+    monkeypatch.setattr(api.voice_calls, "_open_voice_db", lambda needs=None: FakeDB(meta))
+    monkeypatch.setattr(api.voice_calls, "_voice_lock", lambda: threading.Lock())
+    monkeypatch.setattr(api.watch_jobs, "_watch_job_numbers", api.watch_jobs.itertools.count(1))
     return meta
 
 
 @pytest.fixture
 def tags(fresh):
-    return lambda: json.loads(fresh.get(api.VOICE_TAGS_KEY) or "{}")
+    return lambda: json.loads(fresh.get(api.voice_calls.VOICE_TAGS_KEY) or "{}")
 
 
 def make_jobs(server=None, max_jobs=5, options=None, profile=None):
-    grant = api._WatchGrant(grant_id=GRANT_ID, profile=profile, tools=api.WATCH_JOB_TOOLS + api.WATCH_JOB_CALLS,
+    grant = api.watch_tools._WatchGrant(grant_id=GRANT_ID, profile=profile, tools=api.watch_jobs.WATCH_JOB_TOOLS + api.watch_jobs.WATCH_JOB_CALLS,
                             secret=bytes(range(32)), relay_url=RELAY, credential="install-1.gateway-1.secret",
-                            expires_at=time.monotonic() + 600, max_calls=api.WATCH_JOB_GRANT_MAX_CALLS)
-    grant.jobs = api._WatchJobs(grant, max_jobs=max_jobs, options=options or {}, server=server or FakeHermes())
+                            expires_at=time.monotonic() + 600, max_calls=api.watch_jobs.WATCH_JOB_GRANT_MAX_CALLS)
+    grant.jobs = api.watch_jobs._WatchJobs(grant, max_jobs=max_jobs, options=options or {}, server=server or FakeHermes())
     return grant
 
 
 def start(grant, instructions="Check the build logs"):
-    return api.run_watch_job_call(grant, "start_job", {"instructions": instructions})
+    return api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": instructions})
 
 
 def news(grant, wait_s=0):
-    return api.run_watch_job_call(grant, "job_news", {"wait_s": wait_s})
+    return api.watch_jobs.run_watch_job_call(grant, "job_news", {"wait_s": wait_s})
 
 
 def write_pairing(tmp_path):
@@ -169,7 +169,7 @@ class FakeRelay:
 
 def test_a_grant_with_jobs_carries_them_with_the_users_cap_and_more_calls(tmp_path):
     relay, started, server = FakeRelay(), [], FakeHermes()
-    grant = api.open_watch_grant(
+    grant = api.watch_tools.open_watch_grant(
         {"tools": ["web_search", "recall_memory", "start_job", "list_jobs", "cancel_job"], "max_jobs": 2,
          "job_options": {"model": "gpt-5.5", "provider": "openai", "reasoning_effort": "low", "cwd": "/"}},
         profile="coder", path=write_pairing(tmp_path), relay=relay, start=started.append,
@@ -185,10 +185,10 @@ def test_a_grant_with_jobs_carries_them_with_the_users_cap_and_more_calls(tmp_pa
 
 
 def test_a_provider_goes_only_with_its_model():
-    assert api._clean_job_options({"provider": "openai", "reasoning_effort": "high"}) == {"reasoning_effort": "high"}
-    assert api._clean_job_options({"model": " ", "provider": "openai"}) == {}
-    assert api._clean_job_options({"model": "x" * 121}) == {}
-    assert api._clean_job_options("gpt") == {}
+    assert api.watch_jobs._clean_job_options({"provider": "openai", "reasoning_effort": "high"}) == {"reasoning_effort": "high"}
+    assert api.watch_jobs._clean_job_options({"model": " ", "provider": "openai"}) == {}
+    assert api.watch_jobs._clean_job_options({"model": "x" * 121}) == {}
+    assert api.watch_jobs._clean_job_options("gpt") == {}
 
 
 @pytest.mark.parametrize("body, api_available", [
@@ -197,7 +197,7 @@ def test_a_provider_goes_only_with_its_model():
 ])
 def test_without_jobs_allowed_or_runnable_the_grant_is_lookups_only(tmp_path, body, api_available):
     relay, started = FakeRelay(), []
-    grant = api.open_watch_grant(body, profile=None, path=write_pairing(tmp_path), relay=relay,
+    grant = api.watch_tools.open_watch_grant(body, profile=None, path=write_pairing(tmp_path), relay=relay,
                                  start=started.append, session_api=lambda: FakeHermes() if api_available else None)
     assert (grant["tools"], grant["max_calls"], grant["max_jobs"]) == (["web_search"], 60, 0)
     assert started[0].jobs is None
@@ -205,33 +205,33 @@ def test_without_jobs_allowed_or_runnable_the_grant_is_lookups_only(tmp_path, bo
 
 @pytest.mark.parametrize("value, expected", [(None, 5), (0, 0), (7, 7), (50, 20)])
 def test_the_job_cap_defaults_to_five_and_is_capped_at_twenty(value, expected):
-    assert api._watch_max_jobs(value) == expected
+    assert api.watch_tools._watch_max_jobs(value) == expected
 
 
 @pytest.mark.parametrize("value", [-1, "5", True, 2.5])
 def test_a_job_cap_that_isnt_a_whole_number_is_refused(tmp_path, value):
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": ["start_job"], "max_jobs": value}, profile=None, path=write_pairing(tmp_path),
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": ["start_job"], "max_jobs": value}, profile=None, path=write_pairing(tmp_path),
                              relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
     assert err.value.status == 400
 
 
 def test_only_a_session_api_the_dashboard_loaded_counts(monkeypatch):
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
-    assert api._hermes_session_api() is None
+    assert api.watch_jobs._hermes_session_api() is None
     module = types.ModuleType("tui_gateway.server")
     monkeypatch.setitem(sys.modules, "tui_gateway.server", module)
-    assert api._hermes_session_api() is None
+    assert api.watch_jobs._hermes_session_api() is None
     module.dispatch = lambda req, transport=None: None
     module._sessions = {}
-    assert api._hermes_session_api() is module
+    assert api.watch_jobs._hermes_session_api() is module
 
 
 # --- Starting ------------------------------------------------------------------
 
 def test_a_job_is_an_ordinary_hermes_chat_on_the_grants_profile_filed_as_a_voice_job(tags, monkeypatch):
     scoped = []
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
     grant = make_jobs(options={"model": "gpt-5.5"}, profile="coder")
     server = grant.jobs.server
     answer = start(grant, "Quick: summarise   today's\nbuild failures")
@@ -251,10 +251,10 @@ def test_a_job_is_an_ordinary_hermes_chat_on_the_grants_profile_filed_as_a_voice
 
 
 def test_a_job_title_mirrors_the_phones():
-    assert api.watch_job_title("  a   b ") == "a b"
+    assert api.watch_jobs.watch_job_title("  a   b ") == "a b"
     long = "word " * 20
-    assert api.watch_job_title(long) == ("word " * 12).strip() + "…"
-    assert api.watch_job_title("x" * 70) == "x" * 60 + "…"
+    assert api.watch_jobs.watch_job_title(long) == ("word " * 12).strip() + "…"
+    assert api.watch_jobs.watch_job_title("x" * 70) == "x" * 60 + "…"
 
 
 @pytest.mark.parametrize("args, detail", [
@@ -266,7 +266,7 @@ def test_a_job_title_mirrors_the_phones():
 ])
 def test_a_job_the_watch_shouldnt_send_is_refused_without_ending_the_grant(args, detail):
     grant = make_jobs()
-    answer = api.run_watch_job_call(grant, "start_job", args)
+    answer = api.watch_jobs.run_watch_job_call(grant, "start_job", args)
     assert answer["ok"] is False and answer["detail"] == detail
     # 403 and 410 tell the Watch its grant is over; these don't.
     assert answer["status"] not in (403, 410)
@@ -277,7 +277,7 @@ def test_a_job_the_watch_shouldnt_send_is_refused_without_ending_the_grant(args,
 
 def test_a_grant_keeps_the_other_profiles_its_jobs_may_run_on(tmp_path):
     started = []
-    grant = api.open_watch_grant(
+    grant = api.watch_tools.open_watch_grant(
         {"tools": ["start_job"], "job_profiles": ["Fam", "coder", "fam", "current", "writer"]}, profile="Coder",
         path=write_pairing(tmp_path), relay=FakeRelay(), start=started.append, session_api=FakeHermes)
     # The grant's own profile ("current" too) needs no naming; a name counts once.
@@ -287,7 +287,7 @@ def test_a_grant_keeps_the_other_profiles_its_jobs_may_run_on(tmp_path):
 
 def test_a_grant_without_jobs_names_no_profiles(tmp_path):
     # Unread there, as job_options: even a malformed list.
-    grant = api.open_watch_grant({"tools": ["web_search"], "job_profiles": ["../fam"]}, profile=None,
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "job_profiles": ["../fam"]}, profile=None,
                                  path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None,
                                  session_api=FakeHermes)
     assert "job_profiles" not in grant
@@ -295,8 +295,8 @@ def test_a_grant_without_jobs_names_no_profiles(tmp_path):
 
 @pytest.mark.parametrize("value", ["fam", [""], ["../fam"], ["fam", 3], ["x" * 65], ["fam\n"], ["p"] * 33])
 def test_job_profiles_that_arent_profile_names_are_refused(tmp_path, value):
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": ["start_job"], "job_profiles": value}, profile=None,
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": ["start_job"], "job_profiles": value}, profile=None,
                              path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None,
                              session_api=FakeHermes)
     assert err.value.status == 400
@@ -304,18 +304,18 @@ def test_job_profiles_that_arent_profile_names_are_refused(tmp_path, value):
 
 def test_a_job_for_a_listed_profile_runs_there_on_its_own_model(tags, monkeypatch):
     scoped = []
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
     grant = make_jobs(options={"model": "gpt-5.5"}, profile="coder")
     grant.jobs.profiles = ("Fam",)
     server = grant.jobs.server
-    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "check the router", "profile": "fam"})
+    answer = api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": "check the router", "profile": "fam"})
     assert answer["status"] == "started" and answer["profile"] == "Fam"
     assert answer["message"].startswith("The job is running on Hermes on Fam.")
     [create] = server.methods("session.create")
     assert create == {"cols": 96, "source": "desktop", "title": "check the router", "profile": "Fam"}
     assert scoped == ["Fam"]
     assert tags() == {"st-1": {"kind": "job"}}
-    assert api.run_watch_job_call(grant, "list_jobs", {})["job_1"].endswith("; profile=Fam")
+    assert api.watch_jobs.run_watch_job_call(grant, "list_jobs", {})["job_1"].endswith("; profile=Fam")
     server.emit("rt-1", "message.complete", {"text": "Router is fine", "status": "complete"})
     [item] = news(grant)["news"]
     assert (item["status"], item["profile"]) == ("finished", "Fam")
@@ -323,7 +323,7 @@ def test_a_job_for_a_listed_profile_runs_there_on_its_own_model(tags, monkeypatc
 
 def test_naming_the_calls_own_profile_runs_the_job_as_usual():
     grant = make_jobs(options={"model": "gpt-5.5"}, profile="coder")
-    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "check the router", "profile": "Coder"})
+    answer = api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": "check the router", "profile": "Coder"})
     assert answer["status"] == "started" and "profile" not in answer
     [create] = grant.jobs.server.methods("session.create")
     assert (create["profile"], create["model"]) == ("coder", "gpt-5.5")
@@ -332,7 +332,7 @@ def test_naming_the_calls_own_profile_runs_the_job_as_usual():
 def test_a_profile_the_phone_didnt_list_is_never_guessed_at():
     grant = make_jobs(max_jobs=1)
     grant.jobs.profiles = ("Fam",)
-    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "work"})
+    answer = api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "work"})
     assert answer == {"ok": True, "status": "not_started",
                       "message": "I don't know a profile or bot called work, so I didn't start the job."}
     assert grant.jobs.server.calls == []
@@ -344,7 +344,7 @@ def test_a_hermes_that_names_no_profile_is_trusted_with_the_one_asked_for():
     # As the phone's createSession: only a profile Hermes names is checked.
     grant = make_jobs()
     grant.jobs.profiles = ("Fam",)
-    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "Fam"})
+    answer = api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "Fam"})
     assert answer["status"] == "started" and answer["profile"] == "Fam"
 
 
@@ -353,7 +353,7 @@ def test_a_job_hermes_lands_on_another_profile_is_refused_and_closed():
     server.created_profile = "default"
     grant = make_jobs(server=server)
     grant.jobs.profiles = ("Fam",)
-    answer = api.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "Fam"})
+    answer = api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": "do it", "profile": "Fam"})
     assert answer["status"] == "not_started"
     assert answer["message"] == "Hermes couldn't start the job: Hermes put it on default instead of Fam"
     assert server.methods("prompt.submit") == []
@@ -376,7 +376,7 @@ def test_a_renewed_grants_jobs_never_reuse_the_last_grants_ids():
     first, second = make_jobs(), make_jobs()
     assert start(first)["job_id"] == "watch-1"
     assert start(second)["job_id"] == "watch-2"
-    assert api.run_watch_job_call(second, "cancel_job", {"job_id": "watch-1"}) == {
+    assert api.watch_jobs.run_watch_job_call(second, "cancel_job", {"job_id": "watch-1"}) == {
         "ok": True, "message": "There are no background jobs to cancel."}
     assert first.jobs.jobs["watch-1"].status != "cancelled"
 
@@ -397,10 +397,10 @@ class RenewingRelay(FakeRelay):
 
 def open_jobs_grant(tmp_path, server, relay, profile="coder", started=None, ticket_home=None, **extra):
     started = [] if started is None else started
-    answer = api.open_watch_grant({"tools": ["web_search", "start_job"], "max_jobs": 3, **extra}, profile=profile,
+    answer = api.watch_tools.open_watch_grant({"tools": ["web_search", "start_job"], "max_jobs": 3, **extra}, profile=profile,
                                   ticket_home=ticket_home, path=write_pairing(tmp_path), relay=relay,
                                   start=started.append, session_api=lambda: server)
-    return answer, api._watch_grants.get(answer["grant_id"])
+    return answer, api.watch_tools._watch_grants.get(answer["grant_id"])
 
 
 def test_a_renewal_carries_the_last_grants_jobs_and_their_news(tmp_path):
@@ -417,11 +417,11 @@ def test_a_renewal_carries_the_last_grants_jobs_and_their_news(tmp_path):
     # The approval already told isn't told again; the new grant answers it,
     # lists the job, and hears it finish.
     assert news(new)["news"] == []
-    assert api.run_watch_job_call(new, "answer_approval", {"job_id": "watch-1", "request_id": "appr-1",
+    assert api.watch_jobs.run_watch_job_call(new, "answer_approval", {"job_id": "watch-1", "request_id": "appr-1",
                                                             "choice": "once"})["status"] == "approved"
-    assert "watch-1" in api.run_watch_job_call(new, "list_jobs", {})["job_1"]
+    assert "watch-1" in api.watch_jobs.run_watch_job_call(new, "list_jobs", {})["job_1"]
     # The old grant closing (the Watch lets it go) leaves the jobs running.
-    assert api._close_watch_grant_here(old)
+    assert api.watch_tools._close_watch_grant_here(old)
     assert not new.jobs.ended
     server.emit("rt-1", "message.complete", {"text": "All green", "status": "complete"})
     [item] = news(new)["news"]
@@ -431,7 +431,7 @@ def test_a_renewal_carries_the_last_grants_jobs_and_their_news(tmp_path):
         start(new)
     assert start(new)["status"] == "started"
     assert start(new)["message"].startswith("This call has started 4 jobs")
-    assert api._close_watch_grant_here(new)
+    assert api.watch_tools._close_watch_grant_here(new)
     assert new.jobs.ended
 
 
@@ -445,7 +445,7 @@ def test_only_an_open_grant_of_the_same_profile_with_its_own_jobs_is_carried(tmp
     if case == "other profile":
         profile = "writer"
     elif case == "closed":
-        api._close_watch_grant_here(old)
+        api.watch_tools._close_watch_grant_here(old)
     elif case == "unknown":
         carry = "Z" * 22
     elif case == "already carried":
@@ -462,7 +462,7 @@ def test_only_an_open_grant_of_the_same_profile_with_its_own_jobs_is_carried(tmp
 def test_a_renewal_without_a_cap_options_or_profiles_keeps_the_calls(tmp_path):
     server, relay = FakeHermes(), RenewingRelay()
     _, old = open_jobs_grant(tmp_path, server, relay, job_options={"reasoning_effort": "low"}, job_profiles=["fam"])
-    renewed = api.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
+    renewed = api.watch_tools.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
                                    path=write_pairing(tmp_path), relay=relay, start=lambda g: None,
                                    session_api=lambda: server)
     assert (renewed["jobs_carried_from"], renewed["max_jobs"], renewed["job_profiles"]) == (old.grant_id, 3, ["fam"])
@@ -503,13 +503,13 @@ def fake_profile_dirs(monkeypatch, root):
 
 def test_a_ticket_names_only_profiles_on_its_own_home(tmp_path, monkeypatch):
     coder = fake_profile_dirs(monkeypatch, tmp_path / "hermes")
-    assert api._clean_job_profiles(["Fam", "default"], own="coder", ticket_home=str(coder)) == ()
-    assert api._clean_job_profiles(["Fam"], own="coder", ticket_home="") == ()
+    assert api.watch_jobs._clean_job_profiles(["Fam", "default"], own="coder", ticket_home=str(coder)) == ()
+    assert api.watch_jobs._clean_job_profiles(["Fam"], own="coder", ticket_home="") == ()
     # An alias of the ticket's own home stays.
-    assert api._clean_job_profiles(["CODER2"], own="writer", ticket_home=str(tmp_path / "hermes" / "profiles" / "coder2")) == ("CODER2",)
-    assert api._clean_job_profiles(["Fam"], own="coder") == ("Fam",)
+    assert api.watch_jobs._clean_job_profiles(["CODER2"], own="writer", ticket_home=str(tmp_path / "hermes" / "profiles" / "coder2")) == ("CODER2",)
+    assert api.watch_jobs._clean_job_profiles(["Fam"], own="coder") == ("Fam",)
     # A name this Hermes can't place is on no home.
-    assert api._clean_job_profiles(["nope"], own="coder", ticket_home=str(coder)) == ()
+    assert api.watch_jobs._clean_job_profiles(["nope"], own="coder", ticket_home=str(coder)) == ()
 
 
 @pytest.mark.parametrize("stamp, home", [(None, ""), ("coder", ""), ({}, ""), ({"profile_id": 3}, ""),
@@ -521,8 +521,8 @@ def test_a_ticket_stamp_this_plugin_cant_read_names_nothing(tmp_path, monkeypatc
         # A profile name, placed as Hermes places it.
         home = str(tmp_path / "hermes" / "profiles" / "fam")
     request = types.SimpleNamespace(state=types.SimpleNamespace(native_http_principal=stamp))
-    assert api._native_ticket_home(request) == home
-    assert api._native_ticket_home(types.SimpleNamespace(state=types.SimpleNamespace())) is None
+    assert api.core._native_ticket_home(request) == home
+    assert api.core._native_ticket_home(types.SimpleNamespace(state=types.SimpleNamespace())) is None
 
 
 @pytest.mark.parametrize("ticket", ["fam", ""])
@@ -530,8 +530,8 @@ def test_a_ticket_stamp_this_plugin_cant_read_names_nothing(tmp_path, monkeypatc
 def test_a_ticket_cant_open_a_grant_for_a_profile_that_isnt_its_home(tmp_path, monkeypatch, ticket, tools):
     fake_profile_dirs(monkeypatch, tmp_path / "hermes")
     home = str(tmp_path / "hermes" / "profiles" / ticket) if ticket else ""
-    with pytest.raises(api.TokenError) as err:
-        api.open_watch_grant({"tools": tools, "max_jobs": 3}, profile="coder", ticket_home=home,
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.open_watch_grant({"tools": tools, "max_jobs": 3}, profile="coder", ticket_home=home,
                              path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None,
                              session_api=FakeHermes)
     assert err.value.status == 403
@@ -541,13 +541,13 @@ def test_a_tickets_own_home_is_its_request_profile_not_the_ambient_one(tmp_path,
     fake_profile_dirs(monkeypatch, tmp_path / "hermes")
     fam = str(tmp_path / "hermes" / "profiles" / "fam")
     # The ambient home is coder's; the request names Fam, the ticket's home.
-    grant = api.open_watch_grant({"tools": ["web_search"]}, profile="Fam", ticket_home=fam,
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile="Fam", ticket_home=fam,
                                  path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None,
                                  session_api=FakeHermes)
     assert grant["tools"] == ["web_search"]
     # No profile named: the ambient (launch) home, coder's, isn't Fam.
-    with pytest.raises(api.TokenError):
-        api.open_watch_grant({"tools": ["web_search"]}, profile=None, ticket_home=fam,
+    with pytest.raises(api.core.TokenError):
+        api.watch_tools.open_watch_grant({"tools": ["web_search"]}, profile=None, ticket_home=fam,
                              path=write_pairing(tmp_path), relay=FakeRelay(), start=lambda g: None,
                              session_api=FakeHermes)
 
@@ -556,11 +556,11 @@ def test_a_ticket_revokes_only_its_own_homes_grants(tmp_path, monkeypatch):
     coder = fake_profile_dirs(monkeypatch, tmp_path / "hermes")
     _, grant = open_jobs_grant(tmp_path, FakeHermes(), RenewingRelay())
     told = []
-    with pytest.raises(api.TokenError) as err:
-        api.revoke_watch_grant({"grant_id": grant.grant_id}, profile="coder",
+    with pytest.raises(api.core.TokenError) as err:
+        api.watch_tools.revoke_watch_grant({"grant_id": grant.grant_id}, profile="coder",
                                ticket_home=str(tmp_path / "hermes" / "profiles" / "fam"), tell_relay=lambda *a: told.append(a))
     assert err.value.status == 403 and not grant.closed.is_set()
-    assert api.revoke_watch_grant({"grant_id": grant.grant_id}, profile="coder", ticket_home=str(coder),
+    assert api.watch_tools.revoke_watch_grant({"grant_id": grant.grant_id}, profile="coder", ticket_home=str(coder),
                                   tell_relay=lambda *a: told.append(a)) == {"revoked": True}
 
 
@@ -570,10 +570,10 @@ def test_a_tickets_renewal_doesnt_carry_an_owner_grants_other_homes(tmp_path, mo
     # The owner's grant may run jobs on Fam.
     _, old = open_jobs_grant(tmp_path, server, relay, job_profiles=["fam"])
     start(old)
-    renewed = api.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
+    renewed = api.watch_tools.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
                                    ticket_home=str(coder), path=write_pairing(tmp_path), relay=relay,
                                    start=lambda g: None, session_api=lambda: server)
-    new = api._watch_grants.get(renewed["grant_id"])
+    new = api.watch_tools._watch_grants.get(renewed["grant_id"])
     assert "jobs_carried_from" not in renewed and renewed["job_profiles"] == []
     assert new.jobs is not old.jobs and new.jobs.jobs == {} and new.jobs.profiles == ()
     assert old.jobs.grant is old and old.jobs.profiles == ("fam",)
@@ -602,7 +602,7 @@ def test_a_tickets_renewal_carries_jobs_on_its_own_home(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("value", [7, "", "not a grant id", ["A" * 22]])
 def test_carry_jobs_from_must_be_a_grant_id(tmp_path, value):
-    with pytest.raises(api.TokenError) as err:
+    with pytest.raises(api.core.TokenError) as err:
         open_jobs_grant(tmp_path, FakeHermes(), RenewingRelay(), carry_jobs_from=value)
     assert err.value.status == 400
 
@@ -616,8 +616,8 @@ def test_a_renewal_that_cant_start_answering_gives_the_jobs_back(tmp_path):
     def broken(grant):
         raise RuntimeError("no thread to spare")
 
-    with pytest.raises(api.TokenError):
-        api.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
+    with pytest.raises(api.core.TokenError):
+        api.watch_tools.open_watch_grant({"tools": ["start_job"], "carry_jobs_from": old.grant_id}, profile="coder",
                              path=write_pairing(tmp_path), relay=relay, start=broken, session_api=lambda: server)
     assert jobs.grant is old and not jobs.ended
     assert news(old)["running"] == 1
@@ -635,7 +635,7 @@ def test_three_jobs_run_at_once():
 
 
 def test_a_grant_carries_only_the_job_tools_asked_for(tmp_path):
-    grant = api.open_watch_grant({"tools": ["list_jobs"]}, profile=None, path=write_pairing(tmp_path),
+    grant = api.watch_tools.open_watch_grant({"tools": ["list_jobs"]}, profile=None, path=write_pairing(tmp_path),
                                  relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
     # Corrections come with the tools that start or stop jobs, not with a list.
     assert grant["tools"] == ["list_jobs", "job_news", "answer_approval"]
@@ -658,7 +658,7 @@ def test_a_job_hermes_refuses_to_start_is_reported_and_its_session_closed():
 def test_a_job_cancelled_while_it_starts_never_gets_its_prompt():
     grant = make_jobs()
     server = grant.jobs.server
-    server.on_create = lambda: api.run_watch_job_call(grant, "cancel_job", {})
+    server.on_create = lambda: api.watch_jobs.run_watch_job_call(grant, "cancel_job", {})
     answer = start(grant)
     assert answer["status"] == "not_started"
     assert answer["message"] == "Check the build logs was cancelled before it started."
@@ -676,7 +676,7 @@ def test_a_method_hermes_never_answers_times_out(monkeypatch):
     grant = make_jobs()
     server = grant.jobs.server
     server.dispatch = lambda req, transport=None: None
-    with pytest.raises(api.WatchJobError, match="session.create timed out"):
+    with pytest.raises(api.watch_jobs.WatchJobError, match="session.create timed out"):
         grant.jobs.rpc("session.create", {}, timeout=0.05)
     assert grant.jobs._waiters == {}
 
@@ -759,10 +759,10 @@ def test_more_news_than_one_answer_holds_waits_for_the_next_call():
     # Each result was cut to fit, and each answer fits the relay's bound sealed.
     for item in told:
         assert item["result"].endswith("\n[…]")
-        assert len(item["result"].encode()) <= api.WATCH_JOB_RESULT_BYTES
+        assert len(item["result"].encode()) <= api.watch_jobs.WATCH_JOB_RESULT_BYTES
     for answer in (first, second):
-        sealed = api.seal_watch_tool(grant.result_key, "result", GRANT_ID, b64u(bytes(16)), answer)
-        assert len(sealed["ct"]) <= api.WATCH_MAX_RESULT_CT_CHARS
+        sealed = api.watch_tools.seal_watch_tool(grant.result_key, "result", GRANT_ID, b64u(bytes(16)), answer)
+        assert len(sealed["ct"]) <= api.watch_tools.WATCH_MAX_RESULT_CT_CHARS
 
 
 def test_any_mix_of_long_results_and_approvals_fits_the_relays_bound_sealed():
@@ -782,8 +782,8 @@ def test_any_mix_of_long_results_and_approvals_fits_the_relays_bound_sealed():
     while True:
         answer = news(grant)
         answers += 1
-        sealed = api.seal_watch_tool(grant.result_key, "result", GRANT_ID, b64u(bytes(16)), answer)
-        assert len(sealed["ct"]) <= api.WATCH_MAX_RESULT_CT_CHARS
+        sealed = api.watch_tools.seal_watch_tool(grant.result_key, "result", GRANT_ID, b64u(bytes(16)), answer)
+        assert len(sealed["ct"]) <= api.watch_tools.WATCH_MAX_RESULT_CT_CHARS
         told += answer["news"]
         if not answer["more"]:
             break
@@ -800,7 +800,7 @@ def test_more_counts_approval_requests_not_yet_told(monkeypatch):
     for n in (1, 2):
         start(grant, f"Job {n}")
         server.ask_approval(f"rt-{n}", request_id=f"appr-{n}", server_id=f"srq-{n}")
-    monkeypatch.setattr(api, "WATCH_JOB_ANSWER_BYTES", 450)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_ANSWER_BYTES", 450)
     first = news(grant)
     assert (len(first["news"]), first["more"]) == (1, True)
     second = news(grant)
@@ -811,7 +811,7 @@ def test_an_item_too_large_for_any_answer_still_tells_its_status(monkeypatch):
     grant = make_jobs()
     start(grant)
     grant.jobs.server.emit("rt-1", "message.complete", {"text": "done " * 100, "status": "complete"})
-    monkeypatch.setattr(api, "WATCH_JOB_ANSWER_BYTES", 200)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_ANSWER_BYTES", 200)
     answer = news(grant)
     assert answer["news"] == [{"job_id": "watch-1", "title": "Check the build logs", "status": "finished"}]
     assert answer["more"] is False
@@ -830,7 +830,7 @@ def test_an_approval_request_without_ids_is_still_told_once():
 def test_job_news_reads_its_wait_as_a_number_of_seconds(monkeypatch, wait_s, expected):
     grant = make_jobs()
     waits = []
-    monkeypatch.setattr(api.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(api.watch_jobs.time, "monotonic", lambda: 0.0)
 
     class Changed:
         def __enter__(self):
@@ -851,16 +851,16 @@ def test_job_news_reads_its_wait_as_a_number_of_seconds(monkeypatch, wait_s, exp
 
 def test_a_long_ascii_result_is_cut_at_the_phones_length():
     text = "a" * 7_000
-    assert api._clip_job_result(text) == "a" * 6_000 + "\n[…]"
-    assert api._clip_job_result("short") == "short"
+    assert api.watch_jobs._clip_job_result(text) == "a" * 6_000 + "\n[…]"
+    assert api.watch_jobs._clip_job_result("short") == "short"
     # Cut by length and by size, it's marked once.
-    assert api._clip_job_result("😀" * 7_000).count("[…]") == 1
+    assert api.watch_jobs._clip_job_result("😀" * 7_000).count("[…]") == 1
 
 
 @pytest.mark.parametrize("limit", range(2, 14))
 def test_a_clip_never_takes_more_than_its_limit(limit):
-    clipped = api._json_clip("abcdefghijklmnop", limit)
-    assert api._json_bytes(clipped) <= limit
+    clipped = api.watch_jobs._json_clip("abcdefghijklmnop", limit)
+    assert api.watch_jobs._json_bytes(clipped) <= limit
     assert clipped.endswith("\n[…]") or limit < 9
 
 
@@ -902,7 +902,7 @@ def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
     again = news(grant)
     assert again["news"] == [] and again["approvals"] == [{"job_id": "watch-1", "request_id": "appr-1",
                                                            "fingerprint": fingerprint}]
-    answer = api.run_watch_job_call(grant, "answer_approval",
+    answer = api.watch_jobs.run_watch_job_call(grant, "answer_approval",
                                     {"job_id": "watch-1", "request_id": "appr-1", "choice": "once"})
     assert answer == {"ok": True, "status": "approved", "job_id": "watch-1"}
     assert news(grant)["approvals"] == []
@@ -914,7 +914,7 @@ def test_an_approval_request_is_news_once_and_approving_it_answers_hermes():
 
 
 def answer(grant, choice="once", **args):
-    return api.run_watch_job_call(grant, "answer_approval", {"job_id": "watch-1", "choice": choice, **args})
+    return api.watch_jobs.run_watch_job_call(grant, "answer_approval", {"job_id": "watch-1", "choice": choice, **args})
 
 
 def test_an_approval_without_an_id_is_answered_only_for_the_command_the_watch_showed():
@@ -1029,12 +1029,12 @@ def test_a_command_not_shown_whole_can_only_be_denied(command):
     [item] = news(grant)["news"]
     assert item["approval"]["cut"] is True
     assert item["approval"]["command"] != command
-    assert api._json_bytes(item["approval"]["command"]) <= api.WATCH_JOB_COMMAND_BYTES
-    answer = api.run_watch_job_call(grant, "answer_approval",
+    assert api.watch_jobs._json_bytes(item["approval"]["command"]) <= api.watch_jobs.WATCH_JOB_COMMAND_BYTES
+    answer = api.watch_jobs.run_watch_job_call(grant, "answer_approval",
                                     {"job_id": "watch-1", "request_id": "appr-1", "choice": "once"})
     assert (answer["ok"], answer["status"]) == (False, 400)
     assert server.methods("approval.respond") == []
-    denied = api.run_watch_job_call(grant, "answer_approval",
+    denied = api.watch_jobs.run_watch_job_call(grant, "answer_approval",
                                     {"job_id": "watch-1", "request_id": "appr-1", "choice": "deny"})
     assert denied["status"] == "denied"
 
@@ -1047,7 +1047,7 @@ def test_an_approval_with_no_command_to_show_can_only_be_denied(command):
     server.ask_approval("rt-1", command=command)
     [item] = news(grant)["news"]
     assert item["approval"]["cut"] is True
-    answer = api.run_watch_job_call(grant, "answer_approval",
+    answer = api.watch_jobs.run_watch_job_call(grant, "answer_approval",
                                     {"job_id": "watch-1", "request_id": "appr-1", "choice": "once"})
     assert (answer["ok"], answer["status"]) == (False, 400)
     assert server.methods("approval.respond") == []
@@ -1058,7 +1058,7 @@ def test_the_watch_can_only_approve_once_or_deny(choice):
     grant = make_jobs()
     start(grant)
     grant.jobs.server.ask_approval("rt-1")
-    answer = api.run_watch_job_call(grant, "answer_approval",
+    answer = api.watch_jobs.run_watch_job_call(grant, "answer_approval",
                                     {"job_id": "watch-1", "request_id": "appr-1", "choice": choice})
     assert (answer["ok"], answer["status"]) == (False, 400)
     assert grant.jobs.server.methods("approval.respond") == []
@@ -1072,7 +1072,7 @@ def test_an_answer_for_a_replaced_or_settled_request_isnt_sent():
     for args in ({"job_id": "watch-1", "request_id": "appr-1", "choice": "once"},
                  {"job_id": "watch-1", "choice": "once"},
                  {"job_id": "watch-7", "request_id": "appr-2", "choice": "once"}):
-        assert api.run_watch_job_call(grant, "answer_approval", args)["status"] == "not_pending"
+        assert api.watch_jobs.run_watch_job_call(grant, "answer_approval", args)["status"] == "not_pending"
     assert server.methods("approval.respond") == []
 
 
@@ -1099,7 +1099,7 @@ def test_hermes_resolving_nothing_reads_as_not_pending(resolved):
     server.resolved = resolved
     start(grant)
     server.ask_approval("rt-1")
-    answer = api.run_watch_job_call(grant, "answer_approval",
+    answer = api.watch_jobs.run_watch_job_call(grant, "answer_approval",
                                     {"job_id": "watch-1", "request_id": "appr-1", "choice": "deny"})
     assert answer["status"] == "not_pending"
 
@@ -1109,18 +1109,18 @@ def test_hermes_resolving_nothing_reads_as_not_pending(resolved):
 def test_list_jobs_mirrors_the_phones_answer():
     grant = make_jobs()
     server = grant.jobs.server
-    assert api.run_watch_job_call(grant, "list_jobs", {}) == {"ok": True, "summary": "No background jobs are running."}
+    assert api.watch_jobs.run_watch_job_call(grant, "list_jobs", {}) == {"ok": True, "summary": "No background jobs are running."}
     start(grant)
     start(grant, "Second")
     server.emit("rt-2", "message.complete", {"text": "ok", "status": "complete"})
-    assert api.run_watch_job_call(grant, "list_jobs", {}) == {
+    assert api.watch_jobs.run_watch_job_call(grant, "list_jobs", {}) == {
         "ok": True,
         "summary": "Check the build logs is still running. Second has finished.",
         "job_1": "id=watch-1; title=Check the build logs; status=running",
         "job_2": "id=watch-2; title=Second; status=finished",
     }
     news(grant)
-    assert "job_2" not in api.run_watch_job_call(grant, "list_jobs", {})
+    assert "job_2" not in api.watch_jobs.run_watch_job_call(grant, "list_jobs", {})
 
 
 def test_cancel_interrupts_the_running_jobs_and_says_so_once():
@@ -1128,12 +1128,12 @@ def test_cancel_interrupts_the_running_jobs_and_says_so_once():
     server = grant.jobs.server
     start(grant)
     start(grant, "Second")
-    answer = api.run_watch_job_call(grant, "cancel_job", {})
+    answer = api.watch_jobs.run_watch_job_call(grant, "cancel_job", {})
     assert answer == {"ok": True, "message": "Cancelled 2 background jobs."}
     assert server.methods("session.interrupt") == [{"session_id": "rt-1"}, {"session_id": "rt-2"}]
     server.emit("rt-1", "message.complete", {"text": "", "status": "interrupted"})
     assert news(grant)["news"] == []
-    assert api.run_watch_job_call(grant, "cancel_job", {}) == {"ok": True,
+    assert api.watch_jobs.run_watch_job_call(grant, "cancel_job", {}) == {"ok": True,
                                                                "message": "There are no background jobs to cancel."}
 
 
@@ -1141,7 +1141,7 @@ def test_cancelling_one_job_by_id():
     grant = make_jobs()
     start(grant)
     start(grant, "Second")
-    assert api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-2"}) == {"ok": True,
+    assert api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-2"}) == {"ok": True,
                                                                                  "message": "Second was cancelled."}
     assert [job.status for job in grant.jobs.jobs.values()] == ["running", "cancelled"]
 
@@ -1152,7 +1152,7 @@ def test_a_cancel_hermes_refuses_leaves_the_job_followed():
     start(grant)
     server.ask_approval("rt-1")
     server.fail["session.interrupt"] = "no such session"
-    answer = api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    answer = api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
     assert answer == {"ok": True, "message": "Couldn't cancel Check the build logs. It may still be running."}
     job = grant.jobs.jobs["watch-1"]
     assert (job.status, job.approval["request_id"], job.outcome_told) == ("needs_approval", "appr-1", False)
@@ -1162,9 +1162,9 @@ def test_a_long_result_is_kept_only_as_long_as_news_can_tell_it():
     grant = make_jobs()
     start(grant)
     grant.jobs.server.emit("rt-1", "message.complete", {"text": "a" * 50_000, "status": "complete"})
-    assert len(grant.jobs.jobs["watch-1"].result) == api.WATCH_JOB_RESULT_CHARS + 1
+    assert len(grant.jobs.jobs["watch-1"].result) == api.watch_jobs.WATCH_JOB_RESULT_CHARS + 1
     [item] = news(grant)["news"]
-    assert item["result"] == "a" * api.WATCH_JOB_RESULT_CHARS + "\n[…]"
+    assert item["result"] == "a" * api.watch_jobs.WATCH_JOB_RESULT_CHARS + "\n[…]"
 
 
 def test_a_turn_that_ends_while_its_cancel_is_refused_is_told():
@@ -1180,7 +1180,7 @@ def test_a_turn_that_ends_while_its_cancel_is_refused_is_told():
         return dispatch(req, transport)
 
     server.dispatch = ending
-    answer = api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+    answer = api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
     assert answer == {"ok": True, "message": "Couldn't cancel Check the build logs. It may still be running."}
     [item] = news(grant)["news"]
     assert (item["job_id"], item["status"], item["result"]) == ("watch-1", "finished", "All green")
@@ -1200,7 +1200,7 @@ def test_a_cancelled_turns_own_end_reads_as_the_cancel():
         return dispatch(req, transport)
 
     server.dispatch = ending
-    assert api.run_watch_job_call(grant, "cancel_job", {})["message"] == "Cancelled 1 background jobs."
+    assert api.watch_jobs.run_watch_job_call(grant, "cancel_job", {})["message"] == "Cancelled 1 background jobs."
     job = grant.jobs.jobs["watch-1"]
     assert (job.status, job.cancelling, job.held_end) == ("cancelled", False, None)
     assert news(grant)["news"] == []
@@ -1221,11 +1221,11 @@ def test_when_the_grant_ends_settled_jobs_close_now_and_running_ones_once_they_f
     start(grant)
     start(grant, "Second")
     server.emit("rt-1", "message.complete", {"text": "done", "status": "complete"})
-    assert api._close_watch_grant_here(grant)
+    assert api.watch_tools._close_watch_grant_here(grant)
     wait_for(lambda: server.methods("session.close") == [{"session_id": "rt-1"}])
     assert not grant.jobs.transport._closed
     # The running job keeps running, and can't be told to the Watch any more.
-    assert api.run_watch_job_call(grant, "start_job", {"instructions": "more"})["status"] == 410
+    assert api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": "more"})["status"] == 410
     server.emit("rt-2", "message.complete", {"text": "late", "status": "complete"})
     wait_for(lambda: {"session_id": "rt-2"} in server.methods("session.close"))
     wait_for(lambda: grant.jobs.transport._closed)
@@ -1246,7 +1246,7 @@ def test_a_session_the_app_joined_is_left_to_the_app():
 def test_job_news_stops_waiting_when_the_grant_ends():
     grant = make_jobs()
     start(grant)
-    threading.Timer(0.2, api._close_watch_grant_here, args=(grant,)).start()
+    threading.Timer(0.2, api.watch_tools._close_watch_grant_here, args=(grant,)).start()
     began = time.monotonic()
     assert news(grant, wait_s=10)["news"] == []
     assert time.monotonic() - began < 5
@@ -1258,7 +1258,7 @@ def test_job_news_through_a_carried_grant_stops_waiting_when_that_grant_ends(tmp
     start(old)
     _, new = open_jobs_grant(tmp_path, server, relay, carry_jobs_from=old.grant_id)
     assert new.jobs is old.jobs
-    threading.Timer(0.2, api._close_watch_grant_here, args=(old,)).start()
+    threading.Timer(0.2, api.watch_tools._close_watch_grant_here, args=(old,)).start()
     began = time.monotonic()
     assert news(old, wait_s=10)["news"] == []
     assert time.monotonic() - began < 5
@@ -1271,17 +1271,17 @@ def test_a_sealed_start_job_runs_and_its_answer_goes_back_sealed():
     grant = make_jobs()
     relay = FakeRelay()
     rid = b64u(bytes(16))
-    call = {"rid": rid, **api.seal_watch_tool(grant.call_key, "call", GRANT_ID, rid,
+    call = {"rid": rid, **api.watch_tools.seal_watch_tool(grant.call_key, "call", GRANT_ID, rid,
                                                {"tool": "start_job", "args": {"instructions": "Check the build logs"}})}
-    assert api.answer_watch_call(grant, call, relay=relay) == "answered"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=relay) == "answered"
     [post] = relay.requests
-    answer = api.open_watch_tool(grant.result_key, "result", GRANT_ID, rid, post["payload"], max_bytes=64 * 1024)
+    answer = api.watch_tools.open_watch_tool(grant.result_key, "result", GRANT_ID, rid, post["payload"], max_bytes=64 * 1024)
     assert (answer["status"], answer["job_id"]) == ("started", "watch-1")
 
 
 def sealed(grant, tool, args, n):
     rid = b64u(bytes([n]) * 16)
-    return rid, {"rid": rid, **api.seal_watch_tool(grant.call_key, "call", GRANT_ID, rid, {"tool": tool, "args": args})}
+    return rid, {"rid": rid, **api.watch_tools.seal_watch_tool(grant.call_key, "call", GRANT_ID, rid, {"tool": tool, "args": args})}
 
 
 @pytest.mark.parametrize("delivery", ["refused", "raised"])
@@ -1296,11 +1296,11 @@ def test_job_news_that_never_reaches_the_watch_is_sent_again(delivery):
         return 404, {"error": "unknown_call"}
 
     _, call = sealed(grant, "job_news", {"wait_s": 0}, 1)
-    assert api.answer_watch_call(grant, call, relay=lost) == "gone"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=lost) == "gone"
     relay = FakeRelay()
     rid, call = sealed(grant, "job_news", {"wait_s": 0}, 2)
-    assert api.answer_watch_call(grant, call, relay=relay) == "answered"
-    answer = api.open_watch_tool(grant.result_key, "result", GRANT_ID, rid, relay.requests[0]["payload"],
+    assert api.watch_tools.answer_watch_call(grant, call, relay=relay) == "answered"
+    answer = api.watch_tools.open_watch_tool(grant.result_key, "result", GRANT_ID, rid, relay.requests[0]["payload"],
                                  max_bytes=64 * 1024)
     assert [(item["job_id"], item["result"]) for item in answer["news"]] == [("watch-1", "All green.")]
     # Delivered once, it isn't sent again.
@@ -1308,7 +1308,7 @@ def test_job_news_that_never_reaches_the_watch_is_sent_again(delivery):
 
 
 def test_a_start_hermes_is_slow_to_take_is_answered_accepted_and_followed(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_JOB_START_ANSWER_S", 0.05)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_START_ANSWER_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
     release = threading.Event()
@@ -1328,7 +1328,7 @@ def test_a_start_hermes_is_slow_to_take_is_answered_accepted_and_followed(monkey
 
 
 def test_a_slow_start_that_fails_is_told_as_news(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_JOB_START_ANSWER_S", 0.05)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_START_ANSWER_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
     release = threading.Event()
@@ -1345,16 +1345,16 @@ def test_a_failed_start_whose_answer_is_lost_is_told_as_news():
     grant = make_jobs()
     grant.jobs.server.fail["session.create"] = "no provider"
     _, call = sealed(grant, "start_job", {"instructions": "Check the build logs"}, 3)
-    assert api.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
     [item] = news(grant)["news"]
     assert (item["status"], item["error"]) == ("failed", "no provider")
 
 
 def test_a_start_cancelled_first_whose_answer_is_lost_is_told_as_news():
     grant = make_jobs()
-    grant.jobs.server.on_create = lambda: api.run_watch_job_call(grant, "cancel_job", {})
+    grant.jobs.server.on_create = lambda: api.watch_jobs.run_watch_job_call(grant, "cancel_job", {})
     _, call = sealed(grant, "start_job", {"instructions": "Check the build logs"}, 5)
-    assert api.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
     [item] = news(grant)["news"]
     assert (item["job_id"], item["status"]) == ("watch-1", "cancelled")
     assert grant.jobs.started == 0
@@ -1364,7 +1364,7 @@ def test_a_cancel_whose_answer_is_lost_is_told_as_news():
     grant = make_jobs()
     start(grant)
     _, call = sealed(grant, "cancel_job", {"job_id": "watch-1"}, 4)
-    assert api.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
+    assert api.watch_tools.answer_watch_call(grant, call, relay=lambda *a: (404, {})) == "gone"
     [item] = news(grant)["news"]
     assert (item["job_id"], item["status"]) == ("watch-1", "cancelled")
     assert news(grant)["news"] == []
@@ -1380,7 +1380,7 @@ def test_a_start_with_no_thread_to_spare_never_was(monkeypatch):
         def start(self):
             raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(api.threading, "Thread", NoThreads)
+    monkeypatch.setattr(api.watch_jobs.threading, "Thread", NoThreads)
     answer = start(grant)
     assert (answer["status"], answer["message"]) == ("not_started", "Hermes couldn't start the job: the host is "
                                                                       "too busy right now.")
@@ -1416,30 +1416,30 @@ def test_a_numeric_server_request_id_is_withdrawn_too(server_id):
 def test_a_grant_without_jobs_refuses_job_calls():
     grant = make_jobs()
     grant.jobs = None
-    assert api.run_watch_job_call(grant, "job_news", {})["status"] == 403
+    assert api.watch_jobs.run_watch_job_call(grant, "job_news", {})["status"] == 403
 
 
 def test_a_failure_in_a_job_call_is_answered_by_type(monkeypatch):
     grant = make_jobs()
     monkeypatch.setattr(grant.jobs, "list", lambda: 1 / 0)
-    assert api.run_watch_job_call(grant, "list_jobs", {}) == {
+    assert api.watch_jobs.run_watch_job_call(grant, "list_jobs", {}) == {
         "ok": False, "status": 500, "detail": "The job call failed on the host (ZeroDivisionError)"}
 
 
 def test_capabilities_name_watch_jobs():
-    assert "watch-jobs" in api.ROUTE_CAPABILITIES
-    assert "watch-job-follow-ups" in api.ROUTE_CAPABILITIES
+    assert "watch-jobs" in api.capabilities.ROUTE_CAPABILITIES
+    assert "watch-job-follow-ups" in api.capabilities.ROUTE_CAPABILITIES
 
 
 # --- Follow-ups (interrupt_job) ------------------------------------------------
 
 @pytest.fixture
 def no_retry_wait(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_RETRY_S", 0)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_RETRY_S", 0)
 
 
 def follow_up(grant, words="make it Alex", job_id="watch-1"):
-    return api.run_watch_job_call(grant, "interrupt_job", {"job_id": job_id, "message": words})
+    return api.watch_jobs.run_watch_job_call(grant, "interrupt_job", {"job_id": job_id, "message": words})
 
 
 def running_job(server=None):
@@ -1506,7 +1506,7 @@ def test_words_for_a_job_hermes_isnt_working_on_are_tried_a_few_times(no_retry_w
     server.results["session.redirect"] = {"status": "idle"}
     assert follow_up(grant) == {"ok": True, "title": "Check the build logs", "outcome": "failed",
                                 "error": "Hermes wasn't working on \"Check the build logs\" just then."}
-    assert len(server.methods("session.redirect")) == api.WATCH_FOLLOW_UP_ATTEMPTS
+    assert len(server.methods("session.redirect")) == api.watch_jobs.WATCH_FOLLOW_UP_ATTEMPTS
     assert grant.jobs.jobs["watch-1"].follow_up is None
 
 
@@ -1520,7 +1520,7 @@ def test_a_hermes_without_redirect_gets_a_steer():
 def test_an_addition_is_steered_not_redirected():
     # Conduit #1076: kind "add" keeps the job's direction.
     grant, server = running_job()
-    answer = api.run_watch_job_call(grant, "interrupt_job", {"job_id": "watch-1", "message": "a quiet table", "kind": "add"})
+    answer = api.watch_jobs.run_watch_job_call(grant, "interrupt_job", {"job_id": "watch-1", "message": "a quiet table", "kind": "add"})
     assert answer["outcome"] == "interrupted"
     assert server.methods("session.steer") == [{"session_id": "rt-1", "text": "(voice) a quiet table"}]
     assert server.methods("session.redirect") == []
@@ -1534,7 +1534,7 @@ def test_an_addition_hermes_wont_steer_is_redirected():
             server.results["session.steer"] = {"status": refusal}
         else:
             server.fail["session.steer"] = refusal
-        answer = api.run_watch_job_call(grant, "interrupt_job", {"job_id": next(iter(grant.jobs.jobs)), "message": "a quiet table", "kind": "ADD"})
+        answer = api.watch_jobs.run_watch_job_call(grant, "interrupt_job", {"job_id": next(iter(grant.jobs.jobs)), "message": "a quiet table", "kind": "ADD"})
         assert answer["outcome"] == "interrupted", refusal
         assert server.methods("session.redirect") == [{"session_id": "rt-1", "text": "(voice) a quiet table"}], refusal
 
@@ -1543,7 +1543,7 @@ def test_a_change_or_unknown_kind_still_redirects():
     for kind in ("change", "pause", ""):
         grant, server = running_job()
         server.results["session.redirect"] = {"status": "redirected"}
-        api.run_watch_job_call(grant, "interrupt_job", {"job_id": next(iter(grant.jobs.jobs)), "message": "hold that", "kind": kind})
+        api.watch_jobs.run_watch_job_call(grant, "interrupt_job", {"job_id": next(iter(grant.jobs.jobs)), "message": "hold that", "kind": kind})
         assert server.methods("session.steer") == [] and len(server.methods("session.redirect")) == 1, kind
 
 
@@ -1566,7 +1566,7 @@ def test_a_follow_up_to_a_settled_or_unknown_job_isnt_sent():
                                           ({"job_id": "watch-1", "message": "x" * 4_000}, 413)])
 def test_a_follow_up_without_fitting_words_is_refused(args, status):
     grant, _ = running_job()
-    assert api.run_watch_job_call(grant, "interrupt_job", args)["status"] == status
+    assert api.watch_jobs.run_watch_job_call(grant, "interrupt_job", args)["status"] == status
 
 
 def test_a_correction_marker_is_never_a_result():
@@ -1590,7 +1590,7 @@ def test_an_end_held_long_after_the_call_ended_still_settles_and_closes(monkeypa
     grant.jobs.end()
     # The reaper had nothing to hold and stopped; the step ends much later.
     wait_for(lambda: not grant.jobs.reaping)
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_HOLD_S", 0)
     server.emit("rt-1", "message.complete", {"text": "Step one done."})
     wait_for(lambda: server.methods("session.close") == [{"session_id": "rt-1"}])
     wait_for(lambda: grant.jobs.transport._closed)
@@ -1599,11 +1599,11 @@ def test_an_end_held_long_after_the_call_ended_still_settles_and_closes(monkeypa
 def test_follow_ups_reach_the_job_through_the_sealed_grant_route():
     grant, server = running_job()
     server.results["session.redirect"] = {"status": "redirected"}
-    grant.tools = grant.tools + (api.WATCH_JOB_FOLLOW_UP,)
-    answer = api.run_watch_tool(grant, {"tool": "interrupt_job", "args": {"job_id": "watch-1", "message": "hold that"}})
+    grant.tools = grant.tools + (api.watch_jobs.WATCH_JOB_FOLLOW_UP,)
+    answer = api.watch_tools.run_watch_tool(grant, {"tool": "interrupt_job", "args": {"job_id": "watch-1", "message": "hold that"}})
     assert answer["outcome"] == "interrupted"
     # The kind gets through the sealed route too.
-    api.run_watch_tool(grant, {"tool": "interrupt_job", "args": {"job_id": "watch-1", "message": "a quiet table", "kind": "add"}})
+    api.watch_tools.run_watch_tool(grant, {"tool": "interrupt_job", "args": {"job_id": "watch-1", "message": "a quiet table", "kind": "add"}})
     assert server.methods("session.steer") == [{"session_id": "rt-1", "text": "(voice) a quiet table"}]
 
 
@@ -1613,7 +1613,7 @@ def test_an_end_held_for_queued_words_whose_turn_never_comes_settles_the_job(mon
     assert follow_up(grant)["outcome"] == "queued"
     server.emit("rt-1", "message.complete", {"text": "Step one done."})
     assert news(grant)["news"] == []
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_HOLD_S", 0)
     [item] = news(grant)["news"]
     assert (item["status"], item["result"]) == ("finished", "Step one done.")
 
@@ -1623,7 +1623,7 @@ def test_an_end_held_when_the_call_ends_still_settles_and_closes(monkeypatch):
     server.results["session.redirect"] = {"status": "queued"}
     assert follow_up(grant)["outcome"] == "queued"
     server.emit("rt-1", "message.complete", {"text": "Step one done."})
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_HOLD_S", 0)
     grant.jobs.end()
     wait_for(lambda: server.methods("session.close") == [{"session_id": "rt-1"}])
     wait_for(lambda: grant.jobs.transport._closed)
@@ -1660,8 +1660,8 @@ def test_words_taken_as_the_turn_failed_are_reported_too_late():
 
 
 def test_a_follow_up_is_answered_inside_the_relays_wait(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_DEADLINE_S", 0.5)
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_RETRY_S", 0.2)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_DEADLINE_S", 0.5)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_RETRY_S", 0.2)
     grant, server = running_job()
     server.results["session.redirect"] = {"status": "idle"}
     started = time.monotonic()
@@ -1677,13 +1677,13 @@ def test_a_follow_up_after_the_call_ended_is_refused():
 
 
 def test_a_grant_that_names_interrupt_job_is_taken(tmp_path):
-    grant = api.open_watch_grant({"tools": ["start_job", "interrupt_job"]}, profile=None, path=write_pairing(tmp_path),
+    grant = api.watch_tools.open_watch_grant({"tools": ["start_job", "interrupt_job"]}, profile=None, path=write_pairing(tmp_path),
                                  relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
     assert grant["tools"] == ["start_job", "job_news", "answer_approval", "interrupt_job"]
 
 
 def test_a_grant_that_names_only_interrupt_job_opens_the_jobs(tmp_path):
-    grant = api.open_watch_grant({"tools": ["interrupt_job"]}, profile=None, path=write_pairing(tmp_path),
+    grant = api.watch_tools.open_watch_grant({"tools": ["interrupt_job"]}, profile=None, path=write_pairing(tmp_path),
                                  relay=FakeRelay(), start=lambda g: None, session_api=FakeHermes)
     assert grant["tools"] == ["job_news", "answer_approval", "interrupt_job"]
 
@@ -1709,11 +1709,11 @@ def test_hermes_still_at_work_keeps_a_held_end_from_being_reaped(monkeypatch):
     server.results["session.redirect"] = {"status": "queued"}
     assert follow_up(grant)["outcome"] == "queued"
     server.emit("rt-1", "message.complete", {"text": "Step one done."})
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 0.2)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_HOLD_S", 0.2)
     time.sleep(0.3)
     # Any frame for the session renews the hold before the reap looks.
     server.emit("rt-1", "status.update", {"status": "working"})
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_S", 5)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_HOLD_S", 5)
     assert news(grant, wait_s=0)["news"] == []
     server.emit("rt-1", "message.complete", {"text": "Done for Alex."})
     [item] = news(grant)["news"]
@@ -1725,25 +1725,26 @@ def test_a_chattering_session_still_settles_a_held_end_in_the_end(monkeypatch):
     server.results["session.redirect"] = {"status": "queued"}
     assert follow_up(grant)["outcome"] == "queued"
     server.emit("rt-1", "message.complete", {"text": "Step one done."})
-    monkeypatch.setattr(api, "WATCH_FOLLOW_UP_HOLD_MAX_S", 0)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_FOLLOW_UP_HOLD_MAX_S", 0)
     server.emit("rt-1", "status.update", {"status": "working"})
     [item] = news(grant)["news"]
     assert item["result"] == "Step one done."
 
 
-@pytest.mark.parametrize("pattern, valid", [
-    ("_CALL_WATCH_ID", "0" * 24), ("_WATCH_ID", "a" * 22), ("_WATCH_NONCE", "a" * 16),
-    ("_WATCH_CT", "a" * 22), ("_ROOM_IMAGE_ID", "room-1"),
+@pytest.mark.parametrize("module, pattern, valid", [
+    ("hermes_calls", "_CALL_WATCH_ID", "0" * 24), ("watch_tools", "_WATCH_ID", "a" * 22),
+    ("watch_tools", "_WATCH_NONCE", "a" * 16), ("watch_tools", "_WATCH_CT", "a" * 22),
+    ("rooms", "_ROOM_IMAGE_ID", "room-1"),
 ])
-def test_ids_with_a_trailing_newline_are_refused(pattern, valid):
-    assert getattr(api, pattern).match(valid)
-    assert getattr(api, pattern).match(valid + "\n") is None
+def test_ids_with_a_trailing_newline_are_refused(module, pattern, valid):
+    assert getattr(getattr(api, module), pattern).match(valid)
+    assert getattr(getattr(api, module), pattern).match(valid + "\n") is None
 
 
 # --- The call's chat (#1250) ---------------------------------------------------
 
 def start_joining(grant, instructions):
-    return api.run_watch_job_call(grant, "start_job", {"instructions": instructions, "joins_call": True})
+    return api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": instructions, "joins_call": True})
 
 
 def test_a_calls_later_ordinary_requests_run_in_the_chat_its_first_one_made():
@@ -1778,13 +1779,13 @@ def test_a_request_for_the_calls_chat_waits_while_the_first_one_runs():
     start_joining(grant, "plan the trip")
     answers = []
     worker = threading.Thread(target=lambda: answers.append(start_joining(grant, "and book the hotel")))
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.2
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.2
     try:
         worker.start()
         worker.join(1)
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
     assert answers[0]["status"] == "accepted", "answered while it waits its turn"
     assert len(server.methods("prompt.submit")) == 1, "nothing goes in while the first request runs"
 
@@ -1803,7 +1804,7 @@ def test_work_kept_apart_gets_a_chat_of_its_own():
     # Not joining: background, quick, or a plugin before the Watch said so.
     assert start(grant, "research flights")["session_id"] == "st-1"
     assert start_joining(grant, "plan the trip")["session_id"] == "st-2"
-    assert api.run_watch_job_call(grant, "start_job", {"instructions": "check the lights", "profile": "Fam",
+    assert api.watch_jobs.run_watch_job_call(grant, "start_job", {"instructions": "check the lights", "profile": "Fam",
                                                        "joins_call": True})["session_id"] == "st-3"
     assert len(server.methods("session.create")) == 3
     # The first joining one is the call's chat.
@@ -1813,7 +1814,7 @@ def test_work_kept_apart_gets_a_chat_of_its_own():
 
 def test_the_calls_chat_isnt_filed_as_a_job_and_a_tagged_job_is_archived_if_answered(tags, monkeypatch):
     archived = []
-    monkeypatch.setattr(api, "_archive_settled_job", lambda db, sid: archived.append(sid))
+    monkeypatch.setattr(api.voice_calls, "_archive_settled_job", lambda db, sid: archived.append(sid))
     grant = make_jobs()
     # The chat the call took stays listed, as on the phone; a job is filed
     # and, if its turn already ended, archived with its tag.
@@ -1844,13 +1845,13 @@ def test_a_request_waiting_for_the_calls_chat_can_be_cancelled():
     grant = make_jobs()
     server = grant.jobs.server
     start_joining(grant, "plan the trip")
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.1
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
     try:
         assert start_joining(grant, "and book the hotel")["status"] == "accepted"
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
-    cancelled = api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-2"})
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
+    cancelled = api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-2"})
     assert "cancel" in cancelled["message"].lower()
     server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
     time.sleep(0.1)
@@ -1882,13 +1883,13 @@ def test_a_request_started_while_the_calls_chat_is_made_waits_for_that_chat():
     answers = []
     worker = threading.Thread(target=lambda: answers.append(start_joining(grant, "and book the hotel")))
     server.on_create = lambda: None if worker.is_alive() or answers else worker.start()
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.2
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.2
     try:
         assert start_joining(grant, "plan the trip")["session_id"] == "st-1"
         worker.join(1)
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
     assert answers[0]["status"] == "accepted", "it waits for the first request"
     server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
     wait_for(lambda: len(server.methods("prompt.submit")) == 2)
@@ -1921,12 +1922,12 @@ def test_the_transport_closes_when_the_call_ends_while_a_request_waits():
     grant = make_jobs()
     server = grant.jobs.server
     start_joining(grant, "plan the trip")
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.1
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
     try:
         assert start_joining(grant, "and book the hotel")["status"] == "accepted"
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
     grant.jobs.end()
     wait_for(lambda: grant.jobs.jobs["watch-2"].status == "failed")
     server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
@@ -1941,7 +1942,7 @@ def test_joins_call_survives_the_sealed_watch_route():
     relay = FakeRelay()
     for n, instructions in ((1, "plan the trip"), (2, "and book the hotel")):
         rid, call = sealed(grant, "start_job", {"instructions": instructions, "joins_call": True}, n)
-        assert api.answer_watch_call(grant, call, relay=relay) == "answered"
+        assert api.watch_tools.answer_watch_call(grant, call, relay=relay) == "answered"
         if n == 1:
             server.emit("rt-1", "message.complete", {"text": "Plan", "status": "complete"})
     assert len(server.methods("session.create")) == 1, "the second request went to the call's chat"
@@ -1968,14 +1969,14 @@ def test_two_requests_waiting_on_a_chat_never_made_share_the_one_made_next():
         grant.jobs.jobs["watch-1"].status = "cancelled"
 
     server.on_create = created
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.3
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.3
     try:
         assert start_joining(grant, "plan the trip")["status"] == "not_started"
         for worker in workers:
             worker.join(2)
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
     assert len(server.methods("session.create")) == 2, "one chat for the two waiting requests"
     made = grant.jobs.call_chat
     assert made is not None and made.session_id == "rt-2"
@@ -1988,13 +1989,13 @@ def test_the_next_request_waits_for_a_cancelled_requests_turn_to_end():
     grant = make_jobs()
     server = grant.jobs.server
     start_joining(grant, "plan the trip")
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.1
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
     try:
         assert start_joining(grant, "and book the hotel")["status"] == "accepted"
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
-    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
+    api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
     time.sleep(0.1)
     assert len(server.methods("prompt.submit")) == 1, "the interrupted turn hasn't ended yet"
 
@@ -2007,18 +2008,18 @@ def test_the_next_request_waits_for_a_cancelled_requests_turn_to_end():
 
 
 def test_a_cancelled_turn_that_never_ends_holds_the_chat_only_briefly(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.2)
-    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_INTERRUPT_END_S", 0.2)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_CHAT_WAIT_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
     start_joining(grant, "plan the trip")
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.1
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
     try:
         start_joining(grant, "and book the hotel")
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
-    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
+    api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
     wait_for(lambda: len(server.methods("prompt.submit")) == 2)
 
 
@@ -2027,18 +2028,18 @@ def test_a_cancelled_turn_that_never_ends_holds_the_chat_only_briefly(monkeypatc
     ("message.complete", {"text": "Half a plan", "status": "interrupted"}),
 ])
 def test_a_cancelled_turns_end_after_the_next_request_went_in_is_not_that_requests(monkeypatch, kind, payload):
-    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
-    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_INTERRUPT_END_S", 0.0)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_CHAT_WAIT_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
     start_joining(grant, "plan the trip")
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.1
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
     try:
         start_joining(grant, "and book the hotel")
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
-    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
+    api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
     wait_for(lambda: grant.jobs.jobs["watch-2"].status == "running")
 
     # The interrupt's end comes late, after the next request went in.
@@ -2050,18 +2051,18 @@ def test_a_cancelled_turns_end_after_the_next_request_went_in_is_not_that_reques
 
 
 def test_the_next_request_settles_when_a_cancelled_turns_end_never_comes(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
-    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_INTERRUPT_END_S", 0.0)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_CHAT_WAIT_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
     start_joining(grant, "plan the trip")
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.1
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
     try:
         start_joining(grant, "and book the hotel")
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
-    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
+    api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
     wait_for(lambda: grant.jobs.jobs["watch-2"].status == "running")
 
     # No end for the interrupted turn: the next one's own frames come.
@@ -2076,18 +2077,18 @@ def test_the_next_request_settles_when_a_cancelled_turns_end_never_comes(monkeyp
     ("error", {"message": "Provider down"}, "failed"),
 ])
 def test_the_next_requests_own_end_settles_it_once_a_cancelled_turns_end_is_overdue(monkeypatch, kind, payload, status):
-    monkeypatch.setattr(api, "WATCH_JOB_INTERRUPT_END_S", 0.0)
-    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_INTERRUPT_END_S", 0.0)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_CHAT_WAIT_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
     start_joining(grant, "plan the trip")
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.1
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
     try:
         start_joining(grant, "and book the hotel")
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
-    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
+    api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
     wait_for(lambda: len(server.methods("prompt.submit")) == 2)
 
     # The interrupted turn never ends, and the next one's end is its only frame.
@@ -2096,17 +2097,17 @@ def test_the_next_requests_own_end_settles_it_once_a_cancelled_turns_end_is_over
 
 
 def test_an_approval_from_a_cancelled_turn_isnt_the_waiting_requests(monkeypatch):
-    monkeypatch.setattr(api, "WATCH_JOB_CHAT_WAIT_S", 0.05)
+    monkeypatch.setattr(api.watch_jobs, "WATCH_JOB_CHAT_WAIT_S", 0.05)
     grant = make_jobs()
     server = grant.jobs.server
     start_joining(grant, "clean the logs")
-    original = api.WATCH_JOB_START_ANSWER_S
-    api.WATCH_JOB_START_ANSWER_S = 0.1
+    original = api.watch_jobs.WATCH_JOB_START_ANSWER_S
+    api.watch_jobs.WATCH_JOB_START_ANSWER_S = 0.1
     try:
         start_joining(grant, "and the caches")
     finally:
-        api.WATCH_JOB_START_ANSWER_S = original
-    api.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
+        api.watch_jobs.WATCH_JOB_START_ANSWER_S = original
+    api.watch_jobs.run_watch_job_call(grant, "cancel_job", {"job_id": "watch-1"})
 
     # The interrupted turn asks before its end: the next request still waits.
     server.emit("rt-1", "approval.request", {"request_id": "appr-late", "command": "rm -rf /var/log/old",

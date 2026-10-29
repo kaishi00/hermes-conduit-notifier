@@ -417,10 +417,10 @@ def test_a_bad_action_is_refused(tool_home):
 
 @pytest.fixture()
 def route_home(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "_calls_home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_pairing_state_path", lambda: tmp_path / "conduit-push.json")
-    monkeypatch.setattr(api, "_profile_scope", lambda profile: contextlib.nullcontext())
-    api._conduit_settings_limiter._mints.clear()
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_pairing_state_path", lambda: tmp_path / "conduit-push.json")
+    monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
+    api.settings._conduit_settings_limiter._mints.clear()
     (tmp_path / "conduit-push.json").write_text(json.dumps({"credential": "c", "installation_id": "i", "gateway_id": "g"}))
     return tmp_path
 
@@ -453,7 +453,7 @@ def test_the_route_needs_a_paired_profile(route_home):
 
 
 def test_the_route_is_a_reported_capability():
-    assert "conduit-settings" in api.ROUTE_CAPABILITIES
+    assert "conduit-settings" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def test_an_unreadable_store_is_not_overwritten(store, monkeypatch):

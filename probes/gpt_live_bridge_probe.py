@@ -70,8 +70,10 @@ def load_plugin_api():
     except Exception as exc:
         sys.exit(f"Could not load {path} ({exc.__class__.__name__}: {str(exc)[:120]}); "
                  "run the probe with the Python Hermes itself uses")
-    missing = [name for name in ("_profile_scope", "create_gpt_live_session", "gpt_live_status", "TokenError")
-               if not hasattr(module, name)]
+    missing = [f"{part}.{name}" for part, name in (("core", "_profile_scope"), ("core", "TokenError"),
+                                                   ("gpt_live", "create_gpt_live_session"),
+                                                   ("gpt_live", "gpt_live_status"))
+               if not hasattr(getattr(module, part), name)]
     if missing:
         sys.exit(f"This plugin checkout lacks {', '.join(missing)}; use the probe's own branch")
     return module
@@ -139,7 +141,7 @@ class Try:
 
 def scoped(api, profile: Optional[str], fn, *args, **kwargs):
     """`fn` under the Hermes profile the dashboard would use for `?profile=`."""
-    with api._profile_scope(profile):
+    with api.core._profile_scope(profile):
         return fn(*args, **kwargs)
 
 
@@ -228,7 +230,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)  # aiortc gathers ICE before returning
         run.mark("offer ready")
-        answer = await asyncio.to_thread(scoped, api, profile, api.create_gpt_live_session,
+        answer = await asyncio.to_thread(scoped, api, profile, api.gpt_live.create_gpt_live_session,
                                          pc.localDescription.sdp, greeting=GREETING)
         run.mark("answer from chatgpt.com")
         result["source"] = answer.get("source")
@@ -247,7 +249,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
         await asyncio.sleep(max(0.0, deadline - time.monotonic()))
     except Exception as exc:  # the probe reports, never raises
         # TokenError texts are the plugin's own user-facing messages, never provider text.
-        detail = str(exc)[:300] if isinstance(exc, api.TokenError) else exc.__class__.__name__
+        detail = str(exc)[:300] if isinstance(exc, api.core.TokenError) else exc.__class__.__name__
         print(f"  failed: {detail}")
         result["error"] = detail
     finally:
@@ -303,7 +305,7 @@ async def main() -> int:
     except Exception as exc:
         parser.error(f"--wav {args.wav}: {exc.__class__.__name__}: {str(exc)[:120]}")
     try:
-        status = await asyncio.to_thread(scoped, api, args.profile, api.gpt_live_status)
+        status = await asyncio.to_thread(scoped, api, args.profile, api.gpt_live.gpt_live_status)
     except Exception as exc:
         print(f"GPT-Live status check failed: {exc.__class__.__name__}")
         return 3

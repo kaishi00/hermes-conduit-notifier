@@ -136,12 +136,12 @@ def paired(relay, tmp_path, monkeypatch):
         "gateway_id": claimed["gateway_id"],
         "relay_url": relay,
     }), encoding="utf-8")
-    monkeypatch.setattr(api, "_WATCH_RELAY_SCHEMES", ("https://", "http://127.0.0.1"))
-    grants = api._WatchGrants()
-    monkeypatch.setattr(api, "_watch_grants", grants)
+    monkeypatch.setattr(api.watch_tools, "_WATCH_RELAY_SCHEMES", ("https://", "http://127.0.0.1"))
+    grants = api.watch_tools._WatchGrants()
+    monkeypatch.setattr(api.watch_tools, "_watch_grants", grants)
     yield path
     for grant in grants.all():
-        api._close_watch_grant(grant, tell_relay=True)
+        api.watch_tools._close_watch_grant(grant, tell_relay=True)
         if grant.audio is not None:
             grant.audio.finished.wait(10)
 
@@ -180,14 +180,14 @@ class Watch:
             await asyncio.sleep(0.2)
         self.socket = socket
         self.sid = os.urandom(16)
-        keys = api.watch_audio_keys(self.secret, self.sid)
+        keys = api.watch_audio.watch_audio_keys(self.secret, self.sid)
         self.up, self.down = keys[UP], keys[DOWN]
         self.counter = 0
         self.received = -1
         await socket.send(bytes([4]) + self.sid + bytes([1]))
 
     async def send(self, kind, plain):
-        await self.socket.send(api.seal_watch_audio(self.up, UP, self.grant_id, self.sid, kind, self.counter, plain))
+        await self.socket.send(api.watch_audio.seal_watch_audio(self.up, UP, self.grant_id, self.sid, kind, self.counter, plain))
         self.counter += 1
 
     async def control(self, payload):
@@ -195,7 +195,7 @@ class Watch:
 
     async def receive(self, timeout=10.0):
         message = await asyncio.wait_for(self.socket.recv(), timeout)
-        kind, counter, plain = api.open_watch_audio(self.down, DOWN, self.grant_id, self.sid, message)
+        kind, counter, plain = api.watch_audio.open_watch_audio(self.down, DOWN, self.grant_id, self.sid, message)
         assert counter > self.received
         self.received = counter
         if kind in (2, 3):
@@ -213,7 +213,7 @@ class Watch:
                 return seen
 
 
-class EchoSession(api._WatchAudioSession):
+class EchoSession(api.watch_audio._WatchAudioSession):
     engine = "grok"
 
     async def run(self):
@@ -228,8 +228,8 @@ class EchoSession(api._WatchAudioSession):
 
 
 def test_a_watch_call_crosses_the_real_relay_sealed_both_ways(paired, monkeypatch):
-    monkeypatch.setitem(api._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
-    grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
     assert grant["audio"]["url"].startswith("ws://127.0.0.1:")
 
     async def call():
@@ -246,8 +246,8 @@ def test_a_watch_call_crosses_the_real_relay_sealed_both_ways(paired, monkeypatc
         # Revoking the grant ends the call: the host leaves first (4503), or
         # the relay closes the grant before it does (4010). Either way the
         # Watch can't come back on this grant.
-        api.revoke_watch_grant({"grant_id": grant["grant_id"]}, profile=None,
-                               tell_relay=api._close_watch_grant_on_relay)
+        api.watch_tools.revoke_watch_grant({"grant_id": grant["grant_id"]}, profile=None,
+                               tell_relay=api.watch_tools._close_watch_grant_on_relay)
         with pytest.raises(Exception):
             await watch.receive(5)
         assert watch.socket.close_code in (4010, 4503)
@@ -259,8 +259,8 @@ def test_a_watch_call_crosses_the_real_relay_sealed_both_ways(paired, monkeypatc
 
 
 def test_the_watch_rejoining_gets_a_fresh_stream(paired, monkeypatch):
-    monkeypatch.setitem(api._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
-    grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
 
     async def call():
         first = Watch(grant)
@@ -332,10 +332,10 @@ class FakeXai:
 def test_grok_runs_on_the_host_sign_in_with_its_audio_paced(paired, monkeypatch):
     xai = FakeXai(reply_seconds=1.0)
     try:
-        monkeypatch.setattr(api, "GROK_LIVE_URL", f"ws://127.0.0.1:{xai.port}/v1/realtime")
-        monkeypatch.setattr(api, "grok_live_credentials", lambda: ("xai-secret", "subscription"))
-        monkeypatch.setattr(api, "WATCH_AUDIO_LEAD_S", 0.2)
-        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        monkeypatch.setattr(api.grok_live, "GROK_LIVE_URL", f"ws://127.0.0.1:{xai.port}/v1/realtime")
+        monkeypatch.setattr(api.grok_live, "grok_live_credentials", lambda: ("xai-secret", "subscription"))
+        monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_LEAD_S", 0.2)
+        grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
 
         async def call():
             watch = Watch(grant)
@@ -372,10 +372,10 @@ def test_grok_runs_on_the_host_sign_in_with_its_audio_paced(paired, monkeypatch)
 
 def test_grok_without_a_sign_in_tells_the_watch(paired, monkeypatch):
     def no_sign_in():
-        raise api.TokenError(503, api.GROK_LIVE_NO_CREDENTIAL)
+        raise api.core.TokenError(503, api.grok_live.GROK_LIVE_NO_CREDENTIAL)
 
-    monkeypatch.setattr(api, "grok_live_credentials", no_sign_in)
-    grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+    monkeypatch.setattr(api.grok_live, "grok_live_credentials", no_sign_in)
+    grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
 
     async def call():
         watch = Watch(grant)
@@ -384,18 +384,18 @@ def test_grok_without_a_sign_in_tells_the_watch(paired, monkeypatch):
         return [await watch.receive(), await watch.receive()]
 
     error, ended = asyncio.run(call())
-    assert error == (3, {"type": "error", "code": "unavailable", "message": api.GROK_LIVE_NO_CREDENTIAL})
+    assert error == (3, {"type": "error", "code": "unavailable", "message": api.grok_live.GROK_LIVE_NO_CREDENTIAL})
     assert ended == (3, {"type": "ended", "engine": "grok", "reason": "error"})
 
 
 def test_grok_that_stops_answering_ends_the_session_and_says_so(paired, monkeypatch):
     xai = FakeXai(answers=False)
     try:
-        monkeypatch.setattr(api, "GROK_LIVE_URL", f"ws://127.0.0.1:{xai.port}/v1/realtime")
-        monkeypatch.setattr(api, "grok_live_credentials", lambda: ("xai-secret", "subscription"))
-        monkeypatch.setattr(api, "WATCH_AUDIO_UPSTREAM_QUIET_S", 0.5)
-        monkeypatch.setattr(api, "WATCH_AUDIO_UPSTREAM_QUIET_CHECK_S", 0.05)
-        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        monkeypatch.setattr(api.grok_live, "GROK_LIVE_URL", f"ws://127.0.0.1:{xai.port}/v1/realtime")
+        monkeypatch.setattr(api.grok_live, "grok_live_credentials", lambda: ("xai-secret", "subscription"))
+        monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_UPSTREAM_QUIET_S", 0.5)
+        monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_UPSTREAM_QUIET_CHECK_S", 0.05)
+        grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
 
         async def call():
             watch = Watch(grant)
@@ -516,9 +516,9 @@ def test_gpt_live_runs_through_the_webrtc_helper(paired, monkeypatch):
     pytest.importorskip("aiortc")
     peer = FakeGptLive()
     try:
-        monkeypatch.setattr(api, "create_gpt_live_session", peer.create_session)
-        monkeypatch.setattr(api, "_watch_audio_runtime", api._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
-        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        monkeypatch.setattr(api.gpt_live, "create_gpt_live_session", peer.create_session)
+        monkeypatch.setattr(api.watch_audio, "_watch_audio_runtime", api.watch_audio._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
+        grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
         assert grant["audio"]["engines"] == ["gpt_live", "grok"]
 
         async def call():
@@ -567,9 +567,9 @@ def test_the_command_line_watch_stand_in_holds_a_gpt_live_call(paired, monkeypat
     probe = _load_probe()
     peer = FakeGptLive()
     try:
-        monkeypatch.setattr(api, "create_gpt_live_session", peer.create_session)
-        monkeypatch.setattr(api, "_watch_audio_runtime", api._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
-        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        monkeypatch.setattr(api.gpt_live, "create_gpt_live_session", peer.create_session)
+        monkeypatch.setattr(api.watch_audio, "_watch_audio_runtime", api.watch_audio._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
+        grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
         run = probe.Run()
         result = asyncio.run(probe.call(api, grant, "gpt_live", {}, 3.0, run))
         assert result["started"]["engine"] == "gpt_live"
@@ -593,10 +593,10 @@ def test_the_stand_in_answers_a_delegation_through_the_grant(paired, monkeypatch
             {"title": "France", "url": "https://example.com/france", "description": "Its capital is Paris."}]}})
 
     try:
-        monkeypatch.setattr(api, "_hermes_web_search", search)
-        monkeypatch.setattr(api, "create_gpt_live_session", peer.create_session)
-        monkeypatch.setattr(api, "_watch_audio_runtime", api._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
-        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        monkeypatch.setattr(api.gemini_qwen_live, "_hermes_web_search", search)
+        monkeypatch.setattr(api.gpt_live, "create_gpt_live_session", peer.create_session)
+        monkeypatch.setattr(api.watch_audio, "_watch_audio_runtime", api.watch_audio._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
+        grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
         run = probe.Run()
         result = asyncio.run(probe.call(api, grant, "gpt_live", {}, 2.0, run, answer_tail_s=1.0))
         assert "error" not in result and result["lookups"] == 1
@@ -623,9 +623,9 @@ def test_the_stand_in_answers_a_delegation_it_could_not_run(paired, monkeypatch)
 
     try:
         monkeypatch.setattr(probe, "lookup", broken)
-        monkeypatch.setattr(api, "create_gpt_live_session", peer.create_session)
-        monkeypatch.setattr(api, "_watch_audio_runtime", api._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
-        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        monkeypatch.setattr(api.gpt_live, "create_gpt_live_session", peer.create_session)
+        monkeypatch.setattr(api.watch_audio, "_watch_audio_runtime", api.watch_audio._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
+        grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
         run = probe.Run()
         result = asyncio.run(probe.call(api, grant, "gpt_live", {}, 2.0, run, answer_tail_s=1.0))
         assert result["delegations_failed"] == 1 and "lookups" not in result
@@ -652,9 +652,9 @@ def test_the_stand_in_says_nothing_more_once_part_of_an_answer_went_out(paired, 
     try:
         monkeypatch.setattr(probe, "lookup", lambda *_: {"ok": True, "results": [{"title": "France", "snippet": "Paris"}]})
         monkeypatch.setattr(probe, "delegation_appends", cut_off)
-        monkeypatch.setattr(api, "create_gpt_live_session", peer.create_session)
-        monkeypatch.setattr(api, "_watch_audio_runtime", api._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
-        grant = api.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
+        monkeypatch.setattr(api.gpt_live, "create_gpt_live_session", peer.create_session)
+        monkeypatch.setattr(api.watch_audio, "_watch_audio_runtime", api.watch_audio._WatchAudioRuntime(env_dir=lambda: "/nonexistent/env"))
+        grant = api.watch_tools.open_watch_grant({"tools": ["web_search"], "audio": True}, profile=None, path=paired)
         run = probe.Run()
         result = asyncio.run(probe.call(api, grant, "gpt_live", {}, 2.0, run, answer_tail_s=1.0))
         assert result["delegations_failed"] == 1 and "lookups" not in result
@@ -685,7 +685,7 @@ def test_the_stand_in_reports_an_unreadable_relay_answer(monkeypatch):
     grant = {"key": base64.urlsafe_b64encode(bytes(32)).rstrip(b"=").decode(), "grant_id": "G" * 22,
              "relay_url": "https://relay.example.test", "watch_key": "w"}
     for body in (b"not json", b"[1, 2]"):
-        monkeypatch.setattr(api, "_relay_opener", types.SimpleNamespace(open=lambda *_a, body=body, **_k: Answer(body)))
+        monkeypatch.setattr(api.watch_tools, "_relay_opener", types.SimpleNamespace(open=lambda *_a, body=body, **_k: Answer(body)))
         assert probe.lookup(api, grant, "weather") == {"ok": False, "detail": "the relay's answer wasn't a readable JSON object"}
 
 

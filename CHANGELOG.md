@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.116.0 (2026-10-28)
+## 0.116.0 (2026-10-29)
 
 ### Fixes
 - Deleting your copy of a room you're still in lost what you'd posted
@@ -28,6 +28,13 @@ checks it). The format is fixed, because Conduit reads it:
 - Groundwork for a room's own private chat, where an agent that only
   listens will leave you notes once the room goes quiet or ends. It starts
   working with the Conduit update that opens these chats.
+
+## 0.115.3 (2026-10-28)
+
+### Fixes
+- Notifications called the main bot "Default" when it has no name, in its
+  Bot Chat's title and in the relay's plain copy, while Conduit calls it
+  Hermes. They now say Hermes (push relay 0.23.2).
 
 ## 0.115.2 (2026-10-28)
 

@@ -144,24 +144,24 @@ def test_a_write_waits_for_another_process(tmp_path, make):
 def test_a_room_picture_write_and_read_wait_for_another_process(tmp_path):
     root = str(tmp_path / "room-images")
     body = {"data_base64": base64.b64encode(JPEG).decode()}
-    api.store_room_image(root, "room_1", body, now=1_760_000_000)
-    lock = pathlib.Path(root) / api.ROOM_IMAGE_LOCK_FILE
+    api.rooms.store_room_image(root, "room_1", body, now=1_760_000_000)
+    lock = pathlib.Path(root) / api.rooms.ROOM_IMAGE_LOCK_FILE
     assert lock.stat().st_mode & 0o777 == 0o600
-    stored = _waits_for(lock, lambda: api.store_room_image(root, "room_1", body, now=1_760_000_001))
-    record = _waits_for(lock, lambda: api.read_room_image(root, "room_1"))
+    stored = _waits_for(lock, lambda: api.rooms.store_room_image(root, "room_1", body, now=1_760_000_001))
+    record = _waits_for(lock, lambda: api.rooms.read_room_image(root, "room_1"))
     assert record["rev"] == stored["rev"]
-    assert _waits_for(lock, lambda: api.clear_room_image(root, "room_1"))
+    assert _waits_for(lock, lambda: api.rooms.clear_room_image(root, "room_1"))
 
 
 def test_reading_a_room_picture_with_no_folder_creates_nothing(tmp_path):
     root = tmp_path / "room-images"
-    assert api.read_room_image(str(root), "room_1") is None
-    assert api.clear_room_image(str(root), "room_1") is False
+    assert api.rooms.read_room_image(str(root), "room_1") is None
+    assert api.rooms.clear_room_image(str(root), "room_1") is False
     assert not root.exists()
 
 
 def test_an_unreadable_desktop_views_file_is_never_overwritten(tmp_path, monkeypatch):
-    path = tmp_path / api.DESKTOP_VIEWS_FILE
+    path = tmp_path / api.desktop_views.DESKTOP_VIEWS_FILE
     original = json.dumps({"version": 1, "views": {
         "a": {"opened_at": 100.0, "seen_through": 150.0, "client": "browser"}}})
     path.write_text(original)
@@ -172,7 +172,7 @@ def test_an_unreadable_desktop_views_file_is_never_overwritten(tmp_path, monkeyp
             raise PermissionError(13, "Permission denied", str(file))
         return real_open(file, *args, **kwargs)
 
-    store = api._DesktopViewStore(flush_delay=3600.0)
+    store = api.desktop_views._DesktopViewStore(flush_delay=3600.0)
     store.record(tmp_path, "b", "desktop", 210.0, opened_at=200.0)
     monkeypatch.setattr(builtins, "open", refusing_open)
     store.flush()  # logged, not raised
@@ -182,6 +182,6 @@ def test_an_unreadable_desktop_views_file_is_never_overwritten(tmp_path, monkeyp
 
 def test_a_room_picture_read_never_fails_on_a_lock_file_it_cannot_open(tmp_path):
     root = tmp_path / "room-images"
-    (root / api.ROOM_IMAGE_LOCK_FILE).mkdir(parents=True)  # can't be opened for writing
-    assert api.read_room_image(str(root), "room_1") is None
-    assert api.clear_room_image(str(root), "room_1") is False
+    (root / api.rooms.ROOM_IMAGE_LOCK_FILE).mkdir(parents=True)  # can't be opened for writing
+    assert api.rooms.read_room_image(str(root), "room_1") is None
+    assert api.rooms.clear_room_image(str(root), "room_1") is False

@@ -110,7 +110,7 @@ The plugin tells a cron run by its task id (`cron:<job id>:…`) or its classic 
 
 Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-032)).
 
-Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile id capitalized), so you can tell which bot replied. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. How much shows is Conduit's Settings > Notifications > Show in notifications: Generic shows neither the title nor the text, Chat names shows the session's title and the profile without Hermes' words, and Full previews shows both, with the profile as the subtitle. `redact on` or end-to-end encryption keeps the title from reaching the relay.
+Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile id capitalized, and Hermes for the main bot), so you can tell which bot replied. Conduit shows a name you gave the main bot on the phone instead. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. How much shows is Conduit's Settings > Notifications > Show in notifications: Generic shows neither the title nor the text, Chat names shows the session's title and the profile without Hermes' words, and Full previews shows both, with the profile as the subtitle. `redact on` or end-to-end encryption keeps the title from reaching the relay.
 
 Hermes can write a reply's notification itself with the `conduit_notify` tool (plugin 0.112+), when you asked to be told something is done or a scheduled job reports: a title of a few words and a sentence or two, sent instead of the reply's opening when the turn ends. It sends no push of its own, so the turn still sends one, under the same settings, and a reply that sends none (`[SILENT]`, a muted job) sends none with it. The title rides as `headline`, sealed with the rest, and Conduit shows it only with Full previews; Chat names and Generic never show it.
 
@@ -3000,7 +3000,7 @@ relay key. The host still opens no inbound route.
   root, so the relay can neither read nor forge one. The Watch speaks each
   engine's own events, as the phone does, and its tools and jobs go through
   the grant's lookups. The wire format, keys and control messages are
-  described where they're built (`dashboard/plugin_api.py`, "Watch audio").
+  described where they're built (`dashboard/api/watch_audio.py`).
 - **GPT-Live** runs WebRTC in a small helper process
   (`dashboard/watch_audio_helper.py`) under a Python that has `aiortc`. The
   plugin does the SDP exchange with the Codex sign-in itself, so the

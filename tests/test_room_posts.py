@@ -686,15 +686,15 @@ def test_the_routes_post_and_list(posts, monkeypatch):
     from test_room_invites import BASE, Loop, api
 
     room_id = started(posts)
-    dashboard = api._plugin_package_module("room_invites")
+    dashboard = api.core._plugin_package_module("room_invites")
     root = posts.tmp_path / "mona"
     side = dashboard.Rooms(root, send=posts.wire.sender("mona"), link=lambda link_id: posts.links["mona"].get(link_id),
                            clock=posts.clock)
     monkeypatch.setattr(dashboard, "start", lambda root: side)
-    monkeypatch.setattr(api, "_room_links_root", lambda: root)
-    monkeypatch.setattr(api, "_start_room_handlers", lambda root: None)
-    monkeypatch.setattr(api._plugin_package_module("room_links"), "start", lambda root: Loop())
-    monkeypatch.setattr(api._room_invites_limiter, "_mints", {})
+    monkeypatch.setattr(api.linked_rooms, "_room_links_root", lambda: root)
+    monkeypatch.setattr(api.linked_rooms, "_start_room_handlers", lambda root: None)
+    monkeypatch.setattr(api.core._plugin_package_module("room_links"), "start", lambda root: Loop())
+    monkeypatch.setattr(api.linked_rooms._room_invites_limiter, "_mints", {})
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     client = TestClient(app)
@@ -708,7 +708,7 @@ def test_the_routes_post_and_list(posts, monkeypatch):
     refused = client.post(f"{BASE}/rooms/copies/messages",
                           json={"room_id": "conduit-other", "event_id": "m2", "text": "Hi"})
     assert (refused.status_code, refused.json()["code"]) == (409, "not_in")
-    assert "room-posts" in api.ROUTE_CAPABILITIES
+    assert "room-posts" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def test_a_page_that_failed_after_its_events_were_kept_still_says_who_posted(posts, monkeypatch):
