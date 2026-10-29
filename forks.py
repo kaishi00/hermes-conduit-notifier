@@ -13,6 +13,14 @@ the chat's next turn. The plugin wraps the fork builder so each fork's run
 is marked, and the hooks take a marked run for a subagent's. A newer Hermes
 runs no hooks for a fork, so there the mark only makes Conduit's tools
 refuse a fork, as they refuse a subagent.
+
+Both of Hermes' callers take the builder off the module when they fork
+(``agent/side_question.py`` imports it inside ``_answer_via_fork``, and the
+review calls its own module's global), and so does the predict route, so
+each gets the wrapper. Neither a /btw nor a prediction can ask for an
+approval or a question: both empty the thread's tool whitelist, so Hermes
+denies every tool call before it runs. The review's approvals are denied by
+Hermes (``_bg_review_auto_deny``).
 """
 
 from __future__ import annotations
@@ -20,19 +28,34 @@ from __future__ import annotations
 import contextvars
 import functools
 import logging
+import sys
 import threading
+import types
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+_lock = threading.Lock()
 
 _GUARD_FLAG = "__conduit_fork_marks__"
 # Set for the length of a fork's run, on the thread that runs it. Hermes
 # calls the turn's hooks there (post_llm_call and on_session_end from the
 # run's finalizer) and runs its tools on workers given a copy of the
 # context (tool_executor's propagate_context_to_thread), which see it too.
-_in_fork: contextvars.ContextVar[bool] = contextvars.ContextVar("conduit_push_in_fork", default=False)
+# One for the whole process, kept outside this module: a second load of the
+# plugin, or of this file, marks and reads the same one.
+_SHARED = "conduit_push_fork_mark"
 
-_lock = threading.Lock()
+
+def _shared_mark() -> contextvars.ContextVar[bool]:
+    holder = sys.modules.setdefault(_SHARED, types.ModuleType(_SHARED))
+    mark = getattr(holder, "in_fork", None)
+    if not isinstance(mark, contextvars.ContextVar):
+        mark = holder.in_fork = contextvars.ContextVar("conduit_push_in_fork", default=False)
+    return mark
+
+
+_in_fork = _shared_mark()
+
 # The module this load wrapped, and (Hermes' own function, this load's wrapper)
 _wrapped_module: Any = None
 _wrapped: Optional[tuple[Callable[..., Any], Callable[..., Any]]] = None

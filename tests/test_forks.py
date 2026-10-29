@@ -281,3 +281,24 @@ def test_a_tool_worker_hermes_starts_on_a_copy_of_the_context_sees_the_mark(herm
 
     _fork_run(hermes, hooks)
     assert seen == [True]
+
+
+def test_a_caller_that_imports_the_builder_when_it_forks_gets_the_wrapper(hermes, marks):
+    # Hermes' /btw (agent/side_question._answer_via_fork) imports the builder inside the function.
+    def answer_via_fork(parent):
+        from agent.background_review import build_cache_parity_fork
+
+        fork, _runtime, _routed = build_cache_parity_fork(parent, None, max_iterations=3, write_origin="side_question")
+        return fork.run_conversation(user_message="Side question: …")
+
+    inside = []
+    answer_via_fork(types.SimpleNamespace(hooks=lambda: inside.append(marks.inside())))
+    assert inside == [True]
+
+
+def test_every_load_of_the_module_shares_one_mark(hermes, marks):
+    other = _load("conduit_forks_second_copy")
+    assert other._in_fork is marks._in_fork
+    seen = []
+    _fork_run(hermes, lambda: seen.append(other.inside()))
+    assert seen == [True]
