@@ -62,3 +62,10 @@ def test_the_page_comes_from_the_profile_named(dashboard):
     assert [row.get("content") for row in body["messages"]] == ["only here"]
     status, body = dashboard.request("POST", "sessions/history-page", body={"session_id": "history-second", **PAGE})
     assert status == 404, body
+
+
+def test_a_bad_order_gets_hermes_400(dashboard):
+    _seed(dashboard.home, "history-order", ["one"])
+    status, body = dashboard.request("POST", "sessions/history-page",
+                                     body={"session_id": "history-order", **PAGE, "order": "newest"})
+    assert status == 400, body
