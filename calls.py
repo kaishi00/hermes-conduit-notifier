@@ -39,7 +39,7 @@ from typing import Any, Callable
 from hermes_constants import get_hermes_home
 
 from . import chat_on_screen, client, location_profiles, reply_sources, session_titles
-from .calls_store import ALERT_DELAY_S, CallStore
+from .calls_store import ALERT_DELAY_S, MAX_HOLD_S, CallStore
 from .location_store import LocationStore
 from .events import push_event
 
@@ -64,7 +64,7 @@ SCREEN_SOURCES = frozenset({"desktop", "terminal"})
 TERMINAL_PLATFORMS = frozenset({"cli", "tui"})
 # How long an approval or question at a screen waits before it calls: long
 # enough to read and answer there, short enough to reach a user who left.
-SCREEN_ALERT_DELAY_S = 600
+SCREEN_ALERT_DELAY_S = min(600, MAX_HOLD_S)
 
 
 def _spawn(work: Callable[[], None]) -> bool:
@@ -565,11 +565,11 @@ def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | Non
     try:
         home = get_hermes_home()
         store = _store(home)
-        if _quiet_at_screen(store, home, [session_id]):
-            logger.info("Conduit failed-turn call held back: the user is at a screen")
-            return False
         seed = "" if turn_id is None else str(turn_id)
-        result = store.alert_now(session_id, "failed", "", seed=seed)
+        # Seeded like a call, so a replay that can't tell where the turn came
+        # from doesn't ring beside the push this one sends.
+        result = store.alert_now(session_id, "failed", "", seed=seed,
+                                 at_screen=_quiet_at_screen(store, home, [session_id]))
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not check alert calls for a failed turn", exc_info=True)
         return False

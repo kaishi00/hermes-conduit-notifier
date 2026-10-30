@@ -1401,3 +1401,16 @@ def test_with_alert_calls_off_a_screen_turn_never_looks_where_it_came_from(home,
     monkeypatch.setattr(calls, "_at_screen", lambda *args: looked.append(args) or True)
     plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
     assert looked == [] and [event["type"] for event in fake.enqueued] == ["turn.failed"]
+
+
+def test_a_replayed_failure_hook_that_cannot_tell_the_screen_does_not_ring(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, DESKTOP)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    # Replayed after a restart: no source to tell by any more.
+    _from(monkeypatch, None, None)
+    clock[0] += 3_600
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    assert fake.sent == []
+    assert calls._store(home)._load()["history"] == []
+
