@@ -652,6 +652,27 @@ def test_cards_and_the_call_screen_show_no_media_path():
     assert call["reason"] == "Send 📎 notes.txt?"
 
 
+def test_no_push_shows_a_desktop_directive():
+    # Hermes Desktop's directives (Conduit #1522): a preview reads as its
+    # file, a plugin's card as a card, never as the raw line.
+    from events import plain_text
+    reply = plain_text('Rents below.\n::richui{id="ru-c91286278685"}\n::preview{file="/tmp/x/chart.html"}')
+    assert push_event("response.ready", identifier="r", body=reply)["body"] == \
+        "Rents below. 🗂 hermes-rich-ui card 📎 chart.html"
+    approval = push_event("approval.needed", identifier="a", body="Show ::widget{name='x'} now?")
+    assert approval["body"] == "Show 🗂 widget card now?"
+    # Prose, code and CSS stay as written.
+    # A preview's file is named as a MEDIA tag's is: its file attribute
+    # alone, a cache name without its prefix, a hash name as its type.
+    assert push_event("approval.needed", identifier="v",
+                      body='::preview{profile="work" file="/srv/out/chart.html"}')["body"] == "📎 chart.html"
+    assert push_event("approval.needed", identifier="h",
+                      body='::preview{file="/root/.hermes/cache/3f2a9c0d1e2b4a5f.html"}')["body"] == "📎 HTML"
+    for text in ("::selection{color:red}", 'std::richui{id="x"}', "`::richui{id='x'}`", "::richui{}",
+                 "Run `echo ::richui{id='x'}` here"):
+        assert push_event("approval.needed", identifier="p", body=text)["body"] == text
+
+
 # --- Room invites (room.invite) -------------------------------------------------
 
 ROOM = {"link": "Lk3x9QwZ2b1c", "id": "conduit-0123abcd", "name": "Zoo trip", "from": "Furina"}

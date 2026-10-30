@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.120.4 (2026-10-30)
+
+### Fixes
+- A notification for a reply with a card made for Hermes Desktop (such as
+  hermes-rich-ui's) showed the raw `::richui{...}` line. It now says a card
+  is there, and a page the agent previews shows as its file's name.
+
 ## 0.120.3 (2026-10-30)
 
 ### Fixes

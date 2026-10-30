@@ -738,10 +738,50 @@ def _attachment(match: re.Match) -> str:
     return f"📎 {name}".rstrip() + tail
 
 
+# Hermes Desktop's transcript directives, as Conduit reads them
+# (TranscriptDirectives.swift): ::preview{file="..."} shows a host file, and
+# any other ::name{key="value"} is a Desktop plugin's card, such as
+# hermes-rich-ui's ::richui{id="..."} (Conduit #1522). One in a code span is
+# an example.
+_DESKTOP_DIRECTIVE = re.compile(r"(?:^|(?<=\s))::(?P<name>[A-Za-z][\w-]{0,63})\{(?P<body>[^{}\n]{0,1024})\}")
+_DIRECTIVE_ATTRIBUTE = re.compile(r"""(?P<key>[A-Za-z][\w-]{0,63})=(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)')""")
+_DIRECTIVE_BODY = re.compile(r"\s*(?:" + _DIRECTIVE_ATTRIBUTE.pattern + r"\s*)+")
+_CODE_SPAN = re.compile(r"`[^`\n]*`")
+
+
+def _desktop_directive(match: re.Match) -> str:
+    """A Desktop directive as a push shows it: a preview as its file, read
+    as a MEDIA tag is, a plugin's card as the card it is. One that isn't a
+    well-formed preview or card stays as written."""
+    name, body = match.group("name"), match.group("body")
+    if not _DIRECTIVE_BODY.fullmatch(body):
+        return match.group(0)
+    attributes = {found.group("key").lower(): found.group("double") if found.group("double") is not None
+                  else found.group("single") for found in _DIRECTIVE_ATTRIBUTE.finditer(body)}
+    if name == "preview":
+        path = (attributes.get("file") or "").strip()
+        return f'MEDIA:"{path}"' if path and '"' not in path else match.group(0)
+    plugin = "hermes-rich-ui" if name == "richui" else name
+    return f"🗂 {plugin} card"
+
+
+def _desktop_free(value: str) -> str:
+    """``value`` with each Desktop directive outside a code span read."""
+    if "::" not in value:
+        return value
+    spans = [span.span() for span in _CODE_SPAN.finditer(value)]
+
+    def read(match: re.Match) -> str:
+        if any(start <= match.start() < end for start, end in spans):
+            return match.group(0)
+        return _desktop_directive(match)
+    return _DESKTOP_DIRECTIVE.sub(read, value)
+
+
 def media_free(value: str) -> str:
-    """One line with each MEDIA tag shown as its attachment, and Hermes'
-    delivery directives gone."""
-    return _MEDIA_TAG.sub(_attachment, _MEDIA_DIRECTIVE.sub("", value))
+    """One line with each MEDIA tag shown as its attachment, a Desktop
+    directive as its file or card, and Hermes' delivery directives gone."""
+    return _MEDIA_TAG.sub(_attachment, _MEDIA_DIRECTIVE.sub("", _desktop_free(value)))
 
 
 class _Plain(str):
