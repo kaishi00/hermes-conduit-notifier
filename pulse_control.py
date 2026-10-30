@@ -729,6 +729,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "home_problem": problem,
         "home_title": pulse_store.get("home_title") or "Pulse",
         "model": pulse.turn_model(pulse_store),
+        # What "Default" runs on: the model Pulse's own chat is set to; None, Hermes's main model.
+        "default_model": pulse.chat_model(Path(home), chat.chat_id) if chat else None,
         "checks": pulse_store.counts(pulse.PROBE),
         "recent": [{"at": row["created_at"], "kind": row["kind"], "state": row["state"],
                     "detail": row.get("detail") or ""} for row in pulse_store.recent(RECENT)],

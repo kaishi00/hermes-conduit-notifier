@@ -2441,12 +2441,12 @@ def test_pulse_status_says_which_model_pulse_runs_on(live, db, capsys, monkeypat
     every = "for its turns, memory, report lists and follow-up checks"
     assert status() == [f"Model: Hermes's main model, {every}"]
     db.model(model="local-model", billing="custom")  # names no provider, so it lends Pulse none
-    assert status() == ["Model: local-model, the Pulse chat's own, for its turns; memory, report lists and "
+    assert status() == ["Model: local-model, Pulse's default (its chat's own), for its turns; memory, report lists and "
                         "follow-up checks run on Hermes's main model"]
     db.model(model=VOLCENGINE["model"], config=VOLCENGINE_CONFIG)
-    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, the Pulse chat's own, {every}"]
+    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, Pulse's default (its chat's own), {every}"]
     config["auxiliary"][memory.TASK] = {"provider": "openrouter", "model": "google/gemini-flash"}
-    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, the Pulse chat's own, for its turns; memory, "
+    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, Pulse's default (its chat's own), for its turns; memory, "
                         "report lists and follow-up checks run on google/gemini-flash on openrouter, "
                         "Hermes's \"Pulse memory\" model"]
     live.store.set(pulse.MODEL, {"provider": "openrouter", "model": "google/gemini-flash"})
@@ -2721,6 +2721,10 @@ def test_pulse_state_and_settings_as_data(remembering, db):
     home = store_.path.parent
     state = control.state(store_, home, now=DAY)
     assert state["enabled"] is False and state["home_chat"]["id"] == SID and state["memory"] is False
+    assert state["default_model"] is None  # Pulse's chat on Hermes's main model
+    db.model(SID, model="deepseek-v4-1-flash", config={"provider": "volcengine"})
+    assert control.state(store_, home, now=DAY)["default_model"] == {"provider": "volcengine",
+                                                                      "model": "deepseek-v4-1-flash"}
     assert state["report_times"] == ["08:00", "13:00", "18:00"] and state["backfill"] == {"state": "none"}
     assert state["backfill_days"] == 30 and state["daily_tokens"] == store.DEFAULTS["memory_daily_tokens"]
     control.update(store_, {"enabled": True, "daily_report": True, "report_times": ["17:30", "9:00"],

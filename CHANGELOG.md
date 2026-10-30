@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.120.3 (2026-10-30)
+
+### Fixes
+- Settings > Pulse named the Pulse chat, which you no longer see. Its
+  model picker now says what Default runs on, and what's wrong with
+  Pulse's chat says how to fix it from Settings > Pulse.
+
 ## 0.120.2 (2026-10-29)
 
 ### Fixes

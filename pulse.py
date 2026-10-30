@@ -1391,7 +1391,7 @@ def _memory_llm(instructions: str, text: str, purpose: str = "pulse memory",
                 max_tokens: int = memory.MAX_TOKENS, route: Optional[dict[str, str]] = None) -> tuple[Any, int]:
     """One Pulse model call, on Hermes's "Pulse memory" slot. ``route`` is
     the Pulse chat's model (``lent_route``), which that slot left on "auto"
-    then means, as Settings > Pulse's "Same as the Pulse chat" says."""
+    then means, as Settings > Pulse's "Default" (and the model it names) says."""
     llm = getattr(_ctx, "llm", None)
     if llm is None:
         raise RuntimeError("this Hermes gives plugins no model access")
@@ -1526,11 +1526,11 @@ def home_chat(pulse_store: store.PulseStore, home: Path) -> tuple[Optional[herme
     except hermes.HermesUnreadable as error:
         return None, f"can't read Hermes's state.db: {error}"
     if not chats:
-        return None, f'no chat is titled "{title}"; create one and pin it'
+        return None, f'Pulse has no chat titled "{title}" yet; set it up in Settings > Pulse'
     problem = ""
     if len(chats) > 1:
         problem = f'{len(chats)} chats are titled "{title}"; using the {"pinned" if chats[0].pinned else "latest"} one'
     elif not chats[0].pinned:
-        problem = f'pin the "{title}" chat so pruning never removes it'
+        problem = f'Pulse\'s chat "{title}" isn\'t pinned, so Hermes could prune it; pin it from Settings > Pulse'
     return chats[0], problem
 
