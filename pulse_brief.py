@@ -98,20 +98,21 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
     held = HELD_TITLE + "\n" + "\n".join(line(card) for card in cards) if cards else ""
     listed, later, related = "", "", ""
     # What a card still says stays out (candidates.on_cards); on its day one more may come.
-    phone_reminders: dict[str, dict] = {}
-    phone_events: dict[str, dict] = {}
-    report.phone_context(home, now, reminders=phone_reminders, events=phone_events)
-    items = report.remembered_items(pulse_store, now)[0] if pulse_store.get("memory") else []
-    said = candidates.on_cards(pulse_store, now, zone, items=items, reminders=list(phone_reminders.values()),
-                               events=list(phone_events.values()))
-    left_out = [item for item in items if item["id"] in said]
+    left_out: list[int] = []
     if pulse_store.get("memory"):
-        listed, shown = report.remembered_lines([item for item in items if item["id"] not in said], zone)
+        # Every open item, so none past the report's first ones slips into "Related to today's events".
+        open_items = [item for item, _ in places.memories(pulse_store, now).items]
+        left_out = sorted(candidates.on_cards(pulse_store, now, zone, items=open_items))
+        listed, shown = report.remembered_lines(report.remembered_items(pulse_store, now, left_out)[0], zone)
         later = report.later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""
-        related = places.today_related(pulse_store, home, zone, now, leave_out=[item["id"] for item in left_out])
-    phone = report.phone_context(home, now, leave_out=lambda what, entry: (
-        candidates.reminder_ref(entry) if what == "reminder" else candidates.event_ref(entry)) in said
-        if entry.get("id") else False)[0]
+        related = places.today_related(pulse_store, home, zone, now, leave_out=left_out)
+
+    def on_phone_cards(what: str, entries: list[dict]) -> set[str]:
+        refs = candidates.on_cards(pulse_store, now, zone, **{"reminders" if what == "reminder" else "events": entries})
+        ref = candidates.reminder_ref if what == "reminder" else candidates.event_ref
+        return {entry["id"] for entry in entries if ref(entry) in refs}
+
+    phone = report.phone_context(home, now, leave_out=on_phone_cards)[0]
     since = report.window_start(pulse_store, now)
     start = datetime.fromtimestamp(since, zone).strftime("%a %d %b %H:%M")
     logged = report.inbox_context(home, since, title=LOGGED_TITLE.format(start=start))

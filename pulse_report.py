@@ -285,10 +285,11 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
 def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]] = None,
                   events: Optional[dict[str, dict]] = None,
                   upcoming: Optional[list[dict]] = None,
-                  leave_out: Optional[Callable[[str, dict], bool]] = None) -> tuple[str, Optional[str]]:
+                  leave_out: Optional[Callable[[str, list[dict]], Collection[str]]] = None) -> tuple[str, Optional[str]]:
     """Calendar and open reminders from the phone sync, and the phone's time
     zone. Empty when Conduit shares neither. ``leave_out`` ("event" or
-    "reminder", and the entry) drops one from the list. With ``reminders``, each open
+    "reminder", and those read) gives the ids to leave out, as on cards
+    already (ON_CARDS says how many). With ``reminders``, each open
     reminder gets a key ("r1"), and ``reminders`` maps it to the reminder;
     with ``events``, each calendar entry listed gets one ("v1") the same
     way. ``upcoming`` gains every entry in the next EVENT_MATCH_DAYS, listed
@@ -314,10 +315,10 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                                  if e.get("id") and e.get("status") != "canceled" and e.get("my_status") != "declined"]
                 synced = device.get("last_seen")
                 lines = []
+                found = [e for e in found if e.get("status") != "canceled" and e.get("my_status") != "declined"]
+                gone = _left_out(leave_out, "event", found)
                 for e in found:
-                    if e.get("status") == "canceled" or e.get("my_status") == "declined":
-                        continue
-                    if leave_out is not None and leave_out("event", e):
+                    if e.get("id") in gone:
                         continue
                     key = ""
                     if events is not None and e.get("id"):
@@ -325,6 +326,7 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                         events[key.strip()] = e
                     lines.append(f"- {key}{_clip(e.get('title'), 100)} ({e.get('start') or ''}"
                                  f"{', all day' if e.get('all_day') else ''})")
+                lines += [ON_CARDS.format(count=len(gone))] if gone else []
                 parts.append(f"## Calendar, the next {EVENTS_DAYS} days (phone synced {_ago(synced, now)})\n"
                              + ("\n".join(lines) or "Nothing on the calendar."))
         with phone.reader("reminders") as opened:
@@ -333,18 +335,33 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                 zone_name = zone_name or device.get("time_zone")
                 found, more = phone.reminders(db, device["id"], limit=MAX_REMINDERS)
                 lines = []
+                gone = _left_out(leave_out, "reminder", found)
                 for number, r in enumerate(found, 1):
-                    if leave_out is not None and leave_out("reminder", r):
+                    if r.get("id") in gone:
                         continue
                     key = ""
                     if reminders is not None and r.get("id"):
                         key = f"r{number} "
                         reminders[key.strip()] = r
                     lines.append(f"- {key}{_clip(r.get('title'), 100)}" + (f" (due {r['due']})" if r.get("due") else ""))
+                lines += [ON_CARDS.format(count=len(gone))] if gone else []
                 parts.append("## Open reminders\n" + ("\n".join(lines) or "None.") + ("\n(and more)" if more else ""))
     except Exception as error:  # noqa: BLE001 — the report goes out without the phone
         parts.append(f"## Phone\nCouldn't read the phone sync ({type(error).__name__}).")
     return "\n\n".join(parts), zone_name
+
+
+# Said where phone_context left entries out (the morning brief: their cards say them).
+ON_CARDS = "- ({count} more already on cards on the Pulse screen)"
+
+
+def _left_out(leave_out: Optional[Callable[[str, list[dict]], Collection[str]]], what: str,
+              found: list[dict]) -> set[str]:
+    """The ids among ``found`` that ``leave_out`` gives for ``what``."""
+    if leave_out is None:
+        return set()
+    ids = {entry.get("id") for entry in found if entry.get("id")}
+    return set(leave_out(what, [entry for entry in found if entry.get("id")])) & ids
 
 
 def inbox_context(home: Path, since: float, *, title: str = "", query: Optional[str] = None,
@@ -670,23 +687,25 @@ RATED = "rated"
 PUT_AWAY = "put away"
 
 
-def remembered_items(pulse_store: store.PulseStore, now: float) -> tuple[list[dict], list[tuple[dict, str]]]:
+def remembered_items(pulse_store: store.PulseStore, now: float,
+                     leave_out: Collection[int] = ()) -> tuple[list[dict], list[tuple[dict, str]]]:
     """Pulse memory's open items, dated ones soonest first, then by kind
-    and how recently they came up; and the ones resting, with why: rated
-    "no" (RATED), or swiped away with Not now and resting still (PUT_AWAY),
-    until the user brings one up again."""
+    and how recently they came up, none of ``leave_out`` (the brief's, on
+    cards already); and the ones resting, with why: rated "no" (RATED), or
+    swiped away with Not now and resting still (PUT_AWAY), until the user
+    brings one up again."""
     rated = rated_not_useful(pulse_store)
     # Swiped away lately: it rests a while, like a "no" that wears off.
     put_away = pulse_store.resting_items(now, DISMISS_REST_S)
-    items, resting = [], []
+    items, resting, leave_out = [], [], set(leave_out)
     # Not what memory's next run expires either.
-    for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3 + len(rated) + len(put_away), soonest=True,
-                                       stale_before=now - pulse_memory.EXPIRE_S):
+    for item in pulse_store.open_items(limit=MAX_REPORT_ITEMS * 3 + len(rated) + len(put_away) + len(leave_out),
+                                       soonest=True, stale_before=now - pulse_memory.EXPIRE_S):
         why = (RATED if item["mentioned_at"] <= rated.get(item["id"], -1.0)
                else PUT_AWAY if item["mentioned_at"] <= put_away.get(item["id"], -1.0) else "")
         if why:
             resting.append((item, why))
-        else:
+        elif item["id"] not in leave_out:
             items.append(item)
     order = {kind: n for n, kind in enumerate(KIND_ORDER)}
     items.sort(key=lambda item: (item["due_at"] is None, item["due_at"] or 0.0,

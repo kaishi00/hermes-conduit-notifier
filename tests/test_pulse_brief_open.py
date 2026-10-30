@@ -69,6 +69,20 @@ def test_a_phone_reminder_or_calendar_entry_whose_card_is_open_stays_out(live):
     text = brief(live, now)
     assert "File taxes" not in text and "Design review" not in text
     assert "Buy milk" in text and "Standup" in text
+    # Each list says some are on cards, so a list never reads as emptier than it is.
+    assert text.count(pulse.report.ON_CARDS.format(count=1)) == 2
+
+
+def test_a_list_left_empty_by_cards_doesnt_read_as_empty(live):
+    phone_home(live.home)
+    now = at(14, 7)
+    for event in ("e_standup", "e_review", "e_lunch", "e_holiday"):
+        card_for(live, f"event:{event}:2026-10-14", created_at=now - 600)
+    for reminder in ("r_milk", "r_tax"):
+        card_for(live, f"reminder:{reminder}", created_at=now - 600)
+    text = brief(live, now)
+    assert "Nothing on the calendar" not in text and "## Open reminders\nNone." not in text
+    assert pulse.report.ON_CARDS.format(count=2) in text
 
 
 def test_a_reminder_put_away_for_good_stays_out(live):
@@ -77,6 +91,30 @@ def test_a_reminder_put_away_for_good_stays_out(live):
     card = card_for(live, "reminder:r_tax", created_at=now - 2 * 86400)
     live.store.dismiss_card(card, True, now - 3600)  # put away for good: no rest
     assert "File taxes" not in brief(live, now)
+
+
+def test_one_on_a_card_isnt_related_to_today_however_many_are_open(live, monkeypatch):
+    live.store.set("memory", True)
+    now = time.time()
+    for n in range(45):  # due before it, so the report's first ones are all these
+        commitment(live, f"The user will file form {n}.", due_at=now + (n + 1) * 3600, words=f"form {n}")
+    rapids = commitment(live, "The user will get their RAPIDS ID card.", words="RAPIDS ID card")
+    assert rapids not in {item["id"] for item in pulse.report.remembered_items(live.store, now)[0]}
+    monkeypatch.setattr(pulse.places, "today_events", lambda *a: [{"title": "RAPIDS ID card", "start": ""}])
+    assert "RAPIDS" in brief(live, now)
+    card_about(live, rapids, now - 20 * 3600)
+    assert "RAPIDS" not in brief(live, now)
+
+
+def test_items_on_cards_dont_crowd_out_one_that_isnt(live):
+    live.store.set("memory", True)
+    now = time.time()
+    for n in range(45):  # all due first, all on cards
+        card_about(live, commitment(live, f"The user will file form {n}.", due_at=now + (n + 1) * 3600,
+                                    words=f"form {n}"), now - 20 * 3600)
+    commitment(live, "The user will get their RAPIDS ID card.", words="RAPIDS ID card")
+    text = brief(live, now)
+    assert "RAPIDS" in text and "file form" not in text and pulse.brief.NOTHING_NEW_OPEN not in text
 
 
 def test_when_all_it_keeps_open_is_on_cards_the_brief_says_so(live):
