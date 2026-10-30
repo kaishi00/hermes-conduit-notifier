@@ -399,6 +399,7 @@ routes:
   - GET /self/update
   - POST /self/update
   - GET /sessions/desktop-views
+  - POST /sessions/history-page
   - POST /sessions/takeover
   - WS /speech-server/socket
   - GET /speech-server/status

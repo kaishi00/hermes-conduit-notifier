@@ -25,6 +25,8 @@ they run:
                           saved into its chat
     chats                 Chat takeover, where in Conduit a message was sent,
                           and predictions
+    history               Chat history pages without the rows Conduit already
+                          has
     pairing               End-to-end encrypted notifications and pairing from
                           Conduit
     notifications         Cron and reply notifications, the chat Conduit has on

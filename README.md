@@ -1416,6 +1416,33 @@ in Conduit, and its next send claims it again, or meets the usual refusal and
 is Conduit count; a chat Desktop or the web dashboard also has open in this
 process, and Bot Chats, keep their claim.
 
+## Chat history pages (plugin 0.121+)
+
+Conduit opens a chat with Hermes' page of its newest rows. On a slow link most
+of that wait is the page's bytes, even when the phone already holds every row
+of it. This route reads the same page through Hermes' own route function and
+sends each row the phone says it holds as its fingerprint alone, so only new
+or changed rows cross the link.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| POST | `/api/plugins/conduit_push/sessions/history-page?profile=` | Hermes' `GET /api/sessions/{id}/messages` answer, with `row_digests` and each held row as `{"conduit_known": fingerprint}` |
+
+- The body takes `session_id`, `limit`, `offset`, `order`, `include_compacted`
+  and `inline_images` (true or false) as Hermes' route takes them, and `known`: the
+  fingerprints the phone holds (at most 500).
+- A row's fingerprint is the first 24 hex characters of the SHA-256 of its
+  JSON as UTF-8, keys sorted, no spaces (Python's
+  `json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"))`).
+  Conduit never computes one: it keeps the fingerprints `row_digests` sent. An edit, an `/undo` or a compaction changes a row, so the
+  changed row comes in full: what Conduit puts together is Hermes' page row
+  for row.
+- Hermes' answers pass through: 404 for a chat it doesn't have, 400 for a bad
+  `order`. 501 when this Hermes has no session routes to read; Conduit then
+  reads Hermes' route itself, as it does with an older plugin. 504 when
+  Hermes takes over 30 seconds, 429 past 120 reads a minute per profile.
+  Every answer is `Cache-Control: no-store`.
+
 ## Chats opened on Desktop (plugin 0.12+)
 
 Conduit's Unread filter can count a chat as read when you have it open in

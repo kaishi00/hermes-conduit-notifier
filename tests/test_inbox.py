@@ -348,7 +348,9 @@ def test_the_settings_page_reads_its_own_events_sealed_a_page_at_a_time(store, p
     other.accept(store.register_key(other.key_request()))
     store.ingest(other.seal(_batch(_event("theirs"), batch_id="batch-0002")))
     sealed = store.list_sealed({"device_id": DEVICE, "kid": phone.kid, "request_id": "request-0001", "limit": 3})
-    assert "IGA" not in json.dumps(sealed)
+    # The event text has spaces, which the sealed base64 never does: a bare
+    # "IGA" can turn up in the ciphertext by chance.
+    assert "purchase at IGA" not in json.dumps(sealed)
     first = _opened(phone, sealed, "request-0001")
     assert [event["id"] for event in first["events"]] == ["evt-5", "evt-4", "evt-3"]
     assert first["events"][0]["at"] == "2026-10-14T05:00:00-04:00" and first["next"]
