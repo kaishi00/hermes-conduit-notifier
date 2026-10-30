@@ -64,6 +64,16 @@ def test_the_page_comes_from_the_profile_named(dashboard):
     assert status == 404, body
 
 
+
+def test_a_conduit_profile_read_comes_from_that_profile(dashboard):
+    # Conduit names a secondary profile this way, and the request stays in
+    # this process: the read must still be that profile's store.
+    _seed(dashboard.home / "profiles" / "second", "history-conduit-second", ["second only"])
+    status, body = dashboard.request("POST", "sessions/history-page", conduit_profile="second",
+                                     body={"session_id": "history-conduit-second", **PAGE})
+    assert status == 200, body
+    assert [row.get("content") for row in body["messages"]] == ["second only"]
+
 def test_a_bad_order_gets_hermes_400(dashboard):
     _seed(dashboard.home, "history-order", ["one"])
     status, body = dashboard.request("POST", "sessions/history-page",
