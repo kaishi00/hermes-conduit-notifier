@@ -591,7 +591,9 @@ def _quiet_at_screen(store: CallStore, home: Any, session_ids: list[str]) -> boo
     """Whether an alert call about this turn should hold back: the user keeps
     "quiet at a screen" on and is following the turn on one. Called from the
     turn's own hooks, which is where Hermes binds its source."""
-    return bool(store.settings()["quiet_at_screen"]) and _at_screen(home, session_ids)
+    settings = store.settings()
+    return (settings["enabled"] and settings["alerts"] and settings["quiet_at_screen"]
+            and _at_screen(home, session_ids))
 
 
 def _at_screen(home: Any, session_ids: list[str]) -> bool:

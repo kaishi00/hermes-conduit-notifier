@@ -1385,3 +1385,19 @@ def test_a_failed_turn_from_conduit_still_calls(home, fake, clock, monkeypatch):
     [event] = fake.sent
     assert event["call"]["kind"] == "failed"
     assert fake.enqueued == []
+
+
+def test_with_quiet_at_screen_off_a_failed_turn_at_a_screen_still_calls(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True, quiet_at_screen=False)
+    _from(monkeypatch, None, DESKTOP)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    [event] = fake.sent
+    assert event["call"]["kind"] == "failed"
+
+
+def test_with_alert_calls_off_a_screen_turn_never_looks_where_it_came_from(home, fake, monkeypatch):
+    _settings(home)
+    looked = []
+    monkeypatch.setattr(calls, "_at_screen", lambda *args: looked.append(args) or True)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    assert looked == [] and [event["type"] for event in fake.enqueued] == ["turn.failed"]
