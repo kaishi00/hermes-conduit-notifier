@@ -2000,9 +2000,11 @@ With `quiet_at_screen` on (the default, 0.122+), a turn the user is following
 on a screen doesn't ring after a minute: its message came from Hermes Desktop
 or the web dashboard (an app socket with a browser user agent), from a
 terminal (`cli`, or Hermes' TUI), or Conduit has its chat on screen on any
-device. Its approval or question rings only if it's still unanswered after 10
-minutes, so a user who walked away still hears about it, and a failed turn
-sends its usual "Turn failed" push instead of calling. A turn whose source
+device. Its question rings only if it's still unanswered after 10 minutes,
+and its approval 90 seconds before Hermes would deny it (`approvals.timeout`,
+so after 3.5 minutes by default, and never sooner than a minute), so a user
+who walked away still hears about it in time. A failed turn sends its usual
+"Turn failed" push instead of calling. A turn whose source
 can't be told calls as before.
 
 ## Hermes changes Conduit settings (plugin 0.19+)

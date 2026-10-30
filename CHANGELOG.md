@@ -18,9 +18,10 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - Alert calls no longer ring while you're working at a screen. When you're
   talking to Hermes in Hermes Desktop, the web dashboard, a terminal, or a
-  chat open in Conduit, an approval or question calls only if it's still
-  waiting after 10 minutes, and a failed request sends a notification
-  instead of calling. You can turn this off in Calls from Hermes.
+  chat open in Conduit, a question calls only if it's still waiting after 10
+  minutes, an approval shortly before Hermes would turn it down, and a
+  failed request sends a notification instead of calling. You can turn this
+  off in Calls from Hermes.
 
 ## 0.121.0 (2026-10-30)
 

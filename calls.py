@@ -64,7 +64,13 @@ SCREEN_SOURCES = frozenset({"desktop", "terminal"})
 TERMINAL_PLATFORMS = frozenset({"cli", "tui"})
 # How long an approval or question at a screen waits before it calls: long
 # enough to read and answer there, short enough to reach a user who left.
+# (add_alert takes no longer than a hold.)
 SCREEN_ALERT_DELAY_S = min(600, MAX_HOLD_S)
+# Hermes denies an approval nobody answers after approvals.timeout (300 s
+# when it can't be read): an approval's call at a screen rings this long
+# before then, so there's time to answer it.
+APPROVAL_TIMEOUT_S = 300.0
+APPROVAL_ANSWER_S = 90.0
 
 
 def _spawn(work: Callable[[], None]) -> bool:
@@ -350,7 +356,7 @@ def alert(session_id: str, kind: str, reason: str, *, profile: str, turn_session
     try:
         home = get_hermes_home()
         store = _store(home)
-        delay = SCREEN_ALERT_DELAY_S if _quiet_at_screen(store, home, ids) else ALERT_DELAY_S
+        delay = _screen_delay(kind) if _quiet_at_screen(store, home, ids) else ALERT_DELAY_S
         if store.add_alert(ids, kind, reason, delay_s=delay) is not None:
             _wait_for_holds(home, profile)
     except Exception:  # noqa: BLE001
@@ -585,6 +591,28 @@ def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | Non
         logger.warning("Conduit could not send a call request", exc_info=True)
         return False
     return True
+
+
+def _screen_delay(kind: str) -> int:
+    """How long an alert at a screen waits: SCREEN_ALERT_DELAY_S, but an
+    approval's rings while it can still be answered. Never less than an
+    alert anywhere else waits."""
+    if kind != "approval":
+        return SCREEN_ALERT_DELAY_S
+    return int(max(ALERT_DELAY_S, min(SCREEN_ALERT_DELAY_S, _approval_timeout() - APPROVAL_ANSWER_S)))
+
+
+def _approval_timeout() -> float:
+    """Hermes' own approval timeout (approvals.timeout), else its default."""
+    try:
+        try:
+            # Newer Hermes keeps it in tools.approval_context.
+            from tools.approval_context import _get_approval_timeout
+        except ImportError:
+            from tools.approval import _get_approval_timeout
+        return float(_get_approval_timeout())
+    except Exception:  # noqa: BLE001 — an older or different Hermes
+        return APPROVAL_TIMEOUT_S
 
 
 def _quiet_at_screen(store: CallStore, home: Any, session_ids: list[str]) -> bool:

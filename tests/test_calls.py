@@ -1311,6 +1311,7 @@ def _approval_due(home, monkeypatch, clock):
 def test_an_approval_at_a_screen_waits_ten_minutes(home, fake, clock, monkeypatch, platform, transport):
     _settings(home, alerts=True)
     _from(monkeypatch, platform, transport)
+    monkeypatch.setattr(calls, "_approval_timeout", lambda: 3600.0)
     assert _approval_due(home, monkeypatch, clock) == calls.SCREEN_ALERT_DELAY_S == 600
     assert [event["type"] for event in fake.enqueued] == ["approval.needed"], "its notification still goes"
 
@@ -1319,6 +1320,7 @@ def test_an_approval_in_a_chat_conduit_has_on_screen_waits_too(home, fake, clock
     _settings(home, alerts=True)
     _from(monkeypatch, None, CONDUIT)
     chat_on_screen.hold(home, "mac", ["st-1"], 60)
+    monkeypatch.setattr(calls, "_approval_timeout", lambda: 3600.0)
     assert _approval_due(home, monkeypatch, clock) == 600
 
 
@@ -1413,4 +1415,22 @@ def test_a_replayed_failure_hook_that_cannot_tell_the_screen_does_not_ring(home,
     plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
     assert fake.sent == []
     assert calls._store(home)._load()["history"] == []
+
+
+@pytest.mark.parametrize("timeout, due", [
+    (300.0, 210),  # Hermes' default: rings with 90 s left to answer
+    (120.0, 60),  # never sooner than anywhere else
+    (0.0, 60),
+])
+def test_an_approval_at_a_screen_rings_before_hermes_denies_it(home, fake, clock, monkeypatch, timeout, due):
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, DESKTOP)
+    monkeypatch.setattr(calls, "_approval_timeout", lambda: timeout)
+    assert _approval_due(home, monkeypatch, clock) == due
+
+
+def test_hermes_approval_timeout_falls_back_to_its_default(monkeypatch):
+    monkeypatch.setitem(sys.modules, "tools.approval_context", None)
+    monkeypatch.setitem(sys.modules, "tools.approval", None)
+    assert calls._approval_timeout() == 300.0
 
