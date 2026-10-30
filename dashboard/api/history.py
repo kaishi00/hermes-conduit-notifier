@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sys
@@ -34,6 +35,8 @@ HISTORY_MAX_KNOWN = 500
 HISTORY_DIGEST_CHARS = 24
 # The key a held row is sent under, in place of the row.
 HISTORY_KNOWN_KEY = "conduit_known"
+# As long as Conduit waits for the page.
+HISTORY_READ_TIMEOUT_S = 30.0
 
 
 def row_digest(row: Any) -> str:
@@ -94,14 +97,28 @@ async def post_history_page(request: Request, response: Response, profile: Optio
         raise HTTPException(status_code=400, detail="limit must be a whole number")
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise HTTPException(status_code=400, detail="offset must be a whole number")
+    flags = {}
+    for name, default in (("include_compacted", False), ("inline_images", True)):
+        value = body.get(name, default)
+        if not isinstance(value, bool):
+            raise HTTPException(status_code=400, detail=f"{name} must be true or false")
+        flags[name] = value
     routes = _session_routes()
     if routes is None:
         raise HTTPException(status_code=501, detail="Reading history pages needs a newer Hermes on this host.")
-    # Hermes' own route answers the 400s and 404s Conduit already reads.
-    page = await routes.get_session_messages(
-        session_id, profile=profile, limit=limit, offset=offset, order=body.get("order"),
-        include_compacted=bool(body.get("include_compacted", False)),
-        inline_images=bool(body.get("inline_images", True)))
+    # Hermes' own route answers the 400s and 404s Conduit already reads, and
+    # caps the page at its own limit.
+    try:
+        page = await asyncio.wait_for(routes.get_session_messages(
+            session_id, profile=profile, limit=limit, offset=offset, order=body.get("order"), **flags),
+            HISTORY_READ_TIMEOUT_S)
+    except HTTPException:
+        raise
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Reading the chat took too long",
+                            headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        raise core._unexpected("history-page", exc, feature="Chat history")
     if not isinstance(page, dict):
         raise core._unexpected("history-page", TypeError("not a JSON object"), feature="Chat history")
     return history_page(page, _known_digests(body))

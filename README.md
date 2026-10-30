@@ -1429,7 +1429,7 @@ or changed rows cross the link.
 | POST | `/api/plugins/conduit_push/sessions/history-page?profile=` | Hermes' `GET /api/sessions/{id}/messages` answer, with `row_digests` and each held row as `{"conduit_known": fingerprint}` |
 
 - The body takes `session_id`, `limit`, `offset`, `order`, `include_compacted`
-  and `inline_images` as Hermes' route takes them, and `known`: the
+  and `inline_images` (true or false) as Hermes' route takes them, and `known`: the
   fingerprints the phone holds (at most 500).
 - A row's fingerprint is the first 24 hex characters of the SHA-256 of its
   JSON, keys sorted. An edit, an `/undo` or a compaction changes a row, so the

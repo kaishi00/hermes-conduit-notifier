@@ -102,6 +102,8 @@ def test_a_bad_request_is_refused(hermes):
     assert _post({"limit": 5}).status_code == 400
     assert _post({"session_id": "s1", "limit": -1}).status_code == 400
     assert _post({"session_id": "s1", "offset": "x"}).status_code == 400
+    assert _post({"session_id": "s1", "inline_images": "false"}).status_code == 400
+    assert _post({"session_id": "s1", "include_compacted": 1}).status_code == 400
     assert hermes == []
 
 
@@ -109,3 +111,20 @@ def test_without_hermes_route_the_route_says_so(monkeypatch):
     monkeypatch.setattr(api.history, "_session_routes", lambda: None)
     response = _post({"session_id": "s1"})
     assert response.status_code == 501
+
+
+def test_conduit_profile_names_the_profile_read(hermes):
+    response = _post({"session_id": "s1", "limit": 120}, "?conduit_profile=work")
+    assert response.status_code == 200
+    assert hermes[0]["profile"] == "work"
+
+
+def test_a_hermes_failure_is_named(monkeypatch, hermes):
+    async def broken(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    sys.modules["hermes_cli.web_routers.sessions"].get_session_messages = broken
+    response = _post({"session_id": "s1"})
+    assert response.status_code == 500
+    assert response.headers["cache-control"] == "no-store"
+    assert "Chat history history-page failed" in response.json()["detail"]
