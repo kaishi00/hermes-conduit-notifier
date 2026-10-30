@@ -43,6 +43,7 @@ def test_calls_start_off_with_the_agreed_defaults(tmp_path):
         "when_asked": True,
         "decides": False,
         "alerts": False,
+        "quiet_at_screen": True,
         "min_gap_s": 120,
         "per_hour": 6,
         "per_day": 20,
