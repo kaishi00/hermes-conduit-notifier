@@ -310,7 +310,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
         reminder = (listed_reminders.get(str(entry.get("reminder") or "").strip().lower())
                     or (_reminder_named(listed_reminders, text, entry.get("why")) if source == "reminders" else None))
         if reminder is not None and str(reminder.get("id") or ""):
-            ref, source = f"{REMINDER}{_clip(str(reminder['id']), 200)}", "reminders"
+            ref, source = reminder_ref(reminder), "reminders"
             on = _phone_due(reminder.get("due"), zone)
     if not ref and kind != report.NEXT:
         if follows is not None:
@@ -376,6 +376,11 @@ def _event_named(events: Sequence[dict], due: Optional[float], zone: Optional[tz
 
 def _words(text: Any) -> list[str]:
     return re.findall(r"\w+(?:'\w+)?", str(text or "").casefold().replace("\u2019", "'"))
+
+
+def reminder_ref(reminder: dict) -> str:
+    """A phone reminder's REMINDER ref."""
+    return f"{REMINDER}{_clip(str(reminder['id']), 200)}"
 
 
 def event_ref(event: dict) -> str:
@@ -571,6 +576,23 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
             continue  # its day: once more
         out.append(row)
     return out
+
+
+def on_cards(pulse_store: store.PulseStore, now: float, zone: Optional[tzinfo], *, items: Sequence[dict] = (),
+             reminders: Sequence[dict] = (), events: Sequence[dict] = ()) -> set:
+    """What the morning brief leaves out, since a card says it (Eric,
+    2026-10-30: the RAPIDS appointment left open the day before came back in
+    the brief): of the remembered ``items`` and the phone's ``reminders`` and
+    calendar ``events``, those whose card is still open (still_open: on the
+    day it's due one more may come, once, as in a report) and the reminders
+    and entries put away for good. Item ids, and REMINDER and EVENT refs."""
+    rows = ([{"origin": MEMORY, "item_id": item["id"], "due_at": item.get("due_at")} for item in items]
+            + [{"origin": MODEL, "item_id": None, "ref": reminder_ref(reminder),
+                "due_at": _phone_due(reminder.get("due"), zone)} for reminder in reminders if reminder.get("id")]
+            + [{"origin": MODEL, "item_id": None, "ref": event_ref(event),
+                "due_at": _due(str(event.get("start") or "")[:10], zone)} for event in events if event.get("id")])
+    said = {row["item_id"] if row["origin"] == MEMORY else row["ref"] for row in still_open(pulse_store, rows, now)}
+    return said | reminders_raised(pulse_store, [str(row.get("ref") or "") for row in rows], now)[1]
 
 
 def _due_point(pulse_store: store.PulseStore, row: dict) -> Optional[float]:
