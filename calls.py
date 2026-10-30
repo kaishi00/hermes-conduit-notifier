@@ -17,7 +17,10 @@ sweeps for such calls too, so a gateway restart doesn't lose one.
 Hermes asks for a call itself through the ``conduit_call_user`` tool (a watch
 on the asking session, see ``tool_watch``). With alert calls on, an approval
 or question left unanswered calls through the same waiter (``alert``), and a
-failed turn calls in place of its push (``failed_turn``).
+failed turn calls in place of its push (``failed_turn``). An alert from a
+turn the user is following on a screen (Hermes Desktop, the dashboard, a
+terminal, or its chat open in Conduit) waits longer, and a failed one there
+sends its push: they're likely reading it already (notifier #474).
 
 A call the user declined or didn't answer comes back from Conduit (the
 dashboard's outcome route), and the next turn of its chat tells Hermes so
@@ -35,8 +38,8 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import client, location_profiles, session_titles
-from .calls_store import CallStore
+from . import chat_on_screen, client, location_profiles, reply_sources, session_titles
+from .calls_store import ALERT_DELAY_S, MAX_HOLD_S, CallStore
 from .location_store import LocationStore
 from .events import push_event
 
@@ -54,6 +57,23 @@ DELIVERY_WAIT_S = 3.0
 EXIT_WAIT_S = 10.0
 # The relay's errors for an event it took but Apple didn't (relay/src/server.mjs).
 APNS_FAILURES = frozenset({"apns_rejected", "apns_unreachable"})
+# Where a turn's message came from (reply_sources.turn_source) when the user
+# sent it from a screen they're sitting at.
+SCREEN_SOURCES = frozenset({"desktop", "terminal"})
+# Hermes' own terminal app, whose turns have no app socket to tell by.
+TERMINAL_PLATFORMS = frozenset({"cli", "tui"})
+# How long an approval or question at a screen waits before it calls: long
+# enough to read and answer there, short enough to reach a user who left.
+# (add_alert takes no longer than a hold.)
+SCREEN_ALERT_DELAY_S = min(600, MAX_HOLD_S)
+# Hermes denies an approval nobody answers after approvals.timeout (300 s
+# when it can't be read): an approval's call at a screen rings this long
+# before then, so there's time to answer it.
+APPROVAL_TIMEOUT_S = 300.0
+# The same for a question (clarify), whose timeout is an hour by default.
+CLARIFY_TIMEOUT_S = 3600.0
+# How long before Hermes gives up the call rings.
+ANSWER_MARGIN_S = 90.0
 
 
 def _spawn(work: Callable[[], None]) -> bool:
@@ -338,7 +358,9 @@ def alert(session_id: str, kind: str, reason: str, *, profile: str, turn_session
         return
     try:
         home = get_hermes_home()
-        if _store(home).add_alert(ids, kind, reason) is not None:
+        store = _store(home)
+        delay = _screen_delay(kind) if _quiet_at_screen(store, home, ids) else ALERT_DELAY_S
+        if store.add_alert(ids, kind, reason, delay_s=delay) is not None:
             _wait_for_holds(home, profile)
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not set up an alert call", exc_info=True)
@@ -550,8 +572,13 @@ def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | Non
     if not session_id:
         return False
     try:
+        home = get_hermes_home()
+        store = _store(home)
         seed = "" if turn_id is None else str(turn_id)
-        result = _store(get_hermes_home()).alert_now(session_id, "failed", "", seed=seed)
+        # Seeded like a call, so a replay that can't tell where the turn came
+        # from doesn't ring beside the push this one sends.
+        result = store.alert_now(session_id, "failed", "", seed=seed,
+                                 at_screen=_quiet_at_screen(store, home, [session_id]))
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not check alert calls for a failed turn", exc_info=True)
         return False
@@ -567,6 +594,69 @@ def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | Non
         logger.warning("Conduit could not send a call request", exc_info=True)
         return False
     return True
+
+
+def _screen_delay(kind: str) -> int:
+    """How long an alert at a screen waits: SCREEN_ALERT_DELAY_S, but rung
+    while Hermes still waits for the answer. Never less than an alert
+    anywhere else waits."""
+    timeout = _approval_timeout() if kind == "approval" else _clarify_timeout()
+    if timeout <= 0 and kind != "approval":  # a question that never times out
+        return SCREEN_ALERT_DELAY_S
+    return int(max(ALERT_DELAY_S, min(SCREEN_ALERT_DELAY_S, timeout - ANSWER_MARGIN_S)))
+
+
+def _approval_timeout() -> float:
+    """Hermes' own approval timeout (approvals.timeout), else its default."""
+    try:
+        try:
+            # Newer Hermes keeps it in tools.approval_context.
+            from tools.approval_context import _get_approval_timeout
+        except ImportError:
+            from tools.approval import _get_approval_timeout
+        return float(_get_approval_timeout())
+    except Exception:  # noqa: BLE001 — an older or different Hermes
+        return APPROVAL_TIMEOUT_S
+
+
+def _clarify_timeout() -> float:
+    """Hermes' clarify timeout (0: none), else its default."""
+    try:
+        from tools.clarify_gateway import get_clarify_timeout
+        return float(get_clarify_timeout())
+    except Exception:  # noqa: BLE001 — an older or different Hermes
+        return CLARIFY_TIMEOUT_S
+
+
+def _quiet_at_screen(store: CallStore, home: Any, session_ids: list[str]) -> bool:
+    """Whether an alert call about this turn should hold back: the user keeps
+    "quiet at a screen" on and is following the turn on one. Called from the
+    turn's own hooks, which is where Hermes binds its source."""
+    settings = store.settings()
+    return (settings["enabled"] and settings["alerts"] and settings["quiet_at_screen"]
+            and _at_screen(home, session_ids))
+
+
+def _at_screen(home: Any, session_ids: list[str]) -> bool:
+    """Whether this turn's message came from Hermes Desktop, the dashboard or
+    a terminal, or Conduit has its chat on screen. Unknown counts as not, so
+    a fault here can only let a call through."""
+    try:
+        platform = reply_sources.current_platform()
+        transport = reply_sources.current_transport()
+        if reply_sources.turn_source(platform, transport) in SCREEN_SOURCES:
+            return True
+        # Hermes' terminal app: no app socket, and not a messaging platform.
+        if (not reply_sources._is_app_socket(transport) and isinstance(platform, str)
+                and platform.strip().lower() in TERMINAL_PLATFORMS):
+            return True
+    except Exception:  # noqa: BLE001
+        logger.debug("Conduit could not tell where this turn came from", exc_info=True)
+    try:
+        return any(chat_on_screen.on_screen(home, value) for value in session_ids)
+    except Exception:  # noqa: BLE001
+        logger.debug("Conduit's on-screen chats unreadable", exc_info=True)
+        return False
 
 
 def outcome_note(session_id: str) -> str | None:
