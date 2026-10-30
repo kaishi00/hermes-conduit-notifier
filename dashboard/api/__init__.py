@@ -26,6 +26,7 @@ MODULES = (
     "local_live_agent",
     "voice_calls",
     "chats",
+    "history",
     "pairing",
     "notifications",
     "hermes_calls",

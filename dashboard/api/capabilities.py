@@ -46,6 +46,9 @@ ROUTE_CAPABILITIES = (
     "local-live-read-back",
     "desktop-views",
     "turn-surface",
+    # POST /sessions/history-page: Hermes' page of a chat's rows, the ones
+    # Conduit holds sent as their fingerprints.
+    "history-page",
     "hermes-calls",
     "hermes-call-presence",
     "hermes-call-outcomes",

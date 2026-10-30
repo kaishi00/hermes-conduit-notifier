@@ -27,7 +27,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, Collection, Optional, Sequence
+from typing import Any, Callable, Collection, Optional, Sequence
 
 from . import pulse_dates
 from . import pulse_evidence as evidence
@@ -284,9 +284,11 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
 
 def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]] = None,
                   events: Optional[dict[str, dict]] = None,
-                  upcoming: Optional[list[dict]] = None) -> tuple[str, Optional[str]]:
+                  upcoming: Optional[list[dict]] = None,
+                  leave_out: Optional[Callable[[str, dict], bool]] = None) -> tuple[str, Optional[str]]:
     """Calendar and open reminders from the phone sync, and the phone's time
-    zone. Empty when Conduit shares neither. With ``reminders``, each open
+    zone. Empty when Conduit shares neither. ``leave_out`` ("event" or
+    "reminder", and the entry) drops one from the list. With ``reminders``, each open
     reminder gets a key ("r1"), and ``reminders`` maps it to the reminder;
     with ``events``, each calendar entry listed gets one ("v1") the same
     way. ``upcoming`` gains every entry in the next EVENT_MATCH_DAYS, listed
@@ -315,6 +317,8 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                 for e in found:
                     if e.get("status") == "canceled" or e.get("my_status") == "declined":
                         continue
+                    if leave_out is not None and leave_out("event", e):
+                        continue
                     key = ""
                     if events is not None and e.get("id"):
                         key = f"v{len(events) + 1} "
@@ -330,6 +334,8 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                 found, more = phone.reminders(db, device["id"], limit=MAX_REMINDERS)
                 lines = []
                 for number, r in enumerate(found, 1):
+                    if leave_out is not None and leave_out("reminder", r):
+                        continue
                     key = ""
                     if reminders is not None and r.get("id"):
                         key = f"r{number} "

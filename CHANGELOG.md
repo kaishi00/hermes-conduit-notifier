@@ -13,6 +13,26 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.121.1 (2026-10-30)
+
+### Fixes
+- The morning brief no longer repeats what an open card on the Pulse
+  screen already says (a promise, a reminder or a calendar entry). On the
+  day it's due it may come in the brief once.
+
+## 0.121.0 (2026-10-30)
+
+### New and improved
+- Opening a chat on a slow connection is quicker: Conduit downloads only the
+  messages it doesn't already have on the phone.
+
+## 0.120.4 (2026-10-30)
+
+### Fixes
+- A notification for a reply with a card made for Hermes Desktop (such as
+  hermes-rich-ui's) showed the raw `::richui{...}` line. It now says a card
+  is there, and a page the agent previews shows as its file's name.
+
 ## 0.120.3 (2026-10-30)
 
 ### Fixes
