@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.121.0 (2026-10-30)
+
+### New and improved
+- Opening a chat on a slow connection is quicker: Conduit downloads only the
+  messages it doesn't already have on the phone.
+
 ## 0.120.4 (2026-10-30)
 
 ### Fixes
