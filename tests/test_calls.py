@@ -1360,6 +1360,7 @@ def test_an_unanswered_question_at_a_screen_rings_after_ten_minutes(home, fake, 
     loop = sys.modules["conduit_push.clarify_loop"]
     _settings(home, alerts=True)
     _from(monkeypatch, None, DESKTOP)
+    monkeypatch.setattr(calls, "_clarify_timeout", lambda: 3600.0)
     monkeypatch.setattr(calls, "_sleep", sleep)
     monkeypatch.setattr(loop.client, "enqueue", lambda event: True)
     # Nobody answers while the question waits: its waiter runs out.
@@ -1433,4 +1434,25 @@ def test_hermes_approval_timeout_falls_back_to_its_default(monkeypatch):
     monkeypatch.setitem(sys.modules, "tools.approval_context", None)
     monkeypatch.setitem(sys.modules, "tools.approval", None)
     assert calls._approval_timeout() == 300.0
+
+
+@pytest.mark.parametrize("timeout, due", [
+    (3600.0, 600),
+    (0.0, 600),  # no timeout
+    (300.0, 210),  # rings with 90 s left to answer
+    (100.0, 60),
+])
+def test_a_question_at_a_screen_rings_before_hermes_gives_up_on_it(home, fake, clock, monkeypatch, paired, timeout, due):
+    loop = sys.modules["conduit_push.clarify_loop"]
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, DESKTOP)
+    monkeypatch.setattr(calls, "_clarify_timeout", lambda: timeout)
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: None)
+    monkeypatch.setattr(loop.client, "enqueue", lambda event: True)
+    waits = []
+    monkeypatch.setattr(loop, "_first_answer_wins", lambda **kwargs: (
+        waits.append(calls._store(home).next_due() - clock[0]) or "answered"))
+    loop.middleware(session_id="st-1", tool_name="clarify", args={"question": "Which branch?", "choices": ["main", "dev"]},
+                    next_call=lambda args: "native")
+    assert waits == [due]
 

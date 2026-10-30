@@ -70,7 +70,10 @@ SCREEN_ALERT_DELAY_S = min(600, MAX_HOLD_S)
 # when it can't be read): an approval's call at a screen rings this long
 # before then, so there's time to answer it.
 APPROVAL_TIMEOUT_S = 300.0
-APPROVAL_ANSWER_S = 90.0
+# The same for a question (clarify), whose timeout is an hour by default.
+CLARIFY_TIMEOUT_S = 3600.0
+# How long before Hermes gives up the call rings.
+ANSWER_MARGIN_S = 90.0
 
 
 def _spawn(work: Callable[[], None]) -> bool:
@@ -594,12 +597,13 @@ def failed_turn(session_id: str, *, profile: str, fallback: dict[str, Any] | Non
 
 
 def _screen_delay(kind: str) -> int:
-    """How long an alert at a screen waits: SCREEN_ALERT_DELAY_S, but an
-    approval's rings while it can still be answered. Never less than an
-    alert anywhere else waits."""
-    if kind != "approval":
+    """How long an alert at a screen waits: SCREEN_ALERT_DELAY_S, but rung
+    while Hermes still waits for the answer. Never less than an alert
+    anywhere else waits."""
+    timeout = _approval_timeout() if kind == "approval" else _clarify_timeout()
+    if timeout <= 0 and kind != "approval":  # a question that never times out
         return SCREEN_ALERT_DELAY_S
-    return int(max(ALERT_DELAY_S, min(SCREEN_ALERT_DELAY_S, _approval_timeout() - APPROVAL_ANSWER_S)))
+    return int(max(ALERT_DELAY_S, min(SCREEN_ALERT_DELAY_S, timeout - ANSWER_MARGIN_S)))
 
 
 def _approval_timeout() -> float:
@@ -613,6 +617,15 @@ def _approval_timeout() -> float:
         return float(_get_approval_timeout())
     except Exception:  # noqa: BLE001 — an older or different Hermes
         return APPROVAL_TIMEOUT_S
+
+
+def _clarify_timeout() -> float:
+    """Hermes' clarify timeout (0: none), else its default."""
+    try:
+        from tools.clarify_gateway import get_clarify_timeout
+        return float(get_clarify_timeout())
+    except Exception:  # noqa: BLE001 — an older or different Hermes
+        return CLARIFY_TIMEOUT_S
 
 
 def _quiet_at_screen(store: CallStore, home: Any, session_ids: list[str]) -> bool:
