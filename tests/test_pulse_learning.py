@@ -493,7 +493,7 @@ def test_the_brief_comes_every_morning_with_nothing_held_but_not_before_its_time
 def test_a_brief_with_nothing_kept_still_reads_the_calendar(live, monkeypatch):
     live.store.set("memory", True)
     monkeypatch.setattr(pulse.report, "phone_context",
-                        lambda home, now: ("## Calendar, the next 2 days (phone synced 5 min ago)\n- Dentist (09:30)",
+                        lambda home, now, **_: ("## Calendar, the next 2 days (phone synced 5 min ago)\n- Dentist (09:30)",
                                            None))
     brief_due_now(live)
     pulse.tick()
@@ -565,7 +565,7 @@ def test_a_busy_brief_keeps_the_calendar_and_lets_the_held_news_go(live, monkeyp
     phone = ("## Calendar, the next 2 days (phone synced 5 min ago)\n"
              + "\n".join(f"- Meeting {n} {'m' * 95} (2026-10-25 {n % 24:02d}:00)" for n in range(25))
              + "\n\n## Open reminders\n" + "\n".join(f"- Reminder {n} {'r' * 95} (due 2026-10-26)" for n in range(25)))
-    monkeypatch.setattr(pulse.report, "phone_context", lambda home, now: (phone, None))
+    monkeypatch.setattr(pulse.report, "phone_context", lambda home, now, **_: (phone, None))
     monkeypatch.setattr(pulse.report, "remembered_lines",
                         lambda items, zone: (pulse.report.REMEMBERED_TITLE + "\n" + "o" * 3_400, []))
     monkeypatch.setattr(pulse.report, "inbox_context", lambda home, since, title="": title + "\n" + "i" * 2_000)

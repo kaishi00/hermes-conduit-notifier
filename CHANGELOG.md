@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.122.1 (2026-10-30)
+
+### Fixes
+- The morning brief no longer repeats what an open card on the Pulse
+  screen already says (a promise, a reminder or a calendar entry). On the
+  day it's due it may come in the brief once.
+
 ## 0.122.0 (2026-10-30)
 
 ### New and improved

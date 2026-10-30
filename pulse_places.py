@@ -346,15 +346,15 @@ def today_events(home: Path, zone: tzinfo, now: float) -> list[dict]:
 RELATED_TITLE = "## Related to today's events (what Pulse remembers that shares a name or a rare word with one)"
 
 
-def today_related(pulse_store: Any, home: Path, zone: tzinfo, now: float) -> str:
+def today_related(pulse_store: Any, home: Path, zone: tzinfo, now: float, *, leave_out: Collection[int] = ()) -> str:
     """The brief's "Related to today's events": for each timed event left
     today, soonest first, what Pulse remembers that relates to it
-    (``Memories.related``), each item once, at most MAX_RELATED in all; ""
-    when nothing does."""
+    (``Memories.related``), each item once and none of ``leave_out``, at
+    most MAX_RELATED in all; "" when nothing does."""
     events = today_events(home, zone, now)
     if not events:
         return ""
-    found, lines, taken = memories(pulse_store, now), [], set()
+    found, lines, taken = memories(pulse_store, now), [], set(leave_out)
     for event in events:
         when = _event_when(event, zone)
         for item in found.related(*event_keys(event), exclude=taken, limit=MAX_RELATED - len(lines)):

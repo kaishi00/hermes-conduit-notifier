@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import pulse_candidates as candidates
 from . import pulse_places as places
 from . import pulse_report as report
 from . import pulse_store as store
@@ -40,6 +41,8 @@ HELD_TITLE = "## Held for this morning"
 # phone's calendar and reminders say for themselves whether they're empty.
 NOTHING_HELD = "Pulse holds no news for this brief"
 NOTHING_OPEN = "remembers nothing still open"
+# When what it keeps open is all on cards already (on_cards).
+NOTHING_NEW_OPEN = "remembers nothing still open that isn't on a card of its own already"
 NOTHING_LOGGED = "the phone's automations logged nothing since {start}"
 MEMORY_OFF = "Pulse memory is off, so it doesn't track open promises or to-dos."
 CALENDAR_COUNTS = "The calendar and reminders below, if any, still count."
@@ -94,22 +97,36 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
     its own cards anyway."""
     held = HELD_TITLE + "\n" + "\n".join(line(card) for card in cards) if cards else ""
     listed, later, related = "", "", ""
+    # What a card still says stays out (candidates.on_cards); on its day one more may come.
+    left_out: list[int] = []
     if pulse_store.get("memory"):
-        listed, shown = report.remembered_lines(report.remembered_items(pulse_store, now)[0], zone)
+        # Every open item, so none past the report's first ones slips into "Related to today's events".
+        open_items = [item for item, _ in places.memories(pulse_store, now).items]
+        left_out = sorted(candidates.on_cards(pulse_store, now, zone, items=open_items))
+        listed, shown = report.remembered_lines(report.remembered_items(pulse_store, now, left_out)[0], zone)
         later = report.later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""
-        related = places.today_related(pulse_store, home, zone, now)
+        related = places.today_related(pulse_store, home, zone, now, leave_out=left_out)
+
+    def on_phone_cards(what: str, entries: list[dict]) -> set[int]:
+        refs = candidates.on_cards(pulse_store, now, zone, **{"reminders" if what == "reminder" else "events": entries})
+        ref = candidates.reminder_ref if what == "reminder" else candidates.event_ref
+        return {n for n, entry in enumerate(entries) if entry.get("id") and ref(entry) in refs}
+
+    phone = report.phone_context(home, now, leave_out=on_phone_cards)[0]
     since = report.window_start(pulse_store, now)
     start = datetime.fromtimestamp(since, zone).strftime("%a %d %b %H:%M")
     logged = report.inbox_context(home, since, title=LOGGED_TITLE.format(start=start))
-    nothing = "" if held or listed or logged else _nothing(bool(pulse_store.get("memory")), _logs(home), start)
+    nothing = ("" if held or listed or logged
+               else _nothing(bool(pulse_store.get("memory")), _logs(home), start, on_cards=bool(left_out)))
     sections = [f"## Now\n{datetime.fromtimestamp(now, zone).strftime('%A %d %B %Y, %H:%M')}", nothing,
-                report.phone_context(home, now)[0], listed, later, logged, related, held]
+                phone, listed, later, logged, related, held]
     return "\n\n".join(section for section in sections if section)
 
 
-def _nothing(memory: bool, logs: bool, start: str) -> str:
-    """What Pulse found empty, saying only what it read."""
-    said = [NOTHING_HELD] + ([NOTHING_OPEN] if memory else []) + ([NOTHING_LOGGED.format(start=start)] if logs else [])
+def _nothing(memory: bool, logs: bool, start: str, *, on_cards: bool = False) -> str:
+    """What Pulse found empty, saying only what it read (``on_cards``: what
+    it keeps open is all on cards already)."""
+    said = [NOTHING_HELD] + ([NOTHING_NEW_OPEN if on_cards else NOTHING_OPEN] if memory else []) + ([NOTHING_LOGGED.format(start=start)] if logs else [])
     sentence = said[0] if len(said) == 1 else ", ".join(said[:-1]) + (", and " if len(said) > 2 else " and ") + said[-1]
     return " ".join([sentence + "."] + ([] if memory else [MEMORY_OFF]) + [CALENDAR_COUNTS])
 

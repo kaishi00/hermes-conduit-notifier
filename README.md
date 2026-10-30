@@ -2934,6 +2934,11 @@ for as long as it's open. From plugin 0.120.2:
   remembered item comes back as before.
 - **Put away for good or rated not useful**, a reminder or calendar entry
   stays away while it's open.
+- **The morning brief** (0.122.1+) follows the same rules: it leaves out
+  of what it reads the remembered items, reminders and calendar entries
+  an open card already says, and those put away for good, so it doesn't
+  sum up again what's on the Pulse screen. On the day one is due it may
+  come in the brief once.
 
 How Pulse knows what a card is about:
 
