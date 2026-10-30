@@ -74,6 +74,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "decides": False,
     # Call when Hermes waits on the user's approval or answer, or a turn fails.
     "alerts": False,
+    # An alert about a turn the user follows on a screen (Hermes Desktop, the
+    # dashboard, a terminal, or its chat open in Conduit) waits longer, and a
+    # failed one there sends its notification (calls.py, notifier #474).
+    "quiet_at_screen": True,
     "min_gap_s": 120,
     "per_hour": 6,
     "per_day": 20,
@@ -88,7 +92,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "avoid_places": [],
     "avoid_unknown_place": False,
 }
-BOOL_SETTINGS = ("enabled", "when_asked", "decides", "alerts", "avoid_unknown_place")
+BOOL_SETTINGS = ("enabled", "when_asked", "decides", "alerts", "quiet_at_screen", "avoid_unknown_place")
 MAX_AVOID_PLACES = 20
 _PLACE_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}\Z")
 MAX_RULES_CHARS = 500
