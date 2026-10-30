@@ -764,7 +764,12 @@ def test_no_home_chat_means_no_probe(live, db):
     pulse.tick()
     assert live.sent() == []
     chat, problem = pulse.home_chat(live.store, pulse.get_hermes_home())
-    assert chat is None and "titled" in problem
+    # The app hides the chat, so the problem points at Settings > Pulse.
+    assert chat is None and problem == 'Pulse has no chat titled "Pulse" yet; set it up in Settings > Pulse'
+    db.session(pinned=0)
+    chat, problem = pulse.home_chat(live.store, pulse.get_hermes_home())
+    assert chat is not None and not chat.pinned
+    assert problem == 'Pulse\'s chat "Pulse" isn\'t pinned, so Hermes could prune it; pin it from Settings > Pulse'
 
 
 def test_a_pulse_turn_gets_its_note_and_no_tools(live, db):
