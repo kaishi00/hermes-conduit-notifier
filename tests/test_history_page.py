@@ -96,10 +96,13 @@ def test_a_fingerprint_ignores_key_order():
 def test_hermes_refusals_pass_through(hermes):
     response = _post({"session_id": "missing"})
     assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_a_bad_request_is_refused(hermes):
-    assert _post({"limit": 5}).status_code == 400
+    refused = _post({"limit": 5})
+    assert refused.status_code == 400
+    assert refused.headers["cache-control"] == "no-store"
     assert _post({"session_id": "s1", "limit": -1}).status_code == 400
     assert _post({"session_id": "s1", "offset": "x"}).status_code == 400
     assert _post({"session_id": "s1", "inline_images": "false"}).status_code == 400

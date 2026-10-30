@@ -37,6 +37,11 @@ HISTORY_DIGEST_CHARS = 24
 HISTORY_KNOWN_KEY = "conduit_known"
 # As long as Conduit waits for the page.
 HISTORY_READ_TIMEOUT_S = 30.0
+NO_STORE = {"Cache-Control": "no-store"}
+
+# Each open of a chat reads one page; switching between a few chats on a phone
+# stays well under this.
+_history_limiter = core._MintLimiter(120, 60.0, message="Too many chat history reads; try again shortly")
 
 
 def row_digest(row: Any) -> str:
@@ -84,7 +89,19 @@ def history_page(page: Dict[str, Any], known: set) -> Dict[str, Any]:
 @router.post("/sessions/history-page")
 async def post_history_page(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    profile = await core._conduit_route_profile_no_store(request, profile)
+    try:
+        return await _history_page(request, profile)
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        # Hermes' own 400s and 404s too, kept out of caches like the page.
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+
+
+async def _history_page(request: Request, profile: Optional[str]) -> Dict[str, Any]:
+    profile = await core._conduit_route_profile(request, profile)
+    _history_limiter.acquire(core._limiter_key(profile))
     body = await core._read_json_body(request, HISTORY_MAX_BODY_BYTES)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object")
@@ -115,8 +132,7 @@ async def post_history_page(request: Request, response: Response, profile: Optio
     except HTTPException:
         raise
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Reading the chat took too long",
-                            headers={"Cache-Control": "no-store"})
+        raise HTTPException(status_code=504, detail="Reading the chat took too long")
     except Exception as exc:
         raise core._unexpected("history-page", exc, feature="Chat history")
     if not isinstance(page, dict):

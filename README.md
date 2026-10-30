@@ -1432,12 +1432,16 @@ or changed rows cross the link.
   and `inline_images` (true or false) as Hermes' route takes them, and `known`: the
   fingerprints the phone holds (at most 500).
 - A row's fingerprint is the first 24 hex characters of the SHA-256 of its
-  JSON, keys sorted. An edit, an `/undo` or a compaction changes a row, so the
+  JSON as UTF-8, keys sorted, no spaces (Python's
+  `json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"))`).
+  Conduit never computes one: it keeps the fingerprints `row_digests` sent. An edit, an `/undo` or a compaction changes a row, so the
   changed row comes in full: what Conduit puts together is Hermes' page row
   for row.
 - Hermes' answers pass through: 404 for a chat it doesn't have, 400 for a bad
   `order`. 501 when this Hermes has no session routes to read; Conduit then
-  reads Hermes' route itself, as it does with an older plugin.
+  reads Hermes' route itself, as it does with an older plugin. 504 when
+  Hermes takes over 30 seconds, 429 past 120 reads a minute per profile.
+  Every answer is `Cache-Control: no-store`.
 
 ## Chats opened on Desktop (plugin 0.12+)
 
