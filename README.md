@@ -1810,6 +1810,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 | `when_asked` (call when I explicitly ask) | on | |
 | `decides` (Hermes decides when to call, 0.14+) | off | |
 | `alerts` (approval, question and failure calls, 0.14+) | off | |
+| `quiet_at_screen` (alert calls wait while I'm at a screen, 0.122+) | on | |
 | `min_gap_s` (time between calls) | 120 s | 30–3600 s |
 | `per_hour` | 6 | 1–30 |
 | `per_day` | 20 | 1–60 |
@@ -1994,6 +1995,18 @@ With `alerts` on, Hermes also calls when it waits on you:
 
 Alert calls count against the same limits. In the call, Conduit can read the
 approval out and answer it by voice.
+
+With `quiet_at_screen` on (the default, 0.122+), a turn the user is following
+on a screen doesn't ring after a minute: its message came from Hermes Desktop
+or the web dashboard (an app socket with a browser user agent), from a
+terminal (`cli`, or Hermes' TUI), or Conduit has its chat on screen on any
+device. Its question or approval rings only if it's still unanswered after
+10 minutes, or 90 seconds before Hermes would give up on it if that's sooner
+(`approvals.timeout`, 3.5 minutes into an approval by default; the clarify
+timeout), never sooner than a minute, so a user who walked away still hears
+about it in time. A failed turn sends its usual
+"Turn failed" push instead of calling. A turn whose source
+can't be told calls as before.
 
 ## Hermes changes Conduit settings (plugin 0.19+)
 

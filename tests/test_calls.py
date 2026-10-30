@@ -1269,3 +1269,190 @@ def test_a_call_answer_resolves_nothing_when_two_pending_approvals_share_its_com
     approval.resolve_gateway_approval = lambda *args, **kwargs: pytest.fail("resolved a request the user can't be told")
     monkeypatch.setitem(sys.modules, "tools.approval", approval)
     assert calls._resolve_approval("sk-1", "make clean", {"choice": "once", "reason": "", "command_sha": ""}) == 0
+
+
+# --- Alert calls while the user is at a screen (notifier #474) ---------------
+
+reply_sources = sys.modules["conduit_push.reply_sources"]
+chat_on_screen = sys.modules["conduit_push.chat_on_screen"]
+
+
+class WSTransport:
+    """Hermes' app socket, as reply_sources tells it apart: by class name."""
+
+    def __init__(self, headers):
+        self._ws = types.SimpleNamespace(headers=headers)
+
+
+DESKTOP = WSTransport({"User-Agent": "Mozilla/5.0 Electron/38"})
+CONDUIT = WSTransport({"X-Conduit-Client": "conduit", "User-Agent": "Conduit/2.0"})
+
+
+def _from(monkeypatch, platform=None, transport=None):
+    monkeypatch.setattr(reply_sources, "current_platform", lambda: platform)
+    monkeypatch.setattr(reply_sources, "current_transport", lambda: transport)
+
+
+def _approval_due(home, monkeypatch, clock):
+    """When an approval raised now would ring, or None when nothing waits."""
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: None)
+    plugin._pre_approval_request(session_key="sk-1", session_id="st-1", description="Run the migration",
+                                 turn_id="t1")
+    due = calls._store(home).next_due()
+    return None if due is None else due - clock[0]
+
+
+@pytest.mark.parametrize("platform, transport", [
+    (None, DESKTOP),  # Hermes Desktop
+    (None, WSTransport({"User-Agent": "Mozilla/5.0 Safari/605"})),  # the web dashboard
+    ("cli", None),
+    ("tui", None),  # Hermes' terminal app, with no app socket
+])
+def test_an_approval_at_a_screen_waits_ten_minutes(home, fake, clock, monkeypatch, platform, transport):
+    _settings(home, alerts=True)
+    _from(monkeypatch, platform, transport)
+    monkeypatch.setattr(calls, "_approval_timeout", lambda: 3600.0)
+    assert _approval_due(home, monkeypatch, clock) == calls.SCREEN_ALERT_DELAY_S == 600
+    assert [event["type"] for event in fake.enqueued] == ["approval.needed"], "its notification still goes"
+
+
+def test_an_approval_in_a_chat_conduit_has_on_screen_waits_too(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, CONDUIT)
+    chat_on_screen.hold(home, "mac", ["st-1"], 60)
+    monkeypatch.setattr(calls, "_approval_timeout", lambda: 3600.0)
+    assert _approval_due(home, monkeypatch, clock) == 600
+
+
+@pytest.mark.parametrize("platform, transport", [
+    (None, CONDUIT),
+    ("telegram", None),
+    (None, None),  # unknown
+    ("tui", WSTransport({"User-Agent": "curl/8"})),  # an app socket goes by its own source: unknown here
+])
+def test_an_approval_from_elsewhere_still_rings_after_a_minute(home, fake, clock, monkeypatch, platform, transport):
+    _settings(home, alerts=True)
+    _from(monkeypatch, platform, transport)
+    assert _approval_due(home, monkeypatch, clock) == 60
+
+
+def test_a_source_lookup_that_raises_still_rings_after_a_minute(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True)
+
+    def broken():
+        raise RuntimeError("no gateway")
+    monkeypatch.setattr(reply_sources, "current_platform", broken)
+    monkeypatch.setattr(chat_on_screen, "on_screen", lambda *args, **kwargs: broken())
+    assert _approval_due(home, monkeypatch, clock) == 60
+
+
+def test_with_quiet_at_screen_off_a_screen_turn_rings_after_a_minute(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True, quiet_at_screen=False)
+    _from(monkeypatch, None, DESKTOP)
+    assert _approval_due(home, monkeypatch, clock) == 60
+
+
+def test_an_unanswered_question_at_a_screen_rings_after_ten_minutes(home, fake, clock, monkeypatch, paired):
+    def sleep(seconds, wake=None):
+        clock[0] += seconds
+        waited.append(seconds)
+    waited = []
+    loop = sys.modules["conduit_push.clarify_loop"]
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, DESKTOP)
+    monkeypatch.setattr(calls, "_clarify_timeout", lambda: 3600.0)
+    monkeypatch.setattr(calls, "_sleep", sleep)
+    monkeypatch.setattr(loop.client, "enqueue", lambda event: True)
+    # Nobody answers while the question waits: its waiter runs out.
+    monkeypatch.setattr(loop, "_first_answer_wins", lambda **kwargs: "answered")
+    loop.middleware(session_id="st-1", tool_name="clarify", args={"question": "Which branch?", "choices": ["main", "dev"]},
+                    next_call=lambda args: "native")
+    [event] = fake.sent
+    assert event["call"]["kind"] == "question"
+    assert waited == [601.0], "it rang once it had waited ten minutes"
+
+
+def test_a_failed_turn_at_a_screen_sends_its_push_instead_of_calling(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, DESKTOP)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    assert fake.sent == []
+    assert [event["type"] for event in fake.enqueued] == ["turn.failed"]
+    assert calls._store(home)._load()["history"] == [], "nothing counted against the limits"
+
+
+def test_a_failed_turn_from_conduit_still_calls(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, CONDUIT)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    [event] = fake.sent
+    assert event["call"]["kind"] == "failed"
+    assert fake.enqueued == []
+
+
+def test_with_quiet_at_screen_off_a_failed_turn_at_a_screen_still_calls(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True, quiet_at_screen=False)
+    _from(monkeypatch, None, DESKTOP)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    [event] = fake.sent
+    assert event["call"]["kind"] == "failed"
+
+
+def test_with_alert_calls_off_a_screen_turn_never_looks_where_it_came_from(home, fake, monkeypatch):
+    _settings(home)
+    looked = []
+    monkeypatch.setattr(calls, "_at_screen", lambda *args: looked.append(args) or True)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    assert looked == [] and [event["type"] for event in fake.enqueued] == ["turn.failed"]
+
+
+def test_a_replayed_failure_hook_that_cannot_tell_the_screen_does_not_ring(home, fake, clock, monkeypatch):
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, DESKTOP)
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    # Replayed after a restart: no source to tell by any more.
+    _from(monkeypatch, None, None)
+    clock[0] += 3_600
+    plugin._on_session_end(session_id="st-9", turn_id="t1", completed=False, interrupted=False)
+    assert fake.sent == []
+    assert calls._store(home)._load()["history"] == []
+
+
+@pytest.mark.parametrize("timeout, due", [
+    (300.0, 210),  # Hermes' default: rings with 90 s left to answer
+    (120.0, 60),  # never sooner than anywhere else
+    (0.0, 60),
+])
+def test_an_approval_at_a_screen_rings_before_hermes_denies_it(home, fake, clock, monkeypatch, timeout, due):
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, DESKTOP)
+    monkeypatch.setattr(calls, "_approval_timeout", lambda: timeout)
+    assert _approval_due(home, monkeypatch, clock) == due
+
+
+def test_hermes_approval_timeout_falls_back_to_its_default(monkeypatch):
+    monkeypatch.setitem(sys.modules, "tools.approval_context", None)
+    monkeypatch.setitem(sys.modules, "tools.approval", None)
+    assert calls._approval_timeout() == 300.0
+
+
+@pytest.mark.parametrize("timeout, due", [
+    (3600.0, 600),
+    (0.0, 600),  # no timeout
+    (300.0, 210),  # rings with 90 s left to answer
+    (100.0, 60),
+])
+def test_a_question_at_a_screen_rings_before_hermes_gives_up_on_it(home, fake, clock, monkeypatch, paired, timeout, due):
+    loop = sys.modules["conduit_push.clarify_loop"]
+    _settings(home, alerts=True)
+    _from(monkeypatch, None, DESKTOP)
+    monkeypatch.setattr(calls, "_clarify_timeout", lambda: timeout)
+    monkeypatch.setattr(calls, "_wait_for_holds", lambda home, profile: None)
+    monkeypatch.setattr(loop.client, "enqueue", lambda event: True)
+    waits = []
+    monkeypatch.setattr(loop, "_first_answer_wins", lambda **kwargs: (
+        waits.append(calls._store(home).next_due() - clock[0]) or "answered"))
+    loop.middleware(session_id="st-1", tool_name="clarify", args={"question": "Which branch?", "choices": ["main", "dev"]},
+                    next_call=lambda args: "native")
+    assert waits == [due]
+

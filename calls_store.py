@@ -74,6 +74,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "decides": False,
     # Call when Hermes waits on the user's approval or answer, or a turn fails.
     "alerts": False,
+    # An alert about a turn the user follows on a screen (Hermes Desktop, the
+    # dashboard, a terminal, or its chat open in Conduit) waits longer, and a
+    # failed one there sends its notification (calls.py, notifier #474).
+    "quiet_at_screen": True,
     "min_gap_s": 120,
     "per_hour": 6,
     "per_day": 20,
@@ -88,7 +92,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "avoid_places": [],
     "avoid_unknown_place": False,
 }
-BOOL_SETTINGS = ("enabled", "when_asked", "decides", "alerts", "avoid_unknown_place")
+BOOL_SETTINGS = ("enabled", "when_asked", "decides", "alerts", "quiet_at_screen", "avoid_unknown_place")
 MAX_AVOID_PLACES = 20
 _PLACE_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}\Z")
 MAX_RULES_CHARS = 500
@@ -442,13 +446,16 @@ class CallStore:
             state["watches"] = kept
             return removed
 
-    def alert_now(self, session_id: Any, kind: str, reason: Any, *, seed: str = "") -> dict[str, Any] | None:
+    def alert_now(self, session_id: Any, kind: str, reason: Any, *, seed: str = "",
+                  at_screen: bool = False) -> dict[str, Any] | None:
         """A failed turn with alerts on: the result ``fire`` would give for a
         watch on it (``call``, ``limited``, ``busy``), counted against the
         limits. None when alerts are off: nothing is written then. ``seed``
         (the turn) fixes the call's id, so a replayed hook is the same call
         to the relay, which rings it once, and gets the first hook's
-        decision without counting again."""
+        decision without counting again. ``at_screen``: the user follows the
+        turn on a screen (calls.py), so it doesn't call (``limited``, reason
+        ``screen``, not counted), and a replay that can't tell agrees."""
         ids = _session_ids([session_id])
         settings = self.settings()
         if not settings["enabled"] or not settings["alerts"]:
@@ -456,15 +463,20 @@ class CallStore:
         with self._locked() as state:
             now = self.clock()
             watch = _new_watch(ids, now, origin="alert", reason=_reason(reason))
-            if not seed:
+            def decide() -> dict[str, Any]:
+                if at_screen:
+                    return {"watch": watch, "outcome": kind, "status": "limited", "reason": "screen"}
                 return _decide(state, watch, kind, now, self.place_blocked)
+
+            if not seed:
+                return decide()
             watch["id"] = hashlib.sha256("\0".join([kind, *ids, seed]).encode()).hexdigest()[:24]
             earlier = next((entry for entry in state["seeded"] if entry["id"] == watch["id"]), None)
             if earlier is not None:
                 # Not held back by the gap the first call opened: that would
                 # send the failure notification beside its ring.
                 return {"watch": watch, "outcome": kind, "status": earlier["status"]}
-            result = _decide(state, watch, kind, now, self.place_blocked)
+            result = decide()
             state["seeded"] = [*state["seeded"], {"id": watch["id"], "status": result["status"], "at": now}][-MAX_SEEDED:]
             return result
 
