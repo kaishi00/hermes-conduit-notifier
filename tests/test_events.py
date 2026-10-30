@@ -662,7 +662,14 @@ def test_no_push_shows_a_desktop_directive():
     approval = push_event("approval.needed", identifier="a", body="Show ::widget{name='x'} now?")
     assert approval["body"] == "Show 🗂 widget card now?"
     # Prose, code and CSS stay as written.
-    for text in ("::selection{color:red}", 'std::richui{id="x"}', "`::richui{id='x'}`", "::richui{}"):
+    # A preview's file is named as a MEDIA tag's is: its file attribute
+    # alone, a cache name without its prefix, a hash name as its type.
+    assert push_event("approval.needed", identifier="v",
+                      body='::preview{profile="work" file="/srv/out/chart.html"}')["body"] == "📎 chart.html"
+    assert push_event("approval.needed", identifier="h",
+                      body='::preview{file="/root/.hermes/cache/3f2a9c0d1e2b4a5f.html"}')["body"] == "📎 HTML"
+    for text in ("::selection{color:red}", 'std::richui{id="x"}', "`::richui{id='x'}`", "::richui{}",
+                 "Run `echo ::richui{id='x'}` here"):
         assert push_event("approval.needed", identifier="p", body=text)["body"] == text
 
 
