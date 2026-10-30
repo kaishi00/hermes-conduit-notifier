@@ -77,6 +77,10 @@ LATER_KINDS = ("promise", "commitment", "watch", "intention")
 MAX_REPORT_ITEMS = 40
 EVENTS_DAYS = 2
 MAX_EVENTS = 25
+# How far ahead a found candidate may name a calendar entry by its title,
+# listed or not (pulse_candidates.found_row): the look ahead's two weeks.
+EVENT_MATCH_DAYS = 14
+MAX_MATCHED = 200
 MAX_REMINDERS = 25
 MAX_FAILURES = 10
 MAX_JOBS = 25
@@ -278,11 +282,15 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
     return "\n\n".join(out)
 
 
-def phone_context(home: Path, now: float, *,
-                  reminders: Optional[dict[str, dict]] = None) -> tuple[str, Optional[str]]:
+def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]] = None,
+                  events: Optional[dict[str, dict]] = None,
+                  upcoming: Optional[list[dict]] = None) -> tuple[str, Optional[str]]:
     """Calendar and open reminders from the phone sync, and the phone's time
     zone. Empty when Conduit shares neither. With ``reminders``, each open
-    reminder gets a key ("r1"), and ``reminders`` maps it to the reminder."""
+    reminder gets a key ("r1"), and ``reminders`` maps it to the reminder;
+    with ``events``, each calendar entry listed gets one ("v1") the same
+    way. ``upcoming`` gains every entry in the next EVENT_MATCH_DAYS, listed
+    or not."""
     try:
         from .phone_store import PhoneStore
     except Exception:  # noqa: BLE001 — no phone store in this build
@@ -296,12 +304,23 @@ def phone_context(home: Path, now: float, *,
             if opened is not None:
                 db, device = opened
                 zone_name = device.get("time_zone")
-                events, _ = phone.events(db, device["id"], int(now), int(now + EVENTS_DAYS * 86400),
-                                         limit=MAX_EVENTS)
+                found, _ = phone.events(db, device["id"], int(now), int(now + EVENTS_DAYS * 86400),
+                                        limit=MAX_EVENTS)
+                if upcoming is not None:
+                    upcoming += [e for e in phone.events(db, device["id"], int(now),
+                                                         int(now + EVENT_MATCH_DAYS * 86400), limit=MAX_MATCHED)[0]
+                                 if e.get("id") and e.get("status") != "canceled" and e.get("my_status") != "declined"]
                 synced = device.get("last_seen")
-                lines = [f"- {_clip(e.get('title'), 100)} ({e.get('start') or ''}"
-                         f"{', all day' if e.get('all_day') else ''})" for e in events
-                         if e.get("status") != "canceled" and e.get("my_status") != "declined"]
+                lines = []
+                for e in found:
+                    if e.get("status") == "canceled" or e.get("my_status") == "declined":
+                        continue
+                    key = ""
+                    if events is not None and e.get("id"):
+                        key = f"v{len(events) + 1} "
+                        events[key.strip()] = e
+                    lines.append(f"- {key}{_clip(e.get('title'), 100)} ({e.get('start') or ''}"
+                                 f"{', all day' if e.get('all_day') else ''})")
                 parts.append(f"## Calendar, the next {EVENTS_DAYS} days (phone synced {_ago(synced, now)})\n"
                              + ("\n".join(lines) or "Nothing on the calendar."))
         with phone.reader("reminders") as opened:
@@ -776,6 +795,11 @@ class Gathered:
     # With ``keyed``: the phone's open reminders listed (by key, "r1"), which
     # a found candidate can rest on.
     reminders: dict[str, dict] = field(default_factory=dict)
+    # With ``keyed``: the calendar entries listed (by key, "v1"), and every
+    # entry in the next EVENT_MATCH_DAYS, listed or not, that a found
+    # candidate may name by its title (pulse_candidates.found_row).
+    events: dict[str, dict] = field(default_factory=dict)
+    upcoming: list[dict] = field(default_factory=list)
 
 
 def build(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now: float,
@@ -791,7 +815,7 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     """What a report reads, in at most ``room`` characters (by default what
     the report turn's message leaves its context). ``extra`` is one more
     section, after what Pulse remembers; ``keyed`` gives each chat a key
-    (recent_chats) and each open reminder one too. Without ``ratings`` it leaves out how the user rated
+    (recent_chats), and each open reminder and each calendar entry listed one too. Without ``ratings`` it leaves out how the user rated
     earlier reports: the candidate list weighs those in code. With
     ``next_steps``, what got done and the events that ended since the
     report's start (``done_section``, ``ended_section``), which the candidate
@@ -799,7 +823,9 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     room = report_room(note(pulse_store)) if room is None else room
     since = window_start(pulse_store, now)
     reminders: Optional[dict[str, dict]] = {} if keyed else None
-    phone, zone_name = phone_context(home, now, reminders=reminders)
+    events: Optional[dict[str, dict]] = {} if keyed else None
+    upcoming: Optional[list[dict]] = [] if keyed else None
+    phone, zone_name = phone_context(home, now, reminders=reminders, events=events, upcoming=upcoming)
     zone_name = pulse_store.get("time_zone") or zone_name
     zone = zone_for(zone_name)
     others = profile_homes(home) if pulse_store.get("report_profiles") == "all" else []
@@ -849,7 +875,9 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
         done = {item_id: item for item_id, item in done.items() if f"\n- #{item_id} [" in rest}
         ended = {key: event for key, event in ended.items() if f"\n- {key} " in rest}
         reminders = {key: r for key, r in (reminders or {}).items() if f"\n- {key} " in rest}
-    return Gathered(rest + "\n\n" + chats, start, shown, resting, keys or {}, zone, done, ended, reminders or {})
+        events = {key: e for key, e in (events or {}).items() if f"\n- {key} " in rest}
+    return Gathered(rest + "\n\n" + chats, start, shown, resting, keys or {}, zone, done, ended, reminders or {},
+                    events or {}, upcoming or [])
 
 
 def report_room(note: str = "") -> int:

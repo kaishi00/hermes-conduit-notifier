@@ -4,6 +4,7 @@ steps the candidate list may find after them, and Hermes's scheduled jobs
 as they've been running, a failing one covering nothing."""
 
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -567,7 +568,7 @@ def test_a_next_step_already_in_the_calendar_brings_up_nothing(reporting):
         {**HOTEL, "line": "Pack for Lisbon", "why": "A trip is coming up."}]})  # a tip that follows nothing
     run, asked = listed_at(live, now)
     # What the list read shows both: the flights booked, and the hotel already in the calendar.
-    assert f"- #{flights} [commitment]" in asked and "- Hotel Lisboa check-in (" in asked
+    assert f"- #{flights} [commitment]" in asked and re.search(r"\n- v\d+ Hotel Lisboa check-in \(", asked)
     assert [(row["kind"], row["decision"]) for row in live.store.run_candidates(run["id"])] == [
         ("next", candidates.SKIPPED)]
     pulse.tick(now + 1)
