@@ -738,9 +738,37 @@ def _attachment(match: re.Match) -> str:
     return f"📎 {name}".rstrip() + tail
 
 
+# Hermes Desktop's transcript directives, as Conduit reads them
+# (TranscriptDirectives.swift): ::preview{file="..."} shows a host file, and
+# any other ::name{key="value"} is a Desktop plugin's card, such as
+# hermes-rich-ui's ::richui{id="..."} (Conduit #1522).
+_DESKTOP_DIRECTIVE = re.compile(r"(?:^|(?<=\s))::(?P<name>[A-Za-z][\w-]{0,63})\{(?P<body>[^{}\n]{0,1024})\}")
+_DIRECTIVE_ATTRIBUTE = r"""[A-Za-z][\w-]{0,63}=(?:"[^"]*"|'[^']*')"""
+_DIRECTIVE_BODY = re.compile(r"\s*(?:" + _DIRECTIVE_ATTRIBUTE + r"\s*)+")
+_PREVIEW_FILE = re.compile(r"""(?i:file)=(?:"(?P<double>[^"]*)"|'(?P<single>[^']*)')""")
+
+
+def _desktop_directive(match: re.Match) -> str:
+    """A Desktop directive as a push shows it: a preview as its file's name,
+    a plugin's card as the card it is, never the raw line."""
+    name, body = match.group("name"), match.group("body")
+    if name == "preview":
+        found = _PREVIEW_FILE.search(body)
+        path = ((found.group("double") if found and found.group("double") is not None
+                 else found.group("single") if found else "") or "").strip()
+        if not path:
+            return match.group(0)
+        return "📎 " + re.split(r"[/\\]", path.rstrip("/\\"))[-1]
+    if not _DIRECTIVE_BODY.fullmatch(body):
+        return match.group(0)
+    plugin = "hermes-rich-ui" if name == "richui" else name
+    return f"🗂 {plugin} card"
+
+
 def media_free(value: str) -> str:
-    """One line with each MEDIA tag shown as its attachment, and Hermes'
-    delivery directives gone."""
+    """One line with each MEDIA tag shown as its attachment, a Desktop
+    directive as its file or card, and Hermes' delivery directives gone."""
+    value = _DESKTOP_DIRECTIVE.sub(_desktop_directive, value) if "::" in value else value
     return _MEDIA_TAG.sub(_attachment, _MEDIA_DIRECTIVE.sub("", value))
 
 
