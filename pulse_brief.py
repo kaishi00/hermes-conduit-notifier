@@ -107,10 +107,10 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
         later = report.later_lines(home, shown, home_chat_id=home_chat_id, zone=zone) if shown else ""
         related = places.today_related(pulse_store, home, zone, now, leave_out=left_out)
 
-    def on_phone_cards(what: str, entries: list[dict]) -> set[str]:
+    def on_phone_cards(what: str, entries: list[dict]) -> set[int]:
         refs = candidates.on_cards(pulse_store, now, zone, **{"reminders" if what == "reminder" else "events": entries})
         ref = candidates.reminder_ref if what == "reminder" else candidates.event_ref
-        return {entry["id"] for entry in entries if ref(entry) in refs}
+        return {n for n, entry in enumerate(entries) if entry.get("id") and ref(entry) in refs}
 
     phone = report.phone_context(home, now, leave_out=on_phone_cards)[0]
     since = report.window_start(pulse_store, now)

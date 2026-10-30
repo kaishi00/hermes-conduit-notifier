@@ -285,11 +285,11 @@ def recent_chats(home: Path, *, home_chat_id: str, since: float, zone: tzinfo,
 def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]] = None,
                   events: Optional[dict[str, dict]] = None,
                   upcoming: Optional[list[dict]] = None,
-                  leave_out: Optional[Callable[[str, list[dict]], Collection[str]]] = None) -> tuple[str, Optional[str]]:
+                  leave_out: Optional[Callable[[str, list[dict]], Collection[int]]] = None) -> tuple[str, Optional[str]]:
     """Calendar and open reminders from the phone sync, and the phone's time
     zone. Empty when Conduit shares neither. ``leave_out`` ("event" or
-    "reminder", and those read) gives the ids to leave out, as on cards
-    already (ON_CARDS says how many). With ``reminders``, each open
+    "reminder", and those read) gives which of them to leave out, by their
+    place in that list, as on cards already (ON_CARDS says how many). With ``reminders``, each open
     reminder gets a key ("r1"), and ``reminders`` maps it to the reminder;
     with ``events``, each calendar entry listed gets one ("v1") the same
     way. ``upcoming`` gains every entry in the next EVENT_MATCH_DAYS, listed
@@ -317,8 +317,8 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                 lines = []
                 found = [e for e in found if e.get("status") != "canceled" and e.get("my_status") != "declined"]
                 gone = _left_out(leave_out, "event", found)
-                for e in found:
-                    if e.get("id") in gone:
+                for n, e in enumerate(found):
+                    if n in gone:
                         continue
                     key = ""
                     if events is not None and e.get("id"):
@@ -337,7 +337,7 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
                 lines = []
                 gone = _left_out(leave_out, "reminder", found)
                 for number, r in enumerate(found, 1):
-                    if r.get("id") in gone:
+                    if number - 1 in gone:
                         continue
                     key = ""
                     if reminders is not None and r.get("id"):
@@ -355,13 +355,10 @@ def phone_context(home: Path, now: float, *, reminders: Optional[dict[str, dict]
 ON_CARDS = "- ({count} more already on cards on the Pulse screen)"
 
 
-def _left_out(leave_out: Optional[Callable[[str, list[dict]], Collection[str]]], what: str,
-              found: list[dict]) -> set[str]:
-    """The ids among ``found`` that ``leave_out`` gives for ``what``."""
-    if leave_out is None:
-        return set()
-    ids = {entry.get("id") for entry in found if entry.get("id")}
-    return set(leave_out(what, [entry for entry in found if entry.get("id")])) & ids
+def _left_out(leave_out: Optional[Callable[[str, list[dict]], Collection[int]]], what: str,
+              found: list[dict]) -> set[int]:
+    """Which of ``found``, by place, ``leave_out`` gives for ``what``."""
+    return set() if leave_out is None else set(leave_out(what, found)) & set(range(len(found)))
 
 
 def inbox_context(home: Path, since: float, *, title: str = "", query: Optional[str] = None,
