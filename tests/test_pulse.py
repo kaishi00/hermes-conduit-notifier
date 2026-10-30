@@ -764,7 +764,12 @@ def test_no_home_chat_means_no_probe(live, db):
     pulse.tick()
     assert live.sent() == []
     chat, problem = pulse.home_chat(live.store, pulse.get_hermes_home())
-    assert chat is None and "titled" in problem
+    # The app hides the chat, so the problem points at Settings > Pulse.
+    assert chat is None and problem == 'Pulse has no chat titled "Pulse" yet; set it up in Settings > Pulse'
+    db.session(pinned=0)
+    chat, problem = pulse.home_chat(live.store, pulse.get_hermes_home())
+    assert chat is not None and not chat.pinned
+    assert problem == 'Pulse\'s chat "Pulse" isn\'t pinned, so Hermes could prune it; pin it from Settings > Pulse'
 
 
 def test_a_pulse_turn_gets_its_note_and_no_tools(live, db):
@@ -2441,12 +2446,12 @@ def test_pulse_status_says_which_model_pulse_runs_on(live, db, capsys, monkeypat
     every = "for its turns, memory, report lists and follow-up checks"
     assert status() == [f"Model: Hermes's main model, {every}"]
     db.model(model="local-model", billing="custom")  # names no provider, so it lends Pulse none
-    assert status() == ["Model: local-model, the Pulse chat's own, for its turns; memory, report lists and "
+    assert status() == ["Model: local-model, Pulse's default (its chat's own), for its turns; memory, report lists and "
                         "follow-up checks run on Hermes's main model"]
     db.model(model=VOLCENGINE["model"], config=VOLCENGINE_CONFIG)
-    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, the Pulse chat's own, {every}"]
+    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, Pulse's default (its chat's own), {every}"]
     config["auxiliary"][memory.TASK] = {"provider": "openrouter", "model": "google/gemini-flash"}
-    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, the Pulse chat's own, for its turns; memory, "
+    assert status() == [f"Model: {VOLCENGINE['model']} on volcengine, Pulse's default (its chat's own), for its turns; memory, "
                         "report lists and follow-up checks run on google/gemini-flash on openrouter, "
                         "Hermes's \"Pulse memory\" model"]
     live.store.set(pulse.MODEL, {"provider": "openrouter", "model": "google/gemini-flash"})
@@ -2721,6 +2726,10 @@ def test_pulse_state_and_settings_as_data(remembering, db):
     home = store_.path.parent
     state = control.state(store_, home, now=DAY)
     assert state["enabled"] is False and state["home_chat"]["id"] == SID and state["memory"] is False
+    assert state["default_model"] is None  # Pulse's chat on Hermes's main model
+    db.model(SID, model="deepseek-v4-1-flash", config={"provider": "volcengine"})
+    assert control.state(store_, home, now=DAY)["default_model"] == {"provider": "volcengine",
+                                                                      "model": "deepseek-v4-1-flash"}
     assert state["report_times"] == ["08:00", "13:00", "18:00"] and state["backfill"] == {"state": "none"}
     assert state["backfill_days"] == 30 and state["daily_tokens"] == store.DEFAULTS["memory_daily_tokens"]
     control.update(store_, {"enabled": True, "daily_report": True, "report_times": ["17:30", "9:00"],

@@ -379,7 +379,7 @@ def _pulse_model_line(pulse: Any, pulse_store: Any, home: Path, chat_id: str) ->
 
     picked = pulse.turn_model(pulse_store)
     own = None if picked else pulse.chat_model(home, chat_id)
-    turns = (f"{named(picked)}, from Settings > Pulse" if picked else f"{named(own)}, the Pulse chat's own" if own
+    turns = (f"{named(picked)}, from Settings > Pulse" if picked else f"{named(own)}, Pulse's default (its chat's own)" if own
              else "Hermes's main model")
     slot = pulse.memory_slot()
     if slot is None and own and not own["provider"]:
