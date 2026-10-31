@@ -127,6 +127,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(titles, "_bot_name", lambda h: "Furina")
     monkeypatch.setattr(work, "WAKE_BATCH_S", 0.01)
     monkeypatch.setattr(work, "_swept", set())
+    monkeypatch.setattr(work, "_not_compacted", set())
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
     monkeypatch.setattr(work, "_policy_cache", {})
     work._wakes.clear()
@@ -671,3 +672,78 @@ def test_a_chat_whose_title_cant_be_read_is_held_to_the_policy(on, hermes, monke
     assert work.tool_block(OTHER_CHAT, "terminal", {}) == {"action": "block", "message": work.CHECK_FAILED}
     assert work.tool_block(OTHER_CHAT, "work_list", {}) is None
     assert call("work_start", {"title": "x", "instructions": "y"})["error"] == "not_bot_chat"
+
+
+def _state_db(home, rows):
+    import sqlite3
+
+    db = sqlite3.connect(home / "state.db")
+    db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+    db.executemany("INSERT OR REPLACE INTO sessions VALUES (?, ?, ?)", rows)
+    db.commit()
+    db.close()
+
+
+def test_a_compacted_workstream_is_followed_to_its_new_id(on, hermes):
+    start()
+    _state_db(on.home, [("20261031_work_1", None, "compression"), ("20261031_work_1b", "20261031_work_1", None)])
+    hermes.live(BOT_CHAT, transport=object())
+    assert work.turn_ended("20261031_work_1b", "Done after compaction.")
+    assert work.turn_finished("20261031_work_1b", failed=False, interrupted=False)
+    row = on.get("W1")
+    assert row.session_id == "20261031_work_1b" and row.status == "done"
+
+
+def test_a_branch_of_a_workstream_is_not_it(on, hermes):
+    start()
+    _state_db(on.home, [("20261031_work_1", None, "branched"), ("20261031_other", "20261031_work_1", None)])
+    assert not work.turn_ended("20261031_other", "hello")
+    assert on.get("W1").session_id == "20261031_work_1"
+
+
+def test_a_question_marks_it_needs_you_and_the_answer_clears_it(on, hermes, monkeypatch):
+    start()
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    monkeypatch.setattr(plugin, "enqueue", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugin, "push_event", lambda *args, **kwargs: None)
+    plugin._pre_tool_call(session_id="20261031_work_1", tool_name="clarify", args={"question": "Which env?"},
+                          turn_id="t1", tool_call_id="c1")
+    assert on.get("W1").status == "needs_you"
+    plugin._post_tool_call(session_id="20261031_work_1", tool_name="clarify", tool_call_id="c1", status="ok")
+    assert on.get("W1").status == "running"
+
+
+def test_an_answered_approval_puts_it_back_to_work(on, hermes):
+    start()
+    work.needs_you("20261031_work_1", "rm -rf build")
+    plugin._post_approval_response(session_id="20261031_work_1", session_key="20261031_work_1", choice="once")
+    assert on.get("W1").status == "running"
+
+
+def test_a_turn_that_ends_before_the_start_returns_stays_settled(on, hermes, monkeypatch):
+    submit = hermes.prompt_submit
+
+    def quick(params):
+        answer = submit(params)
+        work.turn_ended("20261031_work_1", "Already done.")
+        work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+        return answer
+
+    monkeypatch.setattr(hermes, "prompt_submit", quick)
+    start()
+    assert on.get("W1").status == "done" and on.running_count() == 0
+
+
+def test_a_stop_of_finished_work_keeps_its_status(on, hermes):
+    start()
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    on.update("W1", status="done")
+    assert call("work_stop", {"ref": "W1"})["status"] == "done"
+    assert on.get("W1").status == "done"
+
+
+def test_a_stop_that_finds_nothing_running_leaves_it_stopped(on, hermes):
+    start()
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    assert call("work_stop", {"ref": "W1"})["status"] == "stopped"
+    assert on.get("W1").status == "stopped" and on.running_count() == 0

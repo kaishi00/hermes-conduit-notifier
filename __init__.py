@@ -255,6 +255,8 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
     if kwargs.get("tool_name") != "clarify":
         return
+    # A workstream's question waits on the user too.
+    _quietly(work_tool.needs_you, _text(kwargs.get("session_id")), "a question")
     if _clarify_loop_active:
         # The middleware wraps the execution and pushes a richer, answerable
         # input.needed event itself; pushing here too would double-notify.
@@ -319,6 +321,8 @@ def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 
 def _post_tool_call(**kwargs: Any) -> None:
     if not forks.inside():
+        if kwargs.get("tool_name") == "clarify":
+            _quietly(work_tool.answered, _text(kwargs.get("session_id")))
         _quietly(functools.partial(work_tool.step_ended, _text(kwargs.get("session_id")), kwargs.get("tool_name"),
                                    tool_call_id=kwargs.get("tool_call_id"), status=kwargs.get("status"),
                                    error_type=kwargs.get("error_type")))
@@ -732,6 +736,7 @@ def _post_approval_response(**kwargs: Any) -> None:
     session_key = _text(kwargs.get("session_key"))
     calls.cancel_alerts(session_key or _text(kwargs.get("session_id")), "approval")
     _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)
+    _quietly(work_tool.answered, _text(kwargs.get("session_id")) or session_key)
 
 
 def _pre_api_request(**kwargs: Any) -> None:

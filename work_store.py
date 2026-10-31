@@ -299,9 +299,10 @@ class Store:
             row = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_RUNNING}").fetchone()
         return int(row["n"])
 
-    def update(self, ref: str, **fields: Any) -> Optional[Work]:
+    def update(self, ref: str, *, only_if: Optional[tuple[str, ...]] = None, **fields: Any) -> Optional[Work]:
         """Sets fields on a row and stamps it changed (unless only ``seen_at``
-        moves). Unknown fields raise."""
+        moves). Unknown fields raise. With ``only_if``, only while the row's
+        status is one of those (a turn's end may have settled it meanwhile)."""
         allowed = {"session_id", "status", "last_result", "error", "title", "goal", "cwd", "repo", "seen_at",
                    "closed_at", *_JSON_FIELDS}
         unknown = set(fields) - allowed
@@ -319,8 +320,12 @@ class Store:
         if not values:
             return self.get(ref)
         with self._db() as con:
-            con.execute(f"UPDATE work SET {', '.join(f'{key} = ?' for key in values)} WHERE ref = ?",
-                        (*values.values(), ref))
+            where, args = "ref = ?", [ref]
+            if only_if is not None:
+                where += f" AND status IN ({', '.join('?' for _ in only_if)})"
+                args.extend(only_if)
+            con.execute(f"UPDATE work SET {', '.join(f'{key} = ?' for key in values)} WHERE {where}",
+                        (*values.values(), *args))
             row = con.execute("SELECT * FROM work WHERE ref = ?", (ref,)).fetchone()
         return _work(row) if row else None
 

@@ -357,12 +357,17 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         try:
             stopped = broker.stop(work.session_id)
         except work_broker.BrokerError as error:
-            store.update(work.ref, status=work.status)
+            store.update(work.ref, status=work.status, only_if=("stopped",))
             return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes refused: {error}"}
         if stopped:
             return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
                     "note": f"Stopped {work.ref}: {work.title}. work_send continues it."}
-        store.update(work.ref, status=work.status)
+        if work.status in ("starting", "running", "needs_you"):
+            # Nothing was running, so the row's turn has ended (its end may
+            # have come while this stop was marked): it stays stopped.
+            return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
+                    "note": f"{work.ref} wasn't working on anything; it's marked stopped. work_send continues it."}
+        store.update(work.ref, status=work.status, only_if=("stopped",))
         return {"ok": True, "ref": work.ref, "title": work.title, "status": work.status,
                 "note": f"{work.ref} wasn't working on anything."}
     return _send(home, store, broker, work, args)
@@ -442,7 +447,10 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
     try:
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
                                created=created)
-        store.update(work.ref, session_id=started.session_id, status="running")
+        store.update(work.ref, session_id=started.session_id)
+        # Only while it's starting: a short turn may have ended (and been
+        # settled) before the start returned.
+        store.update(work.ref, status="running", only_if=("starting",))
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
         store.outbox_done(item, "refused")
         reason = str(error)[:300] if isinstance(error, work_broker.BrokerError) else type(error).__name__
@@ -581,14 +589,72 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
 
 
 def _workstream(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[Path], Optional[work_store.Work]]:
+    """The workstream a hook's session is, by its stored id, or through the
+    compactions it continues (``compression.in_place: false`` gives a
+    compacted session a new id; the row then follows it)."""
     home = home or _home()
     if home is None or not isinstance(session_id, str) or not session_id or not work_store.exists(home):
         return home, None
     try:
-        return home, work_store.Store(home).by_session(session_id)
+        store = work_store.Store(home)
+        work = store.by_session(session_id)
+        if work is not None or session_id in _not_compacted or not store.running_count():
+            return home, work
+        found = _compacted_from(home, session_id, store)
+        if found is False:
+            _not_compacted.add(session_id)
+            return home, None
+        if found is None:
+            return home, None
+        store.update(found.ref, session_id=session_id)
+        return home, store.get(found.ref)
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.debug("conduit_push: couldn't read the work registry", exc_info=True)
         return home, None
+
+
+_LINEAGE_HOPS = 8
+# Sessions known not to continue a workstream (their lineage is settled).
+_not_compacted: set[str] = set()
+
+
+def _compacted_from(home: Path, session_id: str, store: work_store.Store) -> Any:
+    """The workstream ``session_id`` continues through compactions, read
+    from the bot's own state.db; False when none, None when that can't be
+    settled yet (not stored, or unreadable)."""
+    import sqlite3
+
+    path = home / "state.db"
+    if not path.exists():
+        return None
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+    try:
+        current = session_id
+        for _ in range(_LINEAGE_HOPS):
+            row = db.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
+            if row is None:
+                return None if current == session_id else False
+            parent = row[0]
+            if not parent:
+                return False
+            ended = db.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
+            reason = ended[0] if ended else None
+            if not reason:
+                return None  # still open: a compaction may be being written, or a subagent runs under it
+            if reason != "compression":
+                return False  # a branch, or an ended chat this one only came after
+            work = store.by_session(parent)
+            if work is not None:
+                return work
+            current = parent
+        return False
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
 
 
 def is_workstream(session_id: Any) -> bool:
@@ -666,13 +732,22 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
 
 def needs_you(session_id: Any, description: Any = None) -> None:
     home, work = _workstream(session_id)
-    if work is None or home is None or work.status == "needs_you":
+    if work is None or home is None or work.status not in ("starting", "running"):
         return
-    work_store.Store(home).update(work.ref, status="needs_you")
+    work_store.Store(home).update(work.ref, status="needs_you", only_if=("starting", "running"))
     what = _cut(description, 160) if isinstance(description, str) and description.strip() else "an approval"
     if work.coordinator:
         _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” is waiting on the user ({what}). The "
                                             "request reaches them from that workstream; you can't answer it.")
+
+
+def answered(session_id: Any) -> None:
+    """The user answered a workstream's approval or question: it's working
+    again (unless its turn has ended meanwhile)."""
+    home, work = _workstream(session_id)
+    if work is None or home is None or work.status != "needs_you":
+        return
+    work_store.Store(home).update(work.ref, status="running", only_if=("needs_you",))
 
 
 def digest(session_id: Any) -> Optional[str]:
