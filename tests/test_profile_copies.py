@@ -288,3 +288,15 @@ def test_a_profiles_own_pre_release_copy_is_left_alone(host):
     _plugin(home / "plugins" / "conduit_push", "0.124.0rc1")
     assert profile_copies.sweep(root, shared) == []
     assert not (home / "plugins" / "conduit_push").is_symlink()
+
+
+def test_a_profile_whose_plugins_folder_is_the_main_one_is_left_alone(host):
+    root, shared = host
+    home = _profile(root, "shared", "plugins:\n  enabled: [conduit_push]\n")
+    os.symlink(root / "plugins", home / "plugins")
+    other = _profile(root, "inner", "plugins:\n  enabled: [conduit_push]\n")
+    (other / "plugins").mkdir()
+    os.symlink(root / "plugins", other / "plugins" / "all")
+    assert profile_copies.sweep(root, shared) == ["profile inner: linked to the main install (0.123.0)"]
+    assert (shared / "plugin.yaml").exists() and not shared.is_symlink()
+    assert not (home / "plugins-backup").exists()

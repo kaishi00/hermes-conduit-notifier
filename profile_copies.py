@@ -179,10 +179,17 @@ def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path,
     ours: Optional[Path] = None
     copies: List[Path] = []
     try:
+        if plugins.resolve() == shared.parent.resolve():
+            return changes  # the profile's plugins folder is the main one: nothing to point
         children = sorted(plugins.iterdir()) if plugins.is_dir() else []
     except OSError:
         children = []
     for child in children:
+        try:
+            if not child.is_symlink() and child.resolve() == shared.resolve():
+                return changes  # the main install itself, reached through a linked folder
+        except OSError:
+            continue
         if _links_to(child, shared):
             ours = child
         elif child.is_dir() and not child.is_symlink() and _manifest(child).get("name") == PLUGIN_NAME:

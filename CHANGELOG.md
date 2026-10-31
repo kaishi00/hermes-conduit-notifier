@@ -22,7 +22,8 @@ checks it). The format is fixed, because Conduit reads it:
   nothing. A profile turned on without its own copy sent no notifications
   at all. Each one is linked to the main install when the dashboard starts,
   and an old copy is kept in the profile's plugins-backup folder. A profile
-  that runs its own gateway picks it up when that gateway restarts.
+  that runs its own gateway picks it up when that gateway restarts, and
+  may fail until then, so restart it after updating.
 
 ## 0.122.1 (2026-10-30)
 
