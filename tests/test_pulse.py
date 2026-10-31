@@ -1042,7 +1042,7 @@ def test_a_harmless_non_zero_exit_is_left_out_of_failed_calls(recording):
     home = pulse.get_hermes_home()
     _terminal(home, "head -5 notes.md; ls data/*.db 2>/dev/null", "# Notes\n- buy milk\n- call mum", 2, DAY)
     [row] = recording.store.recent_outcomes()
-    assert row["error"] == "exit 2: - call mum"
+    assert row["error"] == "exit 2, no error in its output: - call mum"
     assert ledger.harmless_exit(row) and _failed(recording) == ""
 
 
@@ -1071,6 +1071,47 @@ def test_a_long_failure_line_keeps_its_mark():
 ])
 def test_terminal_failure(result, expected):
     assert ledger.terminal_failure(json.dumps(result) if isinstance(result, dict) else result) == expected
+
+
+@pytest.mark.parametrize("line", [
+    "curl: (6) Could not resolve host: example.com",
+    "read: Connection reset by peer",
+    "npm ERR! missing script: build",
+    "cp: /etc/x: Operation not permitted",
+    "write EPIPE",
+    "KeyboardInterrupt",
+    "GET https://api.example.com/v1/x?k=1 -> 500 Internal Server Error",
+])
+def test_failure_wording_keeps_a_call_in_failed_calls(line):
+    error = ledger.terminal_failure({"output": f"working\n{line}", "exit_code": 1, "error": None})
+    assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
+
+
+def test_a_timeout_or_signal_is_never_harmless():
+    for code in (124, 127, 137):
+        error = ledger.terminal_failure({"output": "partial line", "exit_code": code, "error": None})
+        assert error == f"exit {code}: partial line"
+        assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
+
+
+def test_a_url_query_keeps_the_rest_of_the_line():
+    error = ledger.terminal_failure(
+        {"output": "GET https://api.example.com/v1/x?k=1 -> 500 Internal Server Error", "exit_code": 1, "error": None})
+    assert error == "exit 1: GET https://api.example.com/v1/x -> 500 Internal Server Error"
+
+
+def test_secrets_in_a_kept_line_are_redacted(recording):
+    home = pulse.get_hermes_home()
+    _terminal(home, "git push", "fatal: unable to access 'https://bot:hunter2pass@git.example.com/o/r.git/': error: 403",
+              1, DAY)
+    _terminal(home, "deploy", "failed: password=hunter2pass, Authorization: Bearer abcdefgh12345678, "
+                              "at bot:hunter2pass@host.example", 1, DAY + 1)
+    rows = recording.store.recent_outcomes()
+    assert rows[1]["error"] == "exit 1: fatal: unable to access 'https://git.example.com/o/r.git/': error: 403"
+    assert all("hunter2pass" not in row["error"] and "abcdefgh12345678" not in row["error"] for row in rows)
+    assert "hunter2pass" not in _failed(recording) and "host.example" in _failed(recording)
+    assert ledger.terminal_failure({"output": "key " + "a1" * 20 + " failed", "exit_code": 1, "error": None}) == (
+        "exit 1: key [redacted] failed")
 
 
 def test_a_bare_exit_stays_in_failed_calls(recording):

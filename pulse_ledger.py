@@ -8,8 +8,10 @@ error type), and the identifiers the result returned (a reminder or event
 id, a cron job id, a path, a URL), so a later item can link to it by
 evidence instead of wording. The output itself is not kept, and no model is
 involved; a failed terminal command keeps one line of it as its error, the
-line that says what went wrong (or the last, when none does), so a report
-can tell a real failure from a harmless non-zero exit.
+line that says what went wrong (or the last, when none does, marked as
+showing no error), so a report can tell a real failure from a harmless
+non-zero exit. That line loses URL user info and queries, secret-looking
+``key=value`` pairs, bearer tokens and long key-like runs first.
 
 Recorded only while Pulse is on.
 """
@@ -38,14 +40,32 @@ MAX_ID_LEN = 160
 MAX_LABEL = 80
 MAX_ERROR = 200
 # A line of a failed command's output that says something went wrong. A
-# failure whose kept line has none of these (``exit 2: notes.md``) is a
-# command that exited non-zero with nothing wrong to show, like an ``ls``
-# of a glob that matched nothing with its stderr silenced.
+# command whose output has none of these is kept as ``exit 2, no error in its
+# output: <last line>``: it exited non-zero with nothing wrong to show, like
+# an ``ls`` of a glob that matched nothing with its stderr silenced.
 FAILURE_MARK = re.compile(
-    r"traceback|error|exception|fatal|fail|denied|not found|no such|refused|timed out|timeout|cannot|can't|"
-    r"unable|panic|killed|segmentation fault|abort|invalid|forbidden|unauthori[sz]ed|unreachable", re.I)
-EXIT_LINE = re.compile(r"exit -?\d+: (.*)", re.S)
+    r"traceback|error|err!|exception|interrupt|systemexit|fatal|fail|denied|not found|no such|refused|timed out|timeout|cannot|can't|"
+    r"could not|couldn't|unable|panic|killed|terminated|segmentation fault|abort|invalid|forbidden|"
+    r"unauthori[sz]ed|unreachable|not permitted|not allowed|broken pipe|\breset\b|\bmissing\b|\bbad\b|"
+    r"\bwrong\b|\bunknown\b|\bno route\b|\bresolve\b|\busage:|(?-i:\bE[A-Z]{3,}\b)", re.I)
+# Exit codes that are never harmless whatever was printed: a timeout (124),
+# a command that couldn't run (126, 127) or one killed by a signal (128+).
+LOUD_EXITS = 124
+NO_ERROR_SHOWN = "no error in its output"
+HARMLESS = re.compile(rf"exit -?\d+, {NO_ERROR_SHOWN}: ")
 NO_OUTPUT = "no output"
+# What a kept output line could carry that mustn't be kept: a URL's user info
+# and query (each URL cleaned on its own, so the rest of the line stays),
+# ``user:pass@`` without a scheme, a secret-looking ``key=value`` and a
+# bearer token, and any long run of letters and digits that could be a key.
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+_USERINFO = re.compile(r"[^\s:/@'\"]+:[^\s:/@'\"]+@(?=[\w.-])")
+_SECRET_PAIR = re.compile(
+    r"(?i)\b([\w.-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|apikey|auth|authorization|cookie|session|"
+    r"signature|credential|private[_-]?key|access[_-]?key)[\w.-]*)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
+_BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}")
+_LONG_RUN = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b")
+REDACTED = "[redacted]"
 # The ledger write runs inside the tool call: under contention it gives up
 # quickly instead of holding the call up.
 WRITE_BUSY_TIMEOUT_S = 0.5
@@ -196,11 +216,26 @@ def describe_call(args: Any) -> tuple[str, str, str]:
     return action, label, hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+def _redact(text: str) -> str:
+    text = _URL_IN_TEXT.sub(lambda m: _safe_url(m.group()), text)
+    text = _USERINFO.sub("", text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}", text)
+    text = _SECRET_PAIR.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
+    return _LONG_RUN.sub(REDACTED, text)
+
+
+def _clip(text: str, limit: int) -> str:
+    text = _printable(re.sub(r"\s+", " ", text).strip())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def terminal_failure(result: Any) -> Optional[str]:
-    """A failed terminal command's error, ``exit 2: <line>``, from its result
+    """A failed terminal command's error, ``exit 1: <line>``, from its result
     (``output``/``exit_code``/``error``); None when it didn't fail or has an
     error of its own. Hermes words a bare non-zero exit in the user's language
-    and leaves the output out, so this is worked out here."""
+    and leaves the output out, so this is worked out here. Whether the output
+    shows something wrong is decided on the raw output and written into the
+    error, so redacting or cutting the kept line can't change it."""
     parsed = _parsed(result)
     if not isinstance(parsed, dict) or parsed.get("error"):
         return None
@@ -217,20 +252,20 @@ def terminal_failure(result: Any) -> Optional[str]:
         # is kept from just before its mark, so the mark survives the cut.
         part, mark = marked[-1]
         start = max(0, mark.start() - 60)
-        excerpt = ("…" if start else "") + part[start:]
+        head, excerpt = f"exit {code}", ("…" if start else "") + part[start:]
     else:
-        excerpt = lines[-1]
-    return _short(f"exit {code}: {excerpt}", MAX_ERROR)
+        quiet = 0 < code < LOUD_EXITS
+        head, excerpt = (f"exit {code}, {NO_ERROR_SHOWN}" if quiet else f"exit {code}"), lines[-1]
+    return _clip(f"{head}: {_redact(excerpt)}", MAX_ERROR)
 
 
 def harmless_exit(row: dict[str, Any]) -> bool:
-    """A terminal command that exited non-zero while its output shows
-    nothing wrong. A bare exit with no output kept (or from before outputs
-    were kept) isn't one: there's nothing to judge it by."""
+    """A terminal command that exited non-zero while its output showed
+    nothing wrong (terminal_failure). A bare exit with no output kept (or from
+    before outputs were kept) isn't one: there's nothing to judge it by."""
     if row.get("tool") != "terminal" or row.get("status") != "error":
         return False
-    match = EXIT_LINE.fullmatch(row.get("error") or "")
-    return bool(match) and not FAILURE_MARK.search(match.group(1))
+    return bool(HARMLESS.match(row.get("error") or ""))
 
 
 def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, session_id: Any = None,
