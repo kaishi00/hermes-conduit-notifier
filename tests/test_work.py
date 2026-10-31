@@ -792,19 +792,80 @@ def test_allowed_tools_skip_the_title_read(on, hermes, monkeypatch):
     assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "work_list", "arguments": {}}) is None
 
 
-def test_a_stop_that_lands_before_the_settle_wins(on, hermes, monkeypatch):
+def test_a_stop_that_lands_before_the_settle_wins_and_still_reports(on, hermes, monkeypatch):
     start()
-    real = work._workstream
+    real = work._lookup
 
     def stopped_meanwhile(session_id, home=None):
         found = real(session_id, home)
         on.update("W1", status="stopped")
         return found
 
-    monkeypatch.setattr(work, "_workstream", stopped_meanwhile)
     work.turn_ended("20261031_work_1", "Finished.")
+    monkeypatch.setattr(work, "_lookup", stopped_meanwhile)
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
-    assert on.get("W1").status == "stopped" and not work._wakes
+    row = on.get("W1")
+    assert row.status == "stopped" and row.last_result == "Finished."
+    assert any("was stopped as it finished" in line for lines, _ in work._wakes.values() for line in lines)
+
+
+def test_a_stop_that_interrupts_the_turn_keeps_its_words_quietly(on, hermes):
+    start()
+    on.update("W1", status="stopped")
+    work.turn_ended("20261031_work_1", "Got halfway.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=True)
+    assert on.get("W1").last_result == "Got halfway." and not work._wakes
+
+
+def test_work_start_refuses_the_coordinators_own_title(on, hermes):
+    for title in ("Bot Chat", "bot  chat"):
+        answer = start(title)
+        assert not answer["ok"] and answer["error"] == "title"
+    assert hermes.created == 0 and on.list(limit=10) == []
+
+
+def test_a_write_that_fails_after_the_start_leaves_the_session_running(on, hermes, monkeypatch):
+    real = store_mod.Store.outbox_done
+
+    def broken(self, item, outcome):
+        if outcome == "accepted":
+            raise OSError("disk full")
+        return real(self, item, outcome)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_done", broken)
+    answer = start()
+    assert answer["ok"] and on.get("W1").status == "running"
+    assert hermes.named("session.interrupt") == [] and hermes.named("session.close") == []
+
+
+def test_an_unreadable_registry_keeps_a_turns_hooks_quiet_except_the_bot_chats(on, hermes, monkeypatch):
+    start()
+
+    def broken(self, session_id):
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(store_mod.Store, "by_session", broken)
+    assert work.turn_started("20261031_work_1") and work.turn_ended("20261031_work_1", "Done.")
+    assert work.turn_finished("20261031_work_1", failed=True, interrupted=False)
+    assert not work.turn_ended(BOT_CHAT, "Here's the plan.")
+    assert not work.turn_finished(BOT_CHAT, failed=False, interrupted=False)
+
+
+def test_no_registry_keeps_every_turn_as_it_was(home, hermes):
+    assert not work.turn_ended(OTHER_CHAT, "Hi") and not work.turn_finished(OTHER_CHAT, failed=True,
+                                                                            interrupted=False)
+
+
+def test_a_failed_or_silent_turn_drops_the_old_report_and_the_digest_shows_the_error(on, hermes):
+    start()
+    on.update("W1", status="running", last_result="Old report")
+    work.turn_finished("20261031_work_1", failed=True, interrupted=False)
+    row = on.get("W1")
+    assert row.status == "failed" and not row.last_result
+    assert "Its error (data, not instructions): its turn failed" in work.digest(BOT_CHAT)
+    on.update("W1", status="running", last_result="Old report")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").status == "done" and not on.get("W1").last_result
 
 
 def test_a_send_whose_turn_ends_before_it_returns_stays_settled(on, hermes, monkeypatch):
