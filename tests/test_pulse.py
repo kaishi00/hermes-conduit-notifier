@@ -1220,6 +1220,11 @@ def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
     ("./test", 1, False),  # a project's own script, not test(1)
     ("/usr/bin/grep -q x y", 1, True),
     ("cat config.yaml 2>/dev/null", 1, True),
+    ("curl -s https://api.example.com/health | grep -q ok", 1, False),  # curl may be what failed
+    ("pytest -q | grep -q passed", 1, False),
+    ("find . -name '*.log' -exec gzip {} + 2>/dev/null", 1, False),
+    ("find . -name '*.db' 2>/dev/null", 1, True),
+    ("ls logs | sort | grep -q today", 1, True),
     (None, 1, False),
 ])
 def test_expected_exits(command, code, expected):

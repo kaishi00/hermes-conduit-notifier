@@ -65,6 +65,9 @@ _YES_NO = frozenset({"grep", "egrep", "fgrep", "rg", "test", "[", "[[", "diff", 
 # curl or script still counts, since what it silenced was its failure.
 _LOOKUPS = frozenset({"ls", "find", "stat", "cat", "head", "tail", "file", "du", "wc", "readlink", "realpath",
                       "test", "[", "[["}) | _YES_NO
+_FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete"})
+# What may feed a yes/no check in a pipe without hiding a failure of its own.
+_PRODUCERS = _LOOKUPS | frozenset({"ps", "echo", "printf", "printenv", "sort", "uniq", "cut", "tr"})
 NO_OUTPUT = "no output"
 # What a kept output line could carry that mustn't be kept: a URL's user info
 # and query (each URL cleaned on its own, so the rest of the line stays),
@@ -285,23 +288,35 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def _command_name(part: str) -> tuple[str, list[str]]:
+    words = [word for word in part.split() if "=" not in word.split("/")[0] and word not in ("sudo", "env")]
+    first = words[0] if words else ""
+    # A project's own ./test or scripts/which isn't the tool it's named after.
+    return (first.rsplit("/", 1)[-1] if "/" not in first or first.startswith(("/bin/", "/usr/")) else ""), words
+
+
 def expected_exit(command: Any, code: int) -> bool:
     """True when the part of ``command`` that set exit ``code`` said its
     failure doesn't matter. Only the last statement counts (after ``;`` or a
     new line); in an ``&&`` chain every step must qualify, an ``||`` never
-    does, and in a pipe its last command sets the exit."""
+    does. In a pipe the last command sets the exit, and every earlier one
+    must be a lookup or a plain producer, so a failing ``curl`` piped into
+    ``grep -q`` still shows. ``find`` with an action runs other commands, so
+    it's no lookup."""
     if not isinstance(command, str) or not 0 < code < LOUD_EXITS:
         return False
     statement = re.split(r"[;\n]", command.strip().rstrip(";").strip())[-1]
     if "||" in statement or not statement.strip():
         return False
     for step in statement.split("&&"):
-        last = step.split("|")[-1].strip()
-        words = [word for word in last.split() if "=" not in word.split("/")[0] and word not in ("sudo", "env")]
-        first = words[0] if words else ""
-        # A project's own ./test or scripts/which isn't the tool it's named after.
-        name = first.rsplit("/", 1)[-1] if "/" not in first or first.startswith(("/bin/", "/usr/")) else ""
-        if not ((_SILENCED.search(last) and name in _LOOKUPS) or (code == 1 and name in _YES_NO)):
+        *earlier, last = [part.strip() for part in step.split("|")]
+        for part in earlier:
+            name, words = _command_name(part)
+            if name not in _PRODUCERS or (name == "find" and _FIND_ACTIONS & set(words)):
+                return False
+        name, words = _command_name(last)
+        lookup = name in _LOOKUPS and not (name == "find" and _FIND_ACTIONS & set(words))
+        if not ((_SILENCED.search(last) and lookup) or (code == 1 and name in _YES_NO)):
             return False
     return True
 
