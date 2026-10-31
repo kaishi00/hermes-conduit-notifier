@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.122.3 (2026-10-31)
+
+### Fixes
+- Pulse no longer makes a card out of a command that failed harmlessly.
+  A command that said its failure doesn't matter, a lookup like ls or cat
+  with its errors silenced or a yes/no check like grep or test, is left out
+  of what Pulse reads when its output shows nothing wrong, and so is a call that went
+  through when it ran again.
+  A failure that says what went wrong, like a traceback, still shows, now
+  with the line that says it.
+
 ## 0.122.2 (2026-10-31)
 
 ### Fixes
