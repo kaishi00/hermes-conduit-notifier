@@ -1189,3 +1189,57 @@ def test_a_running_workstream_shows_no_earlier_result(on, hermes):
     on.update("W1", status="running", last_result="Turn one's report")
     answer = call("work_read", {"ref": "W1"})
     assert answer["ok"] and "result" not in answer
+
+
+@pytest.mark.parametrize("first, second, alike", [
+    ("Latest Python version", "OS version from os-release", False),
+    ("Port 9119 listener", "Check port 9177", False),
+    ("Check root disk space", "RAM usage", False),
+    ("Login page slow", "Slow login page", True),
+    ("Fix the login page", "Fix the login page again", True),
+    ("Deploy", "Deploy staging", True),
+])
+def test_lookalikes_share_more_than_one_word(first, second, alike):
+    assert work._similar(work._words(first), work._words(second)) is alike
+
+
+def test_a_turn_end_reported_twice_tells_the_coordinator_once(on, hermes, monkeypatch):
+    start()
+    real = work._lookup
+    seen = real("20261031_work_1")
+    monkeypatch.setattr(work, "_lookup", lambda session_id, home=None: seen)  # both read it running
+    work.turn_ended("20261031_work_1", "Done.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.turn_ended("20261031_work_1", "Done.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    lines = [line for lines, _ in work._wakes.values() for line in lines]
+    assert len(lines) == 1 and on.get("W1").status == "done"
+
+
+@pytest.mark.parametrize("args", [
+    {"goal": "Find out why the login page is slow."},
+    {"name": "work_start", "arguments": {"title": "Login bug", "instructions": "Find out why the login page is slow."}},
+    {"name": "work_start", "arguments": '{"title": "Login bug", "task": "Find out why the login page is slow."}'},
+    '{"title": "Login bug", "instructions": "Find out why the login page is slow."}',
+])
+def test_work_start_takes_the_shapes_a_model_guesses(on, hermes, args):
+    answer = json.loads(work.handle("work_start", args, session_id=BOT_CHAT))
+    assert answer["ok"] and on.get("W1").goal == "Find out why the login page is slow."
+    assert on.get("W1").title
+
+
+def test_the_digest_shows_how_to_call_the_work_tools_through_tool_call(on, hermes):
+    assert '"name": "work_start", "arguments": {"title"' in work.digest(BOT_CHAT)
+
+
+def test_the_cli_status_piped_into_head_exits_quietly(home, monkeypatch):
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
+    store_mod.Store(home).set_policy("strict")
+
+    def closed(store, args, action):
+        raise BrokenPipeError
+
+    monkeypatch.setattr(cli, "_work_on_registry", closed)
+    monkeypatch.setattr(__import__("os"), "dup2", lambda *a: None)
+    assert cli._work(types.SimpleNamespace(work_action="status", policy=None, max_running=None)) == 0

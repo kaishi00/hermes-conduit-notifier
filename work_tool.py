@@ -68,8 +68,9 @@ POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. S
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get work through work_ask, which arrives with "
                        "bot-to-bot asks (not yet available here). Tell the user you can't hand this to another bot "
                        "yet, or start a workstream of your own.")
-BRIDGE_BLOCK = ("Call the work tools through tool_call one level deep, by name (work_start, work_send and so on), "
-                "not through another tool_call or with no tool named.")
+BRIDGE_BLOCK = ("That tool_call couldn't be read, so it didn't run. Give it the tool's name and its arguments as an "
+                'object, like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": '
+                '"Find out why the login page is slow."}}, and never put a tool_call inside another.')
 CHECK_FAILED = ("This bot's coordinator settings couldn't be checked just now, so its tools are held back for this "
                 "call. Try again in a moment.")
 NOT_YET = ("Asks between bots come in the next step of Bot workstreams; this one isn't available yet. Nothing was "
@@ -328,11 +329,32 @@ def _bot_name(home: Path) -> str:
 
 def handle(name: str, args: Any, *, session_id: Any = None) -> str:
     try:
-        return json.dumps(_handle(name, args if isinstance(args, dict) else {}, session_id), ensure_ascii=False)
+        return json.dumps(_handle(name, _arguments(args), session_id), ensure_ascii=False)
     except Exception as error:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_push: %s failed", name, exc_info=True)
         return json.dumps({"ok": False, "error": "failed",
                            "note": f"That didn't work ({type(error).__name__}). Nothing else was changed."})
+
+
+def _arguments(args: Any) -> dict:
+    """A tool's arguments as an object: a JSON string is read, and a
+    guessed {"name": ..., "arguments": {...}} wrapper is opened."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return {}
+    if not isinstance(args, dict):
+        return {}
+    inner = args.get("arguments")
+    if isinstance(inner, str):
+        try:
+            inner = json.loads(inner)
+        except ValueError:
+            inner = None
+    if isinstance(inner, dict) and set(args) <= {"name", "arguments"}:
+        return inner
+    return args
 
 
 def _handle(name: str, args: dict, session_id: Any) -> dict:
@@ -436,8 +458,11 @@ def _list(store: work_store.Store, args: dict) -> dict:
 
 
 def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args: dict, coordinator: str) -> dict:
-    title = " ".join(str(args.get("title") or "").split())
-    instructions = str(args.get("instructions") or "").strip()
+    # A model that guessed the schema (behind Tool Search) names the task
+    # goal or task; a missing title comes from the instructions.
+    instructions = next((str(args[key]).strip() for key in ("instructions", "goal", "task", "prompt")
+                         if isinstance(args.get(key), str) and args[key].strip()), "")
+    title = " ".join(str(args.get("title") or "").split()) or _cut(" ".join(instructions.split()[:6]), 60)
     if not title or not instructions:
         return {"ok": False, "error": "missing", "note": "Give the workstream a title and instructions."}
     from . import session_titles
@@ -861,11 +886,12 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     else:
         fields = {"status": "done", "last_result": "", "error": ""}
         line = f"- {work.ref} “{work.title}” finished without a report (work_read shows what it did)."
-    # Only while it's still active: a stop that came meanwhile wins.
-    settled = store.update(work.ref, only_if=_SETTLES, **fields)
-    if settled is None or settled.status != fields["status"]:
-        if settled is not None and settled.status == "stopped":
-            _stopped_report(home, store, settled, text, failed=failed, interrupted=interrupted)
+    # Only while it's still active: a stop that came meanwhile wins, and an
+    # end reported twice settles (and tells the coordinator) once.
+    if store.update(work.ref, only_if=_SETTLES, **fields) is None:
+        now = store.get(work.ref)
+        if now is not None and now.status == "stopped":
+            _stopped_report(home, store, now, text, failed=failed, interrupted=interrupted)
         return True
     if not work.closed_at and work.coordinator:
         _queue_wake(home, work.coordinator, line)
@@ -940,8 +966,10 @@ def digest(session_id: Any) -> Optional[str]:
     rules = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), and "
              "send follow-ups to the one that's on it (work_send with its ref); answer from what you know "
              "otherwise. " + ("You can also make read-only lookups yourself. " if mode == "lookups" else "")
-             + "The work tools may be behind tool_call: call them as tool_call with name work_start, work_send, "
-             "work_list, work_read, work_stop or work_close.")
+             + "If the work tools aren't listed, call them through tool_call with their name and arguments, "
+             'like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": "Find out '
+             'why the login page is slow."}} or tool_call {"name": "work_send", "arguments": {"ref": "W1", '
+             '"text": "Also check the logs."}}; work_list, work_read, work_stop and work_close take {"ref": ...}.')
     if reason:
         rules = f"Bot workstreams can't run here: {reason}"
     body = "\n".join(lines) if lines else "- none open"
@@ -1042,10 +1070,15 @@ def _words(value: Any) -> set[str]:
 
 
 def _similar(a: set[str], b: set[str]) -> bool:
-    """Titles that share most of their words (a title of one word shares it)."""
+    """Titles that share most of their words, and at least two of them (a
+    title of one word shares that word): one word in common ("version",
+    "port") isn't the same task."""
     if not a or not b:
         return False
-    return len(a & b) / min(len(a), len(b)) >= LOOKALIKE
+    shared = len(a & b)
+    if min(len(a), len(b)) == 1:
+        return shared == 1
+    return shared >= 2 and shared / min(len(a), len(b)) >= LOOKALIKE
 
 
 def _cut(value: Any, limit: int) -> str:

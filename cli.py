@@ -412,6 +412,13 @@ def _work(args: argparse.Namespace) -> int:
         return 0
     try:
         return _work_on_registry(work_store.Store(home), args, action)
+    except BrokenPipeError:
+        # Piped into head: the reader left, and nothing more is printed.
+        import os
+        import sys
+
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     except Exception as error:  # noqa: BLE001 — a registry that can't be read, said in a line
         print(f"Bot workstreams: couldn't read this bot's registry ({type(error).__name__}: {error}).")
         return 1

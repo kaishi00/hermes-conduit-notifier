@@ -323,7 +323,9 @@ class Store:
     def update(self, ref: str, *, only_if: Optional[tuple[str, ...]] = None, **fields: Any) -> Optional[Work]:
         """Sets fields on a row and stamps it changed (unless only ``seen_at``
         moves). Unknown fields raise. With ``only_if``, only while the row's
-        status is one of those (a turn's end may have settled it meanwhile)."""
+        status is one of those (a turn's end may have settled it meanwhile).
+        The row as written, or None when nothing was (no row, or not in
+        those states)."""
         allowed = {"session_id", "status", "last_result", "error", "title", "goal", "cwd", "repo", "seen_at",
                    "closed_at", *_JSON_FIELDS}
         unknown = set(fields) - allowed
@@ -345,9 +347,9 @@ class Store:
             if only_if is not None:
                 where += f" AND status IN ({', '.join('?' for _ in only_if)})"
                 args.extend(only_if)
-            con.execute(f"UPDATE work SET {', '.join(f'{key} = ?' for key in values)} WHERE {where}",
-                        (*values.values(), *args))
-            row = con.execute("SELECT * FROM work WHERE ref = ?", (ref,)).fetchone()
+            changed = con.execute(f"UPDATE work SET {', '.join(f'{key} = ?' for key in values)} WHERE {where}",
+                                  (*values.values(), *args)).rowcount
+            row = con.execute("SELECT * FROM work WHERE ref = ?", (ref,)).fetchone() if changed else None
         return _work(row) if row else None
 
     def mark_seen(self, refs: list[str]) -> None:
