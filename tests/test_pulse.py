@@ -77,6 +77,7 @@ cli = _load("conduit_push.cli", ROOT / "cli.py")
 host = _load("conduit_push.pulse_host", ROOT / "pulse_host.py")
 ledger = _load("conduit_push.pulse_ledger", ROOT / "pulse_ledger.py")
 report = _load("conduit_push.pulse_report", ROOT / "pulse_report.py")
+candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
 memory = _load("conduit_push.pulse_memory", ROOT / "pulse_memory.py")
 
 SID = "20261019_165824_560887"  # a Conduit chat's stored id, as Eric's host showed it
@@ -1022,6 +1023,296 @@ def test_urls_lose_their_credentials(recording):
 def test_a_digest_line_has_no_control_characters():
     row = {"tool": "t", "action": "", "label": "a\x1b[31mred", "status": "error", "error": "x\x07", "ids_json": "{}"}
     assert ledger.line(row) == "t 'a[31mred' → error: x"
+
+
+def _terminal(home, command, output, exit_code, now):
+    """A terminal call as Hermes hands it over: a bare non-zero exit gets a
+    localized ``exit N`` and no error in the result."""
+    ledger.record(home, tool_name="terminal", args={"command": command}, now=now, status="error",
+                  error_type="tool_error", error_message=f"exit {exit_code}",
+                  result=json.dumps({"output": output, "exit_code": exit_code, "error": None}))
+
+
+def _failed(live):
+    from datetime import timezone
+    return report.failed_calls(live.store, 0, timezone.utc)
+
+
+def test_a_harmless_non_zero_exit_is_left_out_of_failed_calls(recording):
+    home = pulse.get_hermes_home()
+    _terminal(home, "head -5 notes.md; ls data/*.db 2>/dev/null", "# Notes\n- buy milk\n- call mum", 2, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert row["error"] == "exit 2, an expected exit: - call mum"
+    assert ledger.harmless_exit(row) and _failed(recording) == ""
+
+
+def test_a_traceback_stays_in_failed_calls_with_its_exception(recording):
+    home = pulse.get_hermes_home()
+    output = ("fetching listings\nTraceback (most recent call last):\n  File \"scrape.py\", line 12, in <module>\n"
+              "urllib3.exceptions.NameResolutionError: Failed to resolve 'example.com'\n")
+    _terminal(home, "python3 scrape.py", output, 1, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert row["error"] == "exit 1: urllib3.exceptions.NameResolutionError: Failed to resolve 'example.com'"
+    assert not ledger.harmless_exit(row)
+    assert "→ error: exit 1: urllib3.exceptions.NameResolutionError" in _failed(recording)
+
+
+def test_a_long_failure_line_keeps_its_mark():
+    error = ledger.terminal_failure({"output": "word " * 200 + "permission denied", "exit_code": 1, "error": None})
+    assert error.startswith("exit 1: …") and error.endswith("permission denied") and len(error) <= ledger.MAX_ERROR
+
+
+@pytest.mark.parametrize("result, expected", [
+    ({"output": "", "exit_code": 3, "error": None}, "exit 3, no output"),
+    ({"output": "fine", "exit_code": 0, "error": None}, None),
+    ({"output": "", "exit_code": -1, "error": "Command timed out"}, None),  # Hermes's own error stands
+    ({"output": "x", "exit_code": True}, None),
+    ("plain text", None),
+])
+def test_terminal_failure(result, expected):
+    assert ledger.terminal_failure(json.dumps(result) if isinstance(result, dict) else result) == expected
+
+
+@pytest.mark.parametrize("line", [
+    "curl: (6) Could not resolve host: example.com",
+    "read: Connection reset by peer",
+    "npm ERR! missing script: build",
+    "cp: /etc/x: Operation not permitted",
+    "write EPIPE",
+    "KeyboardInterrupt",
+    "GET https://api.example.com/v1/x?k=1 -> 500 Internal Server Error",
+])
+def test_failure_wording_keeps_a_call_in_failed_calls(line):
+    error = ledger.terminal_failure({"output": f"working\n{line}", "exit_code": 1, "error": None}, "run 2>/dev/null")
+    assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
+
+
+def test_a_timeout_or_signal_is_never_harmless():
+    for code in (124, 127, 137):
+        error = ledger.terminal_failure({"output": "partial line", "exit_code": code, "error": None}, "run 2>/dev/null")
+        assert error == f"exit {code}: partial line"
+        assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
+
+
+def test_a_long_unmarked_last_line_keeps_its_end():
+    error = ledger.terminal_failure({"output": "word " * 60 + "the end", "exit_code": 124, "error": None})
+    assert error.startswith("exit 124: …") and error.endswith("word the end") and len(error) <= ledger.MAX_ERROR
+
+
+def test_a_long_unmarked_line_with_no_space_keeps_its_tail():
+    error = ledger.terminal_failure({"output": "x" * 500 + "Y" * 20, "exit_code": 124, "error": None})
+    assert error.startswith("exit 124: …") and error.endswith("Y" * 20)
+
+
+def test_a_window_with_no_space_starts_at_the_mark():
+    line = "git clone https://u:Pw1234567890@git.example.com/" + "x" * 450 + "fatal"
+    error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
+    assert "Pw1234567890" not in error and error.endswith("fatal")
+
+
+def test_a_url_query_keeps_the_rest_of_the_line():
+    error = ledger.terminal_failure(
+        {"output": "GET https://api.example.com/v1/x?k=1 -> 500 Internal Server Error", "exit_code": 1, "error": None})
+    assert error == "exit 1: GET https://api.example.com/v1/x -> 500 Internal Server Error"
+
+
+def test_secrets_in_a_kept_line_are_redacted(recording):
+    home = pulse.get_hermes_home()
+    _terminal(home, "git push", "fatal: unable to access 'https://bot:hunter2pass@git.example.com/o/r.git/': error: 403",
+              1, DAY)
+    _terminal(home, "deploy", "failed: password=hunter2pass, Authorization: Bearer abcdefgh12345678, "
+                              "at bot:hunter2pass@host.example", 1, DAY + 1)
+    rows = recording.store.recent_outcomes()
+    assert rows[1]["error"] == "exit 1: fatal: unable to access 'https://git.example.com/o/r.git/': error: 403"
+    assert all("hunter2pass" not in row["error"] and "abcdefgh12345678" not in row["error"] for row in rows)
+    assert "hunter2pass" not in _failed(recording) and "host.example" in _failed(recording)
+    assert ledger.terminal_failure({"output": "key " + "a1" * 20 + " failed", "exit_code": 1, "error": None}) == (
+        "exit 1: key [redacted] failed")
+
+
+def test_a_credentialed_url_far_before_the_mark_is_redacted():
+    output = "git clone https://deploy:Hunter2SecretPw99@git.example.com/org/repo.git into /tmp/x: fatal"
+    error = ledger.terminal_failure({"output": output, "exit_code": 1, "error": None})
+    assert "Hunter2SecretPw99" not in error and error.endswith("fatal")
+
+
+@pytest.mark.parametrize("line, secret", [
+    ("failed: key " + "AKIA" + "Q" * 16, "Q" * 16),
+    ("mysql --password hunter2xyz failed", "hunter2xyz"),
+    ("curl -u alice:s3cretpw https://x.example failed", "s3cretpw"),
+    ("curl --user alice:s3cretpw https://x.example -> 401 Unauthorized", "s3cretpw"),
+    ("curl --proxy-user=bob:hunter2pw https://x.example failed", "hunter2pw"),
+    ("failed with " + "gh" + "p_" + "Z" * 30, "Z" * 30),
+    ("DB_PASS=hunter2 connection refused", "hunter2"),
+    ("API key: abc123xyz refused", "abc123xyz"),
+    ("mysql -phunter2xy failed", "hunter2xy"),
+    ("db -p hunter2xy connection refused", "hunter2xy"),
+    ("webhook hooks.slack.com/services/T00000000/B00000000/aB3xK9pQ2wR8 failed", "aB3xK9pQ2wR8"),
+])
+def test_more_secret_shapes_are_redacted(line, secret):
+    error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
+    assert secret not in error and ledger.REDACTED in error
+
+
+@pytest.mark.parametrize("line, kept, gone", [
+    ('{"error": "bad login", "password": "hunter2"}', '"password": [redacted]', "hunter2"),
+    ("auth_password=abc failed", "auth_password=[redacted]", "=abc"),
+    ("token validation failed", "token validation failed", None),
+    ("Authentication: failed", "Authentication: failed", None),
+    ("Basic authentication failed", "Basic authentication failed", None),
+    ("api_key: missing", "api_key: missing", None),
+    ("API_KEY: not set", "API_KEY: not set", None),
+    ("sort -u names.txt failed", "sort -u names.txt failed", None),
+    ("mkdir -p /ro/x: Read-only file system", "mkdir -p /ro/x: Read-only file system", None),
+    ("curl: (22) Authorization: Bearer abcdefghijklmnop", "Bearer [redacted]", "abcdefghijklmnop"),
+    ("mysql -p s3cretpw8 failed", "-p [redacted] failed", "s3cretpw8"),
+    ("Authorization: Basic dXNlcjpwYXNz failed", "Basic [redacted] failed", "dXNlcjpwYXNz"),
+    ("find: -printf: unknown primary", "find: -printf: unknown primary", None),
+    ("token insufficient_privileges", "token insufficient_privileges", None),
+    ("401 Unauthorized: bearer authentication failed", "bearer authentication failed", None),
+    ("auth failed: token=MySecretPassPhrase", "token=[redacted]", "MySecretPassPhrase"),
+    ("session: expired", "session: expired", None),
+    ("Authorization: InvalidCredentials failed", "Authorization: InvalidCredentials failed", None),
+    ("mkdir -p /home/runner/work/output: Read-only file system", "-p /home/runner/work/output: Read-only", None),
+    ("login failed: password hunter2 rejected", "password [redacted] rejected", "hunter2"),
+    ("password reset failed", "password reset failed", None),
+    ("DB pass hunter2 refused", "pass [redacted] refused", "hunter2"),
+    ("pre-auth check failed", "pre-auth check failed", None),
+    ("auth failed: session=averylonglowercasesecret", "session=[redacted]", "averylonglowercasesecret"),
+    ("TOKEN=ABCDEFGHIJKLMNOPQRSTUVWX failed", "TOKEN=[redacted]", "ABCDEFGHIJKLMNOP"),
+    ("mysql -pS3cret failed", "-p[redacted] failed", "S3cret"),
+    ("Authentication: insufficient_privileges", "Authentication: insufficient_privileges", None),
+    ('{"password": "expired"}', '"password": "expired"', None),
+    ("401 Unauthorized: authentication failed", "Unauthorized: authentication failed", None),
+    ("post https://hooks.slack.com/services/T000/B000/" + "X" * 24 + " failed", "/B000/[redacted] failed", "X" * 24),
+    ("\x1b[31merror\x1b[0m: boom", "exit 1: error: boom", "[31m"),
+])
+def test_redaction_keeps_reasons_and_drops_secrets(line, kept, gone):
+    error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
+    assert kept in error and (gone is None or gone not in error)
+
+
+@pytest.mark.parametrize("line", [
+    "make: *** No rule to make target 'build'.  Stop.",
+    "3 packets transmitted, 0 received, 100% packet loss",
+    "! [rejected] main -> main (non-fast-forward)",
+    "sqlite3: database is locked",
+    "tar: No space left on device",
+    "apt: unmet dependencies",
+    "cat: notes: Is a directory",
+    "bind: Address already in use",
+    "mkdir: /ro/x: Read-only file system",
+    "gh: API rate limit exceeded for installation ID 1234",
+    "503 Service Unavailable",
+    "CUDA out of memory",
+    "StopIteration: no more pages",
+])
+def test_more_failure_wording_stays(line):
+    error = ledger.terminal_failure({"output": line, "exit_code": 2, "error": None}, "run 2>/dev/null")
+    assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
+
+
+def test_a_huge_line_is_kept_quickly():
+    started = time.monotonic()
+    error = ledger.terminal_failure({"output": "a1" * 50_000 + " error here " + "b2" * 50_000, "exit_code": 1,
+                                     "error": None})
+    assert time.monotonic() - started < 1 and "error here" in error and len(error) <= ledger.MAX_ERROR
+
+
+def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
+    _terminal(pulse.get_hermes_home(), "retry", "Error: retry #3 of /api failed? see /docs", 1, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert row["error"] == "exit 1: Error: retry #3 of /api failed? see /docs"
+
+
+@pytest.mark.parametrize("command, code, expected", [
+    ("head notes.md; ls data/*.db 2>/dev/null", 2, True),
+    ("grep -q done status.txt", 1, True),
+    ("ps aux | grep hermes", 1, True),
+    ("cd /srv && test -f done.flag", 1, False),  # cd isn't a yes/no check, so it could be what failed
+    ("test -f a.flag && [ -d out ]", 1, True),
+    ("grep -q done status.txt", 2, False),  # grep's 2 is a real error
+    ("test -f done.flag || echo missing", 1, False),
+    ("ls data/*.db 2>/dev/null; python3 job.py", 1, False),  # only the last statement counts
+    ("FOO=1 /usr/bin/grep x y", 1, True),
+    ("sudo ls /root 2>/dev/null", 1, False),  # sudo can fail on its own
+    ("python3 -m pytest 2>/dev/null", 124, False),
+    ("git push origin main 2>/dev/null", 1, False),  # what it silenced was its failure
+    ("curl -sf https://api.example.com/x 2>/dev/null", 22, False),
+    ("./sync.sh 2>/dev/null", 1, False),
+    ("./test", 1, False),  # a project's own script, not test(1)
+    ("/usr/bin/grep -q x y", 1, True),
+    ("cat config.yaml 2>/dev/null", 1, True),
+    ("grep -E '[' notes.md 2>/dev/null", 2, False),
+    ("diff old.txt new.txt 2>/dev/null", 2, False),
+    ("curl -s https://api.example.com/health | grep -q ok", 1, False),  # curl may be what failed
+    ("pytest -q | grep -q passed", 1, False),
+    ("find . -name '*.log' -exec gzip {} + 2>/dev/null", 1, False),
+    ("find . -name '*.db' 2>/dev/null", 1, True),
+    ("ls logs | sort | grep -q today", 1, False),  # ls or sort could have failed
+    ("echo $PATH | grep -q /usr/bin", 1, True),
+    ("cut notes.csv | grep -q x", 1, False),
+    ('[ -n "$(git status --porcelain 2>/dev/null)" ]', 1, False),
+    ('grep -q "a(b" notes.md', 1, True),
+    ("ls data/*.db 2>/dev/null & curl -sf https://api.example.com/x", 22, False),
+    ("grep -q x f & false", 1, False),
+    ("cut -f2 missing.csv 2>/dev/null | grep -q x", 1, False),
+    ("grep -E '[' f 2>/dev/null | grep -q x", 1, False),
+    ("curl -sf https://x $(echo a; ls y 2>/dev/null)", 22, False),
+    ("curl -sf https://x `ls y 2>/dev/null`", 22, False),
+    ("grep -q '[' <(ls a; ls b 2>/dev/null) 2>/dev/null", 2, False),
+    ("(cd /srv; ls data 2>/dev/null)", 2, False),
+    ("ls data 2>/dev/null | grep -q x", 1, False),
+    ('python3 x.py --msg "a; cat f 2>/dev/null"', 1, False),
+    ("python3 x.py --msg 'a | grep -q b'", 1, False),
+    ('grep -q "a;b" notes.md', 1, True),
+    ('echo "unbalanced; cat f 2>/dev/null', 1, False),
+    ("ls data/*.db >/dev/null 2>&1", 2, True),
+    ("ls data/*.db &>/dev/null", 2, True),
+    (None, 1, False),
+])
+def test_expected_exits(command, code, expected):
+    assert ledger.expected_exit(command, code) is expected
+
+
+def test_oddly_worded_failures_stay_unless_the_command_expected_them(recording):
+    home = pulse.get_hermes_home()
+    _terminal(home, "python3 -m pytest", "/usr/bin/python3: No module named pytest", 1, DAY)
+    _terminal(home, "go build ./...", "./main.go:5:2: undefined: foo", 1, DAY + 1)
+    failed = _failed(recording)
+    assert "No module named pytest" in failed and "undefined: foo" in failed
+
+
+def test_a_bare_exit_stays_in_failed_calls(recording):
+    """Nothing to judge it by unless the command expected it, so it isn't
+    dropped; the report's prompt weighs it by what the command was for."""
+    _terminal(pulse.get_hermes_home(), "test -f done.flag", "", 1, DAY)
+    _terminal(pulse.get_hermes_home(), "python3 job.py", "", 1, DAY + 1)
+    failed = _failed(recording)
+    assert "→ error: exit 1, no output" in failed and failed.count("\n- ") == 1
+    row = {"tool": "terminal", "status": "error", "error": "exit 2"}  # recorded before outputs were kept
+    assert not ledger.harmless_exit(row)
+    assert "a bare exit with no output" in candidates.INSTRUCTIONS and "a bare exit with no output" in report.REPORT_TEXT
+
+
+def test_a_call_that_later_went_through_is_left_out(recording):
+    home = pulse.get_hermes_home()
+    output = "Traceback (most recent call last):\nConnectionError: network down"
+    _terminal(home, "python3 scrape.py", output, 1, DAY)
+    _terminal(home, "python3 other.py", output, 1, DAY + 1)
+    ledger.record(home, tool_name="terminal", args={"command": "python3 scrape.py"}, status="ok",
+                  result=json.dumps({"output": "done", "exit_code": 0, "error": None}), now=DAY + 60)
+    failed = _failed(recording)
+    assert "other.py" not in failed  # labels aren't commands; count the lines instead
+    assert failed.count("\n- ") == 1
+
+
+def test_a_failure_after_the_call_went_through_still_counts(recording):
+    home = pulse.get_hermes_home()
+    ledger.record(home, tool_name="terminal", args={"command": "python3 scrape.py"}, status="ok",
+                  result=json.dumps({"output": "done", "exit_code": 0, "error": None}), now=DAY)
+    _terminal(home, "python3 scrape.py", "Traceback (most recent call last):\nConnectionError: down", 1, DAY + 60)
+    assert "ConnectionError: down" in _failed(recording)
 
 
 @pytest.mark.parametrize("value, expected", [
