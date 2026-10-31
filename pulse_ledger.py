@@ -47,7 +47,8 @@ FAILURE_MARK = re.compile(
     r"traceback|error|err!|exception|interrupt|systemexit|fatal|fail|denied|not found|no such|refused|timed out|timeout|cannot|can't|"
     r"could not|couldn't|unable|panic|killed|terminated|segmentation fault|abort|invalid|forbidden|"
     r"unauthori[sz]ed|unreachable|not permitted|not allowed|broken pipe|\breset\b|\bmissing\b|\bbad\b|"
-    r"\bwrong\b|\bunknown\b|\bno route\b|\bresolve\b|\busage:|(?-i:\bE[A-Z]{3,}\b)", re.I)
+    r"\bwrong\b|\bunknown\b|\bno route\b|\bresolve\b|\busage:|no rule|\bstop\.|\*\*\*|packet loss|\brejected\b|"
+    r"\bconflict|\bnot ok\b|nxdomain|\bnot a\b|no space|\blocked\b|\bunmet\b|corrupt|(?-i:\bE[A-Z]{3,}\b)", re.I)
 # Exit codes that are never harmless whatever was printed: a timeout (124),
 # a command that couldn't run (126, 127) or one killed by a signal (128+).
 LOUD_EXITS = 124
@@ -60,12 +61,19 @@ NO_OUTPUT = "no output"
 # bearer token, and any long run of letters and digits that could be a key.
 _URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
 _USERINFO = re.compile(r"[^\s:/@'\"]+:[^\s:/@'\"]+@(?=[\w.-])")
+# A strong key's value is always a secret; a weak key's (auth, session,
+# cookie, signature, token) only when it looks like one, so "Authentication:
+# failed" keeps its reason. A quoted value (JSON) always counts.
+_STRONG_KEY = re.compile(r"(?i)passw(?:or)?d|pwd|secret|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key")
 _SECRET_PAIR = re.compile(
-    r"(?i)\b([\w.-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|apikey|auth|authorization|cookie|session|"
-    r"signature|credential|private[_-]?key|access[_-]?key)[\w.-]*)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
+    r"(?i)\b([\w.-]*(?:passw(?:or)?d|pwd|secret|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key|token|"
+    r"auth|authorization|cookie|session|signature)[\w.-]*)([\"']?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
 _FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+)\S+")
 _KNOWN_TOKEN = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{10,})")
-_BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}")
+_BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+([A-Za-z0-9._~+/=-]{8,})")
+# Webhook URLs carry their secret in the path (Slack, Discord).
+_WEBHOOK_PATH = re.compile(r"(?i)(/services/T\w+/B\w+/|/api/webhooks/\d+/)[\w-]+")
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _LONG_RUN = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b")
 REDACTED = "[redacted]"
 # The ledger write runs inside the tool call: under contention it gives up
@@ -218,13 +226,20 @@ def describe_call(args: Any) -> tuple[str, str, str]:
     return action, label, hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+def _looks_secret(value: str) -> bool:
+    return value[:1] in "\"'" or len(value) >= 16 or (any(c.isdigit() for c in value) and any(c.isalpha() for c in value))
+
+
 def _redact(text: str) -> str:
-    text = _URL_IN_TEXT.sub(lambda m: _safe_url(m.group()), text)
+    text = _ANSI.sub("", text)
+    text = _URL_IN_TEXT.sub(lambda m: _WEBHOOK_PATH.sub(lambda w: w.group(1) + REDACTED, _safe_url(m.group())), text)
     text = _USERINFO.sub("", text)
     text = _KNOWN_TOKEN.sub(REDACTED, text)
     text = _FLAG_SECRET.sub(lambda m: m.group(1) + REDACTED, text)
-    text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}", text)
-    text = _SECRET_PAIR.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}" if m.group(1).lower() != "token" or _looks_secret(m.group(2))
+                       else m.group(), text)
+    text = _SECRET_PAIR.sub(lambda m: m.group(1) + m.group(2) + REDACTED
+                            if _STRONG_KEY.search(m.group(1)) or _looks_secret(m.group(3)) else m.group(), text)
     return _LONG_RUN.sub(REDACTED, text)
 
 

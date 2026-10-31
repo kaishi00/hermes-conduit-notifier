@@ -1131,6 +1131,33 @@ def test_more_secret_shapes_are_redacted(line, secret):
     assert secret not in error and "failed" in error
 
 
+@pytest.mark.parametrize("line, kept, gone", [
+    ('{"error": "bad login", "password": "hunter2"}', '"password": [redacted]', "hunter2"),
+    ("auth_password=abc failed", "auth_password=[redacted]", "=abc"),
+    ("token validation failed", "token validation failed", None),
+    ("Authentication: failed", "Authentication: failed", None),
+    ("401 Unauthorized: authentication failed", "Unauthorized: authentication failed", None),
+    ("post https://hooks.slack.com/services/T000/B000/" + "X" * 24 + " failed", "/B000/[redacted] failed", "X" * 24),
+    ("\x1b[31merror\x1b[0m: boom", "exit 1: error: boom", "[31m"),
+])
+def test_redaction_keeps_reasons_and_drops_secrets(line, kept, gone):
+    error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
+    assert kept in error and (gone is None or gone not in error)
+
+
+@pytest.mark.parametrize("line", [
+    "make: *** No rule to make target 'build'.  Stop.",
+    "3 packets transmitted, 0 received, 100% packet loss",
+    "! [rejected] main -> main (non-fast-forward)",
+    "sqlite3: database is locked",
+    "tar: No space left on device",
+    "apt: unmet dependencies",
+])
+def test_more_failure_wording_stays(line):
+    error = ledger.terminal_failure({"output": line, "exit_code": 2, "error": None})
+    assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
+
+
 def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
     _terminal(pulse.get_hermes_home(), "retry", "Error: retry #3 of /api failed? see /docs", 1, DAY)
     [row] = recording.store.recent_outcomes()
