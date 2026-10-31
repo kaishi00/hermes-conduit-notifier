@@ -406,10 +406,18 @@ def _work(args: argparse.Namespace) -> int:
 
     home = Path(get_hermes_home())
     action = args.work_action
-    if action == "status" and not work_store.exists(home):
+    if action in ("status", "off") and not work_store.exists(home):
+        # Never turned on: said so without leaving a registry behind.
         print("Bot workstreams: off (never turned on). `hermes conduit-push work on` to start them for this bot.")
         return 0
-    store = work_store.Store(home)
+    try:
+        return _work_on_registry(work_store.Store(home), args, action)
+    except Exception as error:  # noqa: BLE001 — a registry that can't be read, said in a line
+        print(f"Bot workstreams: couldn't read this bot's registry ({type(error).__name__}: {error}).")
+        return 1
+
+
+def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
     if action == "on":
         store.set_policy(args.policy or (store.policy() if store.policy() != "off" else "strict"))
         if args.max_running is not None:

@@ -334,6 +334,9 @@ class Broker:
             except BrokerError as error:
                 if not error.unsupported:
                     raise
+            # Couldn't add it to the turn: it goes after it, never redirecting it.
+            status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
+            return ("queued" if status != "streaming" else "started"), tip
         if running:
             try:
                 status = str(call("session.redirect", {"session_id": runtime_id, "text": text}).get("status") or "")
