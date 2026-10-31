@@ -62,6 +62,7 @@ DIGEST_RESULT_CHARS = 240
 READ_MESSAGES = 12
 READ_MESSAGE_CHARS = 1500
 LOOKALIKE = 0.5
+LOOKALIKE_RECENT_S = 600.0
 
 NOT_BOT_CHAT = ("Work tools only work in this bot's Bot Chat, which coordinates its work. This conversation isn't "
                 "it, so nothing was started or changed.")
@@ -479,9 +480,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                                                        "one that says what it's doing."}
     if not args.get("new"):
         mine = _words(title)
-        # Everything still running, however old, and the recent open rest.
+        # Only what's working now, or finished moments ago: settled work from
+        # an hour back drew unrelated jobs into it on a host, and a follow-up
+        # to it is the coordinator's call (work_send).
+        recent = time.time() - LOOKALIKE_RECENT_S
         open_work = {work.ref: work for work in store.list(active_only=True, limit=500)}
-        open_work.update({work.ref: work for work in store.list(active_only=False, limit=50)})
+        open_work.update({work.ref: work for work in store.list(active_only=False, limit=50)
+                          if work.updated_at >= recent})
         alike = [work for work in open_work.values() if work.kind == "workstream"
                  and not work.closed_at and _similar(mine, _words(work.title))]
         if alike:
@@ -1115,7 +1120,8 @@ def _raw_summary(args: Any) -> str:
 
 
 _COMMON = frozenset("the and for with from into about this that what why how check find look work task make "
-                    "please can you our your".split())
+                    "please can you our your count list show get latest current version versions file files "
+                    "etc usr var tmp home root run running status info number total size new old".split())
 
 
 _SHORT_WORDS = frozenset("on in to of is it up at be do as or if by an my we so no me us am go".split())
