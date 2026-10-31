@@ -39,10 +39,10 @@ MAX_IDS = 8
 MAX_ID_LEN = 160
 MAX_LABEL = 80
 MAX_ERROR = 200
-# A line of a failed command's output that says something went wrong. A
-# command whose output has none of these is kept as ``exit 2, no error in its
-# output: <last line>``: it exited non-zero with nothing wrong to show, like
-# an ``ls`` of a glob that matched nothing with its stderr silenced.
+# A line of a failed command's output that says something went wrong. The
+# kept line is the last one with a mark, else the last line; a call whose
+# exit was expected (expected_exit) and whose output has no mark is written
+# ``exit 2, an expected exit: <last line>`` and left out of the report.
 FAILURE_MARK = re.compile(
     r"traceback|error|err!|exception|interrupt|systemexit|stop(?:async)?iteration|generatorexit|fatal|fail|denied|not found|no such|refused|timed out|timeout|cannot|can't|"
     r"could not|couldn't|unable|panic|killed|terminated|segmentation fault|abort|invalid|forbidden|"
@@ -84,7 +84,7 @@ _SECRET_PAIR = re.compile(
     r"(?i)\b([\w.-]*(?:passw(?:or)?d|pwd|(?:\b|_)pass\b|secret|api[_ -]?key|apikey|credential|private[_-]?key|"
     r"access[_-]?key|token|"
     r"auth|authorization|cookie|session|signature)[\w.-]*)([\"']?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
-_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s(?:-[uU]|--(?:proxy-)?user)(?:\s+|=)(?=\S*:)|\s-p(?=\S))\S+")
+_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s(?:-[uU]|--(?:proxy-)?user)(?:\s+|=)(?=\S*:)|\s-p(?=\S)(?!(?-i:[a-z]+)\b))\S+")
 # A spaced -p is often a path (mkdir -p), so only a secret-looking value goes.
 _SPACED_P = re.compile(r"(\s-p\s+)(\S+)")
 _KNOWN_TOKEN = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{10,})")
@@ -263,7 +263,12 @@ def _bearer_secret(scheme: str, value: str) -> bool:
     # Bearer is always followed by its token; basic and token are also words.
     if _JUDGMENT.fullmatch(value):
         return False
-    return scheme.lower() == "bearer" or len(value) >= 16 or _looks_secret(value)
+    scheme = scheme.lower()
+    # Base64 (user:pass) mixes case inside the word or pads with =; a word doesn't.
+    if scheme == "basic" and len(value) >= 8 and re.fullmatch(r"[A-Za-z0-9+/]+=*", value) \
+            and (value.endswith("=") or value[1:] != value[1:].lower()):
+        return True
+    return scheme == "bearer" or _looks_secret(value)
 
 
 def _redact(text: str) -> str:
@@ -316,7 +321,11 @@ def expected_exit(command: Any, code: int) -> bool:
     it's no lookup."""
     if not isinstance(command, str) or not 0 < code < LOUD_EXITS:
         return False
-    statement = re.split(r"[;\n]", command.strip().rstrip(";").strip())[-1]
+    # Quoted text is an argument, never a separator or a redirect.
+    if command.count("'") % 2 or re.sub(r"'[^']*'", "", command).count('"') % 2:
+        return False
+    masked = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "Q", command)
+    statement = re.split(r"[;\n]", masked.strip().rstrip(";").strip())[-1]
     # A lone & backgrounds a command and runs the next one, so it hides nothing.
     if "||" in statement or "&" in re.sub(r"&&|\d*>&\d*-?|&>", "", statement) or not statement.strip():
         return False
