@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from events import REDACTED_APPROVAL_TEXT, REDACTED_QUESTION_TEXT, approval_decision, clarify_decision, clarification_text, event_id, is_silent_response, normalize_clarify_questions, push_event, redact_event, sanitize_call, sanitize_decision, sanitize_room
+from events import REDACTED_APPROVAL_TEXT, REDACTED_QUESTION_TEXT, approval_decision, clarify_decision, clarification_text, event_id, is_silent_response, normalize_clarify_questions, push_event, redact_event, sanitize_call, sanitize_decision, sanitize_room, slot_token
 
 
 def test_event_identifiers_are_stable_for_replayed_hooks():
@@ -726,3 +726,14 @@ def test_redact_event_keeps_only_the_rooms_ids():
     assert redacted["room"] == {"link": ROOM["link"], "id": ROOM["id"]}
     assert "title" not in redacted and "body" not in redacted
     assert redacted["title_label"] == "room.invite"
+
+
+def test_a_slot_is_hashed_kept_through_redaction_and_only_on_a_turns_end():
+    # #1579: which notification a push replaces, when it isn't the chat's.
+    event = push_event("response.ready", identifier="response:1", session_id="s", slot="key:default:report")
+    assert event["slot"] == slot_token("key:default:report")
+    assert "report" not in event["slot"] and len(event["slot"]) == 16
+    assert redact_event(event)["slot"] == event["slot"]
+    assert push_event("turn.failed", identifier="failure:1", slot="cron:default:daily")["slot"]
+    assert "slot" not in push_event("approval.needed", identifier="approval:1", slot="cron:default:daily")
+    assert "slot" not in push_event("response.ready", identifier="response:2", session_id="s")

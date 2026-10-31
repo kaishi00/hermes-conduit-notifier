@@ -1009,3 +1009,18 @@ def test_a_pairing_that_never_rotates_keeps_working(state_file):
     assert client.build_outgoing(_clarify_event(), stored)["e2e"]["kid"] == KID
     answered = {"status": "answered", "answer": _answer("Yes")}
     assert client.opened_answers(answered, stored, "conduit-push-abc123def456")["answer"] == "Yes"
+
+
+def test_a_slot_threads_a_sealed_push_by_the_slot_and_never_shows_it():
+    # #1579: two runs of one job (two chats) share the phone's slot; the
+    # relay sees only the keyed token.
+    keys = _keys()
+    base = {"type": "response.ready", "plugin_version": "0.5.0", "profile": "default", "body": "News."}
+    runs = [e2e.seal_event({**base, "event_id": f"response:{n}", "session_id": f"cron_daily_2026103{n}_120000",
+                            "slot": "abcdef0123456789"}, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+            for n in (0, 1)]
+    chat = e2e.seal_event({**base, "event_id": "response:2", "session_id": "cron_daily_20261030_120000"}, keys,
+                          installation_id=INSTALLATION, gateway_id=GATEWAY)
+    assert runs[0]["e2e"]["tok"] == runs[1]["e2e"]["tok"] == e2e.thread_token(keys, "slot:abcdef0123456789")
+    assert chat["e2e"]["tok"] != runs[0]["e2e"]["tok"]
+    assert "slot" not in runs[0] and "slot" not in e2e.open_event(runs[0], keys, installation_id=INSTALLATION, gateway_id=GATEWAY)

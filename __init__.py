@@ -350,7 +350,8 @@ def _post_llm_call(**kwargs: Any) -> None:
     if pulse_turn and not quiet:
         copy = pulse.push_copy(session_id, kwargs.get("turn_id"), response)
     elif headline and not pulse_turn:
-        copy = {"title": headline[0], "title_label": "response.ready", "body": headline[1], "headline": headline[0]}
+        copy = {"title": headline.title, "title_label": "response.ready", "body": headline.body,
+                "headline": headline.title, **({"level": "passive"} if headline.quiet else {})}
     else:
         copy = {"title": chat_title, "title_label": "response.ready", "body": response}
     ready = None if quiet else push_event(
@@ -367,6 +368,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         count=copy.get("count"),
         level=copy.get("level"),
         private=copy.get("private") is True,
+        slot=_slot(session_id, kwargs.get("task_id"), headline.key if headline and not pulse_turn else ""),
     )
     # A quick reply in a chat Hermes Desktop has selected: the user most
     # likely watched it arrive there (#87); so did one in a chat Conduit has
@@ -401,6 +403,17 @@ def _post_llm_call(**kwargs: Any) -> None:
     for old_session, (old_ready, old_send, old_timer) in overflow:
         _cancel(old_timer)
         _finish_ready(old_session, old_ready, old_send)
+
+
+def _slot(session_id: str, task_id: Any = None, key: str = "") -> str:
+    """Which notification on the phone a turn's end replaces (#1579), when
+    it isn't the chat's own: a conduit_notify key's, shared by this
+    profile's chats and jobs, else a scheduled job's, so each run replaces
+    the last instead of piling up (every run is a chat of its own)."""
+    if key:
+        return f"key:{_profile}:{key}"
+    job = cron_runs.job_id(session_id, task_id)
+    return f"cron:{_profile}:{job}" if job else ""
 
 
 def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
@@ -617,6 +630,7 @@ def _on_session_end(**kwargs: Any) -> None:
         title=_titled("Turn failed", session_id),
         title_label="turn.failed",
         session_title=_session_title(session_id),
+        slot=_slot(session_id, kwargs.get("task_id")),
     )
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
         return
@@ -770,6 +784,7 @@ def _subagent_stop(**kwargs: Any) -> None:
         title_label="background_task.finished" if finished else "",
         session_title=_session_title(parent),
         body=summary or ("" if finished else f"A delegated task {status}."),
+        slot=_slot(parent),
     ))
 
 

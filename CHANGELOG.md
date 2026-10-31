@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.123.0 (2026-10-31)
+
+### New and improved
+- Fewer notifications pile up. Each scheduled job keeps one notification:
+  a new run replaces the last one instead of adding another.
+- Hermes can update a notification it sent earlier instead of adding a
+  new one ("Report in progress", later "Report ready"), from any chat or
+  scheduled job of the same profile, and can make the update quiet: no
+  sound or banner. Needs relay 0.26 for unencrypted notifications.
+
 ## 0.122.3 (2026-10-31)
 
 ### Fixes

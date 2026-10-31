@@ -695,7 +695,44 @@ def test_only_the_newest_written_notifications_are_kept(paired, monkeypatch):
     for session in ("a", "b", "c"):
         notify_tool.keep(session, "Done", session)
     assert notify_tool.take("a") is None
-    assert notify_tool.take("c") == ("Done", "c")
+    assert notify_tool.take("c") == notify_tool.Headline("Done", "c")
+
+
+def test_a_keyed_notification_replaces_the_profiles_earlier_one_from_any_chat(pushed, paired):
+    # #1579: "Report in progress" from a chat, "Report ready" from a
+    # scheduled job, both keyed "report": one slot on the phone.
+    answer = notify_tool.handle({"title": "Report in progress", "body": "Half done.", "key": " Report "}, session_id="s")
+    assert '"key": "report"' in answer
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Working on it.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    notify_tool.handle({"title": "Report ready", "body": "All 150 analysed.", "key": "report", "quiet": True},
+                       session_id="cron_daily_20261031_120000")
+    plugin._post_llm_call(session_id="cron_daily_20261031_120000", turn_id="t2", assistant_response="Done.")
+    plugin._on_session_end(session_id="cron_daily_20261031_120000", turn_id="t2", completed=True, failed=False,
+                           interrupted=False)
+    first, second = pushed
+    assert first["slot"] == second["slot"] == events.slot_token("key:default:report")
+    assert "level" not in first, "a keyed notification still rings unless it's quiet"
+    assert second["level"] == "passive"
+
+
+def test_each_scheduled_job_keeps_one_notification(pushed):
+    # Every run of a job is its own chat; its runs share the job's slot.
+    for run in ("cron_daily_20261031_120000", "cron_daily_20261101_120000"):
+        plugin._post_llm_call(session_id=run, turn_id=run, assistant_response="News.")
+        plugin._on_session_end(session_id=run, turn_id=run, completed=True, failed=False, interrupted=False)
+    plugin._on_session_end(session_id="local-1", task_id="cron:daily:3", turn_id="t3", failed=True)
+    plugin._post_llm_call(session_id="chat", turn_id="t4", assistant_response="Hi.")
+    plugin._on_session_end(session_id="chat", turn_id="t4", completed=True, failed=False, interrupted=False)
+    assert _types(pushed) == ["response.ready", "response.ready", "turn.failed", "response.ready"]
+    job = events.slot_token("cron:default:daily")
+    assert [event.get("slot") for event in pushed] == [job, job, job, None], "a chat keeps its own"
+
+
+def test_a_key_is_kept_short_and_plain():
+    assert notify_tool.slot_key("  Weekly  Report!! ") == "weekly-report"
+    assert notify_tool.slot_key("a" * 80) == "a" * notify_tool.MAX_KEY_CHARS
+    assert notify_tool.slot_key(None) == notify_tool.slot_key("!!!") == ""
 
 
 def test_conduit_notify_registers_on_a_hermes_without_display_fields():
