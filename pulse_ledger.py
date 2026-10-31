@@ -8,9 +8,9 @@ error type), and the identifiers the result returned (a reminder or event
 id, a cron job id, a path, a URL), so a later item can link to it by
 evidence instead of wording. The output itself is not kept, and no model is
 involved; a failed terminal command keeps one line of it as its error, the
-line that says what went wrong (or the last, when none does). An exit the
-command itself expected (a silenced lookup, a yes/no check's "no") with no
-failure word is marked "an expected exit" and left out of the report. That line loses URL user info and queries, secret-looking
+line that says what went wrong (or the last, when none does). An exit the command expected (a silenced lookup, a yes/no check's
+"no") with no failure word is marked "an expected exit" and left out of the
+report. The kept line loses URL user info and queries, secret-looking
 ``key=value`` pairs, bearer tokens and long key-like runs first.
 
 Recorded only while Pulse is on.
@@ -86,7 +86,9 @@ _SECRET_PAIR = re.compile(
     r"auth|authorization|cookie|session|signature)[\w.-]*)([\"']?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
 _FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s(?:-[uU]|--(?:proxy-)?user)(?:\s+|=)(?=\S*:)|\s-p(?=\S)(?!(?-i:[a-z]+)\b))\S+")
 # A spaced -p is often a path (mkdir -p), so only a secret-looking value goes.
-_SPACED_P = re.compile(r"(\s-p\s+)(\S+)")
+_SPACED_P = re.compile(r"(\s-p\s+)(?![/.~])(\S+)")
+# A strong key word, a space and its value ("password hunter2 rejected").
+_SPOKEN_SECRET = re.compile(r"(?i)\b((?:password|passwd|passphrase|secret|api[ _-]?key)\s+)(\S+)")
 _KNOWN_TOKEN = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{10,})")
 _BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+([A-Za-z0-9._~+/=-]{8,})")
 # Webhook URLs carry their secret in the path (Slack, Discord).
@@ -256,7 +258,8 @@ def _looks_secret(value: str) -> bool:
     bare = value.strip("\"'")
     if value[:1] in "\"'" or (any(c.isdigit() for c in bare) and any(c.isalpha() for c in bare)):
         return True
-    if bare.isalpha() and len(bare) >= 12 and bare[1:] != bare[1:].lower() and bare != bare.upper():
+    if bare.isalpha() and len(bare) >= 12 and bare[1:] != bare[1:].lower() and bare != bare.upper() \
+            and not FAILURE_MARK.search(bare):  # InvalidCredentials is a reason
         return True  # a mixed-case passphrase (MySecretPassPhrase), not a word
     return len(bare) >= 16 and not bare.replace("_", "").replace("-", "").isalpha()
 
@@ -282,6 +285,8 @@ def _redact(text: str) -> str:
     text = _USERINFO.sub("", text)
     text = _KNOWN_TOKEN.sub(REDACTED, text)
     text = _FLAG_SECRET.sub(lambda m: m.group(1) + REDACTED, text)
+    text = _SPOKEN_SECRET.sub(lambda m: m.group(1) + REDACTED
+                              if _looks_secret(m.group(2)) and not _JUDGMENT.fullmatch(m.group(2)) else m.group(), text)
     text = _SPACED_P.sub(lambda m: m.group(1) + REDACTED if _looks_secret(m.group(2)) else m.group(), text)
     text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}" if _bearer_secret(m.group(1), m.group(2)) else m.group(),
                        text)
@@ -330,6 +335,8 @@ def expected_exit(command: Any, code: int) -> bool:
     if command.count("'") % 2 or re.sub(r"'[^']*'", "", command).count('"') % 2:
         return False
     masked = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "Q", command)
+    if "$(" in masked or "`" in masked:  # a nested command can hide its own separators
+        return False
     statement = re.split(r"[;\n]", masked.strip().rstrip(";").strip())[-1]
     # A lone & backgrounds a command and runs the next one, so it hides nothing.
     if "||" in statement or "&" in re.sub(r"&&|\d*>&\d*-?|&>", "", statement) or not statement.strip():
