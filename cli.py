@@ -418,7 +418,9 @@ def _work(args: argparse.Namespace) -> int:
         import os
         import sys
 
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, sys.stdout.fileno())
+        os.close(null)
         return 0
     except Exception as error:  # noqa: BLE001 — a registry that can't be read, said in a line
         print(f"Bot workstreams: couldn't read this bot's registry ({type(error).__name__}: {error}).")

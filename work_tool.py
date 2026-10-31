@@ -861,18 +861,20 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     when the session is a workstream."""
     if not isinstance(session_id, str):
         return False
-    with _wake_lock:
-        text = _replies.pop(session_id, "")
-        repeated = session_id in _finished
     home, work, unreadable = _lookup(session_id)
     if work is None or home is None:
+        with _wake_lock:
+            _replies.pop(session_id, None)
         return unreadable and _maybe_workstream(session_id, home)
-    if repeated:
-        return True  # this turn's end was handled; its reply went with it
     with _wake_lock:
+        # Checked and marked together: a second end, even a concurrent one,
+        # finds this one's mark (only workstreams are marked).
+        if session_id in _finished:
+            return True  # this turn's end was handled; its reply went with it
         if len(_finished) > 512:
             _finished.clear()
         _finished.add(session_id)
+        text = _replies.pop(session_id, "")
     store = work_store.Store(home)
     if work.status == "stopped":
         _stopped_report(home, store, work, text, failed=failed, interrupted=interrupted)

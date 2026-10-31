@@ -1308,3 +1308,10 @@ def test_the_cli_status_of_a_bot_never_turned_on_piped_into_head_exits_quietly(h
     monkeypatch.setattr("builtins.print", lambda *a, **k: (_ for _ in ()).throw(BrokenPipeError()))
     monkeypatch.setattr(__import__("os"), "dup2", lambda *a: None)
     assert cli._work(types.SimpleNamespace(work_action="status", policy=None, max_running=None)) == 0
+
+
+def test_only_workstream_turn_ends_are_remembered(on, hermes):
+    start()
+    assert not work.turn_finished(OTHER_CHAT, failed=True, interrupted=False)
+    assert not work.turn_finished(OTHER_CHAT, failed=True, interrupted=False)
+    assert OTHER_CHAT not in work._finished
