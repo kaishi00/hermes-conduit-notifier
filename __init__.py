@@ -648,6 +648,9 @@ def _on_session_end(**kwargs: Any) -> None:
             logger.debug("conduit_push: voice job archive check failed", exc_info=True)
         return
     _settle_ready(session_id, kwargs.get("turn_id"), "dropped")
+    # Taken before any return: a background task this turn started follows
+    # its job's mute and slot, even when the turn itself sends nothing.
+    slot = _slot(session_id, kwargs.get("task_id"), written_key, turn_id=kwargs.get("turn_id"))
     if kwargs.get("interrupted"):
         calls.turn_ended(session_id, "stopped", profile=_profile, fallback=None)
         return
@@ -669,7 +672,7 @@ def _on_session_end(**kwargs: Any) -> None:
         title=_titled("Turn failed", session_id),
         title_label="turn.failed",
         session_title=_session_title(session_id),
-        slot=_slot(session_id, kwargs.get("task_id"), written_key, turn_id=kwargs.get("turn_id")),
+        slot=slot,
     )
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
         return
