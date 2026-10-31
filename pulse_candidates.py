@@ -554,7 +554,10 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     done, put away or rated not useful. That card says it still, so nothing
     makes another (Eric, 2026-10-29: "if it's still open, why are we
     repeating it?"). Only on the day it's due may one come again, once
-    (due_again), so a deadline can't slip by behind an earlier card."""
+    (due_again), so a deadline can't slip by behind an earlier card. A card
+    with no item or ref (the model found it in a chat) counts by its words:
+    an open card of the same kind from the last 30 days that names the same
+    person or thing on the same day (same_subject)."""
     about = lambda row: (row["item_id"] if row["origin"] == MEMORY and row.get("item_id") is not None else None,
                          str(row.get("ref") or "") if str(row.get("ref") or "").startswith((REMINDER, EVENT)) else "")
     keys = [about(row) for row in rows]
@@ -589,40 +592,66 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
 
 # How far back an open card is matched by its words (still_open).
 SAID_WINDOW_S = 30 * 86400.0
+_MONTHS = ("january february march april may june july august september october november december").split()
 _DATE_WORDS = frozenset(
-    "monday tuesday wednesday thursday friday saturday sunday january february march april may june july "
-    "august september october november december jan feb mar apr jun jul aug sep sept oct nov dec".split())
+    "monday tuesday wednesday thursday friday saturday sunday jan feb mar apr jun jul aug sep sept oct nov dec".split()
+    + _MONTHS)
 # Capitalised words that start a sentence rather than name something.
 _STARTERS = frozenset(
     "the a an your you i it its this that there these those pulse hermes today tomorrow tonight remember don't "
-    "buy send get book call check follow reminder birthday happy worth time next".split())
+    "buy send get book call check follow reminder birthday happy worth time next "
+    "file renew pay sign bring take meet read submit cancel order pick return schedule email text ask tell "
+    "write finish fix update prepare confirm register apply collect drop visit see go make set".split())
+# Words too common to tell two things apart when neither names anyone.
+_COMMON = frozenset(
+    "user user's will their they them have with from that this need needs should would could about before "
+    "after until when what which there here been being into onto over your yours just also still then than "
+    "more some time today tomorrow week weeks days".split())
+_ISO_DAY = re.compile(r"\b\d{4}-(\d{2})-(\d{2})\b")
+_NOT_A_DAY = re.compile(r"\b\d{1,2}:\d{2}\b|\b\d{4}\b")  # a clock time or a year
 
 
-def _marks(text: str) -> tuple[set[str], set[str]]:
-    """The words in ``text`` that name something (capitalised, possessive
-    's dropped) and the date words (weekdays, months, numbers)."""
-    names, dates = set(), set()
+def _marks(text: str) -> tuple[set[str], set[str], set[str], set[str]]:
+    """What ``text`` names (capitalised words, possessive 's dropped), its
+    days of the month (1 to 31, "6th" as 6; an ISO date as its day and
+    month; years and clock times left out), its other date words (weekdays,
+    months) and its longer plain words."""
+    text = _ISO_DAY.sub(lambda m: f"{int(m.group(2))} {_MONTHS[int(m.group(1)) - 1]}"
+                        if 1 <= int(m.group(1)) <= 12 else "", text)
+    text = _NOT_A_DAY.sub(" ", text)
+    names, days, dates, words = set(), set(), set(), set()
     for word in re.findall(r"\w+(?:['\u2019]\w+)?", text):
         bare = re.sub(r"['\u2019]s$", "", word).casefold()
-        if any(char.isdigit() for char in word) or bare in _DATE_WORDS:
+        number = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?", bare)
+        if number:
+            if 1 <= int(number.group(1)) <= 31:
+                days.add(str(int(number.group(1))))
+        elif any(char.isdigit() for char in bare):
+            continue
+        elif bare in _DATE_WORDS and (bare != "may" or word[0] == "M"):  # "you may", not May
             dates.add(bare)
         elif word[0].isupper() and bare not in _STARTERS:
             names.add(bare)
-    return names, dates
+        elif len(bare) >= 4 and bare not in _COMMON:
+            words.add(bare)
+    return names, days, dates, words
 
 
 def same_subject(said: str, text: str) -> bool:
-    """Whether ``text`` is about what an earlier card ``said``: the names in
-    the one that names fewer are all in the other (so Kwan's birthday isn't
-    Long's, sharing a surname), they share a date word, a number when both
-    give one (so Kwan's passport on the 20th isn't the birthday on the 6th),
-    and at least three marks in all."""
-    (names_a, dates_a), (names_b, dates_b) = _marks(said), _marks(text)
-    small, large = sorted((names_a, names_b), key=len)
-    numbers_a, numbers_b = ({word for word in dates if any(char.isdigit() for char in word)}
-                            for dates in (dates_a, dates_b))
-    dated = bool(numbers_a & numbers_b) if numbers_a and numbers_b else bool(dates_a & dates_b)
-    return bool(small) and small <= large and dated and len((names_a & names_b) | (dates_a & dates_b)) >= 3
+    """Whether ``text`` is about what an earlier card ``said``. It names no
+    one the card doesn't (so Anna Ho's birthday isn't Ho's, and Long's isn't
+    Kwan's); naming no one, it shares two plain words with the card ("renew",
+    "passport"). And it's on the same day: the same day of the month when
+    both give one (so a passport on the 20th isn't a birthday on the 6th),
+    else a weekday or month in common."""
+    names_a, days_a, dates_a, words_a = _marks(said)
+    names_b, days_b, dates_b, words_b = _marks(text)
+    if names_b:
+        alike = names_b <= names_a
+    else:
+        alike = len((names_a | words_a) & words_b) >= 2
+    dated = bool(days_a & days_b) if days_a and days_b else bool(dates_a & dates_b)
+    return alike and dated
 
 
 def on_cards(pulse_store: store.PulseStore, now: float, zone: Optional[tzinfo], *, items: Sequence[dict] = (),
@@ -632,7 +661,8 @@ def on_cards(pulse_store: store.PulseStore, now: float, zone: Optional[tzinfo], 
     the brief): of the remembered ``items`` and the phone's ``reminders`` and
     calendar ``events``, those whose card is still open (still_open: on the
     day it's due one more may come, once, as in a report) and the reminders
-    and entries put away for good. Item ids, and REMINDER and EVENT refs."""
+    and entries put away for good. Item ids, and REMINDER and EVENT refs,
+    else the card's words (same_subject)."""
     rows = ([{"origin": MEMORY, "item_id": item["id"], "due_at": item.get("due_at"), "kind": item.get("kind"),
               "text": _said_as(item.get("text"), item.get("due_at"), zone)} for item in items]
             + [{"origin": MODEL, "item_id": None, "ref": reminder_ref(reminder), "kind": "reminder",
