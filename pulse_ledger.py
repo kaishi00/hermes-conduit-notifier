@@ -48,7 +48,7 @@ FAILURE_MARK = re.compile(
     r"could not|couldn't|unable|panic|killed|terminated|segmentation fault|abort|invalid|forbidden|"
     r"unauthori[sz]ed|unreachable|not permitted|not allowed|broken pipe|\breset\b|\bmissing\b|\bbad\b|"
     r"\bwrong\b|\bunknown\b|\bno route\b|\bresolve\b|\busage:|no rule|\bstop\.|\*\*\*|packet loss|\brejected\b|"
-    r"\bconflict|\bnot ok\b|nxdomain|\bnot a\b|no space|\blocked\b|\bunmet\b|corrupt|(?-i:\bE[A-Z]{3,}\b)", re.I)
+    r"\bconflict|\bnot ok\b|nxdomain|\bnot a\b|no space|\blocked\b|\bunmet\b|corrupt|is a directory|already in use|read-only|not empty|unavailable|\blimit\b|exceeded|quota|out of memory|\boom\b|unexpected eof|(?-i:\bE[A-Z]{3,}\b)", re.I)
 # Exit codes that are never harmless whatever was printed: a timeout (124),
 # a command that couldn't run (126, 127) or one killed by a signal (128+).
 LOUD_EXITS = 124
@@ -64,11 +64,13 @@ _USERINFO = re.compile(r"[^\s:/@'\"]+:[^\s:/@'\"]+@(?=[\w.-])")
 # A strong key's value is always a secret; a weak key's (auth, session,
 # cookie, signature, token) only when it looks like one, so "Authentication:
 # failed" keeps its reason. A quoted value (JSON) always counts.
-_STRONG_KEY = re.compile(r"(?i)passw(?:or)?d|pwd|secret|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key")
+_STRONG_KEY = re.compile(r"(?i)passw(?:or)?d|pwd|(?:\b|_)pass\b|secret|api[_ -]?key|apikey|credential|private[_-]?key|"
+                         r"access[_-]?key")
 _SECRET_PAIR = re.compile(
-    r"(?i)\b([\w.-]*(?:passw(?:or)?d|pwd|secret|api[_-]?key|apikey|credential|private[_-]?key|access[_-]?key|token|"
+    r"(?i)\b([\w.-]*(?:passw(?:or)?d|pwd|(?:\b|_)pass\b|secret|api[_ -]?key|apikey|credential|private[_-]?key|"
+    r"access[_-]?key|token|"
     r"auth|authorization|cookie|session|signature)[\w.-]*)([\"']?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
-_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+)\S+")
+_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+|\s-p(?=\S))\S+")
 _KNOWN_TOKEN = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{10,})")
 _BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+([A-Za-z0-9._~+/=-]{8,})")
 # Webhook URLs carry their secret in the path (Slack, Discord).
@@ -76,6 +78,9 @@ _WEBHOOK_PATH = re.compile(r"(?i)(/services/T\w+/B\w+/|/api/webhooks/\d+/)[\w-]+
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _LONG_RUN = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b")
 REDACTED = "[redacted]"
+# How much of a kept line is redacted: this runs inside the tool call, and the
+# patterns cost more than linear on one very long run of characters.
+REDACT_WINDOW = 400
 # The ledger write runs inside the tool call: under contention it gives up
 # quickly instead of holding the call up.
 WRITE_BUSY_TIMEOUT_S = 0.5
@@ -226,6 +231,11 @@ def describe_call(args: Any) -> tuple[str, str, str]:
     return action, label, hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+# A value that says what's wrong with a secret rather than being one.
+_JUDGMENT = re.compile(r"(?i)[\"']?(?:missing|invalid|expired|required|wrong|failed|empty|incorrect|denied|none|null|"
+                       r"unset|not set|undefined|rejected|revoked)[\"'.,]?")
+
+
 def _looks_secret(value: str) -> bool:
     return value[:1] in "\"'" or len(value) >= 16 or (any(c.isdigit() for c in value) and any(c.isalpha() for c in value))
 
@@ -236,11 +246,22 @@ def _redact(text: str) -> str:
     text = _USERINFO.sub("", text)
     text = _KNOWN_TOKEN.sub(REDACTED, text)
     text = _FLAG_SECRET.sub(lambda m: m.group(1) + REDACTED, text)
-    text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}" if m.group(1).lower() != "token" or _looks_secret(m.group(2))
-                       else m.group(), text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}" if _looks_secret(m.group(2)) else m.group(), text)
     text = _SECRET_PAIR.sub(lambda m: m.group(1) + m.group(2) + REDACTED
-                            if _STRONG_KEY.search(m.group(1)) or _looks_secret(m.group(3)) else m.group(), text)
+                            if not _JUDGMENT.fullmatch(m.group(3))
+                            and (_STRONG_KEY.search(m.group(1)) or _looks_secret(m.group(3))) else m.group(), text)
     return _LONG_RUN.sub(REDACTED, text)
+
+
+def _around(line: str, at: int) -> str:
+    """At most REDACT_WINDOW characters on each side of ``at``. A cut start
+    moves on to the next space, so it never begins inside a token (a URL's
+    user info among them)."""
+    start, end = max(0, at - REDACT_WINDOW), at + REDACT_WINDOW
+    part = line[start:end]
+    if start and " " in part[:at - start]:
+        part = part[part.index(" ") + 1:]
+    return part
 
 
 def _clip(text: str, limit: int) -> str:
@@ -271,13 +292,14 @@ def terminal_failure(result: Any) -> Optional[str]:
         # redacted whole first (a cut could start inside a URL's user info),
         # then a long one is kept from just before its mark, so the mark
         # survives the cut.
-        clean = _redact(marked[-1][0])
+        part, first = marked[-1]
+        clean = _redact(_around(part, first.start()))
         mark = FAILURE_MARK.search(clean)
         start = max(0, mark.start() - 60) if mark else 0
         head, excerpt = f"exit {code}", ("…" if start else "") + clean[start:]
     else:
         quiet = 0 < code < LOUD_EXITS
-        head, excerpt = (f"exit {code}, {NO_ERROR_SHOWN}" if quiet else f"exit {code}"), _redact(lines[-1])
+        head, excerpt = (f"exit {code}, {NO_ERROR_SHOWN}" if quiet else f"exit {code}"), _redact(_around(lines[-1], len(lines[-1])))
     return _clip(f"{head}: {excerpt}", MAX_ERROR)
 
 

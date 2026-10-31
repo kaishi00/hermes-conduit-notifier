@@ -1058,8 +1058,8 @@ def test_a_traceback_stays_in_failed_calls_with_its_exception(recording):
 
 
 def test_a_long_failure_line_keeps_its_mark():
-    error = ledger.terminal_failure({"output": "x" * 400 + " permission denied", "exit_code": 1, "error": None})
-    assert error.startswith("exit 1: …x") and error.endswith("permission denied") and len(error) <= ledger.MAX_ERROR
+    error = ledger.terminal_failure({"output": "word " * 200 + "permission denied", "exit_code": 1, "error": None})
+    assert error.startswith("exit 1: …") and error.endswith("permission denied") and len(error) <= ledger.MAX_ERROR
 
 
 @pytest.mark.parametrize("result, expected", [
@@ -1125,10 +1125,13 @@ def test_a_credentialed_url_far_before_the_mark_is_redacted():
     ("mysql --password hunter2xyz failed", "hunter2xyz"),
     ("curl -u alice:s3cretpw https://x.example failed", "s3cretpw"),
     ("failed with " + "gh" + "p_" + "Z" * 30, "Z" * 30),
+    ("DB_PASS=hunter2 connection refused", "hunter2"),
+    ("API key: abc123xyz refused", "abc123xyz"),
+    ("mysql -phunter2xy failed", "hunter2xy"),
 ])
 def test_more_secret_shapes_are_redacted(line, secret):
     error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
-    assert secret not in error and "failed" in error
+    assert secret not in error and ledger.REDACTED in error
 
 
 @pytest.mark.parametrize("line, kept, gone", [
@@ -1136,6 +1139,9 @@ def test_more_secret_shapes_are_redacted(line, secret):
     ("auth_password=abc failed", "auth_password=[redacted]", "=abc"),
     ("token validation failed", "token validation failed", None),
     ("Authentication: failed", "Authentication: failed", None),
+    ("Basic authentication failed", "Basic authentication failed", None),
+    ("api_key: missing", "api_key: missing", None),
+    ('{"password": "expired"}', '"password": "expired"', None),
     ("401 Unauthorized: authentication failed", "Unauthorized: authentication failed", None),
     ("post https://hooks.slack.com/services/T000/B000/" + "X" * 24 + " failed", "/B000/[redacted] failed", "X" * 24),
     ("\x1b[31merror\x1b[0m: boom", "exit 1: error: boom", "[31m"),
@@ -1152,10 +1158,23 @@ def test_redaction_keeps_reasons_and_drops_secrets(line, kept, gone):
     "sqlite3: database is locked",
     "tar: No space left on device",
     "apt: unmet dependencies",
+    "cat: notes: Is a directory",
+    "bind: Address already in use",
+    "mkdir: /ro/x: Read-only file system",
+    "gh: API rate limit exceeded for installation ID 1234",
+    "503 Service Unavailable",
+    "CUDA out of memory",
 ])
 def test_more_failure_wording_stays(line):
     error = ledger.terminal_failure({"output": line, "exit_code": 2, "error": None})
     assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
+
+
+def test_a_huge_line_is_kept_quickly():
+    started = time.monotonic()
+    error = ledger.terminal_failure({"output": "a1" * 50_000 + " error here " + "b2" * 50_000, "exit_code": 1,
+                                     "error": None})
+    assert time.monotonic() - started < 1 and "error here" in error and len(error) <= ledger.MAX_ERROR
 
 
 def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
