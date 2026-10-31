@@ -1099,6 +1099,11 @@ def test_a_long_unmarked_last_line_keeps_its_end():
     assert error.startswith("exit 124: …") and error.endswith("word the end") and len(error) <= ledger.MAX_ERROR
 
 
+def test_a_long_unmarked_line_with_no_space_keeps_its_tail():
+    error = ledger.terminal_failure({"output": "x" * 500 + "Y" * 20, "exit_code": 124, "error": None})
+    assert error.startswith("exit 124: …") and error.endswith("Y" * 20)
+
+
 def test_a_window_with_no_space_starts_at_the_mark():
     line = "git clone https://u:Pw1234567890@git.example.com/" + "x" * 375 + " fatal"
     error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
@@ -1139,6 +1144,8 @@ def test_a_credentialed_url_far_before_the_mark_is_redacted():
     ("DB_PASS=hunter2 connection refused", "hunter2"),
     ("API key: abc123xyz refused", "abc123xyz"),
     ("mysql -phunter2xy failed", "hunter2xy"),
+    ("db -p hunter2xy connection refused", "hunter2xy"),
+    ("webhook hooks.slack.com/services/T00000000/B00000000/aB3xK9pQ2wR8 failed", "aB3xK9pQ2wR8"),
 ])
 def test_more_secret_shapes_are_redacted(line, secret):
     error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
@@ -1207,6 +1214,12 @@ def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
     ("ls data/*.db 2>/dev/null; python3 job.py", 1, False),  # only the last statement counts
     ("FOO=1 sudo /usr/bin/grep x y", 1, True),
     ("python3 -m pytest 2>/dev/null", 124, False),
+    ("git push origin main 2>/dev/null", 1, False),  # what it silenced was its failure
+    ("curl -sf https://api.example.com/x 2>/dev/null", 22, False),
+    ("./sync.sh 2>/dev/null", 1, False),
+    ("./test", 1, False),  # a project's own script, not test(1)
+    ("/usr/bin/grep -q x y", 1, True),
+    ("cat config.yaml 2>/dev/null", 1, True),
     (None, 1, False),
 ])
 def test_expected_exits(command, code, expected):

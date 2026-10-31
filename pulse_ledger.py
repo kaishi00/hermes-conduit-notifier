@@ -61,6 +61,10 @@ EXPECTED = "an expected exit"
 HARMLESS = re.compile(rf"exit -?\d+, {EXPECTED}\b")
 _SILENCED = re.compile(r"(?:2|&)>\s*/dev/null|>\s*/dev/null\s+2>&1")
 _YES_NO = frozenset({"grep", "egrep", "fgrep", "rg", "test", "[", "[[", "diff", "cmp", "pgrep", "which", "type"})
+# Lookups whose silenced errors are only "not there": a silenced git push,
+# curl or script still counts, since what it silenced was its failure.
+_LOOKUPS = frozenset({"ls", "find", "stat", "cat", "head", "tail", "file", "du", "wc", "readlink", "realpath",
+                      "test", "[", "[["}) | _YES_NO
 NO_OUTPUT = "no output"
 # What a kept output line could carry that mustn't be kept: a URL's user info
 # and query (each URL cleaned on its own, so the rest of the line stays),
@@ -77,7 +81,7 @@ _SECRET_PAIR = re.compile(
     r"(?i)\b([\w.-]*(?:passw(?:or)?d|pwd|(?:\b|_)pass\b|secret|api[_ -]?key|apikey|credential|private[_-]?key|"
     r"access[_-]?key|token|"
     r"auth|authorization|cookie|session|signature)[\w.-]*)([\"']?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
-_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+|\s-p(?=\S))\S+")
+_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+|\s-p(?:\s+|(?=\S)))\S+")
 _KNOWN_TOKEN = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{10,})")
 _BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+([A-Za-z0-9._~+/=-]{8,})")
 # Webhook URLs carry their secret in the path (Slack, Discord).
@@ -253,6 +257,7 @@ def _looks_secret(value: str) -> bool:
 def _redact(text: str) -> str:
     text = _ANSI.sub("", text)
     text = _URL_IN_TEXT.sub(lambda m: _WEBHOOK_PATH.sub(lambda w: w.group(1) + REDACTED, _safe_url(m.group())), text)
+    text = _WEBHOOK_PATH.sub(lambda w: w.group(1) + REDACTED, text)
     text = _USERINFO.sub("", text)
     text = _KNOWN_TOKEN.sub(REDACTED, text)
     text = _FLAG_SECRET.sub(lambda m: m.group(1) + REDACTED, text)
@@ -293,8 +298,10 @@ def expected_exit(command: Any, code: int) -> bool:
     for step in statement.split("&&"):
         last = step.split("|")[-1].strip()
         words = [word for word in last.split() if "=" not in word.split("/")[0] and word not in ("sudo", "env")]
-        name = words[0].rsplit("/", 1)[-1] if words else ""
-        if not (_SILENCED.search(last) or (code == 1 and name in _YES_NO)):
+        first = words[0] if words else ""
+        # A project's own ./test or scripts/which isn't the tool it's named after.
+        name = first.rsplit("/", 1)[-1] if "/" not in first or first.startswith(("/bin/", "/usr/")) else ""
+        if not ((_SILENCED.search(last) and name in _LOOKUPS) or (code == 1 and name in _YES_NO)):
             return False
     return True
 
@@ -331,7 +338,12 @@ def terminal_failure(result: Any, command: Any = None) -> Optional[str]:
     else:
         head = f"exit {code}, {EXPECTED}" if expected_exit(command, code) else f"exit {code}"
         # The line's end is what's kept: room is what MAX_ERROR leaves after the head.
-        excerpt = _printable(re.sub(r"\s+", " ", _redact(_around(lines[-1], len(lines[-1])))).strip())
+        tail = lines[-1][-2 * REDACT_WINDOW:]
+        if len(tail) < len(lines[-1]):
+            # Never start inside a token: past the first space, or past a cut
+            # URL's user info when there's none.
+            tail = tail[tail.index(" ") + 1:] if " " in tail else re.sub(r"^[^\s/@]*@", "", tail)
+        excerpt = _printable(re.sub(r"\s+", " ", _redact(tail)).strip())
         room = MAX_ERROR - len(head) - 2
         if len(excerpt) > room:
             excerpt = "…" + excerpt[-(room - 1):]
