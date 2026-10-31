@@ -427,6 +427,11 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any =
                 return _turn_slots[(session_id, turn_id)][0]
             _turn_slots.pop((session_id, turn_id), None)
             _turn_slots[(session_id, turn_id)] = (seed, job or "")
+            if key:
+                _key_writers.pop(seed, None)
+                _key_writers[seed] = session_id
+                while len(_key_writers) > MAX_TURN_STARTS:
+                    del _key_writers[next(iter(_key_writers))]
             if job and (job, session_id) not in _job_run_chats:
                 # The job's newest run is the one whose turn ended first
                 # most recently: a later turn in an older run doesn't take it
@@ -452,7 +457,8 @@ def _started_slot(session_id: str, turn_id: Any) -> tuple[str, str]:
         # A task from an older run reports in that run's chat: the job's
         # slot, or the key it wrote, holds the newest run's report, which it
         # mustn't replace.
-        if job and _job_runs.get(job) != session_id:
+        if (job and _job_runs.get(job) != session_id) or (
+                slot.startswith("key:") and _key_writers.get(slot, session_id) != session_id):
             slot = ""
         return slot, job
 
@@ -462,6 +468,9 @@ _turn_slots: dict[tuple[str, str], tuple[str, str]] = {}
 # job -> the chat of its newest run, and every (job, chat) seen so far.
 _job_runs: dict[str, str] = {}
 _job_run_chats: dict[tuple[str, str], None] = {}
+# key slot -> the chat that wrote it last, whose notification a task from
+# another chat mustn't replace.
+_key_writers: dict[str, str] = {}
 _turn_slots_lock = threading.Lock()
 
 

@@ -704,6 +704,7 @@ def runs(monkeypatch):
     monkeypatch.setattr(plugin, "_turn_slots", {})
     monkeypatch.setattr(plugin, "_job_runs", {})
     monkeypatch.setattr(plugin, "_job_run_chats", {})
+    monkeypatch.setattr(plugin, "_key_writers", {})
 
 
 def test_a_keyed_notification_replaces_the_profiles_earlier_one_from_any_chat(pushed, paired, runs):
@@ -817,6 +818,18 @@ def test_an_overlapping_older_run_ending_late_stays_older(pushed, runs):
     plugin._post_llm_call(session_id="local-b", turn_id="t1", task_id="cron:daily:2", assistant_response="Report.")
     plugin._post_llm_call(session_id="local-a", turn_id="t2", task_id="cron:daily:1", assistant_response="Late.")
     assert plugin._job_runs["daily"] == "local-b"
+
+
+def test_a_chats_late_task_leaves_the_key_another_chat_wrote_since(pushed, paired, runs):
+    for chat in ("chat-a", "chat-b"):
+        plugin._pre_llm_call(session_id=chat, turn_id="t")
+        notify_tool.handle({"title": "Report", "body": "Update.", "key": "report"}, session_id=chat)
+        plugin._post_llm_call(session_id=chat, turn_id="t", assistant_response="Done.")
+        plugin._on_session_end(session_id=chat, turn_id="t", completed=True, failed=False, interrupted=False)
+    _subagent(parent="chat-a")
+    _subagent(parent="chat-b", child="c2")
+    key = events.slot_token("key:default:report")
+    assert [event.get("slot") for event in pushed] == [key, key, None, key]
 
 
 def test_conduit_notify_registers_on_a_hermes_without_display_fields():
