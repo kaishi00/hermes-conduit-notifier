@@ -1118,3 +1118,58 @@ def test_a_lookalike_is_found_among_old_running_work(on, hermes):
 def test_a_nested_or_unreadable_bridge_is_held(on, hermes, args):
     assert work.tool_block(BOT_CHAT, "tool_call", args)["action"] == "block"
     assert work.tool_block(OTHER_CHAT, "tool_call", args) is None
+
+
+def test_a_stopped_or_interrupted_turn_without_words_drops_the_old_report(on, hermes):
+    start()
+    on.update("W1", status="stopped", last_result="Turn one's report")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=True)
+    assert not on.get("W1").last_result
+    on.update("W1", status="stopped", last_result="Turn one's report")
+    work.turn_ended("20261031_work_1", "Provider error")
+    work.turn_finished("20261031_work_1", failed=True, interrupted=False)
+    assert not on.get("W1").last_result
+    on.update("W1", status="running", last_result="Turn one's report")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=True)
+    row = on.get("W1")
+    assert row.status == "interrupted" and not row.last_result
+    assert "Turn one's report" not in work.digest(BOT_CHAT)
+
+
+def test_a_start_whose_id_comes_only_after_the_prompt_still_records_it(on, hermes, monkeypatch):
+    create = hermes.session_create
+
+    def nameless(params):
+        made = create(params)
+        made.pop("stored_session_id")
+        return made
+
+    monkeypatch.setattr(hermes, "session_create", nameless)
+    monkeypatch.setattr(broker_mod.Broker, "_stored_id",
+                        lambda self, runtime: "" if not hermes._sessions[runtime]["running"]
+                        else hermes._sessions[runtime]["session_key"])
+    assert start()["ok"] and on.get("W1").session_id == "20261031_work_1"
+
+
+def test_a_failed_record_of_a_late_id_ends_the_session(on, hermes, monkeypatch):
+    create = hermes.session_create
+
+    def nameless(params):
+        made = create(params)
+        made.pop("stored_session_id")
+        return made
+
+    monkeypatch.setattr(hermes, "session_create", nameless)
+    monkeypatch.setattr(broker_mod.Broker, "_stored_id",
+                        lambda self, runtime: "" if not hermes._sessions.get(runtime, {}).get("running")
+                        else hermes._sessions[runtime]["session_key"])
+    real = store_mod.Store.update
+
+    def broken(self, ref, **fields):
+        if "session_id" in fields:
+            raise OSError("disk full")
+        return real(self, ref, **fields)
+
+    monkeypatch.setattr(store_mod.Store, "update", broken)
+    answer = start()
+    assert not answer["ok"] and hermes.named("session.interrupt") and hermes.named("session.close")

@@ -491,7 +491,8 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
             logger.warning("conduit_push: starting a workstream failed", exc_info=True)
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't start it: {reason}"}
     # The session runs from here on, so a write that fails now never marks it
-    # failed: its row keeps the id `created` stored, and its turn's end
+    # failed: its row already has the id (`created` stored it inside the
+    # start, which ends the session when that fails), and its turn's end
     # settles it.
     try:
         store.update(work.ref, session_id=started.session_id)
@@ -702,11 +703,19 @@ def _lookup(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[Path
         return home, None, True
 
 
+_unreadable_warned = -1e9
+
+
 def _maybe_workstream(session_id: Any, home: Optional[Path]) -> bool:
     """A turn's hook couldn't read the registry: the session may be a hidden
     workstream, whose turn must stay quiet, unless it's the Bot Chat (whose
     reply is the one push)."""
-    logger.warning("conduit_push: the work registry couldn't be read at a turn's hook; keeping that turn quiet")
+    global _unreadable_warned
+    now = time.monotonic()
+    if now - _unreadable_warned > 300:
+        _unreadable_warned = now
+        logger.warning("conduit_push: the work registry couldn't be read at a turn's hook; keeping this bot's "
+                       "turns quiet, except its Bot Chat's, until it can")
     return _titled_bot_chat(session_id, home) is not True
 
 
@@ -839,7 +848,7 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
             return True  # a work_send redirected it: the new turn runs, and settles it
         # Not a work_stop or a redirect: the user stopped it from the chat
         # itself. It stays interrupted, its slot free.
-        store.update(work.ref, status="interrupted", only_if=_SETTLES)
+        store.update(work.ref, status="interrupted", last_result=text, only_if=_SETTLES)
         return True
     if failed:
         fields = {"status": "failed", "last_result": "", "error": _cut(text, 300) if text else "its turn failed"}
@@ -868,6 +877,8 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
     that finished as the stop came (not interrupted by it) still reaches the
     coordinator."""
     if not text or failed:
+        # Nothing from this turn: an older turn's report would read as its.
+        store.update(work.ref, last_result="", only_if=("stopped",))
         return
     stored = store.update(work.ref, last_result=text, only_if=("stopped",))
     if stored is not None and not interrupted and not work.closed_at and work.coordinator:

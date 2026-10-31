@@ -254,7 +254,8 @@ class Broker:
     def start(self, *, title: str, prompt: str, idempotency_key: str, cwd: str = "",
               created: Optional[Callable[[str], None]] = None) -> Started:
         """A new hidden session on this bot's profile, with ``prompt`` as its
-        first turn. ``created`` hears its stored id before the prompt goes in.
+        first turn. ``created`` hears its stored id before the prompt goes in (or
+        right after, when Hermes names it only then).
         Anything that fails once the session exists ends it again (its turn
         interrupted, the session closed), so no session runs outside the
         registry."""
@@ -272,12 +273,16 @@ class Broker:
                 raise BrokerError(f"Hermes put the session on {landed[:64]} instead of {self.profile}")
             stored = made.get("stored_session_id")
             stored = stored if isinstance(stored, str) and stored else self._stored_id(runtime_id)
+            told = False
             if stored and created is not None:
                 created(stored)
+                told = True
             self._dispatch("prompt.submit", {"session_id": runtime_id, "text": prompt})
             stored = stored or self._stored_id(runtime_id)
             if not stored:
                 raise BrokerError("Hermes gave the session no stored id")
+            if not told and created is not None:
+                created(stored)  # known only now: a failure still ends the session
         except BaseException:
             self._end(runtime_id)
             raise
