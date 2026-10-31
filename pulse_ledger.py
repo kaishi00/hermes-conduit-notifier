@@ -84,7 +84,9 @@ _SECRET_PAIR = re.compile(
     r"(?i)\b([\w.-]*(?:passw(?:or)?d|pwd|(?:\b|_)pass\b|secret|api[_ -]?key|apikey|credential|private[_-]?key|"
     r"access[_-]?key|token|"
     r"auth|authorization|cookie|session|signature)[\w.-]*)([\"']?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
-_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+(?=\S*:)|\s-p(?:\s+|(?=\S)))\S+")
+_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s(?:-[uU]|--(?:proxy-)?user)(?:\s+|=)(?=\S*:)|\s-p(?=\S))\S+")
+# A spaced -p is often a path (mkdir -p), so only a secret-looking value goes.
+_SPACED_P = re.compile(r"(\s-p\s+)(\S+)")
 _KNOWN_TOKEN = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{10,})")
 _BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+([A-Za-z0-9._~+/=-]{8,})")
 # Webhook URLs carry their secret in the path (Slack, Discord).
@@ -257,6 +259,13 @@ def _looks_secret(value: str) -> bool:
     return len(bare) >= 16 and not bare.replace("_", "").replace("-", "").isalpha()
 
 
+def _bearer_secret(scheme: str, value: str) -> bool:
+    # Bearer is always followed by its token; basic and token are also words.
+    if _JUDGMENT.fullmatch(value):
+        return False
+    return scheme.lower() == "bearer" or len(value) >= 16 or _looks_secret(value)
+
+
 def _redact(text: str) -> str:
     text = _ANSI.sub("", text)
     text = _URL_IN_TEXT.sub(lambda m: _WEBHOOK_PATH.sub(lambda w: w.group(1) + REDACTED, _safe_url(m.group())), text)
@@ -264,7 +273,9 @@ def _redact(text: str) -> str:
     text = _USERINFO.sub("", text)
     text = _KNOWN_TOKEN.sub(REDACTED, text)
     text = _FLAG_SECRET.sub(lambda m: m.group(1) + REDACTED, text)
-    text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}" if _looks_secret(m.group(2)) else m.group(), text)
+    text = _SPACED_P.sub(lambda m: m.group(1) + REDACTED if _looks_secret(m.group(2)) else m.group(), text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}" if _bearer_secret(m.group(1), m.group(2)) else m.group(),
+                       text)
     text = _SECRET_PAIR.sub(lambda m: m.group(1) + m.group(2) + REDACTED
                             if not _JUDGMENT.fullmatch(m.group(3))
                             and (_STRONG_KEY.search(m.group(1)) or _looks_secret(m.group(3))) else m.group(), text)
@@ -306,7 +317,8 @@ def expected_exit(command: Any, code: int) -> bool:
     if not isinstance(command, str) or not 0 < code < LOUD_EXITS:
         return False
     statement = re.split(r"[;\n]", command.strip().rstrip(";").strip())[-1]
-    if "||" in statement or not statement.strip():
+    # A lone & backgrounds a command and runs the next one, so it hides nothing.
+    if "||" in statement or "&" in re.sub(r"&&|\d*>&\d*-?|&>", "", statement) or not statement.strip():
         return False
     for step in statement.split("&&"):
         *earlier, last = [part.strip() for part in step.split("|")]
