@@ -169,6 +169,10 @@ _sweep_lock = threading.Lock()
 # Workstreams a work_send may be redirecting: the superseded turn's end
 # (interrupted) leaves them running for the redirected turn to settle.
 _redirecting: set[tuple[str, str]] = set()
+# Follow-ups queued behind a workstream's running turn: that many turn ends
+# come before the one that settles it.
+_queued: dict[tuple[str, str], int] = {}
+_RUNNING_STATES = ("starting", "running", "needs_you")
 # A workstream turn's reply, from post_llm_call until its turn's end.
 _replies: dict[str, str] = {}
 # This copy's profile home, as it was when Hermes registered the plugin: each
@@ -372,9 +376,12 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         store.update(work.ref, status="stopped")
         try:
             stopped = broker.stop(work.session_id)
-        except work_broker.BrokerError as error:
+        except Exception as error:  # noqa: BLE001 — a stop that didn't happen leaves it as it was
             store.update(work.ref, status=work.status, only_if=("stopped",))
-            return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes refused: {error}"}
+            if not isinstance(error, work_broker.BrokerError):
+                logger.warning("conduit_push: stopping a workstream failed", exc_info=True)
+                error = type(error).__name__
+            return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't stop it: {error}"}
         if stopped:
             return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
                     "note": f"Stopped {work.ref}: {work.title}. work_send continues it."}
@@ -489,8 +496,15 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     words = FOLLOW_UP.format(bot=_bot_name(home), text=text)
     item = store.outbox_add(work.ref, "send", work.session_id, words)
     # Marked running first: a turn that ends before the send returns then
-    # settles the row, and nothing after the send puts it back.
-    store.update(work.ref, status="running", closed_at=0.0, error="")
+    # settles the row, and nothing after the send puts it back. Idle work
+    # takes a slot under the bot's limit, as a start does.
+    if work.status in _RUNNING_STATES:
+        store.update(work.ref, closed_at=0.0, error="")
+    elif not store.reopen(work.ref, running_limit=store.max_running()):
+        store.outbox_done(item, "refused")
+        return {"ok": False, "ref": work.ref, "title": work.title, "error": "busy",
+                "note": f"This bot already has {store.max_running()} workstreams running, its limit. Wait for one, "
+                        "stop one, or send this to one that's running."}
     pending = (str(home), work.ref)
     if how == "auto":
         with _wake_lock:
@@ -513,9 +527,12 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
         return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
                 "note": f"Hermes refused: {error}"}
     store.outbox_done(item, "accepted" if outcome != "queued" else "queued")
-    if outcome != "redirected":
-        with _wake_lock:
+    with _wake_lock:
+        if outcome != "redirected":
             _redirecting.discard(pending)
+        if outcome == "queued":
+            # The running turn's end isn't this one's: it runs after it.
+            _queued[pending] = _queued.get(pending, 0) + 1
     if tip and tip != work.session_id:
         store.update(work.ref, session_id=tip)
     said = {"started": "It's working on it now.", "redirected": "It took it into the turn it was working on.",
@@ -571,17 +588,18 @@ def _sweep(home: Path, store: work_store.Store, broker: Optional[work_broker.Bro
     key = str(home)
     if key in _swept:
         return
-    # Held until the sweep is written: a start on another thread waits, so
-    # its new row is never in the sweep's stale snapshot.
+    # Held until the sweep is written, so a second sweep waits for it; a row
+    # made after the live set was read is left out of it.
     with _sweep_lock:
         if key in _swept:
             return
         try:
             broker = broker or work_broker.Broker(home)
+            read_at = time.time()
             live = broker.live_session_ids()
         except work_broker.BrokerError:
             return
-        stopped = store.interrupt_running(live)
+        stopped = store.interrupt_running(live, before=read_at)
         _swept.add(key)
     if stopped:
         logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
@@ -767,6 +785,18 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         # itself. It stays interrupted, its slot free.
         store.update(work.ref, status="interrupted", only_if=_SETTLES)
         return True
+    with _wake_lock:
+        waiting = _queued.get((str(home), work.ref), 0)
+        if waiting:
+            if waiting > 1:
+                _queued[(str(home), work.ref)] = waiting - 1
+            else:
+                _queued.pop((str(home), work.ref), None)
+    if waiting:
+        # A follow-up runs next: this turn's words are kept, the next settles.
+        if text:
+            store.update(work.ref, last_result=text, only_if=_SETTLES)
+        return True
     if failed:
         fields = {"status": "failed", "error": _cut(text, 300) if text else "its turn failed"}
         line = f"- {work.ref} “{work.title}” failed" + (f": {_cut(text, 300)}" if text else "") \
@@ -888,6 +918,7 @@ def stop() -> None:
         _wakes.clear()
         _replies.clear()
         _redirecting.clear()
+        _queued.clear()
     for _, timer in pending:
         if timer is not None:
             timer.cancel()

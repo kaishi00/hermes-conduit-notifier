@@ -299,6 +299,17 @@ class Store:
             row = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_RUNNING}").fetchone()
         return int(row["n"])
 
+    def reopen(self, ref: str, *, running_limit: int) -> bool:
+        """An idle workstream back to running, if the bot has a slot for it,
+        counted in the same transaction (as ``add`` does)."""
+        with self._db() as con:
+            running = con.execute(f"SELECT COUNT(*) FROM work WHERE {_RUNNING} AND ref != ?", (ref,)).fetchone()[0]
+            if running >= running_limit:
+                return False
+            con.execute("UPDATE work SET status = 'running', closed_at = 0, error = '', updated_at = ? WHERE ref = ?",
+                        (time.time(), ref))
+        return True
+
     def update(self, ref: str, *, only_if: Optional[tuple[str, ...]] = None, **fields: Any) -> Optional[Work]:
         """Sets fields on a row and stamps it changed (unless only ``seen_at``
         moves). Unknown fields raise. With ``only_if``, only while the row's
@@ -336,15 +347,18 @@ class Store:
         with self._db() as con:
             con.executemany("UPDATE work SET seen_at = ? WHERE ref = ?", [(now, ref) for ref in refs])
 
-    def interrupt_running(self, live_session_ids: set[str]) -> list[str]:
+    def interrupt_running(self, live_session_ids: set[str], *, before: Optional[float] = None) -> list[str]:
         """Rows that say they're running on a session this process doesn't
         have live: a restart stopped them. Marked interrupted (never
-        continued here: that's the restart sweep's call), their refs back."""
+        continued here: that's the restart sweep's call), their refs back.
+        With ``before``, only rows made before then (when the live set was
+        read), so a start made since isn't caught."""
         if not self.path.is_file():
             return []
         with self._db() as con:
             rows = con.execute("SELECT ref, session_id FROM work WHERE kind = 'workstream' AND closed_at = 0 AND "
-                               "status IN ('starting', 'running', 'needs_you')").fetchall()
+                               "status IN ('starting', 'running', 'needs_you') AND created_at < ?",
+                               (before if before is not None else float("inf"),)).fetchall()
             stopped = [row["ref"] for row in rows if row["session_id"] not in live_session_ids]
             now = time.time()
             con.executemany("UPDATE work SET status = 'interrupted', updated_at = ? WHERE ref = ?",

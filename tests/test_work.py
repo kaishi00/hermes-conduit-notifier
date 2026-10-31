@@ -134,6 +134,7 @@ def hermes(home, monkeypatch):
     work._wakes.clear()
     work._replies.clear()
     work._redirecting.clear()
+    work._queued.clear()
     return fake
 
 
@@ -878,10 +879,10 @@ def test_a_start_waits_for_the_sweep(on, hermes, monkeypatch):
     sweeping = threading.Event()
     original = store_mod.Store.interrupt_running
 
-    def slow(self, live):
+    def slow(self, live, **kwargs):
         sweeping.set()
         gate.wait(2)
-        return original(self, live)
+        return original(self, live, **kwargs)
 
     monkeypatch.setattr(store_mod.Store, "interrupt_running", slow)
     first = threading.Thread(target=lambda: call("work_list"))
@@ -895,3 +896,62 @@ def test_a_start_waits_for_the_sweep(on, hermes, monkeypatch):
     first.join(2)
     second.join(2)
     assert on.get("W1").status == "running"
+
+
+def test_a_send_to_idle_work_keeps_to_the_running_limit(on, hermes):
+    start("One thing")
+    start("Second matter")
+    on.update("W1", status="done")
+    start("Third question")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    answer = call("work_send", {"ref": "W1", "text": "More"})
+    assert answer["error"] == "busy" and on.get("W1").status == "done" and on.running_count() == 2
+
+
+def test_a_queued_follow_up_is_the_turn_that_settles(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes._sessions["rt-20261031_work_1"]["running"] = True
+    assert call("work_send", {"ref": "W1", "text": "Then this", "how": "after"})["outcome"] == "queued"
+    work.turn_ended("20261031_work_1", "First part.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").status == "running" and on.running_count() == 1 and not work._wakes
+    work.turn_ended("20261031_work_1", "Second part.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.flush_wakes()
+    assert on.get("W1").status == "done" and on.get("W1").last_result == "Second part."
+    (_, params, _), = [c for c in hermes.named("prompt.submit") if c[1].get("display_kind") == "hidden"]
+    assert "Second part." in params["text"]
+
+
+def test_a_stop_that_fails_unexpectedly_keeps_the_status(on, hermes, monkeypatch):
+    start()
+    hermes._sessions["rt-20261031_work_1"]["running"] = True
+
+    def broken(params):
+        raise RuntimeError("gone")
+
+    monkeypatch.setattr(hermes, "session_interrupt", broken)
+    assert call("work_stop", {"ref": "W1"})["error"] == "hermes"
+    assert on.get("W1").status == "running"
+
+
+def test_the_sweep_leaves_rows_made_after_its_snapshot(home):
+    import time as clock
+
+    store = store_mod.Store(home)
+    old = store.add("workstream", title="Old", goal="x")
+    snapshot = clock.time()
+    clock.sleep(0.01)
+    new = store.add("workstream", title="New", goal="y")
+    assert store.interrupt_running(set(), before=snapshot) == [old.ref]
+    assert store.get(new.ref).status == "starting"
+
+
+def test_a_workstream_turn_starts_no_live_activity(on, hermes, monkeypatch):
+    start()
+    started = []
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_started", lambda session_id: started.append(session_id))
+    plugin._pre_llm_call(session_id="20261031_work_1", turn_id="t1", user_message="go")
+    plugin._pre_llm_call(session_id=OTHER_CHAT, turn_id="t2", user_message="hi")
+    assert started == [OTHER_CHAT]
