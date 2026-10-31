@@ -626,8 +626,9 @@ def _on_session_end(**kwargs: Any) -> None:
     # (its held reply is dropped too), is framed with them again.
     _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
     _quietly(_link_asks_ended, session_id, answered)
-    if not pulse_turn and not workstream:
-        # A Pulse turn or a workstream's never started a Live Activity, so there is none to end.
+    if not pulse_turn and (not workstream or _has_live_turn(session_id)):
+        # A Pulse turn or a workstream's never started a Live Activity, so there is none to end, unless
+        # its start couldn't tell it was one (the work registry unreadable, or its id not yet recorded).
         _quietly(live_activity.reporter.turn_ended, session_id,
                  "done" if answered else "stopped" if kwargs.get("interrupted") else "failed")
     if answered:
@@ -779,6 +780,13 @@ def _work_turn_finished(session_id: str, kwargs: dict[str, Any]) -> bool:
                                        interrupted=bool(kwargs.get("interrupted")))
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.debug("conduit_push: couldn't settle the workstream's turn", exc_info=True)
+        return False
+
+
+def _has_live_turn(session_id: Any) -> bool:
+    try:
+        return isinstance(session_id, str) and live_activity.reporter.has_running_turn(session_id)
+    except Exception:  # noqa: BLE001
         return False
 
 

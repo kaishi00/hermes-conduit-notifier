@@ -1173,3 +1173,19 @@ def test_a_failed_record_of_a_late_id_ends_the_session(on, hermes, monkeypatch):
     monkeypatch.setattr(store_mod.Store, "update", broken)
     answer = start()
     assert not answer["ok"] and hermes.named("session.interrupt") and hermes.named("session.close")
+
+
+def test_a_workstream_whose_start_began_a_live_activity_still_ends_it(on, hermes, monkeypatch):
+    start()
+    ended = []
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_ended", lambda *args: ended.append(args[0]))
+    monkeypatch.setattr(plugin.live_activity.reporter, "has_running_turn", lambda session_id: True)
+    plugin._on_session_end(session_id="20261031_work_1", failed=False, interrupted=False, completed=True)
+    assert ended == ["20261031_work_1"]
+
+
+def test_a_running_workstream_shows_no_earlier_result(on, hermes):
+    start()
+    on.update("W1", status="running", last_result="Turn one's report")
+    answer = call("work_read", {"ref": "W1"})
+    assert answer["ok"] and "result" not in answer

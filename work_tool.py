@@ -408,7 +408,8 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
            "updated": _ago(work.updated_at)}
     if work.closed_at:
         row["closed"] = True
-    if work.last_result:
+    # A running turn's result would be the last turn's.
+    if work.last_result and work.status in ("done", "failed", "interrupted", "stopped"):
         row["result"] = _cut(work.last_result, result_chars)
     if work.error:
         row["error"] = work.error
