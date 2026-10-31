@@ -633,8 +633,11 @@ def _on_session_end(**kwargs: Any) -> None:
     _drop_unnamed_end(session_id)
     # The key the turn wrote with conduit_notify: a failure replaces that
     # notification too, so a "Report in progress" doesn't outlive it.
-    written_key = notify_tool.drop(session_id)
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
+    # A Pulse turn keeps its chat's slot: a key is ignored there.
+    written_key = notify_tool.drop(session_id)
+    if pulse_turn:
+        written_key = ""
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
     # step limit) still answered: its reply goes out, not a failure. A Hermes
