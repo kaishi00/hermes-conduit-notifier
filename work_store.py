@@ -275,19 +275,29 @@ class Store:
                               (session_id,)).fetchone()
         return _work(row) if row else None
 
-    def list(self, *, active_only: bool = False, include_closed: bool = False, limit: int = 50) -> list[Work]:
+    def list(self, *, active_only: bool = False, include_closed: bool = False, limit: int = 50,
+             active_or_changed: bool = False) -> list[Work]:
+        """Newest first. ``active_or_changed``: open rows that are active or
+        changed since the coordinator last saw them, chosen before the limit."""
         if not self.path.is_file():
             return []
         query = "SELECT * FROM work"
         where = []
         if active_only:
             where.append(f"status IN ({', '.join('?' * len(ACTIVE))}) AND closed_at = 0")
+        elif active_or_changed:
+            where.append(f"closed_at = 0 AND (status IN ({', '.join('?' * len(ACTIVE))}) OR updated_at > seen_at)")
         elif not include_closed:
             where.append("closed_at = 0")
         if where:
             query += " WHERE " + " AND ".join(where)
-        query += " ORDER BY created_at DESC LIMIT ?"
-        params: tuple = (*ACTIVE, limit) if active_only else (limit,)
+        order = "created_at DESC"
+        if active_or_changed:
+            # Active work first, so newer changes never push it out.
+            order = f"(status IN ({', '.join('?' * len(ACTIVE))})) DESC, " + order
+        query += f" ORDER BY {order} LIMIT ?"
+        params: tuple = ((*ACTIVE, *ACTIVE, limit) if active_or_changed else (*ACTIVE, limit) if active_only
+                         else (limit,))
         with self._db(write=False) as con:
             rows = con.execute(query, params).fetchall()
         return [_work(row) for row in rows]

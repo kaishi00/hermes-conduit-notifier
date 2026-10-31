@@ -68,6 +68,8 @@ POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. S
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get work through work_ask, which arrives with "
                        "bot-to-bot asks (not yet available here). Tell the user you can't hand this to another bot "
                        "yet, or start a workstream of your own.")
+BRIDGE_BLOCK = ("Call the work tools through tool_call one level deep, by name (work_start, work_send and so on), "
+                "not through another tool_call or with no tool named.")
 CHECK_FAILED = ("This bot's coordinator settings couldn't be checked just now, so its tools are held back for this "
                 "call. Try again in a moment.")
 NOT_YET = ("Asks between bots come in the next step of Bot workstreams; this one isn't available yet. Nothing was "
@@ -439,7 +441,10 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         return {"ok": False, "error": "missing", "note": "Give the workstream a title and instructions."}
     if not args.get("new"):
         mine = _words(title)
-        alike = [work for work in store.list(active_only=False) if work.kind == "workstream"
+        # Everything still running, however old, and the recent open rest.
+        open_work = {work.ref: work for work in store.list(active_only=True, limit=500)}
+        open_work.update({work.ref: work for work in store.list(active_only=False, limit=50)})
+        alike = [work for work in open_work.values() if work.kind == "workstream"
                  and not work.closed_at and _similar(mine, _words(work.title))]
         if alike:
             return {"ok": False, "error": "similar_work", "similar": [_row(work) for work in alike[:3]],
@@ -626,7 +631,12 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     if name == "tool_call":
         from . import pulse_tools
 
-        names = [called for called, _ in pulse_tools.called(args)] or [name]
+        names = [called for called, _ in pulse_tools.called(args)]
+        # A bridged call that names nothing readable, or bridges again, is
+        # held: Hermes runs what's inside without asking this hook again.
+        if not names or any(called in BRIDGE for called in names):
+            return {"action": "block", "message": BRIDGE_BLOCK} if _titled_bot_chat(session_id, home) is not False \
+                else None
     if all(called in allowed for called in names):
         return None  # allowed in any chat: which one this is doesn't matter
     has_id = isinstance(session_id, str) and session_id.strip()
@@ -860,8 +870,7 @@ def digest(session_id: Any) -> Optional[str]:
         _sweep(home, store)
     except Exception:  # noqa: BLE001
         logger.debug("conduit_push: work sweep failed", exc_info=True)
-    rows = [work for work in store.list(include_closed=False, limit=40)
-            if work.active or work.changed_since_seen][:DIGEST_ITEMS]
+    rows = store.list(active_or_changed=True, limit=DIGEST_ITEMS)
     lines = []
     for work in rows:
         line = f"- {work.ref} “{work.title}”: {work.status.replace('_', ' ')}, {_ago(work.updated_at)}"

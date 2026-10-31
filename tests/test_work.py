@@ -1029,3 +1029,31 @@ def test_the_cli_off_leaves_no_registry_behind(home, monkeypatch, capsys):
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
     assert cli._work(types.SimpleNamespace(work_action="off", policy=None, max_running=None)) == 0
     assert not store_mod.exists(home)
+
+
+def test_the_digest_keeps_old_running_work_past_many_finished_rows(on, hermes):
+    start("The long one")
+    for n in range(45):
+        row = on.add("workstream", title=f"Finished {n}", goal="x")
+        on.update(row.ref, status="done")
+    assert "The long one" in work.digest(BOT_CHAT)  # newer changes don't push it out
+    on.mark_seen([w.ref for w in on.list(limit=100)])
+    assert "The long one" in work.digest(BOT_CHAT)
+
+
+def test_a_lookalike_is_found_among_old_running_work(on, hermes):
+    start("Fix the login page")
+    for n in range(55):
+        row = on.add("workstream", title=f"Other {n}", goal="x")
+        on.update(row.ref, status="done")
+    assert start("Fix the login page again")["error"] == "similar_work"
+
+
+@pytest.mark.parametrize("args", [
+    {"calls": [{"name": "tool_call", "arguments": {"calls": [{"name": "terminal", "arguments": {}}]}}]},
+    {"name": "tool_call", "arguments": {"name": "terminal"}},
+    {},
+])
+def test_a_nested_or_unreadable_bridge_is_held(on, hermes, args):
+    assert work.tool_block(BOT_CHAT, "tool_call", args)["action"] == "block"
+    assert work.tool_block(OTHER_CHAT, "tool_call", args) is None
