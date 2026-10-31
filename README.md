@@ -25,12 +25,23 @@ In Hermes Conduit, open **Settings > Notifications**, enable notifications, and 
 hermes conduit-push pair XXXXX-XXXXX
 ```
 
-Pair additional profiles independently:
+Pair additional profiles independently. Turn the plugin on for the profile,
+then restart so the profile picks it up:
 
 ```bash
 hermes -p coder plugins enable conduit_push
+hermes gateway restart
 hermes -p coder conduit-push pair YYYYY-YYYYY
 ```
+
+A profile's chats load plugins from that profile's own `plugins/` folder
+only, so with plugin 0.122.2+ the dashboard links every profile that turns
+the plugin on to the main install (`~/.hermes/plugins/conduit_push`) when it
+starts, and again when Conduit updates the plugin. Every profile then runs
+the version you updated to. A copy a profile had of its own (`hermes profile
+create --clone` copies the plugins folder) is moved to the profile's
+`plugins-backup/` folder, never deleted. Where the host can't make a link,
+the main install is copied in instead and replaced at the next update.
 
 Pairing codes expire after ten minutes and can only be claimed once.
 

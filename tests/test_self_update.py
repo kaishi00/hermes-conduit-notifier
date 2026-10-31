@@ -381,3 +381,30 @@ def test_the_corrected_push_isnt_a_duplicate_of_the_failed_one(monkeypatch):
     api.self_update._notify_self_update({"id": "j1", "step": "done", "loaded_version": "0.69.1"})
     assert len(sent) == 2 and sent[0]["identifier"] != sent[1]["identifier"]
     assert sent[1]["title"] == "Conduit plugin updated"
+
+
+def test_an_update_points_every_profile_at_it_before_the_gateway_restarts(monkeypatch, tmp_path):
+    order = []
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: "9.9.9")
+    job = {"id": "j1", "step": "downloading", "boot_id": api.capabilities.BOOT_ID}
+    api.self_update._run_self_update(job, tmp_path / "job.json", lambda: {"ok": True},
+                                     lambda: order.append("restart") or 0, lambda *a: None, lambda: [tmp_path],
+                                     lambda job: None, sleep=lambda s: None,
+                                     point_profiles=lambda: order.append("profiles"))
+    assert order == ["profiles", "restart"]
+
+
+def test_profiles_are_pointed_from_the_main_home(monkeypatch, tmp_path):
+    root = tmp_path / ".hermes"
+    shared = root / "plugins" / "conduit_push"
+    shared.mkdir(parents=True)
+    (shared / "plugin.yaml").write_text("name: conduit_push\nversion: 9.9.9\n")
+    home = root / "profiles" / "coder"
+    home.mkdir(parents=True)
+    (home / "config.yaml").write_text("plugins:\n  enabled: [conduit_push]\n")
+    monkeypatch.setattr(api.core, "_plugin_root", lambda: str(shared))
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_default_hermes_root", lambda: root, raising=False)
+    # The sweep reads profile_copies.py from the plugin's folder.
+    (shared / "profile_copies.py").write_text((ROOT / "profile_copies.py").read_text())
+    assert api.self_update._point_profiles() == ["profile coder: linked to the main install (9.9.9)"]
+    assert (home / "plugins" / "conduit_push").resolve() == shared.resolve()
