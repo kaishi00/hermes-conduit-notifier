@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 import { RelayStore } from '../src/store.mjs';
-import { CrashReports, MAX_FRAME_LEVELS, crashReportRoutes, crashReportsFromEnv, signature, validateReport } from '../src/crash-reports.mjs';
+import { CrashReports, MAX_FRAME_LEVELS, MAX_TRACE_LINES, MAX_TRACE_LINE_CHARS, crashReportRoutes, crashReportsFromEnv, signature, validateReport } from '../src/crash-reports.mjs';
 
 const TOKEN = 'a'.repeat(40);
 
@@ -28,6 +28,17 @@ function diagnostic(offset = 1234) {
 
 function post(overrides = {}) {
   return { app_version: '2.2.1', build: '236', os: 'iPhone OS 27.2 (24C5)', device: 'iPhone17,2', kind: 'crash', diagnostic: diagnostic(), ...overrides };
+}
+
+// Lines as Conduit's ChatViewportTrace writes them: seconds before the save,
+// then the event.
+function trace(reason = 'jump', lines = ['-2.104 surface setOffset 5120.0 -> 5180.0 animated 0 (content 6000.0, bounds 820.0)', '-0.412 jump 5180.0 -> 0.0 (no drag, no command); mode following', '-0.400 blank viewport: offset 0.0 content 6000.0, 0 rows laid out; rebuilding the scroll view']) {
+  return { reason, lines };
+}
+
+function chatPost(overrides = {}) {
+  const { diagnostic: _, ...fields } = post({ kind: 'chat', trace: trace() });
+  return { ...fields, ...overrides };
 }
 
 test('a report needs its build, device and a diagnostic object', () => {
@@ -69,6 +80,31 @@ test('a report needs its build, device and a diagnostic object', () => {
   assert.equal(levels(validateReport(post({ diagnostic: nested(5_000) }))), MAX_FRAME_LEVELS, 'an overflowed stack keeps its first levels');
 });
 
+test('a chat trace comes alone or with a crash, in the characters the app writes', () => {
+  const chat = validateReport(chatPost());
+  assert.equal(chat.kind, 'chat');
+  assert.deepEqual(chat.trace, trace());
+  assert.equal(chat.diagnostic, undefined, 'a chat report has no diagnostic');
+  assert.match(chat.signature, /^[0-9a-f]{16}$/);
+  assert.equal(validateReport(chatPost({ trace: trace('jump', ['-1.000 other']) })).signature, chat.signature, 'traces group by what saved them');
+  assert.notEqual(validateReport(chatPost({ trace: trace('stall') })).signature, chat.signature);
+  assert.throws(() => validateReport(chatPost({ trace: undefined })), /invalid_trace/, 'a chat report is its trace');
+  assert.throws(() => validateReport(chatPost({ trace: trace('typed') })), /invalid_trace/);
+  assert.throws(() => validateReport(chatPost({ trace: trace('jump', []) })), /invalid_trace/);
+  assert.throws(() => validateReport(chatPost({ trace: trace('jump', ['ok', 7]) })), /invalid_trace/);
+  assert.throws(() => validateReport(chatPost({ trace: trace('jump', Array(MAX_TRACE_LINES + 1).fill('x')) })), /invalid_trace/);
+  assert.throws(() => validateReport(chatPost({ trace: trace('jump', ['x'.repeat(MAX_TRACE_LINE_CHARS + 1)]) })), /invalid_trace/);
+  for (const text of ['Hi, I said "yes"', 'naïve', 'two\nlines', 'tab\tthen', 'smile 🙂']) {
+    assert.throws(() => validateReport(chatPost({ trace: trace('manual', [text]) })), /invalid_trace/, `refuses ${JSON.stringify(text)}`);
+  }
+  assert.equal(validateReport(chatPost({ trace: trace('manual', Array(MAX_TRACE_LINES).fill('y'.repeat(MAX_TRACE_LINE_CHARS))) })).trace.lines.length, MAX_TRACE_LINES, 'a full trace');
+  const crash = validateReport(post({ trace: trace('stall') }));
+  assert.deepEqual(crash.trace, trace('stall'), 'a crash or hang can carry the trace saved before it');
+  assert.equal(crash.signature, validateReport(post()).signature, 'the trace leaves the grouping alone');
+  assert.equal(validateReport(post()).trace, undefined);
+  assert.throws(() => validateReport(post({ trace: 'lines' })), /invalid_trace/);
+});
+
 test('the signature follows the attributed thread, so one fault groups', () => {
   assert.equal(signature(diagnostic()), signature(diagnostic()));
   assert.notEqual(signature(diagnostic(1234)), signature(diagnostic(5678)));
@@ -99,6 +135,12 @@ test('reports are kept as private files, newest kept, old ones pruned', () => {
     assert.deepEqual(reports.ids(), []);
     reports.save(validateReport(post()));
     assert.equal(new CrashReports({ directory: join(dir, 'crash-reports'), now: () => now }).list().length, 1, 'headings load back on restart');
+    now += 1;
+    const traced = reports.save(validateReport(chatPost()));
+    const heading = reports.list().find((report) => report.id === traced);
+    assert.equal(heading.trace_reason, 'jump');
+    assert.equal(heading.trace, undefined, 'the list carries no trace lines');
+    assert.deepEqual(reports.get(traced).trace, trace());
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -180,6 +222,7 @@ test('anyone posts a report; only the token reads them', async () => {
   try {
     const sent = await relay.api('/v1/crash-reports', { method: 'POST', body: post() });
     assert.equal(sent.status, 201);
+    assert.equal(sent.json.trace, undefined, 'no trace sent, none kept');
     assert.ok((await relay.capabilities()).includes('crash-reports'), 'the app learns the relay takes reports');
     assert.ok(existsSync(join(relay.dir, 'crash-reports', `${sent.json.id}.report.json`)), 'kept beside the relay data');
     assert.equal((await relay.api('/v1/crash-reports', { method: 'POST', body: post({ kind: 'nope' }) })).status, 400);
@@ -191,6 +234,25 @@ test('anyone posts a report; only the token reads them', async () => {
     assert.equal(read.json.device, 'iPhone17,2');
     assert.deepEqual(read.json.diagnostic.crashDiagnostics, diagnostic().crashDiagnostics);
     assert.equal((await relay.api('/v1/crash-reports', { method: 'DELETE', token: TOKEN })).status, 405);
+  } finally {
+    relay.stop();
+  }
+});
+
+test('a chat trace posts alone, and a big diagnostic still takes a full trace', async () => {
+  const relay = await startRelay({ CRASH_REPORTS_TOKEN: TOKEN });
+  try {
+    const chat = await relay.api('/v1/crash-reports', { method: 'POST', body: chatPost() });
+    assert.equal(chat.status, 201);
+    assert.equal(chat.json.trace, true, 'says it kept the trace, so the app lets its copy go');
+    const read = await relay.api(`/v1/crash-reports/${chat.json.id}`, { token: TOKEN });
+    assert.equal(read.json.kind, 'chat');
+    assert.deepEqual(read.json.trace, trace());
+    const wide = diagnostic();
+    wide.crashDiagnostics[0].callStackTree.callStacks[1].callStackRootFrames[0].binaryName = 'C'.repeat(500_000);
+    const full = trace('stall', Array(MAX_TRACE_LINES).fill('z'.repeat(MAX_TRACE_LINE_CHARS)));
+    assert.equal((await relay.api('/v1/crash-reports', { method: 'POST', body: post({ diagnostic: wide, trace: full }) })).status, 201);
+    assert.equal((await relay.api('/v1/crash-reports', { method: 'POST', body: chatPost({ trace: trace('manual', ['quote "x"']) }) })).status, 400);
   } finally {
     relay.stop();
   }
