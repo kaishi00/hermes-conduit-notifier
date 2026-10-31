@@ -256,12 +256,12 @@ def is_bot_chat(session_id: Any, home: Optional[Path] = None) -> bool:
     subagent or a fork of it."""
     if _is_child(session_id.strip() if isinstance(session_id, str) else ""):
         return False
-    return _titled_bot_chat(session_id, home)
+    return _titled_bot_chat(session_id, home) is True
 
 
-def _titled_bot_chat(session_id: Any, home: Optional[Path] = None) -> bool:
+def _titled_bot_chat(session_id: Any, home: Optional[Path] = None) -> Optional[bool]:
     """Whether the session is titled as this bot's Bot Chat (a fork of it
-    runs under the same id)."""
+    runs under the same id); None when its title couldn't be read."""
     session_id = session_id.strip() if isinstance(session_id, str) else ""
     home = home or _home()
     if not session_id or home is None:
@@ -270,7 +270,13 @@ def _titled_bot_chat(session_id: Any, home: Optional[Path] = None) -> bool:
 
     # A new chat's title waits on its live session until its first turn
     # ends (the row meanwhile carries the first message), so that one wins.
-    title = _pending_title(session_id, home) or session_titles._read(home, session_id)
+    title = _pending_title(session_id, home)
+    if not title:
+        try:
+            title = session_titles.read_or_raise(home, session_id)
+        except Exception:  # noqa: BLE001 — the caller decides what an unknown chat may do
+            logger.debug("conduit_push: couldn't read the title of %s", session_id, exc_info=True)
+            return None
     return title == session_titles.BOT_CHAT_TITLE
 
 
@@ -550,7 +556,10 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     mode = policy(home)
     # A fork of the Bot Chat (its review, /btw) runs under its id and is
     # held to the same policy; a subagent never reaches here.
-    if mode == "off" or not _titled_bot_chat(session_id, home):
+    if mode == "off":
+        return None
+    titled = _titled_bot_chat(session_id, home)
+    if titled is False:
         return None
     allowed = LOOKUPS if mode == "lookups" else STRICT
     names = [name]
@@ -559,10 +568,15 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
 
         names = [called for called, _ in pulse_tools.called(args)] or [name]
     for called in names:
+        if called in allowed:
+            continue
+        if titled is None:
+            # Which chat this is couldn't be read: it might be the
+            # coordinator, so its limits hold for this call, as a room's do.
+            return {"action": "block", "message": CHECK_FAILED}
         if called == MESSAGE_AGENT:
             return {"action": "block", "message": MESSAGE_AGENT_BLOCK}
-        if called not in allowed:
-            return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
+        return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
     return None
 
 

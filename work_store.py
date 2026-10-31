@@ -222,8 +222,9 @@ class Store:
             executor: Optional[dict] = None, reply_to: Optional[dict] = None, ask_id: str = "", cwd: str = "",
             repo: str = "", status: str = "starting", running_limit: Optional[int] = None) -> Optional[Work]:
         """A new row under the next ref of its kind, with a fresh idempotency
-        key for the session it will start (so a retried start can't make a
-        second one). With ``running_limit``, None instead when that many
+        key for the session it will start (Hermes answers a repeated create
+        under it with the same session; a new start is a new row and key).
+        With ``running_limit``, None instead when that many
         workstreams are running already, counted in the same transaction."""
         if kind not in KINDS:
             raise ValueError(f"unknown kind {kind}")

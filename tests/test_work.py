@@ -123,6 +123,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setitem(sys.modules, "tui_gateway.transport", transport)
     monkeypatch.setattr(work, "_home", lambda: home)
     monkeypatch.setattr(titles, "_read", lambda h, key: "Bot Chat" if key == BOT_CHAT else "Some chat")
+    monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat" if key == BOT_CHAT else "Some chat")
     monkeypatch.setattr(titles, "_bot_name", lambda h: "Furina")
     monkeypatch.setattr(work, "WAKE_BATCH_S", 0.01)
     monkeypatch.setattr(work, "_swept", set())
@@ -250,6 +251,7 @@ def test_asks_between_bots_say_not_yet(on, hermes):
 def test_a_plugin_host_answers_with_the_reason(on, monkeypatch):
     monkeypatch.setattr(work, "_home", lambda: on.home)
     monkeypatch.setattr(titles, "_read", lambda h, key: "Bot Chat")
+    monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat")
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
     answer = start()
@@ -659,3 +661,13 @@ def test_each_copy_keeps_the_home_it_registered_under(tmp_path, monkeypatch):
     work.register(types.SimpleNamespace(), is_child=lambda session_id: False)
     monkeypatch.setattr(constants, "get_hermes_home", lambda: launch)
     assert real_home() == second
+
+
+def test_a_chat_whose_title_cant_be_read_is_held_to_the_policy(on, hermes, monkeypatch):
+    def locked(h, key):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(titles, "read_or_raise", locked)
+    assert work.tool_block(OTHER_CHAT, "terminal", {}) == {"action": "block", "message": work.CHECK_FAILED}
+    assert work.tool_block(OTHER_CHAT, "work_list", {}) is None
+    assert call("work_start", {"title": "x", "instructions": "y"})["error"] == "not_bot_chat"

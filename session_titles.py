@@ -172,14 +172,20 @@ def _home() -> Any:
 
 def _read(home: Any, key: str) -> str:
     try:
-        from hermes_state import SessionDB
-
-        # Pin the path: hooks can run off the turn thread, where the ambient home
-        # lookup could fall back to the launch profile.
-        db = SessionDB(db_path=home / "state.db")
-    except Exception:  # noqa: BLE001 - no session store here (tests, older Hermes)
-        logger.debug("No session store for notification titles", exc_info=True)
+        return read_or_raise(home, key)
+    except Exception:  # noqa: BLE001 - a notification must never break the turn
+        logger.debug("Couldn't read the session title for %s", key, exc_info=True)
         return ""
+
+
+def read_or_raise(home: Any, key: str) -> str:
+    """The session's title ("" when it has none), raising when the session
+    store can't be read, for a caller that must tell the two apart."""
+    from hermes_state import SessionDB
+
+    # Pin the path: hooks can run off the turn thread, where the ambient home
+    # lookup could fall back to the launch profile.
+    db = SessionDB(db_path=home / "state.db")
     try:
         # Older Hermes may lack the id lookup; the key lookup can still work.
         getter = getattr(db, "get_session_title", None)
@@ -189,9 +195,6 @@ def _read(home: Any, key: str) -> str:
             rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True)
             value = rows[0].get("title") if rows else None
         return value.strip() if isinstance(value, str) else ""
-    except Exception:  # noqa: BLE001 - a notification must never break the turn
-        logger.debug("Couldn't read the session title for %s", key, exc_info=True)
-        return ""
     finally:
         try:
             db.close()
