@@ -1214,9 +1214,13 @@ def test_a_running_workstream_shows_no_earlier_result(on, hermes):
     ("Set up staging", "Set up prod", False),
     ("Upgrade Python 3.12", "Upgrade Python 3.11", False),
     ("Upgrade Python 3.12", "Python 3.12 upgrade", True),
+    ("Count failed systemd services", "Count files in /etc/systemd", False),
+    ("Count /etc/passwd lines", "Count files in /etc/systemd", False),
+    ("Latest stable kernel version", "Latest Python version", False),
+    ("uname -r kernel version", "Kernel version from kernel.org", False),
 ])
 def test_lookalikes_share_more_than_one_word(first, second, alike):
-    assert work._similar(work._words(first), work._words(second)) is alike
+    assert work._similar(work._words(first) - work._GENERIC, work._words(second) - work._GENERIC) is alike
 
 
 def test_a_turn_end_reported_twice_tells_the_coordinator_once(on, hermes, monkeypatch):
@@ -1355,3 +1359,31 @@ def test_a_reader_that_left_is_caught_at_the_flush(home, monkeypatch, tmp_path):
 def test_the_digest_names_each_tools_arguments(on, hermes):
     text = work.digest(BOT_CHAT)
     assert 'work_list takes {"filter": ...}' in text and "work_list, work_read" not in text
+
+
+def test_settled_work_from_a_while_ago_isnt_a_lookalike(on, hermes, monkeypatch):
+    start("Login page slow")
+    on.update("W1", status="done")
+    assert start("Slow login page")["error"] == "similar_work"  # just finished: offered
+    monkeypatch.setattr(work, "LOOKALIKE_RECENT_S", -60.0)
+    assert start("Slow login page")["ok"]  # settled a while ago: a new workstream
+
+
+def test_a_work_list_query_of_generic_words_still_filters(on, hermes):
+    start("Count files in /etc/systemd")
+    on.update("W1", status="done")
+    on.update(on.add("workstream", title="Login bug", goal="x").ref, status="done")
+    refs = [row["ref"] for row in call("work_list", {"filter": "recent", "query": "count files"})["work"]]
+    assert refs == ["W1"]
+
+
+def test_just_finished_work_is_offered_behind_many_newer_settled_rows(on, hermes):
+    import sqlite3
+
+    start("Login page slow")
+    on.update("W1", status="done")
+    for n in range(510):
+        on.add("workstream", title=f"Old task {n}", goal="x")
+    with sqlite3.connect(on.path) as con:  # newer rows that settled long ago
+        con.execute("UPDATE work SET status = 'done', updated_at = 1 WHERE ref != 'W1'")
+    assert start("Slow login page")["error"] == "similar_work"
