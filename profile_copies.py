@@ -21,8 +21,8 @@ A profile counts when its config.yaml lists the plugin in ``plugins.enabled``
 and not in ``plugins.disabled``, or has no ``plugins.enabled`` at all (Hermes
 then loads every installed plugin) and holds a copy already. A profile that
 doesn't turn the plugin on is left alone, and so is one whose config can't be
-read, one whose own copy is newer than the main install (a build put there on
-purpose), and anything in its folder that isn't this plugin.
+read, one whose own copy is newer than the main install or a pre-release (a build
+put there on purpose), and anything in its folder that isn't this plugin.
 
 The new link or copy is made beside the profile's folder first and moved in
 last, so a sweep that fails partway, or one running at the same moment in
@@ -31,7 +31,9 @@ another process, never leaves the profile without the plugin.
 The dashboard runs it when it starts and after an update pulls the new
 version, before the gateway restarts; the plugin runs it when it registers
 under the main home. A change applies to a process when it next loads its
-plugins. Never raises: a profile it can't fix is logged and skipped.
+plugins: a gateway a profile runs on its own picks the new code up when it
+restarts, and until then may load a later module from the new version. Never
+raises: a profile it can't fix is logged and skipped.
 
 Standalone (no imports from the plugin package): the dashboard loads it from
 its file, the plugin imports it.
@@ -122,8 +124,12 @@ def _version_key(version: str) -> Optional[tuple]:
 
 
 def _newer(version: str, than: str) -> bool:
+    """Whether a profile's own copy should be kept: newer, or a version (a
+    pre-release) that can't be compared and may be."""
     mine, theirs = _version_key(version), _version_key(than)
-    return mine is not None and theirs is not None and mine > theirs
+    if mine is None:
+        return bool(version)
+    return theirs is not None and mine > theirs
 
 
 def _backup_target(home: Path, name: str, version: str) -> Path:
@@ -190,7 +196,7 @@ def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path,
     own = [copy for copy in copies if not (copy / COPY_MARKER).exists()]
     for copy in own:
         if _newer(_manifest(copy).get("version", ""), version):
-            logger.info("Conduit plugin: profile %s runs its own newer copy (%s); leaving it",
+            logger.info("Conduit plugin: profile %s runs its own newer or pre-release copy (%s); leaving it",
                         home.name, _manifest(copy).get("version"))
             return changes
     stale = []
@@ -212,6 +218,8 @@ def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path,
     made = None
     if ours is None:
         made = _make_incoming(shared, incoming, version, link)
+    # Stale copies of ours are set aside, not deleted, until the new one is in place.
+    aside = home / f"{incoming.name}-old"
     moved: List[tuple] = []
     try:
         for copy in own:
@@ -221,23 +229,35 @@ def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path,
             moved.append((backup, copy))
             changes.append(f"profile {home.name}: moved its own copy ({_manifest(backup).get('version') or 'no version'}) "
                            f"to {BACKUP_DIR}/{backup.name}")
-        for copy in stale:
-            shutil.rmtree(copy)
+        for n, copy in enumerate(stale):
+            set_aside = aside.with_name(f"{aside.name}-{n}")
+            copy.rename(set_aside)
+            moved.append((set_aside, copy))
             changes.append(f"profile {home.name}: removed its outdated copy of the main install")
         if made is not None:
             plugins.mkdir(parents=True, exist_ok=True)
             try:
                 incoming.rename(target)
             except OSError:
-                if _links_to(target, shared) or (target / COPY_MARKER).exists():
-                    return changes  # another sweep got there first
-                for backup, copy in moved:  # put the profile's own copy back rather than leave it with none
-                    if not (copy.exists() or copy.is_symlink()):
-                        backup.rename(copy)
-                raise
-            changes.append(made)
+                if not (_links_to(target, shared) or (target / COPY_MARKER).exists()):
+                    raise
+                # Another sweep got there first.
+            else:
+                changes.append(made)
+    except BaseException:
+        # Put back what was moved rather than leave the profile with no plugin.
+        for source, copy in reversed(moved):
+            if not (copy.exists() or copy.is_symlink()):
+                try:
+                    source.rename(copy)
+                except OSError:
+                    logger.warning("Conduit plugin: couldn't put %s back at %s", source, copy)
+        raise
     finally:
         _remove(incoming)
+    for source, copy in moved:
+        if source.name.startswith(aside.name):
+            _remove(source)
     return changes
 
 

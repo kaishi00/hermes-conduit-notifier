@@ -358,7 +358,8 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
         if job["version"] is None:
             _self_update_failed(job, "The update left a plugin.yaml without a readable version on the host")
             return
-        # Before the restart, so every profile's turns load the new version with it.
+        # Before the restart, so the profiles it restarts load the new version with it. A profile
+        # running its own gateway loads it when that gateway restarts.
         point_profiles()
         _write_self_update(path, job)
         try:

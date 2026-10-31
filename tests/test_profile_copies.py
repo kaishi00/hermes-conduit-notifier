@@ -261,3 +261,30 @@ def test_a_swap_that_fails_at_the_end_puts_the_profiles_own_copy_back(host, monk
     copy = home / "plugins" / "conduit_push"
     assert not copy.is_symlink() and "0.1.0" in (copy / "plugin.yaml").read_text()
     assert not list((home / "plugins-backup").iterdir())
+
+
+def test_a_move_that_fails_partway_puts_back_what_it_moved(host, monkeypatch):
+    root, shared = host
+    home = _profile(root, "nahida", "plugins:\n  enabled: [conduit_push]\n")
+    _plugin(home / "plugins" / "conduit-push", "0.1.0")
+    _plugin(home / "plugins" / "conduit_push", "0.2.0")
+    real = pathlib.Path.rename
+
+    def rename(self, target):
+        if self.name == "conduit_push" and self.parent.name == "plugins":
+            raise PermissionError("locked")
+        return real(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "rename", rename)
+    assert profile_copies.sweep(root, shared) == []
+    assert "0.1.0" in (home / "plugins" / "conduit-push" / "plugin.yaml").read_text()
+    assert "0.2.0" in (home / "plugins" / "conduit_push" / "plugin.yaml").read_text()
+    assert not list((home / "plugins-backup").iterdir())
+
+
+def test_a_profiles_own_pre_release_copy_is_left_alone(host):
+    root, shared = host
+    home = _profile(root, "beta", "plugins:\n  enabled: [conduit_push]\n")
+    _plugin(home / "plugins" / "conduit_push", "0.124.0rc1")
+    assert profile_copies.sweep(root, shared) == []
+    assert not (home / "plugins" / "conduit_push").is_symlink()
