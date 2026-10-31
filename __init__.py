@@ -9,7 +9,6 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -349,7 +348,8 @@ def _post_llm_call(**kwargs: Any) -> None:
     headline = notify_tool.take(session_id, kwargs.get("turn_id"))
     # Worked out whether or not a push goes: it learns which job a run's
     # chat belongs to, for a background task that reports later.
-    slot = _slot(session_id, kwargs.get("task_id"), headline.key if headline and not pulse_turn else "")
+    slot = _slot(session_id, kwargs.get("task_id"), headline.key if headline and not pulse_turn else "",
+                 turn_id=kwargs.get("turn_id"))
     # A Pulse push is titled by what it brings, not by Pulse's hidden chat.
     if pulse_turn and not quiet:
         copy = pulse.push_copy(session_id, kwargs.get("turn_id"), response)
@@ -409,67 +409,34 @@ def _post_llm_call(**kwargs: Any) -> None:
         _finish_ready(old_session, old_ready, old_send)
 
 
-def _slot(session_id: str, task_id: Any = None, key: str = "", *, remembered: bool = False) -> str:
+def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any = None) -> str:
     """Which notification on the phone a turn's end replaces (#1579), when
     it isn't the chat's own: a conduit_notify key's, shared by this
     profile's chats and jobs, else a scheduled job's, so each run replaces
-    the last instead of piling up (every run is a chat of its own). Only
-    the run itself takes the job's: a follow-up asked in an older run's
-    chat keeps that chat's, so it never replaces the newest report.
-    `remembered`: a background task, reporting after its run's turn, takes
-    the job of the run that started it."""
+    the last instead of piling up (every run is a chat of its own). Only a
+    run's own turn takes the job's, by its ``cron:<job>:<run>`` task id: a
+    follow-up asked in an older run's chat keeps that chat's. The turn's
+    slot is kept for a background task it started, which reports later."""
     job = cron_runs.job_id(None, task_id)
-    by_session = None if job else cron_runs.job_id(session_id, None)
-    with _cron_sessions_lock:
-        if job:
-            # A gateway-owned run's chat (local-…) names its job only by the
-            # turn's task id.
-            _remember_run(session_id, job)
-        elif by_session:
-            # A classic run's chat (cron_<job>_<time>) is the job's run
-            # unless a newer one has run since, or, with none seen since
-            # this process started, unless it started hours ago.
-            newest = _newest_runs.get(by_session)
-            if (session_id >= newest) if newest is not None else _run_is_recent(session_id):
-                _newest_runs[by_session] = session_id
-                _remember_run(session_id, by_session)
-                job = by_session
-        elif remembered:
-            job = _cron_sessions.get(session_id)
-    # A key wins, after the job is noted for the run's background tasks.
-    if key:
-        return f"key:{_profile}:{key}"
-    return f"cron:{_profile}:{job}" if job else ""
+    seed = f"key:{_profile}:{key}" if key else f"cron:{_profile}:{job}" if job else ""
+    if seed and isinstance(turn_id, str) and turn_id:
+        with _turn_slots_lock:
+            _turn_slots.pop((session_id, turn_id), None)
+            _turn_slots[(session_id, turn_id)] = seed
+            while len(_turn_slots) > MAX_TURN_STARTS:
+                del _turn_slots[next(iter(_turn_slots))]
+    return seed
 
 
-# A classic run's chat older than this, with no newer run seen, is an old
-# run someone asked a follow-up in.
-RUN_RECENT_S = 2 * 60 * 60
+def _started_slot(session_id: str, turn_id: Any) -> str:
+    """The slot of the turn that started a background task."""
+    with _turn_slots_lock:
+        return _turn_slots.get((session_id, turn_id), "") if isinstance(turn_id, str) else ""
 
 
-def _run_is_recent(session_id: str, now: float | None = None) -> bool:
-    # Hermes names a classic run's chat by its local start time.
-    try:
-        started = datetime.strptime(session_id[-15:], "%Y%m%d_%H%M%S").timestamp()
-    except ValueError:
-        return False
-    return abs((time.time() if now is None else now) - started) < RUN_RECENT_S
-
-
-def _remember_run(session_id: str, job: str) -> None:
-    _cron_sessions.pop(session_id, None)
-    _cron_sessions[session_id] = job
-    while len(_cron_sessions) > MAX_TURN_STARTS:
-        del _cron_sessions[next(iter(_cron_sessions))]
-    while len(_newest_runs) > MAX_TURN_STARTS:
-        del _newest_runs[next(iter(_newest_runs))]
-
-
-# chat -> the scheduled job that ran in it, for _slot.
-_cron_sessions: dict[str, str] = {}
-# job -> its newest classic run's chat (cron_<job>_<time> sorts by time).
-_newest_runs: dict[str, str] = {}
-_cron_sessions_lock = threading.Lock()
+# (chat, turn) -> its slot, for a background task the turn started.
+_turn_slots: dict[tuple[str, str], str] = {}
+_turn_slots_lock = threading.Lock()
 
 
 def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
@@ -688,7 +655,7 @@ def _on_session_end(**kwargs: Any) -> None:
         title=_titled("Turn failed", session_id),
         title_label="turn.failed",
         session_title=_session_title(session_id),
-        slot=_slot(session_id, kwargs.get("task_id"), written_key),
+        slot=_slot(session_id, kwargs.get("task_id"), written_key, turn_id=kwargs.get("turn_id")),
     )
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
         return
@@ -842,7 +809,7 @@ def _subagent_stop(**kwargs: Any) -> None:
         title_label="background_task.finished" if finished else "",
         session_title=_session_title(parent),
         body=summary or ("" if finished else f"A delegated task {status}."),
-        slot=_slot(parent, remembered=True),
+        slot=_started_slot(parent, kwargs.get("parent_turn_id")),
     ))
 
 
