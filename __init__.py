@@ -424,6 +424,11 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any =
         with _turn_slots_lock:
             _turn_slots.pop((session_id, turn_id), None)
             _turn_slots[(session_id, turn_id)] = (seed, job or "")
+            if job:
+                _job_runs.pop(job, None)
+                _job_runs[job] = session_id
+                while len(_job_runs) > MAX_TURN_STARTS:
+                    del _job_runs[next(iter(_job_runs))]
             while len(_turn_slots) > MAX_TURN_STARTS:
                 del _turn_slots[next(iter(_turn_slots))]
     return seed
@@ -433,11 +438,18 @@ def _started_slot(session_id: str, turn_id: Any) -> tuple[str, str]:
     """The slot, and the scheduled job if any, of the turn that started a
     background task."""
     with _turn_slots_lock:
-        return _turn_slots.get((session_id, turn_id), ("", "")) if isinstance(turn_id, str) else ("", "")
+        slot, job = _turn_slots.get((session_id, turn_id), ("", "")) if isinstance(turn_id, str) else ("", "")
+        # A task from an older run reports in that run's chat: the job's
+        # slot holds the newest run's report, which it mustn't replace.
+        if job and slot.startswith("cron:") and _job_runs.get(job) != session_id:
+            slot = ""
+        return slot, job
 
 
 # (chat, turn) -> its slot and job, for a background task the turn started.
 _turn_slots: dict[tuple[str, str], tuple[str, str]] = {}
+# job -> the chat of its newest run.
+_job_runs: dict[str, str] = {}
 _turn_slots_lock = threading.Lock()
 
 

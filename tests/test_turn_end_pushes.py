@@ -702,6 +702,7 @@ def test_only_the_newest_written_notifications_are_kept(paired, monkeypatch):
 def runs(monkeypatch):
     """No turn's slot left over from another test."""
     monkeypatch.setattr(plugin, "_turn_slots", {})
+    monkeypatch.setattr(plugin, "_job_runs", {})
 
 
 def test_a_keyed_notification_replaces_the_profiles_earlier_one_from_any_chat(pushed, paired, runs):
@@ -775,6 +776,17 @@ def test_a_muted_gateway_owned_runs_background_task_stays_quiet(pushed, runs, mo
                            failed=False, interrupted=False)
     _subagent(parent="local-run")
     assert pushed == []
+
+
+def test_an_older_runs_late_background_task_keeps_its_own_chats_slot(pushed, runs):
+    for n, run in enumerate(("local-r1", "local-r2")):
+        plugin._pre_llm_call(session_id=run, turn_id="t")
+        plugin._post_llm_call(session_id=run, turn_id="t", task_id=f"cron:daily:{n}", assistant_response="Report.")
+        plugin._on_session_end(session_id=run, turn_id="t", task_id=f"cron:daily:{n}", completed=True,
+                               failed=False, interrupted=False)
+    _subagent(parent="local-r1")
+    job = events.slot_token("cron:default:daily")
+    assert [event.get("slot") for event in pushed] == [job, job, None], "the newest run's report stays"
 
 
 def test_conduit_notify_registers_on_a_hermes_without_display_fields():
