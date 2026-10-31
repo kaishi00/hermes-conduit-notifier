@@ -418,6 +418,11 @@ def _redacted(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _rekeyed(event: dict[str, Any], key: str) -> dict[str, Any]:
+    # A slot (#1579) is an unkeyed hash of a job id or a conduit_notify key:
+    # keyed too, so a guessed "report" can't be checked against it.
+    slot = event.get("slot")
+    if isinstance(slot, str) and slot:
+        event = {**event, "slot": hmac.new(key.encode(), b"slot\n" + slot.encode(), hashlib.sha256).hexdigest()[:16]}
     event_id = event.get("event_id")
     if not isinstance(event_id, str) or not event_id:
         return event

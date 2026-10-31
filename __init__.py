@@ -413,7 +413,23 @@ def _slot(session_id: str, task_id: Any = None, key: str = "") -> str:
     if key:
         return f"key:{_profile}:{key}"
     job = cron_runs.job_id(session_id, task_id)
+    with _cron_sessions_lock:
+        if job:
+            # A gateway-owned run's chat (local-…) names its job only by the
+            # turn's task id; a background task it started reports later
+            # with the chat alone.
+            _cron_sessions.pop(session_id, None)
+            _cron_sessions[session_id] = job
+            while len(_cron_sessions) > MAX_TURN_STARTS:
+                del _cron_sessions[next(iter(_cron_sessions))]
+        else:
+            job = _cron_sessions.get(session_id)
     return f"cron:{_profile}:{job}" if job else ""
+
+
+# chat -> the scheduled job that ran in it, for _slot.
+_cron_sessions: dict[str, str] = {}
+_cron_sessions_lock = threading.Lock()
 
 
 def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
@@ -582,7 +598,9 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
-    notify_tool.drop(session_id)
+    # The key the turn wrote with conduit_notify: a failure replaces that
+    # notification too, so a "Report in progress" doesn't outlive it.
+    written_key = notify_tool.drop(session_id)
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
@@ -630,7 +648,7 @@ def _on_session_end(**kwargs: Any) -> None:
         title=_titled("Turn failed", session_id),
         title_label="turn.failed",
         session_title=_session_title(session_id),
-        slot=_slot(session_id, kwargs.get("task_id")),
+        slot=_slot(session_id, kwargs.get("task_id"), written_key),
     )
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
         return

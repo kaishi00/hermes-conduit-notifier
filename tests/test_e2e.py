@@ -1024,3 +1024,16 @@ def test_a_slot_threads_a_sealed_push_by_the_slot_and_never_shows_it():
     assert runs[0]["e2e"]["tok"] == runs[1]["e2e"]["tok"] == e2e.thread_token(keys, "slot:abcdef0123456789")
     assert chat["e2e"]["tok"] != runs[0]["e2e"]["tok"]
     assert "slot" not in runs[0] and "slot" not in e2e.open_event(runs[0], keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+
+
+def test_redaction_keys_a_slot_so_a_guessed_key_cant_be_checked(monkeypatch):
+    # #1579: under `redact on` the relay gets the slot keyed with the local
+    # secret, still the same for every push in it.
+    state = _state(redact_content=True, redact_key="k")
+    del state["e2e"]
+    sent = _capture(monkeypatch, state)
+    slot = sys.modules["conduit_push.events"].slot_token("key:default:report")
+    for n in (1, 2):
+        client.send_now({"event_id": f"response:{n}", "type": "response.ready", "session_id": f"s{n}", "slot": slot})
+    assert sent[0]["slot"] == sent[1]["slot"] != slot
+    assert len(sent[0]["slot"]) == 16

@@ -147,6 +147,9 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so nothing reaches the phone."}
     key = slot_key(args.get("key"))
+    if args.get("key") not in (None, "") and not key:
+        return {"ok": False, "error": "invalid_key",
+                "note": "Use letters or digits in the key (\"report\"), or leave it out for a new notification."}
     quiet = args.get("quiet") is True
     keep(session, title, body, key=key, quiet=quiet)
     note = ("The notification goes out with your final reply when this turn ends, if the user's "
@@ -160,7 +163,7 @@ def slot_key(value: Any) -> str:
     """A key as the tool keeps it: one line, lower case, short."""
     if not isinstance(value, str):
         return ""
-    return _KEY_JUNK.sub("-", " ".join(value.split()).casefold()).strip("-")[:MAX_KEY_CHARS]
+    return _KEY_JUNK.sub("-", " ".join(value.split()).casefold())[:MAX_KEY_CHARS].strip("-")
 
 
 def keep(session_id: str, title: str, body: str, now: float | None = None, *, key: str = "", quiet: bool = False) -> None:
@@ -194,12 +197,16 @@ def take(session_id: str, turn_id: Any = None, now: float | None = None) -> Head
         return headline
 
 
-def drop(session_id: str) -> None:
+def drop(session_id: str) -> str:
     """The turn ended: what it wrote never rides a later turn's reply, even
-    when this one sent none (interrupted, or failed before answering)."""
+    when this one sent none (interrupted, or failed before answering).
+    Returns the key it wrote, if any, for a failure push to replace."""
     with _lock:
-        _kept.pop(session_id, None)
-        _taken.pop(session_id, None)
+        kept = _kept.pop(session_id, None)
+        taken = _taken.pop(session_id, None)
+    if kept is not None:
+        return kept[0].key
+    return taken[1].key if taken is not None else ""
 
 
 def _line(value: Any, limit: int) -> str:

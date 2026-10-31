@@ -729,10 +729,33 @@ def test_each_scheduled_job_keeps_one_notification(pushed):
     assert [event.get("slot") for event in pushed] == [job, job, job, None], "a chat keeps its own"
 
 
-def test_a_key_is_kept_short_and_plain():
+def test_a_key_is_kept_short_and_plain(paired):
     assert notify_tool.slot_key("  Weekly  Report!! ") == "weekly-report"
     assert notify_tool.slot_key("a" * 80) == "a" * notify_tool.MAX_KEY_CHARS
+    assert notify_tool.slot_key("a" * 39 + " b") == "a" * 39, "no dash left at the cut"
     assert notify_tool.slot_key(None) == notify_tool.slot_key("!!!") == ""
+    assert "invalid_key" in notify_tool.handle({"title": "a", "body": "b", "key": "📊"}, session_id="s")
+    assert notify_tool.take("s") is None
+
+
+def test_a_failed_turn_replaces_the_keyed_notification_it_wrote(pushed, paired):
+    notify_tool.handle({"title": "Report in progress", "body": "Half done.", "key": "report"}, session_id="s")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=False, failed=True, interrupted=False)
+    [failed] = pushed
+    assert failed["type"] == "turn.failed"
+    assert failed["slot"] == events.slot_token("key:default:report")
+
+
+def test_a_gateway_owned_runs_background_task_joins_its_jobs_slot(pushed):
+    # The run's chat (local-…) names the job only through the turn's task id.
+    plugin._pre_llm_call(session_id="local-run", turn_id="t")
+    plugin._post_llm_call(session_id="local-run", turn_id="t", task_id="cron:daily:7", assistant_response="Started.")
+    plugin._on_session_end(session_id="local-run", turn_id="t", task_id="cron:daily:7", completed=True,
+                           failed=False, interrupted=False)
+    _subagent(parent="local-run")
+    reply, task = pushed
+    assert task["type"] == "background_task.finished"
+    assert reply["slot"] == task["slot"] == events.slot_token("cron:default:daily")
 
 
 def test_conduit_notify_registers_on_a_hermes_without_display_fields():
