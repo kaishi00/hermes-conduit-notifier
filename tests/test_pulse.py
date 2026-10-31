@@ -1105,7 +1105,7 @@ def test_a_long_unmarked_line_with_no_space_keeps_its_tail():
 
 
 def test_a_window_with_no_space_starts_at_the_mark():
-    line = "git clone https://u:Pw1234567890@git.example.com/" + "x" * 375 + " fatal"
+    line = "git clone https://u:Pw1234567890@git.example.com/" + "x" * 450 + "fatal"
     error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
     assert "Pw1234567890" not in error and error.endswith("fatal")
 
@@ -1159,6 +1159,8 @@ def test_more_secret_shapes_are_redacted(line, secret):
     ("Authentication: failed", "Authentication: failed", None),
     ("Basic authentication failed", "Basic authentication failed", None),
     ("api_key: missing", "api_key: missing", None),
+    ("API_KEY: not set", "API_KEY: not set", None),
+    ("sort -u names.txt failed", "sort -u names.txt failed", None),
     ("Authentication: insufficient_privileges", "Authentication: insufficient_privileges", None),
     ('{"password": "expired"}', '"password": "expired"', None),
     ("401 Unauthorized: authentication failed", "Unauthorized: authentication failed", None),
@@ -1220,6 +1222,8 @@ def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
     ("./test", 1, False),  # a project's own script, not test(1)
     ("/usr/bin/grep -q x y", 1, True),
     ("cat config.yaml 2>/dev/null", 1, True),
+    ("grep -E '[' notes.md 2>/dev/null", 2, False),
+    ("diff old.txt new.txt 2>/dev/null", 2, False),
     ("curl -s https://api.example.com/health | grep -q ok", 1, False),  # curl may be what failed
     ("pytest -q | grep -q passed", 1, False),
     ("find . -name '*.log' -exec gzip {} + 2>/dev/null", 1, False),

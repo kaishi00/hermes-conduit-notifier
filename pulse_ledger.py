@@ -84,7 +84,7 @@ _SECRET_PAIR = re.compile(
     r"(?i)\b([\w.-]*(?:passw(?:or)?d|pwd|(?:\b|_)pass\b|secret|api[_ -]?key|apikey|credential|private[_-]?key|"
     r"access[_-]?key|token|"
     r"auth|authorization|cookie|session|signature)[\w.-]*)([\"']?\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
-_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+|\s-p(?:\s+|(?=\S)))\S+")
+_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+(?=\S*:)|\s-p(?:\s+|(?=\S)))\S+")
 _KNOWN_TOKEN = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{10,})")
 _BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+([A-Za-z0-9._~+/=-]{8,})")
 # Webhook URLs carry their secret in the path (Slack, Discord).
@@ -247,7 +247,7 @@ def describe_call(args: Any) -> tuple[str, str, str]:
 
 # A value that says what's wrong with a secret rather than being one.
 _JUDGMENT = re.compile(r"(?i)[\"']?(?:missing|invalid|expired|required|wrong|failed|empty|incorrect|denied|none|null|"
-                       r"unset|not set|undefined|rejected|revoked)[\"'.,]?")
+                       r"unset|not|undefined|rejected|revoked)[\"'.,]?")
 
 
 def _looks_secret(value: str) -> bool:
@@ -315,7 +315,8 @@ def expected_exit(command: Any, code: int) -> bool:
             if name not in _PRODUCERS or (name == "find" and _FIND_ACTIONS & set(words)):
                 return False
         name, words = _command_name(last)
-        lookup = name in _LOOKUPS and not (name == "find" and _FIND_ACTIONS & set(words))
+        # A yes/no check is excused at exit 1 only, silenced or not: grep's 2 is an error.
+        lookup = name in _LOOKUPS - _YES_NO and not (name == "find" and _FIND_ACTIONS & set(words))
         if not ((_SILENCED.search(last) and lookup) or (code == 1 and name in _YES_NO)):
             return False
     return True
