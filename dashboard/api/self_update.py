@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.util
 import inspect
 import json
 import logging
@@ -25,6 +26,35 @@ from . import capabilities, chats, core, desktop_views
 
 logger = core.logger
 router = core.router
+
+
+# --- Every profile on the main install (profile_copies.py, #1538) -------------
+#
+# A profile's chat turns load only its own plugins/ folder, so the dashboard
+# points each profile that turns the plugin on at this install: when it starts,
+# and after an update pulls a new version, before the gateway restarts.
+
+
+def _point_profiles() -> List[str]:
+    """profile_copies.sweep over this host's profiles; [] when it can't run."""
+    path = os.path.join(core._plugin_root(), "profile_copies.py")
+    try:
+        from hermes_constants import get_default_hermes_root
+    except (ImportError, AttributeError):  # an older Hermes: one home, no profiles to point
+        return []
+    try:
+        spec = importlib.util.spec_from_file_location("conduit_push_dashboard_profile_copies", path)
+        if spec is None or spec.loader is None or not os.path.isfile(path):
+            return []
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.sweep_quietly(Path(get_default_hermes_root()), Path(core._plugin_root()))
+    except Exception:  # noqa: BLE001 — a fault here mustn't stop the dashboard
+        logger.warning("Conduit plugin: couldn't point profiles at the main install", exc_info=True)
+        return []
+
+
+threading.Thread(target=_point_profiles, name="conduit-profile-copies", daemon=True).start()
 
 
 # --- Self restart -------------------------------------------------------------
@@ -312,7 +342,8 @@ def _self_update_failed(job: Dict[str, Any], detail: str, code: Optional[str] = 
 def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[str, Any]],
                      restart_gateway: Callable[[], int], schedule: Callable[[float, Callable[[], None]], Any],
                      homes: Callable[[], List[Path]], notify: Callable[[Dict[str, Any]], None],
-                     sleep: Callable[[float], None] = time.sleep) -> None:
+                     sleep: Callable[[float], None] = time.sleep,
+                     point_profiles: Callable[[], Any] = lambda: _point_profiles()) -> None:
     global _self_restart_scheduled
     claimed_restart = False
     try:
@@ -327,6 +358,9 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
         if job["version"] is None:
             _self_update_failed(job, "The update left a plugin.yaml without a readable version on the host")
             return
+        # Before the restart, so the profiles it restarts load the new version with it. A profile
+        # running its own gateway loads it when that gateway restarts.
+        point_profiles()
         _write_self_update(path, job)
         try:
             exit_code = restart_gateway()
