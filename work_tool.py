@@ -166,12 +166,10 @@ _wake_lock = threading.Lock()
 _wakes: dict[tuple[str, str], tuple[list[str], Any]] = {}
 _swept: set[str] = set()
 _sweep_lock = threading.Lock()
+_PROCESS_STARTED = time.time()
 # Workstreams a work_send may be redirecting: the superseded turn's end
 # (interrupted) leaves them running for the redirected turn to settle.
 _redirecting: set[tuple[str, str]] = set()
-# Follow-ups queued behind a workstream's running turn: that many turn ends
-# come before the one that settles it.
-_queued: dict[tuple[str, str], int] = {}
 _RUNNING_STATES = ("starting", "running", "needs_you")
 # A workstream turn's reply, from post_llm_call until its turn's end.
 _replies: dict[str, str] = {}
@@ -374,6 +372,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         # Marked first: the interrupted turn's end, which may come before
         # the interrupt returns, then reads as the stop, not as finished.
         store.update(work.ref, status="stopped")
+        with _wake_lock:
+            _redirecting.discard((str(home), work.ref))
         try:
             stopped = broker.stop(work.session_id)
         except Exception as error:  # noqa: BLE001 — a stop that didn't happen leaves it as it was
@@ -461,13 +461,14 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                         "send this to one of them."}
     bot = _bot_name(home)
     prompt = WORKER_PROMPT.format(bot=bot, ref=work.ref, title=work.title, instructions=instructions)
-    item = store.outbox_add(work.ref, "start", work.idempotency_key, prompt)
+    item = None
 
     def created(session_id: str) -> None:
         # Kept before the prompt goes in, so the turn's end finds its row.
         store.update(work.ref, session_id=session_id)
 
     try:
+        item = store.outbox_add(work.ref, "start", work.idempotency_key, prompt)
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
                                created=created)
         store.update(work.ref, session_id=started.session_id)
@@ -475,7 +476,8 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         # settled) before the start returned.
         store.update(work.ref, status="running", only_if=("starting",))
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
-        store.outbox_done(item, "refused")
+        if item is not None:
+            store.outbox_done(item, "refused")
         reason = str(error)[:300] if isinstance(error, work_broker.BrokerError) else type(error).__name__
         store.update(work.ref, status="failed", error=reason)
         if not isinstance(error, work_broker.BrokerError):
@@ -530,9 +532,6 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     with _wake_lock:
         if outcome != "redirected":
             _redirecting.discard(pending)
-        if outcome == "queued":
-            # The running turn's end isn't this one's: it runs after it.
-            _queued[pending] = _queued.get(pending, 0) + 1
     if tip and tip != work.session_id:
         store.update(work.ref, session_id=tip)
     said = {"started": "It's working on it now.", "redirected": "It took it into the turn it was working on.",
@@ -599,7 +598,9 @@ def _sweep(home: Path, store: work_store.Store, broker: Optional[work_broker.Bro
             live = broker.live_session_ids()
         except work_broker.BrokerError:
             return
-        stopped = store.interrupt_running(live, before=read_at)
+        # Only rows from before this process: a restart stopped those, and a
+        # start this process is making (its session not made yet) is left alone.
+        stopped = store.interrupt_running(live, before=min(read_at, _PROCESS_STARTED))
         _swept.add(key)
     if stopped:
         logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
@@ -740,6 +741,20 @@ def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, sta
                                       outcome=outcome)
 
 
+def turn_started(session_id: Any) -> bool:
+    """A workstream's turn starts. One that starts after its row settled (a
+    follow-up queued behind the last turn, which settled it) is running
+    again, and its own end settles it. True when the session is a
+    workstream (its turn shows no Live Activity)."""
+    home, work = _workstream(session_id)
+    if work is None or home is None:
+        return False
+    if work.status not in _SETTLES:
+        work_store.Store(home).update(work.ref, status="running", closed_at=0.0, error="",
+                                      only_if=(work.status,))
+    return True
+
+
 def turn_ended(session_id: Any, response: Any) -> bool:
     """A workstream's turn gave its reply (post_llm_call): kept for the
     turn's end, which settles the row. True when the session is a workstream
@@ -784,18 +799,6 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         # Not a work_stop or a redirect: the user stopped it from the chat
         # itself. It stays interrupted, its slot free.
         store.update(work.ref, status="interrupted", only_if=_SETTLES)
-        return True
-    with _wake_lock:
-        waiting = _queued.get((str(home), work.ref), 0)
-        if waiting:
-            if waiting > 1:
-                _queued[(str(home), work.ref)] = waiting - 1
-            else:
-                _queued.pop((str(home), work.ref), None)
-    if waiting:
-        # A follow-up runs next: this turn's words are kept, the next settles.
-        if text:
-            store.update(work.ref, last_result=text, only_if=_SETTLES)
         return True
     if failed:
         fields = {"status": "failed", "error": _cut(text, 300) if text else "its turn failed"}
@@ -918,7 +921,6 @@ def stop() -> None:
         _wakes.clear()
         _replies.clear()
         _redirecting.clear()
-        _queued.clear()
     for _, timer in pending:
         if timer is not None:
             timer.cancel()

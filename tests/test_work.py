@@ -134,7 +134,6 @@ def hermes(home, monkeypatch):
     work._wakes.clear()
     work._replies.clear()
     work._redirecting.clear()
-    work._queued.clear()
     return fake
 
 
@@ -908,20 +907,46 @@ def test_a_send_to_idle_work_keeps_to_the_running_limit(on, hermes):
     assert answer["error"] == "busy" and on.get("W1").status == "done" and on.running_count() == 2
 
 
-def test_a_queued_follow_up_is_the_turn_that_settles(on, hermes):
+def test_a_queued_follow_up_reopens_the_row_and_settles_it(on, hermes):
     start()
     hermes.live(BOT_CHAT, transport=object())
     hermes._sessions["rt-20261031_work_1"]["running"] = True
     assert call("work_send", {"ref": "W1", "text": "Then this", "how": "after"})["outcome"] == "queued"
     work.turn_ended("20261031_work_1", "First part.")
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
-    assert on.get("W1").status == "running" and on.running_count() == 1 and not work._wakes
+    assert on.get("W1").status == "done"
+    assert work.turn_started("20261031_work_1")
+    assert on.get("W1").status == "running" and on.running_count() == 1
     work.turn_ended("20261031_work_1", "Second part.")
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     work.flush_wakes()
     assert on.get("W1").status == "done" and on.get("W1").last_result == "Second part."
-    (_, params, _), = [c for c in hermes.named("prompt.submit") if c[1].get("display_kind") == "hidden"]
-    assert "Second part." in params["text"]
+    texts = [c[1]["text"] for c in hermes.named("prompt.submit") if c[1].get("display_kind") == "hidden"]
+    assert "Second part." in texts[-1]
+
+
+def test_a_stopped_workstream_whose_queued_turn_runs_is_running(on, hermes):
+    start()
+    on.update("W1", status="stopped")
+    assert work.turn_started("20261031_work_1") and on.get("W1").status == "running"
+    work.turn_ended("20261031_work_1", "Ran anyway.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").status == "done"
+
+
+def test_a_running_turn_start_changes_nothing(on, hermes):
+    start()
+    assert work.turn_started("20261031_work_1") and on.get("W1").status == "running"
+    assert not work.turn_started(OTHER_CHAT)
+
+
+def test_a_workstream_turn_end_ends_no_live_activity(on, hermes, monkeypatch):
+    start()
+    ended = []
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_ended", lambda *args: ended.append(args[0]))
+    plugin._on_session_end(session_id="20261031_work_1", failed=False, interrupted=False, completed=True)
+    plugin._on_session_end(session_id=OTHER_CHAT, failed=False, interrupted=False, completed=True)
+    assert ended == [OTHER_CHAT]
 
 
 def test_a_stop_that_fails_unexpectedly_keeps_the_status(on, hermes, monkeypatch):
@@ -955,3 +980,13 @@ def test_a_workstream_turn_starts_no_live_activity(on, hermes, monkeypatch):
     plugin._pre_llm_call(session_id="20261031_work_1", turn_id="t1", user_message="go")
     plugin._pre_llm_call(session_id=OTHER_CHAT, turn_id="t2", user_message="hi")
     assert started == [OTHER_CHAT]
+
+
+def test_the_sweep_leaves_a_start_this_process_is_making(on, hermes, monkeypatch):
+    row = on.add("workstream", title="In flight", goal="x")
+    call("work_list")
+    assert on.get(row.ref).status == "starting"
+    monkeypatch.setattr(work, "_PROCESS_STARTED", work.time.time() + 60)
+    monkeypatch.setattr(work, "_swept", set())
+    call("work_list")
+    assert on.get(row.ref).status == "interrupted"

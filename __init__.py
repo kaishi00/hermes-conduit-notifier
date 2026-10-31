@@ -413,13 +413,14 @@ def _post_llm_call(**kwargs: Any) -> None:
     turn_id = kwargs.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id:
         _finish_ready(session_id, ready, send)
-        if not pulse_turn:
+        if not pulse_turn and not workstream:
             _hold_unnamed_end(session_id)
         return
     key = (session_id, turn_id)
     # A Hermes that never reports the turn's end still gets its reply out,
     # and its Live Activity ended (a Pulse turn never started one).
-    timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id, live=not pulse_turn))
+    timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id,
+                                                           live=not pulse_turn and not workstream))
     with _pending_lock:
         earlier = _pending_ready.pop(key, None)
         _pending_ready[key] = (ready, send, timer)
@@ -625,8 +626,8 @@ def _on_session_end(**kwargs: Any) -> None:
     # (its held reply is dropped too), is framed with them again.
     _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
     _quietly(_link_asks_ended, session_id, answered)
-    if not pulse_turn:
-        # A Pulse turn never started a Live Activity, so there is none to end.
+    if not pulse_turn and not workstream:
+        # A Pulse turn or a workstream's never started a Live Activity, so there is none to end.
         _quietly(live_activity.reporter.turn_ended, session_id,
                  "done" if answered else "stopped" if kwargs.get("interrupted") else "failed")
     if answered:
@@ -764,10 +765,11 @@ def _pulse_note(session_id: str, turn_id: Any, user_message: Any) -> str | None:
         return None
 
 
-def _is_workstream(session_id: str) -> bool:
+def _work_turn_started(session_id: str) -> bool:
     try:
-        return work_tool.is_workstream(session_id)
+        return work_tool.turn_started(session_id)
     except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't record a workstream's turn start", exc_info=True)
         return False
 
 
@@ -901,8 +903,10 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _note_turn_start(kwargs.get("turn_id"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))
         _drop_unnamed_end(session_id)
-        if not _is_workstream(session_id):
-            # A workstream's hidden turn shows no Lock Screen progress, as Pulse's doesn't.
+        # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
+        # doesn't; one that starts after its row settled (a follow-up queued
+        # behind the last turn) puts it back to running.
+        if not _work_turn_started(session_id):
             _quietly(live_activity.reporter.turn_started, session_id)
         # A voice chat archived when its call ended is in use again (#1124).
         try:
