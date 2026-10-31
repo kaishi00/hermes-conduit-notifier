@@ -606,10 +606,9 @@ def _on_session_end(**kwargs: Any) -> None:
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
     notify_tool.drop(session_id)
-    # A workstream's turn that failed, or ended with no reply recorded,
-    # is settled and its coordinator told (work_tool).
-    _quietly(functools.partial(work_tool.turn_finished, session_id, failed=kwargs.get("failed") is True,
-                               interrupted=bool(kwargs.get("interrupted"))))
+    # A workstream's turn is settled with its reply, or as failed, and its
+    # coordinator told (work_tool); a failed one sends no push of its own.
+    workstream = _work_turn_finished(session_id, kwargs)
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
@@ -641,6 +640,11 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     if pulse_turn:
         # Pulse records its own failures (``pulse status``).
+        return
+    if workstream:
+        # The Bot Chat's reply to the work update is the one push, and a
+        # call the user asked for on it still rings.
+        calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
     if cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id):
         # A muted cron job's failed run, or an agent's in a room someone else
@@ -752,6 +756,15 @@ def _pulse_note(session_id: str, turn_id: Any, user_message: Any) -> str | None:
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.warning("conduit_push: Pulse couldn't check this turn", exc_info=True)
         return None
+
+
+def _work_turn_finished(session_id: str, kwargs: dict[str, Any]) -> bool:
+    try:
+        return work_tool.turn_finished(session_id, failed=kwargs.get("failed") is True,
+                                       interrupted=bool(kwargs.get("interrupted")))
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't settle the workstream's turn", exc_info=True)
+        return False
 
 
 def _quietly(function: Any, *args: Any) -> None:

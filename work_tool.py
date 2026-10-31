@@ -165,6 +165,8 @@ _wake_lock = threading.Lock()
 # (home, coordinator) -> (lines waiting, the timer that sends them)
 _wakes: dict[tuple[str, str], tuple[list[str], Any]] = {}
 _swept: set[str] = set()
+# A workstream turn's reply, from post_llm_call until its turn's end.
+_replies: dict[str, str] = {}
 # This copy's profile home, as it was when Hermes registered the plugin: each
 # profile loads its own copy, so this names its bot whatever thread asks.
 _pinned_home: Optional[Path] = None
@@ -600,50 +602,52 @@ def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, sta
 
 
 def turn_ended(session_id: Any, response: Any) -> bool:
-    """A workstream's turn ended: its row takes the result and its
-    coordinator is told. True when the session is a workstream (its turn's
-    own push stays quiet: the coordinator's reply is the one push)."""
+    """A workstream's turn gave its reply (post_llm_call): kept for the
+    turn's end, which settles the row. True when the session is a workstream
+    (its turn's own push stays quiet: the coordinator's reply is the one
+    push)."""
     home, work = _workstream(session_id)
     if work is None or home is None:
         return False
     text = response.strip() if isinstance(response, str) else ""
+    with _wake_lock:
+        _replies[session_id] = text
+    return True
+
+
+def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
+    """Hermes says a turn ended (on_session_end, after post_llm_call): the
+    workstream's row is settled with the reply it gave, as done, or as
+    failed when Hermes says the turn failed (its text is then the error), and
+    its coordinator is told. An interrupted turn is left alone: a stop marked
+    it, and a redirect goes on. True when the session is a workstream."""
+    if not isinstance(session_id, str):
+        return False
+    with _wake_lock:
+        text = _replies.pop(session_id, "")
+    home, work = _workstream(session_id)
+    if work is None or home is None:
+        return False
     store = work_store.Store(home)
-    if work.status == "stopped":
-        if text:
+    if interrupted or work.status == "stopped":
+        if text and work.status == "stopped":
             store.update(work.ref, last_result=text)
         return True
     if work.status not in ("starting", "running", "needs_you"):
         return True  # already settled: the same end reported again
-    if text:
+    if failed:
+        store.update(work.ref, status="failed", error=_cut(text, 300) if text else "its turn failed")
+        line = f"- {work.ref} “{work.title}” failed" + (f": {_cut(text, 300)}" if text else "") \
+            + " (work_read shows what it did)."
+    elif text:
         store.update(work.ref, status="done", last_result=text, error="")
         line = f"- {work.ref} “{work.title}” finished. Its report: {_cut(text, 1200)}"
     else:
-        store.update(work.ref, status="failed", error="its turn ended without a reply")
-        line = f"- {work.ref} “{work.title}” ended without a reply (work_read shows what it did)."
-    if not work.closed_at and work.coordinator:
-        _queue_wake(home, work.coordinator, line)
-    return True
-
-
-def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> None:
-    """Hermes says a turn ended (on_session_end). A workstream whose turn
-    failed, or ended without the reply post_llm_call records, is settled
-    here, so it never holds a slot or leaves its coordinator waiting. An
-    interrupted turn is left alone: a stop marked it, and a redirect goes on."""
-    home, work = _workstream(session_id)
-    if work is None or home is None or interrupted:
-        return
-    if work.status not in ("starting", "running", "needs_you"):
-        return
-    store = work_store.Store(home)
-    if failed:
-        store.update(work.ref, status="failed", error="its turn failed")
-        line = f"- {work.ref} “{work.title}” failed (work_read shows what it did)."
-    else:
-        store.update(work.ref, status="done")
+        store.update(work.ref, status="done", error="")
         line = f"- {work.ref} “{work.title}” finished without a report (work_read shows what it did)."
     if not work.closed_at and work.coordinator:
         _queue_wake(home, work.coordinator, line)
+    return True
 
 
 def needs_you(session_id: Any, description: Any = None) -> None:

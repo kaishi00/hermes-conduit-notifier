@@ -129,6 +129,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
     monkeypatch.setattr(work, "_policy_cache", {})
     work._wakes.clear()
+    work._replies.clear()
     return fake
 
 
@@ -374,6 +375,8 @@ def test_a_finished_turn_takes_the_result_and_wakes_the_bot_chat(on, hermes):
     hermes.live(BOT_CHAT, transport=object())
     hermes.calls.clear()
     assert work.turn_ended("20261031_work_1", "The login page waits on a slow DNS lookup.")
+    assert on.get("W1").status == "running"
+    assert work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     work.flush_wakes()
     row = on.get("W1")
     assert row.status == "done" and row.last_result.startswith("The login page")
@@ -585,6 +588,7 @@ def test_a_turn_end_after_its_reply_changes_nothing(on, hermes):
     work.turn_ended("20261031_work_1", "All done.")
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     work.turn_ended("20261031_work_1", "All done.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     work.flush_wakes()
     assert on.get("W1").status == "done" and on.get("W1").last_result == "All done."
     assert len([c for c in hermes.named("prompt.submit") if c[1].get("display_kind") == "hidden"]) == 1
@@ -596,10 +600,29 @@ def test_an_interrupted_turn_is_left_to_the_stop(on, hermes):
     assert on.get("W1").status == "running"
 
 
-def test_the_plugins_session_end_hook_settles_a_failed_workstream(on, hermes):
+def test_the_plugins_session_end_hook_settles_a_failed_workstream_without_a_push(on, hermes, monkeypatch):
     start()
+    pushed, alerts = [], []
+    monkeypatch.setattr(plugin, "push_event", lambda *args, **kwargs: pushed.append(args))
+    monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: alerts.append(args), raising=False)
     plugin._on_session_end(session_id="20261031_work_1", failed=True, interrupted=False, completed=False)
-    assert on.get("W1").status == "failed"
+    assert on.get("W1").status == "failed" and pushed == [] and alerts == []
+
+
+def test_a_failed_turn_with_text_is_a_failure_not_a_report(on, hermes):
+    start()
+    work.turn_ended("20261031_work_1", "The provider returned an error.")
+    work.turn_finished("20261031_work_1", failed=True, interrupted=False)
+    row = on.get("W1")
+    assert row.status == "failed" and "provider returned an error" in row.error and not row.last_result
+
+
+def test_a_stopped_workstream_keeps_its_last_words(on, hermes):
+    start()
+    on.update("W1", status="stopped")
+    work.turn_ended("20261031_work_1", "Got halfway.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=True)
+    assert on.get("W1").status == "stopped" and on.get("W1").last_result == "Got halfway."
 
 
 def test_the_running_limit_is_counted_where_the_row_is_added(home):
