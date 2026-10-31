@@ -1042,7 +1042,7 @@ def test_a_harmless_non_zero_exit_is_left_out_of_failed_calls(recording):
     home = pulse.get_hermes_home()
     _terminal(home, "head -5 notes.md; ls data/*.db 2>/dev/null", "# Notes\n- buy milk\n- call mum", 2, DAY)
     [row] = recording.store.recent_outcomes()
-    assert row["error"] == "exit 2, no error in its output: - call mum"
+    assert row["error"] == "exit 2, an expected exit: - call mum"
     assert ledger.harmless_exit(row) and _failed(recording) == ""
 
 
@@ -1083,15 +1083,26 @@ def test_terminal_failure(result, expected):
     "GET https://api.example.com/v1/x?k=1 -> 500 Internal Server Error",
 ])
 def test_failure_wording_keeps_a_call_in_failed_calls(line):
-    error = ledger.terminal_failure({"output": f"working\n{line}", "exit_code": 1, "error": None})
+    error = ledger.terminal_failure({"output": f"working\n{line}", "exit_code": 1, "error": None}, "run 2>/dev/null")
     assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
 
 
 def test_a_timeout_or_signal_is_never_harmless():
     for code in (124, 127, 137):
-        error = ledger.terminal_failure({"output": "partial line", "exit_code": code, "error": None})
+        error = ledger.terminal_failure({"output": "partial line", "exit_code": code, "error": None}, "run 2>/dev/null")
         assert error == f"exit {code}: partial line"
         assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
+
+
+def test_a_long_unmarked_last_line_keeps_its_end():
+    error = ledger.terminal_failure({"output": "word " * 60 + "the end", "exit_code": 124, "error": None})
+    assert error.startswith("exit 124: …") and error.endswith("word the end") and len(error) <= ledger.MAX_ERROR
+
+
+def test_a_window_with_no_space_starts_at_the_mark():
+    line = "git clone https://u:Pw1234567890@git.example.com/" + "x" * 375 + " fatal"
+    error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
+    assert "Pw1234567890" not in error and error.endswith("fatal")
 
 
 def test_a_url_query_keeps_the_rest_of_the_line():
@@ -1141,6 +1152,7 @@ def test_more_secret_shapes_are_redacted(line, secret):
     ("Authentication: failed", "Authentication: failed", None),
     ("Basic authentication failed", "Basic authentication failed", None),
     ("api_key: missing", "api_key: missing", None),
+    ("Authentication: insufficient_privileges", "Authentication: insufficient_privileges", None),
     ('{"password": "expired"}', '"password": "expired"', None),
     ("401 Unauthorized: authentication failed", "Unauthorized: authentication failed", None),
     ("post https://hooks.slack.com/services/T000/B000/" + "X" * 24 + " failed", "/B000/[redacted] failed", "X" * 24),
@@ -1164,9 +1176,10 @@ def test_redaction_keeps_reasons_and_drops_secrets(line, kept, gone):
     "gh: API rate limit exceeded for installation ID 1234",
     "503 Service Unavailable",
     "CUDA out of memory",
+    "StopIteration: no more pages",
 ])
 def test_more_failure_wording_stays(line):
-    error = ledger.terminal_failure({"output": line, "exit_code": 2, "error": None})
+    error = ledger.terminal_failure({"output": line, "exit_code": 2, "error": None}, "run 2>/dev/null")
     assert not ledger.harmless_exit({"tool": "terminal", "status": "error", "error": error})
 
 
@@ -1183,11 +1196,38 @@ def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
     assert row["error"] == "exit 1: Error: retry #3 of /api failed? see /docs"
 
 
+@pytest.mark.parametrize("command, code, expected", [
+    ("head notes.md; ls data/*.db 2>/dev/null", 2, True),
+    ("grep -q done status.txt", 1, True),
+    ("ps aux | grep hermes", 1, True),
+    ("cd /srv && test -f done.flag", 1, False),  # cd isn't a yes/no check, so it could be what failed
+    ("test -f a.flag && [ -d out ]", 1, True),
+    ("grep -q done status.txt", 2, False),  # grep's 2 is a real error
+    ("test -f done.flag || echo missing", 1, False),
+    ("ls data/*.db 2>/dev/null; python3 job.py", 1, False),  # only the last statement counts
+    ("FOO=1 sudo /usr/bin/grep x y", 1, True),
+    ("python3 -m pytest 2>/dev/null", 124, False),
+    (None, 1, False),
+])
+def test_expected_exits(command, code, expected):
+    assert ledger.expected_exit(command, code) is expected
+
+
+def test_oddly_worded_failures_stay_unless_the_command_expected_them(recording):
+    home = pulse.get_hermes_home()
+    _terminal(home, "python3 -m pytest", "/usr/bin/python3: No module named pytest", 1, DAY)
+    _terminal(home, "go build ./...", "./main.go:5:2: undefined: foo", 1, DAY + 1)
+    failed = _failed(recording)
+    assert "No module named pytest" in failed and "undefined: foo" in failed
+
+
 def test_a_bare_exit_stays_in_failed_calls(recording):
-    """Nothing to judge it by, so it isn't dropped; the report's prompt
-    says a bare exit isn't news on its own."""
+    """Nothing to judge it by unless the command expected it, so it isn't
+    dropped; the report's prompt says a bare exit isn't news on its own."""
     _terminal(pulse.get_hermes_home(), "test -f done.flag", "", 1, DAY)
-    assert "→ error: exit 1, no output" in _failed(recording)
+    _terminal(pulse.get_hermes_home(), "python3 job.py", "", 1, DAY + 1)
+    failed = _failed(recording)
+    assert "→ error: exit 1, no output" in failed and failed.count("\n- ") == 1
     row = {"tool": "terminal", "status": "error", "error": "exit 2"}  # recorded before outputs were kept
     assert not ledger.harmless_exit(row)
     assert "a bare non-zero exit" in candidates.INSTRUCTIONS and "a bare non-zero exit" in report.REPORT_TEXT

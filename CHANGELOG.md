@@ -17,9 +17,10 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 - Pulse no longer makes a card out of a command that failed harmlessly.
-  A command that ends with a non-zero exit while nothing went wrong, like a
-  file search that found nothing with its errors silenced, is left out of
-  what Pulse reads, and so is a call that went through when it ran again.
+  A command that said its failure doesn't matter, by silencing its errors
+  or by being a yes/no check like grep or test, is left out of what Pulse
+  reads when its output shows nothing wrong, and so is a call that went
+  through when it ran again.
   A failure that says what went wrong, like a traceback, still shows, now
   with the line that says it.
 

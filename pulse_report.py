@@ -608,8 +608,8 @@ def ended_section(pulse_store: store.PulseStore, events: Sequence[dict], zone: t
 
 def failed_calls(pulse_store: store.PulseStore, since: float, zone: tzinfo) -> str:
     """Tool calls that failed since ``since``, leaving out the ones nothing
-    went wrong in: a command that exited non-zero with no error in its output
-    (pulse_ledger.harmless_exit), and a call that later went through as the
+    went wrong in: a command whose non-zero exit it expected, with nothing wrong
+    in its output (pulse_ledger.harmless_exit), and a call that later went through as the
     very same call (same tool and arguments)."""
     recent = [row for row in pulse_store.recent_outcomes(500) if row["at"] >= since]
     went_through: dict[tuple[str, str], float] = {}

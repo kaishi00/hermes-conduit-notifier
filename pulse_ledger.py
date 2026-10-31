@@ -44,7 +44,7 @@ MAX_ERROR = 200
 # output: <last line>``: it exited non-zero with nothing wrong to show, like
 # an ``ls`` of a glob that matched nothing with its stderr silenced.
 FAILURE_MARK = re.compile(
-    r"traceback|error|err!|exception|interrupt|systemexit|fatal|fail|denied|not found|no such|refused|timed out|timeout|cannot|can't|"
+    r"traceback|error|err!|exception|interrupt|systemexit|stop(?:async)?iteration|generatorexit|fatal|fail|denied|not found|no such|refused|timed out|timeout|cannot|can't|"
     r"could not|couldn't|unable|panic|killed|terminated|segmentation fault|abort|invalid|forbidden|"
     r"unauthori[sz]ed|unreachable|not permitted|not allowed|broken pipe|\breset\b|\bmissing\b|\bbad\b|"
     r"\bwrong\b|\bunknown\b|\bno route\b|\bresolve\b|\busage:|no rule|\bstop\.|\*\*\*|packet loss|\brejected\b|"
@@ -52,8 +52,15 @@ FAILURE_MARK = re.compile(
 # Exit codes that are never harmless whatever was printed: a timeout (124),
 # a command that couldn't run (126, 127) or one killed by a signal (128+).
 LOUD_EXITS = 124
-NO_ERROR_SHOWN = "no error in its output"
-HARMLESS = re.compile(rf"exit -?\d+, {NO_ERROR_SHOWN}: ")
+# A failure is harmless only when the command itself said its failure
+# doesn't matter, and its output shows nothing wrong: the part that set the
+# exit silenced its errors (``2>/dev/null``), or is a yes/no check whose exit
+# 1 means "no" (grep, test, diff...). Any other exit stays, however it's
+# worded, so a missing failure word never hides a real failure.
+EXPECTED = "an expected exit"
+HARMLESS = re.compile(rf"exit -?\d+, {EXPECTED}\b")
+_SILENCED = re.compile(r"(?:2|&)>\s*/dev/null|>\s*/dev/null\s+2>&1")
+_YES_NO = frozenset({"grep", "egrep", "fgrep", "rg", "test", "[", "[[", "diff", "cmp", "pgrep", "which", "type"})
 NO_OUTPUT = "no output"
 # What a kept output line could carry that mustn't be kept: a URL's user info
 # and query (each URL cleaned on its own, so the rest of the line stays),
@@ -237,7 +244,10 @@ _JUDGMENT = re.compile(r"(?i)[\"']?(?:missing|invalid|expired|required|wrong|fai
 
 
 def _looks_secret(value: str) -> bool:
-    return value[:1] in "\"'" or len(value) >= 16 or (any(c.isdigit() for c in value) and any(c.isalpha() for c in value))
+    bare = value.strip("\"'")
+    if value[:1] in "\"'" or (any(c.isdigit() for c in bare) and any(c.isalpha() for c in bare)):
+        return True
+    return len(bare) >= 16 and not bare.replace("_", "").replace("-", "").isalpha()
 
 
 def _redact(text: str) -> str:
@@ -259,8 +269,9 @@ def _around(line: str, at: int) -> str:
     user info among them)."""
     start, end = max(0, at - REDACT_WINDOW), at + REDACT_WINDOW
     part = line[start:end]
-    if start and " " in part[:at - start]:
-        part = part[part.index(" ") + 1:]
+    if start:
+        # With no space before ``at``, the window starts at ``at`` itself.
+        part = part[part.index(" ") + 1:] if " " in part[:at - start] else line[at:end]
     return part
 
 
@@ -269,13 +280,33 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def terminal_failure(result: Any) -> Optional[str]:
+def expected_exit(command: Any, code: int) -> bool:
+    """True when the part of ``command`` that set exit ``code`` said its
+    failure doesn't matter. Only the last statement counts (after ``;`` or a
+    new line); in an ``&&`` chain every step must qualify, an ``||`` never
+    does, and in a pipe its last command sets the exit."""
+    if not isinstance(command, str) or not 0 < code < LOUD_EXITS:
+        return False
+    statement = re.split(r"[;\n]", command.strip().rstrip(";").strip())[-1]
+    if "||" in statement or not statement.strip():
+        return False
+    for step in statement.split("&&"):
+        last = step.split("|")[-1].strip()
+        words = [word for word in last.split() if "=" not in word.split("/")[0] and word not in ("sudo", "env")]
+        name = words[0].rsplit("/", 1)[-1] if words else ""
+        if not (_SILENCED.search(last) or (code == 1 and name in _YES_NO)):
+            return False
+    return True
+
+
+def terminal_failure(result: Any, command: Any = None) -> Optional[str]:
     """A failed terminal command's error, ``exit 1: <line>``, from its result
     (``output``/``exit_code``/``error``); None when it didn't fail or has an
     error of its own. Hermes words a bare non-zero exit in the user's language
-    and leaves the output out, so this is worked out here. Whether the output
-    shows something wrong is decided on the raw output and written into the
-    error, so redacting or cutting the kept line can't change it."""
+    and leaves the output out, so this is worked out here. Whether the exit
+    was expected (expected_exit, with no failure word in the output) is
+    decided on the raw command and output and written into the error, so
+    redacting or cutting the kept line can't change it."""
     parsed = _parsed(result)
     if not isinstance(parsed, dict) or parsed.get("error"):
         return None
@@ -285,7 +316,7 @@ def terminal_failure(result: Any) -> Optional[str]:
     output = parsed.get("output")
     lines = [part.strip() for part in output.splitlines() if part.strip()] if isinstance(output, str) else []
     if not lines:
-        return f"exit {code}, {NO_OUTPUT}"
+        return f"exit {code}, {EXPECTED}, {NO_OUTPUT}" if expected_exit(command, code) else f"exit {code}, {NO_OUTPUT}"
     marked = [(part, mark) for part in lines if (mark := FAILURE_MARK.search(part))]
     if marked:
         # The last marked line is the exception under a traceback. It's
@@ -298,15 +329,19 @@ def terminal_failure(result: Any) -> Optional[str]:
         start = max(0, mark.start() - 60) if mark else 0
         head, excerpt = f"exit {code}", ("…" if start else "") + clean[start:]
     else:
-        quiet = 0 < code < LOUD_EXITS
-        head, excerpt = (f"exit {code}, {NO_ERROR_SHOWN}" if quiet else f"exit {code}"), _redact(_around(lines[-1], len(lines[-1])))
+        head = f"exit {code}, {EXPECTED}" if expected_exit(command, code) else f"exit {code}"
+        # The line's end is what's kept: room is what MAX_ERROR leaves after the head.
+        excerpt = _printable(re.sub(r"\s+", " ", _redact(_around(lines[-1], len(lines[-1])))).strip())
+        room = MAX_ERROR - len(head) - 2
+        if len(excerpt) > room:
+            excerpt = "…" + excerpt[-(room - 1):]
     return _clip(f"{head}: {excerpt}", MAX_ERROR)
 
 
 def harmless_exit(row: dict[str, Any]) -> bool:
-    """A terminal command that exited non-zero while its output showed
-    nothing wrong (terminal_failure). A bare exit with no output kept (or from
-    before outputs were kept) isn't one: there's nothing to judge it by."""
+    """A terminal command whose non-zero exit it said doesn't matter, with
+    nothing wrong in its output (terminal_failure). A bare exit from before
+    outputs were kept isn't one: there's nothing to judge it by."""
     if row.get("tool") != "terminal" or row.get("status") != "error":
         return False
     return bool(HARMLESS.match(row.get("error") or ""))
@@ -331,7 +366,8 @@ def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, 
             error_message = parsed.get("error")
     # A terminal failure's error is already redacted and cut; _short's URL
     # cleaning would cut it again at a plain "#" or "?".
-    kept = terminal_failure(result) if status == "error" and tool == "terminal" else None
+    command = args.get("command") if isinstance(args, dict) else None
+    kept = terminal_failure(result, command) if status == "error" and tool == "terminal" else None
     action, label, digest = describe_call(args)
     pulse_store = _store(home)
     pulse_store.add_outcome({
