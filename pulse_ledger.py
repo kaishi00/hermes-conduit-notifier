@@ -69,7 +69,8 @@ _LOOKUPS = frozenset({"ls", "find", "stat", "cat", "head", "tail", "file", "du",
                       "test", "[", "[["}) | _YES_NO
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete"})
 # What may feed a yes/no check in a pipe without hiding a failure of its own.
-_PRODUCERS = _LOOKUPS | frozenset({"ps", "echo", "printf", "printenv", "sort", "uniq", "cut", "tr"})
+# Pipe stages that can't fail on their own, so they never hide a failure.
+_PRODUCERS = frozenset({"ps", "echo", "printf", "printenv"})
 NO_OUTPUT = "no output"
 # What a kept output line could carry that mustn't be kept: a URL's user info
 # and query (each URL cleaned on its own, so the rest of the line stays),
@@ -263,6 +264,8 @@ def _looks_secret(value: str) -> bool:
     if bare.isalpha() and len(bare) >= 12 and bare[1:] != bare[1:].lower() and bare != bare.upper() \
             and not FAILURE_MARK.search(bare):  # InvalidCredentials is a reason
         return True  # a mixed-case passphrase (MySecretPassPhrase), not a word
+    if bare.isalpha() and len(bare) >= 16 and not FAILURE_MARK.search(bare):
+        return True  # no word runs this long; underscored reasons don't reach here
     return len(bare) >= 16 and not bare.replace("_", "").replace("-", "").isalpha()
 
 
@@ -328,17 +331,19 @@ def expected_exit(command: Any, code: int) -> bool:
     failure doesn't matter. Only the last statement counts (after ``;`` or a
     new line); in an ``&&`` chain every step must qualify, an ``||`` never
     does. In a pipe the last command sets the exit, and every earlier one
-    must be a lookup or a plain producer, so a failing ``curl`` piped into
-    ``grep -q`` still shows. ``find`` with an action runs other commands, so
-    it's no lookup."""
+    must be one that can't fail on its own (echo, ps), so a failing ``curl``
+    or ``cut`` piped into ``grep -q`` still shows. ``find`` with an action
+    runs other commands, so it's no lookup."""
     if not isinstance(command, str) or not 0 < code < LOUD_EXITS:
         return False
     # Quoted text is an argument, never a separator or a redirect.
     if command.count("'") % 2 or re.sub(r"'[^']*'", "", command).count('"') % 2:
         return False
     masked = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "Q", command)
-    # A nested command ($(...), <(...), a subshell, backticks) hides its own separators.
-    if "(" in masked or "`" in masked:
+    # A nested command ($(...), <(...), a subshell, backticks) hides its own
+    # separators; inside double quotes $(...) and backticks still run.
+    single = re.sub(r"'[^']*'", "Q", command)
+    if "(" in masked or "$(" in single or "`" in single:
         return False
     statement = re.split(r"[;\n]", masked.strip().rstrip(";").strip())[-1]
     # A lone & backgrounds a command and runs the next one, so it hides nothing.
@@ -347,10 +352,7 @@ def expected_exit(command: Any, code: int) -> bool:
     for step in statement.split("&&"):
         *earlier, last = [part.strip() for part in step.split("|")]
         for part in earlier:
-            name, words = _command_name(part)
-            # A silenced stage that isn't a lookup could be what failed, unseen.
-            if name not in _PRODUCERS or (name == "find" and _FIND_ACTIONS & set(words)) \
-                    or (_SILENCED.search(part) and name not in _LOOKUPS - _YES_NO):
+            if _command_name(part)[0] not in _PRODUCERS or _SILENCED.search(part):
                 return False
         name, words = _command_name(last)
         # A yes/no check is excused at exit 1 only, silenced or not: grep's 2 is an error.
