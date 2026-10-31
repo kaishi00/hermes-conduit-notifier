@@ -251,27 +251,49 @@ class Broker:
         return {str(record.get("session_key") or "") for record in list(sessions.values())
                 if isinstance(record, dict) and not record.get("_finalized")}
 
-    def start(self, *, title: str, prompt: str, idempotency_key: str, cwd: str = "") -> Started:
+    def start(self, *, title: str, prompt: str, idempotency_key: str, cwd: str = "",
+              created: Optional[Callable[[str], None]] = None) -> Started:
+        """A new hidden session on this bot's profile, with ``prompt`` as its
+        first turn. ``created`` hears its stored id before the prompt goes in.
+        Anything that fails once the session exists ends it again (its turn
+        interrupted, the session closed), so no session runs outside the
+        registry."""
         params: dict[str, Any] = {"cols": 96, "source": "desktop", "title": title, "hidden": True,
                                   "idempotency_key": idempotency_key, **self._profile_params()}
         if cwd:
             params["cwd"] = cwd
-        created = self._dispatch("session.create", params)
-        runtime_id = created.get("session_id")
+        made = self._dispatch("session.create", params)
+        runtime_id = made.get("session_id")
         if not isinstance(runtime_id, str) or not runtime_id:
             raise BrokerError("session.create gave no session")
-        landed = created.get("profile")
-        if isinstance(landed, str) and landed and landed.lower() != self.profile.lower():
-            raise BrokerError(f"Hermes put the session on {landed[:64]} instead of {self.profile}")
-        stored = created.get("stored_session_id")
-        stored = stored if isinstance(stored, str) and stored else ""
-        self._dispatch("prompt.submit", {"session_id": runtime_id, "text": prompt})
-        if not stored:
-            record = getattr(self.api, "_sessions", {}).get(runtime_id)
-            stored = str((record or {}).get("session_key") or "") if isinstance(record, dict) else ""
-        if not stored:
-            raise BrokerError("Hermes gave the session no stored id")
+        try:
+            landed = made.get("profile")
+            if isinstance(landed, str) and landed and landed.lower() != self.profile.lower():
+                raise BrokerError(f"Hermes put the session on {landed[:64]} instead of {self.profile}")
+            stored = made.get("stored_session_id")
+            stored = stored if isinstance(stored, str) and stored else self._stored_id(runtime_id)
+            if stored and created is not None:
+                created(stored)
+            self._dispatch("prompt.submit", {"session_id": runtime_id, "text": prompt})
+            stored = stored or self._stored_id(runtime_id)
+            if not stored:
+                raise BrokerError("Hermes gave the session no stored id")
+        except BaseException:
+            self._end(runtime_id)
+            raise
         return Started(runtime_id, stored, self.profile)
+
+    def _stored_id(self, runtime_id: str) -> str:
+        record = getattr(self.api, "_sessions", {}).get(runtime_id)
+        return str(record.get("session_key") or "") if isinstance(record, dict) else ""
+
+    def _end(self, runtime_id: str) -> None:
+        """Best effort: a session the broker made but couldn't keep."""
+        for method in ("session.interrupt", "session.close"):
+            try:
+                self._dispatch(method, {"session_id": runtime_id}, timeout=10)
+            except Exception:  # noqa: BLE001 — the start's own failure is what gets reported
+                pass
 
     def _open(self, session_id: str) -> tuple[str, str, bool]:
         """(runtime id, stored id at the lineage tip, whether another client

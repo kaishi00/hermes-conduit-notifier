@@ -6,7 +6,9 @@ The coordinator gets eight tools (``work_list``, ``work_start``, ``work_send``,
 They answer only in this bot's canonical Bot Chat, and only while the bot's
 setting (``conduit-push work on``) is on. Every one that names work takes a
 ref (W1, A1) from this bot's own registry (work_store), never a session id,
-so a coordinator can't reach a session that isn't its bot's work.
+so a coordinator can't reach a session that isn't its bot's work. (A result
+carries the session's id only inside its ``conduit://session/`` link, for
+the app to open; no work tool takes one.)
 
 Around the tools, the plugin's hooks:
 
@@ -33,6 +35,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import quote
 
 from . import work_broker, work_store
 
@@ -65,6 +68,8 @@ POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. S
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get work through work_ask, which arrives with "
                        "bot-to-bot asks (not yet available here). Tell the user you can't hand this to another bot "
                        "yet, or start a workstream of your own.")
+CHECK_FAILED = ("This bot's coordinator settings couldn't be checked just now, so its tools are held back for this "
+                "call. Try again in a moment.")
 NOT_YET = ("Asks between bots come in the next step of Bot workstreams; this one isn't available yet. Nothing was "
            "sent. Start a workstream of your own instead, or tell the user.")
 
@@ -160,14 +165,20 @@ _wake_lock = threading.Lock()
 # (home, coordinator) -> (lines waiting, the timer that sends them)
 _wakes: dict[tuple[str, str], tuple[list[str], Any]] = {}
 _swept: set[str] = set()
+# This copy's profile home, as it was when Hermes registered the plugin: each
+# profile loads its own copy, so this names its bot whatever thread asks.
+_pinned_home: Optional[Path] = None
+POLICY_CACHE_S = 2.0
+_policy_cache: dict[str, tuple[float, str]] = {}
 
 
 # Registration
 
 
 def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
-    global _is_child
+    global _is_child, _pinned_home
     _is_child = is_child
+    _pinned_home = _ambient_home()
     if not hasattr(ctx, "register_tool"):
         return
     for name in TOOLS:
@@ -187,6 +198,12 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
 
 
 def _home() -> Optional[Path]:
+    """This bot's home: the one this copy registered under (an ambient
+    lookup off the turn thread can answer with the launch profile's)."""
+    return _pinned_home or _ambient_home()
+
+
+def _ambient_home() -> Optional[Path]:
     try:
         from hermes_constants import get_hermes_home
 
@@ -201,15 +218,30 @@ def _store(home: Optional[Path] = None) -> Optional[work_store.Store]:
 
 
 def policy(home: Optional[Path] = None) -> str:
-    """This bot's setting: "off" unless its registry says otherwise."""
+    """This bot's setting: "off" unless its registry says otherwise. A
+    registry that exists but can't be read is "strict": the coordinator's
+    limits hold until it can be read again."""
     home = home or _home()
     if home is None or not work_store.exists(home):
         return "off"
+    key = str(home)
+    now = time.monotonic()
+    hit = _policy_cache.get(key)
+    if hit and now - hit[0] < POLICY_CACHE_S:
+        return hit[1]
     try:
-        return work_store.Store(home).policy()
-    except Exception:  # noqa: BLE001 — an unreadable registry is off
-        logger.debug("conduit_push: couldn't read the work registry", exc_info=True)
-        return "off"
+        value = work_store.Store(home).policy()
+    except Exception:  # noqa: BLE001 — unreadable: held to strict, read again next time
+        logger.warning("conduit_push: couldn't read the work registry; holding the Bot Chat to strict",
+                       exc_info=True)
+        return "strict"
+    _policy_cache[key] = (now, value)
+    return value
+
+
+def has_registry() -> bool:
+    home = _home()
+    return home is not None and work_store.exists(home)
 
 
 def available() -> bool:
@@ -220,9 +252,17 @@ def available() -> bool:
 def is_bot_chat(session_id: Any, home: Optional[Path] = None) -> bool:
     """Whether the session is this bot's canonical Bot Chat, and not a
     subagent or a fork of it."""
+    if _is_child(session_id.strip() if isinstance(session_id, str) else ""):
+        return False
+    return _titled_bot_chat(session_id, home)
+
+
+def _titled_bot_chat(session_id: Any, home: Optional[Path] = None) -> bool:
+    """Whether the session is titled as this bot's Bot Chat (a fork of it
+    runs under the same id)."""
     session_id = session_id.strip() if isinstance(session_id, str) else ""
     home = home or _home()
-    if not session_id or home is None or _is_child(session_id):
+    if not session_id or home is None:
         return False
     from . import session_titles
 
@@ -288,6 +328,9 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         work = store.get(args.get("ref"))
         if work is None:
             return _no_such(args.get("ref"))
+        if work.kind == "workstream" and work.status in ("starting", "running", "needs_you"):
+            return {"ok": False, "ref": work.ref, "error": "still_running",
+                    "note": f"{work.ref} is still working. Stop it first with work_stop, or let it finish."}
         store.update(work.ref, closed_at=time.time())
         return {"ok": True, "ref": work.ref, "title": work.title, "note": f"Closed {work.ref}: {work.title}."}
     broker = work_broker.Broker(home)
@@ -300,14 +343,18 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
     if name == "work_read":
         return _read(home, work, bool(args.get("transcript")))
     if name == "work_stop":
+        # Marked first: the interrupted turn's end, which may come before
+        # the interrupt returns, then reads as the stop, not as finished.
+        store.update(work.ref, status="stopped")
         try:
             stopped = broker.stop(work.session_id)
         except work_broker.BrokerError as error:
+            store.update(work.ref, status=work.status)
             return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes refused: {error}"}
         if stopped:
-            store.update(work.ref, status="stopped")
             return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
                     "note": f"Stopped {work.ref}: {work.title}. work_send continues it."}
+        store.update(work.ref, status=work.status)
         return {"ok": True, "ref": work.ref, "title": work.title, "status": work.status,
                 "note": f"{work.ref} wasn't working on anything."}
     return _send(home, store, broker, work, args)
@@ -328,8 +375,15 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
     if work.error:
         row["error"] = work.error
     if work.session_id:
-        row["link"] = f"[Open {work.ref}](conduit://session/{work.session_id})"
+        row["link"] = _link(work.ref, work.session_id, (work.executor or {}).get("bot"))
     return row
+
+
+def _link(ref: str, session_id: str, profile: Any) -> str:
+    """The chat's link in the app, on the bot's own profile (Conduit
+    switches to it first, as for a notification)."""
+    query = f"?profile={quote(profile, safe='')}" if isinstance(profile, str) and profile else ""
+    return f"[Open {ref}](conduit://session/{quote(session_id, safe='')}{query})"
 
 
 def _list(store: work_store.Store, args: dict) -> dict:
@@ -356,30 +410,41 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                     "note": "Open work looks like the same task. Send it there with work_send, or call work_start "
                             "again with new=true if this really is new."}
     limit = store.max_running()
-    if store.running_count() >= limit:
+    cwd = str(args.get("cwd") or "").strip()
+    # The count and the new row in one transaction: two starts in one turn
+    # can't both take the last slot.
+    work = store.add("workstream", title=title, goal=instructions, coordinator=coordinator,
+                     requested_by={"by": "user", "via": coordinator},
+                     executor={"bot": work_broker.profile_of(home)},
+                     reply_to={"to": "coordinator", "session": coordinator}, cwd=cwd, running_limit=limit)
+    if work is None:
         running = [_row(work) for work in store.list(active_only=True) if work.kind == "workstream"
                    and work.status in ("starting", "running", "needs_you")]
         return {"ok": False, "error": "busy", "running": running,
                 "note": f"This bot already has {limit} workstreams running, its limit. Wait for one, stop one, or "
                         "send this to one of them."}
-    cwd = str(args.get("cwd") or "").strip()
-    work = store.add("workstream", title=title, goal=instructions, coordinator=coordinator,
-                     requested_by={"by": "user", "via": coordinator},
-                     executor={"bot": work_broker.profile_of(home)},
-                     reply_to={"to": "coordinator", "session": coordinator}, cwd=cwd)
     bot = _bot_name(home)
     prompt = WORKER_PROMPT.format(bot=bot, ref=work.ref, title=work.title, instructions=instructions)
     item = store.outbox_add(work.ref, "start", work.idempotency_key, prompt)
+
+    def created(session_id: str) -> None:
+        # Kept before the prompt goes in, so the turn's end finds its row.
+        store.update(work.ref, session_id=session_id)
+
     try:
-        started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd)
-    except work_broker.BrokerError as error:
+        started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
+                               created=created)
+        store.update(work.ref, session_id=started.session_id, status="running")
+    except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
         store.outbox_done(item, "refused")
-        store.update(work.ref, status="failed", error=str(error)[:300])
-        return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't start it: {error}"}
+        reason = str(error)[:300] if isinstance(error, work_broker.BrokerError) else type(error).__name__
+        store.update(work.ref, status="failed", error=reason)
+        if not isinstance(error, work_broker.BrokerError):
+            logger.warning("conduit_push: starting a workstream failed", exc_info=True)
+        return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't start it: {reason}"}
     store.outbox_done(item, "accepted")
-    store.update(work.ref, session_id=started.session_id, status="running")
     return {"ok": True, "ref": work.ref, "title": work.title, "status": "running",
-            "link": f"[Open {work.ref}](conduit://session/{started.session_id})",
+            "link": _link(work.ref, started.session_id, work_broker.profile_of(home)),
             "note": f"Started {work.ref}: {work.title}. It works in the background; its result comes back to you "
                     "as a work update. Don't wait for it."}
 
@@ -481,7 +546,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     if home is None:
         return None
     mode = policy(home)
-    if mode == "off" or not is_bot_chat(session_id, home):
+    # A fork of the Bot Chat (its review, /btw) runs under its id and is
+    # held to the same policy; a subagent never reaches here.
+    if mode == "off" or not _titled_bot_chat(session_id, home):
         return None
     allowed = LOOKUPS if mode == "lookups" else STRICT
     names = [name]
@@ -545,6 +612,8 @@ def turn_ended(session_id: Any, response: Any) -> bool:
         if text:
             store.update(work.ref, last_result=text)
         return True
+    if work.status not in ("starting", "running", "needs_you"):
+        return True  # already settled: the same end reported again
     if text:
         store.update(work.ref, status="done", last_result=text, error="")
         line = f"- {work.ref} “{work.title}” finished. Its report: {_cut(text, 1200)}"
@@ -554,6 +623,27 @@ def turn_ended(session_id: Any, response: Any) -> bool:
     if not work.closed_at and work.coordinator:
         _queue_wake(home, work.coordinator, line)
     return True
+
+
+def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> None:
+    """Hermes says a turn ended (on_session_end). A workstream whose turn
+    failed, or ended without the reply post_llm_call records, is settled
+    here, so it never holds a slot or leaves its coordinator waiting. An
+    interrupted turn is left alone: a stop marked it, and a redirect goes on."""
+    home, work = _workstream(session_id)
+    if work is None or home is None or interrupted:
+        return
+    if work.status not in ("starting", "running", "needs_you"):
+        return
+    store = work_store.Store(home)
+    if failed:
+        store.update(work.ref, status="failed", error="its turn failed")
+        line = f"- {work.ref} “{work.title}” failed (work_read shows what it did)."
+    else:
+        store.update(work.ref, status="done")
+        line = f"- {work.ref} “{work.title}” finished without a report (work_read shows what it did)."
+    if not work.closed_at and work.coordinator:
+        _queue_wake(home, work.coordinator, line)
 
 
 def needs_you(session_id: Any, description: Any = None) -> None:
@@ -649,6 +739,17 @@ def flush_wakes() -> None:
 
 
 def _summary(args: Any) -> str:
+    """A step's arguments in a line, with credential-shaped text masked."""
+    text = _raw_summary(args)
+    try:
+        from agent.redact import redact_sensitive_text
+
+        return redact_sensitive_text(text)
+    except Exception:  # noqa: BLE001 — no redactor here: long token-like runs are masked instead
+        return re.sub(r"[A-Za-z0-9_\-+/=]{24,}", "***", text)
+
+
+def _raw_summary(args: Any) -> str:
     if isinstance(args, dict):
         for key in ("command", "path", "query", "url", "name", "action"):
             value = args.get(key)

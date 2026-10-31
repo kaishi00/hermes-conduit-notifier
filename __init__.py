@@ -241,13 +241,14 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
                                 kwargs.get("args"))
     if block is not None:
         return block
-    if child:
-        return None  # a fork: nothing on the Lock Screen, and no question of the chat's
-    # A coordinator Bot Chat runs only what its bot's policy allows
-    # (work_tool); a workstream's steps are journaled for restarts.
+    # A coordinator Bot Chat, and a fork of it, runs only what its bot's
+    # policy allows (work_tool). Fails closed once the bot has a registry.
     block = _work_tool_block(kwargs)
     if block is not None:
         return block
+    if child:
+        return None  # a fork: nothing on the Lock Screen, and no question of the chat's
+    # A workstream's steps are journaled for restarts.
     _quietly(functools.partial(work_tool.step_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"),
                                kwargs.get("args"), turn_id=kwargs.get("turn_id"),
                                tool_call_id=kwargs.get("tool_call_id")))
@@ -310,9 +311,10 @@ _ledger_warned = False
 def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
     try:
         return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"))
-    except Exception:  # noqa: BLE001 — the coordinator's policy never breaks another chat's tools
+    except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
-        return None
+        # Only a bot that turned workstreams on can have a coordinator to hold.
+        return {"action": "block", "message": work_tool.CHECK_FAILED} if work_tool.has_registry() else None
 
 
 def _post_tool_call(**kwargs: Any) -> None:
@@ -604,6 +606,10 @@ def _on_session_end(**kwargs: Any) -> None:
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
     notify_tool.drop(session_id)
+    # A workstream's turn that failed, or ended with no reply recorded,
+    # is settled and its coordinator told (work_tool).
+    _quietly(functools.partial(work_tool.turn_finished, session_id, failed=kwargs.get("failed") is True,
+                               interrupted=bool(kwargs.get("interrupted"))))
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the

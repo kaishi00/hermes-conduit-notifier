@@ -8,8 +8,7 @@ launch profile's (the dashboard routes), so every write is a transaction and
 nothing relies on a lock in one copy's memory.
 
 Hermes keeps the sessions themselves; a row only says whose work a session
-is, what it was asked to do and how it went. The model never sees a session
-id: it names work by ref (W1, W2 for workstreams, A1, A2 for asks), and a ref
+is, what it was asked to do and how it went. The model names work by ref (W1, W2 for workstreams, A1, A2 for asks), and a ref
 is looked up in this bot's own file only.
 
 Three tables beside ``work``: ``steps`` journals every tool call a workstream
@@ -106,6 +105,9 @@ CREATE TABLE IF NOT EXISTS outbox (
 """
 
 _JSON_FIELDS = ("requested_by", "executor", "reply_to")
+# A workstream holding one of its bot's running slots: closed or not, its
+# session is still at work.
+_RUNNING = "kind = 'workstream' AND status IN ('starting', 'running', 'needs_you')"
 
 
 @dataclass
@@ -157,15 +159,21 @@ class Store:
         self.path = path_for(self.home)
 
     @contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def _db(self, write: bool = True) -> Iterator[sqlite3.Connection]:
+        """A transaction: a write takes the lock up front; a read (the hooks
+        read on every tool call) never waits on one under WAL."""
+        if write:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         try:
             con.row_factory = sqlite3.Row
-            con.execute("PRAGMA journal_mode=WAL")
             con.execute("PRAGMA busy_timeout=10000")
-            con.executescript(_SCHEMA)
-            con.execute("BEGIN IMMEDIATE")
+            if write:
+                con.execute("PRAGMA journal_mode=WAL")
+                con.executescript(_SCHEMA)
+            else:
+                con.execute("PRAGMA query_only=1")
+            con.execute("BEGIN IMMEDIATE" if write else "BEGIN DEFERRED")
             try:
                 yield con
             except BaseException:
@@ -180,7 +188,7 @@ class Store:
     def get_meta(self, key: str, default: str = "") -> str:
         if not self.path.is_file():
             return default
-        with self._db() as con:
+        with self._db(write=False) as con:
             row = con.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
 
@@ -212,10 +220,11 @@ class Store:
 
     def add(self, kind: str, *, title: str, goal: str = "", coordinator: str = "", requested_by: Optional[dict] = None,
             executor: Optional[dict] = None, reply_to: Optional[dict] = None, ask_id: str = "", cwd: str = "",
-            repo: str = "", status: str = "starting") -> Work:
+            repo: str = "", status: str = "starting", running_limit: Optional[int] = None) -> Optional[Work]:
         """A new row under the next ref of its kind, with a fresh idempotency
         key for the session it will start (so a retried start can't make a
-        second one)."""
+        second one). With ``running_limit``, None instead when that many
+        workstreams are running already, counted in the same transaction."""
         if kind not in KINDS:
             raise ValueError(f"unknown kind {kind}")
         if status not in STATUSES:
@@ -223,6 +232,10 @@ class Store:
         letter = "W" if kind == "workstream" else "A"
         now = time.time()
         with self._db() as con:
+            if running_limit is not None:
+                running = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_RUNNING}").fetchone()["n"]
+                if running >= running_limit:
+                    return None
             counter = f"next_{letter}"
             row = con.execute("SELECT value FROM meta WHERE key = ?", (counter,)).fetchone()
             number = int(row["value"]) if row else 1
@@ -248,7 +261,7 @@ class Store:
         ref = normalize_ref(ref)
         if not ref or not self.path.is_file():
             return None
-        with self._db() as con:
+        with self._db(write=False) as con:
             row = con.execute("SELECT * FROM work WHERE ref = ?", (ref,)).fetchone()
         return _work(row) if row else None
 
@@ -256,7 +269,7 @@ class Store:
         """The workstream a session is, else None."""
         if not isinstance(session_id, str) or not session_id or not self.path.is_file():
             return None
-        with self._db() as con:
+        with self._db(write=False) as con:
             row = con.execute("SELECT * FROM work WHERE session_id = ? AND kind = 'workstream'",
                               (session_id,)).fetchone()
         return _work(row) if row else None
@@ -274,16 +287,15 @@ class Store:
             query += " WHERE " + " AND ".join(where)
         query += " ORDER BY created_at DESC LIMIT ?"
         params: tuple = (*ACTIVE, limit) if active_only else (limit,)
-        with self._db() as con:
+        with self._db(write=False) as con:
             rows = con.execute(query, params).fetchall()
         return [_work(row) for row in rows]
 
     def running_count(self) -> int:
         if not self.path.is_file():
             return 0
-        with self._db() as con:
-            row = con.execute("SELECT COUNT(*) AS n FROM work WHERE kind = 'workstream' AND closed_at = 0 AND "
-                              "status IN ('starting', 'running', 'needs_you')").fetchone()
+        with self._db(write=False) as con:
+            row = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_RUNNING}").fetchone()
         return int(row["n"])
 
     def update(self, ref: str, **fields: Any) -> Optional[Work]:
@@ -364,7 +376,7 @@ class Store:
         if not self.path.is_file():
             return []
         query = "SELECT * FROM steps WHERE ref = ?" + (" AND ended_at = 0" if open_only else "")
-        with self._db() as con:
+        with self._db(write=False) as con:
             rows = con.execute(query + " ORDER BY id DESC LIMIT ?", (ref, limit)).fetchall()
         return [dict(row) for row in reversed(rows)]
 
@@ -387,7 +399,7 @@ class Store:
     def outbox_pending(self) -> list[dict]:
         if not self.path.is_file():
             return []
-        with self._db() as con:
+        with self._db(write=False) as con:
             rows = con.execute("SELECT * FROM outbox WHERE accepted_at = 0 ORDER BY created_at").fetchall()
         return [dict(row) for row in rows]
 

@@ -15,6 +15,7 @@ store_mod = _load("conduit_push.work_store", ROOT / "work_store.py")
 broker_mod = _load("conduit_push.work_broker", ROOT / "work_broker.py")
 work = _load("conduit_push.work_tool", ROOT / "work_tool.py")
 titles = sys.modules["conduit_push.session_titles"]
+real_home = work._home
 
 BOT_CHAT = "20261031_120000_botchat"
 OTHER_CHAT = "20261031_120000_other"
@@ -35,7 +36,7 @@ class FakeHermes:
         self.created = 0
         self._methods = {name: self._method(name) for name in (
             "session.create", "session.resume", "prompt.submit", "session.steer", "session.redirect",
-            "session.interrupt")}
+            "session.interrupt", "session.close")}
         self.transport_module = types.SimpleNamespace(bind_transport=self._current.set,
                                                       current_transport=self._current.get)
         self.refuse = {}
@@ -94,6 +95,10 @@ class FakeHermes:
         self._sessions[params["session_id"]]["running"] = False
         return {"status": "interrupted"}
 
+    def session_close(self, params):
+        self._sessions.pop(params["session_id"], None)
+        return {"closed": True}
+
     def named(self, name):
         return [call for call in self.calls if call[0] == name]
 
@@ -122,6 +127,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 0.01)
     monkeypatch.setattr(work, "_swept", set())
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
+    monkeypatch.setattr(work, "_policy_cache", {})
     work._wakes.clear()
     return fake
 
@@ -267,7 +273,7 @@ def test_start_makes_a_hidden_titled_session_on_the_bots_own_profile(on, hermes)
     row = on.get("W1")
     assert row.session_id == "20261031_work_1" and row.coordinator == BOT_CHAT
     assert row.requested_by["via"] == BOT_CHAT and row.reply_to == {"to": "coordinator", "session": BOT_CHAT}
-    assert answer["link"] == "[Open W1](conduit://session/20261031_work_1)"
+    assert answer["link"] == "[Open W1](conduit://session/20261031_work_1?profile=default)"
     assert on.outbox_pending() == []
 
 
@@ -277,9 +283,11 @@ def test_a_secondary_bot_starts_on_its_own_profile(tmp_path, monkeypatch, hermes
     hermes.home = home
     monkeypatch.setattr(work, "_home", lambda: home)
     store_mod.Store(home).set_policy("strict")
-    assert start()["ok"]
+    answer = start()
+    assert answer["ok"] and answer["link"].endswith("?profile=nahida)")
     (_, params, _), = hermes.named("session.create")
     assert params["profile"] == "nahida"
+    assert call("work_list")["work"][0]["link"] == "[Open W1](conduit://session/20261031_work_1?profile=nahida)"
 
 
 def test_a_session_on_another_profile_is_refused(on, hermes, monkeypatch):
@@ -353,6 +361,7 @@ def test_stop_interrupts_and_marks_it(on, hermes):
 
 def test_close_hides_it_from_the_active_list(on, hermes):
     start()
+    on.update("W1", status="done")
     call("work_close", {"ref": "W1"})
     assert call("work_list")["work"] == []
     assert call("work_list", {"filter": "all"})["work"][0]["closed"] is True
@@ -444,6 +453,7 @@ def test_the_policy_touches_no_other_chat_and_nothing_while_off(home, hermes):
     store_mod.Store(home).set_policy("strict")
     assert work.tool_block(OTHER_CHAT, "terminal", {}) is None
     store_mod.Store(home).set_policy("off")
+    work._policy_cache.clear()
     assert work.tool_block(BOT_CHAT, "terminal", {}) is None
 
 
@@ -474,3 +484,155 @@ def test_the_cli_turns_it_on_and_off(home, monkeypatch, capsys):
     cli._work(types.SimpleNamespace(work_action="off", policy=None, max_running=None))
     assert store_mod.Store(home).policy() == "off"
     assert "Bot workstreams: off" in capsys.readouterr().out
+
+
+# Failure paths --------------------------------------------------------------------
+
+def test_a_fork_of_the_bot_chat_keeps_to_the_policy(on, hermes, monkeypatch):
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    monkeypatch.setattr(plugin, "_is_child", lambda session_id: True)
+    monkeypatch.setattr(plugin.forks, "inside", lambda: True)
+    block = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={"command": "ls"}, turn_id="t1",
+                                  tool_call_id="c1")
+    assert block and block["action"] == "block"
+
+
+def test_an_unreadable_registry_holds_the_bot_chat_to_strict(on, hermes, monkeypatch):
+    def broken(self):
+        raise OSError("disk I/O error")
+
+    monkeypatch.setattr(store_mod.Store, "policy", broken)
+    assert work.policy() == "strict"
+    assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"
+
+
+def test_a_failing_policy_check_blocks_once_the_bot_has_a_registry(on, hermes, monkeypatch):
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(work, "tool_block", broken)
+    block = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={}, turn_id="t1")
+    assert block == {"action": "block", "message": work.CHECK_FAILED}
+
+
+def test_a_failing_policy_check_leaves_a_bot_without_workstreams_alone(home, hermes, monkeypatch):
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    monkeypatch.setattr(work, "tool_block", lambda *args, **kwargs: 1 / 0)
+    assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={}, turn_id="t1") is None
+
+
+def test_close_is_refused_while_it_runs(on, hermes):
+    start()
+    answer = call("work_close", {"ref": "W1"})
+    assert answer["error"] == "still_running" and not on.get("W1").closed_at
+
+
+def test_a_stop_hermes_refuses_keeps_the_old_status(on, hermes):
+    start()
+    hermes.refuse["session.interrupt"] = {"code": 4000, "message": "no"}
+    hermes._sessions["rt-20261031_work_1"]["running"] = True
+    assert call("work_stop", {"ref": "W1"})["error"] == "hermes"
+    assert on.get("W1").status == "running"
+
+
+def test_an_unexpected_start_failure_frees_the_slot(on, hermes, monkeypatch):
+    def broken(params):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(hermes, "prompt_submit", broken)
+    answer = start()
+    assert not answer["ok"] and answer["error"] == "hermes"
+    assert on.get("W1").status == "failed" and on.running_count() == 0
+
+
+def test_a_session_that_fails_after_create_is_ended(on, hermes):
+    hermes.refuse["prompt.submit"] = {"code": 5000, "message": "agent init failed"}
+    answer = start()
+    assert not answer["ok"] and "agent init failed" in answer["note"]
+    assert [call[1]["session_id"] for call in hermes.named("session.interrupt")] == ["rt-20261031_work_1"]
+    assert [call[1]["session_id"] for call in hermes.named("session.close")] == ["rt-20261031_work_1"]
+    assert "rt-20261031_work_1" not in hermes._sessions
+
+
+def test_the_row_knows_its_session_before_the_prompt_goes_in(on, hermes, monkeypatch):
+    seen = []
+    submit = hermes.prompt_submit
+
+    def watching(params):
+        seen.append(on.get("W1").session_id)
+        return submit(params)
+
+    monkeypatch.setattr(hermes, "prompt_submit", watching)
+    start()
+    assert seen == ["20261031_work_1"]
+
+
+def test_a_failed_turn_settles_the_row_and_wakes_the_bot_chat(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    work.turn_finished("20261031_work_1", failed=True, interrupted=False)
+    work.flush_wakes()
+    assert on.get("W1").status == "failed" and on.running_count() == 0
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "W1" in params["text"] and "failed" in params["text"]
+
+
+def test_a_turn_end_after_its_reply_changes_nothing(on, hermes):
+    start()
+    work.turn_ended("20261031_work_1", "All done.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.turn_ended("20261031_work_1", "All done.")
+    work.flush_wakes()
+    assert on.get("W1").status == "done" and on.get("W1").last_result == "All done."
+    assert len([c for c in hermes.named("prompt.submit") if c[1].get("display_kind") == "hidden"]) == 1
+
+
+def test_an_interrupted_turn_is_left_to_the_stop(on, hermes):
+    start()
+    work.turn_finished("20261031_work_1", failed=False, interrupted=True)
+    assert on.get("W1").status == "running"
+
+
+def test_the_plugins_session_end_hook_settles_a_failed_workstream(on, hermes):
+    start()
+    plugin._on_session_end(session_id="20261031_work_1", failed=True, interrupted=False, completed=False)
+    assert on.get("W1").status == "failed"
+
+
+def test_the_running_limit_is_counted_where_the_row_is_added(home):
+    store = store_mod.Store(home)
+    first = store.add("workstream", title="One", goal="x", running_limit=1)
+    assert first is not None
+    assert store.add("workstream", title="Two", goal="y", running_limit=1) is None
+    store.update(first.ref, status="done", closed_at=1.0)
+    assert store.add("workstream", title="Two", goal="y", running_limit=1) is not None
+
+
+def test_a_closed_running_row_still_holds_its_slot(home):
+    store = store_mod.Store(home)
+    first = store.add("workstream", title="One", goal="x", running_limit=1)
+    store.update(first.ref, closed_at=1.0)
+    assert store.running_count() == 1
+
+
+def test_step_summaries_mask_credentials(on, hermes):
+    start()
+    token = "sk-" + "a1B2" * 12
+    work.step_started("20261031_work_1", "terminal", {"command": f"curl -H 'Authorization: Bearer {token}' x"},
+                      tool_call_id="c1")
+    summary = on.steps("W1", open_only=True)[0]["summary"]
+    assert token not in summary and summary.startswith("command: curl")
+
+
+def test_each_copy_keeps_the_home_it_registered_under(tmp_path, monkeypatch):
+    launch, second = tmp_path / "launch", tmp_path / "second"
+    constants = sys.modules["hermes_constants"]
+    monkeypatch.setattr(work, "_pinned_home", None)
+    monkeypatch.setattr(work, "_is_child", work._is_child)
+    monkeypatch.setattr(constants, "get_hermes_home", lambda: second)
+    work.register(types.SimpleNamespace(), is_child=lambda session_id: False)
+    monkeypatch.setattr(constants, "get_hermes_home", lambda: launch)
+    assert real_home() == second
