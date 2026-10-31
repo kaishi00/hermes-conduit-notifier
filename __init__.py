@@ -20,7 +20,7 @@ from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, cli
                review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
-               room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
+               room_wakeups, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .present_store import PresentStore
@@ -149,6 +149,9 @@ def register(ctx: Any) -> None:
     room_asks.register(ctx, is_child=_is_child, profile=lambda: _profile)
     room_free_busy.register(ctx, is_child=_is_child)
     link_ask_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    # Bot workstreams (designs/bot-mode-coordinator): a bot's Bot Chat
+    # coordinates work sessions of its own; off until turned on per bot.
+    work_tool.register(ctx, is_child=_is_child)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
@@ -240,6 +243,14 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         return block
     if child:
         return None  # a fork: nothing on the Lock Screen, and no question of the chat's
+    # A coordinator Bot Chat runs only what its bot's policy allows
+    # (work_tool); a workstream's steps are journaled for restarts.
+    block = _work_tool_block(kwargs)
+    if block is not None:
+        return block
+    _quietly(functools.partial(work_tool.step_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"),
+                               kwargs.get("args"), turn_id=kwargs.get("turn_id"),
+                               tool_call_id=kwargs.get("tool_call_id")))
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
     if kwargs.get("tool_name") != "clarify":
         return
@@ -296,7 +307,19 @@ def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 _ledger_warned = False
 
 
+def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
+    try:
+        return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"))
+    except Exception:  # noqa: BLE001 — the coordinator's policy never breaks another chat's tools
+        logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
+        return None
+
+
 def _post_tool_call(**kwargs: Any) -> None:
+    if not forks.inside():
+        _quietly(functools.partial(work_tool.step_ended, _text(kwargs.get("session_id")), kwargs.get("tool_name"),
+                                   tool_call_id=kwargs.get("tool_call_id"), status=kwargs.get("status"),
+                                   error_type=kwargs.get("error_type")))
     # Every session counts, subagents and cron runs included (3.6).
     try:
         pulse.post_tool_call(**kwargs)
@@ -339,7 +362,10 @@ def _post_llm_call(**kwargs: Any) -> None:
     # nothing to tell the phone. A follow-up, a brief or a report's items are
     # news for the user, so they go like any reply.
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
-    quiet = (is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
+    # A workstream's turn tells its coordinator (work_tool), whose reply is
+    # the one push.
+    workstream = _work_turn_ended(session_id, response)
+    quiet = (workstream or is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
              or _member_room_turn(session_id))
     chat_title = "" if quiet or pulse_turn else _session_title(session_id)
@@ -401,6 +427,14 @@ def _post_llm_call(**kwargs: Any) -> None:
     for old_session, (old_ready, old_send, old_timer) in overflow:
         _cancel(old_timer)
         _finish_ready(old_session, old_ready, old_send)
+
+
+def _work_turn_ended(session_id: str, response: Any) -> bool:
+    try:
+        return work_tool.turn_ended(session_id, response)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.warning("conduit_push: couldn't record a workstream's turn", exc_info=True)
+        return False
 
 
 def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
@@ -635,6 +669,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
     description = _text(kwargs.get("description"))
     _quietly(live_activity.reporter.waiting,
              _text(kwargs.get("session_id")) or session_id, "approval")
+    _quietly(work_tool.needs_you, _text(kwargs.get("session_id")) or session_id, description)
     # The event id deliberately excludes `id(kwargs)`: CPython recycles ids, so
     # a later, distinct approval with the same session/pattern/command could
     # collide and be silently deduped by the relay for 24h. `turn_id` (forwarded
@@ -855,9 +890,19 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else _room_chat_note(session_id),
         # What linked people answered this chat's asks since (link_ask_tool), once.
         None if child else _link_answers_note(session_id),
+        # A coordinator Bot Chat's open work (work_tool).
+        None if child else _work_digest(session_id),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _work_digest(session_id: str) -> str | None:
+    try:
+        return work_tool.digest(session_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: work digest failed", exc_info=True)
+        return None
 
 
 def _link_asks_ended(session_id: str, answered: bool) -> None:
