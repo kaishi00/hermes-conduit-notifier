@@ -63,6 +63,8 @@ _USERINFO = re.compile(r"[^\s:/@'\"]+:[^\s:/@'\"]+@(?=[\w.-])")
 _SECRET_PAIR = re.compile(
     r"(?i)\b([\w.-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|apikey|auth|authorization|cookie|session|"
     r"signature|credential|private[_-]?key|access[_-]?key)[\w.-]*)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;&]+)")
+_FLAG_SECRET = re.compile(r"(?i)(--?(?:password|passwd|pass|token|secret|api-key|apikey|auth)[ =]|\s-u\s+)\S+")
+_KNOWN_TOKEN = re.compile(r"\b(?:AKIA[0-9A-Z]{16}|(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-)[A-Za-z0-9_-]{10,})")
 _BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}")
 _LONG_RUN = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b")
 REDACTED = "[redacted]"
@@ -219,6 +221,8 @@ def describe_call(args: Any) -> tuple[str, str, str]:
 def _redact(text: str) -> str:
     text = _URL_IN_TEXT.sub(lambda m: _safe_url(m.group()), text)
     text = _USERINFO.sub("", text)
+    text = _KNOWN_TOKEN.sub(REDACTED, text)
+    text = _FLAG_SECRET.sub(lambda m: m.group(1) + REDACTED, text)
     text = _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}", text)
     text = _SECRET_PAIR.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     return _LONG_RUN.sub(REDACTED, text)
@@ -248,15 +252,18 @@ def terminal_failure(result: Any) -> Optional[str]:
         return f"exit {code}, {NO_OUTPUT}"
     marked = [(part, mark) for part in lines if (mark := FAILURE_MARK.search(part))]
     if marked:
-        # The last marked line is the exception under a traceback; a long one
-        # is kept from just before its mark, so the mark survives the cut.
-        part, mark = marked[-1]
-        start = max(0, mark.start() - 60)
-        head, excerpt = f"exit {code}", ("…" if start else "") + part[start:]
+        # The last marked line is the exception under a traceback. It's
+        # redacted whole first (a cut could start inside a URL's user info),
+        # then a long one is kept from just before its mark, so the mark
+        # survives the cut.
+        clean = _redact(marked[-1][0])
+        mark = FAILURE_MARK.search(clean)
+        start = max(0, mark.start() - 60) if mark else 0
+        head, excerpt = f"exit {code}", ("…" if start else "") + clean[start:]
     else:
         quiet = 0 < code < LOUD_EXITS
-        head, excerpt = (f"exit {code}, {NO_ERROR_SHOWN}" if quiet else f"exit {code}"), lines[-1]
-    return _clip(f"{head}: {_redact(excerpt)}", MAX_ERROR)
+        head, excerpt = (f"exit {code}, {NO_ERROR_SHOWN}" if quiet else f"exit {code}"), _redact(lines[-1])
+    return _clip(f"{head}: {excerpt}", MAX_ERROR)
 
 
 def harmless_exit(row: dict[str, Any]) -> bool:
@@ -285,15 +292,16 @@ def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, 
         status = "error" if failed else "ok"
         if failed and not error_message:
             error_message = parsed.get("error")
-    if status == "error" and tool == "terminal":
-        error_message = terminal_failure(result) or error_message
+    # A terminal failure's error is already redacted and cut; _short's URL
+    # cleaning would cut it again at a plain "#" or "?".
+    kept = terminal_failure(result) if status == "error" and tool == "terminal" else None
     action, label, digest = describe_call(args)
     pulse_store = _store(home)
     pulse_store.add_outcome({
         "at": now, "session_id": _text(session_id), "turn_id": _text(turn_id), "task_id": _text(task_id),
         "tool_call_id": _text(tool_call_id), "tool": tool, "action": action, "label": label,
         "args_digest": digest, "status": status, "error_type": _short(error_type or "", 60),
-        "error": _short(error_message or "", MAX_ERROR) if status == "error" else "",
+        "error": (kept or _short(error_message or "", MAX_ERROR)) if status == "error" else "",
         "ids_json": json.dumps(extract_ids(result), ensure_ascii=False),
         "duration_ms": int(duration_ms) if isinstance(duration_ms, (int, float)) and duration_ms >= 0 else 0,
     })

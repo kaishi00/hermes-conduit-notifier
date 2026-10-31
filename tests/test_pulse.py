@@ -1114,6 +1114,29 @@ def test_secrets_in_a_kept_line_are_redacted(recording):
         "exit 1: key [redacted] failed")
 
 
+def test_a_credentialed_url_far_before_the_mark_is_redacted():
+    output = "git clone https://deploy:Hunter2SecretPw99@git.example.com/org/repo.git into /tmp/x: fatal"
+    error = ledger.terminal_failure({"output": output, "exit_code": 1, "error": None})
+    assert "Hunter2SecretPw99" not in error and error.endswith("fatal")
+
+
+@pytest.mark.parametrize("line, secret", [
+    ("failed: key " + "AKIA" + "Q" * 16, "Q" * 16),
+    ("mysql --password hunter2xyz failed", "hunter2xyz"),
+    ("curl -u alice:s3cretpw https://x.example failed", "s3cretpw"),
+    ("failed with " + "gh" + "p_" + "Z" * 30, "Z" * 30),
+])
+def test_more_secret_shapes_are_redacted(line, secret):
+    error = ledger.terminal_failure({"output": line, "exit_code": 1, "error": None})
+    assert secret not in error and "failed" in error
+
+
+def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
+    _terminal(pulse.get_hermes_home(), "retry", "Error: retry #3 of /api failed? see /docs", 1, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert row["error"] == "exit 1: Error: retry #3 of /api failed? see /docs"
+
+
 def test_a_bare_exit_stays_in_failed_calls(recording):
     """Nothing to judge it by, so it isn't dropped; the report's prompt
     says a bare exit isn't news on its own."""
@@ -1121,7 +1144,7 @@ def test_a_bare_exit_stays_in_failed_calls(recording):
     assert "→ error: exit 1, no output" in _failed(recording)
     row = {"tool": "terminal", "status": "error", "error": "exit 2"}  # recorded before outputs were kept
     assert not ledger.harmless_exit(row)
-    assert "a bare non-zero exit" in candidates.INSTRUCTIONS
+    assert "a bare non-zero exit" in candidates.INSTRUCTIONS and "a bare non-zero exit" in report.REPORT_TEXT
 
 
 def test_a_call_that_later_went_through_is_left_out(recording):
