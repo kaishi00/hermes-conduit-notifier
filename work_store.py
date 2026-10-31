@@ -276,9 +276,11 @@ class Store:
         return _work(row) if row else None
 
     def list(self, *, active_only: bool = False, include_closed: bool = False, limit: int = 50,
-             active_or_changed: bool = False) -> list[Work]:
+             active_or_changed: bool = False, changed_since: float | None = None) -> list[Work]:
         """Newest first. ``active_or_changed``: open rows that are active or
-        changed since the coordinator last saw them, chosen before the limit."""
+        changed since the coordinator last saw them, chosen before the limit.
+        ``changed_since``: only rows changed at or after that time, also
+        chosen before the limit."""
         if not self.path.is_file():
             return []
         query = "SELECT * FROM work"
@@ -289,6 +291,8 @@ class Store:
             where.append(f"closed_at = 0 AND (status IN ({', '.join('?' * len(ACTIVE))}) OR updated_at > seen_at)")
         elif not include_closed:
             where.append("closed_at = 0")
+        if changed_since is not None:
+            where.append("updated_at >= ?")
         if where:
             query += " WHERE " + " AND ".join(where)
         order = "created_at DESC"
@@ -296,8 +300,9 @@ class Store:
             # Active work first, so newer changes never push it out.
             order = f"(status IN ({', '.join('?' * len(ACTIVE))})) DESC, " + order
         query += f" ORDER BY {order} LIMIT ?"
-        params: tuple = ((*ACTIVE, *ACTIVE, limit) if active_or_changed else (*ACTIVE, limit) if active_only
-                         else (limit,))
+        since = () if changed_since is None else (changed_since,)
+        params: tuple = ((*ACTIVE, *since, *ACTIVE, limit) if active_or_changed else (*ACTIVE, *since, limit)
+                         if active_only else (*since, limit))
         with self._db(write=False) as con:
             rows = con.execute(query, params).fetchall()
         return [_work(row) for row in rows]

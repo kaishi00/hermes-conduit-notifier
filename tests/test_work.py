@@ -1220,7 +1220,7 @@ def test_a_running_workstream_shows_no_earlier_result(on, hermes):
     ("uname -r kernel version", "Kernel version from kernel.org", False),
 ])
 def test_lookalikes_share_more_than_one_word(first, second, alike):
-    assert work._similar(work._words(first), work._words(second)) is alike
+    assert work._similar(work._words(first) - work._GENERIC, work._words(second) - work._GENERIC) is alike
 
 
 def test_a_turn_end_reported_twice_tells_the_coordinator_once(on, hermes, monkeypatch):
@@ -1367,3 +1367,23 @@ def test_settled_work_from_a_while_ago_isnt_a_lookalike(on, hermes, monkeypatch)
     assert start("Slow login page")["error"] == "similar_work"  # just finished: offered
     monkeypatch.setattr(work, "LOOKALIKE_RECENT_S", -60.0)
     assert start("Slow login page")["ok"]  # settled a while ago: a new workstream
+
+
+def test_a_work_list_query_of_generic_words_still_filters(on, hermes):
+    start("Count files in /etc/systemd")
+    on.update("W1", status="done")
+    on.update(on.add("workstream", title="Login bug", goal="x").ref, status="done")
+    refs = [row["ref"] for row in call("work_list", {"filter": "recent", "query": "count files"})["work"]]
+    assert refs == ["W1"]
+
+
+def test_just_finished_work_is_offered_behind_many_newer_settled_rows(on, hermes):
+    import sqlite3
+
+    start("Login page slow")
+    on.update("W1", status="done")
+    for n in range(510):
+        on.add("workstream", title=f"Old task {n}", goal="x")
+    with sqlite3.connect(on.path) as con:  # newer rows that settled long ago
+        con.execute("UPDATE work SET status = 'done', updated_at = 1 WHERE ref != 'W1'")
+    assert start("Slow login page")["error"] == "similar_work"

@@ -479,16 +479,15 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         return {"ok": False, "error": "title", "note": "That's the coordinator's own title. Give the workstream "
                                                        "one that says what it's doing."}
     if not args.get("new"):
-        mine = _words(title)
+        mine = _words(title) - _GENERIC
         # Only what's working now, or finished moments ago: settled work from
         # an hour back drew unrelated jobs into it on a host, and a follow-up
         # to it is the coordinator's call (work_send).
         recent = time.time() - LOOKALIKE_RECENT_S
         open_work = {work.ref: work for work in store.list(active_only=True, limit=500)}
-        open_work.update({work.ref: work for work in store.list(active_only=False, limit=50)
-                          if work.updated_at >= recent})
+        open_work.update({work.ref: work for work in store.list(changed_since=recent, limit=500)})
         alike = [work for work in open_work.values() if work.kind == "workstream"
-                 and not work.closed_at and _similar(mine, _words(work.title))]
+                 and not work.closed_at and _similar(mine, _words(work.title) - _GENERIC)]
         if alike:
             return {"ok": False, "error": "similar_work", "similar": [_row(work) for work in alike[:3]],
                     "note": "Open work looks like the same task. Send it there with work_send, or call work_start "
@@ -1120,8 +1119,10 @@ def _raw_summary(args: Any) -> str:
 
 
 _COMMON = frozenset("the and for with from into about this that what why how check find look work task make "
-                    "please can you our your count list show get latest current version versions file files "
-                    "etc usr var tmp home root run running status info number total size new old".split())
+                    "please can you our your".split())
+# Words too generic to make two titles the same task (still searchable).
+_GENERIC = frozenset("count list show get latest current version versions file files etc usr var tmp home root "
+                     "run running status info number total size new old".split())
 
 
 _SHORT_WORDS = frozenset("on in to of is it up at be do as or if by an my we so no me us am go".split())
