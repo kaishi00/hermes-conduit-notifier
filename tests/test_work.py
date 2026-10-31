@@ -1210,6 +1210,10 @@ def test_a_running_workstream_shows_no_earlier_result(on, hermes):
     ("Port check", "Port 9119 listener", False),
     ("Port 9119 listener", "Port 9177 listener", False),
     ("Port 9119 listener", "Fix the port 9119 listener", True),
+    ("Fix login on iOS", "Fix crash on Android", False),
+    ("Set up staging", "Set up prod", False),
+    ("Upgrade Python 3.12", "Upgrade Python 3.11", False),
+    ("Upgrade Python 3.12", "Python 3.12 upgrade", True),
 ])
 def test_lookalikes_share_more_than_one_word(first, second, alike):
     assert work._similar(work._words(first), work._words(second)) is alike
@@ -1315,3 +1319,18 @@ def test_only_workstream_turn_ends_are_remembered(on, hermes):
     assert not work.turn_finished(OTHER_CHAT, failed=True, interrupted=False)
     assert not work.turn_finished(OTHER_CHAT, failed=True, interrupted=False)
     assert OTHER_CHAT not in work._finished
+
+
+def test_a_broken_pipe_points_stdout_at_devnull(home, monkeypatch, tmp_path):
+    import os
+
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
+    out = tmp_path / "out"
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT)
+    monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(fileno=lambda: fd))
+    monkeypatch.setattr("builtins.print", lambda *a, **k: (_ for _ in ()).throw(BrokenPipeError()))
+    assert cli._work(types.SimpleNamespace(work_action="status", policy=None, max_running=None)) == 0
+    os.write(fd, b"after the reader left")
+    os.close(fd)
+    assert out.read_bytes() == b""

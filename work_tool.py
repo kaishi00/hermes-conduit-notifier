@@ -1114,9 +1114,14 @@ _COMMON = frozenset("the and for with from into about this that what why how che
                     "please can you our your".split())
 
 
+_SHORT_WORDS = frozenset("on in to of is it up at be do as or if by an my we so no me us am go".split())
+
+
 def _words(value: Any) -> set[str]:
-    return {word for word in re.findall(r"[a-z0-9]+", str(value or "").lower())
-            if (len(word) > 1 or word.isdigit()) and word not in _COMMON}
+    # A version stays one word ("3.12"), so 3.11 and 3.12 differ.
+    return {word for word in re.findall(r"[a-z0-9]+(?:\.[0-9]+)*", str(value or "").lower())
+            if (len(word) > 2 or word[0].isdigit() or (len(word) == 2 and word not in _SHORT_WORDS))
+            and word not in _COMMON}
 
 
 def _similar(a: set[str], b: set[str]) -> bool:
