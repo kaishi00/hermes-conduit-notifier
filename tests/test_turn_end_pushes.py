@@ -783,3 +783,26 @@ def test_only_an_answered_turn_checks_for_a_voice_job_to_archive(pushed, tmp_pat
         raise RuntimeError("store gone")
     monkeypatch.setattr(plugin.voice_archive, "archive_answered_job", broken)
     plugin._on_session_end(session_id="job", turn_id="t4", completed=True, failed=False, interrupted=False)
+
+
+def test_a_follow_up_in_an_older_run_keeps_its_own_chats_slot(pushed, monkeypatch):
+    monkeypatch.setattr(plugin, "_newest_runs", {})
+    for run in ("cron_weekly_20261030_120000", "cron_weekly_20261031_120000", "cron_weekly_20261030_120000"):
+        plugin._post_llm_call(session_id=run, turn_id=f"t{len(pushed)}", assistant_response="News.")
+        plugin._on_session_end(session_id=run, turn_id=f"t{len(pushed)}", completed=True, failed=False, interrupted=False)
+    job = events.slot_token("cron:default:weekly")
+    assert [event.get("slot") for event in pushed] == [job, job, None], "the newest run's report stays"
+
+
+def test_a_silent_gateway_owned_run_still_hands_its_job_to_a_later_background_task(pushed, monkeypatch):
+    monkeypatch.setattr(plugin, "_cron_sessions", {})
+    plugin._pre_llm_call(session_id="local-quiet", turn_id="t")
+    plugin._post_llm_call(session_id="local-quiet", turn_id="t", task_id="cron:nightly:1", assistant_response="[SILENT]")
+    plugin._on_session_end(session_id="local-quiet", turn_id="t", task_id="cron:nightly:1", completed=True,
+                           failed=False, interrupted=False)
+    _subagent(parent="local-quiet")
+    [task] = pushed
+    assert task["slot"] == events.slot_token("cron:default:nightly")
+    plugin._post_llm_call(session_id="local-quiet", turn_id="t2", assistant_response="A follow-up.")
+    plugin._on_session_end(session_id="local-quiet", turn_id="t2", completed=True, failed=False, interrupted=False)
+    assert "slot" not in pushed[-1], "the user's own follow-up keeps the chat's slot"

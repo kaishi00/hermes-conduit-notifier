@@ -346,6 +346,9 @@ def _post_llm_call(**kwargs: Any) -> None:
     # What the turn wrote for its push with conduit_notify, taken whatever
     # happens so it never rides a later turn's reply.
     headline = notify_tool.take(session_id, kwargs.get("turn_id"))
+    # Worked out whether or not a push goes: it learns which job a run's
+    # chat belongs to, for a background task that reports later.
+    slot = _slot(session_id, kwargs.get("task_id"), headline.key if headline and not pulse_turn else "")
     # A Pulse push is titled by what it brings, not by Pulse's hidden chat.
     if pulse_turn and not quiet:
         copy = pulse.push_copy(session_id, kwargs.get("turn_id"), response)
@@ -368,7 +371,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         count=copy.get("count"),
         level=copy.get("level"),
         private=copy.get("private") is True,
-        slot=_slot(session_id, kwargs.get("task_id"), headline.key if headline and not pulse_turn else ""),
+        slot=slot,
     )
     # A quick reply in a chat Hermes Desktop has selected: the user most
     # likely watched it arrive there (#87); so did one in a chat Conduit has
@@ -405,30 +408,50 @@ def _post_llm_call(**kwargs: Any) -> None:
         _finish_ready(old_session, old_ready, old_send)
 
 
-def _slot(session_id: str, task_id: Any = None, key: str = "") -> str:
+def _slot(session_id: str, task_id: Any = None, key: str = "", *, remembered: bool = False) -> str:
     """Which notification on the phone a turn's end replaces (#1579), when
     it isn't the chat's own: a conduit_notify key's, shared by this
     profile's chats and jobs, else a scheduled job's, so each run replaces
-    the last instead of piling up (every run is a chat of its own)."""
+    the last instead of piling up (every run is a chat of its own). Only
+    the run itself takes the job's: a follow-up asked in an older run's
+    chat keeps that chat's, so it never replaces the newest report.
+    `remembered`: a background task, reporting after its run's turn, takes
+    the job of the run that started it."""
     if key:
         return f"key:{_profile}:{key}"
-    job = cron_runs.job_id(session_id, task_id)
+    job = cron_runs.job_id(None, task_id)
+    by_session = None if job else cron_runs.job_id(session_id, None)
     with _cron_sessions_lock:
         if job:
             # A gateway-owned run's chat (local-…) names its job only by the
-            # turn's task id; a background task it started reports later
-            # with the chat alone.
-            _cron_sessions.pop(session_id, None)
-            _cron_sessions[session_id] = job
-            while len(_cron_sessions) > MAX_TURN_STARTS:
-                del _cron_sessions[next(iter(_cron_sessions))]
-        else:
+            # turn's task id.
+            _remember_run(session_id, job)
+        elif by_session:
+            # A classic run's chat (cron_<job>_<time>) is the job's run
+            # unless a newer one has run since.
+            newest = _newest_runs.get(by_session)
+            if newest is None or session_id >= newest:
+                _newest_runs[by_session] = session_id
+                _remember_run(session_id, by_session)
+                job = by_session
+        elif remembered:
             job = _cron_sessions.get(session_id)
     return f"cron:{_profile}:{job}" if job else ""
 
 
+def _remember_run(session_id: str, job: str) -> None:
+    _cron_sessions.pop(session_id, None)
+    _cron_sessions[session_id] = job
+    while len(_cron_sessions) > MAX_TURN_STARTS:
+        del _cron_sessions[next(iter(_cron_sessions))]
+    while len(_newest_runs) > MAX_TURN_STARTS:
+        del _newest_runs[next(iter(_newest_runs))]
+
+
 # chat -> the scheduled job that ran in it, for _slot.
 _cron_sessions: dict[str, str] = {}
+# job -> its newest classic run's chat (cron_<job>_<time> sorts by time).
+_newest_runs: dict[str, str] = {}
 _cron_sessions_lock = threading.Lock()
 
 
@@ -802,7 +825,7 @@ def _subagent_stop(**kwargs: Any) -> None:
         title_label="background_task.finished" if finished else "",
         session_title=_session_title(parent),
         body=summary or ("" if finished else f"A delegated task {status}."),
-        slot=_slot(parent),
+        slot=_slot(parent, remembered=True),
     ))
 
 

@@ -1037,3 +1037,13 @@ def test_redaction_keys_a_slot_so_a_guessed_key_cant_be_checked(monkeypatch):
         client.send_now({"event_id": f"response:{n}", "type": "response.ready", "session_id": f"s{n}", "slot": slot})
     assert sent[0]["slot"] == sent[1]["slot"] != slot
     assert len(sent[0]["slot"]) == 16
+
+
+def test_a_plaintext_slot_is_keyed_even_without_redaction(monkeypatch):
+    state = _state(redact_key="k")
+    del state["e2e"]
+    sent = _capture(monkeypatch, state)
+    slot = sys.modules["conduit_push.events"].slot_token("key:default:report")
+    client.send_now({"event_id": "response:3", "type": "response.ready", "session_id": "s", "slot": slot, "body": "Hi"})
+    assert sent[0]["slot"] != slot and len(sent[0]["slot"]) == 16
+    assert sent[0]["body"] == "Hi"

@@ -155,7 +155,8 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
     note = ("The notification goes out with your final reply when this turn ends, if the user's "
             "settings let a reply notify. End the turn with your full answer as usual.")
     if key:
-        note += f" It replaces this profile's earlier notification with the key \"{key}\", if it's still showing."
+        note += (f" It replaces this profile's earlier notification with the key \"{key}\", if it's still showing. A turn "
+                 "that sends no notification (a [SILENT] reply, or the user is watching the chat) leaves the earlier one.")
     return {"ok": True, "note": note, **({"key": key} if key else {})}
 
 
