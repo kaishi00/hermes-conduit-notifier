@@ -164,7 +164,8 @@ def slot_key(value: Any) -> str:
     """A key as the tool keeps it: one line, lower case, short."""
     if not isinstance(value, str):
         return ""
-    return _KEY_JUNK.sub("-", " ".join(value.split()).casefold())[:MAX_KEY_CHARS].strip("-")
+    key = _KEY_JUNK.sub("-", " ".join(value.split()).casefold())[:MAX_KEY_CHARS].strip("-")
+    return key if re.search(r"[^\W_]", key) else ""
 
 
 def keep(session_id: str, title: str, body: str, now: float | None = None, *, key: str = "", quiet: bool = False) -> None:

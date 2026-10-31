@@ -741,7 +741,9 @@ def test_a_key_is_kept_short_and_plain(paired):
     assert notify_tool.slot_key("a" * 80) == "a" * notify_tool.MAX_KEY_CHARS
     assert notify_tool.slot_key("a" * 39 + " b") == "a" * 39, "no dash left at the cut"
     assert notify_tool.slot_key(None) == notify_tool.slot_key("!!!") == ""
-    assert "invalid_key" in notify_tool.handle({"title": "a", "body": "b", "key": "📊"}, session_id="s")
+    assert notify_tool.slot_key("___") == notify_tool.slot_key("...") == notify_tool.slot_key("_._") == ""
+    for junk in ("📊", "___", "..."):
+        assert "invalid_key" in notify_tool.handle({"title": "a", "body": "b", "key": junk}, session_id="s")
     assert notify_tool.take("s") is None
 
 

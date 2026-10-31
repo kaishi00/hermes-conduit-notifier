@@ -21,7 +21,8 @@ checks it). The format is fixed, because Conduit reads it:
 - Hermes can update a notification it sent earlier instead of adding a
   new one ("Report in progress", later "Report ready"), from any chat or
   scheduled job of the same profile, and can make the update quiet: no
-  sound or banner. Needs relay 0.26 for unencrypted notifications.
+  sound or banner. Quiet updates need relay 0.26, and so does replacing
+  an unencrypted notification.
 
 ## 0.122.3 (2026-10-31)
 
