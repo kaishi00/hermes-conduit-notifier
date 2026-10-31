@@ -698,7 +698,15 @@ def test_only_the_newest_written_notifications_are_kept(paired, monkeypatch):
     assert notify_tool.take("c") == notify_tool.Headline("Done", "c")
 
 
-def test_a_keyed_notification_replaces_the_profiles_earlier_one_from_any_chat(pushed, paired):
+@pytest.fixture
+def runs(monkeypatch):
+    """Scheduled runs this process saw start, as when they're running now."""
+    monkeypatch.setattr(plugin, "_newest_runs", {})
+    monkeypatch.setattr(plugin, "_cron_sessions", {})
+    monkeypatch.setattr(plugin, "_run_is_recent", lambda session_id, now=None: True)
+
+
+def test_a_keyed_notification_replaces_the_profiles_earlier_one_from_any_chat(pushed, paired, runs):
     # #1579: "Report in progress" from a chat, "Report ready" from a
     # scheduled job, both keyed "report": one slot on the phone.
     answer = notify_tool.handle({"title": "Report in progress", "body": "Half done.", "key": " Report "}, session_id="s")
@@ -716,7 +724,7 @@ def test_a_keyed_notification_replaces_the_profiles_earlier_one_from_any_chat(pu
     assert second["level"] == "passive"
 
 
-def test_each_scheduled_job_keeps_one_notification(pushed):
+def test_each_scheduled_job_keeps_one_notification(pushed, runs):
     # Every run of a job is its own chat; its runs share the job's slot.
     for run in ("cron_daily_20261031_120000", "cron_daily_20261101_120000"):
         plugin._post_llm_call(session_id=run, turn_id=run, assistant_response="News.")
@@ -746,7 +754,7 @@ def test_a_failed_turn_replaces_the_keyed_notification_it_wrote(pushed, paired):
     assert failed["slot"] == events.slot_token("key:default:report")
 
 
-def test_a_gateway_owned_runs_background_task_joins_its_jobs_slot(pushed):
+def test_a_gateway_owned_runs_background_task_joins_its_jobs_slot(pushed, runs):
     # The run's chat (local-…) names the job only through the turn's task id.
     plugin._pre_llm_call(session_id="local-run", turn_id="t")
     plugin._post_llm_call(session_id="local-run", turn_id="t", task_id="cron:daily:7", assistant_response="Started.")
@@ -785,8 +793,7 @@ def test_only_an_answered_turn_checks_for_a_voice_job_to_archive(pushed, tmp_pat
     plugin._on_session_end(session_id="job", turn_id="t4", completed=True, failed=False, interrupted=False)
 
 
-def test_a_follow_up_in_an_older_run_keeps_its_own_chats_slot(pushed, monkeypatch):
-    monkeypatch.setattr(plugin, "_newest_runs", {})
+def test_a_follow_up_in_an_older_run_keeps_its_own_chats_slot(pushed, runs):
     for run in ("cron_weekly_20261030_120000", "cron_weekly_20261031_120000", "cron_weekly_20261030_120000"):
         plugin._post_llm_call(session_id=run, turn_id=f"t{len(pushed)}", assistant_response="News.")
         plugin._on_session_end(session_id=run, turn_id=f"t{len(pushed)}", completed=True, failed=False, interrupted=False)
@@ -794,8 +801,7 @@ def test_a_follow_up_in_an_older_run_keeps_its_own_chats_slot(pushed, monkeypatc
     assert [event.get("slot") for event in pushed] == [job, job, None], "the newest run's report stays"
 
 
-def test_a_silent_gateway_owned_run_still_hands_its_job_to_a_later_background_task(pushed, monkeypatch):
-    monkeypatch.setattr(plugin, "_cron_sessions", {})
+def test_a_silent_gateway_owned_run_still_hands_its_job_to_a_later_background_task(pushed, runs):
     plugin._pre_llm_call(session_id="local-quiet", turn_id="t")
     plugin._post_llm_call(session_id="local-quiet", turn_id="t", task_id="cron:nightly:1", assistant_response="[SILENT]")
     plugin._on_session_end(session_id="local-quiet", turn_id="t", task_id="cron:nightly:1", completed=True,
@@ -806,3 +812,24 @@ def test_a_silent_gateway_owned_run_still_hands_its_job_to_a_later_background_ta
     plugin._post_llm_call(session_id="local-quiet", turn_id="t2", assistant_response="A follow-up.")
     plugin._on_session_end(session_id="local-quiet", turn_id="t2", completed=True, failed=False, interrupted=False)
     assert "slot" not in pushed[-1], "the user's own follow-up keeps the chat's slot"
+
+
+def test_after_a_restart_an_old_runs_follow_up_keeps_its_chats_slot(pushed, monkeypatch):
+    monkeypatch.setattr(plugin, "_newest_runs", {})
+    now = 1_793_500_000.0
+    old = "cron_weekly_" + plugin.datetime.fromtimestamp(now - 3 * 24 * 3600).strftime("%Y%m%d_%H%M%S")
+    fresh = "cron_weekly_" + plugin.datetime.fromtimestamp(now - 60).strftime("%Y%m%d_%H%M%S")
+    assert not plugin._run_is_recent(old, now) and plugin._run_is_recent(fresh, now)
+    assert not plugin._run_is_recent("cron_weekly_notatime")
+
+
+def test_a_keyed_gateway_owned_run_still_hands_its_job_to_a_later_background_task(pushed, paired, runs):
+    notify_tool.handle({"title": "Backup running", "body": "Started.", "key": "backup"}, session_id="local-keyed")
+    plugin._pre_llm_call(session_id="local-keyed", turn_id="t")
+    plugin._post_llm_call(session_id="local-keyed", turn_id="t", task_id="cron:nightly:2", assistant_response="Started.")
+    plugin._on_session_end(session_id="local-keyed", turn_id="t", task_id="cron:nightly:2", completed=True,
+                           failed=False, interrupted=False)
+    _subagent(parent="local-keyed")
+    reply, task = pushed
+    assert reply["slot"] == events.slot_token("key:default:backup")
+    assert task["slot"] == events.slot_token("cron:default:nightly")

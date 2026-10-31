@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -417,8 +418,6 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, remembered: bo
     chat keeps that chat's, so it never replaces the newest report.
     `remembered`: a background task, reporting after its run's turn, takes
     the job of the run that started it."""
-    if key:
-        return f"key:{_profile}:{key}"
     job = cron_runs.job_id(None, task_id)
     by_session = None if job else cron_runs.job_id(session_id, None)
     with _cron_sessions_lock:
@@ -428,15 +427,33 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, remembered: bo
             _remember_run(session_id, job)
         elif by_session:
             # A classic run's chat (cron_<job>_<time>) is the job's run
-            # unless a newer one has run since.
+            # unless a newer one has run since, or, with none seen since
+            # this process started, unless it started hours ago.
             newest = _newest_runs.get(by_session)
-            if newest is None or session_id >= newest:
+            if (session_id >= newest) if newest is not None else _run_is_recent(session_id):
                 _newest_runs[by_session] = session_id
                 _remember_run(session_id, by_session)
                 job = by_session
         elif remembered:
             job = _cron_sessions.get(session_id)
+    # A key wins, after the job is noted for the run's background tasks.
+    if key:
+        return f"key:{_profile}:{key}"
     return f"cron:{_profile}:{job}" if job else ""
+
+
+# A classic run's chat older than this, with no newer run seen, is an old
+# run someone asked a follow-up in.
+RUN_RECENT_S = 2 * 60 * 60
+
+
+def _run_is_recent(session_id: str, now: float | None = None) -> bool:
+    # Hermes names a classic run's chat by its local start time.
+    try:
+        started = datetime.strptime(session_id[-15:], "%Y%m%d_%H%M%S").timestamp()
+    except ValueError:
+        return False
+    return abs((time.time() if now is None else now) - started) < RUN_RECENT_S
 
 
 def _remember_run(session_id: str, job: str) -> None:
