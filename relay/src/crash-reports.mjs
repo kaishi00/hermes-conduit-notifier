@@ -7,6 +7,10 @@ import { dirname, join } from 'node:path';
 // hands Conduit a MetricKit diagnostic on the next launch: call stacks,
 // exception and termination codes, the build and the device model, never
 // what was typed or said. The app asks once per report; Send posts it here.
+// A report can carry a chat trace (hermes-conduit ChatViewportTrace): what
+// the chat's transcript did just before, a line per event naming sizes,
+// offsets and row counts, never message text. A trace also comes on its own
+// (kind `chat`) when the user sends it from Diagnostics & logs.
 //
 // Anyone can post (a tester needn't use notifications), so each address and
 // the relay as a whole have small budgets, and a post is capped in size.
@@ -20,14 +24,24 @@ export const CRASH_REPORTS_ROUTE = /^\/v1\/crash-reports(?:\/([0-9a-z-]{1,64}))?
 // A MetricKit diagnostic payload with a few deep stacks; the app trims a
 // bigger one to its crashes and hangs first.
 export const MAX_REPORT_CHARS = 600_000;
+// A chat trace: at most this many lines of at most this many characters,
+// each only letters, digits, spaces and the punctuation the app's lines use.
+export const MAX_TRACE_LINES = 2_000;
+export const MAX_TRACE_LINE_CHARS = 160;
+// The diagnostic and a full trace with room for the JSON around them.
+export const MAX_POST_CHARS = 1_000_000;
 export const MAX_REPORTS = 1_000;
 export const MAX_AGE_DAYS = 90;
 export const REPORTS_PER_ADDRESS_PER_HOUR = 10;
 export const REPORTS_PER_DAY = 500;
-export const KINDS = new Set(['crash', 'hang']);
+export const KINDS = new Set(['crash', 'hang', 'chat']);
+// What saved a trace: the app's watchers (a jump, a stall, a layout storm,
+// a blank screen rebuilt) or the user's own send.
+export const TRACE_REASONS = new Set(['jump', 'stall', 'storm', 'rebuild', 'manual']);
 
 const ID_PATTERN = /^\d{13}-[0-9a-f]{12}$/;
 const FIELD_PATTERN = /^[\p{L}\p{N} ()._,:+-]{1,64}$/u;
+const TRACE_LINE_PATTERN = new RegExp(`^[A-Za-z0-9 ()._,:;+=<>/#%\\[\\]-]{0,${MAX_TRACE_LINE_CHARS}}$`);
 
 export class CrashReports {
   constructor({ directory, maxReports = MAX_REPORTS, maxAgeMs = MAX_AGE_DAYS * 86_400_000, now = Date.now }) {
@@ -63,9 +77,9 @@ export class CrashReports {
   // sort oldest first.
   save(report) {
     const id = `${this.now()}-${randomBytes(6).toString('hex')}`;
-    const { diagnostic, ...fields } = report;
-    const heading = { id, received_at: new Date(this.now()).toISOString(), ...fields };
-    writeFileSync(this.path(id, 'report'), JSON.stringify({ ...heading, diagnostic }), { mode: 0o600 });
+    const { diagnostic, trace, ...fields } = report;
+    const heading = { id, received_at: new Date(this.now()).toISOString(), ...fields, ...(trace ? { trace_reason: trace.reason } : {}) };
+    writeFileSync(this.path(id, 'report'), JSON.stringify({ ...heading, diagnostic, trace }), { mode: 0o600 });
     writeFileSync(this.path(id, 'head'), JSON.stringify(heading), { mode: 0o600 });
     this.headings.set(id, heading);
     this.prune();
@@ -133,6 +147,12 @@ export function validateReport(body) {
     kind: field('kind'),
   };
   if (!KINDS.has(report.kind)) throw badRequest('invalid_kind');
+  // A trace rides with a crash or hang, and is the whole of a chat report.
+  if (body?.trace !== undefined || report.kind === 'chat') report.trace = validateTrace(body?.trace);
+  if (report.kind === 'chat') {
+    report.signature = createHash('sha256').update(`chat|${report.trace.reason}`).digest('hex').slice(0, 16);
+    return report;
+  }
   const diagnostic = body?.diagnostic;
   if (!diagnostic || typeof diagnostic !== 'object' || Array.isArray(diagnostic)) throw badRequest('invalid_diagnostic');
   const crashDiagnostics = Array.isArray(diagnostic.crashDiagnostics) ? diagnostic.crashDiagnostics : [];
@@ -149,6 +169,17 @@ export function validateReport(body) {
   if (Buffer.byteLength(JSON.stringify(report.diagnostic)) > MAX_REPORT_CHARS) throw httpError(413, 'payload_too_large');
   report.signature = signature(report.diagnostic);
   return report;
+}
+
+// A trace's reason and lines, or a 400: the relay takes only lines made of
+// the characters the app's own lines use, so a trace can't carry other text.
+function validateTrace(trace) {
+  if (!trace || typeof trace !== 'object' || Array.isArray(trace)) throw badRequest('invalid_trace');
+  if (!TRACE_REASONS.has(trace.reason)) throw badRequest('invalid_trace');
+  const lines = trace.lines;
+  if (!Array.isArray(lines) || !lines.length || lines.length > MAX_TRACE_LINES) throw badRequest('invalid_trace');
+  if (!lines.every((line) => typeof line === 'string' && TRACE_LINE_PATTERN.test(line))) throw badRequest('invalid_trace');
+  return { reason: trace.reason, lines };
 }
 
 // The keys a report keeps, level by level, as the app sends them
@@ -235,11 +266,13 @@ export function crashReportRoutes({ reports, adminToken, readJson, enforceRateLi
     const id = match[1];
     if (request.method === 'POST' && !id) {
       enforceRateLimit(`crash-report:${clientAddress(request)}`, REPORTS_PER_ADDRESS_PER_HOUR, 60 * 60_000);
-      const report = validateReport(await readJson(request, MAX_REPORT_CHARS));
+      const report = validateReport(await readJson(request, MAX_POST_CHARS));
       // Only a well-formed report spends the relay's daily budget.
       enforceRateLimit('crash-report-global', REPORTS_PER_DAY, 24 * 60 * 60_000);
       const saved = reports.save(report);
-      sendJson(response, 201, { id: saved });
+      // Says it kept the trace, so the app lets its copy go only then (an
+      // older relay takes the report and drops what it doesn't know).
+      sendJson(response, 201, report.trace ? { id: saved, trace: true } : { id: saved });
       return true;
     }
     if (request.method === 'GET') {
