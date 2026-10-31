@@ -428,8 +428,11 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any =
             _turn_slots.pop((session_id, turn_id), None)
             _turn_slots[(session_id, turn_id)] = (seed, job or "")
             if job and (job, session_id) not in _job_run_chats:
-                # The job's newest run is the one seen last for the first
-                # time: an older run that ends late, overlapping it, isn't.
+                # The job's newest run is the one whose turn ended first
+                # most recently: a later turn in an older run doesn't take it
+                # back. Runs that overlap are ordered by when they first end,
+                # and the record lives only as long as this process (after a
+                # restart, a run's task reports in its own chat's slot).
                 _job_run_chats[(job, session_id)] = None
                 _job_runs.pop(job, None)
                 _job_runs[job] = session_id
