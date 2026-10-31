@@ -406,11 +406,12 @@ def _work(args: argparse.Namespace) -> int:
 
     home = Path(get_hermes_home())
     action = args.work_action
-    if action in ("status", "off") and not work_store.exists(home):
-        # Never turned on: said so without leaving a registry behind.
-        print("Bot workstreams: off (never turned on). `hermes conduit-push work on` to start them for this bot.")
-        return 0
     try:
+        if action in ("status", "off") and not work_store.exists(home):
+            # Never turned on: said so without leaving a registry behind.
+            print("Bot workstreams: off (never turned on). `hermes conduit-push work on` to start them for this "
+                  "bot.")
+            return 0
         return _work_on_registry(work_store.Store(home), args, action)
     except BrokenPipeError:
         # Piped into head: the reader left, and nothing more is printed.

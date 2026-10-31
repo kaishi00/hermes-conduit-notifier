@@ -824,6 +824,8 @@ def turn_started(session_id: Any) -> bool:
     was interrupted (a follow-up queued behind the last turn, or the user
     writing in its chat) is running again, and its own end settles it. True when the session is a
     workstream (its turn shows no Live Activity)."""
+    with _wake_lock:
+        _finished.discard(session_id)  # a new turn: its end is its own
     home, work, unreadable = _lookup(session_id)
     if work is None or home is None:
         return unreadable and _maybe_workstream(session_id, home)
@@ -846,6 +848,7 @@ def turn_ended(session_id: Any, response: Any) -> bool:
     text = response.strip() if isinstance(response, str) else ""
     with _wake_lock:
         _replies[session_id] = text
+        _finished.discard(session_id)  # a reply: this is a new turn's end coming
     return True
 
 
@@ -860,9 +863,16 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         return False
     with _wake_lock:
         text = _replies.pop(session_id, "")
+        repeated = session_id in _finished
     home, work, unreadable = _lookup(session_id)
     if work is None or home is None:
         return unreadable and _maybe_workstream(session_id, home)
+    if repeated:
+        return True  # this turn's end was handled; its reply went with it
+    with _wake_lock:
+        if len(_finished) > 512:
+            _finished.clear()
+        _finished.add(session_id)
     store = work_store.Store(home)
     if work.status == "stopped":
         _stopped_report(home, store, work, text, failed=failed, interrupted=interrupted)
@@ -1030,6 +1040,9 @@ def _send_wake(home: Path, coordinator: str) -> None:
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
 
 
+# Sessions whose turn's end has been handled, until their next turn starts:
+# Hermes may report one end twice.
+_finished: set[str] = set()
 # When each held update first found its Bot Chat busy.
 _wake_held: dict[tuple[str, str], float] = {}
 
@@ -1050,6 +1063,7 @@ def stop() -> None:
         pending = list(_wakes.values())
         _wakes.clear()
         _wake_held.clear()
+        _finished.clear()
         _replies.clear()
         _redirecting.clear()
     for _, timer in pending:
@@ -1099,19 +1113,23 @@ _COMMON = frozenset("the and for with from into about this that what why how che
 
 
 def _words(value: Any) -> set[str]:
-    return {word for word in re.findall(r"[a-z0-9]+", str(value or "").lower()) if len(word) > 2
-            and word not in _COMMON}
+    return {word for word in re.findall(r"[a-z0-9]+", str(value or "").lower())
+            if (len(word) > 1 or word.isdigit()) and word not in _COMMON}
 
 
 def _similar(a: set[str], b: set[str]) -> bool:
-    """Titles that share most of their words, and at least two of them (a
-    title of one word shares that word): one word in common ("version",
-    "port") isn't the same task."""
+    """Titles that share most of their words, and at least two of them (or
+    the same one-word title): one word in common ("version", "port") isn't
+    the same task, and neither are titles naming different numbers."""
     if not a or not b:
         return False
+    numbers_a = {word for word in a if any(ch.isdigit() for ch in word)}
+    numbers_b = {word for word in b if any(ch.isdigit() for ch in word)}
+    if numbers_a and numbers_b and not numbers_a & numbers_b:
+        return False  # different ports, issues or versions: different tasks
     shared = len(a & b)
-    if min(len(a), len(b)) == 1:
-        return shared == 1
+    if len(a) == len(b) == 1:
+        return shared == 1  # the same one-word title
     return shared >= 2 and shared / min(len(a), len(b)) >= LOOKALIKE
 
 

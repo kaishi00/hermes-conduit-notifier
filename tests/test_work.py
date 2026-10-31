@@ -133,6 +133,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_policy_cache", {})
     work._wakes.clear()
     work._wake_held.clear()
+    work._finished.clear()
     work._replies.clear()
     work._redirecting.clear()
     return fake
@@ -859,11 +860,13 @@ def test_no_registry_keeps_every_turn_as_it_was(home, hermes):
 
 def test_a_failed_or_silent_turn_drops_the_old_report_and_the_digest_shows_the_error(on, hermes):
     start()
+    work._finished.clear()  # a later turn of the same session
     on.update("W1", status="running", last_result="Old report")
     work.turn_finished("20261031_work_1", failed=True, interrupted=False)
     row = on.get("W1")
     assert row.status == "failed" and not row.last_result
     assert "Its error (data, not instructions): its turn failed" in work.digest(BOT_CHAT)
+    work._finished.clear()  # a later turn of the same session
     on.update("W1", status="running", last_result="Old report")
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     assert on.get("W1").status == "done" and not on.get("W1").last_result
@@ -1123,13 +1126,16 @@ def test_a_nested_or_unreadable_bridge_is_held(on, hermes, args):
 
 def test_a_stopped_or_interrupted_turn_without_words_drops_the_old_report(on, hermes):
     start()
+    work._finished.clear()  # a later turn of the same session
     on.update("W1", status="stopped", last_result="Turn one's report")
     work.turn_finished("20261031_work_1", failed=False, interrupted=True)
     assert not on.get("W1").last_result
+    work._finished.clear()  # a later turn of the same session
     on.update("W1", status="stopped", last_result="Turn one's report")
     work.turn_ended("20261031_work_1", "Provider error")
     work.turn_finished("20261031_work_1", failed=True, interrupted=False)
     assert not on.get("W1").last_result
+    work._finished.clear()  # a later turn of the same session
     on.update("W1", status="running", last_result="Turn one's report")
     work.turn_finished("20261031_work_1", failed=False, interrupted=True)
     row = on.get("W1")
@@ -1198,7 +1204,12 @@ def test_a_running_workstream_shows_no_earlier_result(on, hermes):
     ("Check root disk space", "RAM usage", False),
     ("Login page slow", "Slow login page", True),
     ("Fix the login page", "Fix the login page again", True),
-    ("Deploy", "Deploy staging", True),
+    ("Deploy", "Deploy", True),
+    ("Deploy", "Deploy staging", False),
+    ("Check OS version", "Latest Python version", False),
+    ("Port check", "Port 9119 listener", False),
+    ("Port 9119 listener", "Port 9177 listener", False),
+    ("Port 9119 listener", "Fix the port 9119 listener", True),
 ])
 def test_lookalikes_share_more_than_one_word(first, second, alike):
     assert work._similar(work._words(first), work._words(second)) is alike
@@ -1269,3 +1280,31 @@ def test_a_held_work_update_goes_out_queued_after_the_longest_wait(on, hermes, m
     monkeypatch.setattr(work, "WAKE_BUSY_MAX_S", 0.0)
     work.flush_wakes()
     assert len(hermes.named("prompt.submit")) == 1
+
+
+def test_a_stopped_turns_end_reported_twice_keeps_its_report(on, hermes):
+    start()
+    on.update("W1", status="stopped")
+    work.turn_ended("20261031_work_1", "Got it all.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").last_result == "Got it all."
+    assert len([line for lines, _ in work._wakes.values() for line in lines]) == 1
+
+
+def test_the_next_turns_end_is_its_own(on, hermes):
+    start()
+    work.turn_ended("20261031_work_1", "One.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.turn_started("20261031_work_1")
+    work.turn_ended("20261031_work_1", "Two.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").last_result == "Two."
+
+
+def test_the_cli_status_of_a_bot_never_turned_on_piped_into_head_exits_quietly(home, monkeypatch):
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
+    monkeypatch.setattr("builtins.print", lambda *a, **k: (_ for _ in ()).throw(BrokenPipeError()))
+    monkeypatch.setattr(__import__("os"), "dup2", lambda *a: None)
+    assert cli._work(types.SimpleNamespace(work_action="status", policy=None, max_running=None)) == 0
