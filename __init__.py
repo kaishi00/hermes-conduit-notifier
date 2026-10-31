@@ -409,7 +409,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         _finish_ready(old_session, old_ready, old_send)
 
 
-def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any = None) -> str:
+def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any = None, keep: bool = False) -> str:
     """Which notification on the phone a turn's end replaces (#1579), when
     it isn't the chat's own: a conduit_notify key's, shared by this
     profile's chats and jobs, else a scheduled job's, so each run replaces
@@ -417,18 +417,25 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any =
     run's own turn takes the job's, by its ``cron:<job>:<run>`` task id: a
     follow-up asked in an older run's chat keeps that chat's. The turn's
     slot is kept for a background task it started, which reports later,
-    with the job, whose mute the task follows."""
+    with the job, whose mute the task follows. ``keep`` leaves a slot the
+    turn already took (its reply's) in place."""
     job = cron_runs.job_id(None, task_id)
     seed = f"key:{_profile}:{key}" if key else f"cron:{_profile}:{job}" if job else ""
     if (seed or job) and isinstance(turn_id, str) and turn_id:
         with _turn_slots_lock:
+            if keep and (session_id, turn_id) in _turn_slots:
+                return _turn_slots[(session_id, turn_id)][0]
             _turn_slots.pop((session_id, turn_id), None)
             _turn_slots[(session_id, turn_id)] = (seed, job or "")
-            if job:
+            if job and (job, session_id) not in _job_run_chats:
+                # The job's newest run is the one seen last for the first
+                # time: an older run that ends late, overlapping it, isn't.
+                _job_run_chats[(job, session_id)] = None
                 _job_runs.pop(job, None)
                 _job_runs[job] = session_id
-                while len(_job_runs) > MAX_TURN_STARTS:
-                    del _job_runs[next(iter(_job_runs))]
+                for kept in (_job_runs, _job_run_chats):
+                    while len(kept) > MAX_TURN_STARTS:
+                        del kept[next(iter(kept))]
             while len(_turn_slots) > MAX_TURN_STARTS:
                 del _turn_slots[next(iter(_turn_slots))]
     return seed
@@ -440,16 +447,18 @@ def _started_slot(session_id: str, turn_id: Any) -> tuple[str, str]:
     with _turn_slots_lock:
         slot, job = _turn_slots.get((session_id, turn_id), ("", "")) if isinstance(turn_id, str) else ("", "")
         # A task from an older run reports in that run's chat: the job's
-        # slot holds the newest run's report, which it mustn't replace.
-        if job and slot.startswith("cron:") and _job_runs.get(job) != session_id:
+        # slot, or the key it wrote, holds the newest run's report, which it
+        # mustn't replace.
+        if job and _job_runs.get(job) != session_id:
             slot = ""
         return slot, job
 
 
 # (chat, turn) -> its slot and job, for a background task the turn started.
 _turn_slots: dict[tuple[str, str], tuple[str, str]] = {}
-# job -> the chat of its newest run.
+# job -> the chat of its newest run, and every (job, chat) seen so far.
 _job_runs: dict[str, str] = {}
+_job_run_chats: dict[tuple[str, str], None] = {}
 _turn_slots_lock = threading.Lock()
 
 
@@ -638,6 +647,9 @@ def _on_session_end(**kwargs: Any) -> None:
         _quietly(live_activity.reporter.turn_ended, session_id,
                  "done" if answered else "stopped" if kwargs.get("interrupted") else "failed")
     if answered:
+        # A turn with no reply text skipped post_llm_call: its job and slot
+        # are taken here for a background task it started.
+        _slot(session_id, kwargs.get("task_id"), written_key, turn_id=kwargs.get("turn_id"), keep=True)
         if not _settle_ready(session_id, kwargs.get("turn_id"), "done"):
             calls.turn_ended(session_id, "done", profile=_profile, fallback=None)
         # A voice job's chat leaves Desktop's list once Hermes has answered

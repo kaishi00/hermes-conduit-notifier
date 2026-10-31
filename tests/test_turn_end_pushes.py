@@ -703,6 +703,7 @@ def runs(monkeypatch):
     """No turn's slot left over from another test."""
     monkeypatch.setattr(plugin, "_turn_slots", {})
     monkeypatch.setattr(plugin, "_job_runs", {})
+    monkeypatch.setattr(plugin, "_job_run_chats", {})
 
 
 def test_a_keyed_notification_replaces_the_profiles_earlier_one_from_any_chat(pushed, paired, runs):
@@ -789,14 +790,33 @@ def test_an_older_runs_late_background_task_keeps_its_own_chats_slot(pushed, run
     assert [event.get("slot") for event in pushed] == [job, job, None], "the newest run's report stays"
 
 
-@pytest.mark.parametrize("ending", [{"failed": True}, {"interrupted": True}])
+@pytest.mark.parametrize("ending", [{"failed": True}, {"interrupted": True}, {"completed": True}])
 def test_a_muted_gateway_owned_run_that_ends_without_text_keeps_its_task_quiet(pushed, runs, monkeypatch, ending):
     monkeypatch.setattr(plugin.cron_runs, "muted", lambda job: job == "daily")
     plugin._pre_llm_call(session_id="local-run", turn_id="t")
-    plugin._on_session_end(session_id="local-run", turn_id="t", task_id="cron:daily:7", completed=False,
-                           **{"failed": False, "interrupted": False, **ending})
+    plugin._on_session_end(session_id="local-run", turn_id="t", task_id="cron:daily:7",
+                           **{"completed": False, "failed": False, "interrupted": False, **ending})
     _subagent(parent="local-run")
     assert [event["type"] for event in pushed if event["type"] != "turn.failed"] == []
+
+
+def test_an_older_keyed_runs_late_task_leaves_the_newer_runs_key(pushed, paired, runs):
+    for n, run in enumerate(("local-k1", "local-k2")):
+        plugin._pre_llm_call(session_id=run, turn_id="t")
+        notify_tool.handle({"title": "Backup done", "body": "All good.", "key": "backup"}, session_id=run)
+        plugin._post_llm_call(session_id=run, turn_id="t", task_id=f"cron:backup:{n}", assistant_response="Done.")
+        plugin._on_session_end(session_id=run, turn_id="t", task_id=f"cron:backup:{n}", completed=True,
+                               failed=False, interrupted=False)
+    _subagent(parent="local-k1")
+    key = events.slot_token("key:default:backup")
+    assert [event.get("slot") for event in pushed] == [key, key, None]
+
+
+def test_an_overlapping_older_run_ending_late_stays_older(pushed, runs):
+    plugin._post_llm_call(session_id="local-a", turn_id="t1", task_id="cron:daily:1", assistant_response="Working.")
+    plugin._post_llm_call(session_id="local-b", turn_id="t1", task_id="cron:daily:2", assistant_response="Report.")
+    plugin._post_llm_call(session_id="local-a", turn_id="t2", task_id="cron:daily:1", assistant_response="Late.")
+    assert plugin._job_runs["daily"] == "local-b"
 
 
 def test_conduit_notify_registers_on_a_hermes_without_display_fields():
