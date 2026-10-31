@@ -1169,6 +1169,9 @@ def test_more_secret_shapes_are_redacted(line, secret):
     ("Authorization: Basic dXNlcjpwYXNz failed", "Basic [redacted] failed", "dXNlcjpwYXNz"),
     ("find: -printf: unknown primary", "find: -printf: unknown primary", None),
     ("token insufficient_privileges", "token insufficient_privileges", None),
+    ("401 Unauthorized: bearer authentication failed", "bearer authentication failed", None),
+    ("auth failed: token=MySecretPassPhrase", "token=[redacted]", "MySecretPassPhrase"),
+    ("session: expired", "session: expired", None),
     ("mysql -pS3cret failed", "-p[redacted] failed", "S3cret"),
     ("Authentication: insufficient_privileges", "Authentication: insufficient_privileges", None),
     ('{"password": "expired"}', '"password": "expired"', None),
@@ -1223,7 +1226,8 @@ def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
     ("grep -q done status.txt", 2, False),  # grep's 2 is a real error
     ("test -f done.flag || echo missing", 1, False),
     ("ls data/*.db 2>/dev/null; python3 job.py", 1, False),  # only the last statement counts
-    ("FOO=1 sudo /usr/bin/grep x y", 1, True),
+    ("FOO=1 /usr/bin/grep x y", 1, True),
+    ("sudo ls /root 2>/dev/null", 1, False),  # sudo can fail on its own
     ("python3 -m pytest 2>/dev/null", 124, False),
     ("git push origin main 2>/dev/null", 1, False),  # what it silenced was its failure
     ("curl -sf https://api.example.com/x 2>/dev/null", 22, False),
@@ -1240,6 +1244,8 @@ def test_a_plain_hash_or_question_mark_keeps_the_line(recording):
     ("ls logs | sort | grep -q today", 1, True),
     ("ls data/*.db 2>/dev/null & curl -sf https://api.example.com/x", 22, False),
     ("grep -q x f & false", 1, False),
+    ("cut -f2 missing.csv 2>/dev/null | grep -q x", 1, False),
+    ("ls data 2>/dev/null | grep -q x", 1, True),
     ('python3 x.py --msg "a; cat f 2>/dev/null"', 1, False),
     ("python3 x.py --msg 'a | grep -q b'", 1, False),
     ('grep -q "a;b" notes.md', 1, True),
@@ -1262,14 +1268,14 @@ def test_oddly_worded_failures_stay_unless_the_command_expected_them(recording):
 
 def test_a_bare_exit_stays_in_failed_calls(recording):
     """Nothing to judge it by unless the command expected it, so it isn't
-    dropped; the report's prompt says a bare exit isn't news on its own."""
+    dropped; the report's prompt weighs it by what the command was for."""
     _terminal(pulse.get_hermes_home(), "test -f done.flag", "", 1, DAY)
     _terminal(pulse.get_hermes_home(), "python3 job.py", "", 1, DAY + 1)
     failed = _failed(recording)
     assert "→ error: exit 1, no output" in failed and failed.count("\n- ") == 1
     row = {"tool": "terminal", "status": "error", "error": "exit 2"}  # recorded before outputs were kept
     assert not ledger.harmless_exit(row)
-    assert "a bare non-zero exit" in candidates.INSTRUCTIONS and "a bare non-zero exit" in report.REPORT_TEXT
+    assert "a bare exit with no output" in candidates.INSTRUCTIONS and "a bare exit with no output" in report.REPORT_TEXT
 
 
 def test_a_call_that_later_went_through_is_left_out(recording):

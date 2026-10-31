@@ -8,9 +8,9 @@ error type), and the identifiers the result returned (a reminder or event
 id, a cron job id, a path, a URL), so a later item can link to it by
 evidence instead of wording. The output itself is not kept, and no model is
 involved; a failed terminal command keeps one line of it as its error, the
-line that says what went wrong (or the last, when none does, marked as
-showing no error), so a report can tell a real failure from a harmless
-non-zero exit. That line loses URL user info and queries, secret-looking
+line that says what went wrong (or the last, when none does). An exit the
+command itself expected (a silenced lookup, a yes/no check's "no") with no
+failure word is marked "an expected exit" and left out of the report. That line loses URL user info and queries, secret-looking
 ``key=value`` pairs, bearer tokens and long key-like runs first.
 
 Recorded only while Pulse is on.
@@ -256,6 +256,8 @@ def _looks_secret(value: str) -> bool:
     bare = value.strip("\"'")
     if value[:1] in "\"'" or (any(c.isdigit() for c in bare) and any(c.isalpha() for c in bare)):
         return True
+    if bare.isalpha() and len(bare) >= 12 and bare[1:] != bare[1:].lower() and bare != bare.upper():
+        return True  # a mixed-case passphrase (MySecretPassPhrase), not a word
     return len(bare) >= 16 and not bare.replace("_", "").replace("-", "").isalpha()
 
 
@@ -268,7 +270,9 @@ def _bearer_secret(scheme: str, value: str) -> bool:
     if scheme == "basic" and len(value) >= 8 and re.fullmatch(r"[A-Za-z0-9+/]+=*", value) \
             and (value.endswith("=") or value[1:] != value[1:].lower()):
         return True
-    return scheme == "bearer" or _looks_secret(value)
+    # A short lowercase word after bearer is prose ("bearer authentication failed").
+    prose = value.isalpha() and value.islower() and len(value) < 16
+    return (scheme == "bearer" and not prose) or _looks_secret(value)
 
 
 def _redact(text: str) -> str:
@@ -305,7 +309,8 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _command_name(part: str) -> tuple[str, list[str]]:
-    words = [word for word in part.split() if "=" not in word.split("/")[0] and word not in ("sudo", "env")]
+    # sudo or env can fail on their own (no tty), so they're never the lookup.
+    words = [word for word in part.split() if "=" not in word.split("/")[0]]
     first = words[0] if words else ""
     # A project's own ./test or scripts/which isn't the tool it's named after.
     return (first.rsplit("/", 1)[-1] if "/" not in first or first.startswith(("/bin/", "/usr/")) else ""), words
@@ -333,7 +338,9 @@ def expected_exit(command: Any, code: int) -> bool:
         *earlier, last = [part.strip() for part in step.split("|")]
         for part in earlier:
             name, words = _command_name(part)
-            if name not in _PRODUCERS or (name == "find" and _FIND_ACTIONS & set(words)):
+            # A silenced stage that isn't a lookup could be what failed, unseen.
+            if name not in _PRODUCERS or (name == "find" and _FIND_ACTIONS & set(words)) \
+                    or (_SILENCED.search(part) and name not in _LOOKUPS):
                 return False
         name, words = _command_name(last)
         # A yes/no check is excused at exit 1 only, silenced or not: grep's 2 is an error.

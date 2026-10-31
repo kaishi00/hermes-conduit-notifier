@@ -118,7 +118,7 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 - "source" (found only): chat, calendar, reminders, notes, jobs or tools; "chat": the key of the chat it came from, when it did; "reminder": the key of the open reminder it is about (like r2), when it is one; "event": the key of the calendar entry it is about (like v1), when it is one; "area": one of {areas}.
 - "after" (found, kind "next" only): the #number under "Done since the last report", or the key under "Events that ended since the last report" (like e1), that it follows.
 
-A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare non-zero exit ("exit 1", "exit 2, no output") is not news on its own.
+A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen.
 
 A scheduled job marked failing covers nothing: weigh what rests on it as if there were no job, and say in its "why" that the job is failing.
 
