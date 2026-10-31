@@ -51,6 +51,12 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "(pushes already on their way then show generic text). The current key keeps working until Conduit "
              "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
+    work = commands.add_parser("work", help="Bot workstreams: this bot's Bot Chat coordinates work sessions of its own "
+                                            "(on, off, status)")
+    work.add_argument("work_action", choices=["on", "off", "status"])
+    work.add_argument("--policy", choices=["strict", "lookups"], default=None,
+                      help="for on: what the coordinator may do itself (default strict)")
+    work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 2)")
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
                                                  "dates, ahead, inbox, look, where, private, claims, spots")
@@ -359,6 +365,8 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if action == "pulse":
         return _pulse(args)
+    if action == "work":
+        return _work(args)
     if action == "prefs":
         return _prefs(args)
     if action == "rooms":
@@ -389,6 +397,35 @@ def _pulse_model_line(pulse: Any, pulse_store: Any, home: Path, chat_id: str) ->
         return f"Model: {turns}, for its turns, memory, report lists and follow-up checks"
     return (f"Model: {turns}, for its turns; memory, report lists and follow-up checks run on {named(slot)}, "
             "Hermes's \"Pulse memory\" model")
+
+
+def _work(args: argparse.Namespace) -> int:
+    from hermes_constants import get_hermes_home
+
+    from . import work_store
+
+    home = Path(get_hermes_home())
+    action = args.work_action
+    if action == "status" and not work_store.exists(home):
+        print("Bot workstreams: off (never turned on). `hermes conduit-push work on` to start them for this bot.")
+        return 0
+    store = work_store.Store(home)
+    if action == "on":
+        store.set_policy(args.policy or (store.policy() if store.policy() != "off" else "strict"))
+        if args.max_running is not None:
+            store.set_max_running(args.max_running)
+    elif action == "off":
+        store.set_policy("off")
+    mode = store.policy()
+    print(f"Bot workstreams: {mode if mode != 'off' else 'off'}"
+          + (f" (the coordinator {'may also look things up' if mode == 'lookups' else 'only coordinates'}; "
+             f"up to {store.max_running()} running at once)" if mode != "off" else ""))
+    if action == "status":
+        for work in store.list(include_closed=False, limit=20):
+            print(f"  {work.ref}  {work.status:<11} {_printable(work.title)}")
+    if action in ("on", "off"):
+        print("Takes effect on the bot's next turn. Its Bot Chat is the coordinator.")
+    return 0
 
 
 def _pulse(args: argparse.Namespace) -> int:

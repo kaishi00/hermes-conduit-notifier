@@ -21,6 +21,10 @@ watch_paths:
   - gateway/hosted_room*.py
   - website/docs/user-guide/features/plugins.md
   - website/docs/user-guide/features/extending-the-dashboard.md
+  - tui_gateway/server.py
+  - tui_gateway/transport.py
+  - tui_gateway/methods_session*.py
+  - tui_gateway/methods_prompt.py
 
 # Words that make a changed hunk worth a closer look.
 keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,
@@ -69,6 +73,14 @@ notes:
     hermes_cli.web_server_files._agent_fs_path, keeps a locked or hosted install's roots inside
     the folder _managed_files_policy names, and keeps out what _is_sensitive_path keeps out of
     Hermes' own file routes.
+  bot workstreams: >-
+    A bot's Bot Chat coordinating work sessions of its own (designs/bot-mode-coordinator, branch
+    bot-workstreams). work_broker drives the dashboard's session API in process, read from
+    sys.modules (so module_paths doesn't list it): tui_gateway.server.dispatch with the broker's
+    own transport for session.create (hidden, idempotency_key, profile) and prompt.submit, its
+    _methods with nothing bound for a session another client holds and for the hidden queued
+    work-update turn, and _sessions (session_key, profile_home, running, pending_title) to find
+    live sessions. upstream/test_bot_work.py runs it on the launch profile and a secondary one.
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the

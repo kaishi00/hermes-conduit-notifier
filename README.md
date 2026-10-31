@@ -1384,6 +1384,35 @@ calls end without these steps until one finishes, and past 20 calls waiting a
 call ends without them too (the log says so each time). A call that isn't saved
 (saving turned off in Conduit, or no speech from you) ends nothing.
 
+## Bot workstreams (experimental, `bot-workstreams` branch)
+
+A bot's Bot Chat can coordinate work sessions of its own: you ask Furina for
+something, she starts a workstream (a hidden chat on her own profile) and stays
+free to talk while it runs, and its result comes back to her as a work update
+she tells you about. It's off until you turn it on for a bot:
+
+    hermes -p <bot> conduit-push work on            # strict: she only coordinates
+    hermes -p <bot> conduit-push work on --policy lookups   # she may also look things up
+    hermes -p <bot> conduit-push work status
+    hermes -p <bot> conduit-push work off
+
+- The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
+  `work_read` and `work_close` (behind Hermes' Tool Search). They answer only
+  in that bot's canonical Bot Chat, and name work by ref (W1, W2), never by
+  session id, so a bot only ever reaches its own work. `work_ask` and
+  `work_reply` (asks between bots) say they aren't available yet.
+- Strict leaves the coordinator the work tools, `clarify` and `memory`;
+  lookups adds read-only lookups (past chats, web search, skills, Conduit's
+  health, location and inbox). `message_agent` is refused there in favour of
+  asks between bots.
+- A workstream's turn sends no push of its own: the Bot Chat's reply about it
+  is the one push. Its approvals still come from the workstream.
+- Up to 2 run at once per bot (`--max-running`). The registry is
+  `<profile>/conduit/workstreams.db`, with a journal of each workstream's
+  tool steps; after a restart, work that was running shows as interrupted.
+- It needs the Hermes dashboard to run plugins in its own process: under
+  `plugins.isolation: host` the tools answer with that reason.
+
 ## Chat takeover
 
 Hermes lets one app own a chat at a time. Hermes Desktop claims a chat on its
