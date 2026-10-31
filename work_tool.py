@@ -165,6 +165,10 @@ _wake_lock = threading.Lock()
 # (home, coordinator) -> (lines waiting, the timer that sends them)
 _wakes: dict[tuple[str, str], tuple[list[str], Any]] = {}
 _swept: set[str] = set()
+_sweep_lock = threading.Lock()
+# Workstreams a work_send may be redirecting: the superseded turn's end
+# (interrupted) leaves them running for the redirected turn to settle.
+_redirecting: set[tuple[str, str]] = set()
 # A workstream turn's reply, from post_llm_call until its turn's end.
 _replies: dict[str, str] = {}
 # This copy's profile home, as it was when Hermes registered the plugin: each
@@ -487,11 +491,21 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     # Marked running first: a turn that ends before the send returns then
     # settles the row, and nothing after the send puts it back.
     store.update(work.ref, status="running", closed_at=0.0, error="")
+    pending = (str(home), work.ref)
+    if how == "auto":
+        with _wake_lock:
+            _redirecting.add(pending)
     try:
         outcome, tip = broker.send(work.session_id, words, how)
-    except work_broker.BrokerError as error:
+    except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
+        with _wake_lock:
+            _redirecting.discard(pending)
         store.outbox_done(item, "refused")
         store.update(work.ref, status=work.status, closed_at=work.closed_at, error=work.error, only_if=("running",))
+        if not isinstance(error, work_broker.BrokerError):
+            logger.warning("conduit_push: sending to a workstream failed", exc_info=True)
+            return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
+                    "note": f"Hermes couldn't take it: {type(error).__name__}"}
         if error.not_owned:
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "open_elsewhere",
                     "note": f"{work.ref} is open in another Hermes window, which holds it. Nothing was sent; the "
@@ -499,6 +513,9 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
         return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
                 "note": f"Hermes refused: {error}"}
     store.outbox_done(item, "accepted" if outcome != "queued" else "queued")
+    if outcome != "redirected":
+        with _wake_lock:
+            _redirecting.discard(pending)
     if tip and tip != work.session_id:
         store.update(work.ref, session_id=tip)
     said = {"started": "It's working on it now.", "redirected": "It took it into the turn it was working on.",
@@ -554,13 +571,18 @@ def _sweep(home: Path, store: work_store.Store, broker: Optional[work_broker.Bro
     key = str(home)
     if key in _swept:
         return
-    try:
-        broker = broker or work_broker.Broker(home)
-        live = broker.live_session_ids()
-    except work_broker.BrokerError:
-        return
-    _swept.add(key)
-    stopped = store.interrupt_running(live)
+    # Held until the sweep is written: a start on another thread waits, so
+    # its new row is never in the sweep's stale snapshot.
+    with _sweep_lock:
+        if key in _swept:
+            return
+        try:
+            broker = broker or work_broker.Broker(home)
+            live = broker.live_session_ids()
+        except work_broker.BrokerError:
+            return
+        stopped = store.interrupt_running(live)
+        _swept.add(key)
     if stopped:
         logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
 
@@ -736,8 +758,13 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     if work.status not in _SETTLES:
         return True  # already settled: the same end reported again
     if interrupted:
-        # Not a work_stop: a redirect's next turn settles it, and one the user
-        # stopped from the chat itself stays interrupted, its slot free.
+        with _wake_lock:
+            redirected = (str(home), work.ref) in _redirecting
+            _redirecting.discard((str(home), work.ref))
+        if redirected:
+            return True  # a work_send redirected it: the new turn runs, and settles it
+        # Not a work_stop or a redirect: the user stopped it from the chat
+        # itself. It stays interrupted, its slot free.
         store.update(work.ref, status="interrupted", only_if=_SETTLES)
         return True
     if failed:
@@ -860,6 +887,7 @@ def stop() -> None:
         pending = list(_wakes.values())
         _wakes.clear()
         _replies.clear()
+        _redirecting.clear()
     for _, timer in pending:
         if timer is not None:
             timer.cancel()

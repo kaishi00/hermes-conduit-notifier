@@ -133,6 +133,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_policy_cache", {})
     work._wakes.clear()
     work._replies.clear()
+    work._redirecting.clear()
     return fake
 
 
@@ -837,3 +838,60 @@ def test_a_refused_send_puts_the_row_back(on, hermes):
 def test_a_call_naming_no_chat_keeps_to_the_policy(on, hermes, session_id):
     assert work.tool_block(session_id, "terminal", {}) == {"action": "block", "message": work.CHECK_FAILED}
     assert work.tool_block(session_id, "work_list", {}) is None
+
+
+def test_a_send_that_fails_unexpectedly_frees_the_slot(on, hermes, monkeypatch):
+    start()
+    on.update("W1", status="done")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+
+    def broken(params):
+        raise RuntimeError("socket gone")
+
+    monkeypatch.setattr(hermes, "prompt_submit", broken)
+    assert call("work_send", {"ref": "W1", "text": "More"})["error"] == "hermes"
+    assert on.get("W1").status == "done" and on.running_count() == 0
+
+
+def test_a_redirected_workstream_keeps_running_and_its_slot(on, hermes, monkeypatch):
+    start()
+    hermes._sessions["rt-20261031_work_1"]["running"] = True
+    redirect = hermes.session_redirect
+
+    def superseding(params):
+        answer = redirect(params)
+        work.turn_finished("20261031_work_1", failed=False, interrupted=True)
+        return answer
+
+    monkeypatch.setattr(hermes, "session_redirect", superseding)
+    assert call("work_send", {"ref": "W1", "text": "Do it this way"})["outcome"] == "redirected"
+    assert on.get("W1").status == "running" and on.running_count() == 1
+    work.turn_ended("20261031_work_1", "Done this way.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").status == "done"
+
+
+def test_a_start_waits_for_the_sweep(on, hermes, monkeypatch):
+    import threading
+
+    gate = threading.Event()
+    sweeping = threading.Event()
+    original = store_mod.Store.interrupt_running
+
+    def slow(self, live):
+        sweeping.set()
+        gate.wait(2)
+        return original(self, live)
+
+    monkeypatch.setattr(store_mod.Store, "interrupt_running", slow)
+    first = threading.Thread(target=lambda: call("work_list"))
+    first.start()
+    assert sweeping.wait(2)
+    second = threading.Thread(target=start)
+    second.start()
+    second.join(0.3)
+    assert second.is_alive()  # waiting on the sweep
+    gate.set()
+    first.join(2)
+    second.join(2)
+    assert on.get("W1").status == "running"
