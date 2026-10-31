@@ -20,8 +20,13 @@ as ours, and copied again whenever its version falls behind.
 A profile counts when its config.yaml lists the plugin in ``plugins.enabled``
 and not in ``plugins.disabled``, or has no ``plugins.enabled`` at all (Hermes
 then loads every installed plugin) and holds a copy already. A profile that
-doesn't turn the plugin on is left alone, and so is anything in its folder that
-isn't this plugin.
+doesn't turn the plugin on is left alone, and so is one whose config can't be
+read, one whose own copy is newer than the main install (a build put there on
+purpose), and anything in its folder that isn't this plugin.
+
+The new link or copy is made beside the profile's folder first and moved in
+last, so a sweep that fails partway, or one running at the same moment in
+another process, never leaves the profile without the plugin.
 
 The dashboard runs it when it starts and after an update pulls the new
 version, before the gateway restarts; the plugin runs it when it registers
@@ -37,6 +42,8 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
@@ -47,6 +54,14 @@ BACKUP_DIR = "plugins-backup"
 # In a copy made where no link could be: the copy is ours to replace.
 COPY_MARKER = ".conduit-shared-copy"
 _COPY_IGNORED = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", COPY_MARKER)
+# Where a new link or copy is made, in the profile's home (which Hermes doesn't scan for plugins).
+_INCOMING = ".conduit-push-incoming-"
+_INCOMING_STALE_SECONDS = 600
+
+
+def _link_dir(source: Path, target: Path) -> None:
+    # Windows makes a file link unless told otherwise, and a file link to a folder loads nothing.
+    os.symlink(source, target, target_is_directory=True)
 
 
 def _manifest(directory: Path) -> dict:
@@ -66,11 +81,15 @@ def _manifest(directory: Path) -> dict:
     return values
 
 
-def _config(home: Path) -> dict:
-    try:
-        text = (home / "config.yaml").read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError):
+def _config(home: Path) -> Optional[dict]:
+    """The profile's config.yaml, {} when it has none, None when it can't be read."""
+    path = home / "config.yaml"
+    if not path.exists():
         return {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return None
     try:
         try:
             import hermes_yaml as yaml
@@ -78,13 +97,12 @@ def _config(home: Path) -> dict:
             import yaml
         data = yaml.safe_load(text)
     except Exception:  # noqa: BLE001 — an unreadable config turns nothing on
-        logger.info("Conduit plugin: couldn't read %s; leaving its plugins alone", home / "config.yaml")
-        return {}
+        return None
     return data if isinstance(data, dict) else {}
 
 
-def _turns_on(home: Path, has_copy: bool) -> bool:
-    plugins = _config(home).get("plugins")
+def _turns_on(config: dict, has_copy: bool) -> bool:
+    plugins = config.get("plugins")
     plugins = plugins if isinstance(plugins, dict) else {}
     disabled = plugins.get("disabled")
     if isinstance(disabled, list) and PLUGIN_NAME in disabled:
@@ -94,6 +112,18 @@ def _turns_on(home: Path, has_copy: bool) -> bool:
         return PLUGIN_NAME in enabled
     # No allow-list: Hermes loads what's installed, so only a profile with a copy runs it.
     return has_copy
+
+
+def _version_key(version: str) -> Optional[tuple]:
+    try:
+        return tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return None
+
+
+def _newer(version: str, than: str) -> bool:
+    mine, theirs = _version_key(version), _version_key(than)
+    return mine is not None and theirs is not None and mine > theirs
 
 
 def _backup_target(home: Path, name: str, version: str) -> Path:
@@ -112,7 +142,7 @@ def _links_to(path: Path, shared: Path) -> bool:
         return False
 
 
-def sweep(root: Path, shared: Path, *, link: Callable[[Path, Path], None] = os.symlink) -> List[str]:
+def sweep(root: Path, shared: Path, *, link: Callable[[Path, Path], None] = _link_dir) -> List[str]:
     """Points every profile under ``root`` that turns the plugin on at
     ``shared``, the main install's folder. Returns what it changed, one line
     each, for the log and the tests."""
@@ -151,37 +181,102 @@ def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path,
             ours = child
         elif child.is_dir() and not child.is_symlink() and _manifest(child).get("name") == PLUGIN_NAME:
             copies.append(child)
-    if not _turns_on(home, bool(ours or copies)):
+    config = _config(home)
+    if config is None:
+        logger.info("Conduit plugin: couldn't read %s; leaving its plugins alone", home / "config.yaml")
         return changes
+    if not _turns_on(config, bool(ours or copies)):
+        return changes
+    own = [copy for copy in copies if not (copy / COPY_MARKER).exists()]
+    for copy in own:
+        if _newer(_manifest(copy).get("version", ""), version):
+            logger.info("Conduit plugin: profile %s runs its own newer copy (%s); leaving it",
+                        home.name, _manifest(copy).get("version"))
+            return changes
+    stale = []
     for copy in copies:
-        if (copy / COPY_MARKER).exists():
-            if copy == target and _manifest(copy).get("version") == version:
-                ours = copy  # our copy, current
-                continue
-            shutil.rmtree(copy)
-            changes.append(f"profile {home.name}: removed its outdated copy of the main install")
+        if copy in own:
             continue
-        backup = _backup_target(home, copy.name, _manifest(copy).get("version", ""))
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        copy.rename(backup)
-        changes.append(f"profile {home.name}: moved its own copy ({_manifest(backup).get('version') or 'no version'}) "
-                       f"to {BACKUP_DIR}/{backup.name}")
-    if ours is not None:
+        if copy == target and _manifest(copy).get("version") == version:
+            ours = copy  # our copy, current
+        else:
+            stale.append(copy)
+    if ours is not None and not own and not stale:
         return changes
-    if target.exists() or target.is_symlink():
+    if ours is None and (target.exists() or target.is_symlink()) and target not in copies:
         # Something else holds the name (not this plugin, or a link elsewhere): not ours to replace.
         logger.warning("Conduit plugin: profile %s has %s, which isn't the main install; leaving it", home.name, target)
         return changes
-    plugins.mkdir(parents=True, exist_ok=True)
+    _clear_incoming(home)
+    incoming = home / f"{_INCOMING}{os.getpid()}-{threading.get_ident()}"
+    made = None
+    if ours is None:
+        made = _make_incoming(shared, incoming, version, link)
     try:
-        link(shared, target)
-        changes.append(f"profile {home.name}: linked to the main install ({version})")
-    except OSError:
-        shutil.copytree(shared, target, ignore=_COPY_IGNORED)
-        (target / COPY_MARKER).write_text("Copied from the main install by the Conduit plugin; replaced on update.\n",
-                                          encoding="utf-8")
-        changes.append(f"profile {home.name}: copied the main install ({version}), as no link could be made")
+        for copy in own:
+            backup = _backup_target(home, copy.name, _manifest(copy).get("version", ""))
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            copy.rename(backup)
+            changes.append(f"profile {home.name}: moved its own copy ({_manifest(backup).get('version') or 'no version'}) "
+                           f"to {BACKUP_DIR}/{backup.name}")
+        for copy in stale:
+            shutil.rmtree(copy)
+            changes.append(f"profile {home.name}: removed its outdated copy of the main install")
+        if made is not None:
+            plugins.mkdir(parents=True, exist_ok=True)
+            try:
+                incoming.rename(target)
+            except OSError:
+                if _links_to(target, shared) or (target / COPY_MARKER).exists():
+                    return changes  # another sweep got there first
+                raise
+            changes.append(made)
+    finally:
+        _remove(incoming)
     return changes
+
+
+def _make_incoming(shared: Path, incoming: Path, version: str, link: Callable[[Path, Path], None]) -> str:
+    """Makes the link, or the copy where no link can be made, at ``incoming``."""
+    try:
+        link(shared, incoming)
+        if (incoming / "plugin.yaml").is_file():
+            return f"profile {incoming.parent.name}: linked to the main install ({version})"
+        _remove(incoming)  # a link that doesn't open as a folder loads nothing
+    except OSError:
+        _remove(incoming)
+    try:
+        shutil.copytree(shared, incoming, ignore=_COPY_IGNORED)
+        (incoming / COPY_MARKER).write_text("Copied from the main install by the Conduit plugin; replaced on update.\n",
+                                            encoding="utf-8")
+    except BaseException:
+        _remove(incoming)
+        raise
+    return f"profile {incoming.parent.name}: copied the main install ({version}), as no link could be made"
+
+
+def _remove(path: Path) -> None:
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    except OSError:
+        pass
+
+
+def _clear_incoming(home: Path) -> None:
+    """Removes what a sweep that died left behind. A recent one may still be in use."""
+    try:
+        leftovers = [p for p in home.iterdir() if p.name.startswith(_INCOMING)]
+    except OSError:
+        return
+    for path in leftovers:
+        try:
+            if time.time() - path.lstat().st_mtime > _INCOMING_STALE_SECONDS:
+                _remove(path)
+        except OSError:
+            pass
 
 
 def sweep_quietly(root: Any, shared: Any) -> List[str]:

@@ -2,6 +2,7 @@
 import importlib.util
 import os
 import pathlib
+import sys
 
 import pytest
 
@@ -148,3 +149,97 @@ def test_one_profile_that_fails_doesnt_stop_the_others(host, monkeypatch):
     monkeypatch.setattr(profile_copies, "_point_profile", flaky)
     assert profile_copies.sweep(root, shared) == ["profile b: linked to the main install (0.123.0)"]
     assert (b / "plugins" / "conduit_push").is_symlink()
+
+
+def test_links_are_made_as_folder_links(host, monkeypatch):
+    # Windows makes a file link unless told otherwise, and a file link to a folder loads nothing.
+    root, shared = host
+    _profile(root, "nahida", "plugins:\n  enabled: [conduit_push]\n")
+    calls = []
+    real = os.symlink
+
+    def symlink(source, target, target_is_directory=False):
+        calls.append(target_is_directory)
+        real(source, target, target_is_directory=target_is_directory)
+
+    monkeypatch.setattr(profile_copies.os, "symlink", symlink)
+    assert profile_copies.sweep(root, shared) == ["profile nahida: linked to the main install (0.123.0)"]
+    assert calls == [True]
+
+
+def test_a_link_that_doesnt_open_as_a_folder_falls_back_to_a_copy(host, tmp_path):
+    root, shared = host
+    home = _profile(root, "nahida", "plugins:\n  enabled: [conduit_push]\n")
+    (tmp_path / "a-file").write_text("not a folder")
+
+    def file_link(_source, target):
+        os.symlink(tmp_path / "a-file", target)
+
+    assert profile_copies.sweep(root, shared, link=file_link) == [
+        "profile nahida: copied the main install (0.123.0), as no link could be made"]
+    assert (home / "plugins" / "conduit_push" / profile_copies.COPY_MARKER).exists()
+
+
+def test_a_profiles_own_newer_copy_is_left_alone(host):
+    root, shared = host
+    home = _profile(root, "beta", "plugins:\n  enabled: [conduit_push]\n")
+    _plugin(home / "plugins" / "conduit_push", "0.124.1")
+    assert profile_copies.sweep(root, shared) == []
+    assert not (home / "plugins" / "conduit_push").is_symlink()
+    assert not (home / "plugins-backup").exists()
+
+
+def test_a_profile_whose_config_cant_be_read_is_left_alone(host):
+    root, shared = host
+    home = _profile(root, "broken", "plugins: [unclosed\n")
+    _plugin(home / "plugins" / "conduit-push", "0.1.0")
+    assert profile_copies.sweep(root, shared) == []
+    assert (home / "plugins" / "conduit-push" / "plugin.yaml").exists()
+
+
+def test_a_copy_that_fails_partway_leaves_the_profiles_own_copy_in_place(host, monkeypatch):
+    root, shared = host
+    home = _profile(root, "nahida", "plugins:\n  enabled: [conduit_push]\n")
+    _plugin(home / "plugins" / "conduit-push", "0.1.0")
+
+    def refuse(_source, _target):
+        raise OSError("no links here")
+
+    def disk_full(source, target, **kwargs):
+        pathlib.Path(target).mkdir()
+        (pathlib.Path(target) / "plugin.yaml").write_text("name: conduit_push\n")
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(profile_copies.shutil, "copytree", disk_full)
+    assert profile_copies.sweep(root, shared, link=refuse) == []
+    assert (home / "plugins" / "conduit-push" / "plugin.yaml").read_text().startswith("name: conduit_push\nversion: 0.1.0")
+    assert not (home / "plugins" / "conduit_push").exists()
+    assert not (home / "plugins-backup").exists()
+    assert not [p for p in home.iterdir() if p.name.startswith(profile_copies._INCOMING)]
+
+
+def test_what_a_dead_sweep_left_behind_is_cleared(host):
+    root, shared = host
+    home = _profile(root, "nahida", "plugins:\n  enabled: [conduit_push]\n")
+    old = _plugin(home / f"{profile_copies._INCOMING}1-1", "0.123.0")
+    recent = _plugin(home / f"{profile_copies._INCOMING}2-2", "0.123.0")
+    os.utime(old, (0, 0))
+    profile_copies.sweep(root, shared)
+    assert not old.exists() and recent.exists()
+    assert (home / "plugins" / "conduit_push").is_symlink()
+
+
+def test_the_plugin_points_profiles_only_from_the_main_home(host, monkeypatch):
+    from test_chat_on_screen import plugin  # loads the plugin package with Hermes stubbed
+
+    root, shared = host
+    _profile(root, "coder", "plugins:\n  enabled: [conduit_push]\n")
+    calls = []
+    monkeypatch.setattr(plugin.profile_copies, "sweep_quietly", lambda *args: calls.append(args))
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_default_hermes_root", lambda: root, raising=False)
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: root / "profiles" / "coder")
+    plugin._point_profiles_here()
+    assert calls == []
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: root)
+    plugin._point_profiles_here()
+    assert calls == [(root, pathlib.Path(plugin.__file__).parent)]
