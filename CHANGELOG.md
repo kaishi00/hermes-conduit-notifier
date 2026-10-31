@@ -13,6 +13,28 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.122.3 (2026-10-31)
+
+### Fixes
+- Pulse no longer makes a card out of a command that failed harmlessly.
+  A command that ends with a non-zero exit while nothing went wrong, like a
+  file search that found nothing with its errors silenced, is left out of
+  what Pulse reads, and so is a call that went through when it ran again.
+  A failure that says what went wrong, like a traceback, still shows, now
+  with the line that says it.
+
+## 0.122.2 (2026-10-31)
+
+### Fixes
+- Every Hermes profile that has Conduit turned on now runs this version.
+  Before, a profile made by cloning another kept the plugin it was cloned
+  with, so its notifications missed the chat's name and tapping one opened
+  nothing. A profile turned on without its own copy sent no notifications
+  at all. Each one is linked to the main install when the dashboard starts,
+  and an old copy is kept in the profile's plugins-backup folder. A profile
+  that runs its own gateway picks it up when that gateway restarts, and
+  may fail until then, so restart it after updating.
+
 ## 0.122.1 (2026-10-30)
 
 ### Fixes

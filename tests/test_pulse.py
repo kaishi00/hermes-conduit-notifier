@@ -77,6 +77,7 @@ cli = _load("conduit_push.cli", ROOT / "cli.py")
 host = _load("conduit_push.pulse_host", ROOT / "pulse_host.py")
 ledger = _load("conduit_push.pulse_ledger", ROOT / "pulse_ledger.py")
 report = _load("conduit_push.pulse_report", ROOT / "pulse_report.py")
+candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
 memory = _load("conduit_push.pulse_memory", ROOT / "pulse_memory.py")
 
 SID = "20261019_165824_560887"  # a Conduit chat's stored id, as Eric's host showed it
@@ -1022,6 +1023,84 @@ def test_urls_lose_their_credentials(recording):
 def test_a_digest_line_has_no_control_characters():
     row = {"tool": "t", "action": "", "label": "a\x1b[31mred", "status": "error", "error": "x\x07", "ids_json": "{}"}
     assert ledger.line(row) == "t 'a[31mred' → error: x"
+
+
+def _terminal(home, command, output, exit_code, now):
+    """A terminal call as Hermes hands it over: a bare non-zero exit gets a
+    localized ``exit N`` and no error in the result."""
+    ledger.record(home, tool_name="terminal", args={"command": command}, now=now, status="error",
+                  error_type="tool_error", error_message=f"exit {exit_code}",
+                  result=json.dumps({"output": output, "exit_code": exit_code, "error": None}))
+
+
+def _failed(live):
+    from datetime import timezone
+    return report.failed_calls(live.store, 0, timezone.utc)
+
+
+def test_a_harmless_non_zero_exit_is_left_out_of_failed_calls(recording):
+    home = pulse.get_hermes_home()
+    _terminal(home, "head -5 notes.md; ls data/*.db 2>/dev/null", "# Notes\n- buy milk\n- call mum", 2, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert row["error"] == "exit 2: - call mum"
+    assert ledger.harmless_exit(row) and _failed(recording) == ""
+
+
+def test_a_traceback_stays_in_failed_calls_with_its_exception(recording):
+    home = pulse.get_hermes_home()
+    output = ("fetching listings\nTraceback (most recent call last):\n  File \"scrape.py\", line 12, in <module>\n"
+              "urllib3.exceptions.NameResolutionError: Failed to resolve 'example.com'\n")
+    _terminal(home, "python3 scrape.py", output, 1, DAY)
+    [row] = recording.store.recent_outcomes()
+    assert row["error"] == "exit 1: urllib3.exceptions.NameResolutionError: Failed to resolve 'example.com'"
+    assert not ledger.harmless_exit(row)
+    assert "→ error: exit 1: urllib3.exceptions.NameResolutionError" in _failed(recording)
+
+
+def test_a_long_failure_line_keeps_its_mark():
+    error = ledger.terminal_failure({"output": "x" * 400 + " permission denied", "exit_code": 1, "error": None})
+    assert error.startswith("exit 1: …x") and error.endswith("permission denied") and len(error) <= ledger.MAX_ERROR
+
+
+@pytest.mark.parametrize("result, expected", [
+    ({"output": "", "exit_code": 3, "error": None}, "exit 3, no output"),
+    ({"output": "fine", "exit_code": 0, "error": None}, None),
+    ({"output": "", "exit_code": -1, "error": "Command timed out"}, None),  # Hermes's own error stands
+    ({"output": "x", "exit_code": True}, None),
+    ("plain text", None),
+])
+def test_terminal_failure(result, expected):
+    assert ledger.terminal_failure(json.dumps(result) if isinstance(result, dict) else result) == expected
+
+
+def test_a_bare_exit_stays_in_failed_calls(recording):
+    """Nothing to judge it by, so it isn't dropped; the report's prompt
+    says a bare exit isn't news on its own."""
+    _terminal(pulse.get_hermes_home(), "test -f done.flag", "", 1, DAY)
+    assert "→ error: exit 1, no output" in _failed(recording)
+    row = {"tool": "terminal", "status": "error", "error": "exit 2"}  # recorded before outputs were kept
+    assert not ledger.harmless_exit(row)
+    assert "a bare non-zero exit" in candidates.INSTRUCTIONS
+
+
+def test_a_call_that_later_went_through_is_left_out(recording):
+    home = pulse.get_hermes_home()
+    output = "Traceback (most recent call last):\nConnectionError: network down"
+    _terminal(home, "python3 scrape.py", output, 1, DAY)
+    _terminal(home, "python3 other.py", output, 1, DAY + 1)
+    ledger.record(home, tool_name="terminal", args={"command": "python3 scrape.py"}, status="ok",
+                  result=json.dumps({"output": "done", "exit_code": 0, "error": None}), now=DAY + 60)
+    failed = _failed(recording)
+    assert "other.py" not in failed  # labels aren't commands; count the lines instead
+    assert failed.count("\n- ") == 1
+
+
+def test_a_failure_after_the_call_went_through_still_counts(recording):
+    home = pulse.get_hermes_home()
+    ledger.record(home, tool_name="terminal", args={"command": "python3 scrape.py"}, status="ok",
+                  result=json.dumps({"output": "done", "exit_code": 0, "error": None}), now=DAY)
+    _terminal(home, "python3 scrape.py", "Traceback (most recent call last):\nConnectionError: down", 1, DAY + 60)
+    assert "ConnectionError: down" in _failed(recording)
 
 
 @pytest.mark.parametrize("value, expected", [

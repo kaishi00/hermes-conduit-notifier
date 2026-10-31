@@ -25,12 +25,31 @@ In Hermes Conduit, open **Settings > Notifications**, enable notifications, and 
 hermes conduit-push pair XXXXX-XXXXX
 ```
 
-Pair additional profiles independently:
+Pair additional profiles independently. Turn the plugin on for the profile,
+restart the main gateway, whose copy of the plugin links the profile to it,
+then restart the profile's own gateway if it runs one, so its chats load it:
 
 ```bash
 hermes -p coder plugins enable conduit_push
+hermes gateway restart
+hermes -p coder gateway restart
 hermes -p coder conduit-push pair YYYYY-YYYYY
 ```
+
+A profile's chats load plugins from that profile's own `plugins/` folder
+only, so with plugin 0.122.2+ the dashboard links every profile that turns
+the plugin on to the main install (`~/.hermes/plugins/conduit_push`) when it
+starts, and again when Conduit updates the plugin; the main gateway does
+the same when it loads the plugin. Every profile then runs the version you
+updated to. A profile with its own gateway runs it once that gateway
+restarts, and until then may fail or mix versions, so restart it after an
+update. As the profile's folder is a link, `hermes -p <name> plugins remove
+conduit_push` removes only the link, and `plugins update` updates the main
+install. A copy a profile had of its own (`hermes profile
+create --clone` copies the plugins folder) is moved to the profile's
+`plugins-backup/` folder, never deleted, unless it's newer than the main
+install, which leaves the profile alone. Where the host can't make a link,
+the main install is copied in instead and replaced at the next update.
 
 Pairing codes expire after ten minutes and can only be claimed once.
 
@@ -215,10 +234,17 @@ next launch, and Conduit asks the user once whether to send it. Send posts
 the diagnostic (call stacks, exception and termination codes, version, build,
 iOS version and device model; never an exception's message text) to
 `POST /v1/crash-reports` on the developer's relay (`push.milim.dev`), even
-when the user's notifications use another relay. A post holds at most
-600,000 characters, and the relay keeps only the diagnostic keys it names
+when the user's notifications use another relay. A report can also carry a
+chat trace (relay 0.25+): the lines Conduit's chat screen recorded just
+before (sizes, offsets, row counts and what moved the chat; never message
+text), at most 2,000 lines of at most 160 characters, each only letters,
+digits, spaces and `()._,:;+=<>/#%[]-`. A user who sees a chat jump or stop
+responding sends the trace on its own from Settings > Connection >
+Diagnostics & logs (kind `chat`), and the trace says what saved it: `jump`,
+`stall`, `storm`, `rebuild` or `manual`. The relay answers a post whose trace it kept with `"trace": true`, so the app deletes its copy only then. A post holds at most 1,000,000
+characters, and the relay keeps only the diagnostic keys it names
 (metadata codes, exception type and name, stack frames, 512 levels of a
-stack), at most 600,000 bytes of them, so the folder stays under about 600 MB. The relay keeps each as a file under
+stack), at most 600,000 bytes of them, with the trace, so the folder stays under about 1 GB. The relay keeps each as a file under
 `data/crash-reports/`, at most 1,000 and for 90 days, and takes at most 10
 an hour from one address and 500 a day in all. The route takes posts from
 anyone, so a flood from many addresses can spend the day's 500 or push the
@@ -297,7 +323,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | GET | `/v1/rings/:id/session` | The Watch fetches it, waiting up to `?wait=20` seconds (0.11+; the ring's token as the bearer) |
 | POST | `/v1/rings/:id/control` | The phone or the Watch mutes, unmutes or ends a call the Watch answered that stays on the phone's headset (0.17+; the ring's token) |
 | GET | `/v1/rings/:id/control` | Either reads the other's change past `?after=` its last seq, waiting up to `?wait=20` seconds (0.17+; the ring's token as the bearer) |
-| POST | `/v1/crash-reports` | A crash or freeze report from Conduit, no credential (0.24+, capability `crash-reports`; see "Crash and freeze reports") |
+| POST | `/v1/crash-reports` | A crash or freeze report from Conduit, or a chat trace on its own (0.25+), no credential (0.24+, capability `crash-reports`; see "Crash and freeze reports") |
 | GET | `/v1/crash-reports`, `/v1/crash-reports/:id` | List reports (`?build=`) or read one (`CRASH_REPORTS_TOKEN` as the bearer) |
 
 Watch tool grants carry an Apple Watch call's lookups while the Watch can't

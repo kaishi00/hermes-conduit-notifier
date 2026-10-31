@@ -16,7 +16,8 @@ from hermes_constants import get_hermes_home
 
 from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity,
-               location_tool, maps_tool, notify_tool, phone_tool, present_tool, pulse, reply_sources, review_notices,
+               location_tool, maps_tool, notify_tool, phone_tool, present_tool, profile_copies, pulse, reply_sources,
+               review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
                room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
@@ -58,6 +59,9 @@ PARENT_TURN_MAX_S = 6 * 3600.0
 def register(ctx: Any) -> None:
     global _profile
     _profile = ctx.profile_name
+    # Every profile that turns the plugin on runs this copy from its next
+    # load (profile_copies, hermes-conduit#1538).
+    _point_profiles_here()
     # Background work belongs to this load: unloading the plugin (disable,
     # reload) stops it. A Hermes without on_unload keeps it until exit.
     client.start()
@@ -200,6 +204,19 @@ def register(ctx: Any) -> None:
         handler_fn=dispatch,
         description="Manage the profile-scoped Conduit push notification pairing.",
     )
+
+
+def _point_profiles_here() -> None:
+    """profile_copies.sweep, when this is the main home's copy."""
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        root = Path(get_default_hermes_root())
+        if Path(get_hermes_home()).resolve() != root.resolve():
+            return
+    except Exception:  # noqa: BLE001 — an older Hermes has one home, and no profiles to point
+        return
+    profile_copies.sweep_quietly(root, Path(__file__).parent)
 
 
 def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:

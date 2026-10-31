@@ -7,7 +7,9 @@ action, a short label, the status Hermes worked out (ok or error, with the
 error type), and the identifiers the result returned (a reminder or event
 id, a cron job id, a path, a URL), so a later item can link to it by
 evidence instead of wording. The output itself is not kept, and no model is
-involved.
+involved; a failed terminal command keeps one line of it as its error, the
+line that says what went wrong (or the last, when none does), so a report
+can tell a real failure from a harmless non-zero exit.
 
 Recorded only while Pulse is on.
 """
@@ -35,6 +37,15 @@ MAX_IDS = 8
 MAX_ID_LEN = 160
 MAX_LABEL = 80
 MAX_ERROR = 200
+# A line of a failed command's output that says something went wrong. A
+# failure whose kept line has none of these (``exit 2: notes.md``) is a
+# command that exited non-zero with nothing wrong to show, like an ``ls``
+# of a glob that matched nothing with its stderr silenced.
+FAILURE_MARK = re.compile(
+    r"traceback|error|exception|fatal|fail|denied|not found|no such|refused|timed out|timeout|cannot|can't|"
+    r"unable|panic|killed|segmentation fault|abort|invalid|forbidden|unauthori[sz]ed|unreachable", re.I)
+EXIT_LINE = re.compile(r"exit -?\d+: (.*)", re.S)
+NO_OUTPUT = "no output"
 # The ledger write runs inside the tool call: under contention it gives up
 # quickly instead of holding the call up.
 WRITE_BUSY_TIMEOUT_S = 0.5
@@ -185,6 +196,43 @@ def describe_call(args: Any) -> tuple[str, str, str]:
     return action, label, hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+def terminal_failure(result: Any) -> Optional[str]:
+    """A failed terminal command's error, ``exit 2: <line>``, from its result
+    (``output``/``exit_code``/``error``); None when it didn't fail or has an
+    error of its own. Hermes words a bare non-zero exit in the user's language
+    and leaves the output out, so this is worked out here."""
+    parsed = _parsed(result)
+    if not isinstance(parsed, dict) or parsed.get("error"):
+        return None
+    code = parsed.get("exit_code")
+    if isinstance(code, bool) or not isinstance(code, int) or code == 0:
+        return None
+    output = parsed.get("output")
+    lines = [part.strip() for part in output.splitlines() if part.strip()] if isinstance(output, str) else []
+    if not lines:
+        return f"exit {code}, {NO_OUTPUT}"
+    marked = [(part, mark) for part in lines if (mark := FAILURE_MARK.search(part))]
+    if marked:
+        # The last marked line is the exception under a traceback; a long one
+        # is kept from just before its mark, so the mark survives the cut.
+        part, mark = marked[-1]
+        start = max(0, mark.start() - 60)
+        excerpt = ("…" if start else "") + part[start:]
+    else:
+        excerpt = lines[-1]
+    return _short(f"exit {code}: {excerpt}", MAX_ERROR)
+
+
+def harmless_exit(row: dict[str, Any]) -> bool:
+    """A terminal command that exited non-zero while its output shows
+    nothing wrong. A bare exit with no output kept (or from before outputs
+    were kept) isn't one: there's nothing to judge it by."""
+    if row.get("tool") != "terminal" or row.get("status") != "error":
+        return False
+    match = EXIT_LINE.fullmatch(row.get("error") or "")
+    return bool(match) and not FAILURE_MARK.search(match.group(1))
+
+
 def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, session_id: Any = None,
            turn_id: Any = None, task_id: Any = None, tool_call_id: Any = None, status: Any = None,
            error_type: Any = None, error_message: Any = None, duration_ms: Any = 0,
@@ -202,6 +250,8 @@ def record(home: Path, *, tool_name: Any, args: Any = None, result: Any = None, 
         status = "error" if failed else "ok"
         if failed and not error_message:
             error_message = parsed.get("error")
+    if status == "error" and tool == "terminal":
+        error_message = terminal_failure(result) or error_message
     action, label, digest = describe_call(args)
     pulse_store = _store(home)
     pulse_store.add_outcome({

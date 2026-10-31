@@ -607,7 +607,18 @@ def ended_section(pulse_store: store.PulseStore, events: Sequence[dict], zone: t
 
 
 def failed_calls(pulse_store: store.PulseStore, since: float, zone: tzinfo) -> str:
-    rows = [row for row in pulse_store.recent_outcomes(500) if row["at"] >= since and row["status"] == "error"]
+    """Tool calls that failed since ``since``, leaving out the ones nothing
+    went wrong in: a command that exited non-zero with no error in its output
+    (pulse_ledger.harmless_exit), and a call that later went through as the
+    very same call (same tool and arguments)."""
+    recent = [row for row in pulse_store.recent_outcomes(500) if row["at"] >= since]
+    went_through: dict[tuple[str, str], float] = {}
+    for row in recent:
+        if row["status"] == "ok" and row.get("args_digest"):
+            key = (row["tool"], row["args_digest"])
+            went_through[key] = max(went_through.get(key, 0.0), row["at"])
+    rows = [row for row in recent if row["status"] == "error" and not ledger.harmless_exit(row)
+            and went_through.get((row["tool"], row.get("args_digest") or ""), 0.0) <= row["at"]]
     if not rows:
         return ""
     lines = [f"- {ledger.line(row)}" for row in rows[:MAX_FAILURES]]
