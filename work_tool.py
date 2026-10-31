@@ -484,10 +484,14 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     how = args.get("how") if args.get("how") in ("auto", "add", "after") else "auto"
     words = FOLLOW_UP.format(bot=_bot_name(home), text=text)
     item = store.outbox_add(work.ref, "send", work.session_id, words)
+    # Marked running first: a turn that ends before the send returns then
+    # settles the row, and nothing after the send puts it back.
+    store.update(work.ref, status="running", closed_at=0.0, error="")
     try:
         outcome, tip = broker.send(work.session_id, words, how)
     except work_broker.BrokerError as error:
         store.outbox_done(item, "refused")
+        store.update(work.ref, status=work.status, closed_at=work.closed_at, error=work.error, only_if=("running",))
         if error.not_owned:
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "open_elsewhere",
                     "note": f"{work.ref} is open in another Hermes window, which holds it. Nothing was sent; the "
@@ -495,10 +499,8 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
         return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
                 "note": f"Hermes refused: {error}"}
     store.outbox_done(item, "accepted" if outcome != "queued" else "queued")
-    fields: dict[str, Any] = {"status": "running", "closed_at": 0.0, "error": ""}
     if tip and tip != work.session_id:
-        fields["session_id"] = tip
-    store.update(work.ref, **fields)
+        store.update(work.ref, session_id=tip)
     said = {"started": "It's working on it now.", "redirected": "It took it into the turn it was working on.",
             "steered": "It added it to the turn it's working on.",
             "queued": "It's queued: it runs when the current turn ends."}[outcome]
@@ -586,7 +588,10 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         names = [called for called, _ in pulse_tools.called(args)] or [name]
     if all(called in allowed for called in names):
         return None  # allowed in any chat: which one this is doesn't matter
-    titled = _titled_bot_chat(session_id, home)
+    has_id = isinstance(session_id, str) and session_id.strip()
+    # A call that names no chat might be the coordinator's: held like one
+    # whose title can't be read.
+    titled = _titled_bot_chat(session_id, home) if has_id else None
     if titled is False:
         return None
     for called in names:
@@ -713,8 +718,9 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     """Hermes says a turn ended (on_session_end, after post_llm_call): the
     workstream's row is settled with the reply it gave, as done, or as
     failed when Hermes says the turn failed (its text is then the error), and
-    its coordinator is told. An interrupted turn is left alone: a stop marked
-    it, and a redirect goes on. True when the session is a workstream."""
+    its coordinator is told. An interrupted turn leaves it interrupted (a
+    stop marked it stopped first; a redirect's next turn settles it). True
+    when the session is a workstream."""
     if not isinstance(session_id, str):
         return False
     with _wake_lock:
@@ -723,25 +729,39 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     if work is None or home is None:
         return False
     store = work_store.Store(home)
-    if interrupted or work.status == "stopped":
-        if text and work.status == "stopped":
+    if work.status == "stopped":
+        if text:
             store.update(work.ref, last_result=text)
         return True
-    if work.status not in ("starting", "running", "needs_you"):
+    if work.status not in _SETTLES:
         return True  # already settled: the same end reported again
+    if interrupted:
+        # Not a work_stop: a redirect's next turn settles it, and one the user
+        # stopped from the chat itself stays interrupted, its slot free.
+        store.update(work.ref, status="interrupted", only_if=_SETTLES)
+        return True
     if failed:
-        store.update(work.ref, status="failed", error=_cut(text, 300) if text else "its turn failed")
+        fields = {"status": "failed", "error": _cut(text, 300) if text else "its turn failed"}
         line = f"- {work.ref} “{work.title}” failed" + (f": {_cut(text, 300)}" if text else "") \
             + " (work_read shows what it did)."
     elif text:
-        store.update(work.ref, status="done", last_result=text, error="")
+        fields = {"status": "done", "last_result": text, "error": ""}
         line = f"- {work.ref} “{work.title}” finished. Its report: {_cut(text, 1200)}"
     else:
-        store.update(work.ref, status="done", error="")
+        fields = {"status": "done", "error": ""}
         line = f"- {work.ref} “{work.title}” finished without a report (work_read shows what it did)."
+    # Only while it's still active: a stop that came meanwhile wins.
+    settled = store.update(work.ref, only_if=_SETTLES, **fields)
+    if settled is None or settled.status != fields["status"]:
+        return True
     if not work.closed_at and work.coordinator:
         _queue_wake(home, work.coordinator, line)
     return True
+
+
+# The states a turn's end settles: working, waiting on the user, or a turn
+# interrupted by a redirect whose next turn is this one.
+_SETTLES = ("starting", "running", "needs_you", "interrupted")
 
 
 def needs_you(session_id: Any, description: Any = None) -> None:

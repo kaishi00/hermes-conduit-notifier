@@ -598,10 +598,20 @@ def test_a_turn_end_after_its_reply_changes_nothing(on, hermes):
     assert len([c for c in hermes.named("prompt.submit") if c[1].get("display_kind") == "hidden"]) == 1
 
 
-def test_an_interrupted_turn_is_left_to_the_stop(on, hermes):
+def test_a_turn_interrupted_outside_work_stop_frees_its_slot(on, hermes):
     start()
     work.turn_finished("20261031_work_1", failed=False, interrupted=True)
-    assert on.get("W1").status == "running"
+    assert on.get("W1").status == "interrupted" and on.running_count() == 0
+
+
+def test_a_redirects_next_turn_settles_the_interrupted_row(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_finished("20261031_work_1", failed=False, interrupted=True)
+    work.turn_ended("20261031_work_1", "Done the new way.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.flush_wakes()
+    assert on.get("W1").status == "done" and on.get("W1").last_result == "Done the new way."
 
 
 def test_the_plugins_session_end_hook_settles_a_failed_workstream_without_a_push(on, hermes, monkeypatch):
@@ -779,3 +789,51 @@ def test_allowed_tools_skip_the_title_read(on, hermes, monkeypatch):
     monkeypatch.setattr(titles, "read_or_raise", locked)
     assert work.tool_block(OTHER_CHAT, "work_list", {}) is None
     assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "work_list", "arguments": {}}) is None
+
+
+def test_a_stop_that_lands_before_the_settle_wins(on, hermes, monkeypatch):
+    start()
+    real = work._workstream
+
+    def stopped_meanwhile(session_id, home=None):
+        found = real(session_id, home)
+        on.update("W1", status="stopped")
+        return found
+
+    monkeypatch.setattr(work, "_workstream", stopped_meanwhile)
+    work.turn_ended("20261031_work_1", "Finished.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").status == "stopped" and not work._wakes
+
+
+def test_a_send_whose_turn_ends_before_it_returns_stays_settled(on, hermes, monkeypatch):
+    start()
+    on.update("W1", status="done")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    submit = hermes.prompt_submit
+
+    def quick(params):
+        answer = submit(params)
+        work.turn_ended("20261031_work_1", "Quick answer.")
+        work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+        return answer
+
+    monkeypatch.setattr(hermes, "prompt_submit", quick)
+    assert call("work_send", {"ref": "W1", "text": "One more thing"})["ok"]
+    assert on.get("W1").status == "done" and on.get("W1").last_result == "Quick answer."
+
+
+def test_a_refused_send_puts_the_row_back(on, hermes):
+    start()
+    on.update("W1", status="done", closed_at=5.0)
+    hermes._sessions.clear()
+    hermes.refuse["session.resume"] = {"code": 4000, "message": "no"}
+    assert call("work_send", {"ref": "W1", "text": "More"})["error"] == "hermes"
+    row = on.get("W1")
+    assert row.status == "done" and row.closed_at == 5.0
+
+
+@pytest.mark.parametrize("session_id", [None, "", "  "])
+def test_a_call_naming_no_chat_keeps_to_the_policy(on, hermes, session_id):
+    assert work.tool_block(session_id, "terminal", {}) == {"action": "block", "message": work.CHECK_FAILED}
+    assert work.tool_block(session_id, "work_list", {}) is None
