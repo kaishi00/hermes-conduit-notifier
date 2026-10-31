@@ -243,6 +243,16 @@ class LiveActivityReporter:
         ratio = min(used * 100 / limit, 100.0)
         self._update(session_id, context=max(0, round(ratio)))
 
+    def has_running_turn(self, session_id: str) -> bool:
+        """Whether a turn started for this session (or the one a compaction
+        moved it from) and hasn't ended."""
+        if not session_id:
+            return False
+        session_id = self._turn_id(session_id, recheck=True)
+        with self._lock:
+            turn = self._turns.get(session_id)
+            return turn is not None and turn.end is None
+
     def turn_ended(self, session_id: str, outcome: str) -> None:
         if not session_id or outcome not in ENDS:
             return
