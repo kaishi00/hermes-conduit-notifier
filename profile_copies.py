@@ -212,11 +212,13 @@ def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path,
     made = None
     if ours is None:
         made = _make_incoming(shared, incoming, version, link)
+    moved: List[tuple] = []
     try:
         for copy in own:
             backup = _backup_target(home, copy.name, _manifest(copy).get("version", ""))
             backup.parent.mkdir(parents=True, exist_ok=True)
             copy.rename(backup)
+            moved.append((backup, copy))
             changes.append(f"profile {home.name}: moved its own copy ({_manifest(backup).get('version') or 'no version'}) "
                            f"to {BACKUP_DIR}/{backup.name}")
         for copy in stale:
@@ -229,6 +231,9 @@ def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path,
             except OSError:
                 if _links_to(target, shared) or (target / COPY_MARKER).exists():
                     return changes  # another sweep got there first
+                for backup, copy in moved:  # put the profile's own copy back rather than leave it with none
+                    if not (copy.exists() or copy.is_symlink()):
+                        backup.rename(copy)
                 raise
             changes.append(made)
     finally:
@@ -258,7 +263,10 @@ def _make_incoming(shared: Path, incoming: Path, version: str, link: Callable[[P
 def _remove(path: Path) -> None:
     try:
         if path.is_symlink() or path.is_file():
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError:
+                os.rmdir(path)  # Windows removes a folder link with rmdir
         elif path.is_dir():
             shutil.rmtree(path)
     except OSError:

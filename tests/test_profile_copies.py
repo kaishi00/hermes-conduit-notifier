@@ -243,3 +243,21 @@ def test_the_plugin_points_profiles_only_from_the_main_home(host, monkeypatch):
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: root)
     plugin._point_profiles_here()
     assert calls == [(root, pathlib.Path(plugin.__file__).parent)]
+
+
+def test_a_swap_that_fails_at_the_end_puts_the_profiles_own_copy_back(host, monkeypatch):
+    root, shared = host
+    home = _profile(root, "nahida", "plugins:\n  enabled: [conduit_push]\n")
+    _plugin(home / "plugins" / "conduit_push", "0.1.0")
+    real = pathlib.Path.rename
+
+    def rename(self, target):
+        if self.name.startswith(profile_copies._INCOMING):
+            raise PermissionError("in use")
+        return real(self, target)
+
+    monkeypatch.setattr(pathlib.Path, "rename", rename)
+    assert profile_copies.sweep(root, shared) == []
+    copy = home / "plugins" / "conduit_push"
+    assert not copy.is_symlink() and "0.1.0" in (copy / "plugin.yaml").read_text()
+    assert not list((home / "plugins-backup").iterdir())

@@ -40,7 +40,8 @@ A profile's chats load plugins from that profile's own `plugins/` folder
 only, so with plugin 0.122.2+ the dashboard links every profile that turns
 the plugin on to the main install (`~/.hermes/plugins/conduit_push`) when it
 starts, and again when Conduit updates the plugin. Every profile then runs
-the version you updated to. A copy a profile had of its own (`hermes profile
+the version you updated to (a profile with its own gateway once that
+gateway restarts). A copy a profile had of its own (`hermes profile
 create --clone` copies the plugins folder) is moved to the profile's
 `plugins-backup/` folder, never deleted, unless it's newer than the main
 install, which leaves the profile alone. Where the host can't make a link,
