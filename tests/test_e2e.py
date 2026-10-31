@@ -1047,3 +1047,16 @@ def test_a_plaintext_slot_is_keyed_even_without_redaction(monkeypatch):
     client.send_now({"event_id": "response:3", "type": "response.ready", "session_id": "s", "slot": slot, "body": "Hi"})
     assert sent[0]["slot"] != slot and len(sent[0]["slot"]) == 16
     assert sent[0]["body"] == "Hi"
+
+
+def test_a_slot_that_cant_be_keyed_still_lets_the_push_go(monkeypatch):
+    state = _state()
+    del state["e2e"]
+    sent = _capture(monkeypatch, state)
+
+    def unwritable(_state):
+        raise OSError("read-only profile")
+    monkeypatch.setattr(client, "_redact_key", unwritable)
+    slot = sys.modules["conduit_push.events"].slot_token("cron:default:daily")
+    client.send_now({"event_id": "response:4", "type": "response.ready", "session_id": "s", "slot": slot, "body": "Hi"})
+    assert sent[0]["body"] == "Hi" and "slot" not in sent[0]

@@ -383,7 +383,15 @@ def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         plain = {key: value for key, value in event.items() if key != "private"}
         # A slot (#1579) is keyed with the local secret, so the relay can't
         # check a guessed conduit_notify key against it.
-        return _keyed_slot(plain, _redact_key(state)) if plain.get("slot") else plain
+        if not plain.get("slot"):
+            return plain
+        try:
+            return _keyed_slot(plain, _redact_key(state))
+        except OSError as error:
+            # The secret couldn't be saved: the push still goes, adding a
+            # notification instead of replacing one.
+            logger.warning("Conduit notification slot could not be keyed; sending it without one: %s", error)
+            return {key: value for key, value in plain.items() if key != "slot"}
     keys = None
     try:
         keys = e2e.keys_from_state(state)
