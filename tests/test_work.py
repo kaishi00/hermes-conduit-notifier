@@ -1334,3 +1334,24 @@ def test_a_broken_pipe_points_stdout_at_devnull(home, monkeypatch, tmp_path):
     os.write(fd, b"after the reader left")
     os.close(fd)
     assert out.read_bytes() == b""
+
+
+def test_a_reader_that_left_is_caught_at_the_flush(home, monkeypatch, tmp_path):
+    import os
+
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
+    fd = os.open(tmp_path / "out", os.O_WRONLY | os.O_CREAT)
+
+    def gone():
+        raise BrokenPipeError
+
+    monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(fileno=lambda: fd, flush=gone,
+                                                             write=lambda text: len(text)))
+    assert cli._work(types.SimpleNamespace(work_action="status", policy=None, max_running=None)) == 0
+    os.close(fd)
+
+
+def test_the_digest_names_each_tools_arguments(on, hermes):
+    text = work.digest(BOT_CHAT)
+    assert 'work_list takes {"filter": ...}' in text and "work_list, work_read" not in text

@@ -9,6 +9,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -411,13 +412,15 @@ def _work(args: argparse.Namespace) -> int:
             # Never turned on: said so without leaving a registry behind.
             print("Bot workstreams: off (never turned on). `hermes conduit-push work on` to start them for this "
                   "bot.")
-            return 0
-        return _work_on_registry(work_store.Store(home), args, action)
+            code = 0
+        else:
+            code = _work_on_registry(work_store.Store(home), args, action)
+        # Flushed here, where a reader that left raises inside this guard
+        # rather than at the interpreter's exit.
+        sys.stdout.flush()
+        return code
     except BrokenPipeError:
         # Piped into head: the reader left, and nothing more is printed.
-        import os
-        import sys
-
         null = os.open(os.devnull, os.O_WRONLY)
         os.dup2(null, sys.stdout.fileno())
         os.close(null)

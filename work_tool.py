@@ -987,7 +987,8 @@ def digest(session_id: Any) -> Optional[str]:
              + "If the work tools aren't listed, call them through tool_call with their name and arguments, "
              'like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": "Find out '
              'why the login page is slow."}} or tool_call {"name": "work_send", "arguments": {"ref": "W1", '
-             '"text": "Also check the logs."}}; work_list, work_read, work_stop and work_close take {"ref": ...}.')
+             '"text": "Also check the logs."}}; work_read, work_stop and work_close take {"ref": "W1"}, and work_list takes '
+             '{"filter": ...} or {"query": ...} or nothing.')
     if reason:
         rules = f"Bot workstreams can't run here: {reason}"
     body = "\n".join(lines) if lines else "- none open"
@@ -1031,6 +1032,9 @@ def _send_wake(home: Path, coordinator: str) -> None:
             _wake_held[key] = held_since or now
             retry.start()
         return
+    # A turn that starts between the check and the send still gets this
+    # queued into it (the window is small); the hold narrows the duplicate
+    # Hermes makes of it rather than closing it.
     store = work_store.Store(home)
     text = WAKE.format(lines="\n".join(lines))
     item = store.outbox_add("", "wake", coordinator, text)
