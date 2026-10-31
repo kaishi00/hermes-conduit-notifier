@@ -51,6 +51,12 @@ LOOKUPS = STRICT | frozenset({"session_search", "web_search", "web_extract", "sk
 # Hermes' own bot-to-bot message: a coordinator gives other bots work with work_ask.
 MESSAGE_AGENT = "message_agent"
 WAKE_BATCH_S = 3.0
+# A work update waits while the Bot Chat runs a turn: Hermes keeps a prompt
+# queued at a busy session in the running turn's history and then runs it
+# again as its own turn, so the coordinator would hear it twice. Checked
+# this often, for at most this long, then sent queued anyway.
+WAKE_BUSY_RETRY_S = 2.0
+WAKE_BUSY_MAX_S = 600.0
 DIGEST_ITEMS = 12
 DIGEST_RESULT_CHARS = 240
 READ_MESSAGES = 12
@@ -994,9 +1000,24 @@ def _queue_wake(home: Path, coordinator: str, line: str) -> None:
 
 
 def _send_wake(home: Path, coordinator: str) -> None:
+    key = (str(home), coordinator)
     with _wake_lock:
-        lines, _ = _wakes.pop((str(home), coordinator), ([], None))
+        lines, _ = _wakes.pop(key, ([], None))
+        held_since = _wake_held.pop(key, None)
     if not lines:
+        return
+    now = time.monotonic()
+    if _coordinator_busy(home, coordinator) and now - (held_since or now) < WAKE_BUSY_MAX_S:
+        with _wake_lock:
+            # Lines queued meanwhile join these; their own timer (if any) finds them gone.
+            more, timer = _wakes.pop(key, ([], None))
+            if timer is not None:
+                timer.cancel()
+            retry = threading.Timer(WAKE_BUSY_RETRY_S, _send_wake, args=(home, coordinator))
+            retry.daemon = True
+            _wakes[key] = (lines + more, retry)
+            _wake_held[key] = held_since or now
+            retry.start()
         return
     store = work_store.Store(home)
     text = WAKE.format(lines="\n".join(lines))
@@ -1009,6 +1030,18 @@ def _send_wake(home: Path, coordinator: str) -> None:
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
 
 
+# When each held update first found its Bot Chat busy.
+_wake_held: dict[tuple[str, str], float] = {}
+
+
+def _coordinator_busy(home: Path, coordinator: str) -> bool:
+    try:
+        found = work_broker.Broker(home).live(coordinator)
+    except Exception:  # noqa: BLE001 — unknown: sent as before
+        return False
+    return bool(found and found[1].get("running"))
+
+
 def stop() -> None:
     """The plugin unloads: batched wakes are dropped with their timers
     rather than sent through a plugin on its way out. The Bot Chat's next
@@ -1016,6 +1049,7 @@ def stop() -> None:
     with _wake_lock:
         pending = list(_wakes.values())
         _wakes.clear()
+        _wake_held.clear()
         _replies.clear()
         _redirecting.clear()
     for _, timer in pending:

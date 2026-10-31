@@ -132,6 +132,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
     monkeypatch.setattr(work, "_policy_cache", {})
     work._wakes.clear()
+    work._wake_held.clear()
     work._replies.clear()
     work._redirecting.clear()
     return fake
@@ -1243,3 +1244,28 @@ def test_the_cli_status_piped_into_head_exits_quietly(home, monkeypatch):
     monkeypatch.setattr(cli, "_work_on_registry", closed)
     monkeypatch.setattr(__import__("os"), "dup2", lambda *a: None)
     assert cli._work(types.SimpleNamespace(work_action="status", policy=None, max_running=None)) == 0
+
+
+def test_a_work_update_waits_while_the_bot_chat_runs_a_turn(on, hermes):
+    start()
+    runtime = hermes.live(BOT_CHAT, transport=object(), running=True)
+    hermes.calls.clear()
+    work.turn_ended("20261031_work_1", "Done.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.flush_wakes()  # busy: held, not sent
+    assert hermes.named("prompt.submit") == [] and work._wakes
+    hermes._sessions[runtime]["running"] = False
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "W1" in params["text"] and not work._wakes
+
+
+def test_a_held_work_update_goes_out_queued_after_the_longest_wait(on, hermes, monkeypatch):
+    start()
+    hermes.live(BOT_CHAT, transport=object(), running=True)
+    hermes.calls.clear()
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.flush_wakes()
+    monkeypatch.setattr(work, "WAKE_BUSY_MAX_S", 0.0)
+    work.flush_wakes()
+    assert len(hermes.named("prompt.submit")) == 1
