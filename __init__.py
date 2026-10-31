@@ -416,26 +416,28 @@ def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any =
     the last instead of piling up (every run is a chat of its own). Only a
     run's own turn takes the job's, by its ``cron:<job>:<run>`` task id: a
     follow-up asked in an older run's chat keeps that chat's. The turn's
-    slot is kept for a background task it started, which reports later."""
+    slot is kept for a background task it started, which reports later,
+    with the job, whose mute the task follows."""
     job = cron_runs.job_id(None, task_id)
     seed = f"key:{_profile}:{key}" if key else f"cron:{_profile}:{job}" if job else ""
-    if seed and isinstance(turn_id, str) and turn_id:
+    if (seed or job) and isinstance(turn_id, str) and turn_id:
         with _turn_slots_lock:
             _turn_slots.pop((session_id, turn_id), None)
-            _turn_slots[(session_id, turn_id)] = seed
+            _turn_slots[(session_id, turn_id)] = (seed, job or "")
             while len(_turn_slots) > MAX_TURN_STARTS:
                 del _turn_slots[next(iter(_turn_slots))]
     return seed
 
 
-def _started_slot(session_id: str, turn_id: Any) -> str:
-    """The slot of the turn that started a background task."""
+def _started_slot(session_id: str, turn_id: Any) -> tuple[str, str]:
+    """The slot, and the scheduled job if any, of the turn that started a
+    background task."""
     with _turn_slots_lock:
-        return _turn_slots.get((session_id, turn_id), "") if isinstance(turn_id, str) else ""
+        return _turn_slots.get((session_id, turn_id), ("", "")) if isinstance(turn_id, str) else ("", "")
 
 
-# (chat, turn) -> its slot, for a background task the turn started.
-_turn_slots: dict[tuple[str, str], str] = {}
+# (chat, turn) -> its slot and job, for a background task the turn started.
+_turn_slots: dict[tuple[str, str], tuple[str, str]] = {}
 _turn_slots_lock = threading.Lock()
 
 
@@ -790,8 +792,11 @@ def _subagent_stop(**kwargs: Any) -> None:
     # a background task, notifies. Nor does a nested one, or a muted cron job's.
     # The parent is asked about by id: this hook can run in the child's own
     # run, where Hermes' delegation flag describes the child.
+    # A gateway-owned run's chat (local-…) names its job only through the
+    # turn that started the task.
+    slot, job = _started_slot(parent, kwargs.get("parent_turn_id"))
     if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child_session(parent)
-            or cron_runs.quiet(parent, None)):
+            or cron_runs.quiet(parent, None) or (job and cron_runs.muted(job))):
         return
     status = _text(kwargs.get("child_status")) or "finished"
     # Hermes reports "completed" (else "failed", "timeout", "error"). Only a
@@ -809,7 +814,7 @@ def _subagent_stop(**kwargs: Any) -> None:
         title_label="background_task.finished" if finished else "",
         session_title=_session_title(parent),
         body=summary or ("" if finished else f"A delegated task {status}."),
-        slot=_started_slot(parent, kwargs.get("parent_turn_id")),
+        slot=slot,
     ))
 
 

@@ -23,6 +23,11 @@ checks it). The format is fixed, because Conduit reads it:
   scheduled job of the same profile, and can make the update quiet: no
   sound or banner. Quiet updates need relay 0.26, and so does replacing
   an unencrypted notification.
+- A quiet notification makes no sound now, Pulse's included (one sent
+  while your phone says you're busy, or a quiet report). They used to
+  chime when the completion sound was on.
+- A muted scheduled job's background task no longer notifies when
+  Hermes runs the job in a chat of its own.
 
 ## 0.122.3 (2026-10-31)
 

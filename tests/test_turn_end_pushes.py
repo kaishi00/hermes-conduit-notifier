@@ -767,6 +767,16 @@ def test_a_gateway_owned_runs_background_task_joins_its_jobs_slot(pushed, runs):
     assert reply["slot"] == task["slot"] == events.slot_token("cron:default:daily")
 
 
+def test_a_muted_gateway_owned_runs_background_task_stays_quiet(pushed, runs, monkeypatch):
+    monkeypatch.setattr(plugin.cron_runs, "muted", lambda job: job == "daily")
+    plugin._pre_llm_call(session_id="local-run", turn_id="t")
+    plugin._post_llm_call(session_id="local-run", turn_id="t", task_id="cron:daily:7", assistant_response="Started.")
+    plugin._on_session_end(session_id="local-run", turn_id="t", task_id="cron:daily:7", completed=True,
+                           failed=False, interrupted=False)
+    _subagent(parent="local-run")
+    assert pushed == []
+
+
 def test_conduit_notify_registers_on_a_hermes_without_display_fields():
     registered = []
 
