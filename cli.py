@@ -9,6 +9,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -406,12 +407,24 @@ def _work(args: argparse.Namespace) -> int:
 
     home = Path(get_hermes_home())
     action = args.work_action
-    if action in ("status", "off") and not work_store.exists(home):
-        # Never turned on: said so without leaving a registry behind.
-        print("Bot workstreams: off (never turned on). `hermes conduit-push work on` to start them for this bot.")
-        return 0
     try:
-        return _work_on_registry(work_store.Store(home), args, action)
+        if action in ("status", "off") and not work_store.exists(home):
+            # Never turned on: said so without leaving a registry behind.
+            print("Bot workstreams: off (never turned on). `hermes conduit-push work on` to start them for this "
+                  "bot.")
+            code = 0
+        else:
+            code = _work_on_registry(work_store.Store(home), args, action)
+        # Flushed here, where a reader that left raises inside this guard
+        # rather than at the interpreter's exit.
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # Piped into head: the reader left, and nothing more is printed.
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, sys.stdout.fileno())
+        os.close(null)
+        return 0
     except Exception as error:  # noqa: BLE001 — a registry that can't be read, said in a line
         print(f"Bot workstreams: couldn't read this bot's registry ({type(error).__name__}: {error}).")
         return 1

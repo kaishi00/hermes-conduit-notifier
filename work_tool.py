@@ -51,6 +51,12 @@ LOOKUPS = STRICT | frozenset({"session_search", "web_search", "web_extract", "sk
 # Hermes' own bot-to-bot message: a coordinator gives other bots work with work_ask.
 MESSAGE_AGENT = "message_agent"
 WAKE_BATCH_S = 3.0
+# A work update waits while the Bot Chat runs a turn: Hermes keeps a prompt
+# queued at a busy session in the running turn's history and then runs it
+# again as its own turn, so the coordinator would hear it twice. Checked
+# this often, for at most this long, then sent queued anyway.
+WAKE_BUSY_RETRY_S = 2.0
+WAKE_BUSY_MAX_S = 600.0
 DIGEST_ITEMS = 12
 DIGEST_RESULT_CHARS = 240
 READ_MESSAGES = 12
@@ -68,8 +74,9 @@ POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. S
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get work through work_ask, which arrives with "
                        "bot-to-bot asks (not yet available here). Tell the user you can't hand this to another bot "
                        "yet, or start a workstream of your own.")
-BRIDGE_BLOCK = ("Call the work tools through tool_call one level deep, by name (work_start, work_send and so on), "
-                "not through another tool_call or with no tool named.")
+BRIDGE_BLOCK = ("That tool_call couldn't be read, so it didn't run. Give it the tool's name and its arguments as an "
+                'object, like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": '
+                '"Find out why the login page is slow."}}, and never put a tool_call inside another.')
 CHECK_FAILED = ("This bot's coordinator settings couldn't be checked just now, so its tools are held back for this "
                 "call. Try again in a moment.")
 NOT_YET = ("Asks between bots come in the next step of Bot workstreams; this one isn't available yet. Nothing was "
@@ -328,11 +335,32 @@ def _bot_name(home: Path) -> str:
 
 def handle(name: str, args: Any, *, session_id: Any = None) -> str:
     try:
-        return json.dumps(_handle(name, args if isinstance(args, dict) else {}, session_id), ensure_ascii=False)
+        return json.dumps(_handle(name, _arguments(args), session_id), ensure_ascii=False)
     except Exception as error:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_push: %s failed", name, exc_info=True)
         return json.dumps({"ok": False, "error": "failed",
                            "note": f"That didn't work ({type(error).__name__}). Nothing else was changed."})
+
+
+def _arguments(args: Any) -> dict:
+    """A tool's arguments as an object: a JSON string is read, and a
+    guessed {"name": ..., "arguments": {...}} wrapper is opened."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return {}
+    if not isinstance(args, dict):
+        return {}
+    inner = args.get("arguments")
+    if isinstance(inner, str):
+        try:
+            inner = json.loads(inner)
+        except ValueError:
+            inner = None
+    if isinstance(inner, dict) and set(args) <= {"name", "arguments"}:
+        return inner
+    return args
 
 
 def _handle(name: str, args: dict, session_id: Any) -> dict:
@@ -436,8 +464,11 @@ def _list(store: work_store.Store, args: dict) -> dict:
 
 
 def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args: dict, coordinator: str) -> dict:
-    title = " ".join(str(args.get("title") or "").split())
-    instructions = str(args.get("instructions") or "").strip()
+    # A model that guessed the schema (behind Tool Search) names the task
+    # goal or task; a missing title comes from the instructions.
+    instructions = next((str(args[key]).strip() for key in ("instructions", "goal", "task", "prompt")
+                         if isinstance(args.get(key), str) and args[key].strip()), "")
+    title = " ".join(str(args.get("title") or "").split()) or _cut(" ".join(instructions.split()[:6]), 60)
     if not title or not instructions:
         return {"ok": False, "error": "missing", "note": "Give the workstream a title and instructions."}
     from . import session_titles
@@ -793,6 +824,8 @@ def turn_started(session_id: Any) -> bool:
     was interrupted (a follow-up queued behind the last turn, or the user
     writing in its chat) is running again, and its own end settles it. True when the session is a
     workstream (its turn shows no Live Activity)."""
+    with _wake_lock:
+        _finished.discard(session_id)  # a new turn: its end is its own
     home, work, unreadable = _lookup(session_id)
     if work is None or home is None:
         return unreadable and _maybe_workstream(session_id, home)
@@ -815,6 +848,7 @@ def turn_ended(session_id: Any, response: Any) -> bool:
     text = response.strip() if isinstance(response, str) else ""
     with _wake_lock:
         _replies[session_id] = text
+        _finished.discard(session_id)  # a reply: this is a new turn's end coming
     return True
 
 
@@ -827,11 +861,20 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     when the session is a workstream."""
     if not isinstance(session_id, str):
         return False
-    with _wake_lock:
-        text = _replies.pop(session_id, "")
     home, work, unreadable = _lookup(session_id)
     if work is None or home is None:
+        with _wake_lock:
+            _replies.pop(session_id, None)
         return unreadable and _maybe_workstream(session_id, home)
+    with _wake_lock:
+        # Checked and marked together: a second end, even a concurrent one,
+        # finds this one's mark (only workstreams are marked).
+        if session_id in _finished:
+            return True  # this turn's end was handled; its reply went with it
+        if len(_finished) > 512:
+            _finished.clear()
+        _finished.add(session_id)
+        text = _replies.pop(session_id, "")
     store = work_store.Store(home)
     if work.status == "stopped":
         _stopped_report(home, store, work, text, failed=failed, interrupted=interrupted)
@@ -861,11 +904,12 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     else:
         fields = {"status": "done", "last_result": "", "error": ""}
         line = f"- {work.ref} “{work.title}” finished without a report (work_read shows what it did)."
-    # Only while it's still active: a stop that came meanwhile wins.
-    settled = store.update(work.ref, only_if=_SETTLES, **fields)
-    if settled is None or settled.status != fields["status"]:
-        if settled is not None and settled.status == "stopped":
-            _stopped_report(home, store, settled, text, failed=failed, interrupted=interrupted)
+    # Only while it's still active: a stop that came meanwhile wins, and an
+    # end reported twice settles (and tells the coordinator) once.
+    if store.update(work.ref, only_if=_SETTLES, **fields) is None:
+        now = store.get(work.ref)
+        if now is not None and now.status == "stopped":
+            _stopped_report(home, store, now, text, failed=failed, interrupted=interrupted)
         return True
     if not work.closed_at and work.coordinator:
         _queue_wake(home, work.coordinator, line)
@@ -940,8 +984,11 @@ def digest(session_id: Any) -> Optional[str]:
     rules = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), and "
              "send follow-ups to the one that's on it (work_send with its ref); answer from what you know "
              "otherwise. " + ("You can also make read-only lookups yourself. " if mode == "lookups" else "")
-             + "The work tools may be behind tool_call: call them as tool_call with name work_start, work_send, "
-             "work_list, work_read, work_stop or work_close.")
+             + "If the work tools aren't listed, call them through tool_call with their name and arguments, "
+             'like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": "Find out '
+             'why the login page is slow."}} or tool_call {"name": "work_send", "arguments": {"ref": "W1", '
+             '"text": "Also check the logs."}}; work_read, work_stop and work_close take {"ref": "W1"}, and work_list takes '
+             '{"filter": ...} or {"query": ...} or nothing.')
     if reason:
         rules = f"Bot workstreams can't run here: {reason}"
     body = "\n".join(lines) if lines else "- none open"
@@ -966,10 +1013,28 @@ def _queue_wake(home: Path, coordinator: str, line: str) -> None:
 
 
 def _send_wake(home: Path, coordinator: str) -> None:
+    key = (str(home), coordinator)
     with _wake_lock:
-        lines, _ = _wakes.pop((str(home), coordinator), ([], None))
+        lines, _ = _wakes.pop(key, ([], None))
+        held_since = _wake_held.pop(key, None)
     if not lines:
         return
+    now = time.monotonic()
+    if _coordinator_busy(home, coordinator) and now - (held_since or now) < WAKE_BUSY_MAX_S:
+        with _wake_lock:
+            # Lines queued meanwhile join these; their own timer (if any) finds them gone.
+            more, timer = _wakes.pop(key, ([], None))
+            if timer is not None:
+                timer.cancel()
+            retry = threading.Timer(WAKE_BUSY_RETRY_S, _send_wake, args=(home, coordinator))
+            retry.daemon = True
+            _wakes[key] = (lines + more, retry)
+            _wake_held[key] = held_since or now
+            retry.start()
+        return
+    # A turn that starts between the check and the send still gets this
+    # queued into it (the window is small); the hold narrows the duplicate
+    # Hermes makes of it rather than closing it.
     store = work_store.Store(home)
     text = WAKE.format(lines="\n".join(lines))
     item = store.outbox_add("", "wake", coordinator, text)
@@ -981,6 +1046,21 @@ def _send_wake(home: Path, coordinator: str) -> None:
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
 
 
+# Sessions whose turn's end has been handled, until their next turn starts:
+# Hermes may report one end twice.
+_finished: set[str] = set()
+# When each held update first found its Bot Chat busy.
+_wake_held: dict[tuple[str, str], float] = {}
+
+
+def _coordinator_busy(home: Path, coordinator: str) -> bool:
+    try:
+        found = work_broker.Broker(home).live(coordinator)
+    except Exception:  # noqa: BLE001 — unknown: sent as before
+        return False
+    return bool(found and found[1].get("running"))
+
+
 def stop() -> None:
     """The plugin unloads: batched wakes are dropped with their timers
     rather than sent through a plugin on its way out. The Bot Chat's next
@@ -988,6 +1068,8 @@ def stop() -> None:
     with _wake_lock:
         pending = list(_wakes.values())
         _wakes.clear()
+        _wake_held.clear()
+        _finished.clear()
         _replies.clear()
         _redirecting.clear()
     for _, timer in pending:
@@ -1036,16 +1118,30 @@ _COMMON = frozenset("the and for with from into about this that what why how che
                     "please can you our your".split())
 
 
+_SHORT_WORDS = frozenset("on in to of is it up at be do as or if by an my we so no me us am go".split())
+
+
 def _words(value: Any) -> set[str]:
-    return {word for word in re.findall(r"[a-z0-9]+", str(value or "").lower()) if len(word) > 2
+    # A version stays one word ("3.12"), so 3.11 and 3.12 differ.
+    return {word for word in re.findall(r"[a-z0-9]+(?:\.[0-9]+)*", str(value or "").lower())
+            if (len(word) > 2 or word[0].isdigit() or (len(word) == 2 and word not in _SHORT_WORDS))
             and word not in _COMMON}
 
 
 def _similar(a: set[str], b: set[str]) -> bool:
-    """Titles that share most of their words (a title of one word shares it)."""
+    """Titles that share most of their words, and at least two of them (or
+    the same one-word title): one word in common ("version", "port") isn't
+    the same task, and neither are titles naming different numbers."""
     if not a or not b:
         return False
-    return len(a & b) / min(len(a), len(b)) >= LOOKALIKE
+    numbers_a = {word for word in a if any(ch.isdigit() for ch in word)}
+    numbers_b = {word for word in b if any(ch.isdigit() for ch in word)}
+    if numbers_a and numbers_b and not numbers_a & numbers_b:
+        return False  # different ports, issues or versions: different tasks
+    shared = len(a & b)
+    if len(a) == len(b) == 1:
+        return shared == 1  # the same one-word title
+    return shared >= 2 and shared / min(len(a), len(b)) >= LOOKALIKE
 
 
 def _cut(value: Any, limit: int) -> str:
