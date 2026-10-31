@@ -41,5 +41,13 @@ provides_tools:
   - conduit_ask_owner
   - conduit_free_busy
   - conduit_ask_linked
+  - work_list
+  - work_start
+  - work_send
+  - work_stop
+  - work_read
+  - work_close
+  - work_ask
+  - work_reply
 provides_middleware:
   - tool_execution
