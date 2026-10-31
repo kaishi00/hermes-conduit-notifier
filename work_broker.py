@@ -309,6 +309,7 @@ class Broker:
             raise BrokerError("couldn't reopen the session")
         landed = (resumed.get("info") or {}).get("profile_name") if isinstance(resumed.get("info"), dict) else None
         if isinstance(landed, str) and landed and landed.lower() != self.profile.lower():
+            self._end(runtime_id)
             raise BrokerError(f"the session reopened on {landed[:64]}, not {self.profile}")
         tip = resumed.get("stored_session_id")
         return runtime_id, tip if isinstance(tip, str) and tip else session_id, False

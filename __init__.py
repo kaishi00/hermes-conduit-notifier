@@ -523,7 +523,7 @@ def _unload() -> None:
     group room guards (memory, planner, cut-off, wakeups and disband
     cleanup, with a sweep that hasn't run yet) and the self-improvement
     setting's live read come off, the room turns it remembers are forgotten,
-    and the delivery and Live Activity threads end (waiting about a second
+    batched work updates are dropped (the Bot Chat's digest carries them), and the delivery and Live Activity threads end (waiting about a second
     for a send in progress). Nothing more goes to the relay from this load."""
     with _pending_lock:
         held = list(_pending_ready.values())
@@ -536,6 +536,7 @@ def _unload() -> None:
         _cancel(timer)
     calls.stop()
     pulse.stop()
+    work_tool.stop()
     room_memory.uninstall()
     room_planner.uninstall()
     room_cutoff.uninstall()

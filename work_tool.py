@@ -171,6 +171,9 @@ _replies: dict[str, str] = {}
 # profile loads its own copy, so this names its bot whatever thread asks.
 _pinned_home: Optional[Path] = None
 POLICY_CACHE_S = 2.0
+# A chat's stored title, read once per call otherwise (a rename takes this long).
+TITLE_CACHE_S = 10.0
+_title_cache: dict[tuple[str, str], tuple[float, str]] = {}
 _policy_cache: dict[str, tuple[float, str]] = {}
 
 
@@ -272,11 +275,20 @@ def _titled_bot_chat(session_id: Any, home: Optional[Path] = None) -> Optional[b
     # ends (the row meanwhile carries the first message), so that one wins.
     title = _pending_title(session_id, home)
     if not title:
-        try:
-            title = session_titles.read_or_raise(home, session_id)
-        except Exception:  # noqa: BLE001 — the caller decides what an unknown chat may do
-            logger.debug("conduit_push: couldn't read the title of %s", session_id, exc_info=True)
-            return None
+        key = (str(home), session_id)
+        now = time.monotonic()
+        hit = _title_cache.get(key)
+        if hit and now - hit[0] < TITLE_CACHE_S:
+            title = hit[1]
+        else:
+            try:
+                title = session_titles.read_or_raise(home, session_id)
+            except Exception:  # noqa: BLE001 — the caller decides what an unknown chat may do
+                logger.debug("conduit_push: couldn't read the title of %s", session_id, exc_info=True)
+                return None
+            if len(_title_cache) > 512:
+                _title_cache.clear()
+            _title_cache[key] = (now, title)
     return title == session_titles.BOT_CHAT_TITLE
 
 
@@ -566,15 +578,17 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     # held to the same policy; a subagent never reaches here.
     if mode == "off":
         return None
-    titled = _titled_bot_chat(session_id, home)
-    if titled is False:
-        return None
     allowed = LOOKUPS if mode == "lookups" else STRICT
     names = [name]
     if name == "tool_call":
         from . import pulse_tools
 
         names = [called for called, _ in pulse_tools.called(args)] or [name]
+    if all(called in allowed for called in names):
+        return None  # allowed in any chat: which one this is doesn't matter
+    titled = _titled_bot_chat(session_id, home)
+    if titled is False:
+        return None
     for called in names:
         if called in allowed:
             continue
@@ -818,8 +832,21 @@ def _send_wake(home: Path, coordinator: str) -> None:
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
 
 
+def stop() -> None:
+    """The plugin unloads: batched wakes are dropped with their timers
+    rather than sent through a plugin on its way out. The Bot Chat's next
+    turn still hears of the work, from the digest."""
+    with _wake_lock:
+        pending = list(_wakes.values())
+        _wakes.clear()
+        _replies.clear()
+    for _, timer in pending:
+        if timer is not None:
+            timer.cancel()
+
+
 def flush_wakes() -> None:
-    """Sends every batched wake now (tests, unload)."""
+    """Sends every batched wake now (tests)."""
     with _wake_lock:
         pending = list(_wakes.items())
     for (home, coordinator), (_, timer) in pending:

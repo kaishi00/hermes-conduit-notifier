@@ -128,6 +128,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 0.01)
     monkeypatch.setattr(work, "_swept", set())
     monkeypatch.setattr(work, "_not_compacted", set())
+    monkeypatch.setattr(work, "_title_cache", {})
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
     monkeypatch.setattr(work, "_policy_cache", {})
     work._wakes.clear()
@@ -747,3 +748,34 @@ def test_a_stop_that_finds_nothing_running_leaves_it_stopped(on, hermes):
     hermes._sessions["rt-20261031_work_1"]["running"] = False
     assert call("work_stop", {"ref": "W1"})["status"] == "stopped"
     assert on.get("W1").status == "stopped" and on.running_count() == 0
+
+
+def test_unload_drops_batched_wakes(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    work.turn_ended("20261031_work_1", "Done.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert work._wakes
+    work.stop()
+    assert not work._wakes
+
+
+def test_a_reopen_on_another_profile_is_ended(on, hermes, monkeypatch):
+    start()
+    on.update("W1", status="done")
+    hermes._sessions.clear()
+    monkeypatch.setattr(hermes, "session_resume", lambda params: {
+        "session_id": "rt-elsewhere", "stored_session_id": params["session_id"], "info": {"profile_name": "raiden"}})
+    hermes._sessions["rt-elsewhere"] = {"session_key": "x", "transport": None, "running": False, "profile_home": ""}
+    answer = call("work_send", {"ref": "W1", "text": "Continue"})
+    assert not answer["ok"] and "raiden" in answer["note"]
+    assert [c[1]["session_id"] for c in hermes.named("session.close")] == ["rt-elsewhere"]
+
+
+def test_allowed_tools_skip_the_title_read(on, hermes, monkeypatch):
+    def locked(h, key):
+        raise AssertionError("read")
+
+    monkeypatch.setattr(titles, "read_or_raise", locked)
+    assert work.tool_block(OTHER_CHAT, "work_list", {}) is None
+    assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "work_list", "arguments": {}}) is None
