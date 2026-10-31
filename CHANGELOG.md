@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.122.4 (2026-10-31)
+
+### Fixes
+- Pulse no longer brings up something again while its card is still open
+  when that card had nothing to tie it to (no remembered item, reminder or
+  calendar entry): it now matches by what the card says, the same names and
+  the same day, so a birthday you already have a card for doesn't come back
+  in a report or the morning brief before its day.
+
 ## 0.122.3 (2026-10-31)
 
 ### Fixes

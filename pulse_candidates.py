@@ -560,8 +560,10 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     keys = [about(row) for row in rows]
     cards = pulse_store.open_cards_about([item for item, _ in keys if item is not None],
                                          [ref for _, ref in keys if ref], (store.NOTICED, "followup"))
-    if not cards:
-        return []
+    # A card with no item or ref (the model found it, or it came before refs)
+    # is matched by what it says (Eric, 2026-10-31: Kwan's birthday again,
+    # Tuesday's card still open, both from the model with nothing to key on).
+    worded = pulse_store.open_cards_on([str(row.get("kind") or "") for row in rows], now - SAID_WINDOW_S)
     by_item: dict[int, list[dict]] = {}
     by_ref: dict[str, list[dict]] = {}
     for card in cards:
@@ -572,12 +574,55 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     out = []
     for row, (item, ref) in zip(rows, keys):
         found = (by_item.get(item, []) if item is not None else []) + (by_ref.get(ref, []) if ref else [])
+        # The look ahead's own dates and deadlines (their own refs) keep their lead times.
+        own = str(row.get("ref") or "")
+        if not found and row.get("text") and (not own or own.startswith((REMINDER, EVENT))):
+            found = [card for card in worded
+                     if card["topic"] == row.get("kind") and same_subject(card["news"], str(row["text"]))]
         if not found:
             continue
         if due_again(row, max(card["created_at"] for card in found), now, due=_due_point(pulse_store, row)):
             continue  # its day: once more
         out.append(row)
     return out
+
+
+# How far back an open card is matched by its words (still_open).
+SAID_WINDOW_S = 30 * 86400.0
+_DATE_WORDS = frozenset(
+    "monday tuesday wednesday thursday friday saturday sunday january february march april may june july "
+    "august september october november december jan feb mar apr jun jul aug sep sept oct nov dec".split())
+# Capitalised words that start a sentence rather than name something.
+_STARTERS = frozenset(
+    "the a an your you i it its this that there these those pulse hermes today tomorrow tonight remember don't "
+    "buy send get book call check follow reminder birthday happy worth time next".split())
+
+
+def _marks(text: str) -> tuple[set[str], set[str]]:
+    """The words in ``text`` that name something (capitalised, possessive
+    's dropped) and the date words (weekdays, months, numbers)."""
+    names, dates = set(), set()
+    for word in re.findall(r"\w+(?:['\u2019]\w+)?", text):
+        bare = re.sub(r"['\u2019]s$", "", word).casefold()
+        if any(char.isdigit() for char in word) or bare in _DATE_WORDS:
+            dates.add(bare)
+        elif word[0].isupper() and bare not in _STARTERS:
+            names.add(bare)
+    return names, dates
+
+
+def same_subject(said: str, text: str) -> bool:
+    """Whether ``text`` is about what an earlier card ``said``: the names in
+    the one that names fewer are all in the other (so Kwan's birthday isn't
+    Long's, sharing a surname), they share a date word, a number when both
+    give one (so Kwan's passport on the 20th isn't the birthday on the 6th),
+    and at least three marks in all."""
+    (names_a, dates_a), (names_b, dates_b) = _marks(said), _marks(text)
+    small, large = sorted((names_a, names_b), key=len)
+    numbers_a, numbers_b = ({word for word in dates if any(char.isdigit() for char in word)}
+                            for dates in (dates_a, dates_b))
+    dated = bool(numbers_a & numbers_b) if numbers_a and numbers_b else bool(dates_a & dates_b)
+    return bool(small) and small <= large and dated and len((names_a & names_b) | (dates_a & dates_b)) >= 3
 
 
 def on_cards(pulse_store: store.PulseStore, now: float, zone: Optional[tzinfo], *, items: Sequence[dict] = (),
@@ -588,13 +633,27 @@ def on_cards(pulse_store: store.PulseStore, now: float, zone: Optional[tzinfo], 
     calendar ``events``, those whose card is still open (still_open: on the
     day it's due one more may come, once, as in a report) and the reminders
     and entries put away for good. Item ids, and REMINDER and EVENT refs."""
-    rows = ([{"origin": MEMORY, "item_id": item["id"], "due_at": item.get("due_at")} for item in items]
-            + [{"origin": MODEL, "item_id": None, "ref": reminder_ref(reminder),
+    rows = ([{"origin": MEMORY, "item_id": item["id"], "due_at": item.get("due_at"), "kind": item.get("kind"),
+              "text": _said_as(item.get("text"), item.get("due_at"), zone)} for item in items]
+            + [{"origin": MODEL, "item_id": None, "ref": reminder_ref(reminder), "kind": "reminder",
                 "due_at": _phone_due(reminder.get("due"), zone)} for reminder in reminders if reminder.get("id")]
-            + [{"origin": MODEL, "item_id": None, "ref": event_ref(event),
+            + [{"origin": MODEL, "item_id": None, "ref": event_ref(event), "kind": "date",
                 "due_at": _due(str(event.get("start") or "")[:10], zone)} for event in events if event.get("id")])
+    for row, entry in zip(rows[len(items):], [*[r for r in reminders if r.get("id")], *[e for e in events if e.get("id")]]):
+        row["text"] = _said_as(entry.get("title"), row["due_at"], zone)
     said = {row["item_id"] if row["origin"] == MEMORY else row["ref"] for row in still_open(pulse_store, rows, now)}
     return said | reminders_raised(pulse_store, [str(row.get("ref") or "") for row in rows], now)[1]
+
+
+def _said_as(text: Any, due_at: Optional[float], zone: Optional[tzinfo]) -> str:
+    """``text`` with the day it's due, as a card would say it ("Friday 6
+    November"), so an open card with nothing to key on can be matched by
+    its words (same_subject)."""
+    text = str(text or "").strip()
+    if not text or due_at is None:
+        return text
+    day = datetime.fromtimestamp(due_at, zone or timezone.utc)
+    return f"{text} {day:%A} {day.day} {day:%B}"
 
 
 def _due_point(pulse_store: store.PulseStore, row: dict) -> Optional[float]:

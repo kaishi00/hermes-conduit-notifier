@@ -2199,6 +2199,22 @@ class PulseStore:
                 (*item_ids, *refs, *kinds)).fetchall()
         return [dict(row) for row in rows]
 
+    def open_cards_on(self, topics: Sequence[str], since: float) -> list[dict]:
+        """The "noticed" cards on any of ``topics`` made since ``since`` that
+        are still open, as open_cards_about counts it."""
+        topics = [topic for topic in dict.fromkeys(topics) if topic]
+        if not topics:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT cards.* FROM cards WHERE cards.kind=? AND cards.created_at>=? "
+                f"AND cards.topic IN ({','.join('?' * len(topics))}) "
+                "AND cards.id NOT IN (SELECT card_id FROM card_done) "
+                "AND (cards.dismissed_at IS NULL OR cards.rest_until IS NOT NULL) "
+                "AND NOT (coalesce(cards.rating, '')='down' AND coalesce(cards.reason, '')!='wrong_time')",
+                (NOTICED, since, *topics)).fetchall()
+        return [dict(row) for row in rows]
+
     def away_refs(self, prefix: str) -> set[str]:
         """The refs starting with ``prefix`` whose candidates made a card the
         user put away for good (dismissed with no rest) or rated not
