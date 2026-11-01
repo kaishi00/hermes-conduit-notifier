@@ -16,12 +16,13 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.123.2 (2026-11-01)
 
 ### Fixes
-- A bot can always reach another bot's Bot Chat. A Bot Chat from before
-  Hermes' gateway took over chats only moved to the gateway when the
-  first bot message arrived while nothing had it open. With the chat open
-  in Conduit or Desktop, messages from other bots were refused every time
-  ("held by another session writer"). The plugin now moves such a Bot
-  Chat to its gateway itself, soon after a restart.
+- Messages from other bots no longer keep failing with "held by another
+  session writer". A Bot Chat from before Hermes' gateway took over chats
+  only moved to the gateway when a bot's message arrived while nothing
+  had the chat open, so with it open in Conduit or Desktop every message
+  was refused. On Linux and macOS hosts, the plugin now moves such a Bot
+  Chat itself the next time it's free, usually right after a restart, and
+  messages get through from then on, open or not.
 
 ## 0.123.1 (2026-11-01)
 

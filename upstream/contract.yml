@@ -21,6 +21,11 @@ watch_paths:
   - gateway/hosted_room*.py
   - website/docs/user-guide/features/plugins.md
   - website/docs/user-guide/features/extending-the-dashboard.md
+  # bot_chat_adopt.py's child (imports inside a string, which the scanner can't see).
+  - hermes_cli/gateway_client.py
+  - hermes_cli/gateway_runtime*.py
+  - gateway/session_local_migration.py
+  - hermes_cli/active_sessions.py
 
 # Words that make a changed hunk worth a closer look.
 keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,
@@ -29,6 +34,12 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  old Bot Chat move: >-
+    bot_chat_adopt.py moves a pre-gateway Bot Chat under its profile's gateway (feature map: "Bot
+    mentions and teammate messages"): a child with that profile's HERMES_HOME calls
+    discover_gateway_endpoint, connect_gateway, then session.resume and session.detach; Hermes'
+    adopt_legacy_session does the move. It reads <home>/runtime/active_sessions.json to skip a held
+    chat. Without it, a bot whose old Bot Chat is open in Conduit can't be messaged by other bots.
   plugin sockets on a secondary profile: >-
     Local Live, the speech server, Grok Live and Watch audio (feature map: "Voice on a profile the
     dashboard didn't start with"). Hermes 0.22.3+ refuses them on ?profile=; Conduit sends

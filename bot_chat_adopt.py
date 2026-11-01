@@ -104,8 +104,10 @@ def held_by_live_process(home: Path, session_id: str, alive: Callable[[int], boo
     alive = alive or _pid_alive
     try:
         entries = json.loads((Path(home) / "runtime" / "active_sessions.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return False
+    except (OSError, ValueError):
+        return True  # unreadable: never guessed free (as chat_takeover reads it)
     entries = entries.get("entries") if isinstance(entries, dict) else None
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict) or entry.get("session_id") != session_id:
@@ -246,6 +248,14 @@ def _sweep_one(home: Path, now: float, adopt_one: Callable[[Path, str], str], tr
         logger.info("conduit_push: %s's Bot Chat isn't under its gateway yet (%s)", home.name, outcome)
 
 
+def _can_lock() -> bool:
+    try:
+        import fcntl  # noqa: F401
+    except ImportError:
+        return False  # Windows hosts: Hermes' own relay still moves the chat when nothing holds it
+    return True
+
+
 def _take_lock(root: Path) -> bool:
     """One sweeper per host: the first long-lived process to take this lock."""
     global _lock_handle
@@ -265,7 +275,7 @@ def _take_lock(root: Path) -> bool:
 def _run(root: Path, stop: threading.Event) -> None:
     """Waits for the lock (another process may hold it, then exit), then
     sweeps; the lock goes when this thread ends."""
-    if stop.wait(FIRST_DELAY_S):
+    if stop.wait(FIRST_DELAY_S) or not _can_lock():
         return
     while not _take_lock(root):
         if stop.wait(SWEEP_S):

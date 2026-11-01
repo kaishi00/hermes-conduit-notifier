@@ -236,6 +236,8 @@ def test_the_plugin_points_profiles_only_from_the_main_home(host, monkeypatch):
     _profile(root, "coder", "plugins:\n  enabled: [conduit_push]\n")
     calls = []
     monkeypatch.setattr(plugin.profile_copies, "sweep_quietly", lambda *args: calls.append(args))
+    started = []
+    monkeypatch.setattr(plugin.bot_chat_adopt, "start", lambda root: started.append(root))
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_default_hermes_root", lambda: root, raising=False)
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: root / "profiles" / "coder")
     plugin._point_profiles_here()
@@ -243,6 +245,7 @@ def test_the_plugin_points_profiles_only_from_the_main_home(host, monkeypatch):
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: root)
     plugin._point_profiles_here()
     assert calls == [(root, pathlib.Path(plugin.__file__).parent)]
+    assert started == [root]  # the Bot Chat move sweep, from the main home's copy only
 
 
 def test_a_swap_that_fails_at_the_end_puts_the_profiles_own_copy_back(host, monkeypatch):

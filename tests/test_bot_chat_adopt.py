@@ -197,3 +197,10 @@ def test_a_process_that_loses_the_lock_takes_it_when_its_holder_lets_go(tmp_path
     monkeypatch.setattr(adopt_mod, "_release_lock", lambda: released.append(True))
     adopt_mod._run(tmp_path, stop)
     assert swept.is_set() and released == [True]
+
+
+def test_an_unreadable_registry_counts_as_held(tmp_path):
+    sid = _store(tmp_path)
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "active_sessions.json").write_text('{"entries": [')
+    assert adopt_mod.held_by_live_process(tmp_path, sid, alive=lambda pid: False)
