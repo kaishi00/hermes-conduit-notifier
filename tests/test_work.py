@@ -1514,3 +1514,24 @@ def test_a_ready_result_without_a_report_is_still_ready(on, hermes):
     assert on.get("W1").status == "ready"
     (_, params, _), = hermes.named("prompt.submit")
     assert "has something for the user to look at, with no report" in params["text"]
+
+
+def test_a_checklist_of_empty_steps_keeps_the_old_one_and_extra_steps_are_named(on, hermes):
+    start()
+    call("work_progress", {"steps": [{"step": "Read", "state": "done"}]}, session_id=WORKER)
+    out = call("work_progress", {"steps": [{"state": "done"}]}, session_id=WORKER)
+    assert out["error"] == "missing" and on.get("W1").progress["steps"][0]["step"] == "Read"
+    out = call("work_progress", {"steps": [f"Step {n}" for n in range(15)]}, session_id=WORKER)
+    assert "the last 3 were left out" in out["note"]
+
+
+def test_a_checklist_still_works_after_workstreams_are_turned_off(on, hermes):
+    start()
+    on.set_policy("off")
+    work._policy_cache.clear()
+    assert call("work_progress", {"steps": [{"step": "Read", "state": "done"}]}, session_id=WORKER)["ok"]
+
+
+def test_the_bot_chat_isnt_told_to_start_a_workstream_for_a_checklist(on, hermes):
+    assert work.tool_block(BOT_CHAT, "work_progress") is None
+    assert call("work_progress", {"steps": ["x"]})["error"] == "not_workstream"

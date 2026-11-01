@@ -1407,7 +1407,8 @@ she tells you about. It's off until you turn it on for a bot:
   asks between bots.
 - A workstream writes its report for you, in its own chat, which you can open
   and answer. The Bot Chat's update carries a short line of it and the chat's
-  link. A workstream keeps a checklist with `work_progress` (its only work
+  link (`work_read` gives the coordinator up to 2,000 characters of it).
+  A workstream keeps a checklist with `work_progress` (its only work
   tool), which the Bot Chat's digest shows, and marks a result you should look
   at first (a draft, a diff) as ready.
 - A workstream's turn sends no push of its own: the Bot Chat's reply about it

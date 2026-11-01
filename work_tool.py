@@ -53,7 +53,7 @@ TOOLS = ("work_list", "work_start", "work_send", "work_stop", "work_read", "work
 WORKER_TOOLS = ("work_progress",)
 BRIDGE = frozenset({"tool_search", "tool_describe", "tool_call"})
 # What a coordinator may call itself (C.4). Everything else becomes a workstream.
-STRICT = frozenset({*TOOLS, "clarify", "memory", "conduit_notify", *BRIDGE})
+STRICT = frozenset({*TOOLS, *WORKER_TOOLS, "clarify", "memory", "conduit_notify", *BRIDGE})
 LOOKUPS = STRICT | frozenset({"session_search", "web_search", "web_extract", "skills_list", "skill_view",
                               "conduit_health", "conduit_location", "conduit_inbox"})
 # Hermes' own bot-to-bot message: a coordinator gives other bots work with work_ask.
@@ -191,7 +191,7 @@ SCHEMAS: dict[str, dict] = {
 SCHEMAS["work_progress"] = {
     "name": "work_progress",
     "description": ("Only in a workstream: your checklist for this task, which the user and your coordinator see. "
-                    "Each call replaces the whole list. Mark a step done, doing or todo. Set ready=true when what "
+                    "Each call replaces the whole list (up to 12 steps of a few words each). Mark a step done, doing or todo. Set ready=true when what "
                     "you made is something the user should look at before it's used (a draft, a diff, a plan)."),
     "parameters": {"type": "object", "properties": {
         "steps": {"type": "array", "description": "The steps, in order.", "items": {
@@ -406,13 +406,15 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
     home = _home()
     if home is None:
         return {"ok": False, "error": "unavailable", "note": work_broker.UNAVAILABLE_NO_API}
+    if name == "work_progress":
+        # Only writes a row that exists: it keeps working if the bot's
+        # workstreams were turned off while this one runs.
+        return _progress(home, args, session_id)
     if policy(home) == "off":
         return {"ok": False, "error": "off", "note": OFF}
     reason = work_broker.unavailable_reason()
     if reason:
         return {"ok": False, "error": "unavailable", "note": reason}
-    if name == "work_progress":
-        return _progress(home, args, session_id)
     if not is_bot_chat(session_id, home):
         return {"ok": False, "error": "not_bot_chat", "note": NOT_BOT_CHAT}
     if name in ("work_ask", "work_reply"):
@@ -494,8 +496,12 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
             continue
         state = item.get("state") if item.get("state") in PROGRESS_STATES else "todo"
         steps.append({"step": step, "state": state})
-        if len(steps) == PROGRESS_STEPS:
-            break
+    if raw and not steps:
+        return {"ok": False, "ref": work.ref, "error": "missing",
+                "note": 'None of those steps had any words, so the checklist was kept as it was. Give each one '
+                        'like {"step": "Read the logs", "state": "done"}.'}
+    dropped = max(len(steps) - PROGRESS_STEPS, 0)
+    steps = steps[:PROGRESS_STEPS]
     # Left out, the mark stays as it was this turn (a turn's start clears it).
     flag = args.get("ready")
     if isinstance(flag, str):
@@ -504,6 +510,8 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     work_store.Store(found).update(work.ref, progress={"steps": steps, "ready": ready})
     done = sum(1 for step in steps if step["state"] == "done")
     note = f"Checklist kept: {done} of {len(steps)} done." if steps else "Checklist cleared."
+    if dropped:
+        note += f" It keeps {PROGRESS_STEPS} steps, so the last {dropped} were left out."
     if ready:
         note += " Your result will show as ready for the user to look at."
     return {"ok": True, "ref": work.ref, "note": note}
@@ -1039,8 +1047,9 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
         return
     stored = store.update(work.ref, last_result=text, only_if=("stopped",))
     if stored is not None and not interrupted and not work.closed_at and work.coordinator:
+        link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
         _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” was stopped as it finished. In short: "
-                                            f"{_cut(text, WAKE_REPORT_CHARS)}")
+                                            f"{_cut(text, WAKE_REPORT_CHARS)}" + (f" {link}" if link else ""))
 
 
 # The states a turn's end settles: working, waiting on the user, or a turn
