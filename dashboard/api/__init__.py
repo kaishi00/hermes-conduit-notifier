@@ -43,6 +43,7 @@ MODULES = (
     "desktop_views",
     "rooms",
     "workspace",
+    "workstreams",
     "capabilities",
     "self_update",
 )

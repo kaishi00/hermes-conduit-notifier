@@ -2592,3 +2592,166 @@ def test_a_message_hermes_never_stored_goes_back_to_the_coordinator(on, hermes, 
     wake, = submitted_to(hermes, BOT_CHAT)
     assert "may not have reached it" in wake["text"] and "Also check the logs." in wake["text"]
     assert "Use staging." not in wake["text"]
+
+
+# The Work panel (M2): what Conduit shows, and the user's own actions --------------
+
+def test_the_work_panel_lists_work_with_its_counts_and_actions(on, hermes):
+    start()
+    start(title="Disk space", instructions="Check disk space on the NAS.")
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: dig login.example.com")
+    on.update("W1", progress={"steps": [{"step": "Read the logs", "state": "done"},
+                                        {"step": "Time the DNS lookup", "state": "doing"}]})
+    on.update("W2", status="ready", last_result="The NAS has 12% free.")
+    listed = work.app_list(on.home)
+    assert listed["policy"] == "strict" and listed["bot"] == "Furina"
+    assert listed["counts"] == {"working": 1, "needs_you": 0, "ready": 1, "waiting": 0}
+    rows = {row["ref"]: row for row in listed["work"]}
+    assert rows["W1"]["step"] == "terminal: command: dig login.example.com"
+    assert rows["W1"]["checklist"][1] == {"step": "Time the DNS lookup", "state": "doing"}
+    assert rows["W1"]["actions"] == ["send", "stop"] and rows["W1"]["result"] == ""
+    assert rows["W1"]["session_id"] == WORKER_1
+    assert rows["W2"]["result"] == "The NAS has 12% free." and rows["W2"]["actions"] == ["send"]
+
+
+def test_the_work_panel_is_empty_for_a_bot_without_workstreams(home, hermes):
+    listed = work.app_list(home)
+    assert listed["policy"] == "off" and listed["work"] == [] and not (home / "conduit").exists()
+
+
+def test_reply_in_a_workstream_sends_the_users_own_words_with_no_bot_chat_turn(on, hermes):
+    start()
+    on.update("W1", status="done", last_result="Slow DNS.")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False  # its turn ended
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    answer = work.app_act(on.home, "w1", "send", {"text": "Try the second fix."})
+    assert answer["ok"] and answer["work"]["status"] == "running"
+    sent, = submitted_to(hermes, WORKER_1)
+    assert sent["text"] == "Try the second fix."  # as if typed in its chat, not passed on by the bot
+    assert submitted_to(hermes, BOT_CHAT) == []
+    assert [row["kind"] for row in on.outbox_rows("W1", "user_send")] == ["user_send"]
+
+
+def test_the_user_can_stop_running_work_from_the_panel(on, hermes):
+    start()
+    hermes._sessions["rt-20261031_work_1"]["running"] = True
+    answer = work.app_act(on.home, "W1", "stop")
+    assert answer["ok"] and answer["work"]["status"] == "stopped" and hermes.named("session.interrupt")
+    assert answer["work"]["actions"] == ["continue", "send"]
+
+
+def test_check_first_and_continue_after_a_restart_cut_off_a_change(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    row, = work.app_list(on.home)["work"]
+    assert row["status"] == "interrupted" and row["uncertain"] and "./deploy.sh" in row["error"]
+    assert row["actions"] == ["check", "continue", "stop", "send"]
+    assert work.app_list(on.home)["counts"]["needs_you"] == 1
+    hermes.calls.clear()
+    answer = work.app_act(on.home, "W1", "check")
+    assert answer["ok"] and answer["work"]["status"] == "running"
+    sent, = submitted_to(hermes, WORKER_1)
+    assert sent["text"].startswith("The user tapped Check first") and "./deploy.sh" in sent["text"]
+    assert "Change nothing" in sent["text"]
+    # Cut off again during the same step: Continue says it may have run.
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c2", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    answer = work.app_act(on.home, "W1", "continue")
+    assert answer["ok"]
+    sent, = submitted_to(hermes, WORKER_1)
+    assert "may or may not have taken effect" in sent["text"] and "don't run it again" in sent["text"]
+
+
+def test_continue_after_a_safe_cut_off_just_carries_on(on, hermes, monkeypatch):
+    start()
+    store_mod.Store(on.home).set_after_restart("ask")
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "read_file", tool_call_id="c1", summary="path: build.log")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    row, = work.app_list(on.home)["work"]
+    assert row["status"] == "interrupted" and not row["uncertain"]
+    assert row["actions"] == ["continue", "stop", "send"]
+    assert work.app_act(on.home, "W1", "check")["error"] == "not_now"
+    hermes.calls.clear()
+    assert work.app_act(on.home, "W1", "continue")["ok"]
+    sent, = submitted_to(hermes, WORKER_1)
+    assert sent["text"].startswith("The user tapped Continue") and "may or may not" not in sent["text"]
+
+
+def test_stopping_interrupted_work_runs_nothing(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    hermes.calls.clear()
+    answer = work.app_act(on.home, "W1", "stop")
+    assert answer["ok"] and answer["work"]["status"] == "stopped" and not answer["work"]["uncertain"]
+    assert hermes.calls == []
+
+
+def test_the_panel_refuses_what_it_cant_do(on, hermes, home):
+    start()
+    assert work.app_act(home, "W9", "send", {"text": "hi"})["error"] == "no_such_work"
+    assert work.app_act(home, WORKER_1, "send", {"text": "hi"})["error"] == "no_such_work"  # a session id names nothing
+    assert work.app_act(home, "W1", "send", {"text": "  "})["error"] == "missing"
+    assert work.app_act(home, "W1", "continue")["error"] == "not_now"  # it's running
+    assert work.app_act(home, "W1", "delete")["error"] == "unknown_action"
+    on.set_policy("off")
+    work._policy_cache.clear()
+    assert work.app_act(home, "W1", "stop")["error"] == "off"
+
+
+def test_an_ask_shows_who_its_waiting_on(bots, hermes, monkeypatch):
+    homes = bots
+    call("work_ask", {"bot": "Nahida", "text": "What's on the calendar Friday?"})
+    listed = work.app_list(homes["hermes"])
+    row, = listed["work"]
+    assert row["kind"] == "ask_out" and row["bot"] == "Nahida" and row["status"] == "waiting"
+    assert row["actions"] == [] and listed["counts"]["waiting"] == 1
+    theirs, = work.app_list(homes["nahida"])["work"]
+    assert theirs["kind"] == "ask_in" and theirs["bot"] == "Furina"
+
+
+def test_the_panel_acts_through_the_copy_hermes_loaded_for_the_bot(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    assert work.copy_for(on.home) is None
+    assert work.app_list(on.home)["work"][0]["status"] == "running"  # an unloaded copy doesn't recover it
+    monkeypatch.setitem(work._copies(), str(on.home), work)
+    assert work.copy_for(on.home) is work
+    assert work.app_list(on.home)["work"][0]["status"] == "interrupted"
+
+
+def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    spec = importlib.util.spec_from_file_location("conduit_plugin_api_workstreams",
+                                                  ROOT / "dashboard" / "plugin_api.py")
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    monkeypatch.setattr(api.workstreams, "_work_tool", lambda: work)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: on.home)
+    app = FastAPI()
+    app.include_router(api.router, prefix="/api/plugins/conduit_push")
+    client = TestClient(app)
+    start()
+    listed = client.get("/api/plugins/conduit_push/workstreams")
+    assert listed.status_code == 200 and listed.headers["cache-control"] == "no-store"
+    assert listed.json()["ok"] and listed.json()["work"][0]["ref"] == "W1"
+    sent = client.post("/api/plugins/conduit_push/workstreams/W1/send", json={"text": "Also the logs."})
+    assert sent.status_code == 200 and sent.json()["outcome"] in ("started", "redirected", "steered", "queued")
+    refused = client.post("/api/plugins/conduit_push/workstreams/W7/stop", json={})
+    assert refused.status_code == 404 and refused.json()["code"] == "no_such_work"
+    assert client.post("/api/plugins/conduit_push/workstreams/W1/send", content=b"[1]").status_code == 400

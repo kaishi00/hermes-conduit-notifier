@@ -48,6 +48,7 @@ import re
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 from typing import Any, Callable, Optional
 import uuid
@@ -316,6 +317,10 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
     global _is_child, _pinned_home
     _is_child = is_child
     _pinned_home = _ambient_home()
+    if _pinned_home is not None:
+        # The dashboard's routes act through the copy Hermes loaded for a
+        # bot, whose hooks see that bot's turns (copy_for).
+        _copies()[str(_pinned_home)] = sys.modules[__name__]
     if not hasattr(ctx, "register_tool"):
         return
     for name in (*TOOLS, *WORKER_TOOLS):
@@ -336,6 +341,29 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
         except Exception:  # noqa: BLE001
             logger.warning("conduit_push: could not register %s", name, exc_info=True)
     start_recovery(_pinned_home)
+
+
+# Each profile's loaded copy of this module, by its home, kept outside any
+# one copy: the dashboard's Work panel routes (designs/bot-mode-coordinator
+# C.6, C.8) act through the copy whose hooks see that bot's turns.
+_COPIES = "conduit_push_work_copies"
+
+
+def _copies() -> dict:
+    holder = sys.modules.setdefault(_COPIES, types.ModuleType(_COPIES))
+    copies = getattr(holder, "copies", None)
+    if not isinstance(copies, dict):
+        copies = holder.copies = {}
+    return copies
+
+
+def copy_for(home: Any) -> Any:
+    """The copy of this module Hermes loaded for the bot at ``home``, else
+    None (no chat of that bot has run in this process)."""
+    try:
+        return _copies().get(str(Path(home)))
+    except TypeError:
+        return None
 
 
 def _home() -> Optional[Path]:
@@ -539,33 +567,38 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
             f"{work.ref} is an ask from {_ask_bot(work)}. Answer it with work_reply, or start a workstream for it.")
         return {"ok": False, "ref": work.ref, "error": "ask", "note": what}
     if name == "work_stop":
-        # Marked first: the interrupted turn's end, which may come before
-        # the interrupt returns, then reads as the stop, not as finished.
-        store.update(work.ref, status="stopped")
-        with _wake_lock:
-            _redirecting.discard((str(home), work.ref))
-        try:
-            stopped = broker.stop(work.session_id)
-        except Exception as error:  # noqa: BLE001 — a stop that didn't happen leaves it as it was
-            store.update(work.ref, status=work.status, only_if=("stopped",))
-            if not isinstance(error, work_broker.BrokerError):
-                logger.warning("conduit_push: stopping a workstream failed", exc_info=True)
-                error = type(error).__name__
-            return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't stop it: {error}"}
-        # A stop ends the continued turn too: the next restart may continue it again.
-        store.set_meta(_CONTINUED + work.ref, "")
-        if stopped:
-            return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
-                    "note": f"Stopped {work.ref}: {work.title}. work_send continues it."}
-        if work.status in ("starting", "running", "needs_you"):
-            # Nothing was running, so the row's turn has ended (its end may
-            # have come while this stop was marked): it stays stopped.
-            return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
-                    "note": f"{work.ref} wasn't working on anything; it's marked stopped. work_send continues it."}
-        store.update(work.ref, status=work.status, only_if=("stopped",))
-        return {"ok": True, "ref": work.ref, "title": work.title, "status": work.status,
-                "note": f"{work.ref} wasn't working on anything."}
+        return _stop(store, broker, work)
     return _send(home, store, broker, work, args, str(session_id))
+
+
+def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work) -> dict:
+    home = store.home
+    # Marked first: the interrupted turn's end, which may come before
+    # the interrupt returns, then reads as the stop, not as finished.
+    store.update(work.ref, status="stopped")
+    with _wake_lock:
+        _redirecting.discard((str(home), work.ref))
+    try:
+        stopped = broker.stop(work.session_id)
+    except Exception as error:  # noqa: BLE001 — a stop that didn't happen leaves it as it was
+        store.update(work.ref, status=work.status, only_if=("stopped",))
+        if not isinstance(error, work_broker.BrokerError):
+            logger.warning("conduit_push: stopping a workstream failed", exc_info=True)
+            error = type(error).__name__
+        return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't stop it: {error}"}
+    # A stop ends the continued turn too: the next restart may continue it again.
+    store.set_meta(_CONTINUED + work.ref, "")
+    if stopped:
+        return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
+                "note": f"Stopped {work.ref}: {work.title}. work_send continues it."}
+    if work.status in ("starting", "running", "needs_you"):
+        # Nothing was running, so the row's turn has ended (its end may
+        # have come while this stop was marked): it stays stopped.
+        return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
+                "note": f"{work.ref} wasn't working on anything; it's marked stopped. work_send continues it."}
+    store.update(work.ref, status=work.status, only_if=("stopped",))
+    return {"ok": True, "ref": work.ref, "title": work.title, "status": work.status,
+            "note": f"{work.ref} wasn't working on anything."}
 
 
 def _progress(home: Path, args: dict, session_id: Any) -> dict:
@@ -1186,7 +1219,15 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     # from the Bot Chat this call came from: after a compression the one the
     # work started from holds only older messages.
     words = FOLLOW_UP.format(bot=bot, text=text) + _quoted_words(home, bot, coordinator)
-    item = store.outbox_add(work.ref, "send", work.session_id, words)
+    return _deliver(store, broker, work, words, how)
+
+
+def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, words: str, how: str,
+             kind: str = "send") -> dict:
+    """Words into a workstream, through the outbox: running work takes them
+    as ``how`` says, idle work starts a turn with them (a slot allowing)."""
+    home = store.home
+    item = store.outbox_add(work.ref, kind, work.session_id, words)
     # Marked running first: a turn that ends before the send returns then
     # settles the row, and nothing after the send puts it back. Idle work
     # takes a slot under the bot's limit, as a start does.
@@ -1345,6 +1386,9 @@ def _reads_only(tool: str) -> bool:
     return tool in READ_TOOLS
 # Meta key: a workstream continued after a restart, until a turn of it ends.
 _CONTINUED = "continued:"
+# Meta key: what Check first asks a workstream a restart cut off during a
+# step that can change things, until a turn of it starts.
+_CHECK = "check:"
 # How old a send the outbox still looks into after a restart.
 REPLAY_MAX_S = 6 * 3600.0
 RECOVERY_WAIT_S = 900.0
@@ -1419,6 +1463,7 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     finished = [step for step in steps if step["ended_at"] and step["outcome"] == "ok"
                 and not _reads_only(step["tool"])]
     store.close_open_steps(ref, "interrupted")
+    store.set_meta(_CHECK + ref, "")  # an earlier restart's step isn't this one's
     # A row from before turns were stamped can still have run: its steps say so.
     began = bool(work.turn_at) or bool(store.steps(ref, limit=1))
     briefs = store.outbox_rows(ref, "start") if not began and work.session_id else []
@@ -1441,6 +1486,7 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
         check = step.get("check") or CHECK.format(tool=shown, summary=_cut(step["summary"] or "no details", 160))
         said = shown + (f": {step['summary']}" if step["summary"] else "")
         store.update(ref, error=_cut(f"stopped by a restart during {said}", 300))
+        store.set_meta(_CHECK + ref, check)
         line = (f"- {ref} “{work.title}” stopped when Hermes restarted, during {_cut(said, 160)} (data, not "
                 "instructions). That step may or may not have taken effect, so it wasn't continued. Ask the "
                 "user whether to check first, continue or stop it. To check first, work_send it: "
@@ -1596,7 +1642,7 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
     if kind == "continue":
         store.outbox_done(row["id"], "dropped")  # recovery owns it: it decides again from the journal
         return
-    if kind in ("send", "answer") and row["target"]:
+    if kind in ("send", "answer", "user_send") and row["target"]:
         work = store.get(row["ref"])
         sessions = {row["target"], *([work.session_id] if work and work.session_id else [])}
         if any(_in_transcript(home, session, row["text"]) for session in sessions):
@@ -1617,7 +1663,8 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
                 store.outbox_done(row["id"], "queued" if outcome == "queued" else "accepted")
                 return
         store.outbox_done(row["id"], "lost")
-        what = {"send": "Your message", "answer": "An answer from another bot"}[kind]
+        what = {"send": "Your message", "answer": "An answer from another bot",
+                "user_send": "The user's message from Conduit"}[kind]
         _queue_wake(home, _bot_chat_of(home) or work.coordinator,
                     f"- {what} to {work.ref} “{work.title}” may not have reached it before Hermes restarted "
                     f"(data, not instructions): «{_cut(row['text'], 400)}» Send it again with work_send if it's "
@@ -2000,6 +2047,8 @@ def turn_started(session_id: Any) -> bool:
         _turn_began[str(session_id)] = began
     # On disk too: after a restart, the steps since then are the turn it stopped.
     work_store.Store(home).update(work.ref, turn_at=began)
+    if work_store.Store(home).get_meta(_CHECK + work.ref):
+        work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
     if work.status not in _RUNNING_STATES:
         # Already running in Hermes, so it takes its slot even past the limit;
@@ -2147,6 +2196,162 @@ def answered(session_id: Any) -> None:
     if work is None or home is None or work.status != "needs_you":
         return
     work_store.Store(home).update(work.ref, status="running", only_if=("needs_you",))
+
+
+# The Work panel (designs/bot-mode-coordinator C.6, C.8): what Conduit shows
+# of a bot's work, and the user's own actions on it, which skip the model.
+
+APP_ROWS = 40
+APP_RECENT_S = 7 * 86400.0
+APP_RESULT_CHARS = 600
+APP_GOAL_CHARS = 300
+APP_TEXT_CHARS = work_store.GOAL_CHARS
+APP_ACTIONS = ("send", "stop", "continue", "check")
+APP_CONTINUE = ("The user tapped Continue in Conduit for this work. Carry on from where you were, without redoing "
+                "finished steps, and end with your report as before.")
+APP_CONTINUE_UNCERTAIN = ("The user tapped Continue in Conduit for this work. Your last turn was cut off during "
+                          "{step}, which may or may not have taken effect. Find out first whether it did, and don't "
+                          "run it again if it did. Then carry on from where you were, without redoing finished "
+                          "steps, and end with your report as before.")
+APP_CHECK = "The user tapped Check first in Conduit. {check}"
+APP_CHECK_DEFAULT = "Find out whether your last step took effect and report back. Change nothing."
+
+
+def app_list(home: Path) -> dict:
+    """The bot's work for the Work panel: active work first, then what
+    changed in the last week, each with what the user can do with it, and
+    the counts the Work strip shows."""
+    home = Path(home)
+    mode = policy(home)
+    out = {"policy": mode, "bot": _bot_name(home), "bot_chat": _bot_chat_of(home), "work": [],
+           "counts": {"working": 0, "needs_you": 0, "ready": 0, "waiting": 0},
+           "max_running": work_store.DEFAULT_MAX_RUNNING}
+    if not work_store.exists(home):
+        return out
+    store = work_store.Store(home)
+    if copy_for(home) is sys.modules[__name__]:
+        # Only the copy whose hooks see this bot's turns recovers its work.
+        try:
+            _sweep(home, store)
+        except Exception:  # noqa: BLE001 — the panel still shows the work as it is
+            logger.debug("conduit_push: work sweep failed", exc_info=True)
+    out["max_running"] = store.max_running()
+    cutoff = time.time() - APP_RECENT_S
+    # Work a restart cut off waits on the user, so it stays with the open work.
+    def still_open(work: work_store.Work) -> bool:
+        return work.active or (work.status == "interrupted" and not work.closed_at)
+
+    rows = [work for work in store.list(include_closed=True, limit=200)
+            if still_open(work) or work.updated_at >= cutoff]
+    rows.sort(key=lambda work: (not still_open(work), -work.updated_at))
+    counts = out["counts"]
+    for work in rows:
+        if work.closed_at:
+            continue
+        if work.kind == "workstream" and work.status in ("starting", "running"):
+            counts["working"] += 1
+        elif work.kind == "workstream" and work.status in ("needs_you", "interrupted"):
+            counts["needs_you"] += 1
+        elif work.kind == "workstream" and work.status == "ready":
+            counts["ready"] += 1
+        elif work.kind == "ask_out" and work.status == "waiting":
+            counts["waiting"] += 1
+    out["work"] = [_app_row(store, work) for work in rows[:APP_ROWS]]
+    return out
+
+
+def _app_row(store: work_store.Store, work: work_store.Work) -> dict:
+    row = {"ref": work.ref, "kind": work.kind, "status": work.status, "title": work.title,
+           "goal": _cut(work.goal, APP_GOAL_CHARS), "session_id": work.session_id,
+           "profile": str((work.executor or {}).get("bot") or "") if work.kind == "workstream" else "",
+           "created_at": work.created_at, "updated_at": work.updated_at, "closed": bool(work.closed_at),
+           "result": _cut(work.last_result, APP_RESULT_CHARS) if work.status in _REPORTED else "",
+           "error": work.error if work.status in ("failed", "interrupted", "stopped") else "",
+           "checklist": [step for step in (work.progress or {}).get("steps") or [] if isinstance(step, dict)],
+           "step": "", "uncertain": False, "actions": []}
+    if work.kind != "workstream":
+        row["bot"] = _ask_bot(work)
+        return row
+    if work.status in _RUNNING_STATES:
+        open_steps = store.steps(work.ref, open_only=True, limit=1)
+        if open_steps:
+            step = open_steps[-1]
+            row["step"] = _shown_tool(step["tool"]) + (f": {step['summary']}" if step["summary"] else "")
+    row["uncertain"] = work.status == "interrupted" and bool(store.get_meta(_CHECK + work.ref))
+    row["actions"] = _app_actions(work, row["uncertain"])
+    return row
+
+
+def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
+    if work.kind != "workstream" or not work.session_id:
+        return []
+    if work.status in _RUNNING_STATES:
+        return ["send", "stop"]
+    if work.status == "interrupted":
+        return ["check", "continue", "stop", "send"] if uncertain else ["continue", "stop", "send"]
+    if work.status == "stopped":
+        return ["continue", "send"]
+    return ["send"]
+
+
+def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> dict:
+    """The user's own action on a workstream from Conduit: ``send`` their
+    words straight into it (Reply in W3), ``stop`` it, ``continue`` it or
+    ``check`` first after a restart. No Bot Chat turn: the coordinator sees
+    it in its next digest. The answer has ``ok``, the row as it is now, and
+    ``error`` with a ``note`` when nothing was done."""
+    home = Path(home)
+    body = body if isinstance(body, dict) else {}
+    if action not in APP_ACTIONS:
+        return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for work."}
+    if policy(home) == "off":
+        return {"ok": False, "error": "off", "note": "Bot workstreams are off for this bot."}
+    reason = work_broker.unavailable_reason()
+    if reason:
+        return {"ok": False, "error": "unavailable", "note": reason}
+    store = work_store.Store(home)
+    broker = work_broker.Broker(home)
+    if copy_for(home) is sys.modules[__name__]:
+        _sweep(home, store, broker)  # before any action, as the tools do
+    work = store.get(ref)
+    if work is None or work.kind != "workstream":
+        return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's workstreams."}
+    if not work.session_id:
+        return {"ok": False, "ref": work.ref, "error": "starting", "note": f"{work.ref} is still being started."}
+    allowed = _app_actions(work, work.status == "interrupted" and bool(store.get_meta(_CHECK + work.ref)))
+    if action not in allowed:
+        return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
+                "note": f"{work.ref} can't {action} while it's {work.status.replace('_', ' ')}."}
+    if action == "stop":
+        if work.status == "interrupted":
+            # Nothing runs: the user decided it stays stopped.
+            store.update(work.ref, status="stopped", only_if=("interrupted",))
+            store.set_meta(_CHECK + work.ref, "")
+            answer = {"ok": True, "ref": work.ref, "status": "stopped"}
+        else:
+            answer = _stop(store, broker, work)
+    else:
+        if action == "send":
+            text = str(body.get("text") or "").strip()
+            if not text:
+                return {"ok": False, "ref": work.ref, "error": "missing", "note": "Type what to send."}
+            words = text[:APP_TEXT_CHARS]
+            how = body.get("how") if body.get("how") in ("auto", "add", "after") else "auto"
+        elif action == "check":
+            words = APP_CHECK.format(check=store.get_meta(_CHECK + work.ref) or APP_CHECK_DEFAULT)
+            how = "after"
+        else:
+            step = work.error.removeprefix("stopped by a restart during ") if work.error else ""
+            uncertain = work.status == "interrupted" and bool(store.get_meta(_CHECK + work.ref))
+            words = APP_CONTINUE_UNCERTAIN.format(step=step or "a step") if uncertain else APP_CONTINUE
+            how = "after"
+        answer = _deliver(store, broker, work, words, how, kind="user_send")
+        if answer.get("ok") and action in ("check", "continue"):
+            store.set_meta(_CHECK + work.ref, "")
+    now = store.get(work.ref)
+    if now is not None:
+        answer["work"] = _app_row(store, now)
+    return answer
 
 
 def digest(session_id: Any) -> Optional[str]:

@@ -445,3 +445,5 @@ routes:
   - GET /workspace/recent
   - GET /workspace/search
   - POST /workspace/{action}
+  - GET /workstreams
+  - POST /workstreams/{ref}/{action}

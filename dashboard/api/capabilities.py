@@ -218,6 +218,10 @@ ROUTE_CAPABILITIES = (
     # each Link's rules or its owner (link_asks), and the present store's
     # prompts for them (Linked Rooms).
     "link-asks",
+    # /workstreams: a bot's work for the Work panel and the user's own actions
+    # on a workstream (Reply, Stop, Continue, Check first), ?conduit_profile=
+    # included (Bot workstreams).
+    "bot-workstreams",
 )
 
 

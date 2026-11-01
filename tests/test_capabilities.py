@@ -149,6 +149,7 @@ def test_every_capability_names_a_served_route_family():
         # Use my data's free/busy, set in the choices.
         "room-free-busy": "/rooms/choices",
         "link-asks": "/links/rules",
+        "bot-workstreams": "/workstreams",
     }
     assert set(prefixes) == set(api.capabilities.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

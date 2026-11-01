@@ -1471,6 +1471,31 @@ she tells you about. It's off until you turn it on for a bot:
 - It needs the Hermes dashboard to run plugins in its own process: under
   `plugins.isolation: host` the tools answer with that reason.
 
+Conduit's Work panel reads and acts on a bot's work through these routes,
+which skip the Bot Chat's model: your words go straight into the
+workstream, as if typed in its chat, and the coordinator sees the change in
+its next digest. A secondary bot is named with `?conduit_profile=`.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, work}` |
+| POST | `/api/plugins/conduit_push/workstreams/<ref>/send` with `{text, how?}` | `{ok, outcome, work}` |
+| POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
+
+- `work` lists active work first, then what changed in the last week:
+  workstreams, and asks to and from other bots (`kind` `ask_out` with `bot`,
+  the bot it's waiting on, or `ask_in`). Each row has its status, checklist,
+  the step it's on, its last result, and `actions`: what you can do with it
+  now. `counts` has `working`, `needs_you` (approvals, questions and work a
+  restart left for you), `ready` and `waiting` (asks to other bots).
+- `check` (Check first) is offered when a restart cut off a step that can
+  change things (`uncertain`): the workstream is asked to find out whether
+  that step took effect and change nothing. `continue` after such a cut-off
+  tells the workstream the step may have run, so it checks before running it
+  again. Stopping interrupted work runs nothing.
+- A refusal is a 4xx with `code` (`no_such_work`, `not_now`, `busy`,
+  `open_elsewhere`, `off`, `missing`) and `detail`.
+
 ## Chat takeover
 
 Hermes lets one app own a chat at a time. Hermes Desktop claims a chat on its
