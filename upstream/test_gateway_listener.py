@@ -1,0 +1,362 @@
+"""Conduit on the gateway's own listener (hermes-conduit#1618).
+
+Hermes serves /api/ws twice: ``hermes dashboard`` answers session verbs with
+its TUI gateway, and the gateway's own listener (the Webapp, ``hermes
+webapp``) with its session authority, which takes other shapes for the same
+verbs. Conduit tells them apart by the ``session_authority`` flag in
+``gateway.ready`` and sends each its own shape. These tests start a real
+gateway with the Webapp listener and send the frames Conduit sends there
+(HermesClient.swift, "The session authority's shapes"), signed in the way
+Conduit signs in: with the Webapp's session token, like the browser.
+
+The other half is the resend: a request Conduit built before it read
+``gateway.ready`` goes in the dashboard's shape and is sent again in the
+authority's when refused. That is only safe while the authority refuses the
+dashboard's shape before anything runs, so that is checked too.
+
+A Hermes without the Webapp (before 2026-10-25) skips these. A small fake
+model server answers the turns, slowly enough that a steer finds one running.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import pytest
+import yaml
+
+from conftest import COPY_IGNORE, PLUGIN, READY_TIMEOUT_S, ROOT, _free_port, _hermes_bin
+
+WORDS = 10
+WORD_DELAY_S = 0.4
+
+
+class _FakeModel(BaseHTTPRequestHandler):
+    """An OpenAI-compatible model that streams WORDS words, one every WORD_DELAY_S."""
+
+    def log_message(self, *args: Any) -> None:
+        pass
+
+    def _json(self, body: Dict[str, Any]) -> None:
+        raw = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self) -> None:
+        self._json({"data": [{"id": "fake-model", "object": "model"}]})
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        request = json.loads(self.rfile.read(length) or b"{}")
+        if not request.get("stream"):
+            self._json({"id": "x", "object": "chat.completion", "created": 0, "model": "fake-model",
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+
+        def chunk(delta: Dict[str, Any], finish: Optional[str] = None) -> bytes:
+            body = {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": "fake-model",
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+            return f"data: {json.dumps(body)}\n\n".encode()
+
+        try:
+            for index in range(WORDS):
+                self.wfile.write(chunk({"content": f"word{index} "}))
+                self.wfile.flush()
+                time.sleep(WORD_DELAY_S)
+            self.wfile.write(chunk({}, "stop") + b"data: [DONE]\n\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+class Listener:
+    """The gateway's listener: Conduit's socket, signed in with the Webapp's session token."""
+
+    def __init__(self, port: int, home: Path) -> None:
+        self.port = port
+        self.home = home
+
+    @property
+    def token(self) -> str:
+        return (self.home / "webapp" / "session-token").read_text().strip()
+
+    def plugin_get(self, path: str) -> int:
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/plugins/{PLUGIN}/{path}",
+                                     headers={"X-Hermes-Session-Token": self.token})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    def run(self, script) -> Any:
+        """Runs ``await script(socket)`` on a fresh Conduit socket."""
+        return asyncio.run(self._run(script))
+
+    async def _run(self, script) -> Any:
+        from websockets.asyncio.client import connect
+
+        url = f"ws://127.0.0.1:{self.port}/api/ws?token={self.token}"
+        async with connect(url, open_timeout=15, max_size=None, proxy=None) as ws:
+            sock = ConduitSocket(ws)
+            reader = asyncio.create_task(sock.read())
+            try:
+                await asyncio.wait_for(sock.ready.wait(), 20)
+                return await script(sock)
+            finally:
+                reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reader
+
+
+class ConduitSocket:
+    def __init__(self, ws: Any) -> None:
+        self.ws = ws
+        self.ready = asyncio.Event()
+        self.ready_payload: Dict[str, Any] = {}
+        self.events: List[Dict[str, Any]] = []
+        self._pending: Dict[int, asyncio.Future] = {}
+        self._next = 0
+        self._event_seen = asyncio.Event()
+
+    async def read(self) -> None:
+        async for raw in self.ws:
+            frame = json.loads(raw)
+            future = self._pending.pop(frame.get("id"), None) if "id" in frame else None
+            if future is not None:
+                future.set_result(frame)
+            elif frame.get("method") == "event":
+                params = frame.get("params") or {}
+                if params.get("type") == "gateway.ready":
+                    self.ready_payload = params.get("payload") or {}
+                    self.ready.set()
+                self.events.append(params)
+                self._event_seen.set()
+
+    async def call(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """The whole answer frame: ``result`` or ``error``."""
+        self._next += 1
+        future = asyncio.get_running_loop().create_future()
+        self._pending[self._next] = future
+        await self.ws.send(json.dumps({"jsonrpc": "2.0", "id": self._next, "method": method, "params": params}))
+        return await asyncio.wait_for(future, 60)
+
+    async def result(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        frame = await self.call(method, params)
+        assert "error" not in frame, f"{method} {params} -> {frame['error']}"
+        return frame["result"]
+
+    async def event(self, session_id: str, kind: str, timeout: float = 60) -> Dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while True:
+            for event in self.events:
+                if event.get("type") == kind and event.get("session_id") == session_id:
+                    return event
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"no {kind} for {session_id}; saw {[e.get('type') for e in self.events]}"
+            self._event_seen.clear()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._event_seen.wait(), remaining)
+
+
+def _refusal(frame: Dict[str, Any]) -> str:
+    error = frame.get("error") or {}
+    return (error.get("data") or {}).get("reason") or str(error.get("code"))
+
+
+def _submit(session_id: str, text: str) -> Dict[str, Any]:
+    """Conduit's prompt.submit on the authority: one submission id per message."""
+    return {"session_id": session_id, "text": text, "submission_id": str(uuid.uuid4())}
+
+
+def _create() -> Dict[str, Any]:
+    """Conduit's session.create on the authority (HermesClient.createParams)."""
+    return {"source": "gui", "reasoning": "low"}
+
+
+def _resume(session_id: str, omit_messages: bool) -> Dict[str, Any]:
+    """Conduit's session.resume on the authority: no inline_images."""
+    params: Dict[str, Any] = {"session_id": session_id, "cols": 96, "source": "desktop"}
+    if omit_messages:
+        params["omit_messages"] = True
+    return params
+
+
+def _mutate(snapshot: Dict[str, Any], session_id: str, operation: str, payload: Dict[str, Any],
+            fences_generation: bool) -> Dict[str, Any]:
+    params = {"session_id": session_id, "request_id": str(uuid.uuid4()), "operation": operation,
+              "payload": payload, "expected_revision": snapshot["revision"]}
+    if fences_generation:
+        params["expected_generation"] = snapshot["execution_generation"]
+    return params
+
+
+@pytest.fixture(scope="module")
+def listener(tmp_path_factory: pytest.TempPathFactory):
+    if importlib.util.find_spec("gateway.webapp_listener") is None:
+        pytest.skip("this Hermes has no Webapp listener (before 2026-10-25)")
+    hermes = _hermes_bin()
+    home = tmp_path_factory.mktemp("hermes-gateway-home")
+    model = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModel)
+    threading.Thread(target=model.serve_forever, daemon=True).start()
+    port = _free_port()
+    shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "plugins": {"enabled": [PLUGIN]},
+        "webapp": {"enabled": True, "port": port},
+        "model": {"default": "fake-model", "provider": "custom",
+                  "base_url": f"http://127.0.0.1:{model.server_address[1]}/v1", "api_key": "fake"},
+    }))
+    env = {**os.environ, "HERMES_HOME": str(home), "NO_COLOR": "1"}
+    log_path = home / "gateway.log"
+    log = log_path.open("w")
+    proc = subprocess.Popen([hermes, "gateway", "run"], env=env, stdout=log, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    try:
+        deadline = time.monotonic() + READY_TIMEOUT_S
+        while True:
+            if proc.poll() is not None:
+                raise RuntimeError(f"the gateway exited ({proc.returncode}):\n{log_path.read_text()[-4000:]}")
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"the gateway's listener did not start:\n{log_path.read_text()[-4000:]}")
+            if (home / "webapp" / "session-token").exists():
+                with contextlib.suppress(OSError):
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=5) as resp:
+                        if resp.status == 200:
+                            break
+            time.sleep(0.5)
+        yield Listener(port, home)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(20)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(15)
+        log.close()
+        model.shutdown()
+        if os.environ.get("UPSTREAM_CONTRACT_LOG"):
+            print(log_path.read_text()[-8000:])
+
+
+def test_ready_names_the_session_authority_and_the_plugin_is_served(listener):
+    async def script(sock: ConduitSocket) -> Dict[str, Any]:
+        return sock.ready_payload
+
+    assert listener.run(script).get("session_authority") is True
+    # The listener mounts the dashboard, so the plugin's routes answer on it too.
+    assert listener.plugin_get("capabilities") == 200
+
+
+def test_a_turn_in_conduits_authority_shapes(listener):
+    async def script(sock: ConduitSocket) -> None:
+        created = await sock.result("session.create", _create())
+        sid = created["session_id"]
+        assert isinstance(created["revision"], int) and isinstance(created["execution_generation"], int)
+
+        receipt = await sock.result("prompt.submit", _submit(sid, "first"))
+        assert receipt["status"] in {"queued", "started"}, receipt
+        start = await sock.event(sid, "message.start")
+        generation = start["execution_generation"]
+
+        # A steer names the running turn by the generation its events carry.
+        steered = await sock.result("session.steer", {"session_id": sid, "execution_generation": generation,
+                                                       "text": "keep it short"})
+        assert steered["status"] in {"queued", "rejected"}, steered
+        await sock.event(sid, "message.complete")
+
+        # A turn that ended: the old generation is stale, and the refusal says so.
+        stale = await sock.call("session.interrupt", {"session_id": sid, "execution_generation": generation - 1})
+        assert _refusal(stale) == "stale_generation", stale
+
+        await sock.result("prompt.submit", _submit(sid, "second"))
+        deadline = time.monotonic() + 60
+        while sum(1 for e in sock.events if e.get("type") == "message.complete" and e.get("session_id") == sid) < 2:
+            assert time.monotonic() < deadline, "the second turn never completed"
+            await asyncio.sleep(0.2)
+
+        full = await sock.result("session.resume", _resume(sid, omit_messages=False))
+        replies = [m for m in full["messages"] if m.get("role") == "assistant"]
+        assert len(replies) >= 2 and all(isinstance(m.get("row_id"), int) for m in replies), full["messages"]
+        through = replies[0]["row_id"]
+        kept = sum(1 for m in full["messages"] if isinstance(m.get("row_id"), int) and m["row_id"] <= through)
+        snapshot = await sock.result("session.resume", _resume(sid, omit_messages=True))
+        assert snapshot["messages"] == [] and snapshot["running"] is False
+
+        renamed = await sock.result("session.mutate", _mutate(snapshot, sid, "rename", {"title": "Trip plans"},
+                                                               fences_generation=False))
+        assert (await sock.result("session.info", {"session_id": sid})).get("title") == "Trip plans"
+        snapshot = {**snapshot, "revision": renamed["revision"]}
+
+        # A stale revision is refused with the current fences, which Conduit retries with once.
+        conflict = await sock.call("session.mutate", _mutate({**snapshot, "revision": 0}, sid, "rename",
+                                                             {"title": "x"}, fences_generation=False))
+        assert _refusal(conflict) == "revision_conflict", conflict
+        assert conflict["error"]["data"]["revision"] == renamed["revision"], conflict
+
+        # Branching keeps the rows through the first reply.
+        branched = await sock.result("session.mutate", _mutate(
+            snapshot, sid, "branch", {"title": "Branch", "through_message_id": through},
+            fences_generation=True))
+        assert branched["branched_session_id"] and branched["branched_session_id"] != sid, branched
+        assert branched.get("copied_messages") == kept, branched
+        snapshot = {**snapshot, "revision": branched["revision"]}
+
+        compressed = await sock.result("session.mutate", _mutate(snapshot, sid, "compress",
+                                                                  {"focus": "names"}, fences_generation=True))
+        assert compressed["operation"] == "compress", compressed
+
+        pending = await sock.result("approval.pending", {"session_id": sid})
+        assert isinstance(pending, dict), pending
+
+    listener.run(script)
+
+
+def test_dashboard_shapes_are_refused_before_anything_runs(listener):
+    """Conduit resends a request built before the ready in the authority's shape;
+    that is only safe while the authority refuses the dashboard's shape outright."""
+
+    async def script(sock: ConduitSocket) -> None:
+        dashboard_create = await sock.call("session.create", {"cols": 96, "source": "desktop"})
+        assert "error" in dashboard_create, dashboard_create
+
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        no_id = await sock.call("prompt.submit", {"session_id": sid, "text": "hello"})
+        assert "error" in no_id, no_id
+        with_images = await sock.call("session.resume", {**_resume(sid, omit_messages=False), "inline_images": False})
+        assert "error" in with_images, with_images
+        for method in ("session.title", "session.compress"):
+            missing = await sock.call(method, {"session_id": sid})
+            assert missing.get("error", {}).get("code") == -32601, (method, missing)
+
+        await asyncio.sleep(1)
+        snapshot = await sock.result("session.resume", _resume(sid, omit_messages=True))
+        assert snapshot["message_count"] == 0 and snapshot["running"] is False, snapshot
+        assert not [e for e in sock.events if e.get("type") == "message.start" and e.get("session_id") == sid]
+
+    listener.run(script)

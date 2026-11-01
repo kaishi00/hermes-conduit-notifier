@@ -26,6 +26,15 @@ watch_paths:
   - hermes_cli/gateway_runtime*.py
   - gateway/session_local_migration.py
   - hermes_cli/active_sessions.py
+  # Conduit's chat socket on the gateway's own listener (test_gateway_listener.py).
+  - gateway/run_api.py
+  - gateway/webapp_listener.py
+  - gateway/session_controls.py
+  - gateway/session_contract.py
+  - gateway/session_mutations.py
+  - hermes_state_mutations.py
+  - tui_gateway/ws.py
+  - tui_gateway/contracts/
 
 # Words that make a changed hunk worth a closer look.
 keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,
@@ -84,6 +93,12 @@ notes:
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
     update can't confirm, so hosts stay on the old version (hermes-conduit#1500).
+  chats on the gateway's listener: >-
+    Conduit's chat socket, when its address is the gateway's own listener (the Webapp) instead of
+    hermes dashboard (feature map: "Two Hermes servers"). gateway.ready's session_authority tells
+    them apart; the authority takes its own shapes for the same verbs (submission_id,
+    execution_generation, session.mutate for renames, branches, compression and model picks) and
+    refuses the dashboard's before running anything, which Conduit's one resend relies on.
 
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
