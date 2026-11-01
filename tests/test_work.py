@@ -327,8 +327,9 @@ def test_an_answer_for_a_workstream_goes_into_it(bots, hermes, monkeypatch):
 
 def test_an_answer_for_work_a_restart_left_waiting_goes_to_the_bot_chat(bots, hermes, monkeypatch):
     start()
-    call("work_ask", {"bot": "Nahida", "text": "Research the login library.", "for": "W1"})
     store_mod.Store(bots["hermes"]).update("W1", status="interrupted")
+    asked = call("work_ask", {"bot": "Nahida", "text": "Research the login library.", "for": "W1"})
+    assert "W1 is interrupted" in asked["note"]
     work.flush_wakes()
     hermes.calls.clear()
     as_bot(monkeypatch, bots, "nahida")
