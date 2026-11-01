@@ -503,7 +503,8 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
         step = _cut(" ".join(str(item.get("step") or "").split()), PROGRESS_STEP_CHARS)
         if not step:
             continue
-        state = item.get("state") if item.get("state") in PROGRESS_STATES else "todo"
+        state = str(item.get("state") or "").strip().lower()
+        state = state if state in PROGRESS_STATES else "todo"
         steps.append({"step": step, "state": state})
     if raw and not steps:
         return {"ok": False, "ref": work.ref, "error": "missing",
@@ -933,8 +934,18 @@ def _checklist_only(tool_name: Any, args: Any = None) -> bool:
     return bool(names) and all(called in WORKER_TOOLS for called in names)
 
 
+# Bridged checklist calls left out of the journal, by call id, so their end
+# doesn't close another bridged step.
+_unjournaled: set[str] = set()
+
+
 def step_started(session_id: Any, tool_name: Any, args: Any, *, turn_id: Any = None, tool_call_id: Any = None) -> None:
     if _checklist_only(tool_name, args):
+        if tool_name == "tool_call" and tool_call_id:
+            with _wake_lock:
+                if len(_unjournaled) > 512:
+                    _unjournaled.clear()
+                _unjournaled.add(str(tool_call_id))
         return
     home, work = _workstream(session_id)
     if work is None or home is None:
@@ -946,7 +957,12 @@ def step_started(session_id: Any, tool_name: Any, args: Any, *, turn_id: Any = N
 def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, status: Any = None,
                error_type: Any = None) -> None:
     if tool_name in WORKER_TOOLS:
-        return  # a bridged one never opened a step, so closing finds none
+        return
+    if tool_name == "tool_call" and tool_call_id:
+        with _wake_lock:
+            if str(tool_call_id) in _unjournaled:
+                _unjournaled.discard(str(tool_call_id))
+                return  # a bridged checklist call: it opened no step
     home, work = _workstream(session_id)
     if work is None or home is None:
         return
@@ -1222,6 +1238,7 @@ def stop() -> None:
         _wakes.clear()
         _wake_held.clear()
         _finished.clear()
+        _unjournaled.clear()
         _replies.clear()
         _redirecting.clear()
     for _, timer in pending:

@@ -134,6 +134,7 @@ def hermes(home, monkeypatch):
     work._wakes.clear()
     work._wake_held.clear()
     work._finished.clear()
+    work._unjournaled.clear()
     work._replies.clear()
     work._redirecting.clear()
     return fake
@@ -1587,3 +1588,18 @@ def test_checklist_calls_leave_the_step_journal_alone(on, hermes):
                       tool_call_id="c3")
     work.step_ended(WORKER, "work_progress", tool_call_id="c2")
     assert [step["tool"] for step in call("work_read", {"ref": "W1"})["recent_steps"]] == ["terminal"]
+
+
+def test_a_bridged_checklist_calls_end_doesnt_close_another_bridged_step(on, hermes):
+    start()
+    work.step_started(WORKER, "tool_call", {"name": "terminal", "arguments": {"command": "ls"}}, tool_call_id="c1")
+    work.step_started(WORKER, "tool_call", {"name": "work_progress", "arguments": {"steps": ["x"]}},
+                      tool_call_id="c2")
+    work.step_ended(WORKER, "tool_call", tool_call_id="c2", status="ok")
+    assert [step["tool_call_id"] for step in on.steps("W1", open_only=True)] == ["c1"]
+
+
+def test_a_step_state_in_capitals_is_read(on, hermes):
+    start()
+    call("work_progress", {"steps": [{"step": "Read", "state": " DONE "}]}, session_id=WORKER)
+    assert on.get("W1").progress["steps"][0]["state"] == "done"
