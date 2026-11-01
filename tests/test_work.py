@@ -2907,3 +2907,22 @@ def test_a_lost_continue_is_named_as_the_users_tap(on, hermes, monkeypatch):
     work.flush_wakes()
     wake, = submitted_to(hermes, BOT_CHAT)
     assert "The user's Continue or Check first from Conduit to W1" in wake["text"]
+
+
+def test_a_second_continue_tap_finds_the_work_already_running(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "read_file", tool_call_id="c1", summary="path: build.log")
+    store_mod.Store(on.home).set_after_restart("ask")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    hermes.calls.clear()
+    assert work.app_act(on.home, "W1", "continue")["ok"]
+    assert work.app_act(on.home, "W1", "continue")["error"] == "not_now"
+    assert len(submitted_to(hermes, WORKER_1)) == 1
+
+
+def test_work_that_never_got_a_session_says_so(on, hermes):
+    store = store_mod.Store(on.home)
+    row = store.add("workstream", title="Never started", status="interrupted")
+    assert work.app_act(on.home, row.ref, "send", {"text": "Go"})["error"] == "not_now"

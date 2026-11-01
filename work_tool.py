@@ -2353,7 +2353,22 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
     if work is None or work.kind != "workstream":
         return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's workstreams."}
     if not work.session_id:
-        return {"ok": False, "ref": work.ref, "error": "starting", "note": f"{work.ref} is still being started."}
+        if work.status in _RUNNING_STATES:
+            return {"ok": False, "ref": work.ref, "error": "starting", "note": f"{work.ref} is still being started."}
+        return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
+                "note": f"{work.ref} never started, so there's nothing to send to. Ask the bot to start it again."}
+    with _app_lock:
+        # One action at a time: a second tap on Continue sees the first's row.
+        return _app_act(store, broker, work.ref, action, body)
+
+
+_app_lock = threading.Lock()
+
+
+def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, action: str, body: dict) -> dict:
+    work = store.get(ref)
+    if work is None:
+        return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's workstreams."}
     uncertain = _app_uncertain(store, work)
     allowed = _app_actions(work, uncertain)
     if action not in allowed:
