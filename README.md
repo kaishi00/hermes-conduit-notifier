@@ -1410,7 +1410,9 @@ she tells you about. It's off until you turn it on for a bot:
   link (`work_read` gives the coordinator up to 2,000 characters of it).
   A workstream keeps a checklist with `work_progress` (its only work
   tool), which the Bot Chat's digest shows, and marks a result you should look
-  at first (a draft, a diff) as ready.
+  at first (a draft, a diff) as ready. `work_progress` stays offered while
+  the bot has a registry, so turning workstreams off doesn't take it from one
+  that's running; anywhere but a workstream it answers that it's only for one.
 - A workstream's turn sends no push of its own: the Bot Chat's reply about it
   is the one push. Its approvals and questions still come from the workstream.
 - Up to 2 run at once per bot (`--max-running`). The registry is

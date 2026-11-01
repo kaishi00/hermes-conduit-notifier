@@ -518,7 +518,8 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     ready = flag if isinstance(flag, bool) else bool((work.progress or {}).get("ready"))
     work_store.Store(found).update(work.ref, progress={"steps": steps, "ready": ready})
     done = sum(1 for step in steps if step["state"] == "done")
-    note = f"Checklist kept: {done} of {len(steps)} done." if steps else "Checklist cleared."
+    note = f"Checklist kept: {done} of {len(steps)} done." if steps else (
+        "Checklist cleared." if args.get("steps") is not None else "No checklist yet.")
     if dropped:
         note += f" It keeps {PROGRESS_STEPS} steps, so the last {dropped} were left out."
     if ready:
@@ -919,7 +920,22 @@ def is_workstream(session_id: Any) -> bool:
     return _workstream(session_id)[1] is not None
 
 
+def _checklist_only(tool_name: Any, args: Any = None) -> bool:
+    """A workstream's checklist call (direct or through tool_call): no side
+    effect to journal, and its words would fill work_read's steps."""
+    if tool_name in WORKER_TOOLS:
+        return True
+    if tool_name != "tool_call":
+        return False
+    from . import pulse_tools
+
+    names = [called for called, _ in pulse_tools.called(args)]
+    return bool(names) and all(called in WORKER_TOOLS for called in names)
+
+
 def step_started(session_id: Any, tool_name: Any, args: Any, *, turn_id: Any = None, tool_call_id: Any = None) -> None:
+    if _checklist_only(tool_name, args):
+        return
     home, work = _workstream(session_id)
     if work is None or home is None:
         return
@@ -929,6 +945,8 @@ def step_started(session_id: Any, tool_name: Any, args: Any, *, turn_id: Any = N
 
 def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, status: Any = None,
                error_type: Any = None) -> None:
+    if tool_name in WORKER_TOOLS:
+        return  # a bridged one never opened a step, so closing finds none
     home, work = _workstream(session_id)
     if work is None or home is None:
         return

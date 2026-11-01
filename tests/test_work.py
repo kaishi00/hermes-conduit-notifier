@@ -1577,3 +1577,13 @@ def test_the_checklist_tool_stays_offered_while_the_bot_has_work(on, hermes, mon
     work._policy_cache.clear()
     assert registered["work_progress"]["check_fn"]() is True
     assert registered["work_start"]["check_fn"]() is False
+
+
+def test_checklist_calls_leave_the_step_journal_alone(on, hermes):
+    start()
+    work.step_started(WORKER, "terminal", {"command": "ls"}, tool_call_id="c1")
+    work.step_started(WORKER, "work_progress", {"steps": ["x"]}, tool_call_id="c2")
+    work.step_started(WORKER, "tool_call", {"name": "work_progress", "arguments": {"steps": ["x"]}},
+                      tool_call_id="c3")
+    work.step_ended(WORKER, "work_progress", tool_call_id="c2")
+    assert [step["tool"] for step in call("work_read", {"ref": "W1"})["recent_steps"]] == ["terminal"]
