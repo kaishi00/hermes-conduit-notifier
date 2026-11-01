@@ -1348,6 +1348,10 @@ def _recover(home: Path, store: work_store.Store, broker: Optional[work_broker.B
             # Hermes may still re-run it on its own: never continued on top.
             gap = {"at": float("inf"), "tool": "Hermes' own re-run",
                    "summary": "its crash marker couldn't be cleared, so Hermes may re-run the turn when it's opened"}
+        elif retired == "unsure":
+            # Another process may still be running it: the user decides.
+            gap = {"at": float("inf"), "tool": "another Hermes process",
+                   "summary": "its turn marker's writer couldn't be checked, so that process may still be running it"}
         try:
             _recover_one(home, store, broker, work, mode, gap)
         except Exception:  # noqa: BLE001 — the others are still recovered
@@ -1358,8 +1362,7 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
                  mode: str, gap: Optional[dict]) -> None:
     ref = work.ref
     steps = [step for step in store.steps(ref, limit=500) if step["started_at"] >= (work.turn_at or 0.0)]
-    uncertain = [step for step in steps if not _reads_only(step["tool"])
-                 and (not step["ended_at"] or step["outcome"] == "timed_out")]
+    uncertain = [step for step in store.unsettled_steps(ref, work.turn_at or 0.0) if not _reads_only(step["tool"])]
     if gap and float(gap.get("at") or 0) >= (work.turn_at or 0.0):
         uncertain.append({"tool": str(gap.get("tool") or "a tool"),
                           "summary": str(gap.get("summary") or "its journal entry couldn't be written")})
@@ -1397,8 +1400,11 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
         item = ""
         try:
             item = store.outbox_add(ref, "continue", work.session_id, text)
+            # Before the send: a crash once Hermes has it must not continue it again.
+            store.set_meta(_CONTINUED + ref, str(time.time()))
             outcome, tip = broker.send(work.session_id, text, "after")
         except Exception as error:  # noqa: BLE001 — it stays interrupted, for the user to continue
+            store.set_meta(_CONTINUED + ref, "")
             store.update(ref, status="interrupted", only_if=("running",))
             if item:
                 store.outbox_done(item, "refused")
@@ -1406,7 +1412,6 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
                     f"but couldn't be continued ({_cut(error, 120)}). work_send continues it.")
         else:
             store.outbox_done(item, "queued" if outcome == "queued" else "accepted")
-            store.set_meta(_CONTINUED + ref, str(time.time()))
             if tip and tip != work.session_id:
                 store.update(ref, session_id=tip)
             line = (f"- {ref} “{work.title}” was cut off when Hermes restarted, with nothing uncertain in "
@@ -1475,8 +1480,10 @@ def _retire_auto_continue(home: Path, session_id: str) -> str:
     after (``desktop.auto_continue``): for a workstream that's the blind
     re-run recovery is there to prevent, so its marker goes ("cleared";
     "none" when there was none). A marker a live sibling process wrote is
-    its own account of a running turn and stays ("held"). "failed": a
-    marker that couldn't be read or cleared, which Hermes may still act on."""
+    its own account of a running turn and stays ("held"). "unsure": one
+    whose writer couldn't be checked, cleared but maybe still running.
+    "failed": a marker that couldn't be read or cleared, which Hermes may
+    still act on."""
     try:
         from tui_gateway.turn_marker import clear_turn_marker, marker_writer_state, read_turn_marker
     except Exception:  # noqa: BLE001 — a Hermes without it has no re-run to retire
@@ -1487,9 +1494,14 @@ def _retire_auto_continue(home: Path, session_id: str) -> str:
             return "none"
         import os
 
-        if marker_writer_state(marker) == "alive" and marker.get("writer_pid") != os.getpid():
+        state = marker_writer_state(marker)
+        if state == "alive" and marker.get("writer_pid") != os.getpid():
             return "held"
+        # Cleared unless provably alive: Hermes' own resume re-runs an
+        # "unknown" one. Whether to continue is left to the user then.
         clear_turn_marker(home, session_id)
+        if state != "dead" and marker.get("writer_pid") != os.getpid():
+            return "unsure"
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't retire a workstream's turn marker", exc_info=True)
         return "failed"

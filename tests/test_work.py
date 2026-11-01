@@ -2288,6 +2288,33 @@ def test_a_start_cut_off_before_its_session_was_stored_is_told(on, hermes, monke
     assert "before the brief was sent" in on.get("W1").error
 
 
+def test_a_marker_whose_writer_cant_be_checked_is_cleared_and_the_user_decides(on, hermes, monkeypatch):
+    cleared = []
+    markers = types.ModuleType("tui_gateway.turn_marker")
+    markers.read_turn_marker = lambda home, key: {"writer_pid": 1, "prompt": "x"}
+    markers.marker_writer_state = lambda marker: "unknown"
+    markers.clear_turn_marker = lambda home, key: cleared.append(key)
+    monkeypatch.setitem(sys.modules, "tui_gateway.turn_marker", markers)
+    start()
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert cleared == [WORKER_1] and submitted_to(hermes, WORKER_1) == []
+    assert "another Hermes process" in on.get("W1").error
+
+
+def test_an_open_write_step_is_found_behind_many_later_steps(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="w", summary="command: ./deploy.sh")
+    for n in range(510):
+        on.step_started("W1", WORKER_1, "read_file", tool_call_id=f"r{n}")
+        on.step_ended("W1", tool="read_file", tool_call_id=f"r{n}")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and "./deploy.sh" in on.get("W1").error
+
+
 def test_a_continue_that_cant_be_written_leaves_the_work_interrupted(on, hermes, monkeypatch):
     start()
     work.turn_started(WORKER_1)

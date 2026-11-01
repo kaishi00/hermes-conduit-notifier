@@ -476,6 +476,16 @@ class Store:
             rows = con.execute(query + " ORDER BY id DESC LIMIT ?", (ref, limit)).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def unsettled_steps(self, ref: str, since: float) -> list[dict]:
+        """Every step since then that's still open or timed out, however
+        many steps came after it."""
+        if not self.path.is_file():
+            return []
+        with self._db(write=False) as con:
+            rows = con.execute("SELECT * FROM steps WHERE ref = ? AND started_at >= ? AND "
+                               "(ended_at = 0 OR outcome = 'timed_out') ORDER BY id", (ref, since)).fetchall()
+        return [dict(row) for row in rows]
+
     # The outbox
 
     def outbox_add(self, ref: str, kind: str, target: str, text: str) -> str:
