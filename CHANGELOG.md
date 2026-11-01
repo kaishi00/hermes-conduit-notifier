@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.122.4 (2026-10-31)
+## 0.123.1 (2026-11-01)
 
 ### Fixes
 - Pulse no longer brings up something again while its card is still open
@@ -21,6 +21,23 @@ checks it). The format is fixed, because Conduit reads it:
   calendar entry): it now matches by what the card says, the same names and
   the same day, so a birthday you already have a card for doesn't come back
   in a report or the morning brief before its day.
+
+## 0.123.0 (2026-10-31)
+
+### New and improved
+- Fewer notifications pile up. Each scheduled job keeps one notification:
+  a new run replaces the last one instead of adding another.
+- Hermes can update a notification it sent earlier instead of adding a
+  new one ("Report in progress", later "Report ready"), from any chat or
+  scheduled job of the same profile, and can make the update quiet: no
+  sound or banner. Quiet updates need relay 0.26, and so does replacing
+  an unencrypted notification.
+- A quiet notification makes no sound now, Pulse's included (one sent
+  while your phone says you're busy, or a quiet report). They used to
+  chime when the completion sound was on.
+- A muted scheduled job's background task no longer notifies when the
+  run's chat is one Hermes' gateway made (a `local-` chat that names the
+  job only through its task).
 
 ## 0.122.3 (2026-10-31)
 

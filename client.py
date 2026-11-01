@@ -380,7 +380,18 @@ def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     if state.get("e2e") is None or event.get("type") == "plugin.hello":
         # Whether a Pulse push is private is for the phone, sealed: in
         # plaintext its body is already the private copy (pulse_push).
-        return {key: value for key, value in event.items() if key != "private"}
+        plain = {key: value for key, value in event.items() if key != "private"}
+        # A slot (#1579) is keyed with the local secret, so the relay can't
+        # check a guessed conduit_notify key against it.
+        if not plain.get("slot"):
+            return plain
+        try:
+            return _keyed_slot(plain, _redact_key(state))
+        except OSError as error:
+            # The secret couldn't be saved: the push still goes, adding a
+            # notification instead of replacing one.
+            logger.warning("Conduit notification slot could not be keyed; sending it without one: %s", error)
+            return {key: value for key, value in plain.items() if key != "slot"}
     keys = None
     try:
         keys = e2e.keys_from_state(state)
@@ -415,6 +426,13 @@ def _redacted(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     # recompute the digest for guessed commands. Runs once per event at this
     # chokepoint; the output is not meant to be fed back in.
     return _rekeyed(redacted, _redact_key(state))
+
+
+def _keyed_slot(event: dict[str, Any], key: str) -> dict[str, Any]:
+    slot = event.get("slot")
+    if not isinstance(slot, str) or not slot:
+        return event
+    return {**event, "slot": hmac.new(key.encode(), b"slot\n" + slot.encode(), hashlib.sha256).hexdigest()[:16]}
 
 
 def _rekeyed(event: dict[str, Any], key: str) -> dict[str, Any]:

@@ -1009,3 +1009,54 @@ def test_a_pairing_that_never_rotates_keeps_working(state_file):
     assert client.build_outgoing(_clarify_event(), stored)["e2e"]["kid"] == KID
     answered = {"status": "answered", "answer": _answer("Yes")}
     assert client.opened_answers(answered, stored, "conduit-push-abc123def456")["answer"] == "Yes"
+
+
+def test_a_slot_threads_a_sealed_push_by_the_slot_and_never_shows_it():
+    # #1579: two runs of one job (two chats) share the phone's slot; the
+    # relay sees only the keyed token.
+    keys = _keys()
+    base = {"type": "response.ready", "plugin_version": "0.5.0", "profile": "default", "body": "News."}
+    runs = [e2e.seal_event({**base, "event_id": f"response:{n}", "session_id": f"cron_daily_2026103{n}_120000",
+                            "slot": "abcdef0123456789"}, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+            for n in (0, 1)]
+    chat = e2e.seal_event({**base, "event_id": "response:2", "session_id": "cron_daily_20261030_120000"}, keys,
+                          installation_id=INSTALLATION, gateway_id=GATEWAY)
+    assert runs[0]["e2e"]["tok"] == runs[1]["e2e"]["tok"] == e2e.thread_token(keys, "slot:abcdef0123456789")
+    assert chat["e2e"]["tok"] != runs[0]["e2e"]["tok"]
+    assert "slot" not in runs[0] and "slot" not in e2e.open_event(runs[0], keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+
+
+def test_redaction_keys_a_slot_so_a_guessed_key_cant_be_checked(monkeypatch):
+    # #1579: under `redact on` the relay gets the slot keyed with the local
+    # secret, still the same for every push in it.
+    state = _state(redact_content=True, redact_key="k")
+    del state["e2e"]
+    sent = _capture(monkeypatch, state)
+    slot = sys.modules["conduit_push.events"].slot_token("key:default:report")
+    for n in (1, 2):
+        client.send_now({"event_id": f"response:{n}", "type": "response.ready", "session_id": f"s{n}", "slot": slot})
+    assert sent[0]["slot"] == sent[1]["slot"] != slot
+    assert len(sent[0]["slot"]) == 16
+
+
+def test_a_plaintext_slot_is_keyed_even_without_redaction(monkeypatch):
+    state = _state(redact_key="k")
+    del state["e2e"]
+    sent = _capture(monkeypatch, state)
+    slot = sys.modules["conduit_push.events"].slot_token("key:default:report")
+    client.send_now({"event_id": "response:3", "type": "response.ready", "session_id": "s", "slot": slot, "body": "Hi"})
+    assert sent[0]["slot"] != slot and len(sent[0]["slot"]) == 16
+    assert sent[0]["body"] == "Hi"
+
+
+def test_a_slot_that_cant_be_keyed_still_lets_the_push_go(monkeypatch):
+    state = _state()
+    del state["e2e"]
+    sent = _capture(monkeypatch, state)
+
+    def unwritable(_state):
+        raise OSError("read-only profile")
+    monkeypatch.setattr(client, "_redact_key", unwritable)
+    slot = sys.modules["conduit_push.events"].slot_token("cron:default:daily")
+    client.send_now({"event_id": "response:4", "type": "response.ready", "session_id": "s", "slot": slot, "body": "Hi"})
+    assert sent[0]["body"] == "Hi" and "slot" not in sent[0]
