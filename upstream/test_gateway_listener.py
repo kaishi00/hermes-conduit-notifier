@@ -308,8 +308,8 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
         pytest.skip("this Hermes has no Webapp listener (before 2026-10-25)")
     hermes = _hermes_bin()
     home = tmp_path_factory.mktemp("hermes-gateway-home")
-    model = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModel)
-    speech = FakeSpeechServer()
+    model: Optional[ThreadingHTTPServer] = None
+    speech: Optional[FakeSpeechServer] = None
     env = {**os.environ, "HERMES_HOME": str(home), "NO_COLOR": "1"}
     log_path = home / "gateway.log"
     log = None
@@ -317,6 +317,8 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
     serving = False
     speaking = False
     try:
+        model = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModel)
+        speech = FakeSpeechServer()
         port = _free_port()
         log = log_path.open("w")
         threading.Thread(target=model.serve_forever, daemon=True).start()
@@ -366,7 +368,8 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
             log.close()
         if serving:
             model.shutdown()
-        model.server_close()
+        if model is not None:
+            model.server_close()
         if speaking:
             speech.stop()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):
