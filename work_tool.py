@@ -472,7 +472,11 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
 def _progress(home: Path, args: dict, session_id: Any) -> dict:
     """A workstream's checklist (C.11), and whether its result is for the
     user to look at. Only the workstream itself can write it."""
-    found, work = _workstream(session_id, home)
+    found, work, unreadable = _lookup(session_id, home)
+    if unreadable:
+        return {"ok": False, "error": "unavailable",
+                "note": "This bot's work couldn't be read just now, so nothing was changed. Try work_progress again "
+                        "in a moment."}
     if work is None or found is None:
         return {"ok": False, "error": "not_workstream", "note": NOT_WORKSTREAM}
     raw = args.get("steps")

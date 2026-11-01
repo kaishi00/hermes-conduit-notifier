@@ -1546,3 +1546,10 @@ def test_a_ready_mark_alone_keeps_the_checklist(on, hermes):
     assert call("work_progress", {"ready": True}, session_id="20261031_work_2")["ok"]
     assert on.get("W2").progress == {"steps": [], "ready": True}
     assert call("work_progress", {}, session_id=WORKER)["error"] == "missing"
+
+
+def test_a_checklist_when_the_registry_cant_be_read_says_to_try_again(on, hermes, monkeypatch):
+    start()
+    monkeypatch.setattr(store_mod.Store, "by_session", lambda self, session_id: (_ for _ in ()).throw(
+        store_mod.sqlite3.OperationalError("database is locked")))
+    assert call("work_progress", {"steps": ["x"]}, session_id=WORKER)["error"] == "unavailable"
