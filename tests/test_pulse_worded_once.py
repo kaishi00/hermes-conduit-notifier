@@ -93,6 +93,25 @@ def test_its_day_still_brings_it_once(live):
     ("Kwan's passport renewal in Nov.", "Kwan's passport renewal, November.", True),
     ("Dentist appointment for Kwan, Friday 6 November.", "Kwan's dentist appointment is on Friday 6 November.", True),
     ("Dentist appointment for Kwan, Friday 6 November.", "Anna's dentist appointment is on Friday 6 November.", False),
+    ("Kwan's birthday is Friday 6 November.", "Kwan's birthday is Fri 6 November.", True),
+    ("Kwan's party is Friday 6 November.", "Kwan's party is 2026-11-06T18:00.", True),
+    ("May's birthday is Friday 6 November.", "May's 41st birthday is Friday 6 November.", True),
+    ("May's birthday is Friday 6 November.", "Kwan's birthday is in May.", False),
+    ("Kwan's 21st birthday is Friday 6 November.", "Kwan's flight is on the 21st.", False),
+    ("Kwan's birthday is 6 November.", "Kwan's flight at 6 pm on 9 November.", False),
+    ("Kwan's birthday is 6 November.", "Kwan's flight at 18.06 on 9 November.", False),
 ])
 def test_same_subject(said, text, same):
     assert candidates.same_subject(said, text) is same
+
+
+
+def test_a_remembered_item_of_its_own_only_counts_a_card_with_nothing_to_key_on(live):
+    now = time.time()
+    open_card(live, "Send Mara the deck by Friday 6 November.", created_at=now - 3600, topic="commitment",
+              item_id=901)
+    row = {"origin": candidates.MEMORY, "item_id": 902, "kind": "commitment", "ref": "",
+           "text": "Send Mara the deck by Friday 6 November.", "due_at": None}
+    assert candidates.still_open(live.store, [row], now) == []
+    open_card(live, "Send Mara the deck by Friday 6 November.", created_at=now - 600, topic="commitment")
+    assert candidates.still_open(live.store, [row], now) == [row]

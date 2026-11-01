@@ -2201,13 +2201,15 @@ class PulseStore:
 
     def open_cards_on(self, topics: Sequence[str], since: float) -> list[dict]:
         """The "noticed" cards on any of ``topics`` made since ``since`` that
-        are still open, as open_cards_about counts it."""
+        are still open, as open_cards_about counts it, each with its
+        candidate's ``ref`` (None for none)."""
         topics = [topic for topic in dict.fromkeys(topics) if topic]
         if not topics:
             return []
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT cards.* FROM cards WHERE cards.kind=? AND cards.created_at>=? "
+                "SELECT cards.*, candidates.ref AS ref FROM cards LEFT JOIN candidates ON candidates.card_id=cards.id "
+                "WHERE cards.kind=? AND cards.created_at>=? "
                 f"AND cards.topic IN ({','.join('?' * len(topics))}) "
                 "AND cards.id NOT IN (SELECT card_id FROM card_done) "
                 "AND (cards.dismissed_at IS NULL OR cards.rest_until IS NOT NULL) "

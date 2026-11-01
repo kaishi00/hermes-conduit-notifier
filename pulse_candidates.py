@@ -561,6 +561,7 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     about = lambda row: (row["item_id"] if row["origin"] == MEMORY and row.get("item_id") is not None else None,
                          str(row.get("ref") or "") if str(row.get("ref") or "").startswith((REMINDER, EVENT)) else "")
     keys = [about(row) for row in rows]
+    keyed = lambda card: card["item_id"] is not None or str(card.get("ref") or "").startswith((REMINDER, EVENT))
     cards = pulse_store.open_cards_about([item for item, _ in keys if item is not None],
                                          [ref for _, ref in keys if ref], (store.NOTICED, "followup"))
     # A card with no item or ref (the model found it, or it came before refs)
@@ -580,8 +581,11 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
         # The look ahead's own dates and deadlines (their own refs) keep their lead times.
         own = str(row.get("ref") or "")
         if not found and row.get("text") and (not own or own.startswith((REMINDER, EVENT))):
+            # A remembered item or reminder of its own isn't another's: it
+            # only counts a card that has nothing to key on.
             found = [card for card in worded
-                     if card["topic"] == row.get("kind") and same_subject(card["news"], str(row["text"]))]
+                     if card["topic"] == row.get("kind") and not (keyed(card) and (item is not None or ref))
+                     and same_subject(card["news"], str(row["text"]))]
         if not found:
             continue
         if due_again(row, max(card["created_at"] for card in found), now, due=_due_point(pulse_store, row)):
@@ -596,6 +600,10 @@ _MONTHS = ("january february march april may june july august september october 
 _DATE_WORDS = frozenset(
     "monday tuesday wednesday thursday friday saturday sunday jan feb mar apr jun jul aug sep sept oct nov dec".split()
     + _MONTHS)
+# Short weekdays, counted only capitalised ("Fri 6 November", not "sat").
+_SHORT_DAYS = {"mon": "monday", "tue": "tuesday", "tues": "tuesday", "wed": "wednesday", "weds": "wednesday",
+               "thu": "thursday", "thur": "thursday", "thurs": "thursday", "fri": "friday", "sat": "saturday",
+               "sun": "sunday"}
 # Verbs a line starts with ("Send Mara the deck"): never a name, and no help
 # telling two things apart.
 _VERBS = frozenset(
@@ -611,8 +619,10 @@ _COMMON = frozenset(
     "user user's will their they them have with from that this need needs should would could about before "
     "after until when what which there here been being into onto over your yours just also still then than "
     "more some time today tomorrow week weeks days".split())
-_ISO_DAY = re.compile(r"(?<!\d)\d{4}-(\d{2})-(\d{2})(?!\d)")  # "2026-11-06T18:00" too
-_NOT_A_DAY = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?!\d)|\b\d{4}\b")  # a clock time or a year
+_ISO_DAY = re.compile(r"(?<!\d)\d{4}-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2})?)?(?!\d)")  # "2026-11-06T18:00" too
+# A clock time ("18:00", "18.00", "6 pm"), a year, or an age ("21st birthday").
+_NOT_A_DAY = re.compile(r"(?<!\d)\d{1,2}[:.]\d{2}(?!\d)|\b\d{1,2}\s*(?:am|pm|a\.m\.|p\.m\.)(?!\w)|\b\d{4}\b"
+                        r"|\b\d{1,3}(?:st|nd|rd|th)\s+(?=birthday|anniversary)", re.IGNORECASE)
 
 
 def _marks(text: str) -> tuple[list[str], set[str], set[str], set[str]]:
@@ -632,8 +642,10 @@ def _marks(text: str) -> tuple[list[str], set[str], set[str], set[str]]:
                 days.add(str(int(number.group(1))))
         elif any(char.isdigit() for char in bare):
             continue
-        elif bare in _DATE_WORDS and (bare != "may" or word[0] == "M"):  # "you may", not May
-            dates.add(bare)
+        elif bare in _DATE_WORDS and (bare != "may" or (word[0] == "M" and bare == word.casefold())):
+            dates.add(bare)  # "you may" and "May's birthday" aren't the month
+        elif bare in _SHORT_DAYS and word[0].isupper():
+            dates.add(_SHORT_DAYS[bare])
         elif word[0].isupper() and bare not in _STARTERS:
             if bare not in names:
                 names.append(bare)
