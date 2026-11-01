@@ -1405,8 +1405,13 @@ she tells you about. It's off until you turn it on for a bot:
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
   health, location and inbox). `message_agent` is refused there in favour of
   asks between bots.
+- A workstream writes its report for you, in its own chat, which you can open
+  and answer. The Bot Chat's update carries a short line of it and the chat's
+  link. A workstream keeps a checklist with `work_progress` (its only work
+  tool), which the Bot Chat's digest shows, and marks a result you should look
+  at first (a draft, a diff) as ready.
 - A workstream's turn sends no push of its own: the Bot Chat's reply about it
-  is the one push. Its approvals still come from the workstream.
+  is the one push. Its approvals and questions still come from the workstream.
 - Up to 2 run at once per bot (`--max-running`). The registry is
   `<profile>/conduit/workstreams.db`, with a journal of each workstream's
   tool steps; after a restart, work that was running shows as interrupted.

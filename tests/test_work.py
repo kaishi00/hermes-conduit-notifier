@@ -1387,3 +1387,98 @@ def test_just_finished_work_is_offered_behind_many_newer_settled_rows(on, hermes
     with sqlite3.connect(on.path) as con:  # newer rows that settled long ago
         con.execute("UPDATE work SET status = 'done', updated_at = 1 WHERE ref != 'W1'")
     assert start("Slow login page")["error"] == "similar_work"
+
+
+# A workstream's own checklist and ready mark (C.11) ---------------------------------
+
+WORKER = "20261031_work_1"
+
+
+def test_a_workstream_keeps_its_checklist_and_the_digest_shows_it(on, hermes):
+    start()
+    out = call("work_progress", {"steps": [{"step": "Read the logs", "state": "done"},
+                                           {"step": "Find the cause", "state": "doing"},
+                                           {"step": "Write it up", "state": "todo"}]}, session_id=WORKER)
+    assert out["ok"] and "1 of 3" in out["note"]
+    assert [step["state"] for step in on.get("W1").progress["steps"]] == ["done", "doing", "todo"]
+    note = work.digest(BOT_CHAT)
+    assert "on “Find the cause”, 1 of 3 steps done" in note
+    assert call("work_read", {"ref": "W1"})["progress"][0]["step"] == "Read the logs"
+
+
+def test_a_checklist_isnt_a_change_the_coordinator_is_told_about(on, hermes):
+    start()
+    on.mark_seen(["W1"])
+    call("work_progress", {"steps": [{"step": "Read the logs", "state": "doing"}]}, session_id=WORKER)
+    assert not on.get("W1").changed_since_seen
+
+
+def test_only_a_workstream_keeps_a_checklist(on, hermes):
+    start()
+    for chat in (BOT_CHAT, OTHER_CHAT):
+        out = call("work_progress", {"steps": [{"step": "Anything", "state": "done"}]}, session_id=chat)
+        assert out["error"] == "not_workstream"
+    assert on.get("W1").progress == {}
+
+
+def test_a_messy_checklist_is_tidied(on, hermes):
+    start()
+    call("work_progress", {"steps": ["Just a name", {"step": "  Odd   state ", "state": "maybe"}, {"state": "done"},
+                                     *[{"step": f"Step {n}", "state": "todo"} for n in range(20)]]},
+         session_id=WORKER)
+    steps = on.get("W1").progress["steps"]
+    assert steps[:2] == [{"step": "Just a name", "state": "todo"}, {"step": "Odd state", "state": "todo"}]
+    assert len(steps) == work.PROGRESS_STEPS
+
+
+def test_a_ready_result_settles_as_ready_and_says_so(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    call("work_progress", {"steps": [{"step": "Draft the email", "state": "done"}], "ready": True},
+         session_id=WORKER)
+    work.turn_ended(WORKER, "Here's the draft to your landlord: ...")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    assert on.get("W1").status == "ready"
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "has something for the user to look at" in params["text"]
+    assert "conduit://session/20261031_work_1" in params["text"]
+    assert "ready for the user to look at" in work.digest(BOT_CHAT)
+    assert call("work_list", {"filter": "recent"})["work"][0]["result"].startswith("Here's the draft")
+    # A follow-up turn says again whether its own result is for the user.
+    assert work.turn_started(WORKER)
+    assert on.get("W1").status == "running" and on.get("W1").progress["ready"] is False
+
+
+def test_the_update_carries_a_short_line_and_the_chat_link(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    long_report = "The cause is a slow DNS lookup. " + "Details. " * 200
+    work.turn_ended(WORKER, long_report)
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "In short: The cause is a slow DNS lookup." in params["text"]
+    assert "Details. " * 60 not in params["text"]
+    assert "[Open W1](conduit://session/20261031_work_1" in params["text"]
+    assert on.get("W1").last_result.startswith("The cause")  # the whole report is kept
+
+
+def test_a_registry_from_before_the_checklist_gets_its_column(home):
+    import sqlite3
+
+    path = store_mod.path_for(home)
+    path.parent.mkdir(parents=True)
+    old = store_mod._SCHEMA.replace(",\n    progress TEXT NOT NULL DEFAULT '{}'", "")
+    assert "progress" not in old
+    with sqlite3.connect(path) as con:
+        con.executescript(old)
+        con.execute("INSERT INTO work (ref, kind, status, created_at, updated_at) "
+                    "VALUES ('W1', 'workstream', 'done', 1, 1)")
+    store = store_mod.Store(home)
+    assert store.get("W1").progress == {}  # read before any write
+    store.set_policy("strict")  # the first write adds the column
+    store.update("W1", progress={"steps": [{"step": "x", "state": "done"}], "ready": False})
+    assert store.get("W1").progress["steps"][0]["step"] == "x"
