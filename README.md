@@ -36,6 +36,13 @@ hermes -p coder gateway restart
 hermes -p coder conduit-push pair YYYYY-YYYYY
 ```
 
+`plugins enable` finds only a plugin in the profile's own `plugins/` folder.
+A profile made without `--clone` has none until the dashboard links it, which
+it does only for a profile that turned the plugin on, so for such a profile
+add `conduit_push` to `plugins.enabled` in its `config.yaml` instead, then
+restart as above. Until then Hermes answers that profile's plugin requests
+with "Plugin not found", and Conduit says so on the screen that asked.
+
 A profile's chats load plugins from that profile's own `plugins/` folder
 only, so with plugin 0.122.2+ the dashboard links every profile that turns
 the plugin on to the main install (`~/.hermes/plugins/conduit_push`) when it
