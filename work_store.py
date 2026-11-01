@@ -51,7 +51,7 @@ STATUSES = ("starting", "running", "needs_you", "waiting", "ready", "done", "fai
 ACTIVE = ("starting", "running", "needs_you", "waiting", "ready")
 RESULT_CHARS = 2000
 TITLE_CHARS = 80
-GOAL_CHARS = 1000
+GOAL_CHARS = 2000
 STEP_SUMMARY_CHARS = 200
 REF = re.compile(r"^([WA])(\d{1,6})$")
 

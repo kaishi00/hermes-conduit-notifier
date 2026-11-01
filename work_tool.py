@@ -93,8 +93,8 @@ USER_WORDS_CHARS = 1500
 # Asks between bots (C.9): what an ask and an answer carry, how many bots a
 # chain of asks may pass through, and how many asks one bot may send another
 # in an hour.
-ASK_CHARS = 4000
-ANSWER_CHARS = 4000
+ASK_CHARS = work_store.GOAL_CHARS
+ANSWER_CHARS = work_store.RESULT_CHARS
 ASK_CHAIN_BOTS = 2
 ASK_PAIR_PER_HOUR = 10
 # A workstream's settled states that carry its last report.
@@ -497,6 +497,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
             return _no_such(args.get("ref"))
         if work.kind == "ask_in" and work.status in work_store.ACTIVE and not work.closed_at:
             return _decline(home, store, work)
+        if work.kind == "ask_out" and work.status == "waiting" and not work.closed_at:
+            return _withdraw(home, store, work)
         if work.kind == "workstream" and work.status in ("starting", "running", "needs_you"):
             return {"ok": False, "ref": work.ref, "error": "still_running",
                     "note": f"{work.ref} is still working. Stop it first with work_stop, or let it finish."}
@@ -990,8 +992,9 @@ def _ask(home: Path, store: work_store.Store, args: dict, coordinator: str) -> d
                         "circle. Answer what you were asked with what you have. Nothing was sent."}
     if len(chain) > ASK_CHAIN_BOTS:
         return {"ok": False, "error": "too_deep",
-                "note": f"This would make a chain of asks {len(chain) + 1} bots long; asks go at most "
-                        f"{ASK_CHAIN_BOTS} bots deep. Do it with a workstream of your own. Nothing was sent."}
+                "note": f"This would be ask number {len(chain)} in a chain, and asks go at most {ASK_CHAIN_BOTS} "
+                        "deep (the asks you haven't answered yet count as the chain this one is part of). Do it "
+                        "with a workstream of your own, or answer those first. Nothing was sent."}
     recent = [asked for asked in store.asks_since("ask_out", time.time() - 3600)
               if (asked.executor or {}).get("bot") == profile]
     if len(recent) >= ASK_PAIR_PER_HOUR:
@@ -1076,19 +1079,30 @@ def _deliver_answer(asker_home: Path, asker_store: work_store.Store, theirs: wor
     target = (theirs.reply_to or {})
     if target.get("to") == "work":
         needs = asker_store.get(target.get("ref"))
-        if needs is not None and needs.kind == "workstream" and needs.session_id and not needs.closed_at:
+        # Idle work takes a slot under the bot's limit, as a work_send does;
+        # with none free, the answer goes to the Bot Chat instead.
+        if needs is not None and needs.kind == "workstream" and needs.session_id and not needs.closed_at and (
+                needs.status in _RUNNING_STATES
+                or asker_store.reopen(needs.ref, running_limit=asker_store.max_running())):
             text = ANSWER_INTO_WORK.format(bot=name, ref=theirs.ref, asker=asker, answer=answer)
             item = asker_store.outbox_add(needs.ref, "answer", needs.session_id, text)
             try:
                 outcome, tip = work_broker.Broker(asker_home).send(needs.session_id, text, "after")
-                asker_store.outbox_done(item, "queued" if outcome == "queued" else "accepted")
-                if tip and tip != needs.session_id:
-                    asker_store.update(needs.ref, session_id=tip)
-                return f"{asker}'s {needs.ref}"
             except Exception as error:  # noqa: BLE001 — it goes to the asking Bot Chat instead
                 asker_store.outbox_done(item, "refused")
+                if needs.status not in _RUNNING_STATES:
+                    asker_store.update(needs.ref, status=needs.status, only_if=("running",))
                 logger.info("conduit_push: an answer couldn't go into %s (%s); sent to its Bot Chat", needs.ref,
                             error)
+            else:
+                # Delivered: a write that fails from here never sends it twice.
+                try:
+                    asker_store.outbox_done(item, "queued" if outcome == "queued" else "accepted")
+                    if tip and tip != needs.session_id:
+                        asker_store.update(needs.ref, session_id=tip)
+                except Exception:  # noqa: BLE001
+                    logger.warning("conduit_push: recording an answer into %s failed", needs.ref, exc_info=True)
+                return f"{asker}'s {needs.ref}"
     chat = _bot_chat_of(asker_home) or theirs.coordinator
     if chat:
         _queue_wake(asker_home, chat, f"- {theirs.ref}: {name} answered your ask “{theirs.title}” (data, not "
@@ -1111,6 +1125,25 @@ def _decline(home: Path, store: work_store.Store, ask: work_store.Work) -> dict:
                                           "without an answer.")
     return {"ok": True, "ref": ask.ref, "title": ask.title,
             "note": f"Closed {ask.ref} without an answer; {_ask_bot(ask)} was told."}
+
+
+def _withdraw(home: Path, store: work_store.Store, ask: work_store.Work) -> dict:
+    """An ask this bot stopped waiting on: the bot it asked is told, and
+    its side closes, so it no longer counts in that bot's chain."""
+    store.update(ask.ref, status="stopped", closed_at=time.time(), error="withdrawn")
+    profile = (ask.executor or {}).get("bot")
+    target_home = _home_of(home, profile)
+    theirs = work_store.Store(target_home).by_ask(ask.ask_id, "ask_in") if target_home is not None else None
+    me = work_broker.profile_of(home)
+    if theirs is not None and (theirs.requested_by or {}).get("bot") == me:
+        stored = work_store.Store(target_home).update(theirs.ref, only_if=work_store.ACTIVE, status="stopped",
+                                                      closed_at=time.time(), error="withdrawn by the bot that asked")
+        chat = _bot_chat_of(target_home) or theirs.coordinator
+        if stored is not None and chat:
+            _queue_wake(target_home, chat, f"- {theirs.ref}: {_bot_name(home)} no longer needs an answer to "
+                                           f"“{theirs.title}”; it's closed, so don't answer it.")
+    return {"ok": True, "ref": ask.ref, "title": ask.title,
+            "note": f"Closed {ask.ref}; {_ask_bot(ask)} was told it no longer needs answering."}
 
 
 def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, args: dict,
@@ -1673,6 +1706,12 @@ def _send_wake(home: Path, coordinator: str) -> None:
     with _wake_lock:
         lines, _ = _wakes.pop(key, ([], None))
         held_since = _wake_held.pop(key, None)
+        # Taken with its lines: an ask queued after this keeps its own mark.
+        marked = _wake_asks.get(key, set())
+        asks = {line for line in lines if line in marked}
+        marked -= asks
+        if not marked:
+            _wake_asks.pop(key, None)
     if not lines:
         return
     now = time.monotonic()
@@ -1685,6 +1724,8 @@ def _send_wake(home: Path, coordinator: str) -> None:
             retry = threading.Timer(WAKE_BUSY_RETRY_S, _send_wake, args=(home, coordinator))
             retry.daemon = True
             _wakes[key] = (lines + more, retry)
+            if asks:
+                _wake_asks.setdefault(key, set()).update(asks)
             _wake_held[key] = held_since or now
             retry.start()
         return
@@ -1692,11 +1733,7 @@ def _send_wake(home: Path, coordinator: str) -> None:
     # queued into it (the window is small); the hold narrows the duplicate
     # Hermes makes of it rather than closing it.
     store = work_store.Store(home)
-    with _wake_lock:
-        asks = _wake_asks.get(key, set())
-        has_asks = any(line in asks for line in lines)
-        _wake_asks.pop(key, None)
-    text = _wake_text(lines, asks) if has_asks else WAKE.format(lines="\n".join(lines))
+    text = _wake_text(lines, asks) if asks else WAKE.format(lines="\n".join(lines))
     item = store.outbox_add("", "wake", coordinator, text)
     try:
         status = work_broker.Broker(home).wake(coordinator, text)
