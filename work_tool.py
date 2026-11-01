@@ -41,6 +41,7 @@ in it, goes at most two bots deep, and each pair of bots has an hourly cap.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -1647,6 +1648,14 @@ def _in_transcript(home: Path, session_id: str, text: str) -> bool:
 
 
 _shutting_down = threading.Event()
+# Each profile's copy of the plugin is its own module, with its own event:
+# the one wrapper marks the stopper's modules too, which every copy reads.
+_SHUTDOWN_MARK = "_conduit_shutting_down"
+
+
+def _is_shutting_down() -> bool:
+    return _shutting_down.is_set() or any(getattr(sys.modules.get(name), _SHUTDOWN_MARK, False) is True
+                                          for name in _SHUTDOWN_MODULES)
 _SHUTDOWN_HOOK = "_stop_turns_before_exit"
 _SHUTDOWN_MODULES = ("tui_gateway.session_reaper", "tui_gateway.server")
 
@@ -1669,6 +1678,9 @@ def _watch_shutdown() -> bool:
 
         def stopping(*args: Any, _original: Any = original, **kwargs: Any) -> Any:
             _shutting_down.set()
+            for marked in _SHUTDOWN_MODULES:
+                with contextlib.suppress(Exception):
+                    setattr(sys.modules[marked], _SHUTDOWN_MARK, True)
             return _original(*args, **kwargs)
 
         stopping._conduit_watch = True  # type: ignore[attr-defined]
@@ -1737,6 +1749,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         names = [called for called, _ in pulse_tools.called(args)]
     if mode == "off":
         # Turning workstreams off doesn't stop one that's running, nor what it may not do.
+        if name == "tool_call" and (not names or any(called in BRIDGE for called in names)):
+            _, work, unreadable = _lookup(session_id, home)
+            return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
         return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
     allowed = LOOKUPS if mode == "lookups" else STRICT
     if name == "tool_call":
@@ -1962,7 +1977,7 @@ def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, sta
     outcome = str(status or "") or ("error" if error_type else "ok")
     if outcome not in ("ok", "error", "cancelled", "timed_out", "blocked"):
         outcome = "error" if error_type else outcome[:20]
-    if _shutting_down.is_set() and str(status or "") != "ok":
+    if _is_shutting_down() and str(status or "") != "ok":
         return  # cut off by the shutdown: it may have taken effect, so it stays open for recovery
     work_store.Store(home).step_ended(work.ref, tool=str(tool_name or ""), tool_call_id=str(tool_call_id or ""),
                                       outcome=outcome, prefix=BRIDGED if tool_name == "tool_call" else "")
@@ -2050,7 +2065,7 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
             _redirecting.discard((str(home), work.ref))
         if redirected:
             return True  # a work_send redirected it: the new turn runs, and settles it
-        if _shutting_down.is_set():
+        if _is_shutting_down():
             # Hermes stopped it on its way out: a restart, not the user. Left
             # running, so the next process's sweep recovers it.
             return True

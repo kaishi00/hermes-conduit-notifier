@@ -4,7 +4,9 @@ of its own, names them by ref only, and keeps to its policy."""
 import contextvars
 import json
 import pathlib
+import importlib.util
 import sys
+from pathlib import Path
 import types
 
 import pytest
@@ -2023,6 +2025,9 @@ def restart(hermes, monkeypatch):
     after everything in the registry."""
     hermes._sessions.clear()
     work._shutting_down.clear()  # a new process
+    for name in work._SHUTDOWN_MODULES:
+        if hasattr(sys.modules.get(name), work._SHUTDOWN_MARK):
+            delattr(sys.modules[name], work._SHUTDOWN_MARK)
     monkeypatch.setattr(work, "_swept", set())
     monkeypatch.setattr(work, "_PROCESS_STARTED", __import__("time").time() + 1)
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends
@@ -2442,6 +2447,28 @@ def test_a_change_a_clean_restart_cut_off_waits_for_the_user(on, hermes, monkeyp
     work.flush_wakes()
     wake, = submitted_to(hermes, BOT_CHAT)
     assert "whether to check first" in wake["text"]
+
+
+def test_every_copy_of_the_plugin_sees_the_shutdown(on, hermes, monkeypatch):
+    hermes_stops_turns(monkeypatch, lambda: None)
+    start()
+    work.turn_started(WORKER_1)  # this copy wraps the stopper
+    spec = importlib.util.spec_from_file_location("conduit_push_other.work_tool", Path(work.__file__),
+                                                  submodule_search_locations=None)
+    other = importlib.util.module_from_spec(spec)
+    other.__package__ = work.__package__
+    spec.loader.exec_module(other)  # another profile's copy, with its own flag
+    other._watch_shutdown()  # already wrapped: the first copy's wrapper stays
+    sys.modules["tui_gateway.session_reaper"]._stop_turns_before_exit()
+    assert other._is_shutting_down() and not other._shutting_down.is_set()
+
+
+def test_with_workstreams_off_an_unreadable_tool_call_is_held_in_a_workstream(on, hermes):
+    start()
+    on.set_policy("off")
+    work._policy_cache.clear()
+    assert work.tool_block(WORKER_1, "tool_call", None)["message"] == work.BRIDGE_BLOCK
+    assert work.tool_block(OTHER_CHAT, "tool_call", None) is None
 
 
 def test_a_users_stop_still_leaves_the_work_interrupted(on, hermes, monkeypatch):
