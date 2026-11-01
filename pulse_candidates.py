@@ -596,13 +596,16 @@ _MONTHS = ("january february march april may june july august september october 
 _DATE_WORDS = frozenset(
     "monday tuesday wednesday thursday friday saturday sunday jan feb mar apr jun jul aug sep sept oct nov dec".split()
     + _MONTHS)
+# Verbs a line starts with ("Send Mara the deck"): never a name, and no help
+# telling two things apart.
+_VERBS = frozenset(
+    "remember buy send get book call check follow file renew pay sign bring take meet read submit cancel order "
+    "pick return schedule email text ask tell write finish fix update prepare confirm register apply collect "
+    "drop visit see go make set remind plan review look keep attend join start stop move pack wish".split())
 # Capitalised words that start a sentence rather than name something.
-_STARTERS = frozenset(
-    "the a an your you i it its this that there these those pulse hermes today tomorrow tonight remember don't "
-    "buy send get book call check follow reminder birthday happy worth time next "
-    "file renew pay sign bring take meet read submit cancel order pick return schedule email text ask tell "
-    "write finish fix update prepare confirm register apply collect drop visit see go make set remind plan "
-    "review look keep attend join start stop move pack wish".split())
+_STARTERS = _VERBS | frozenset(
+    "the a an your you i it its this that there these those pulse hermes today tomorrow tonight don't "
+    "reminder birthday happy worth time next".split())
 # Words too common to tell two things apart when neither names anyone.
 _COMMON = frozenset(
     "user user's will their they them have with from that this need needs should would could about before "
@@ -655,18 +658,26 @@ def same_subject(said: str, text: str) -> bool:
     20th isn't a birthday on the 6th, nor the 6th of December the 6th of
     November), else a weekday or month in common
     and a plain word that isn't a verb like "send" (Mara's deck on Friday
-    isn't her budget)."""
+    isn't her budget). A capitalised word the other has in lower case
+    ("Dentist") isn't a name. Two things for one person on the same day
+    count as one until the day before it's due (due_again)."""
     names_a, days_a, dates_a, words_a = _marks(said)
     names_b, days_b, dates_b, words_b = _marks(text)
-    if names_b:
+    # A capitalised word the other text has as a plain word isn't a name
+    # ("Dentist appointment for Kwan" and "Kwan's dentist appointment").
+    names_a, names_b = [n for n in names_a if n not in words_b], [n for n in names_b if n not in words_a]
+    if names_b and names_a:
         alike = set(names_b) <= set(names_a) and names_b[0] == names_a[0]
+    elif names_b:
+        alike = False
     else:
         alike = len((set(names_a) | words_a) & words_b) >= 2
     months_a, months_b = (_month_set(dates_a), _month_set(dates_b))
     if days_a and days_b:  # the 6th of December isn't the 6th of November
         dated = bool(days_a & days_b) and (not months_a or not months_b or bool(months_a & months_b))
     else:
-        dated = bool(dates_a & dates_b) and bool((words_a & words_b) - _STARTERS)
+        weekdays = (dates_a & dates_b) - set(_MONTHS) - {month[:3] for month in _MONTHS} - {"sept"}
+        dated = bool(weekdays or months_a & months_b) and bool((words_a & words_b) - _VERBS)
     return alike and dated
 
 
