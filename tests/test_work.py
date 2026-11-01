@@ -2315,6 +2315,27 @@ def test_an_open_write_step_is_found_behind_many_later_steps(on, hermes, monkeyp
     assert submitted_to(hermes, WORKER_1) == [] and "./deploy.sh" in on.get("W1").error
 
 
+def test_an_unsure_marker_cleared_at_load_still_holds_the_work_at_the_sweep(on, hermes, home, monkeypatch):
+    present = {WORKER_1}
+    markers = types.ModuleType("tui_gateway.turn_marker")
+    markers.read_turn_marker = lambda home, key: {"writer_pid": 1, "prompt": "x"} if key in present else None
+    markers.marker_writer_state = lambda marker: "unknown"
+    markers.clear_turn_marker = lambda home, key: present.discard(key)
+    monkeypatch.setitem(sys.modules, "tui_gateway.turn_marker", markers)
+    start()
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    real_thread = work.threading.Thread
+    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: types.SimpleNamespace(start=lambda: None))
+    work.start_recovery(home)  # the load-time pass clears it
+    monkeypatch.setattr(work.threading, "Thread", real_thread)
+    assert present == set()
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and "another Hermes process" in on.get("W1").error
+    work.flush_wakes()
+    assert "still running or finished" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+
+
 def test_a_continue_that_cant_be_written_leaves_the_work_interrupted(on, hermes, monkeypatch):
     start()
     work.turn_started(WORKER_1)

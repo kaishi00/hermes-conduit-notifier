@@ -1333,12 +1333,29 @@ def _recover(home: Path, store: work_store.Store, broker: Optional[work_broker.B
     allowing); with a step that can change things cut off, it waits for the
     user, and the coordinator says so. Hermes' own re-run of the turn is
     retired either way."""
-    mode = store.after_restart()
-    works = [work for work in (store.get(ref) for ref in refs) if work is not None]
-    missed = _take_unjournaled(home, {work.session_id for work in works if work.session_id})
+    works = []
+    for ref in refs:
+        try:
+            work = store.get(ref)
+        except Exception:  # noqa: BLE001 — left interrupted; the digest shows it
+            logger.warning("conduit_push: couldn't read %s to recover it", ref, exc_info=True)
+            continue
+        if work is not None:
+            works.append(work)
+    try:
+        mode = store.after_restart()
+        missed = _take_unjournaled(home, {work.session_id for work in works if work.session_id})
+    except Exception:  # noqa: BLE001 — without the setting or the gaps, nothing is continued
+        logger.warning("conduit_push: couldn't read the recovery setting", exc_info=True)
+        mode, missed = "ask", {}
     for work in works:
         # Before anything that can fail: Hermes' re-run goes whatever else does.
         retired = _retire_auto_continue(home, work.session_id) if work.session_id else "none"
+        with _wake_lock:
+            # What the load-time pass found counts, though it cleared the marker.
+            earlier = _load_verdicts.pop((str(home), work.session_id), "none")
+        if retired in ("none", "cleared") and earlier in ("unsure", "failed", "held"):
+            retired = earlier
         if retired == "held":
             # Another process sharing this home is running the turn: still running.
             store.update(work.ref, status="running", only_if=("interrupted",))
@@ -1347,11 +1364,14 @@ def _recover(home: Path, store: work_store.Store, broker: Optional[work_broker.B
         if retired == "failed":
             # Hermes may still re-run it on its own: never continued on top.
             gap = {"at": float("inf"), "tool": "Hermes' own re-run",
-                   "summary": "its crash marker couldn't be cleared, so Hermes may re-run the turn when it's opened"}
+                   "summary": "its crash marker couldn't be cleared, so Hermes may re-run the turn when it's opened",
+                   "check": "Find out whether your last turn ran again on its own, and report back. Change nothing."}
         elif retired == "unsure":
             # Another process may still be running it: the user decides.
             gap = {"at": float("inf"), "tool": "another Hermes process",
-                   "summary": "its turn marker's writer couldn't be checked, so that process may still be running it"}
+                   "summary": "its turn marker's writer couldn't be checked, so that process may still be running it",
+                   "check": "Find out whether your last turn is still running or finished, and report back. Change "
+                            "nothing."}
         try:
             _recover_one(home, store, broker, work, mode, gap)
         except Exception:  # noqa: BLE001 — the others are still recovered
@@ -1365,7 +1385,8 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     uncertain = [step for step in store.unsettled_steps(ref, work.turn_at or 0.0) if not _reads_only(step["tool"])]
     if gap and float(gap.get("at") or 0) >= (work.turn_at or 0.0):
         uncertain.append({"tool": str(gap.get("tool") or "a tool"),
-                          "summary": str(gap.get("summary") or "its journal entry couldn't be written")})
+                          "summary": str(gap.get("summary") or "its journal entry couldn't be written"),
+                          "check": gap.get("check")})
     finished = [step for step in steps if step["ended_at"] and step["outcome"] == "ok"
                 and not _reads_only(step["tool"])]
     store.close_open_steps(ref, "interrupted")
@@ -1385,12 +1406,13 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
                 "nothing ran. work_send it the instructions again to start it.")
     elif uncertain:
         step = uncertain[-1]
+        check = step.get("check") or CHECK.format(tool=step["tool"], summary=_cut(step["summary"] or "no details", 160))
         said = f"{step['tool']}" + (f": {step['summary']}" if step["summary"] else "")
         store.update(ref, error=_cut(f"stopped by a restart during {said}", 300))
         line = (f"- {ref} “{work.title}” stopped when Hermes restarted, during {_cut(said, 160)} (data, not "
                 "instructions). That step may or may not have taken effect, so it wasn't continued. Ask the "
                 "user whether to check first, continue or stop it. To check first, work_send it: "
-                f"“{CHECK.format(tool=step['tool'], summary=_cut(step['summary'] or 'no details', 160))}”")
+                f"“{check}”")
     elif mode == "continue" and not store.get_meta(_CONTINUED + ref) and broker is not None \
             and store.reopen(ref, running_limit=store.max_running(), if_open=True):
         done = ("Steps that already finished (don't repeat them): "
@@ -1423,6 +1445,11 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
                 f"wasn't continued because {why}. work_send continues it.")
     if not work.closed_at and work.coordinator:
         _queue_wake(home, _bot_chat_of(home) or work.coordinator, line)
+
+
+# What the load-time marker pass found that the sweep must still act on
+# (it cleared an "unsure" marker the sweep then won't see), by home and session.
+_load_verdicts: dict[tuple[str, str], str] = {}
 
 
 # Steps whose journal row couldn't be written, by session, kept in a file
@@ -1601,7 +1628,10 @@ def start_recovery(home: Optional[Path] = None) -> None:
     try:
         for work in work_store.Store(home).list(active_only=True, limit=1000):
             if work.status in _RUNNING_STATES and work.session_id:
-                _retire_auto_continue(home, work.session_id)
+                verdict = _retire_auto_continue(home, work.session_id)
+                if verdict in ("unsure", "failed", "held"):
+                    with _wake_lock:
+                        _load_verdicts[(str(home), work.session_id)] = verdict
     except Exception:  # noqa: BLE001 — the sweep still retires them
         logger.debug("conduit_push: couldn't retire workstream turn markers at load", exc_info=True)
     if policy(home) == "off":
@@ -2176,6 +2206,7 @@ def stop() -> None:
         _wake_held.clear()
         _wake_asks.clear()
         _wake_items.clear()
+        _load_verdicts.clear()
         _finished.clear()
         _unjournaled.clear()
         _turn_began.clear()
