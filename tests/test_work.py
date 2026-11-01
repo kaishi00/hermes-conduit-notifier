@@ -630,6 +630,9 @@ def test_the_cli_turns_it_on_and_off(home, monkeypatch, capsys):
     assert cli._work(args) == 0 and not store_mod.exists(home)
     cli._work(types.SimpleNamespace(work_action="on", policy="lookups", max_running=3))
     assert store_mod.Store(home).policy() == "lookups" and store_mod.Store(home).max_running() == 3
+    assert "safe work is continued" in capsys.readouterr().out
+    cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, after_restart="ask"))
+    assert store_mod.Store(home).after_restart() == "ask" and "left to ask about" in capsys.readouterr().out
     cli._work(types.SimpleNamespace(work_action="off", policy=None, max_running=None))
     assert store_mod.Store(home).policy() == "off"
     assert "Bot workstreams: off" in capsys.readouterr().out
@@ -1965,3 +1968,137 @@ def test_an_answer_for_idle_work_at_the_limit_goes_to_the_bot_chat(bots, hermes,
     work.flush_wakes()
     (_, params, _), = hermes.named("prompt.submit")
     assert params["session_id"] == f"rt-{BOT_CHAT}" and "Nothing new." in params["text"]
+
+
+# Recovery after a restart (C.7) ---------------------------------------------------
+
+WORKER_1 = "20261031_work_1"
+
+
+def restart(hermes, monkeypatch):
+    """The dashboard came back: no session is live, and this process started
+    after everything in the registry."""
+    hermes._sessions.clear()
+    monkeypatch.setattr(work, "_swept", set())
+    monkeypatch.setattr(work, "_PROCESS_STARTED", __import__("time").time() + 1)
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends
+    hermes.calls.clear()
+
+
+def submitted_to(hermes, stored):
+    return [params for _, params, _ in hermes.named("prompt.submit") if params["session_id"] == f"rt-{stored}"]
+
+
+def test_a_restart_continues_work_with_nothing_uncertain_in_flight(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: make build")
+    on.step_ended("W1", tool="terminal", tool_call_id="c1", outcome="ok")
+    on.step_started("W1", WORKER_1, "read_file", tool_call_id="c2", summary="path: build.log")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    sent, = submitted_to(hermes, WORKER_1)
+    assert "Hermes restarted" in sent["text"] and "terminal: command: make build" in sent["text"]
+    assert on.get("W1").status == "running" and on.steps("W1", open_only=True) == []
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"] and "so it was continued" in wake["text"]
+    # Cut off again before a turn of it ended: not continued a second time.
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
+    work.flush_wakes()
+    assert "already continued once" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+
+
+def test_a_step_that_can_change_things_waits_for_the_user(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == []
+    row = on.get("W1")
+    assert row.status == "interrupted" and "./deploy.sh" in row.error
+    assert on.steps("W1")[0]["outcome"] == "interrupted"
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "may or may not have taken effect" in wake["text"] and "check first" in wake["text"]
+    assert "Find out whether that step took effect" in wake["text"] and "Change nothing." in wake["text"]
+
+
+def test_steps_from_an_earlier_turn_dont_count(on, hermes, monkeypatch):
+    start()
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="old", summary="command: rm -rf build")
+    on.update("W1", turn_at=__import__("time").time() + 0.5)  # a later turn started after that step
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert len(submitted_to(hermes, WORKER_1)) == 1
+
+
+def test_a_bot_that_asks_first_isnt_continued(on, hermes, monkeypatch):
+    on.set_after_restart("ask")
+    start()
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
+    work.flush_wakes()
+    assert "this bot asks first" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+
+
+def test_hermes_own_rerun_of_the_turn_is_retired(on, hermes, monkeypatch):
+    cleared = []
+    markers = types.ModuleType("tui_gateway.turn_marker")
+    markers.read_turn_marker = lambda home, key: {"writer_pid": 1, "prompt": "x"} if key == WORKER_1 else None
+    markers.marker_writer_state = lambda marker: "dead"
+    markers.clear_turn_marker = lambda home, key: cleared.append(key)
+    monkeypatch.setitem(sys.modules, "tui_gateway.turn_marker", markers)
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert cleared == [WORKER_1]
+
+
+def test_update_lines_a_restart_caught_in_the_batch_go_out_again(on, hermes, monkeypatch):
+    item = on.outbox_add("", "line", BOT_CHAT, "- W9 “Old job” finished. In short: all good.")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W9 “Old job” finished" in wake["text"]
+    assert item not in [row["id"] for row in on.outbox_pending()]
+
+
+def test_a_send_a_restart_cut_off_reaches_continued_work_once(on, hermes, home, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    lost = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nAlso check the logs.")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    continued, resent = submitted_to(hermes, WORKER_1)
+    assert "Hermes restarted" in continued["text"] and resent["text"] == "Bot passes on:\nAlso check the logs."
+    assert resent["queued"] is True and lost not in {row["id"] for row in on.outbox_pending()}
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "so it was continued" in wake["text"] and "may not have reached it" not in wake["text"]
+
+
+def test_a_message_hermes_never_stored_goes_back_to_the_coordinator(on, hermes, home, monkeypatch):
+    start()
+    lost = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nAlso check the logs.")
+    kept = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nUse staging.")
+    _chat_db(home, [(WORKER_1, "user", "Bot passes on:\nUse staging.", None)])
+    on.update("W1", status="done")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == []  # never resent behind the coordinator's back
+    pending = {row["id"] for row in on.outbox_pending()}
+    assert lost not in pending and kept not in pending
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "may not have reached it" in wake["text"] and "Also check the logs." in wake["text"]
+    assert "Use staging." not in wake["text"]

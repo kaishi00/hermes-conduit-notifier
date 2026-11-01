@@ -81,6 +81,9 @@ notes:
     _methods with nothing bound for a session another client holds and for the hidden queued
     work-update turn, and _sessions (session_key, profile_home, running, pending_title) to find
     live sessions. upstream/test_bot_work.py runs it on the launch profile and a secondary one.
+    After a restart, tui_gateway.turn_marker (read_turn_marker, marker_writer_state,
+    clear_turn_marker) retires Hermes' own re-run of a crash-killed workstream turn, so recovery
+    decides from the journal instead; without it a cut-off step could run twice.
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
@@ -215,6 +218,8 @@ imports:
     optional: ["resolve_xai_http_credentials"]
   tui_gateway:
     optional: ["turn_marker"]
+  tui_gateway.turn_marker:
+    optional: ["clear_turn_marker", "marker_writer_state", "read_turn_marker"]
 
 # Where those modules live upstream (a .py file or a package).
 module_paths:
@@ -272,6 +277,7 @@ module_paths:
   - tools/web_tools
   - tools/xai_http
   - tui_gateway
+  - tui_gateway/turn_marker
 
 # The plugin's routes under /api/plugins/conduit_push/, from dashboard/.
 routes:

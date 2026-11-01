@@ -13,7 +13,8 @@ on the profile, and a terminal call in the Bot Chat, are refused. The launch
 profile's bot asks the secondary one (acceptance test 17): the ask arrives in
 its Bot Chat as a hidden turn, it answers with work_reply, and the answer
 comes back to the asking Bot Chat. Under ``plugins.isolation: host`` the tool
-answers with the reason.
+answers with the reason. After a restart, Hermes' own re-run of a crash-killed
+workstream turn is retired (acceptance test 6), and a live sibling's marker kept.
 """
 
 from __future__ import annotations
@@ -391,3 +392,43 @@ def test_a_plugin_host_answers_with_the_reason(isolated: Run, profile: str) -> N
     assert any("plugins.isolation: host" in t for t in answers), answers
     rows = _work_store().Store(isolated.profile_home(profile)).list(include_closed=True)
     assert rows == []
+
+
+RETIRE_PROBE = r"""
+import importlib.util, json, os, sys
+from pathlib import Path
+
+root, home = Path(sys.argv[1]), Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("conduit_push", root / "__init__.py",
+                                              submodule_search_locations=[str(root)])
+package = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push"] = package
+spec.loader.exec_module(package)
+from conduit_push import work_tool
+from tui_gateway.turn_marker import read_turn_marker, record_turn_start
+
+record_turn_start(home, "crashed", "do the work")
+record_turn_start(home, "sibling", "a turn another process is running")
+path = home / "desktop" / "interrupted_turns.json"
+markers = json.loads(path.read_text())
+markers["crashed"]["writer_pid"] = 2 ** 22 + 12345  # a process that's gone
+markers["sibling"]["writer_pid"] = os.getppid()  # one that's alive
+markers["sibling"].pop("writer_start_time", None)
+path.write_text(json.dumps(markers))
+for session_key in ("crashed", "sibling"):
+    work_tool._retire_auto_continue(home, session_key)
+print(json.dumps({key: read_turn_marker(home, key) is not None for key in ("crashed", "sibling")}))
+"""
+
+
+def test_a_restart_retires_hermes_own_rerun_of_a_workstream_turn(tmp_path: Path) -> None:
+    """Recovery after a restart (C.7) decides from the journal, so Hermes'
+    auto-continue marker for a crash-killed workstream turn goes; a marker
+    a live sibling process wrote stays, as Hermes' own resume leaves it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    python = Path(_hermes_bin()).with_name("python")
+    done = subprocess.run([str(python), "-c", RETIRE_PROBE, str(ROOT), str(home)], capture_output=True, text=True,
+                          timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert json.loads(done.stdout.strip().splitlines()[-1]) == {"crashed": False, "sibling": True}
