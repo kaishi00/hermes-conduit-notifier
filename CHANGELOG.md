@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.123.3 (2026-11-01)
+
+### Fixes
+- Pulse's "still want it?" card for something open over a week now says
+  what it's about. It used to say only "It has been over a week and
+  nothing shows it happened". Cards already on the Pulse screen or waiting
+  for the morning brief say it too.
+
 ## 0.123.2 (2026-11-01)
 
 ### Fixes
