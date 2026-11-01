@@ -594,6 +594,9 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
     if work.status in ("starting", "running", "needs_you"):
         # Nothing was running, so the row's turn has ended (its end may
         # have come while this stop was marked): it stays stopped.
+        if work.status == "starting":
+            # Or its brief's turn hasn't begun yet: when it does, it's stopped.
+            store.set_meta(_STOPPED_START + work.ref, str(time.time()))
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
                 "note": f"{work.ref} wasn't working on anything; it's marked stopped. work_send continues it."}
     store.update(work.ref, status=work.status, only_if=("stopped",))
@@ -797,8 +800,26 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         store.outbox_done(item, "accepted")
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: recording a started workstream failed", exc_info=True)
-    return {"ok": True, "ref": work.ref, "title": work.title, "status": "running",
-            "link": _link(work.ref, started.session_id, work_broker.profile_of(home)),
+    # As it is now: a stop (or a short turn's end) may have come during the start.
+    try:
+        now = store.get(work.ref)
+    except Exception:  # noqa: BLE001
+        now = None
+    status = now.status if now is not None and now.status != "starting" else "running"
+    link = _link(work.ref, started.session_id, work_broker.profile_of(home))
+    if status == "stopped":
+        # The user stopped it while Hermes was still starting it: its brief's
+        # turn may begin only now, so it's stopped again, and stays stopped.
+        try:
+            if not broker.stop(started.session_id):
+                store.set_meta(_STOPPED_START + work.ref, str(time.time()))  # its turn, when it begins
+        except Exception:  # noqa: BLE001 — its row says stopped; a turn that runs anyway settles it
+            logger.warning("conduit_push: stopping a stopped start failed", exc_info=True)
+        store.update(work.ref, status="stopped")
+        return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped", "link": link,
+                "note": f"{work.ref} was stopped while it was being started, so it hasn't begun its work. "
+                        "work_send continues it."}
+    return {"ok": True, "ref": work.ref, "title": work.title, "status": status, "link": link,
             "note": f"Started {work.ref}: {work.title}. It works in the background; its result comes back to you "
                     "as a work update. Don't wait for it."}
 
@@ -1212,14 +1233,32 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     text = str(args.get("text") or "").strip()
     if not text:
         return {"ok": False, "ref": work.ref, "error": "missing", "note": "Say what to send."}
+    if work.status == "starting":
+        # Its brief may not be in yet, and a reply mustn't land before it.
+        return {"ok": False, "ref": work.ref, "error": "starting",
+                "note": f"{work.ref} is still being started. Send it this once it's running."}
+    if not work.session_id:
+        return {"ok": False, "ref": work.ref, "error": "not_now",
+                "note": f"{work.ref} never got a chat, so there's nothing to send to. work_start it again, with new=true if it says similar work is open."}
     how = args.get("how") if args.get("how") in ("auto", "add", "after") else "auto"
     bot = _bot_name(home)
     # The user's own words go along, quoted as theirs, so a go-ahead given in
     # the Bot Chat reaches a worker that only takes the user's words. Read
     # from the Bot Chat this call came from: after a compression the one the
     # work started from holds only older messages.
-    words = FOLLOW_UP.format(bot=bot, text=text) + _quoted_words(home, bot, coordinator)
+    words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + _quoted_words(home, bot, coordinator))
     return _deliver(store, broker, work, words, how)
+
+
+def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: str) -> str:
+    """For a start a restart cut off before its brief went in, the brief
+    first: nothing ran, so the words alone would start it with no task."""
+    if work.error != _BRIEF_UNSENT:
+        return words
+    briefs = store.outbox_rows(work.ref, "start")
+    if not briefs or not briefs[-1]["text"]:
+        return words
+    return f"{briefs[-1]['text']}\n\n{words}"
 
 
 def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, words: str, how: str,
@@ -1227,6 +1266,7 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
     """Words into a workstream, through the outbox: running work takes them
     as ``how`` says, idle work starts a turn with them (a slot allowing)."""
     home = store.home
+    store.set_meta(_STOPPED_START + work.ref, "")  # sent words start it again
     item = store.outbox_add(work.ref, kind, work.session_id, words)
     # Marked running first: a turn that ends before the send returns then
     # settles the row, and nothing after the send puts it back. Idle work
@@ -1386,6 +1426,11 @@ def _reads_only(tool: str) -> bool:
     return tool in READ_TOOLS
 # Meta key: a workstream continued after a restart, until a turn of it ends.
 _CONTINUED = "continued:"
+# Meta key: a start stopped before its brief's turn began (the time of the
+# stop), so that turn, beginning late, is stopped too rather than undoing
+# the stop. A send clears it, and it lapses after _STOPPED_START_S.
+_STOPPED_START = "stopped_start:"
+_STOPPED_START_S = 600.0
 # Meta key: what Check first asks a workstream a restart cut off during a
 # step that can change things, until a turn of it starts.
 _CHECK = "check:"
@@ -1486,9 +1531,16 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     elif not began:
         # Its brief never reached it (the restart came before or while the
         # session was made): there's no turn to continue.
-        store.update(ref, error=_BRIEF_UNSENT)
-        line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before its brief was sent, so "
-                "nothing ran. work_send it the instructions again to start it.")
+        if work.session_id:
+            store.update(ref, error=_BRIEF_UNSENT)
+            line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before its brief was sent, so "
+                    "nothing ran. work_send it a word to start it; its brief goes in first.")
+        else:
+            # No chat to send to: closed, so a new work_start of it isn't
+            # taken for the same work.
+            store.update(ref, error=_BRIEF_UNSENT, closed_at=time.time())
+            line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before it got a chat, so "
+                    "nothing ran and it's closed. work_start it again if it's still needed.")
     elif uncertain:
         step = uncertain[-1]
         shown = _shown_tool(step["tool"])
@@ -2041,6 +2093,29 @@ def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, sta
                                       outcome=outcome, prefix=BRIDGED if tool_name == "tool_call" else "")
 
 
+def _stopped_before_its_turn(home: Path, work: work_store.Work) -> bool:
+    store = work_store.Store(home)
+    try:
+        at = float(store.get_meta(_STOPPED_START + work.ref) or 0)
+    except ValueError:
+        at = 0.0
+    if not at:
+        return False
+    store.set_meta(_STOPPED_START + work.ref, "")  # one turn: the brief's
+    return time.time() - at < _STOPPED_START_S
+
+
+def _stop_late_turn(home: Path, session_id: str) -> None:
+    """Off the hook's thread: the turn is still beginning."""
+    try:
+        for _ in range(20):
+            if work_broker.Broker(home).stop(session_id):
+                return
+            time.sleep(0.25)
+    except Exception:  # noqa: BLE001 — its row says stopped; its end settles nothing
+        logger.warning("conduit_push: stopping a stopped start's turn failed", exc_info=True)
+
+
 def turn_started(session_id: Any) -> bool:
     """A workstream's turn starts. One that starts after its row settled or
     was interrupted (a follow-up queued behind the last turn, or the user
@@ -2061,8 +2136,14 @@ def turn_started(session_id: Any) -> bool:
     if work_store.Store(home).get_meta(_CHECK + work.ref):
         work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
-    if work.status not in _RUNNING_STATES:
-        # Already running in Hermes, so it takes its slot even past the limit;
+    if work.status == "stopped" and _stopped_before_its_turn(home, work):
+        # The user stopped this start before its brief's turn began: that
+        # turn is the start's, so it's stopped too, and the row stays stopped.
+        threading.Thread(target=_stop_late_turn, args=(home, str(session_id)),
+                         name="conduit-work-stop", daemon=True).start()
+        return True
+    if work.status not in _RUNNING_STATES or work.status == "starting":
+        # A turn of it began, so its brief went in. Already running in Hermes, so it takes its slot even past the limit;
         # work_start and work_send keep to the count.
         work_store.Store(home).update(work.ref, status="running", closed_at=0.0, error="",
                                       only_if=(work.status,))
@@ -2312,12 +2393,17 @@ def _app_uncertain(store: work_store.Store, work: work_store.Work) -> bool:
     return work.status in ("interrupted", "stopped") and bool(store.get_meta(_CHECK + work.ref))
 
 
+_STARTING_STUCK_SECONDS = 120
+
+
 def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
     if work.kind != "workstream" or not work.session_id:
         return []
     if work.status == "starting":
-        # Its brief may not be in yet: a reply now could land before it.
-        return ["stop"]
+        # Its brief may not be in yet: a reply could land before it, and a
+        # stop be undone as the brief's turn begins. It's running in moments;
+        # one that's still starting after that is stuck, and Stop ends it.
+        return ["stop"] if time.time() - work.updated_at > _STARTING_STUCK_SECONDS else []
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
     if work.status in ("interrupted", "stopped") and work.error == _BRIEF_UNSENT:
@@ -2372,7 +2458,8 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
     uncertain = _app_uncertain(store, work)
     allowed = _app_actions(work, uncertain)
     if action not in allowed:
-        return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
+        return {"ok": False, "ref": work.ref, "error": "starting" if work.status == "starting" else "not_now",
+                "status": work.status,
                 "note": f"{work.ref} can't {action} while it's {work.status.replace('_', ' ')}."}
     if action == "stop":
         if work.status == "interrupted":
@@ -2386,6 +2473,9 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
             answer = {"ok": True, "ref": work.ref, "status": "stopped"}
         else:
             answer = _stop(store, broker, work)
+        if answer.get("ok"):
+            # The tool's note names work_send; the user continues it here.
+            answer["note"] = f"Stopped {work.ref}. Continue it, or reply, when you're ready."
     else:
         if action == "send":
             text = body.get("text").strip() if isinstance(body.get("text"), str) else ""
@@ -2398,9 +2488,7 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
             words = text
             if work.error == _BRIEF_UNSENT:
                 # Nothing ran: the brief it never had goes in, with the reply.
-                briefs = store.outbox_rows(work.ref, "start")
-                if briefs and briefs[-1]["text"]:
-                    words = f"{briefs[-1]['text']}\n\nThe user adds, from Conduit:\n{text}"
+                words = _with_unsent_brief(store, work, f"The user adds, from Conduit:\n{text}")
             how = body.get("how") if body.get("how") in ("auto", "add", "after") else "auto"
         elif action == "check":
             words = APP_CHECK.format(check=store.get_meta(_CHECK + work.ref) or APP_CHECK_DEFAULT)

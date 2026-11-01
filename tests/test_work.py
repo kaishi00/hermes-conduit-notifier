@@ -2294,7 +2294,7 @@ def test_a_start_cut_off_before_its_brief_isnt_continued(on, hermes, monkeypatch
     call("work_list")
     assert submitted_to(hermes, WORKER_1) == [] and "before the brief was sent" in on.get("W1").error
     work.flush_wakes()
-    assert "work_send it the instructions again" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+    assert "work_send it a word to start it; its brief goes in first" in submitted_to(hermes, BOT_CHAT)[0]["text"]
     # Nothing ran, so the panel offers no Continue or Check first: a reply is its brief.
     row, = work.app_list(on.home)["work"]
     assert row["actions"] == ["stop", "send"] and work.app_act(on.home, "W1", "continue")["error"] == "not_now"
@@ -2862,8 +2862,64 @@ def test_a_start_offers_no_reply_until_its_turn_begins(on, hermes):
     start()
     on.update("W1", status="starting")
     row, = work.app_list(on.home)["work"]
+    assert row["actions"] == []
+    assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "starting"
+
+
+def test_a_start_still_starting_after_two_minutes_can_be_stopped(on, hermes, monkeypatch):
+    start()
+    on.update("W1", status="starting")
+    monkeypatch.setattr(work, "_STARTING_STUCK_SECONDS", -1.0)  # it's been starting too long
+    row, = work.app_list(on.home)["work"]
     assert row["actions"] == ["stop"]
-    assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "not_now"
+    assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "starting"
+    answer = work.app_act(on.home, "W1", "stop")
+    assert answer["ok"] and answer["work"]["status"] == "stopped"
+
+
+def test_a_stuck_start_stopped_before_its_turn_stays_stopped_when_the_turn_begins(on, hermes, monkeypatch):
+    start()
+    on.update("W1", status="starting")
+    monkeypatch.setattr(work, "_STARTING_STUCK_SECONDS", -1.0)
+    stops = []
+    monkeypatch.setattr(work, "_stop_late_turn", lambda home, session_id: stops.append(session_id))
+    monkeypatch.setattr(broker_mod.Broker, "stop", lambda self, session_id: False)  # its turn hasn't begun
+    assert work.app_act(on.home, "W1", "stop")["ok"]
+    assert work.turn_started(WORKER_1)  # the brief's turn begins late
+    assert on.get("W1").status == "stopped" and stops == [WORKER_1]
+    assert work.turn_started(WORKER_1)  # a later turn (the user writing in its chat) runs it again
+    assert on.get("W1").status == "running"
+
+
+def test_a_start_stopped_while_hermes_was_starting_it_says_stopped(on, hermes, monkeypatch):
+    original = broker_mod.Broker.start
+
+    def slow_start(self, **kwargs):
+        started = original(self, **kwargs)
+        on.update("W1", status="stopped")  # the user's Stop, while the start ran long
+        return started
+
+    stops = []
+    original_stop = broker_mod.Broker.stop
+
+    def stop(self, session_id):
+        stops.append(session_id)
+        return original_stop(self, session_id)
+
+    monkeypatch.setattr(broker_mod.Broker, "start", slow_start)
+    monkeypatch.setattr(broker_mod.Broker, "stop", stop)
+    answer = start()
+    assert answer["ok"] and answer["status"] == "stopped"
+    assert "hasn't begun its work" in answer["note"] and "Don't wait" not in answer["note"]
+    assert stops == [on.get("W1").session_id]  # its brief's turn, if it begins late, is stopped too
+    assert on.get("W1").status == "stopped"
+
+
+def test_the_coordinator_cant_send_to_a_start_still_under_way(on, hermes):
+    start()
+    on.update("W1", status="starting")
+    answer = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert answer["error"] == "starting" and "still being started" in answer["note"]
 
 
 def test_a_reply_that_isnt_text_is_refused(on, hermes):
@@ -2926,3 +2982,52 @@ def test_work_that_never_got_a_session_says_so(on, hermes):
     store = store_mod.Store(on.home)
     row = store.add("workstream", title="Never started", status="interrupted")
     assert work.app_act(on.home, row.ref, "send", {"text": "Go"})["error"] == "not_now"
+
+
+def test_the_coordinators_send_to_an_unbriefed_start_carries_the_brief(on, hermes, monkeypatch):
+    start()
+    with on._db() as con:
+        con.execute("UPDATE outbox SET accepted_at = 0, outcome = '' WHERE kind = 'start'")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    hermes.calls.clear()
+    assert call("work_send", {"ref": "W1", "text": "Go ahead."})["ok"]
+    sent, = submitted_to(hermes, WORKER_1)
+    assert sent["text"].startswith(on.outbox_rows("W1", "start")[-1]["text"]) and "Go ahead." in sent["text"]
+
+
+def test_a_start_that_never_got_a_chat_is_started_again(on, hermes, monkeypatch):
+    store = store_mod.Store(on.home)
+    store.add("workstream", title="Never started", status="running", coordinator=BOT_CHAT)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    assert "before it got a chat, so nothing ran and it's closed" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+    assert store.get("W1").closed_at
+    assert call("work_start", {"title": "Never started", "instructions": "Again."})["ok"]  # not taken for W1
+
+
+def test_a_send_to_work_with_no_chat_is_refused(on, hermes):
+    store_mod.Store(on.home).add("workstream", title="No chat", status="stopped", coordinator=BOT_CHAT)
+    hermes.calls.clear()
+    assert call("work_send", {"ref": "W1", "text": "Go"})["error"] == "not_now" and hermes.calls == []
+
+
+def test_every_stop_from_the_panel_tells_the_user_how_to_go_on(on, hermes, monkeypatch):
+    start()
+    hermes._sessions["rt-20261031_work_1"]["running"] = True
+    assert work.app_act(on.home, "W1", "stop")["note"].startswith("Stopped W1. Continue it")
+    start(title="Disk space", instructions="Check disk space on the NAS.")
+    work.turn_started("rt-20261031_work_2")
+    on.step_started("W2", "rt-20261031_work_2", "read_file", tool_call_id="c1", summary="path: df.txt")
+    store_mod.Store(on.home).set_after_restart("ask")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert work.app_act(on.home, "W2", "stop")["note"].startswith("Stopped W2. Continue it")
+
+
+def test_a_turn_beginning_moves_a_start_on_to_running(on, hermes):
+    start()
+    on.update("W1", status="starting")
+    work.turn_started(WORKER_1)
+    assert on.get("W1").status == "running"
