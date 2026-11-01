@@ -2203,6 +2203,7 @@ def test_one_workstream_failing_to_recover_leaves_the_others_recovered(on, herme
     start()
     start(title="Second", instructions="Something else.")
     work.turn_started(WORKER_1)
+    work.turn_started(on.get("W2").session_id)
     restart(hermes, monkeypatch)
     real = work._recover_one
 
@@ -2230,6 +2231,28 @@ def test_recovery_doesnt_reopen_work_closed_meanwhile(on, hermes, monkeypatch):
     on.update("W1", closed_at=1.0)
     assert not on.reopen("W1", running_limit=2, if_open=True)
     assert on.reopen("W1", running_limit=2)  # a send still reopens it
+
+
+def test_a_start_cut_off_before_its_brief_isnt_continued(on, hermes, monkeypatch):
+    start()  # its turn never started
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and "before the brief was sent" in on.get("W1").error
+    work.flush_wakes()
+    assert "work_send it the instructions again" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+
+
+def test_a_continue_that_cant_be_written_leaves_the_work_interrupted(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+
+    def locked(self, *args, **kwargs):
+        raise store_mod.sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store_mod.Store, "outbox_add", locked)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
 
 
 def test_update_lines_a_restart_caught_in_the_batch_go_out_again(on, hermes, monkeypatch):

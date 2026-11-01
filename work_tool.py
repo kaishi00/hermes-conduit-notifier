@@ -1360,7 +1360,13 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     finished = [step for step in steps if step["ended_at"] and step["outcome"] == "ok"
                 and not _reads_only(step["tool"])]
     store.close_open_steps(ref, "interrupted")
-    if uncertain:
+    if not work.turn_at:
+        # Its brief never ran (the restart came between making the session
+        # and sending it): there's no turn to continue.
+        store.update(ref, error="its start was cut off by a restart, before the brief was sent")
+        line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before its brief was sent, so "
+                "nothing ran. work_send it the instructions again to start it.")
+    elif uncertain:
         step = uncertain[-1]
         said = f"{step['tool']}" + (f": {step['summary']}" if step["summary"] else "")
         store.update(ref, error=_cut(f"stopped by a restart during {said}", 300))
@@ -1374,12 +1380,14 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
                 + "; ".join(_cut(f"{step['tool']}: {step['summary']}", 120) for step in finished[-8:])
                 + ". ") if finished else ""
         text = CONTINUE.format(done=done)
-        item = store.outbox_add(ref, "continue", work.session_id, text)
+        item = ""
         try:
+            item = store.outbox_add(ref, "continue", work.session_id, text)
             outcome, tip = broker.send(work.session_id, text, "after")
         except Exception as error:  # noqa: BLE001 — it stays interrupted, for the user to continue
-            store.outbox_done(item, "refused")
             store.update(ref, status="interrupted", only_if=("running",))
+            if item:
+                store.outbox_done(item, "refused")
             line = (f"- {ref} “{work.title}” stopped when Hermes restarted, with nothing uncertain in flight, "
                     f"but couldn't be continued ({_cut(error, 120)}). work_send continues it.")
         else:
@@ -2084,16 +2092,20 @@ def _send_wake(home: Path, coordinator: str) -> None:
     # Hermes makes of it rather than closing it.
     store = work_store.Store(home)
     text = _wake_text(lines, asks) if asks else WAKE.format(lines="\n".join(lines))
-    item = store.outbox_add("", "wake", coordinator, text)
+    item = ""
     try:
+        item = store.outbox_add("", "wake", coordinator, text)
         status = work_broker.Broker(home).wake(coordinator, text)
         store.outbox_done(item, "queued" if status in ("queued", "streaming") else status or "accepted")
         for line_item in items:
             store.outbox_done(line_item, "accepted")
     except Exception as error:  # noqa: BLE001 — the digest still carries it on the next turn
-        store.outbox_done(item, "refused")
-        for line_item in items:
-            store.outbox_done(line_item, "refused")
+        # Not sent: none of it comes back as news after a restart.
+        for row in ([item] if item else []) + items:
+            try:
+                store.outbox_done(row, "refused")
+            except Exception:  # noqa: BLE001
+                logger.debug("conduit_push: couldn't mark an update row refused", exc_info=True)
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
 
 
