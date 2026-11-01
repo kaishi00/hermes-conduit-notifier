@@ -666,7 +666,9 @@ def test_pulse_sends_its_turn_into_its_chat_on_the_authority(listener):
     sid = _turn(listener, "my pulse chat")
     status, out = listener.plugin_call(f"pulse-send?chat_id={sid}", plugin=DRIVER, timeout=180)
     assert status == 200, out
-    assert out == {"available": True, "ok": True, "status": "queued", "detail": "queued"}, out
+    # An idle chat's turn may start before the receipt comes back ("started", read as streaming).
+    assert out["available"] is True and out["ok"] is True, out
+    assert (out["status"], out["detail"]) in {("queued", "queued"), ("streaming", "started")}, out
     deadline = time.monotonic() + 60
     while not _told("PULSE check in"):
         assert time.monotonic() < deadline, "Pulse's turn never ran"

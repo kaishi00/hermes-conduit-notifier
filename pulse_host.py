@@ -56,15 +56,22 @@ def _authority_chats() -> Any:
     try:
         from . import gateway_chats
         return gateway_chats.session_api()
-    except Exception:  # noqa: BLE001 — a partial install: the session host's way, if any
+    except Exception:  # noqa: BLE001 — a partial install: no chats to send into
+        logger.warning("conduit_push: Pulse couldn't reach the gateway's session authority", exc_info=True)
         return None
+
+
+def _gateway_runs_here() -> bool:
+    return getattr(sys.modules.get("gateway.run_api"), "_ACTIVE_RUNNER", None) is not None
 
 
 def _methods() -> Optional[dict[str, Callable[..., Any]]]:
     # Only a process that already runs the session host has it loaded;
     # importing it anywhere else would start one. A gateway's listener loads
     # it too, but its chats are the authority's.
-    if _authority_chats() is not None:
+    if _gateway_runs_here():
+        # Never the listener's TUI registry, even when the authority can't be
+        # reached: its users never see those chats.
         return None
     server = sys.modules.get("tui_gateway.server")
     if server is None:
@@ -260,6 +267,8 @@ def _send_on_authority(chats: Any, chat_id: str, text: str, *, profile: str = ""
             return Sent(False, "", f"the chat refused the turn: {_message(submitted)}")
         result = submitted.get("result") if isinstance(submitted.get("result"), dict) else {}
         status = str(result.get("status") or "")
+        if status == "terminal":
+            return Sent(False, "", "the chat settled the turn without running it")
         # The authority's "started" is the TUI gateway's "streaming": the turn runs now.
         return Sent(True, "streaming" if status == "started" else "queued", status)
     finally:
@@ -292,6 +301,8 @@ def _use_model_on_authority(call: Callable[[str, dict], Any], sid: str, snapshot
                 logger.warning("conduit_push: Pulse couldn't put its chat on %s: %s", name, _message(result))
                 return
             if answer.get("status") != "confirmation_required" or not answer.get("confirm"):
+                if answer.get("status") not in (None, "applied", "noop", "ok"):
+                    logger.warning("conduit_push: Pulse couldn't put its chat on %s: %s", name, answer.get("status"))
                 return
             payload = {**payload, "confirm": answer["confirm"]}
         logger.warning("conduit_push: Pulse's chat stayed on its own model: %s wasn't confirmed", name)

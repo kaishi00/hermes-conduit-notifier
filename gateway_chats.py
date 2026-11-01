@@ -106,7 +106,8 @@ def authority_agent(session_id: Any) -> Optional[tuple]:
     with authority_scope(authority):
         try:
             agent = gateway._resident_agent_for(gateway._session_key_for_source(live.source))
-        except Exception:  # noqa: BLE001 — no agent to read
+        except Exception:  # noqa: BLE001 — Hermes changed how it keeps agents
+            logger.warning("Conduit: couldn't read the gateway's agent for a chat", exc_info=True)
             return None
     return (authority, agent) if agent is not None else None
 
@@ -300,8 +301,10 @@ class _AuthorityLink:
         reason = ((error.get("data") or {}).get("reason") or error.get("message")) if isinstance(error, dict) else None
         if method == "approval.respond":
             prompt_id = shaped[1].get("prompt_id")
-            with self.lock:
-                self.prompts.pop(prompt_id, None)
+            if not error or reason == "stale_generation":
+                # Settled (or its turn ended); a refused answer keeps it to try again.
+                with self.lock:
+                    self.prompts.pop(prompt_id, None)
             if reason == "stale_generation":
                 # The turn that asked has ended: nothing was waiting.
                 return {**response, "error": None, "result": {"resolved": 0}}

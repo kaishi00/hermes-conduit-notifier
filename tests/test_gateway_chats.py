@@ -304,3 +304,22 @@ def test_pulse_sends_on_the_authority_with_its_model(monkeypatch):
     assert calls[2][1]["expected_revision"] == 5 and calls[2][1]["expected_generation"] == 2
     assert calls[3][1] == {"session_id": "pulse-1", "text": "check in", "display_kind": "hidden", "profile": "pulsebot"}
     assert pulse_host.on_authority() and pulse_host.available()
+
+
+def test_an_authority_report_lives_a_minute():
+    now = [1000.0]
+    report = turn_surface.Report("auth-old", turn_surface.text_sha256("yes"), "watch", "spoken")
+    turn_surface.record_for_authority(report, clock=lambda: now[0])
+    now[0] += turn_surface.AUTHORITY_FRESH_S + 1
+    assert turn_surface._take_for_authority("auth-old", "yes", lambda: now[0]) is None
+
+
+def test_a_refused_answer_keeps_its_prompt_to_try_again(gateway):
+    chats, answers, connections = gateway
+    transport = Transport()
+    link = chats.link(transport)
+    link.write(_event("s1", "approval.request", {"prompt_id": "p1", "command": "ls"}))
+    answers["approval.respond"] = {"error": {"code": 4001, "message": "invalid_params", "data": {"reason": "invalid_params"}}}
+    assert _call(chats, transport, "approval.respond", {"session_id": "s1", "request_id": "p1", "choice": "bogus"})["error"]
+    answers["approval.respond"] = {"result": {"status": "resolved", "prompt_id": "p1"}}
+    assert _call(chats, transport, "approval.respond", {"session_id": "s1", "request_id": "p1", "choice": "once"})["result"] == {"resolved": 1}

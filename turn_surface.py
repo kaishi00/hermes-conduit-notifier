@@ -32,7 +32,10 @@ turn runs from the admitted message, not on the socket that sent it, so it
 can't tell Conduit's from another client's. The report is kept here instead,
 by the chat's session id (``record_for_authority``, one map for the process),
 and the turn whose session and text match it takes it: only Conduit reports,
-for the exact text it is about to send in that chat.
+for the exact text it is about to send in that chat. So the same words sent
+from another client within ``AUTHORITY_FRESH_S`` of a send of Conduit's that
+never became a turn would take its line; the short life keeps that window
+small.
 
 Standalone (no imports from the plugin package): the dashboard loads it from
 its file, the plugin imports it.
@@ -51,6 +54,10 @@ from typing import Any, Callable, Optional, Tuple
 KEY = "conduit_turn_surface"
 # A message queued behind a long turn may wait this long before it runs.
 FRESH_S = 900.0
+# On the gateway's listener a report isn't tied to Conduit's socket, so a
+# refused send's report could label another client's same words: Conduit
+# sends right after reporting, so it lives a minute there.
+AUTHORITY_FRESH_S = 60.0
 # Reports kept per chat; the oldest goes first.
 MAX_KEPT = 8
 MAX_SESSION_ID_CHARS = 200
@@ -137,8 +144,8 @@ def record(session: dict, report: Report, clock: Callable[[], float] = time.mono
     session[KEY] = kept
 
 
-def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic
-         ) -> Optional[Tuple[str, Optional[str]]]:
+def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic,
+         fresh_s: float = FRESH_S) -> Optional[Tuple[str, Optional[str]]]:
     """Removes the report for ``message`` kept on ``session`` and returns its
     surface and entry while fresh."""
     if not isinstance(session, dict):
@@ -148,17 +155,17 @@ def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic
     if not isinstance(kept, dict) or text is None:
         return None
     value = kept.pop(text_sha256(text), None)
-    if value is None or not _fresh(value, clock()):
+    if value is None or not _fresh(value, clock(), fresh_s):
         return None
     surface, entry, _at = value
     return surface, entry if entry in INPUTS else None
 
 
-def _fresh(value: Any, now: float) -> bool:
+def _fresh(value: Any, now: float, fresh_s: float = FRESH_S) -> bool:
     if not (isinstance(value, tuple) and len(value) == 3 and value[0] in SURFACES):
         return False
     at = value[2]
-    return isinstance(at, float) and 0 <= now - at <= FRESH_S
+    return isinstance(at, float) and 0 <= now - at <= fresh_s
 
 
 def _message_text(message: Any) -> Optional[str]:
@@ -229,7 +236,7 @@ def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float
     lock, chats = _authority_store()
     with lock:
         session = chats.get(session_id)
-        kept = take(session, message, clock) if session is not None else None
+        kept = take(session, message, clock, AUTHORITY_FRESH_S) if session is not None else None
         if session is not None and not session.get(KEY):
             chats.pop(session_id, None)
     return kept
