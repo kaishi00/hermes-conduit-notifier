@@ -47,7 +47,12 @@ WORD_DELAY_S = 0.4
 
 
 class _FakeModel(BaseHTTPRequestHandler):
-    """An OpenAI-compatible model that streams WORDS words, one every WORD_DELAY_S."""
+    """An OpenAI-compatible model that streams WORDS words, one every WORD_DELAY_S.
+
+    A user message with RUN in it gets a terminal call that needs approval,
+    and one with ASK a clarify question, so a turn waits on a prompt. The
+    reply reports its usage, so a model switch has a context to guard.
+    """
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -81,12 +86,29 @@ class _FakeModel(BaseHTTPRequestHandler):
                     "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
             return f"data: {json.dumps(body)}\n\n".encode()
 
+        messages = request.get("messages") or []
+        last = messages[-1] if messages else {}
+        text = last.get("content") if isinstance(last.get("content"), str) else ""
+        if last.get("role") == "user" and ("RUN" in text or "ASK" in text):
+            if "ASK" in text:
+                arguments = {"questions": [{"question": "Which one?", "choices": ["a", "b"]}]}
+                call = {"index": 0, "id": "call_1", "type": "function",
+                        "function": {"name": "clarify", "arguments": json.dumps(arguments)}}
+            else:
+                call = {"index": 0, "id": "call_1", "type": "function",
+                        "function": {"name": "terminal", "arguments": json.dumps({"command": "rm -rf /tmp/conduit-contract-nothing"})}}
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(chunk({"tool_calls": [call]}) + chunk({}, "tool_calls") + b"data: [DONE]\n\n")
+            return
         try:
             for index in range(WORDS):
                 self.wfile.write(chunk({"content": f"word{index} "}))
                 self.wfile.flush()
                 time.sleep(WORD_DELAY_S)
-            self.wfile.write(chunk({}, "stop") + b"data: [DONE]\n\n")
+            end = {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": "fake-model",
+                   "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                   "usage": {"prompt_tokens": 5000, "completion_tokens": WORDS, "total_tokens": 5000 + WORDS}}
+            self.wfile.write(f"data: {json.dumps(end)}\n\n".encode() + b"data: [DONE]\n\n")
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -226,7 +248,8 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
     (home / "config.yaml").write_text(yaml.safe_dump({
         "plugins": {"enabled": [PLUGIN]},
         "webapp": {"enabled": True, "port": port},
-        "model": {"default": "fake-model", "provider": "custom",
+        # Any switch on a chat with context asks first, so the confirm exchange can be tried.
+        "model": {"default": "fake-model", "provider": "custom", "switch_context_confirm_tokens": 1,
                   "base_url": f"http://127.0.0.1:{model.server_address[1]}/v1", "api_key": "fake"},
     }))
     env = {**os.environ, "HERMES_HOME": str(home), "NO_COLOR": "1"}
@@ -358,5 +381,55 @@ def test_dashboard_shapes_are_refused_before_anything_runs(listener):
         snapshot = await sock.result("session.resume", _resume(sid, omit_messages=True))
         assert snapshot["message_count"] == 0 and snapshot["running"] is False, snapshot
         assert not [e for e in sock.events if e.get("type") == "message.start" and e.get("session_id") == sid]
+
+    listener.run(script)
+
+
+def test_prompts_are_answered_from_a_socket_that_never_saw_them_asked(listener):
+    """A card shown before a reconnect: Conduit reads its prompt id and turn
+    from the chat's resume (HermesClient.respondToApproval and
+    respondToClarification) and answers in the authority's shape."""
+
+    for text, method, answer in (("RUN it", "approval.respond", {"choice": "deny"}),
+                                 ("ASK me", "clarify.respond", {"answer": "a"})):
+        sid = _ask(listener, text)
+        async def answer_it(sock: ConduitSocket) -> None:
+            snapshot = await sock.result("session.resume", _resume(sid, omit_messages=True))
+            prompts = snapshot["prompts"]
+            assert len(prompts) == 1 and prompts[0].get("prompt_id"), snapshot
+            assert isinstance(prompts[0].get("execution_generation"), int), prompts
+            done = await sock.result(method, {"session_id": sid, "prompt_id": prompts[0]["prompt_id"],
+                                              "execution_generation": prompts[0]["execution_generation"], **answer})
+            assert done.get("status") == "resolved", done
+            gone = await sock.result("session.resume", _resume(sid, omit_messages=True))
+            assert gone["prompts"] == [], gone
+        listener.run(answer_it)
+
+
+def _ask(listener: "Listener", text: str) -> str:
+    """Starts a turn that waits on a prompt, on a socket that then closes."""
+    async def script(sock: ConduitSocket) -> str:
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        await sock.result("prompt.submit", _submit(sid, text))
+        await sock.event(sid, "clarify.request" if "ASK" in text else "approval.request")
+        return sid
+    return listener.run(script)
+
+
+def test_a_guarded_model_pick_asks_then_applies_with_its_token(listener):
+    async def script(sock: ConduitSocket) -> None:
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        await sock.result("prompt.submit", _submit(sid, "hello"))
+        await sock.event(sid, "message.complete")
+        snapshot = await sock.result("session.resume", _resume(sid, omit_messages=True))
+        pick = {"model": "fake-model-2", "provider": "custom"}
+        asked = await sock.result("session.mutate", _mutate(snapshot, sid, "model", pick, fences_generation=True))
+        assert asked.get("status") == "confirmation_required" and asked.get("confirm_required") is True, asked
+        assert asked.get("confirm") and asked.get("confirm_message") and asked.get("target_model"), asked
+        assert "model" not in asked, "nothing applied yet"
+        applied = await sock.result("session.mutate", _mutate(snapshot, sid, "model",
+                                                               {**pick, "confirm": asked["confirm"]},
+                                                               fences_generation=True))
+        assert applied.get("model") == asked["target_model"], applied
 
     listener.run(script)
