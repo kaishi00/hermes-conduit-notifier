@@ -1680,6 +1680,26 @@ def test_a_send_carries_the_users_words_as_theirs(on, hermes, home):
     assert "More." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
 
 
+def test_a_send_quotes_the_bot_chat_it_came_from(on, hermes, home, monkeypatch):
+    start()
+    chats = (BOT_CHAT, "20261031_bot_2")  # the Bot Chat continued in a child after a compression
+    monkeypatch.setattr(titles, "_read", lambda h, key: "Bot Chat" if key in chats else "Some chat")
+    monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat" if key in chats else "Some chat")
+    work.turn_ended(WORKER, "Ready to deploy.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    _chat_db(home, [(BOT_CHAT, "user", "yes, delete the backups", None),
+                    ("20261031_bot_2", "user", "deploy it", None)])
+    hermes.calls.clear()
+    assert call("work_send", {"ref": "W1", "text": "Go."}, session_id="20261031_bot_2")["ok"]
+    sent = hermes.calls[-1][1]["text"]
+    assert "«deploy it»" in sent and "backups" not in sent
+
+
+def test_an_unknown_how_on_a_note_is_refused(on, hermes):
+    assert call("work_note", {"text": "x", "how": "rewrite"})["error"] == "how"
+    assert call("work_note", {"text": "Only", "how": "Replace"})["notes"] == "Only"
+
+
 def test_a_ready_mark_with_no_recorded_turn_start_isnt_taken(on, hermes):
     start()
     call("work_progress", {"ready": True}, session_id=WORKER)

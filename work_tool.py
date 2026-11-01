@@ -504,7 +504,7 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         store.update(work.ref, status=work.status, only_if=("stopped",))
         return {"ok": True, "ref": work.ref, "title": work.title, "status": work.status,
                 "note": f"{work.ref} wasn't working on anything."}
-    return _send(home, store, broker, work, args)
+    return _send(home, store, broker, work, args, str(session_id))
 
 
 def _progress(home: Path, args: dict, session_id: Any) -> dict:
@@ -558,7 +558,8 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     if progress["ready"]:
         # Counted only for the turn that set it: a mark a turn's start
         # couldn't clear never settles a later turn as ready.
-        progress["ready_at"] = time.time() if flag else (work.progress or {}).get("ready_at", time.time())
+        # A kept mark with no time of its own isn't taken as this turn's.
+        progress["ready_at"] = time.time() if flag else (work.progress or {}).get("ready_at", 0.0)
     work_store.Store(found).update(work.ref, progress=progress)
     ready = progress["ready"]
     done = sum(1 for step in steps if step["state"] == "done")
@@ -791,7 +792,9 @@ def _note(home: Path, args: dict) -> dict:
     preferences every new workstream is told."""
     import tempfile
 
-    how = args.get("how") if args.get("how") in ("add", "replace", "clear") else "add"
+    how = str(args.get("how") or "add").strip().lower()
+    if how not in ("add", "replace", "clear"):
+        return {"ok": False, "error": "how", "note": "how is add, replace or clear. Nothing was changed."}
     text = str(args.get("text") or "").strip()
     if how == "add":
         text = " ".join(text.split())  # one note, one line
@@ -830,15 +833,18 @@ def _note(home: Path, args: dict) -> dict:
             "note": "Noted. New workstreams get these notes." if new else "Notes cleared."}
 
 
-def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, args: dict) -> dict:
+def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, args: dict,
+          coordinator: str) -> dict:
     text = str(args.get("text") or "").strip()
     if not text:
         return {"ok": False, "ref": work.ref, "error": "missing", "note": "Say what to send."}
     how = args.get("how") if args.get("how") in ("auto", "add", "after") else "auto"
     bot = _bot_name(home)
     # The user's own words go along, quoted as theirs, so a go-ahead given in
-    # the Bot Chat reaches a worker that only takes the user's words.
-    words = FOLLOW_UP.format(bot=bot, text=text) + _quoted_words(home, bot, work.coordinator)
+    # the Bot Chat reaches a worker that only takes the user's words. Read
+    # from the Bot Chat this call came from: after a compression the one the
+    # work started from holds only older messages.
+    words = FOLLOW_UP.format(bot=bot, text=text) + _quoted_words(home, bot, coordinator)
     item = store.outbox_add(work.ref, "send", work.session_id, words)
     # Marked running first: a turn that ends before the send returns then
     # settles the row, and nothing after the send puts it back. Idle work
