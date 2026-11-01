@@ -178,11 +178,12 @@ class Store:
             if write:
                 con.execute("PRAGMA journal_mode=WAL")
                 con.executescript(_SCHEMA)
-                _add_columns(con)
             else:
                 con.execute("PRAGMA query_only=1")
             con.execute("BEGIN IMMEDIATE" if write else "BEGIN DEFERRED")
             try:
+                if write:
+                    _add_columns(con)  # under the write lock: two first writers can't both add it
                 yield con
             except BaseException:
                 con.execute("ROLLBACK")
