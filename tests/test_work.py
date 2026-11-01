@@ -2184,6 +2184,54 @@ def test_a_long_bridged_batch_with_a_write_at_the_end_is_uncertain(on, hermes, m
     assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
 
 
+def test_a_turn_a_live_sibling_holds_is_left_running(on, hermes, monkeypatch):
+    markers = types.ModuleType("tui_gateway.turn_marker")
+    markers.read_turn_marker = lambda home, key: {"writer_pid": 1, "prompt": "x"}
+    markers.marker_writer_state = lambda marker: "alive"
+    markers.clear_turn_marker = lambda home, key: None
+    monkeypatch.setitem(sys.modules, "tui_gateway.turn_marker", markers)
+    start()
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "running"
+    work.flush_wakes()
+    assert submitted_to(hermes, BOT_CHAT) == []
+
+
+def test_one_workstream_failing_to_recover_leaves_the_others_recovered(on, hermes, monkeypatch):
+    start()
+    start(title="Second", instructions="Something else.")
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    real = work._recover_one
+
+    def flaky(home, store, broker, row, *rest):
+        if row.ref == "W1":
+            raise RuntimeError("database is locked")
+        return real(home, store, broker, row, *rest)
+
+    monkeypatch.setattr(work, "_recover_one", flaky)
+    call("work_list")
+    assert on.get("W2").status == "running" and on.get_meta(work._CONTINUED + "W2")
+
+
+def test_a_missed_step_of_a_session_still_live_is_kept_for_a_later_restart(on, hermes, home, monkeypatch):
+    work._note_unjournaled(home, "some-live-session", "terminal")
+    start()
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert list(work._read_unjournaled(on.path.parent / work._UNJOURNALED_FILE)) == ["some-live-session"]
+
+
+def test_recovery_doesnt_reopen_work_closed_meanwhile(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.update("W1", closed_at=1.0)
+    assert not on.reopen("W1", running_limit=2, if_open=True)
+    assert on.reopen("W1", running_limit=2)  # a send still reopens it
+
+
 def test_update_lines_a_restart_caught_in_the_batch_go_out_again(on, hermes, monkeypatch):
     item = on.outbox_add("", "line", BOT_CHAT, "- W9 “Old job” finished. In short: all good.")
     restart(hermes, monkeypatch)

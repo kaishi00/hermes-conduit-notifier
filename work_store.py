@@ -357,16 +357,18 @@ class Store:
             row = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_RUNNING}").fetchone()
         return int(row["n"])
 
-    def reopen(self, ref: str, *, running_limit: int) -> bool:
+    def reopen(self, ref: str, *, running_limit: int, if_open: bool = False) -> bool:
         """An idle workstream back to running, if the bot has a slot for it,
-        counted in the same transaction (as ``add`` does)."""
+        counted in the same transaction (as ``add`` does). ``if_open``: not
+        one that's been closed (a send reopens it; recovery doesn't)."""
         with self._db() as con:
             running = con.execute(f"SELECT COUNT(*) FROM work WHERE {_RUNNING} AND ref != ?", (ref,)).fetchone()[0]
             if running >= running_limit:
                 return False
-            con.execute("UPDATE work SET status = 'running', closed_at = 0, error = '', updated_at = ? WHERE ref = ?",
-                        (time.time(), ref))
-        return True
+            changed = con.execute("UPDATE work SET status = 'running', closed_at = 0, error = '', updated_at = ? "
+                                  "WHERE ref = ?" + (" AND closed_at = 0" if if_open else ""),
+                                  (time.time(), ref)).rowcount
+        return bool(changed)
 
     def update(self, ref: str, *, only_if: Optional[tuple[str, ...]] = None, **fields: Any) -> Optional[Work]:
         """Sets fields on a row and stamps it changed (unless only ``seen_at``
