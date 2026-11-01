@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.123.2 (2026-11-01)
+
+### Fixes
+- A bot can always reach another bot's Bot Chat. A Bot Chat from before
+  Hermes' gateway took over chats only moved to the gateway when the
+  first bot message arrived while nothing had it open. With the chat open
+  in Conduit or Desktop, messages from other bots were refused every time
+  ("held by another session writer"). The plugin now moves such a Bot
+  Chat to its gateway itself, soon after a restart.
+
 ## 0.123.1 (2026-11-01)
 
 ### Fixes

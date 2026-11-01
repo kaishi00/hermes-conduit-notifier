@@ -14,7 +14,7 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
+from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity,
                location_tool, maps_tool, notify_tool, phone_tool, present_tool, profile_copies, pulse, reply_sources,
                review_notices,
@@ -207,7 +207,8 @@ def register(ctx: Any) -> None:
 
 
 def _point_profiles_here() -> None:
-    """profile_copies.sweep, when this is the main home's copy."""
+    """profile_copies.sweep, when this is the main home's copy, and the
+    sweep that moves old Bot Chats under their gateways (bot_chat_adopt)."""
     try:
         from hermes_constants import get_default_hermes_root
 
@@ -217,6 +218,10 @@ def _point_profiles_here() -> None:
     except Exception:  # noqa: BLE001 — an older Hermes has one home, and no profiles to point
         return
     profile_copies.sweep_quietly(root, Path(__file__).parent)
+    try:
+        bot_chat_adopt.start(root)
+    except Exception:  # noqa: BLE001 — Hermes' relay still moves a chat nothing holds
+        logger.warning("conduit_push: Bot Chat move sweep didn't start", exc_info=True)
 
 
 def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
@@ -567,6 +572,7 @@ def _unload() -> None:
         _cancel(timer)
     calls.stop()
     pulse.stop()
+    bot_chat_adopt.stop()
     room_memory.uninstall()
     room_planner.uninstall()
     room_cutoff.uninstall()
