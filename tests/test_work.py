@@ -356,6 +356,14 @@ def test_a_workstream_cant_message_other_bots_directly(bots, hermes, monkeypatch
     assert work.tool_block(OTHER_CHAT, "message_agent", {}) is None  # an ordinary chat is left alone
 
 
+def test_message_agent_is_held_when_the_registry_cant_be_read(bots, hermes, monkeypatch):
+    start()
+    monkeypatch.setattr(store_mod.Store, "by_session", lambda self, session_id: (_ for _ in ()).throw(
+        store_mod.sqlite3.OperationalError("database is locked")))
+    block = work.tool_block("20261031_work_1", "message_agent", {"agent": "nahida", "message": "hi"})
+    assert block == {"action": "block", "message": work.CHECK_FAILED}
+
+
 def test_an_answer_can_be_a_workstreams_report(bots, hermes, monkeypatch):
     call("work_ask", {"bot": "nahida", "text": "Summarise the outage."})
     as_bot(monkeypatch, bots, "nahida")

@@ -1712,8 +1712,13 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     if titled is False:
         # A workstream reaches other bots only through its coordinator,
         # whose asks carry the loop guard and the limits.
-        if MESSAGE_AGENT in names and is_workstream(session_id):
-            return {"action": "block", "message": MESSAGE_AGENT_IN_WORKSTREAM}
+        if MESSAGE_AGENT in names:
+            _, work, unreadable = _lookup(session_id, home)
+            if work is not None:
+                return {"action": "block", "message": MESSAGE_AGENT_IN_WORKSTREAM}
+            if unreadable:
+                # It might be a workstream: held, as an unreadable title is.
+                return {"action": "block", "message": CHECK_FAILED}
         return None
     for called in names:
         if called in allowed:
