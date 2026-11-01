@@ -39,6 +39,10 @@ SCHEMA_VERSION = 1
 POLICIES = ("off", "strict", "lookups")
 DEFAULT_POLICY = "off"
 DEFAULT_MAX_RUNNING = 2
+# What a restart does with a workstream it stopped that had nothing
+# uncertain in flight (C.7): continue it once, or only tell the coordinator.
+AFTER_RESTART = ("continue", "ask")
+DEFAULT_AFTER_RESTART = "continue"
 MAX_RUNNING_LIMIT = 6
 
 KINDS = ("workstream", "ask_out", "ask_in")
@@ -109,7 +113,7 @@ CREATE TABLE IF NOT EXISTS outbox (
 
 _JSON_FIELDS = ("requested_by", "executor", "reply_to", "progress")
 # Columns added after a registry's first version: (name, definition).
-_ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"),)
+_ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL NOT NULL DEFAULT 0"))
 # A workstream holding one of its bot's running slots: closed or not, its
 # session is still at work.
 _RUNNING = "kind = 'workstream' AND status IN ('starting', 'running', 'needs_you')"
@@ -140,6 +144,9 @@ class Work:
     # The worker's own checklist (work_progress): {"steps": [{"step", "state"}],
     # "ready": bool}.
     progress: dict = field(default_factory=dict)
+    # When the workstream's latest turn started: a restart reads the steps
+    # since then as the turn it stopped.
+    turn_at: float = 0.0
 
     @property
     def active(self) -> bool:
@@ -225,6 +232,15 @@ class Store:
 
     def set_max_running(self, value: int) -> None:
         self.set_meta("max_running", str(min(max(int(value), 1), MAX_RUNNING_LIMIT)))
+
+    def after_restart(self) -> str:
+        value = self.get_meta("after_restart", DEFAULT_AFTER_RESTART)
+        return value if value in AFTER_RESTART else DEFAULT_AFTER_RESTART
+
+    def set_after_restart(self, value: str) -> None:
+        if value not in AFTER_RESTART:
+            raise ValueError(f"after_restart must be one of {', '.join(AFTER_RESTART)}")
+        self.set_meta("after_restart", value)
 
     # Work
 
@@ -341,16 +357,18 @@ class Store:
             row = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_RUNNING}").fetchone()
         return int(row["n"])
 
-    def reopen(self, ref: str, *, running_limit: int) -> bool:
+    def reopen(self, ref: str, *, running_limit: int, if_open: bool = False) -> bool:
         """An idle workstream back to running, if the bot has a slot for it,
-        counted in the same transaction (as ``add`` does)."""
+        counted in the same transaction (as ``add`` does). ``if_open``: not
+        one that's been closed (a send reopens it; recovery doesn't)."""
         with self._db() as con:
             running = con.execute(f"SELECT COUNT(*) FROM work WHERE {_RUNNING} AND ref != ?", (ref,)).fetchone()[0]
             if running >= running_limit:
                 return False
-            con.execute("UPDATE work SET status = 'running', closed_at = 0, error = '', updated_at = ? WHERE ref = ?",
-                        (time.time(), ref))
-        return True
+            changed = con.execute("UPDATE work SET status = 'running', closed_at = 0, error = '', updated_at = ? "
+                                  "WHERE ref = ?" + (" AND closed_at = 0" if if_open else ""),
+                                  (time.time(), ref)).rowcount
+        return bool(changed)
 
     def update(self, ref: str, *, only_if: Optional[tuple[str, ...]] = None, **fields: Any) -> Optional[Work]:
         """Sets fields on a row and stamps it changed (unless only ``seen_at``
@@ -359,7 +377,7 @@ class Store:
         The row as written, or None when nothing was (no row, or not in
         those states)."""
         allowed = {"session_id", "status", "last_result", "error", "title", "goal", "cwd", "repo", "seen_at",
-                   "closed_at", *_JSON_FIELDS}
+                   "closed_at", "turn_at", *_JSON_FIELDS}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown fields {sorted(unknown)}")
@@ -372,7 +390,7 @@ class Store:
         values = {key: (json.dumps(value) if key in _JSON_FIELDS else value) for key, value in fields.items()}
         # Seen marks and a worker's checklist aren't changes the
         # coordinator's "new since your last turn" is about.
-        if set(fields) - {"seen_at", "progress"}:
+        if set(fields) - {"seen_at", "progress", "turn_at"}:
             values["updated_at"] = time.time()
         if not values:
             return self.get(ref)
@@ -422,14 +440,18 @@ class Store:
                 (ref, session_id, turn_id, tool_call_id, tool, _clip(summary, STEP_SUMMARY_CHARS), time.time()))
             return int(cursor.lastrowid)
 
-    def step_ended(self, ref: str, *, tool: str, tool_call_id: str = "", outcome: str = "ok") -> bool:
+    def step_ended(self, ref: str, *, tool: str, tool_call_id: str = "", outcome: str = "ok", prefix: str = "") -> bool:
         """Closes the step: by its call id, else the oldest open step of that
-        tool. False when no open step matched."""
+        tool (or, with a prefix, journaled under a name that starts with it).
+        False when no open step matched."""
         with self._db() as con:
             row = None
             if tool_call_id:
                 row = con.execute("SELECT id FROM steps WHERE ref = ? AND tool_call_id = ? AND ended_at = 0 "
                                   "ORDER BY id LIMIT 1", (ref, tool_call_id)).fetchone()
+            if row is None and prefix:
+                row = con.execute("SELECT id FROM steps WHERE ref = ? AND substr(tool, 1, ?) = ? AND ended_at = 0 "
+                                  "ORDER BY id LIMIT 1", (ref, len(prefix), prefix)).fetchone()
             if row is None:
                 row = con.execute("SELECT id FROM steps WHERE ref = ? AND tool = ? AND ended_at = 0 "
                                   "ORDER BY id LIMIT 1", (ref, tool)).fetchone()
@@ -438,6 +460,14 @@ class Store:
             con.execute("UPDATE steps SET ended_at = ?, outcome = ? WHERE id = ?", (time.time(), outcome, row["id"]))
         return True
 
+    def close_open_steps(self, ref: str, outcome: str) -> int:
+        """Closes every step of the row still open (a restart cut them off)."""
+        if not self.path.is_file():
+            return 0
+        with self._db() as con:
+            return con.execute("UPDATE steps SET ended_at = ?, outcome = ? WHERE ref = ? AND ended_at = 0",
+                               (time.time(), outcome, ref)).rowcount
+
     def steps(self, ref: str, *, open_only: bool = False, limit: int = 50) -> list[dict]:
         if not self.path.is_file():
             return []
@@ -445,6 +475,16 @@ class Store:
         with self._db(write=False) as con:
             rows = con.execute(query + " ORDER BY id DESC LIMIT ?", (ref, limit)).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def unsettled_steps(self, ref: str, since: float) -> list[dict]:
+        """Every step since then that's still open or timed out, however
+        many steps came after it."""
+        if not self.path.is_file():
+            return []
+        with self._db(write=False) as con:
+            rows = con.execute("SELECT * FROM steps WHERE ref = ? AND started_at >= ? AND "
+                               "(ended_at = 0 OR outcome = 'timed_out') ORDER BY id", (ref, since)).fetchall()
+        return [dict(row) for row in rows]
 
     # The outbox
 
@@ -462,11 +502,20 @@ class Store:
             con.execute("UPDATE outbox SET accepted_at = ?, outcome = ? WHERE id = ?",
                         (time.time() if outcome in ("accepted", "queued") else 0.0, outcome, item))
 
-    def outbox_pending(self) -> list[dict]:
+    def outbox_rows(self, ref: str, kind: str) -> list[dict]:
         if not self.path.is_file():
             return []
         with self._db(write=False) as con:
-            rows = con.execute("SELECT * FROM outbox WHERE accepted_at = 0 ORDER BY created_at").fetchall()
+            rows = con.execute("SELECT * FROM outbox WHERE ref = ? AND kind = ? ORDER BY created_at",
+                               (ref, kind)).fetchall()
+        return [dict(row) for row in rows]
+
+    def outbox_pending(self) -> list[dict]:
+        """Rows nothing has been heard of yet: not taken, refused, lost or dropped."""
+        if not self.path.is_file():
+            return []
+        with self._db(write=False) as con:
+            rows = con.execute("SELECT * FROM outbox WHERE accepted_at = 0 AND outcome = '' ORDER BY created_at").fetchall()
         return [dict(row) for row in rows]
 
 

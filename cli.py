@@ -58,6 +58,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     work.add_argument("--policy", choices=["strict", "lookups"], default=None,
                       help="for on: what the coordinator may do itself (default strict)")
     work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 2)")
+    work.add_argument("--after-restart", choices=["continue", "ask"], default=None,
+                      help="for on: a workstream a restart cut off with nothing uncertain in flight is continued "
+                           "once (continue, the default) or left for the coordinator to ask about (ask)")
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
                                                  "dates, ahead, inbox, look, where, private, claims, spots")
@@ -435,12 +438,16 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
         store.set_policy(args.policy or (store.policy() if store.policy() != "off" else "strict"))
         if args.max_running is not None:
             store.set_max_running(args.max_running)
+        if getattr(args, "after_restart", None):
+            store.set_after_restart(args.after_restart)
     elif action == "off":
         store.set_policy("off")
     mode = store.policy()
     print(f"Bot workstreams: {mode if mode != 'off' else 'off'}"
           + (f" (the coordinator {'may also look things up' if mode == 'lookups' else 'only coordinates'}; "
-             f"up to {store.max_running()} running at once)" if mode != "off" else ""))
+             f"up to {store.max_running()} running at once; after a restart, safe work is "
+             f"{'continued' if store.after_restart() == 'continue' else 'left to ask about'})"
+             if mode != "off" else ""))
     if action == "status":
         for work in store.list(include_closed=False, limit=20):
             print(f"  {work.ref}  {work.status:<11} {_printable(work.title)}")

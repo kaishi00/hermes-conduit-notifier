@@ -1393,6 +1393,7 @@ she tells you about. It's off until you turn it on for a bot:
 
     hermes -p <bot> conduit-push work on            # strict: she only coordinates
     hermes -p <bot> conduit-push work on --policy lookups   # she may also look things up
+    hermes -p <bot> conduit-push work on --after-restart ask  # after a restart, ask before continuing
     hermes -p <bot> conduit-push work status
     hermes -p <bot> conduit-push work off
 
@@ -1441,7 +1442,24 @@ she tells you about. It's off until you turn it on for a bot:
   is the one push. Its approvals and questions still come from the workstream.
 - Up to 2 run at once per bot (`--max-running`). The registry is
   `<profile>/conduit/workstreams.db`, with a journal of each workstream's
-  tool steps; after a restart, work that was running shows as interrupted.
+  tool steps and an outbox of every turn sent into a chat.
+- After a restart, work that was running is marked interrupted and sorted by
+  its journal, once the dashboard is up. If nothing that could change things
+  was in flight when it stopped (only lookups, or nothing at all), it's
+  continued once with a note saying which steps already finished; a second
+  restart before a turn of it ends leaves it for you. If a step that can
+  change things was cut off (a command, a file write, a send; a `tool_call`
+  counts by the tools it calls, and a step whose journal entry couldn't be
+  written counts as one), it waits: the
+  Bot Chat tells you, with a note it can `work_send` to check whether that
+  step took effect. `work on --after-restart ask` leaves every interrupted
+  workstream for you to decide. Hermes' own re-run of a crash-killed turn
+  (`desktop.auto_continue`) is retired for workstreams, so nothing is redone
+  blindly. Work updates a restart caught before they went out are sent
+  again. A message into a workstream that Hermes never stored is sent once
+  more if the workstream was continued; if it's stopped or idle it isn't
+  resent behind your back (that would start a turn of its own): the Bot Chat
+  hears it may not have arrived.
 - It needs the Hermes dashboard to run plugins in its own process: under
   `plugins.isolation: host` the tools answer with that reason.
 
