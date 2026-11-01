@@ -803,8 +803,19 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
     except Exception:  # noqa: BLE001
         now = None
     status = now.status if now is not None and now.status != "starting" else "running"
-    return {"ok": True, "ref": work.ref, "title": work.title, "status": status,
-            "link": _link(work.ref, started.session_id, work_broker.profile_of(home)),
+    link = _link(work.ref, started.session_id, work_broker.profile_of(home))
+    if status == "stopped":
+        # The user stopped it while Hermes was still starting it: its brief's
+        # turn may begin only now, so it's stopped again, and stays stopped.
+        try:
+            broker.stop(started.session_id)
+        except Exception:  # noqa: BLE001 — its row says stopped; a turn that runs anyway settles it
+            logger.warning("conduit_push: stopping a stopped start failed", exc_info=True)
+        store.update(work.ref, status="stopped")
+        return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped", "link": link,
+                "note": f"{work.ref} was stopped while it was being started, so it hasn't begun its work. "
+                        "work_send continues it."}
+    return {"ok": True, "ref": work.ref, "title": work.title, "status": status, "link": link,
             "note": f"Started {work.ref}: {work.title}. It works in the background; its result comes back to you "
                     "as a work update. Don't wait for it."}
 

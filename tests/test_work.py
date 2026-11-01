@@ -2885,9 +2885,19 @@ def test_a_start_stopped_while_hermes_was_starting_it_says_stopped(on, hermes, m
         on.update("W1", status="stopped")  # the user's Stop, while the start ran long
         return started
 
+    stops = []
+    original_stop = broker_mod.Broker.stop
+
+    def stop(self, session_id):
+        stops.append(session_id)
+        return original_stop(self, session_id)
+
     monkeypatch.setattr(broker_mod.Broker, "start", slow_start)
+    monkeypatch.setattr(broker_mod.Broker, "stop", stop)
     answer = start()
     assert answer["ok"] and answer["status"] == "stopped"
+    assert "hasn't begun its work" in answer["note"] and "Don't wait" not in answer["note"]
+    assert stops == [on.get("W1").session_id]  # its brief's turn, if it begins late, is stopped too
     assert on.get("W1").status == "stopped"
 
 
