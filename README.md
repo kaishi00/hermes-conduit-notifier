@@ -1397,10 +1397,20 @@ she tells you about. It's off until you turn it on for a bot:
     hermes -p <bot> conduit-push work off
 
 - The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
-  `work_read` and `work_close` (behind Hermes' Tool Search). They answer only
+  `work_read`, `work_close` and `work_note` (behind Hermes' Tool Search). They answer only
   in that bot's canonical Bot Chat, and name work by ref (W1, W2), never by
   session id, so a bot only ever reaches its own work. `work_ask` and
   `work_reply` (asks between bots) say they aren't available yet.
+- Every new workstream's brief carries the coordinator's notes (`work_note`,
+  kept in `<profile>/conduit/work-notes.md`, labelled as data, never as your
+  go-ahead) and the message of yours the Bot Chat is answering, quoted as
+  yours. A start from a work update quotes nothing, so an older message never
+  passes for a go-ahead; a `work_send` quotes it the same way, so a yes you
+  give in the Bot Chat reaches the workstream as yours. What counts as your go-ahead there follows the
+  bot's `approvals.mode`: under manual, only your own words do (your quoted
+  message when it covers the step, or what you write in the workstream), never the coordinator's
+  instructions alone; under smart, Hermes' approvals decide; under off, the
+  brief is enough.
 - Strict leaves the coordinator the work tools, `clarify` and `memory`;
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
   health, location and inbox). `message_agent` is refused there in favour of

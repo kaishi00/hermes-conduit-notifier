@@ -135,6 +135,7 @@ def hermes(home, monkeypatch):
     work._wake_held.clear()
     work._finished.clear()
     work._unjournaled.clear()
+    work._turn_began.clear()
     work._replies.clear()
     work._redirecting.clear()
     return fake
@@ -804,12 +805,13 @@ def test_a_stop_that_lands_before_the_settle_wins_and_still_reports(on, hermes, 
         on.update("W1", status="stopped")
         return found
 
-    work.turn_ended("20261031_work_1", "Finished.")
+    work.turn_ended("20261031_work_1", "Finished. " + "More. " * 200)
     monkeypatch.setattr(work, "_lookup", stopped_meanwhile)
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     row = on.get("W1")
-    assert row.status == "stopped" and row.last_result == "Finished."
-    assert any("was stopped as it finished" in line for lines, _ in work._wakes.values() for line in lines)
+    assert row.status == "stopped" and row.last_result.startswith("Finished.")
+    line, = [line for lines, _ in work._wakes.values() for line in lines if "was stopped as it finished" in line]
+    assert "conduit://session/20261031_work_1" in line and len(line) < 600
 
 
 def test_a_stop_that_interrupts_the_turn_keeps_its_words_quietly(on, hermes):
@@ -1395,6 +1397,10 @@ def test_just_finished_work_is_offered_behind_many_newer_settled_rows(on, hermes
 WORKER = "20261031_work_1"
 
 
+def _plain(progress):
+    return {key: value for key, value in progress.items() if key != "ready_at"}
+
+
 def test_a_workstream_keeps_its_checklist_and_the_digest_shows_it(on, hermes):
     start()
     out = call("work_progress", {"steps": [{"step": "Read the logs", "state": "done"},
@@ -1421,7 +1427,7 @@ def test_only_a_workstream_keeps_a_checklist(on, hermes):
     for chat in (BOT_CHAT, OTHER_CHAT):
         out = call("work_progress", {"steps": [{"step": "Anything", "state": "done"}]}, session_id=chat)
         assert out["error"] == "not_workstream"
-    assert on.get("W1").progress == {}
+    assert _plain(on.get("W1").progress) == {}
 
 
 def test_a_messy_checklist_is_tidied(on, hermes):
@@ -1436,6 +1442,7 @@ def test_a_messy_checklist_is_tidied(on, hermes):
 
 def test_a_ready_result_settles_as_ready_and_says_so(on, hermes):
     start()
+    work.turn_started(WORKER)
     hermes.live(BOT_CHAT, transport=object())
     hermes.calls.clear()
     call("work_progress", {"steps": [{"step": "Draft the email", "state": "done"}], "ready": True},
@@ -1500,13 +1507,14 @@ def test_steps_as_a_json_string_are_read_and_nonsense_is_refused(on, hermes):
     start()
     out = call("work_progress", {"steps": json.dumps([{"step": "Read", "state": "done"}]), "ready": "true"},
                session_id=WORKER)
-    assert out["ok"] and on.get("W1").progress == {"steps": [{"step": "Read", "state": "done"}], "ready": True}
+    assert out["ok"] and _plain(on.get("W1").progress) == {"steps": [{"step": "Read", "state": "done"}], "ready": True}
     out = call("work_progress", {"steps": "read the logs"}, session_id=WORKER)
     assert out["error"] == "missing" and on.get("W1").progress["steps"][0]["step"] == "Read"
 
 
 def test_a_ready_result_without_a_report_is_still_ready(on, hermes):
     start()
+    work.turn_started(WORKER)
     hermes.live(BOT_CHAT, transport=object())
     hermes.calls.clear()
     call("work_progress", {"steps": [{"step": "Write the file", "state": "done"}], "ready": True}, session_id=WORKER)
@@ -1542,10 +1550,10 @@ def test_a_ready_mark_alone_keeps_the_checklist(on, hermes):
     start()
     call("work_progress", {"steps": [{"step": "Draft", "state": "done"}]}, session_id=WORKER)
     assert call("work_progress", {"ready": True}, session_id=WORKER)["ok"]
-    assert on.get("W1").progress == {"steps": [{"step": "Draft", "state": "done"}], "ready": True}
+    assert _plain(on.get("W1").progress) == {"steps": [{"step": "Draft", "state": "done"}], "ready": True}
     start("Other task", "Something else entirely.")
     assert call("work_progress", {"ready": True}, session_id="20261031_work_2")["ok"]
-    assert on.get("W2").progress == {"steps": [], "ready": True}
+    assert _plain(on.get("W2").progress) == {"steps": [], "ready": True}
     assert call("work_progress", {}, session_id=WORKER)["error"] == "missing"
 
 
@@ -1558,6 +1566,7 @@ def test_a_checklist_when_the_registry_cant_be_read_says_to_try_again(on, hermes
 
 def test_a_ready_result_stays_in_the_active_list_until_closed(on, hermes):
     start()
+    work.turn_started(WORKER)
     call("work_progress", {"ready": True}, session_id=WORKER)
     work.turn_ended(WORKER, "Here's the draft.")
     work.turn_finished(WORKER, failed=False, interrupted=False)
@@ -1603,3 +1612,185 @@ def test_a_step_state_in_capitals_is_read(on, hermes):
     start()
     call("work_progress", {"steps": [{"step": "Read", "state": " DONE "}]}, session_id=WORKER)
     assert on.get("W1").progress["steps"][0]["state"] == "done"
+
+
+
+# The coordinator's notes, the user's words, the approval mode (C.11) ------------------
+
+def _brief_text(hermes):
+    return next(c[1]["text"] for c in hermes.named("prompt.submit") if c[1].get("display_kind") != "hidden")
+
+
+def test_notes_are_kept_and_every_new_workstream_gets_them(on, hermes):
+    assert call("work_note", {"text": "Eric's projects live in ~/dev"})["ok"]
+    assert call("work_note", {"text": "He prefers short answers"})["notes"] == (
+        "- Eric's projects live in ~/dev\n- He prefers short answers")
+    start()
+    brief = _brief_text(hermes)
+    assert "Furina's notes on the user's work" in brief and "- He prefers short answers" in brief
+    assert call("work_note", {"text": "Only this now", "how": "replace"})["notes"] == "Only this now"
+    assert call("work_note", {"text": "x" * 3001, "how": "replace"})["error"] == "too_long"
+    assert call("work_note", {"text": "x"}, session_id=OTHER_CHAT)["error"] == "not_bot_chat"
+    assert call("work_note", {"text": "x"}, session_id=WORKER)["error"] == "not_bot_chat"
+
+
+def _chat_db(home, rows):
+    import sqlite3
+
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+                    "content TEXT, display_kind TEXT, active INTEGER NOT NULL DEFAULT 1)")
+        con.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, "
+                    "end_reason TEXT)")
+        con.executemany("INSERT INTO messages (session_id, role, content, display_kind) VALUES (?, ?, ?, ?)", rows)
+
+
+def test_the_brief_quotes_the_message_the_bot_chat_is_answering(on, hermes, home):
+    _chat_db(home, [(BOT_CHAT, "user", "Something older", None),
+                    (BOT_CHAT, "assistant", "Done.", None),
+                    (BOT_CHAT, "user", "Delete the old backups in /srv,\nyes all of them", None),
+                    (OTHER_CHAT, "user", "Something else", None)])
+    start("Old backups", "Remove the old backups in /srv.")
+    brief = _brief_text(hermes)
+    assert "«Delete the old backups in /srv,\nyes all of them»" in brief and "as they wrote it (" in brief
+    assert "Something older" not in brief and "Something else" not in brief
+
+
+def test_a_start_from_a_work_update_quotes_no_older_message(on, hermes, home):
+    _chat_db(home, [(BOT_CHAT, "user", "Fix the login bug", None),
+                    (BOT_CHAT, "assistant", "Started W9.", None),
+                    (BOT_CHAT, "user", "Work update from your workstreams. W9 finished.", "hidden")])
+    start("Deploy", "Deploy the fix.")
+    brief = _brief_text(hermes)
+    assert "Fix the login bug" not in brief and "W9 finished" not in brief and "is answering now" not in brief
+
+
+def test_a_send_carries_the_users_words_as_theirs(on, hermes, home):
+    start()
+    work.turn_ended(WORKER, "Ready to deploy.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    _chat_db(home, [(BOT_CHAT, "user", "yes, deploy it", None)])
+    hermes.calls.clear()
+    assert call("work_send", {"ref": "W1", "text": "The user says go ahead."})["ok"]
+    sent = hermes.calls[-1][1]["text"]
+    assert "passes on:\nThe user says go ahead." in sent and "«yes, deploy it»" in sent
+    _chat_db(home, [(BOT_CHAT, "user", "Work update from your workstreams. W1 finished.", "hidden")])
+    hermes.calls.clear()
+    call("work_send", {"ref": "W1", "text": "More."})
+    assert "More." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
+
+
+def test_a_send_quotes_the_bot_chat_it_came_from(on, hermes, home, monkeypatch):
+    start()
+    chats = (BOT_CHAT, "20261031_bot_2")  # the Bot Chat continued in a child after a compression
+    monkeypatch.setattr(titles, "_read", lambda h, key: "Bot Chat" if key in chats else "Some chat")
+    monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat" if key in chats else "Some chat")
+    work.turn_ended(WORKER, "Ready to deploy.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    _chat_db(home, [(BOT_CHAT, "user", "yes, delete the backups", None),
+                    ("20261031_bot_2", "user", "deploy it", None)])
+    hermes.calls.clear()
+    assert call("work_send", {"ref": "W1", "text": "Go."}, session_id="20261031_bot_2")["ok"]
+    sent = hermes.calls[-1][1]["text"]
+    assert "«deploy it»" in sent and "backups" not in sent
+
+
+def test_an_unknown_how_on_a_note_is_refused(on, hermes):
+    assert call("work_note", {"text": "x", "how": "rewrite"})["error"] == "how"
+    assert call("work_note", {"text": "Only", "how": "Replace"})["notes"] == "Only"
+
+
+def test_a_ready_mark_with_no_recorded_turn_start_isnt_taken(on, hermes):
+    start()
+    call("work_progress", {"ready": True}, session_id=WORKER)
+    work._turn_began.clear()
+    work.turn_ended(WORKER, "A plain answer.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    assert on.get("W1").status == "done"
+
+
+def test_an_inactive_user_row_isnt_quoted(on, hermes, home):
+    _chat_db(home, [(BOT_CHAT, "user", "Keep this", None)])
+    import sqlite3
+
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("INSERT INTO messages (session_id, role, content, active) VALUES (?, 'user', 'Rewound', 0)",
+                    (BOT_CHAT,))
+    start()
+    brief = _brief_text(hermes)
+    assert "«Keep this»" in brief and "Rewound" not in brief
+
+
+def test_a_long_message_is_cut_and_says_so(on, hermes, home):
+    _chat_db(home, [(BOT_CHAT, "user", "y" * 2000, None)])
+    start()
+    brief = _brief_text(hermes)
+    assert "shortened to 1500 characters" in brief and "«" + "y" * 1499 + "…»" in brief
+
+
+def test_notes_grow_to_the_cap_refuse_an_empty_replace_and_clear(on, hermes):
+    assert call("work_note", {"text": "x" * 2990})["ok"]
+    assert call("work_note", {"text": "one more line"})["error"] == "too_long"
+    assert call("work_note", {"text": "", "how": "replace"})["error"] == "missing"
+    assert call("work_note", {"how": "clear"})["notes"] == ""
+    assert call("work_note", {"text": "fresh"})["notes"] == "- fresh"
+
+
+def test_unreadable_notes_dont_hold_a_slot(on, hermes, home):
+    path = work._notes_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe bad")
+    assert start()["ok"]
+    assert "notes on the user's work" not in _brief_text(hermes)
+    assert call("work_note", {"text": "new"})["error"] == "unreadable"
+    assert path.read_bytes() == b"\xff\xfe bad"
+    assert call("work_note", {"text": "a\nb"}, session_id=BOT_CHAT)["error"] == "unreadable"
+    path.unlink()
+    assert call("work_note", {"text": "a\n b"})["notes"] == "- a b"
+    assert not list(path.parent.glob(".work-notes-*.tmp"))
+
+
+def test_a_brief_that_fails_settles_the_row(on, hermes, monkeypatch):
+    def broken(*args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(work, "_brief", broken)
+    assert start()["error"] == "hermes"
+    assert on.get("W1").status == "failed"
+
+
+def test_a_config_hermes_cant_read_counts_as_manual(on, hermes, home):
+    (home / "config.yaml").write_text("approvals: [unclosed\n")
+    start()
+    assert "only the user's own words count as their go-ahead" in _brief_text(hermes)
+
+
+@pytest.mark.parametrize("mode, expected, absent", [
+    (None, "only the user's own words count as their go-ahead", "smart approvals"),
+    ("manual", "only the user's own words count as their go-ahead", "smart approvals"),
+    ("smart", "Hermes' approvals decide", "own words count"),
+    ("off", None, "own words count"),
+])
+def test_what_counts_as_the_users_go_ahead_follows_the_approval_mode(on, hermes, home, mode, expected, absent):
+    if mode:
+        (home / "config.yaml").write_text(f"approvals:\n  mode: {mode}\n")
+    start()
+    brief = _brief_text(hermes)
+    assert expected is None or expected in brief
+    assert absent not in brief
+
+
+def test_a_ready_mark_from_before_this_turn_doesnt_settle_it_as_ready(on, hermes):
+    start()
+    call("work_progress", {"ready": True}, session_id=WORKER)
+    work._turn_began[WORKER] = __import__("time").time() + 60  # a turn whose start couldn't clear the mark
+    work.turn_ended(WORKER, "A plain answer.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    assert on.get("W1").status == "done"
+
+
+def test_a_ready_value_that_isnt_true_or_false_is_refused(on, hermes):
+    start()
+    assert call("work_progress", {"ready": "maybe"}, session_id=WORKER)["error"] == "ready"
+    assert call("work_progress", {"ready": 1}, session_id=WORKER)["error"] == "ready"
+    assert call("work_progress", {"ready": "yes"}, session_id=WORKER)["ok"]
