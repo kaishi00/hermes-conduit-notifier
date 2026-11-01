@@ -49,5 +49,6 @@ provides_tools:
   - work_close
   - work_ask
   - work_reply
+  - work_progress
 provides_middleware:
   - tool_execution

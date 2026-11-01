@@ -43,10 +43,12 @@ MAX_RUNNING_LIMIT = 6
 
 KINDS = ("workstream", "ask_out", "ask_in")
 # "needs_you": waiting on an approval or a question from the user;
-# "waiting": an ask_out whose answer hasn't come; "interrupted": a restart
-# stopped it mid-turn.
-STATUSES = ("starting", "running", "needs_you", "waiting", "done", "failed", "stopped", "interrupted")
-ACTIVE = ("starting", "running", "needs_you", "waiting")
+# "waiting": an ask_out whose answer hasn't come; "ready": finished with
+# something for the user to look at (a draft, a diff); "interrupted": a
+# restart stopped it mid-turn.
+STATUSES = ("starting", "running", "needs_you", "waiting", "ready", "done", "failed", "stopped", "interrupted")
+# "ready" stays active: it waits on the user to look, until it's closed.
+ACTIVE = ("starting", "running", "needs_you", "waiting", "ready")
 RESULT_CHARS = 2000
 TITLE_CHARS = 80
 GOAL_CHARS = 1000
@@ -75,7 +77,8 @@ CREATE TABLE IF NOT EXISTS work (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     seen_at REAL NOT NULL DEFAULT 0,
-    closed_at REAL NOT NULL DEFAULT 0
+    closed_at REAL NOT NULL DEFAULT 0,
+    progress TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS work_session ON work (session_id);
 CREATE INDEX IF NOT EXISTS work_ask ON work (ask_id);
@@ -104,7 +107,9 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 """
 
-_JSON_FIELDS = ("requested_by", "executor", "reply_to")
+_JSON_FIELDS = ("requested_by", "executor", "reply_to", "progress")
+# Columns added after a registry's first version: (name, definition).
+_ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"),)
 # A workstream holding one of its bot's running slots: closed or not, its
 # session is still at work.
 _RUNNING = "kind = 'workstream' AND status IN ('starting', 'running', 'needs_you')"
@@ -132,6 +137,9 @@ class Work:
     updated_at: float = 0.0
     seen_at: float = 0.0
     closed_at: float = 0.0
+    # The worker's own checklist (work_progress): {"steps": [{"step", "state"}],
+    # "ready": bool}.
+    progress: dict = field(default_factory=dict)
 
     @property
     def active(self) -> bool:
@@ -175,6 +183,8 @@ class Store:
                 con.execute("PRAGMA query_only=1")
             con.execute("BEGIN IMMEDIATE" if write else "BEGIN DEFERRED")
             try:
+                if write:
+                    _add_columns(con)  # under the write lock: two first writers can't both add it
                 yield con
             except BaseException:
                 con.execute("ROLLBACK")
@@ -327,7 +337,7 @@ class Store:
 
     def update(self, ref: str, *, only_if: Optional[tuple[str, ...]] = None, **fields: Any) -> Optional[Work]:
         """Sets fields on a row and stamps it changed (unless only ``seen_at``
-        moves). Unknown fields raise. With ``only_if``, only while the row's
+        or ``progress`` moves). Unknown fields raise. With ``only_if``, only while the row's
         status is one of those (a turn's end may have settled it meanwhile).
         The row as written, or None when nothing was (no row, or not in
         those states)."""
@@ -343,7 +353,9 @@ class Store:
         if "title" in fields:
             fields["title"] = _clip(fields["title"], TITLE_CHARS)
         values = {key: (json.dumps(value) if key in _JSON_FIELDS else value) for key, value in fields.items()}
-        if set(fields) != {"seen_at"}:
+        # Seen marks and a worker's checklist aren't changes the
+        # coordinator's "new since your last turn" is about.
+        if set(fields) - {"seen_at", "progress"}:
             values["updated_at"] = time.time()
         if not values:
             return self.get(ref)
@@ -439,6 +451,15 @@ class Store:
         with self._db(write=False) as con:
             rows = con.execute("SELECT * FROM outbox WHERE accepted_at = 0 ORDER BY created_at").fetchall()
         return [dict(row) for row in rows]
+
+
+def _add_columns(con: sqlite3.Connection) -> None:
+    """A registry from before a column was added gets it (a write opens the
+    file this way first, so reads after any write see it)."""
+    have = {row[1] for row in con.execute("PRAGMA table_info(work)")}
+    for name, definition in _ADDED_COLUMNS:
+        if name not in have:
+            con.execute(f"ALTER TABLE work ADD COLUMN {name} {definition}")
 
 
 def normalize_ref(value: Any) -> str:
