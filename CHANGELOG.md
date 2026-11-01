@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.124.0 (2026-11-01)
+
+### New and improved
+- Predictive's fast model is now one of Hermes' helper models, named
+  "Conduit predictions", so you can pick it in Conduit under Models &
+  providers > Helper models, or on Hermes' own Models page.
+
 ## 0.123.3 (2026-11-01)
 
 ### Fixes

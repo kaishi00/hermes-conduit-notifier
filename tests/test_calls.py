@@ -794,6 +794,31 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
                               task_id="t"))["ok"] is True
 
 
+def test_predictions_get_a_helper_model_slot(home, paired):
+    tasks = []
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: None,
+                                register_cli_command=lambda **kwargs: None, register_tool=lambda **kwargs: None,
+                                register_auxiliary_task=lambda key, **kwargs: tasks.append((key, kwargs)))
+    plugin.register(ctx)
+    predict = dict(tasks)["conduit_predict"]
+    # The dashboard's predictions read the same slot.
+    assert plugin.PREDICT_TASK == "conduit_predict"
+    assert predict["display_name"] == "Conduit predictions" and predict["description"]
+    # Pulse's own stays too.
+    assert "pulse_memory" in dict(tasks)
+
+
+def test_a_hermes_without_helper_model_slots_still_loads(home, paired):
+    def refuse(key, **kwargs):
+        raise AttributeError("no auxiliary tasks")
+    hooks = []
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: hooks.append(name),
+                                register_cli_command=lambda **kwargs: None, register_tool=lambda **kwargs: None,
+                                register_auxiliary_task=refuse)
+    plugin.register(ctx)
+    assert "post_llm_call" in hooks
+
+
 def test_a_hermes_that_refuses_the_tool_keeps_the_hooks():
     hooks = []
 

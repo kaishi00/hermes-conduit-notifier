@@ -1651,7 +1651,10 @@ it as a `[btw …]` note), the route answers only the device that asked.
 - `"model": "fast"` answers on `auxiliary.conduit_predict` (`provider`,
   `model`) from the chat's profile config, from a digest of the chat instead
   of the warm cache; without it the chat's own model answers. Usage is
-  billed to the chat, like `/btw`.
+  billed to the chat, like `/btw`. From plugin 0.124 the plugin registers
+  `conduit_predict` as a helper model ("Conduit predictions"), so Hermes'
+  `/api/model/auxiliary` lists it and `/api/model/set` sets it, from Conduit
+  (Models & providers > Helper models) or Hermes' Models page.
 - The chat must be live in this dashboard (404 otherwise). On a Hermes without
   the fork's parts the route falls back to its plain side question.
 
