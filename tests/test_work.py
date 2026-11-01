@@ -2156,6 +2156,34 @@ def test_markers_are_retired_at_load_before_a_client_can_resume(on, hermes, home
     assert cleared == [WORKER_1]
 
 
+def test_markers_are_retired_at_load_with_workstreams_off(on, hermes, home, monkeypatch):
+    cleared = []
+    markers = types.ModuleType("tui_gateway.turn_marker")
+    markers.read_turn_marker = lambda home, key: {"writer_pid": 1, "prompt": "x"}
+    markers.marker_writer_state = lambda marker: "dead"
+    markers.clear_turn_marker = lambda home, key: cleared.append(key)
+    monkeypatch.setitem(sys.modules, "tui_gateway.turn_marker", markers)
+    start()
+    on.set_policy("off")
+    work._policy_cache.clear()
+    threads = []
+    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: threads.append(k) or types.SimpleNamespace(
+        start=lambda: None))
+    work.start_recovery(home)
+    assert cleared == [WORKER_1] and threads == []  # the sweep itself waits for the bot to turn it on
+
+
+def test_a_long_bridged_batch_with_a_write_at_the_end_is_uncertain(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    calls = [{"name": "read_file", "arguments": {"path": str(n)}} for n in range(25)]
+    calls.append({"name": "terminal", "arguments": {"command": "./deploy.sh"}})
+    work.step_started(WORKER_1, "tool_call", {"calls": calls}, tool_call_id="b1")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
+
+
 def test_update_lines_a_restart_caught_in_the_batch_go_out_again(on, hermes, monkeypatch):
     item = on.outbox_add("", "line", BOT_CHAT, "- W9 “Old job” finished. In short: all good.")
     restart(hermes, monkeypatch)

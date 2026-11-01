@@ -1527,16 +1527,19 @@ def start_recovery(home: Optional[Path] = None) -> None:
     bot whose workstreams are on sweeps once the session host is up,
     rather than waiting for its Bot Chat's next turn."""
     home = home or _home()
-    if home is None or not work_store.exists(home) or policy(home) == "off":
+    if home is None or not work_store.exists(home):
         return
     # Now, before a client can reopen a chat: Hermes re-runs a crash-killed
-    # turn on its resume, which could come before the sweep below.
+    # turn on its resume, which could come before the sweep below. Whatever
+    # the policy: turning workstreams off doesn't stop one that's running.
     try:
         for work in work_store.Store(home).list(include_closed=False, limit=200):
             if work.status in _RUNNING_STATES and work.session_id:
                 _retire_auto_continue(home, work.session_id)
     except Exception:  # noqa: BLE001 — the sweep still retires them
         logger.debug("conduit_push: couldn't retire workstream turn markers at load", exc_info=True)
+    if policy(home) == "off":
+        return
 
     def run() -> None:
         deadline = time.monotonic() + RECOVERY_WAIT_S
@@ -1729,7 +1732,9 @@ def step_started(session_id: Any, tool_name: Any, args: Any, *, turn_id: Any = N
         # read from a bridged write.
         from . import pulse_tools
 
-        tool = BRIDGED + ",".join(_cut(called, 60) for called, _ in pulse_tools.called(args))[:200]
+        names = ",".join(_cut(called, 60) for called, _ in pulse_tools.called(args))
+        # Too long to keep whole: a name no tool has, so it counts as a change.
+        tool = BRIDGED + (names if len(names) <= 200 else names[:180] + ",(more)")
     home, work, unreadable = _lookup(session_id)
     if work is None or home is None:
         if unreadable and home is not None and not _reads_only(tool):
