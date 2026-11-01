@@ -1465,7 +1465,7 @@ def test_the_update_carries_a_short_line_and_the_chat_link(on, hermes):
     assert "In short: The cause is a slow DNS lookup." in params["text"]
     assert "Details. " * 60 not in params["text"]
     assert "[Open W1](conduit://session/20261031_work_1" in params["text"]
-    assert on.get("W1").last_result.startswith("The cause")  # the whole report is kept
+    assert on.get("W1").last_result.startswith("The cause")  # the report is kept (up to RESULT_CHARS)
 
 
 def test_a_registry_from_before_the_checklist_gets_its_column(home):
@@ -1535,3 +1535,14 @@ def test_a_checklist_still_works_after_workstreams_are_turned_off(on, hermes):
 def test_the_bot_chat_isnt_told_to_start_a_workstream_for_a_checklist(on, hermes):
     assert work.tool_block(BOT_CHAT, "work_progress") is None
     assert call("work_progress", {"steps": ["x"]})["error"] == "not_workstream"
+
+
+def test_a_ready_mark_alone_keeps_the_checklist(on, hermes):
+    start()
+    call("work_progress", {"steps": [{"step": "Draft", "state": "done"}]}, session_id=WORKER)
+    assert call("work_progress", {"ready": True}, session_id=WORKER)["ok"]
+    assert on.get("W1").progress == {"steps": [{"step": "Draft", "state": "done"}], "ready": True}
+    start("Other task", "Something else entirely.")
+    assert call("work_progress", {"ready": True}, session_id="20261031_work_2")["ok"]
+    assert on.get("W2").progress == {"steps": [], "ready": True}
+    assert call("work_progress", {}, session_id=WORKER)["error"] == "missing"

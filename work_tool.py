@@ -201,7 +201,7 @@ SCHEMAS["work_progress"] = {
             "required": ["step", "state"]}},
         "ready": {"type": "boolean", "description": ("Your result is for the user to look at. Left out, it stays "
                                                      "as you last set it this turn.")}},
-        "required": ["steps"]},
+        "required": []},
 }
 EMOJI = {"work_list": "🗂️", "work_start": "🚀", "work_send": "✉️", "work_stop": "⏹️", "work_read": "📖",
          "work_close": "✅", "work_ask": "🤝", "work_reply": "↩️", "work_progress": "☑️"}
@@ -476,6 +476,8 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     if work is None or found is None:
         return {"ok": False, "error": "not_workstream", "note": NOT_WORKSTREAM}
     raw = args.get("steps")
+    if raw is None and "ready" in args:
+        raw = list((work.progress or {}).get("steps") or [])  # a ready mark alone keeps the list
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
