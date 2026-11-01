@@ -1060,7 +1060,8 @@ def _reply(home: Path, store: work_store.Store, args: dict) -> dict:
         store.update(ask.ref, status="failed", error="the bot that asked has no record of it now")
         return {"ok": False, "ref": ask.ref, "error": "gone",
                 "note": f"{_ask_bot(ask)} has no record of this ask any more, so the answer has nowhere to go."}
-    store.update(ask.ref, status="done", last_result=answer, error="")
+    if store.update(ask.ref, only_if=("running",), status="done", last_result=answer, error="") is None:
+        return {"ok": False, "ref": ask.ref, "error": "answered", "note": f"{ask.ref} was closed meanwhile."}
     asker_store = work_store.Store(asker_home)
     stored = asker_store.update(theirs.ref, only_if=("waiting",), status="done", last_result=answer, error="")
     name = _bot_name(home)
