@@ -26,6 +26,14 @@ than ``FRESH_S`` counts as none. Under plugin isolation or a turn on a
 compute host the record isn't in this process, and the turn gets no line,
 as before.
 
+On the gateway's own listener (the Webapp, hermes-conduit#1618) the session
+authority runs the chat: there is no record of Hermes' to keep it on, and a
+turn runs from the admitted message, not on the socket that sent it, so it
+can't tell Conduit's from another client's. The report is kept here instead,
+by the chat's session id (``record_for_authority``, one map for the process),
+and the turn whose session and text match it takes it: only Conduit reports,
+for the exact text it is about to send in that chat.
+
 Standalone (no imports from the plugin package): the dashboard loads it from
 its file, the plugin imports it.
 """
@@ -35,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sys
+import threading
 import time
 from typing import Any, Callable, Optional, Tuple
 
@@ -171,6 +180,46 @@ def line(surface: str, entry: Optional[str] = None) -> str:
     return f"[Conduit: this message came from {where}.{''.join(' ' + text for text in hints)}]"
 
 
+# The reports for chats the gateway's session authority runs, by session id:
+# kept on ``sys`` so the dashboard's copy of this module (loaded from its
+# file) and the plugin's share them.
+_AUTHORITY_STORE = "_conduit_turn_surface_authority"
+# Chats with reports kept at once; the one reported to longest ago goes first.
+MAX_AUTHORITY_CHATS = 256
+
+
+def _authority_store() -> Tuple[Any, dict]:
+    store = sys.__dict__.get(_AUTHORITY_STORE)
+    if store is None:
+        store = sys.__dict__.setdefault(_AUTHORITY_STORE, (threading.Lock(), {}))
+    return store
+
+
+def record_for_authority(report: Report, clock: Callable[[], float] = time.monotonic) -> None:
+    """Keeps ``report`` for its chat's next turn of that text, for a chat the
+    gateway's session authority runs."""
+    lock, chats = _authority_store()
+    with lock:
+        session = chats.pop(report.session_id, None) or {}
+        record(session, report, clock)
+        chats[report.session_id] = session
+        while len(chats) > MAX_AUTHORITY_CHATS:
+            chats.pop(next(iter(chats)))
+
+
+def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float]
+                        ) -> Optional[Tuple[str, Optional[str]]]:
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    lock, chats = _authority_store()
+    with lock:
+        session = chats.get(session_id)
+        kept = take(session, message, clock) if session is not None else None
+        if session is not None and not session.get(KEY):
+            chats.pop(session_id, None)
+    return kept
+
+
 def current_session() -> Any:
     """Hermes' record of the chat whose turn runs on this thread, if Hermes'
     app gateway runs in this process. Never imports it: a copy this plugin
@@ -183,12 +232,15 @@ def current_session() -> Any:
 
 
 def note(from_conduit: bool, message: Any, transport: Any = None,
-         clock: Callable[[], float] = time.monotonic) -> Optional[str]:
+         clock: Callable[[], float] = time.monotonic, session_id: Any = None) -> Optional[str]:
     """The line for this turn, or None. Never raises: a hook calls this."""
     try:
-        if not from_conduit:
+        # A chat the gateway's authority runs: its report is the evidence.
+        kept = _take_for_authority(session_id, message, clock)
+        if kept is None and not from_conduit:
             return None
-        kept = take(current_session(), message, clock)
+        if kept is None:
+            kept = take(current_session(), message, clock)
         if kept is None:
             # The plugin's Watch jobs and call chats name their own surface.
             surface = getattr(transport, "conduit_surface", None)

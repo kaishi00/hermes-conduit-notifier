@@ -99,12 +99,15 @@ notes:
     them apart; the authority takes its own shapes for the same verbs (submission_id,
     execution_generation, session.mutate for renames, branches, compression and model picks) and
     refuses the dashboard's before running anything, which Conduit's one resend relies on.
-    The plugin's capabilities route and its signed speech-server socket answer there (checked), but
-    the features that look up a chat's live session in the dashboard's chat registry don't find the
-    authority's chats until they're ported (an open gap in the entry): Predictions says the chat
-    isn't open, takeover reads every chat as free, and Watch jobs, Local Live's Hermes turns and
-    turn-surface miss them.
-
+    The plugin's capabilities route and its signed speech-server socket answer there (checked). The
+    plugin's chat features find the authority's chats there (gateway_chats.py): the gateway is
+    gateway.run_api._ACTIVE_RUNNER, a chat is authority.sessions[id] (all_authorities), its agent
+    the runner's resident one (Predictions), and turn-surface keeps Conduit's report by session id.
+    Watch jobs, a Watch call's Local Live chat and Pulse's turns drive their own chats through a
+    gateway.session_controls.AuthorityConnection of their own on the gateway's loop
+    (runner._gateway_loop), translating the TUI gateway's shapes both ways (approval.settled reads
+    as approval.cancelled). Each is checked with listener_driver/'s test-only routes.
+    Desktop views report not observing there: the authority has no Desktop selection to read.
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
 # passes (upstream fixed it: review the workaround) or fails differently.
@@ -152,6 +155,8 @@ imports:
     optional: ["BasePlatformAdapter"]
   gateway.response_filters:
     optional: ["is_autonomous_silence_response"]
+  gateway.session_controls:
+    required: ["AuthorityConnection"]
   hermes_cli:
     optional: ["active_sessions", "lifecycle"]
   hermes_cli._launchers:
@@ -253,6 +258,7 @@ module_paths:
   - gateway/config
   - gateway/platforms/base
   - gateway/response_filters
+  - gateway/session_controls
   - hermes_cli
   - hermes_cli/_launchers
   - hermes_cli/active_sessions

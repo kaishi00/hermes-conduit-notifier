@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
@@ -46,6 +47,7 @@ from conftest import COPY_IGNORE, PLUGIN, READY_TIMEOUT_S, ROOT, FakeSpeechServe
 
 WORDS = 10
 WORD_DELAY_S = 0.4
+DRIVER = "conduit_listener_driver"
 
 
 class _FakeModel(BaseHTTPRequestHandler):
@@ -55,6 +57,9 @@ class _FakeModel(BaseHTTPRequestHandler):
     and one with ASK a clarify question, so a turn waits on a prompt. The
     reply reports its usage, so a model switch has a context to guard.
     """
+
+    # Every request's model and messages, for what a turn was told.
+    seen: List[Dict[str, Any]] = []
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -73,9 +78,23 @@ class _FakeModel(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         request = json.loads(self.rfile.read(length) or b"{}")
-        if not request.get("stream"):
+        _FakeModel.seen.append({"model": request.get("model"), "messages": request.get("messages") or []})
+        # A prediction's side question gets the JSON it asks for (predict.py).
+        asked = json.dumps(request.get("messages") or [])
+        reply = '{"replies":[{"text":"sounds good","p":0.9}]}' if "Predict what the user" in asked else "ok"
+        if not request.get("stream") or reply != "ok":
+            if request.get("stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                body = {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": "fake-model",
+                        "choices": [{"index": 0, "delta": {"content": reply}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    self.wfile.write(f"data: {json.dumps(body)}\n\n".encode() + b"data: [DONE]\n\n")
+                return
             self._json({"id": "x", "object": "chat.completion", "created": 0, "model": "fake-model",
-                        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"},
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": reply},
                                      "finish_reason": "stop"}],
                         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
             return
@@ -128,13 +147,20 @@ class Listener:
         return (self.home / "webapp" / "session-token").read_text().strip()
 
     def plugin_get(self, path: str) -> int:
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/plugins/{PLUGIN}/{path}",
-                                     headers={"X-Hermes-Session-Token": self.token})
+        return self.plugin_call(path)[0]
+
+    def plugin_call(self, path: str, body: Optional[Dict[str, Any]] = None, plugin: str = PLUGIN,
+                    timeout: float = 30) -> tuple:
+        """``(status, JSON body)`` of a plugin route: a POST of ``body``, else a GET."""
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/plugins/{plugin}/{path}", data=data,
+                                     headers={"X-Hermes-Session-Token": self.token,
+                                              **({"Content-Type": "application/json"} if data else {})})
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return resp.status
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, json.loads(resp.read() or b"null")
         except urllib.error.HTTPError as exc:
-            return exc.code
+            return exc.code, exc.read()[:2000].decode(errors="replace")
 
     def run(self, script) -> Any:
         """Runs ``await script(socket)`` on a fresh Conduit socket."""
@@ -298,8 +324,11 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
         speech.start()
         speaking = True
         shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
+        # Test-only routes that drive the plugin's own chats as its Watch calls and Pulse do.
+        shutil.copytree(Path(__file__).parent / "listener_driver", home / "plugins" / DRIVER,
+                        ignore=shutil.ignore_patterns("__pycache__"))
         (home / "config.yaml").write_text(yaml.safe_dump({
-            "plugins": {"enabled": [PLUGIN]},
+            "plugins": {"enabled": [PLUGIN, DRIVER]},
             "webapp": {"enabled": True, "port": port},
             # A speech server to relay to, so a signed plugin socket shows it got past sign-in.
             "voice": {"speech_server": {"url": speech.url("listener")}},
@@ -537,3 +566,108 @@ def test_a_guarded_model_pick_asks_then_applies_with_its_token(listener):
         assert applied.get("model") == asked["target_model"], applied
 
     listener.run(script)
+
+
+# --- The plugin's features on the authority's chats ---------------------------
+#
+# The plugin's routes and its own chats used to find a chat in the dashboard's
+# TUI gateway, which a gateway's listener doesn't run chats in. These check
+# each feature finds the authority's chat, or drives its own there
+# (gateway_chats.py), and that what the turn hears is right.
+
+def _told(text: str) -> List[str]:
+    """What the turns whose last user message is ``text`` were told around it."""
+    told = []
+    for request in list(_FakeModel.seen):
+        users = [m for m in request["messages"] if m.get("role") == "user"]
+        content = users[-1].get("content") if users else None
+        words = content if isinstance(content, str) else json.dumps(content)
+        if text in words:
+            told.append(words)
+    return told
+
+
+def _turn(listener: "Listener", text: str) -> str:
+    """A chat with one finished turn of ``text``, left open on the authority."""
+    async def script(sock: ConduitSocket) -> str:
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        await sock.result("prompt.submit", _submit(sid, text))
+        await sock.event(sid, "message.complete")
+        return sid
+    return listener.run(script)
+
+
+def test_a_turn_hears_where_in_conduit_its_message_was_sent(listener):
+    text = "where should I stop for lunch"
+
+    async def script(sock: ConduitSocket) -> None:
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        # What Conduit posts just before it sends the message (TurnSurfaceReporter).
+        status, body = listener.plugin_call("turn-surface", {
+            "session_id": sid, "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "surface": "carplay", "input": "spoken"})
+        assert status == 200 and body.get("recorded") is True, body
+        await sock.result("prompt.submit", _submit(sid, text))
+        await sock.event(sid, "message.complete")
+
+    listener.run(script)
+    told = _told(text)
+    assert told and "[Conduit: this message came from CarPlay in the user's car, spoken." in told[0], told
+
+
+def test_predictions_answer_for_a_chat_the_authority_runs(listener):
+    sid = _turn(listener, "plan my week")
+    status, body = listener.plugin_call("predict", {"session_id": sid, "kind": "replies", "count": 2, "wait_s": 30},
+                                        timeout=60)
+    assert status == 200, body
+    assert body.get("parsed") is True and [r.get("text") for r in body.get("replies")] == ["sounds good"], body
+
+
+def test_watch_jobs_session_api_runs_its_chats_on_the_authority(listener):
+    status, out = listener.plugin_call("session-api-turn", plugin=DRIVER, timeout=180)
+    assert status == 200, out
+    assert out["api"] == "_AuthorityChats", out
+    assert "error" not in out["create"] and "error" not in out["submit"], out
+    # The authority's prompt id under the TUI gateway's name, and its answer's count.
+    assert out["approval"]["request_id"] == out["approval"]["prompt_id"], out
+    assert out["viewer"] is True, out
+    assert out["respond"].get("result") == {"resolved": 1}, out
+    assert out["settled"] == {"request_ids": [out["approval"]["prompt_id"]]}, out
+    assert out["complete"], out
+    # After the turn: a steer finds nothing running, a requestless answer nothing waiting.
+    assert out["steer_after"].get("result") == {"status": "rejected"}, out
+    assert out["again"].get("result") == {"resolved": 0}, out
+    assert "error" not in out["close"] and out["viewer_after_close"] is False, out
+    # The job's turn names the Watch, as its transport says.
+    told = _told("RUN the job")
+    assert told and "[Conduit: this message came from the user's Apple Watch, spoken." in told[0], told
+
+    # The chat is the authority's: the phone opens it, with the job's turn in it.
+    async def script(sock: ConduitSocket) -> List[Any]:
+        full = await sock.result("session.resume", _resume(out["session_id"], omit_messages=False))
+        return [m.get("text") or m.get("content") for m in full["messages"] if m.get("role") == "user"]
+    assert "RUN the job" in listener.run(script)
+
+
+def test_a_watch_calls_local_live_chat_runs_on_the_authority(listener):
+    status, out = listener.plugin_call("watch-call-turn", plugin=DRIVER, timeout=180)
+    assert status == 200, out
+    # The authority admits every send to its FIFO.
+    assert out["status"] in ("queued", "started"), out
+    assert out["finished"] is True and "message.complete" in out["kinds"], out
+    told = _told("hello from the watch")
+    assert told and "[Conduit: this message came from the user's Apple Watch, spoken." in told[0], told
+
+
+def test_pulse_sends_its_turn_into_its_chat_on_the_authority(listener):
+    sid = _turn(listener, "my pulse chat")
+    status, out = listener.plugin_call(f"pulse-send?chat_id={sid}", plugin=DRIVER, timeout=180)
+    assert status == 200, out
+    assert out == {"available": True, "ok": True, "status": "queued", "detail": "queued"}, out
+    deadline = time.monotonic() + 60
+    while not _told("PULSE check in"):
+        assert time.monotonic() < deadline, "Pulse's turn never ran"
+        time.sleep(0.5)
+    # On Pulse's model: the guarded switch was confirmed with its token.
+    assert any(r["model"] == "fake-model-2" for r in _FakeModel.seen
+               if "PULSE check in" in json.dumps(r["messages"])), [r["model"] for r in _FakeModel.seen[-3:]]

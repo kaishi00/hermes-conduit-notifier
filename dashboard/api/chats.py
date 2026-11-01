@@ -177,7 +177,7 @@ def _sweep_idle_claims(token: object) -> None:
             claims = core._plugin_package_module("conduit_claims")
             time.sleep(claims.SWEEP_S)
             if sys.__dict__.get(_CLAIMS_SWEEPER) is token:
-                claims.sweep(watch_jobs._hermes_session_api(), _claims_home)
+                claims.sweep(watch_jobs._tui_session_api(), _claims_home)
         except Exception:  # noqa: BLE001 — keep sweeping
             logger.debug("Conduit: idle claim sweep failed", exc_info=True)
             time.sleep(60.0)
@@ -255,7 +255,11 @@ def record_turn_surface(body: Any) -> bool:
     here. Raises ValueError for a body that isn't one."""
     module = _turn_surface()
     report = module.parse(body)
-    server = watch_jobs._hermes_session_api()
+    if core._authority_session(report.session_id) is not None:
+        # The gateway's listener: the authority runs the chat (turn_surface.py).
+        module.record_for_authority(report)
+        return True
+    server = watch_jobs._tui_session_api()
     session = server._sessions.get(report.session_id) if server is not None else None
     if not isinstance(session, dict):
         return False
@@ -393,7 +397,12 @@ def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:
         request = module.parse(body)
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
-    server = watch_jobs._hermes_session_api()
+    authority = core._authority_agent(request.session_id)
+    if authority is not None:
+        # The gateway's listener: the chat's agent is the gateway's, and its
+        # profile is the authority's (hermes-conduit#1618).
+        return module, request, {"authority": authority[0]}, authority[1]
+    server = watch_jobs._tui_session_api()
     session = server._sessions.get(request.session_id) if server is not None else None
     agent = session.get("agent") if isinstance(session, dict) else None
     if agent is None:
@@ -403,7 +412,8 @@ def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:
 
 def _answer_prediction(module: Any, request: Any, session: dict, agent: Any) -> Dict[str, Any]:
     history = list(getattr(agent, "_session_messages", None) or session.get("history") or [])
-    with _predict_profile_scope(session):
+    scope = core._authority_scope(session["authority"]) if "authority" in session else _predict_profile_scope(session)
+    with scope:
         task_cfg = _predict_fast_model() if request.model == "fast" else {}
         text = _predict_fork_answer(agent, history, module.question(request), task_cfg)
     today = time.strftime("%Y-%m-%d")

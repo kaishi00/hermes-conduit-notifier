@@ -1,0 +1,3 @@
+name: conduit_listener_driver
+version: 0.0.1
+description: Drives the Conduit plugin's own chats on the gateway's listener for upstream/test_gateway_listener.py.

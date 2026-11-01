@@ -132,6 +132,9 @@ def _watch_chats_can_load() -> bool:
     """Whether this is a dashboard that serves Hermes' chats, its session API
     not imported yet (no chat socket since it started)."""
     web_server = sys.modules.get("hermes_cli.web_server")
+    if core._gateway_runner() is not None:
+        # The gateway's listener: its chats are the authority's, never this module's.
+        return False
     if web_server is None or not getattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True):
         return False
     try:
@@ -298,6 +301,7 @@ class _WatchChatTransport:
 
     def close(self) -> None:
         self._closed = True
+        core._release_authority_link(self)
 
 
 class _WatchCallChat:

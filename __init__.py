@@ -958,7 +958,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         return {"context": room_framing}
     notes = [
         None if child else calls.outcome_note(session_id),
-        None if child else _turn_surface_note(kwargs.get("platform"), kwargs.get("user_message")),
+        None if child else _turn_surface_note(kwargs.get("platform"), kwargs.get("user_message"), session_id),
         _voice_persona_note(kwargs.get("conversation_history")),
         # Subagents can't use the shared data (each tool refuses them).
         None if child else conduit_first.note(),
@@ -1151,14 +1151,14 @@ def _room_platform(platform: Any) -> bool:
     return str(platform or "").strip().lower() == room_rules.ROOM_SOURCE
 
 
-def _turn_surface_note(platform: Any, message: Any) -> str | None:
+def _turn_surface_note(platform: Any, message: Any, session_id: str = "") -> str | None:
     """Which Conduit surface sent this turn's message (turn_surface.py)."""
     transport = reply_sources.current_transport()
     try:
         from_conduit = reply_sources.turn_source(platform, transport) == "conduit"
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         from_conduit = False
-    return turn_surface.note(from_conduit, message, transport)
+    return turn_surface.note(from_conduit, message, transport, session_id=session_id)
 
 
 def _note_turn_start(turn_id: Any) -> None:

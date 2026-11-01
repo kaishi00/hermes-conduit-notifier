@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.125.0 (2026-11-01)
+
+### Fixes
+- On a host where Conduit connects to Hermes' Webapp (`hermes webapp`)
+  instead of `hermes dashboard`, Predictions said the chat isn't open,
+  Watch jobs and a Watch call's Hermes chat ran where the phone couldn't
+  see them, Pulse sent nothing, and messages from CarPlay or the Watch lost
+  the note saying where they came from. They all work there now.
+
 ## 0.124.0 (2026-11-01)
 
 ### New and improved

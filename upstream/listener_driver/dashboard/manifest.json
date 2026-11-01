@@ -1,0 +1,10 @@
+{
+  "name": "conduit_listener_driver",
+  "label": "Conduit listener driver",
+  "description": "Test-only: drives the Conduit plugin's own chats on the gateway's listener.",
+  "icon": "Puzzle",
+  "version": "0.0.1",
+  "tab": { "path": "/conduit-listener-driver", "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

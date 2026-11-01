@@ -755,7 +755,7 @@ def notes(monkeypatch):
     monkeypatch.setattr(plugin.conduit_first, "note", lambda: NOTES["conduit_first"])
     monkeypatch.setattr(plugin.calls, "outcome_note", lambda session_id: NOTES["calls"])
     monkeypatch.setattr(plugin, "_voice_persona_note", lambda history: NOTES["voice"])
-    monkeypatch.setattr(plugin, "_turn_surface_note", lambda platform, message: NOTES["surface"])
+    monkeypatch.setattr(plugin, "_turn_surface_note", lambda platform, message, session_id="": NOTES["surface"])
     monkeypatch.setattr(plugin.live_activity.reporter, "turn_started", lambda session_id: None)
     return NOTES
 

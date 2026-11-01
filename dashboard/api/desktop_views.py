@@ -416,6 +416,13 @@ class _DesktopViewHook:
         with self._lock:
             if self.installed:
                 return True
+            if core._gateway_runner() is not None:
+                # The gateway's own listener (hermes-conduit#1618): its chats open
+                # on the session authority, which says which clients view a chat
+                # but not which one Desktop has selected, and the TUI gateway's
+                # handlers loaded here never see an open. Not observing, said so.
+                self.reason = "gateway-authority"
+                return False
             server = sys.modules.get("tui_gateway.server")
             if server is None:
                 # Under plugins.isolation: host this process never gets one.
