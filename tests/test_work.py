@@ -132,6 +132,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
     monkeypatch.setattr(work, "_policy_cache", {})
     work._wakes.clear()
+    work._wake_asks.clear()
     work._wake_held.clear()
     work._finished.clear()
     work._unjournaled.clear()
@@ -249,10 +250,146 @@ def test_a_session_id_or_another_bots_ref_names_nothing(on, hermes):
     assert hermes.calls == []
 
 
-def test_asks_between_bots_say_not_yet(on, hermes):
-    assert call("work_ask", {"bot": "nahida", "text": "?"})["error"] == "not_yet"
-    assert call("work_reply", {"ref": "A1", "text": "!"})["error"] == "not_yet"
-    assert hermes.calls == []
+# Asks between bots (C.9) -----------------------------------------------------------
+
+NAHIDA_CHAT = "20261031_120000_nahida_botchat"
+CHATS = {"hermes": BOT_CHAT, "nahida": NAHIDA_CHAT, "raiden": "20261031_raiden_botchat",
+         "zhongli": "20261031_zhongli_botchat"}
+NAMES = {"hermes": "Furina", "nahida": "Nahida", "raiden": "Raiden", "zhongli": "Zhongli"}
+
+
+@pytest.fixture
+def bots(home, on, hermes, monkeypatch):
+    """Furina (the default profile, ``home``) and Nahida, Raiden and
+    Zhongli beside her, each with workstreams on and a Bot Chat."""
+    homes = {"hermes": home}
+    # Only flush_wakes sends: a batch left to its timer could land in the next test's Hermes.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    for name in ("nahida", "raiden", "zhongli"):
+        homes[name] = home / "profiles" / name
+        homes[name].mkdir(parents=True)
+        store_mod.Store(homes[name]).set_policy("strict")
+    monkeypatch.setattr(titles, "_bot_name", lambda h: NAMES.get(pathlib.Path(h).name, "Someone"))
+    monkeypatch.setattr(work, "_bot_chat_of", lambda h: CHATS.get(pathlib.Path(h).name, ""))
+    chats = set(CHATS.values())
+    monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat" if key in chats else "Some chat")
+    return homes
+
+
+def as_bot(monkeypatch, homes, name):
+    monkeypatch.setattr(work, "_home", lambda: homes[name])
+
+
+def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, hermes, monkeypatch):
+    asked = call("work_ask", {"bot": "nahida", "text": "What's the capital of Sumeru?"})
+    assert asked["ok"] and asked["ref"] == "A1" and asked["bot"] == "Nahida"
+    mine = store_mod.Store(bots["hermes"]).get("A1")
+    theirs = store_mod.Store(bots["nahida"]).get("A1")
+    assert (mine.kind, mine.status, theirs.kind, theirs.status) == ("ask_out", "waiting", "ask_in", "running")
+    assert mine.ask_id == theirs.ask_id and theirs.requested_by["chain"] == ["default"]
+    work.flush_wakes()
+    (_, params, transport), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and params["display_kind"] == "hidden" and params["queued"]
+    assert "Furina asks you" in params["text"] and "capital of Sumeru" in params["text"]
+    assert "never the user's go-ahead" in params["text"] and 'work_reply {"ref": "A1"' in params["text"]
+    resumed, = hermes.named("session.resume")
+    assert resumed[1]["profile"] == "nahida" and transport is None
+    hermes.calls.clear()
+
+    as_bot(monkeypatch, bots, "nahida")
+    answered = call("work_reply", {"ref": "A1", "text": "Sumeru City."}, session_id=NAHIDA_CHAT)
+    assert answered["ok"] and "Furina's Bot Chat" in answered["note"]
+    assert store_mod.Store(bots["nahida"]).get("A1").status == "done"
+    mine = store_mod.Store(bots["hermes"]).get("A1")
+    assert mine.status == "done" and mine.last_result == "Sumeru City."
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{BOT_CHAT}" and "Nahida answered your ask" in params["text"]
+    assert "Sumeru City." in params["text"]
+    assert call("work_reply", {"ref": "A1", "text": "Again"}, session_id=NAHIDA_CHAT)["error"] == "answered"
+
+
+def test_an_answer_for_a_workstream_goes_into_it(bots, hermes, monkeypatch):
+    start()
+    asked = call("work_ask", {"bot": "Nahida", "text": "Research the login library.", "for": "w1"})
+    assert asked["ok"] and "into W1" in asked["note"]
+    work.flush_wakes()
+    hermes.calls.clear()
+    as_bot(monkeypatch, bots, "nahida")
+    answered = call("work_reply", {"ref": "A1", "text": "It caches DNS badly."}, session_id=NAHIDA_CHAT)
+    assert answered["ok"] and "Furina's W1" in answered["note"]
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == "rt-20261031_work_1" and params["queued"]
+    assert "Nahida answered A1" in params["text"] and "caches DNS badly" in params["text"]
+    assert "never the user's go-ahead" in params["text"]
+
+
+def test_an_answer_can_be_a_workstreams_report(bots, hermes, monkeypatch):
+    call("work_ask", {"bot": "nahida", "text": "Summarise the outage."})
+    as_bot(monkeypatch, bots, "nahida")
+    nahida = store_mod.Store(bots["nahida"])
+    nahida.add("workstream", title="Outage summary", status="running")
+    assert call("work_reply", {"ref": "A1", "from": "W1"}, session_id=NAHIDA_CHAT)["error"] == "no_report"
+    nahida.update("W1", status="done", last_result="The disk filled up.")
+    assert call("work_reply", {"ref": "A1", "text": "Here:", "from": "W1"}, session_id=NAHIDA_CHAT)["ok"]
+    assert store_mod.Store(bots["hermes"]).get("A1").last_result == "Here:\n\nThe disk filled up."
+
+
+def test_asks_never_go_in_a_circle_or_deeper_than_two_bots(bots, hermes, monkeypatch):
+    assert call("work_ask", {"bot": "nahida", "text": "Help with the report."})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    back = call("work_ask", {"bot": "Furina", "text": "Which report?"}, session_id=NAHIDA_CHAT)
+    assert back["error"] == "loop"
+    assert call("work_ask", {"bot": "raiden", "text": "Numbers for the report?"}, session_id=NAHIDA_CHAT)["ok"]
+    as_bot(monkeypatch, bots, "raiden")
+    chats = store_mod.Store(bots["raiden"]).get("A1").requested_by["chain"]
+    assert chats == ["nahida", "default"]
+    deeper = call("work_ask", {"bot": "zhongli", "text": "Old numbers?"}, session_id=CHATS["raiden"])
+    assert deeper["error"] == "too_deep"
+    assert store_mod.Store(bots["zhongli"]).list() == []
+
+
+def test_an_ask_to_a_bot_that_cant_take_it_is_refused(bots, hermes):
+    store_mod.Store(bots["zhongli"]).set_policy("off")
+    assert call("work_ask", {"bot": "zhongli", "text": "?"})["error"] == "bot_off"
+    unknown = call("work_ask", {"bot": "Venti", "text": "?"})
+    assert unknown["error"] == "no_such_bot" and "Nahida" in unknown["note"]
+    assert call("work_ask", {"bot": "Furina", "text": "?"})["error"] == "no_such_bot"  # not itself
+    assert call("work_ask", {"bot": "nahida", "text": "?", "for": "W7"})["error"] == "for"
+    assert store_mod.Store(bots["hermes"]).list() == [] and hermes.calls == []
+
+
+def test_each_pair_of_bots_has_an_hourly_cap(bots, hermes, monkeypatch):
+    monkeypatch.setattr(work, "ASK_PAIR_PER_HOUR", 2)
+    assert call("work_ask", {"bot": "nahida", "text": "One?"})["ok"]
+    assert call("work_ask", {"bot": "nahida", "text": "Two?"})["ok"]
+    assert call("work_ask", {"bot": "nahida", "text": "Three?"})["error"] == "busy"
+    assert call("work_ask", {"bot": "raiden", "text": "Three?"})["ok"]
+
+
+def test_closing_an_ask_unanswered_tells_the_bot_that_asked(bots, hermes, monkeypatch):
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    hermes.calls.clear()
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_close", {"ref": "A1"}, session_id=NAHIDA_CHAT)["ok"]
+    mine = store_mod.Store(bots["hermes"]).get("A1")
+    assert mine.status == "stopped" and mine.error == "closed without an answer"
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{BOT_CHAT}" and "closed your ask" in params["text"]
+
+
+def test_asks_show_in_the_digest_and_refuse_workstream_tools(bots, hermes, monkeypatch):
+    call("work_ask", {"bot": "nahida", "text": "Weather in Sumeru?"})
+    assert "your ask to Nahida" in work.digest(BOT_CHAT) and "waiting on Nahida" in work.digest(BOT_CHAT)
+    assert call("work_send", {"ref": "A1", "text": "more"})["error"] == "ask"
+    assert call("work_reply", {"ref": "A1", "text": "x"})["error"] == "not_an_ask"
+    assert call("work_read", {"ref": "A1"})["asked"] == "Nahida"
+    as_bot(monkeypatch, bots, "nahida")
+    digest = work.digest(NAHIDA_CHAT)
+    assert "Furina asks" in digest and "waiting on your answer" in digest
 
 
 def test_a_plugin_host_answers_with_the_reason(on, monkeypatch):
@@ -1665,7 +1802,8 @@ def test_a_start_from_a_work_update_quotes_no_older_message(on, hermes, home):
     assert "Fix the login bug" not in brief and "W9 finished" not in brief and "is answering now" not in brief
 
 
-def test_a_send_carries_the_users_words_as_theirs(on, hermes, home):
+def test_a_send_carries_the_users_words_as_theirs(on, hermes, home, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # W1's update stays batched, out of the calls checked
     start()
     work.turn_ended(WORKER, "Ready to deploy.")
     work.turn_finished(WORKER, failed=False, interrupted=False)
@@ -1681,6 +1819,7 @@ def test_a_send_carries_the_users_words_as_theirs(on, hermes, home):
 
 
 def test_a_send_quotes_the_bot_chat_it_came_from(on, hermes, home, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # W1's update stays batched, out of the calls checked
     start()
     chats = (BOT_CHAT, "20261031_bot_2")  # the Bot Chat continued in a child after a compression
     monkeypatch.setattr(titles, "_read", lambda h, key: "Bot Chat" if key in chats else "Some chat")
@@ -1794,3 +1933,35 @@ def test_a_ready_value_that_isnt_true_or_false_is_refused(on, hermes):
     assert call("work_progress", {"ready": "maybe"}, session_id=WORKER)["error"] == "ready"
     assert call("work_progress", {"ready": 1}, session_id=WORKER)["error"] == "ready"
     assert call("work_progress", {"ready": "yes"}, session_id=WORKER)["ok"]
+
+
+def test_withdrawing_an_ask_closes_the_other_side_and_tells_it(bots, hermes, monkeypatch):
+    call("work_ask", {"bot": "nahida", "text": "Can you check the logs?"})
+    work.flush_wakes()
+    hermes.calls.clear()
+    assert call("work_close", {"ref": "A1"})["ok"]
+    theirs = store_mod.Store(bots["nahida"]).get("A1")
+    assert theirs.status == "stopped" and theirs.closed_at
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and "no longer needs an answer" in params["text"]
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_reply", {"ref": "A1", "text": "Late."}, session_id=NAHIDA_CHAT)["error"] == "answered"
+    assert call("work_ask", {"bot": "Furina", "text": "Anything else?"}, session_id=NAHIDA_CHAT)["ok"]
+
+
+def test_an_answer_for_idle_work_at_the_limit_goes_to_the_bot_chat(bots, hermes, monkeypatch):
+    start()
+    on = store_mod.Store(bots["hermes"])
+    on.update("W1", status="done", last_result="Done.")
+    on.set_max_running(1)
+    call("work_ask", {"bot": "nahida", "text": "More on the login library?", "for": "W1"})
+    on.add("workstream", title="Busy one", status="running")
+    work.flush_wakes()
+    hermes.calls.clear()
+    as_bot(monkeypatch, bots, "nahida")
+    answered = call("work_reply", {"ref": "A1", "text": "Nothing new."}, session_id=NAHIDA_CHAT)
+    assert "Furina's Bot Chat" in answered["note"] and on.get("W1").status == "done"
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{BOT_CHAT}" and "Nothing new." in params["text"]

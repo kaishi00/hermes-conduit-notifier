@@ -9,8 +9,11 @@ starts a workstream. The test checks Hermes' state, not the replies: the
 registry row, the worker's session in that profile's own state.db, on that
 profile's model, hidden, with none of its events on the app's socket, and the
 work update that came back into the Bot Chat as a hidden turn. A second chat
-on the profile, and a terminal call in the Bot Chat, are refused. Under
-``plugins.isolation: host`` the tool answers with the reason.
+on the profile, and a terminal call in the Bot Chat, are refused. The launch
+profile's bot asks the secondary one (acceptance test 17): the ask arrives in
+its Bot Chat as a hidden turn, it answers with work_reply, and the answer
+comes back to the asking Bot Chat. Under ``plugins.isolation: host`` the tool
+answers with the reason.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -89,8 +93,15 @@ def _responder(fake: Any, profile: str):
         if last.get("role") == "tool":
             return fake.Text(f"COORDINATOR-SAW on {profile}: {_text_of(last)[:800]}")
         user = next((_text_of(m) for m in reversed(messages) if m.get("role") == "user"), "")
+        if "Work update from" in user and "answered your ask" in user:
+            return fake.Text(f"ANSWER-SEEN on {profile}")
+        asked = re.search(r'work_reply \{"ref": "(A\d+)"', user)
+        if "Work update from" in user and "asks you" in user and asked:
+            return _call(fake, tools, "work_reply", {"ref": asked.group(1), "text": f"ANSWER-FROM-{profile}"})
         if "Work update from your workstreams" in user:
             return fake.Text(f"WAKE-SEEN on {profile}")
+        if "PLEASE ASK" in user:
+            return _call(fake, tools, "work_ask", {"bot": "second", "text": "ASK-TASK: what's two and two?"})
         if "WORKER-TASK" in user:
             return fake.Text(f"WORKER-OK from the {profile} model")
         if "PLEASE START" in user:
@@ -292,12 +303,14 @@ def coordinated(tmp_path_factory: pytest.TempPathFactory) -> Run:
         script += [(profile, "chat", "PLEASE START a workstream", "WAKE-SEEN"),
                    (profile, "chat", "PLEASE RUN a command yourself", "COORDINATOR-SAW"),
                    (profile, "other", "PLEASE START from another chat", "COORDINATOR-SAW")]
+    script.append(("launch", "chat", "PLEASE ASK the second bot", "ANSWER-SEEN"))
     return _run_dashboard(tmp_path_factory.mktemp("bot-work"), "", script)
 
 
 @pytest.mark.parametrize("profile", PROFILES)
 def test_a_bot_chat_starts_a_workstream_on_its_own_profile(coordinated: Run, profile: str) -> None:
-    rows = _work_store().Store(coordinated.profile_home(profile)).list(include_closed=True)
+    rows = [row for row in _work_store().Store(coordinated.profile_home(profile)).list(include_closed=True)
+            if row.kind == "workstream"]
     assert [(row.ref, row.kind) for row in rows] == [("W1", "workstream")], rows
     row = rows[0]
     assert row.coordinator == coordinated.stored[profile]
@@ -342,7 +355,28 @@ def test_the_coordinator_keeps_to_its_policy(coordinated: Run, profile: str) -> 
 def test_another_chat_on_the_profile_cant_start_work(coordinated: Run, profile: str) -> None:
     answers = coordinated.completions(coordinated.others[profile])
     assert any("only work in this bot's Bot Chat" in t for t in answers), answers
-    assert len(_work_store().Store(coordinated.profile_home(profile)).list(include_closed=True)) == 1
+    rows = _work_store().Store(coordinated.profile_home(profile)).list(include_closed=True)
+    assert len([row for row in rows if row.kind == "workstream"]) == 1
+
+
+def test_one_bot_asks_another_and_the_answer_comes_back(coordinated: Run) -> None:
+    asked = [row for row in _work_store().Store(coordinated.profile_home("launch")).list(include_closed=True)
+             if row.kind == "ask_out"]
+    took = [row for row in _work_store().Store(coordinated.profile_home("second")).list(include_closed=True)
+            if row.kind == "ask_in"]
+    assert len(asked) == 1 and len(took) == 1, (asked, took)
+    assert asked[0].ask_id == took[0].ask_id
+    assert took[0].status == "done" and asked[0].status == "done"
+    assert asked[0].last_result == "ANSWER-FROM-second", asked[0]
+    # The ask reached the second bot's Bot Chat as a hidden turn, and the
+    # answer came back into the asking one, also hidden.
+    theirs = coordinated.messages("second", coordinated.stored["second"])
+    asks = [m for m in theirs if m.get("role") == "user" and "asks you" in (m.get("content") or "")]
+    assert asks and all(m.get("display_kind") == "hidden" for m in asks if "display_kind" in m), theirs
+    assert any(t.startswith("ANSWER-SEEN") for t in coordinated.completions(coordinated.chats["launch"]))
+    mine = coordinated.messages("launch", coordinated.stored["launch"])
+    answers = [m for m in mine if m.get("role") == "user" and "answered your ask" in (m.get("content") or "")]
+    assert answers and "ANSWER-FROM-second" in answers[0]["content"]
 
 
 @pytest.fixture(scope="module")

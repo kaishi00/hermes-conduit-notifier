@@ -51,7 +51,7 @@ STATUSES = ("starting", "running", "needs_you", "waiting", "ready", "done", "fai
 ACTIVE = ("starting", "running", "needs_you", "waiting", "ready")
 RESULT_CHARS = 2000
 TITLE_CHARS = 80
-GOAL_CHARS = 1000
+GOAL_CHARS = 2000
 STEP_SUMMARY_CHARS = 200
 REF = re.compile(r"^([WA])(\d{1,6})$")
 
@@ -315,6 +315,23 @@ class Store:
                          if active_only else (*since, limit))
         with self._db(write=False) as con:
             rows = con.execute(query, params).fetchall()
+        return [_work(row) for row in rows]
+
+    def by_ask(self, ask_id: Any, kind: str) -> Optional[Work]:
+        """The row of this kind an ask between bots shares its id with."""
+        if not isinstance(ask_id, str) or not ask_id or not self.path.is_file():
+            return None
+        with self._db(write=False) as con:
+            row = con.execute("SELECT * FROM work WHERE ask_id = ? AND kind = ?", (ask_id, kind)).fetchone()
+        return _work(row) if row else None
+
+    def asks_since(self, kind: str, since: float) -> list[Work]:
+        """Asks of this kind made at or after ``since``, newest first."""
+        if not self.path.is_file():
+            return []
+        with self._db(write=False) as con:
+            rows = con.execute("SELECT * FROM work WHERE kind = ? AND created_at >= ? ORDER BY created_at DESC",
+                               (kind, since)).fetchall()
         return [_work(row) for row in rows]
 
     def running_count(self) -> int:
