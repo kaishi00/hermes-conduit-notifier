@@ -173,9 +173,14 @@ class ConduitSocket:
 
         reason = "the socket closed"
         try:
-            # A frame that doesn't parse fails here with its own error.
             async for raw in self.ws:
-                self._take(json.loads(raw))
+                try:
+                    frame = json.loads(raw)
+                except ValueError as exc:
+                    # Named as what it is, not as a dropped socket.
+                    reason = f"a frame that isn't JSON ({exc}): {str(raw)[:200]}"
+                    break
+                self._take(frame)
         except (ConnectionClosed, OSError) as exc:
             reason = f"the socket closed: {exc!r}"
         finally:
@@ -363,12 +368,13 @@ async def _socket_close(listener: "Listener", path: str, signed: bool) -> Option
     async with connect(f"ws://127.0.0.1:{listener.port}/api/plugins/{PLUGIN}/{path}{query}",
                        open_timeout=15, proxy=None) as ws:
         try:
-            await asyncio.wait_for(ws.recv(), 10)
+            # Whatever comes first, the close code is what tells.
+            while True:
+                await asyncio.wait_for(ws.recv(), 10)
         except ConnectionClosed:
             return ws.close_code
         except asyncio.TimeoutError:
             return None
-        return None
 
 
 def test_a_turn_in_conduits_authority_shapes(listener):
