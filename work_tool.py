@@ -229,7 +229,8 @@ SCHEMAS: dict[str, dict] = {
         "name": "work_close",
         "description": ("Mark work as done with: it leaves your work updates and the active list, and moves to "
                         "the user's Resolved list in Conduit. Nothing is deleted: the user can reopen it, and "
-                        "work_send reopens it. Work the user pinned or reopened stays open until they resolve it."),
+                        "work_send reopens it. Work the user pinned stays open until they resolve it, and a workstream they "
+                        "reopened until they resolve it or it runs again."),
         "parameters": {"type": "object", "properties": {"ref": _REF_SCHEMA}, "required": ["ref"]},
     },
     "work_ask": {
@@ -544,6 +545,10 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         work = store.get(args.get("ref"))
         if work is None:
             return _no_such(args.get("ref"))
+        if work.pinned_at and not work.closed_at:
+            return {"ok": False, "ref": work.ref, "error": "pinned",
+                    "note": f"The user pinned {work.ref}, so it stays open until they resolve it. Ask them if "
+                            "they want it resolved."}
         if work.kind == "ask_in" and work.status in work_store.ACTIVE and not work.closed_at:
             return _decline(home, store, work)
         if work.kind == "ask_out" and work.status == "waiting" and not work.closed_at:
@@ -553,11 +558,7 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
                     "note": f"{work.ref} is still working. Stop it first with work_stop, or let it finish."}
         if work.closed_at:
             return {"ok": True, "ref": work.ref, "title": work.title, "note": f"{work.ref} is already closed."}
-        if work.pinned_at:
-            return {"ok": False, "ref": work.ref, "error": "pinned",
-                    "note": f"The user pinned {work.ref}, so it stays open until they resolve it. Ask them if "
-                            "they want it resolved."}
-        if work.reopened_at > work.turn_at:
+        if work.kind == "workstream" and work.reopened_at > work.turn_at:
             return {"ok": False, "ref": work.ref, "error": "reopened",
                     "note": f"The user reopened {work.ref}, so it stays open until they resolve it or it runs again."}
         store.update(work.ref, closed_at=time.time(), resolved_by="bot")
@@ -1205,7 +1206,7 @@ def _deliver_answer(asker_home: Path, asker_store: work_store.Store, theirs: wor
 
 def _decline(home: Path, store: work_store.Store, ask: work_store.Work) -> dict:
     """An ask closed without an answer: the asking bot stops waiting on it."""
-    store.update(ask.ref, status="stopped", closed_at=time.time())
+    store.update(ask.ref, status="stopped", closed_at=time.time(), resolved_by="bot")
     asker_home = _home_of(home, (ask.reply_to or {}).get("bot"))
     theirs = work_store.Store(asker_home).by_ask(ask.ask_id, "ask_out") if asker_home is not None else None
     me = work_broker.profile_of(home)
@@ -1223,14 +1224,15 @@ def _decline(home: Path, store: work_store.Store, ask: work_store.Work) -> dict:
 def _withdraw(home: Path, store: work_store.Store, ask: work_store.Work) -> dict:
     """An ask this bot stopped waiting on: the bot it asked is told, and
     its side closes, so it no longer counts in that bot's chain."""
-    store.update(ask.ref, status="stopped", closed_at=time.time(), error="withdrawn")
+    store.update(ask.ref, status="stopped", closed_at=time.time(), resolved_by="bot", error="withdrawn")
     profile = (ask.executor or {}).get("bot")
     target_home = _home_of(home, profile)
     theirs = work_store.Store(target_home).by_ask(ask.ask_id, "ask_in") if target_home is not None else None
     me = work_broker.profile_of(home)
     if theirs is not None and (theirs.requested_by or {}).get("bot") == me:
         stored = work_store.Store(target_home).update(theirs.ref, only_if=work_store.ACTIVE, status="stopped",
-                                                      closed_at=time.time(), error="withdrawn by the bot that asked")
+                                                      closed_at=time.time(), resolved_by="bot",
+                                                      error="withdrawn by the bot that asked")
         chat = _bot_chat_of(target_home) or theirs.coordinator
         if stored is not None and chat:
             _queue_wake(target_home, chat, f"- {theirs.ref}: {_bot_name(home)} no longer needs an answer to "
@@ -1283,7 +1285,7 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
     # settles the row, and nothing after the send puts it back. Idle work
     # takes a slot under the bot's limit, as a start does.
     if work.status in _RUNNING_STATES:
-        store.update(work.ref, closed_at=0.0, error="")
+        store.update(work.ref, closed_at=0.0, resolved_by="", error="")
     elif not store.reopen(work.ref, running_limit=store.max_running()):
         store.outbox_done(item, "refused")
         return {"ok": False, "ref": work.ref, "title": work.title, "error": "busy",
@@ -2156,8 +2158,8 @@ def turn_started(session_id: Any) -> bool:
     if work.status not in _RUNNING_STATES or work.status == "starting":
         # A turn of it began, so its brief went in. Already running in Hermes, so it takes its slot even past the limit;
         # work_start and work_send keep to the count.
-        work_store.Store(home).update(work.ref, status="running", closed_at=0.0, error="",
-                                      only_if=(work.status,))
+        work_store.Store(home).update(work.ref, status="running", closed_at=0.0, resolved_by="",
+                                      error="", only_if=(work.status,))
     elif work.error == _BRIEF_UNSENT:
         work_store.Store(home).update(work.ref, error="")  # its brief came, and a turn of it ran
     if (work.progress or {}).get("ready"):
@@ -2306,7 +2308,6 @@ def answered(session_id: Any) -> None:
 # The Work panel (designs/bot-mode-coordinator C.6, C.8): what Conduit shows
 # of a bot's work, and the user's own actions on it, which skip the model.
 
-APP_ROWS = 100  # settled open rows listed; active, cut-off, stopped and pinned rows always are
 APP_RESOLVED_ROWS = 50  # a page of the Resolved list
 APP_RESULT_CHARS = 600
 APP_GOAL_CHARS = 300
@@ -2335,7 +2336,7 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     mode = policy(home)
     out = {"policy": mode, "bot": _bot_name(home), "bot_chat": _bot_chat_of(home), "work": [],
            "counts": {"working": 0, "needs_you": 0, "ready": 0, "waiting": 0},
-           "max_running": work_store.DEFAULT_MAX_RUNNING, "resolved_count": 0, "unlisted": 0,
+           "max_running": work_store.DEFAULT_MAX_RUNNING, "resolved_count": 0,
            "workstream_sessions": []}
     if resolved:
         out["more"] = False
@@ -2373,17 +2374,10 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
         out["work"] = [_app_row(store, work, on=mode != "off") for work in rows[:APP_RESOLVED_ROWS]]
         return out
 
-    # Active work, work cut off or stopped (it waits on the user to continue
-    # it) and pinned work always; then the APP_ROWS settled rows that
-    # changed last.
-    def always(work: work_store.Work) -> bool:
-        return work.active or work.status in ("interrupted", "stopped") or bool(work.pinned_at)
-
-    kept = [work for work in open_rows if always(work)]
-    settled = [work for work in open_rows if not always(work)]
-    kept.sort(key=lambda work: (not work.active and work.status != "interrupted", -work.updated_at))
-    out["unlisted"] = max(0, len(settled) - APP_ROWS)
-    out["work"] = [_app_row(store, work, on=mode != "off") for work in kept + settled[:APP_ROWS]]
+    # Every open row: active work and work cut off first, then the rest
+    # by when it last changed.
+    rows = sorted(open_rows, key=lambda work: (not work.active and work.status != "interrupted", -work.updated_at))
+    out["work"] = [_app_row(store, work, on=mode != "off") for work in rows]
     return out
 
 
@@ -2429,7 +2423,9 @@ def _app_manage(work: work_store.Work) -> list[str]:
     """How the user files it: pin it, resolve it, or reopen it from the
     Resolved list. Work still at it isn't resolved: stop it first."""
     if work.closed_at:
-        return ["reopen"]
+        # An ask closed without its answer can't be taken up again: the
+        # other bot's side closed too. It's asked again instead.
+        return [] if work.kind != "workstream" and work.status == "stopped" else ["reopen"]
     still_at_it = ((work.kind == "workstream" and work.status in _RUNNING_STATES)
                    or (work.kind == "ask_out" and work.status == "waiting")
                    or (work.kind == "ask_in" and work.status in work_store.ACTIVE))
@@ -2517,6 +2513,8 @@ def _app_manage_act(store: work_store.Store, ref: str, action: str) -> dict:
             note = {"pin": f"{work.ref} is already pinned.", "unpin": f"{work.ref} isn't pinned.",
                     "resolve": f"{work.ref} is already resolved.", "reopen": f"{work.ref} isn't resolved."}.get(
                 action, f"{work.ref} can't {action} now.")
+            if action == "reopen" and work.closed_at:
+                note = f"{work.ref} was closed without an answer, so it can't be reopened. Ask the bot to ask again."
             if work.closed_at and action in ("pin", "unpin"):
                 note = f"{work.ref} is resolved. Reopen it first."
         return {"ok": False, "ref": work.ref, "error": error, "status": work.status, "note": note}

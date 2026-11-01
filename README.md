@@ -1478,15 +1478,14 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, resolved_count, unlisted, workstream_sessions, work}` |
+| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, resolved_count, workstream_sessions, work}` |
 | GET | `/api/plugins/conduit_push/workstreams?resolved=1&before=<closed_at>` | `{ok, ..., work, more}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/send` with `{text, how?}` | `{ok, outcome, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
 
 - `work` lists every open (unresolved) row, however old: active work first,
-  then the rest by when it last changed; past 100 settled rows the oldest
-  are left out and counted in `unlisted`. Rows are workstreams, and asks to
+  then the rest by when it last changed. Rows are workstreams, and asks to
   and from other bots (`kind` `ask_out` with `bot`, the bot it's waiting on,
   or `ask_in`). Each row has its status, checklist, the step it's on, its
   last result, `pinned`, `actions` (what you can do with it now) and
@@ -1495,9 +1494,9 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   `still_running` while it's at work: stop it first) or by the bot
   (`work_close`). Nothing resolves itself. `resolved=1` lists resolved work,
   last resolved first, 50 at a time, with `closed_at` and `resolved_by`
-  (`user` or `bot`); `reopen` brings a row back and tells the coordinator.
-  The bot can't close work you pinned, or work you reopened until it runs
-  again. Resolving unpins it.
+  (`user` or `bot`); `reopen` brings a row back and tells the coordinator
+  (not an ask closed without its answer: the bot asks again). The bot can't
+  close work you pinned, or a workstream you reopened until it runs again. Resolving unpins it.
 - `workstream_sessions` names every workstream's chat, resolved ones too, so
   Conduit keeps them out of its chat lists. `counts` has `working`, `needs_you` (approvals, questions and work a
   restart left for you), `ready` and `waiting` (asks to other bots).

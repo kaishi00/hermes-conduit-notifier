@@ -2847,7 +2847,6 @@ def test_a_reply_from_conduit_a_restart_cut_off_is_resent_or_handed_back(on, her
 
 
 def test_the_panel_lists_every_open_row_the_strip_counts_and_what_changed_last(on, hermes, monkeypatch):
-    monkeypatch.setattr(work, "APP_ROWS", 2)
     store = store_mod.Store(on.home)
     for n in range(4):
         store.add("ask_out", title=f"Ask {n}", status="waiting")
@@ -2863,9 +2862,9 @@ def test_the_panel_lists_every_open_row_the_strip_counts_and_what_changed_last(o
     assert listed["counts"]["waiting"] == 4 and listed["resolved_count"] == 4
     refs = [row["ref"] for row in listed["work"]]
     assert not any(row["closed"] for row in listed["work"])  # resolved work has its own list
-    # Past APP_ROWS every open row still at it is listed, then the settled
-    # ones that changed last; the rest are counted.
-    assert len(refs) == 6 and refs[4] == settled[0].ref and listed["unlisted"] == 1
+    # Every open row: those still at it, then the settled ones by when they
+    # last changed.
+    assert len(refs) == 7 and refs[4] == settled[0].ref
     resolved = work.app_list(on.home, resolved=True)
     assert len(resolved["work"]) == 4 and not resolved["more"]
 
@@ -3154,3 +3153,28 @@ def test_filing_is_offered_nothing_with_workstreams_off(on, hermes):
     work._policy_cache.clear()
     row, = work.app_list(on.home)["work"]
     assert row["manage"] == [] and work.app_act(on.home, "W1", "resolve")["error"] == "off"
+
+
+def test_the_bot_cant_withdraw_or_decline_an_ask_the_user_pinned(on, hermes):
+    store = store_mod.Store(on.home)
+    waiting = store.add("ask_out", title="Ask Nahida", status="waiting")
+    asked = store.add("ask_in", title="Nahida asks", status="running")
+    for ask in (waiting, asked):
+        work.app_act(on.home, ask.ref, "pin")
+        assert call("work_close", {"ref": ask.ref})["error"] == "pinned"
+        assert not on.get(ask.ref).closed_at
+        work.app_act(on.home, ask.ref, "unpin")
+    assert call("work_close", {"ref": waiting.ref})["ok"]
+    assert on.get(waiting.ref).resolved_by == "bot"
+    # Closed without its answer: it can't be taken up again.
+    row, = work.app_list(on.home, resolved=True)["work"]
+    assert row["manage"] == [] and work.app_act(on.home, waiting.ref, "reopen")["error"] == "not_now"
+
+
+def test_a_turn_reopening_resolved_work_clears_who_resolved_it(on, hermes):
+    start()
+    on.update("W1", status="done", last_result="Found it.")
+    work.app_act(on.home, "W1", "resolve")
+    work.turn_started(WORKER_1)
+    now = on.get("W1")
+    assert not now.closed_at and now.resolved_by == "" and now.status == "running"
