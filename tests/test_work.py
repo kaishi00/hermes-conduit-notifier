@@ -1695,6 +1695,12 @@ def test_unreadable_notes_dont_hold_a_slot(on, hermes, home):
     path.write_bytes(b"\xff\xfe bad")
     assert start()["ok"]
     assert "notes on the user's work" not in _brief_text(hermes)
+    assert call("work_note", {"text": "new"})["error"] == "unreadable"
+    assert path.read_bytes() == b"\xff\xfe bad"
+    assert call("work_note", {"text": "a\nb"}, session_id=BOT_CHAT)["error"] == "unreadable"
+    path.unlink()
+    assert call("work_note", {"text": "a\n b"})["notes"] == "- a b"
+    assert not list(path.parent.glob(".work-notes-*.tmp"))
 
 
 def test_a_brief_that_fails_settles_the_row(on, hermes, monkeypatch):

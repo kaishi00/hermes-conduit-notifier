@@ -784,14 +784,21 @@ def _note(home: Path, args: dict) -> dict:
     preferences every new workstream is told."""
     import tempfile
 
-    text = str(args.get("text") or "").strip()
     how = args.get("how") if args.get("how") in ("add", "replace", "clear") else "add"
+    text = str(args.get("text") or "").strip()
+    if how == "add":
+        text = " ".join(text.split())  # one note, one line
     if not text and how != "clear":
         return {"ok": False, "error": "missing",
                 "note": "Say what to note." if how == "add" else "Give all the notes, or use how=clear."}
     path = _notes_path(home)
     with _notes_lock:
-        old = _read_notes(home)
+        try:
+            old = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+        except (OSError, ValueError):
+            # Left as it is: rewriting it would lose what's there.
+            return {"ok": False, "error": "unreadable",
+                    "note": f"The notes file ({path}) can't be read as UTF-8 text, so it was left alone."}
         new = "" if how == "clear" else text if how == "replace" else (f"{old}\n- {text}" if old else f"- {text}")
         if len(new) > NOTES_CHARS:
             return {"ok": False, "error": "too_long", "chars": len(old),
@@ -800,8 +807,18 @@ def _note(home: Path, args: dict) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=".work-notes-",
                                          suffix=".tmp", delete=False) as temp:
-            temp.write(new + "\n" if new else "")
-        Path(temp.name).replace(path)
+            name = temp.name
+            try:
+                temp.write(new + "\n" if new else "")
+            except BaseException:
+                temp.close()
+                Path(name).unlink(missing_ok=True)
+                raise
+        try:
+            Path(name).replace(path)
+        except BaseException:
+            Path(name).unlink(missing_ok=True)
+            raise
     return {"ok": True, "chars": len(new), "notes": new,
             "note": "Noted. New workstreams get these notes." if new else "Notes cleared."}
 
