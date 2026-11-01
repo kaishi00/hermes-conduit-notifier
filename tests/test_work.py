@@ -2869,3 +2869,41 @@ def test_a_start_offers_no_reply_until_its_turn_begins(on, hermes):
 def test_a_reply_that_isnt_text_is_refused(on, hermes):
     start()
     assert work.app_act(on.home, "W1", "send", {"text": ["Try", "this"]})["error"] == "missing"
+
+
+def test_a_start_cut_off_as_its_brief_was_taken_offers_check_first(on, hermes, monkeypatch):
+    start()
+    restart(hermes, monkeypatch)  # Hermes took the brief, but no turn of it was seen
+    call("work_list")
+    row, = work.app_list(on.home)["work"]
+    assert "just as its brief was taken" in row["error"] and row["uncertain"]
+    assert row["actions"] == ["check", "continue", "stop", "send"]
+    hermes.calls.clear()
+    assert work.app_act(on.home, "W1", "continue")["ok"]
+    sent, = submitted_to(hermes, WORKER_1)
+    assert "its first steps" in sent["text"] and "may or may not have taken effect" in sent["text"]
+
+
+def test_a_reply_to_a_start_that_never_got_its_brief_carries_the_brief(on, hermes, monkeypatch):
+    start()
+    with on._db() as con:
+        con.execute("UPDATE outbox SET accepted_at = 0, outcome = '' WHERE kind = 'start'")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    hermes.calls.clear()
+    assert work.app_act(on.home, "W1", "send", {"text": "Start with the DNS."})["ok"]
+    sent, = submitted_to(hermes, WORKER_1)
+    assert "Find out why the login page is slow." in sent["text"]
+    assert sent["text"].endswith("The user adds, from Conduit:\nStart with the DNS.")
+
+
+def test_a_lost_continue_is_named_as_the_users_tap(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.update("W1", status="done")
+    on.outbox_add("W1", "user_send", WORKER_1, work.APP_CONTINUE)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "The user's Continue or Check first from Conduit to W1" in wake["text"]
