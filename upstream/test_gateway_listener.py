@@ -26,6 +26,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -180,6 +181,9 @@ class ConduitSocket:
                     # Named as what it is, not as a dropped socket.
                     reason = f"a frame that isn't JSON ({exc}): {str(raw)[:200]}"
                     break
+                if not isinstance(frame, dict):
+                    reason = f"a frame that isn't a JSON object: {str(raw)[:200]}"
+                    break
                 self._take(frame)
         except (ConnectionClosed, OSError) as exc:
             reason = f"the socket closed: {exc!r}"
@@ -270,8 +274,11 @@ def _mutate(snapshot: Dict[str, Any], session_id: str, operation: str, payload: 
 @pytest.fixture(scope="module")
 def listener(tmp_path_factory: pytest.TempPathFactory):
     if importlib.util.find_spec("gateway.webapp_listener") is None:
-        if "+canary" in os.environ.get("HERMES_REF", ""):
-            pytest.fail("this canary has no gateway.webapp_listener: Conduit's Webapp support needs a look")
+        ref = os.environ.get("HERMES_REF", "")
+        # Only a release tag (vX.Y.Z) or a local run may lack it: a canary, or a commit
+        # given by hand, is newer than the Webapp, so a missing listener is the break.
+        if ref and not re.fullmatch(r"v\d+\.\d+\.\d+", ref):
+            pytest.fail(f"Hermes {ref} has no gateway.webapp_listener: Conduit's Webapp support needs a look")
         pytest.skip("this Hermes has no Webapp listener (before 2026-10-25)")
     hermes = _hermes_bin()
     home = tmp_path_factory.mktemp("hermes-gateway-home")
@@ -282,12 +289,14 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
     log = None
     proc: Optional[subprocess.Popen] = None
     serving = False
+    speaking = False
     try:
         port = _free_port()
         log = log_path.open("w")
         threading.Thread(target=model.serve_forever, daemon=True).start()
         serving = True
         speech.start()
+        speaking = True
         shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
         (home / "config.yaml").write_text(yaml.safe_dump({
             "plugins": {"enabled": [PLUGIN]},
@@ -329,7 +338,8 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
         if serving:
             model.shutdown()
         model.server_close()
-        speech.stop()
+        if speaking:
+            speech.stop()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):
             print(log_path.read_text()[-8000:])
 
@@ -343,7 +353,7 @@ def test_ready_names_the_session_authority_and_the_plugin_is_served(listener):
     assert listener.plugin_get("capabilities") == 200
     # And the speech-server socket keeps the dashboard's sign-in: the plugin closes one
     # without the session token with 4401, and relays one with it to the speech server.
-    assert asyncio.run(_socket_close(listener, "speech-server/socket", signed=False)) == 4401
+    assert asyncio.run(_socket_close(listener, "speech-server/socket")) == 4401
     assert asyncio.run(_socket_first_frame(listener, "speech-server/socket")) == {"type": "ready"}
     assert listener.speech.paths == ["/listener"]
 
@@ -357,15 +367,13 @@ async def _socket_first_frame(listener: "Listener", path: str) -> Any:
         return json.loads(await asyncio.wait_for(ws.recv(), 15))
 
 
-async def _socket_close(listener: "Listener", path: str, signed: bool) -> Optional[int]:
-    """How the plugin socket ended: its close code, or None while it stays open."""
+async def _socket_close(listener: "Listener", path: str) -> Optional[int]:
+    """How an unsigned plugin socket ended: its close code, or None while it stays open."""
     from websockets.asyncio.client import connect
     from websockets.exceptions import ConnectionClosed
 
-    # Signed as Conduit signs the chat socket, with the session token in the query.
-    query = f"?token={listener.token}" if signed else ""
     # A missing route is refused at the handshake, which raises here.
-    async with connect(f"ws://127.0.0.1:{listener.port}/api/plugins/{PLUGIN}/{path}{query}",
+    async with connect(f"ws://127.0.0.1:{listener.port}/api/plugins/{PLUGIN}/{path}",
                        open_timeout=15, proxy=None) as ws:
         try:
             # Whatever comes first, the close code is what tells.
