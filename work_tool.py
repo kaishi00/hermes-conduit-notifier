@@ -1214,7 +1214,7 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
         return {"ok": False, "ref": work.ref, "error": "missing", "note": "Say what to send."}
     if not work.session_id:
         return {"ok": False, "ref": work.ref, "error": "not_now",
-                "note": f"{work.ref} never got a chat, so there's nothing to send to. work_start it again."}
+                "note": f"{work.ref} never got a chat, so there's nothing to send to. work_start it again, with new=true if it says similar work is open."}
     how = args.get("how") if args.get("how") in ("auto", "add", "after") else "auto"
     bot = _bot_name(home)
     # The user's own words go along, quoted as theirs, so a go-ahead given in
@@ -2333,13 +2333,17 @@ def _app_uncertain(store: work_store.Store, work: work_store.Work) -> bool:
     return work.status in ("interrupted", "stopped") and bool(store.get_meta(_CHECK + work.ref))
 
 
+_STARTING_STUCK_SECONDS = 120
+
+
 def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
     if work.kind != "workstream" or not work.session_id:
         return []
     if work.status == "starting":
         # Its brief may not be in yet: a reply could land before it, and a
-        # stop be undone as the brief's turn begins. It's running in moments.
-        return []
+        # stop be undone as the brief's turn begins. It's running in moments;
+        # one that's still starting after that is stuck, and Stop ends it.
+        return ["stop"] if time.time() - work.updated_at > _STARTING_STUCK_SECONDS else []
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
     if work.status in ("interrupted", "stopped") and work.error == _BRIEF_UNSENT:
@@ -2394,7 +2398,8 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
     uncertain = _app_uncertain(store, work)
     allowed = _app_actions(work, uncertain)
     if action not in allowed:
-        return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
+        return {"ok": False, "ref": work.ref, "error": "starting" if work.status == "starting" else "not_now",
+                "status": work.status,
                 "note": f"{work.ref} can't {action} while it's {work.status.replace('_', ' ')}."}
     if action == "stop":
         if work.status == "interrupted":

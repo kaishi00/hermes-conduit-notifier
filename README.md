@@ -1492,7 +1492,9 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   change things (`uncertain`): the workstream is asked to find out whether
   that step took effect and change nothing. `continue` after such a cut-off
   tells the workstream the step may have run, so it checks before running it
-  again. Stopping interrupted work runs nothing.
+  again. Stopping interrupted work runs nothing. Work that's still starting
+  offers nothing until its first turn begins, and Stop once it has been
+  starting for two minutes.
 - A refusal has `code` and `detail`: a 4xx for `no_such_work`, `not_now`,
   `starting`, `busy`, `open_elsewhere`, `off`, `missing`, `unknown_action`
   and `too_long`, a 502 (`hermes`) when Hermes refused it, and a 503

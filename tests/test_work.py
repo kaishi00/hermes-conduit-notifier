@@ -2863,7 +2863,18 @@ def test_a_start_offers_no_reply_until_its_turn_begins(on, hermes):
     on.update("W1", status="starting")
     row, = work.app_list(on.home)["work"]
     assert row["actions"] == []
-    assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "not_now"
+    assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "starting"
+
+
+def test_a_start_still_starting_after_two_minutes_can_be_stopped(on, hermes, monkeypatch):
+    start()
+    on.update("W1", status="starting")
+    monkeypatch.setattr(work, "_STARTING_STUCK_SECONDS", -1.0)  # it's been starting too long
+    row, = work.app_list(on.home)["work"]
+    assert row["actions"] == ["stop"]
+    assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "starting"
+    answer = work.app_act(on.home, "W1", "stop")
+    assert answer["ok"] and answer["work"]["status"] == "stopped"
 
 
 def test_a_reply_that_isnt_text_is_refused(on, hermes):
