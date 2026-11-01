@@ -167,14 +167,19 @@ class ConduitSocket:
         self._event_seen = asyncio.Event()
 
     async def read(self) -> None:
+        reason = "the socket closed"
         try:
             async for raw in self.ws:
                 self._take(json.loads(raw))
         except Exception as exc:  # noqa: BLE001 — every waiting call fails with it at once
+            reason = f"the socket closed: {exc!r}"
+        finally:
+            # A clean close fails the waiting calls too, and wakes an event wait.
             for future in self._pending.values():
                 if not future.done():
-                    future.set_exception(ConnectionError(f"the socket closed: {exc!r}"))
+                    future.set_exception(ConnectionError(reason))
             self._pending.clear()
+            self._event_seen.set()
 
     def _take(self, frame: Dict[str, Any]) -> None:
         # A frame with a method is an event (or a request of the server's),
@@ -259,21 +264,21 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
     hermes = _hermes_bin()
     home = tmp_path_factory.mktemp("hermes-gateway-home")
     model = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModel)
-    threading.Thread(target=model.serve_forever, daemon=True).start()
     port = _free_port()
-    shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
-    (home / "config.yaml").write_text(yaml.safe_dump({
-        "plugins": {"enabled": [PLUGIN]},
-        "webapp": {"enabled": True, "port": port},
-        # Any switch on a chat with context asks first, so the confirm exchange can be tried.
-        "model": {"default": "fake-model", "provider": "custom", "switch_context_confirm_tokens": 1,
-                  "base_url": f"http://127.0.0.1:{model.server_address[1]}/v1", "api_key": "fake"},
-    }))
     env = {**os.environ, "HERMES_HOME": str(home), "NO_COLOR": "1"}
     log_path = home / "gateway.log"
     log = log_path.open("w")
     proc: Optional[subprocess.Popen] = None
     try:
+        threading.Thread(target=model.serve_forever, daemon=True).start()
+        shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
+        (home / "config.yaml").write_text(yaml.safe_dump({
+            "plugins": {"enabled": [PLUGIN]},
+            "webapp": {"enabled": True, "port": port},
+            # Any switch on a chat with context asks first, so the confirm exchange can be tried.
+            "model": {"default": "fake-model", "provider": "custom", "switch_context_confirm_tokens": 1,
+                      "base_url": f"http://127.0.0.1:{model.server_address[1]}/v1", "api_key": "fake"},
+        }))
         proc = subprocess.Popen([hermes, "gateway", "run"], env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         deadline = time.monotonic() + READY_TIMEOUT_S
@@ -312,7 +317,7 @@ def test_ready_names_the_session_authority_and_the_plugin_is_served(listener):
         return sock.ready_payload
 
     assert listener.run(script).get("session_authority") is True
-    # The listener mounts the dashboard, so the plugin's routes answer on it too.
+    # The listener mounts the dashboard, so the plugin's capabilities route answers on it.
     assert listener.plugin_get("capabilities") == 200
     # And its sockets keep the dashboard's sign-in: one without a token is refused.
     assert asyncio.run(_socket_refused(listener, "speech-server/socket")), "an unsigned plugin socket opened"
@@ -329,6 +334,8 @@ async def _socket_refused(listener: "Listener", path: str) -> bool:
                 await asyncio.wait_for(ws.recv(), 10)
             except ConnectionClosed:
                 return True
+            except asyncio.TimeoutError:
+                return False  # open and silent: not refused
             return False
     except (InvalidHandshake, OSError):
         return True
