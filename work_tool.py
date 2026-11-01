@@ -1325,8 +1325,10 @@ BRIDGED = "tool_call:"
 
 def _shown_tool(tool: str) -> str:
     """A step's tool as the model and the user know it: a bridged step by
-    the tools it called."""
-    return tool[len(BRIDGED):].replace(",", ", ") if tool.startswith(BRIDGED) else tool
+    the tools it called, or as tool_call when they couldn't be read."""
+    if not tool.startswith(BRIDGED):
+        return tool
+    return tool[len(BRIDGED):].replace(",", ", ") or "tool_call"
 
 
 def _reads_only(tool: str) -> bool:

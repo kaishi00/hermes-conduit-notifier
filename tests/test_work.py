@@ -2391,6 +2391,15 @@ def test_a_bridged_step_is_shown_by_the_tools_it_called(on, hermes, monkeypatch)
     assert "during terminal" in error and "tool_call:" not in error
 
 
+def test_a_bridged_step_with_unreadable_calls_is_still_named(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    work.step_started(WORKER_1, "tool_call", {"arguments": "not a call"}, tool_call_id="b2")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert "during tool_call: " in on.get("W1").error
+
+
 def test_lines_of_a_wake_hermes_rejected_arent_marked_delivered(on, hermes, monkeypatch):
     monkeypatch.setattr(work.work_broker.Broker, "wake", lambda self, coordinator, text: "rejected")
     work._queue_wake(on.path.parent.parent, BOT_CHAT, "- W9 finished.")
