@@ -239,6 +239,8 @@ def _sweep_one(home: Path, now: float, adopt_one: Callable[[Path, str], str], tr
         _backoff.pop(key, None)
         logger.info("conduit_push: moved %s's Bot Chat under its gateway, so other bots can reach it",
                     home.name)
+    elif outcome.startswith("no_gateway"):
+        _backoff[key] = (now + SWEEP_S, wait)  # nothing refused: try again at the next pass
     else:
         _backoff[key] = (now + wait, min(wait * 2, RETRY_MAX_S))
         logger.info("conduit_push: %s's Bot Chat isn't under its gateway yet (%s)", home.name, outcome)
@@ -261,15 +263,33 @@ def _take_lock(root: Path) -> bool:
 
 
 def _run(root: Path, stop: threading.Event) -> None:
-    if stop.wait(FIRST_DELAY_S) or not _take_lock(root):
+    """Waits for the lock (another process may hold it, then exit), then
+    sweeps; the lock goes when this thread ends."""
+    if stop.wait(FIRST_DELAY_S):
         return
-    while True:
-        try:
-            sweep(root, stop=stop)
-        except Exception:  # noqa: BLE001 — the next pass tries again
-            logger.warning("conduit_push: Bot Chat move sweep failed", exc_info=True)
+    while not _take_lock(root):
         if stop.wait(SWEEP_S):
             return
+    try:
+        while True:
+            try:
+                sweep(root, stop=stop)
+            except Exception:  # noqa: BLE001 — the next pass tries again
+                logger.warning("conduit_push: Bot Chat move sweep failed", exc_info=True)
+            if stop.wait(SWEEP_S):
+                return
+    finally:
+        _release_lock()
+
+
+def _release_lock() -> None:
+    global _lock_handle
+    handle, _lock_handle = _lock_handle, None
+    if handle is not None:
+        try:
+            handle.close()
+        except OSError:
+            pass
 
 
 def start(root: Path) -> None:
@@ -283,16 +303,9 @@ def start(root: Path) -> None:
 
 
 def stop(timeout: float = 1.0) -> None:
-    global _lock_handle
+    """Ends the sweep; its thread lets the lock go when it finishes (after
+    a child still running, at most CHILD_TIMEOUT_S)."""
     _stop.set()
     thread = _thread
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout)
-        if thread.is_alive():
-            return  # a child still running: the lock stays with this load until it ends
-    if _lock_handle is not None:
-        try:
-            _lock_handle.close()
-        except OSError:
-            pass
-        _lock_handle = None

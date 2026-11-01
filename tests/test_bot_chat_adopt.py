@@ -173,3 +173,27 @@ def test_a_stopped_sweep_tries_no_more_profiles(tmp_path):
     stop = threading.Event()
     stop.set()
     assert adopt_mod.sweep(tmp_path, now=0.0, adopt_one=lambda home, sid: "adopted", stop=stop) == {}
+
+
+def test_a_profile_with_no_gateway_is_tried_again_next_pass(tmp_path):
+    _store(tmp_path)
+    off = lambda home, sid: "no_gateway: stopped"  # noqa: E731
+    assert adopt_mod.sweep(tmp_path, now=0.0, adopt_one=off)
+    assert adopt_mod.sweep(tmp_path, now=adopt_mod.SWEEP_S, adopt_one=off)
+    assert adopt_mod.sweep(tmp_path, now=adopt_mod.SWEEP_S * 2, adopt_one=off)
+
+
+def test_a_process_that_loses_the_lock_takes_it_when_its_holder_lets_go(tmp_path, monkeypatch):
+    import threading
+
+    taken = iter([False, False, True])
+    swept = threading.Event()
+    stop = threading.Event()
+    monkeypatch.setattr(adopt_mod, "FIRST_DELAY_S", 0.0)
+    monkeypatch.setattr(adopt_mod, "SWEEP_S", 0.01)
+    monkeypatch.setattr(adopt_mod, "_take_lock", lambda root: next(taken))
+    monkeypatch.setattr(adopt_mod, "sweep", lambda root, stop=None: (swept.set(), stop.set()))
+    released = []
+    monkeypatch.setattr(adopt_mod, "_release_lock", lambda: released.append(True))
+    adopt_mod._run(tmp_path, stop)
+    assert swept.is_set() and released == [True]
