@@ -2202,6 +2202,7 @@ def answered(session_id: Any) -> None:
 # of a bot's work, and the user's own actions on it, which skip the model.
 
 APP_ROWS = 40
+APP_OPEN_ROWS = 500
 APP_RECENT_S = 7 * 86400.0
 APP_RESULT_CHARS = 600
 APP_GOAL_CHARS = 300
@@ -2229,8 +2230,9 @@ def app_list(home: Path) -> dict:
     if not work_store.exists(home):
         return out
     store = work_store.Store(home)
-    if copy_for(home) is sys.modules[__name__]:
-        # Only the copy whose hooks see this bot's turns recovers its work.
+    if mode != "off" and copy_for(home) is sys.modules[__name__]:
+        # Only the copy whose hooks see this bot's turns recovers its work,
+        # and only while its workstreams are on, as the tools do.
         try:
             _sweep(home, store)
         except Exception:  # noqa: BLE001 — the panel still shows the work as it is
@@ -2241,8 +2243,11 @@ def app_list(home: Path) -> dict:
     def still_open(work: work_store.Work) -> bool:
         return work.active or (work.status == "interrupted" and not work.closed_at)
 
-    rows = [work for work in store.list(include_closed=True, limit=200)
-            if still_open(work) or work.updated_at >= cutoff]
+    # Every open row, however old, then what changed in the last week.
+    rows = {work.ref: work for work in store.list(limit=APP_OPEN_ROWS) if still_open(work)}
+    for work in store.list(include_closed=True, changed_since=cutoff, limit=APP_ROWS):
+        rows.setdefault(work.ref, work)
+    rows = list(rows.values())
     rows.sort(key=lambda work: (not still_open(work), -work.updated_at))
     counts = out["counts"]
     for work in rows:
@@ -2256,11 +2261,11 @@ def app_list(home: Path) -> dict:
             counts["ready"] += 1
         elif work.kind == "ask_out" and work.status == "waiting":
             counts["waiting"] += 1
-    out["work"] = [_app_row(store, work) for work in rows[:APP_ROWS]]
+    out["work"] = [_app_row(store, work, on=mode != "off") for work in rows[:APP_ROWS]]
     return out
 
 
-def _app_row(store: work_store.Store, work: work_store.Work) -> dict:
+def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True) -> dict:
     row = {"ref": work.ref, "kind": work.kind, "status": work.status, "title": work.title,
            "goal": _cut(work.goal, APP_GOAL_CHARS), "session_id": work.session_id,
            "profile": str((work.executor or {}).get("bot") or "") if work.kind == "workstream" else "",
@@ -2277,9 +2282,17 @@ def _app_row(store: work_store.Store, work: work_store.Work) -> dict:
         if open_steps:
             step = open_steps[-1]
             row["step"] = _shown_tool(step["tool"]) + (f": {step['summary']}" if step["summary"] else "")
-    row["uncertain"] = work.status == "interrupted" and bool(store.get_meta(_CHECK + work.ref))
-    row["actions"] = _app_actions(work, row["uncertain"])
+    row["uncertain"] = _app_uncertain(store, work)
+    # With workstreams off the routes refuse every action, so none is offered.
+    row["actions"] = _app_actions(work, row["uncertain"]) if on else []
     return row
+
+
+def _app_uncertain(store: work_store.Store, work: work_store.Work) -> bool:
+    """A restart cut it off during a step that can change things, and no
+    turn of it has run since: stopping it keeps that, so a later Continue
+    still says the step may have run."""
+    return work.status in ("interrupted", "stopped") and bool(store.get_meta(_CHECK + work.ref))
 
 
 def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
@@ -2290,7 +2303,7 @@ def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
     if work.status == "interrupted":
         return ["check", "continue", "stop", "send"] if uncertain else ["continue", "stop", "send"]
     if work.status == "stopped":
-        return ["continue", "send"]
+        return ["check", "continue", "send"] if uncertain else ["continue", "send"]
     return ["send"]
 
 
@@ -2318,15 +2331,16 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
         return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's workstreams."}
     if not work.session_id:
         return {"ok": False, "ref": work.ref, "error": "starting", "note": f"{work.ref} is still being started."}
-    allowed = _app_actions(work, work.status == "interrupted" and bool(store.get_meta(_CHECK + work.ref)))
+    uncertain = _app_uncertain(store, work)
+    allowed = _app_actions(work, uncertain)
     if action not in allowed:
         return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
                 "note": f"{work.ref} can't {action} while it's {work.status.replace('_', ' ')}."}
     if action == "stop":
         if work.status == "interrupted":
             # Nothing runs: the user decided it stays stopped.
+            # Its check stays: a later Continue still says the step may have run.
             store.update(work.ref, status="stopped", only_if=("interrupted",))
-            store.set_meta(_CHECK + work.ref, "")
             answer = {"ok": True, "ref": work.ref, "status": "stopped"}
         else:
             answer = _stop(store, broker, work)
@@ -2335,14 +2349,17 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
             text = str(body.get("text") or "").strip()
             if not text:
                 return {"ok": False, "ref": work.ref, "error": "missing", "note": "Type what to send."}
-            words = text[:APP_TEXT_CHARS]
+            if len(text) > APP_TEXT_CHARS:
+                return {"ok": False, "ref": work.ref, "error": "too_long",
+                        "note": f"That's longer than {APP_TEXT_CHARS} characters, so nothing was sent. Shorten it, "
+                                "or open the chat and send it there."}
+            words = text
             how = body.get("how") if body.get("how") in ("auto", "add", "after") else "auto"
         elif action == "check":
             words = APP_CHECK.format(check=store.get_meta(_CHECK + work.ref) or APP_CHECK_DEFAULT)
             how = "after"
         else:
             step = work.error.removeprefix("stopped by a restart during ") if work.error else ""
-            uncertain = work.status == "interrupted" and bool(store.get_meta(_CHECK + work.ref))
             words = APP_CONTINUE_UNCERTAIN.format(step=step or "a step") if uncertain else APP_CONTINUE
             how = "after"
         answer = _deliver(store, broker, work, words, how, kind="user_send")

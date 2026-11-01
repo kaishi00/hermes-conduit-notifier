@@ -2694,7 +2694,7 @@ def test_stopping_interrupted_work_runs_nothing(on, hermes, monkeypatch):
     call("work_list")
     hermes.calls.clear()
     answer = work.app_act(on.home, "W1", "stop")
-    assert answer["ok"] and answer["work"]["status"] == "stopped" and not answer["work"]["uncertain"]
+    assert answer["ok"] and answer["work"]["status"] == "stopped" and answer["work"]["uncertain"]
     assert hermes.calls == []
 
 
@@ -2755,3 +2755,66 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     refused = client.post("/api/plugins/conduit_push/workstreams/W7/stop", json={})
     assert refused.status_code == 404 and refused.json()["code"] == "no_such_work"
     assert client.post("/api/plugins/conduit_push/workstreams/W1/send", content=b"[1]").status_code == 400
+
+
+def test_the_panel_of_a_bot_with_workstreams_off_recovers_nothing_and_offers_nothing(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    monkeypatch.setitem(work._copies(), str(on.home), work)
+    on.set_policy("off")
+    work._policy_cache.clear()
+    listed = work.app_list(on.home)
+    row, = listed["work"]
+    assert listed["policy"] == "off" and row["status"] == "running" and row["actions"] == []
+    assert hermes.calls == []
+
+
+def test_stopping_cut_off_work_keeps_the_warning_for_a_later_continue(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    stopped = work.app_act(on.home, "W1", "stop")["work"]
+    assert stopped["status"] == "stopped" and stopped["uncertain"]
+    assert stopped["actions"] == ["check", "continue", "send"]
+    hermes.calls.clear()
+    assert work.app_act(on.home, "W1", "continue")["ok"]
+    sent, = submitted_to(hermes, WORKER_1)
+    assert "may or may not have taken effect" in sent["text"] and "./deploy.sh" in sent["text"]
+    assert not work.app_list(on.home)["work"][0]["uncertain"]
+
+
+def test_open_work_shows_however_long_ago_it_last_changed(on, hermes, monkeypatch):
+    start()
+    monkeypatch.setattr(work, "APP_RECENT_S", -86400.0)  # nothing counts as recent
+    row, = work.app_list(on.home)["work"]
+    assert row["ref"] == "W1" and row["status"] == "running"
+
+
+def test_a_reply_too_long_is_refused_whole_not_cut(on, hermes):
+    start()
+    hermes.calls.clear()
+    answer = work.app_act(on.home, "W1", "send", {"text": "x" * (work.APP_TEXT_CHARS + 1)})
+    assert answer["error"] == "too_long" and submitted_to(hermes, WORKER_1) == []
+
+
+def test_a_reply_from_conduit_a_restart_cut_off_is_resent_or_handed_back(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    lost = on.outbox_add("W1", "user_send", WORKER_1, "Try the second fix.")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    continued, resent = submitted_to(hermes, WORKER_1)
+    assert resent["text"] == "Try the second fix." and lost not in {row["id"] for row in on.outbox_pending()}
+    # Idle when Hermes came back: the coordinator hears it may not have arrived.
+    start(title="Disk space", instructions="Check disk space on the NAS.")
+    on.update("W2", status="done")
+    lost = on.outbox_add("W2", "user_send", "rt-20261031_work_2", "Also the NAS logs.")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "The user's message from Conduit to W2" in wake["text"] and "Also the NAS logs." in wake["text"]

@@ -26,7 +26,7 @@ WORKSTREAMS_WINDOW_S = 60.0
 # A refusal's code -> its HTTP status. The body has the code, so Conduit
 # words it, and the note.
 REFUSAL_STATUS = {"no_such_work": 404, "missing": 400, "unknown_action": 404, "off": 409, "busy": 409,
-                  "not_now": 409, "starting": 409, "open_elsewhere": 409, "unavailable": 503, "hermes": 502}
+                  "not_now": 409, "starting": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502}
 
 _workstreams_limiter = core._MintLimiter(WORKSTREAMS_LIMIT, WORKSTREAMS_WINDOW_S,
                                          message="Too many work requests; try again shortly")
@@ -92,4 +92,4 @@ async def post_workstream_action(ref: str, action: str, request: Request, respon
     body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
-    return await _workstreams_route(f"workstream {action}", profile, lambda: workstreams_act(ref, action, body))
+    return await _workstreams_route("workstream action", profile, lambda: workstreams_act(ref, action, body))
