@@ -302,11 +302,13 @@ class Store:
         return _work(row) if row else None
 
     def list(self, *, active_only: bool = False, include_closed: bool = False, limit: int = 50,
-             active_or_changed: bool = False, changed_since: float | None = None) -> list[Work]:
-        """Newest first. ``active_or_changed``: open rows that are active or
-        changed since the coordinator last saw them, chosen before the limit.
-        ``changed_since``: only rows changed at or after that time, also
-        chosen before the limit."""
+             active_or_changed: bool = False, changed_since: float | None = None,
+             by_change: bool = False) -> list[Work]:
+        """Newest first (``by_change``: last changed first). A ``limit`` of
+        -1 takes every row. ``active_or_changed``: open rows that are active
+        or changed since the coordinator last saw them, chosen before the
+        limit. ``changed_since``: only rows changed at or after that time,
+        also chosen before the limit."""
         if not self.path.is_file():
             return []
         query = "SELECT * FROM work"
@@ -321,7 +323,7 @@ class Store:
             where.append("updated_at >= ?")
         if where:
             query += " WHERE " + " AND ".join(where)
-        order = "created_at DESC"
+        order = "updated_at DESC, created_at DESC" if by_change else "created_at DESC"
         if active_or_changed:
             # Active work first, so newer changes never push it out.
             order = f"(status IN ({', '.join('?' * len(ACTIVE))})) DESC, " + order
