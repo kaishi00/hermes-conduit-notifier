@@ -54,6 +54,23 @@ _unnamed_ends: dict[str, tuple[object, Any]] = {}
 _parent_turns: dict[str, tuple[str, float]] = {}
 _parent_turns_lock = threading.Lock()
 PARENT_TURN_MAX_S = 6 * 3600.0
+# Predictive's fast model (dashboard/api/chats.py, PREDICT_TASK) as one of
+# Hermes' helper model slots, so Conduit's Models & providers and Hermes'
+# Models page can set it (hermes-conduit stage 2 of configuring Hermes).
+PREDICT_TASK = "conduit_predict"
+PREDICT_TASK_NAME = "Conduit predictions"
+PREDICT_TASK_DESCRIPTION = ("Suggested replies and draft guesses in Conduit, when Predictive uses the fast "
+                            "model. Unset, the chat's own model answers.")
+
+
+def _register_predict_task(ctx: Any) -> None:
+    """Lists Predictive's fast model among Hermes' helper models; an older
+    Hermes without them keeps reading it from config as before."""
+    try:
+        ctx.register_auxiliary_task(PREDICT_TASK, display_name=PREDICT_TASK_NAME,
+                                    description=PREDICT_TASK_DESCRIPTION)
+    except Exception:  # noqa: BLE001 — no helper slot; config still works
+        logger.debug("conduit_push: no auxiliary task for predictions", exc_info=True)
 
 
 def register(ctx: Any) -> None:
@@ -70,6 +87,7 @@ def register(ctx: Any) -> None:
     # Pulse (designs/proactivity.md): off unless turned on, and then only
     # the gateway process sends anything.
     pulse.register(ctx)
+    _register_predict_task(ctx)
     if hasattr(ctx, "on_unload"):
         ctx.on_unload(_unload)
     # A group room's turns aren't saved into the memory provider as the
