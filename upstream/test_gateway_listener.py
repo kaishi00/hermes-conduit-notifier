@@ -165,16 +165,21 @@ class ConduitSocket:
         self._pending: Dict[int, asyncio.Future] = {}
         self._next = 0
         self._event_seen = asyncio.Event()
+        self.closed: Optional[str] = None
 
     async def read(self) -> None:
+        from websockets.exceptions import ConnectionClosed
+
         reason = "the socket closed"
         try:
+            # A frame that doesn't parse fails here with its own error.
             async for raw in self.ws:
                 self._take(json.loads(raw))
-        except Exception as exc:  # noqa: BLE001 — every waiting call fails with it at once
+        except (ConnectionClosed, OSError) as exc:
             reason = f"the socket closed: {exc!r}"
         finally:
             # A clean close fails the waiting calls too, and wakes an event wait.
+            self.closed = reason
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(ConnectionError(reason))
@@ -217,6 +222,7 @@ class ConduitSocket:
             for event in self.events:
                 if event.get("type") == kind and event.get("session_id") == session_id:
                     return event
+            assert self.closed is None, f"no {kind} for {session_id} before {self.closed}"
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"no {kind} for {session_id}; saw {[e.get('type') for e in self.events]}"
             with contextlib.suppress(asyncio.TimeoutError):
@@ -319,26 +325,29 @@ def test_ready_names_the_session_authority_and_the_plugin_is_served(listener):
     assert listener.run(script).get("session_authority") is True
     # The listener mounts the dashboard, so the plugin's capabilities route answers on it.
     assert listener.plugin_get("capabilities") == 200
-    # And its sockets keep the dashboard's sign-in: one without a token is refused.
-    assert asyncio.run(_socket_refused(listener, "speech-server/socket")), "an unsigned plugin socket opened"
+    # And the speech-server socket keeps the dashboard's sign-in: the plugin closes one
+    # without the session token with 4401, and lets one with it past the check.
+    assert asyncio.run(_socket_close(listener, "speech-server/socket", signed=False)) == 4401
+    assert asyncio.run(_socket_close(listener, "speech-server/socket", signed=True)) != 4401
 
 
-async def _socket_refused(listener: "Listener", path: str) -> bool:
+async def _socket_close(listener: "Listener", path: str, signed: bool) -> Optional[int]:
+    """How the plugin socket ended: its close code, or None while it stays open."""
     from websockets.asyncio.client import connect
-    from websockets.exceptions import ConnectionClosed, InvalidHandshake
+    from websockets.exceptions import ConnectionClosed
 
-    try:
-        async with connect(f"ws://127.0.0.1:{listener.port}/api/plugins/{PLUGIN}/{path}",
-                           open_timeout=15, proxy=None) as ws:
-            try:
-                await asyncio.wait_for(ws.recv(), 10)
-            except ConnectionClosed:
-                return True
-            except asyncio.TimeoutError:
-                return False  # open and silent: not refused
-            return False
-    except (InvalidHandshake, OSError):
-        return True
+    # Signed as Conduit signs the chat socket, with the session token in the query.
+    query = f"?token={listener.token}" if signed else ""
+    # A missing route is refused at the handshake, which raises here.
+    async with connect(f"ws://127.0.0.1:{listener.port}/api/plugins/{PLUGIN}/{path}{query}",
+                       open_timeout=15, proxy=None) as ws:
+        try:
+            await asyncio.wait_for(ws.recv(), 10)
+        except ConnectionClosed:
+            return ws.close_code
+        except asyncio.TimeoutError:
+            return None
+        return None
 
 
 def test_a_turn_in_conduits_authority_shapes(listener):

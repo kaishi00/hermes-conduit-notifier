@@ -108,6 +108,9 @@ jobs:
       - name: Run the contract tests
         env:
           # The leg that needs the Webapp fails on a canary without it rather than skipping.
+          # Until a release has the Webapp, PRs (which run the latest release) skip it, so
+          # test_gateway_listener.py and the listener's watched modules gate only on the daily
+          # canary run: check that run after merging a change to them.
           HERMES_REF: ${{ matrix.ref }}
         run: |
           hermes="$RUNNER_TEMP/hermes"
