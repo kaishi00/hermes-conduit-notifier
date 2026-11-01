@@ -2877,6 +2877,27 @@ def test_a_start_still_starting_after_two_minutes_can_be_stopped(on, hermes, mon
     assert answer["ok"] and answer["work"]["status"] == "stopped"
 
 
+def test_a_start_stopped_while_hermes_was_starting_it_says_stopped(on, hermes, monkeypatch):
+    original = broker_mod.Broker.start
+
+    def slow_start(self, **kwargs):
+        started = original(self, **kwargs)
+        on.update("W1", status="stopped")  # the user's Stop, while the start ran long
+        return started
+
+    monkeypatch.setattr(broker_mod.Broker, "start", slow_start)
+    answer = start()
+    assert answer["ok"] and answer["status"] == "stopped"
+    assert on.get("W1").status == "stopped"
+
+
+def test_the_coordinator_cant_send_to_a_start_still_under_way(on, hermes):
+    start()
+    on.update("W1", status="starting")
+    answer = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert answer["error"] == "starting" and "still being started" in answer["note"]
+
+
 def test_a_reply_that_isnt_text_is_refused(on, hermes):
     start()
     assert work.app_act(on.home, "W1", "send", {"text": ["Try", "this"]})["error"] == "missing"

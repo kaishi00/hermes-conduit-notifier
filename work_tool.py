@@ -797,7 +797,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         store.outbox_done(item, "accepted")
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: recording a started workstream failed", exc_info=True)
-    return {"ok": True, "ref": work.ref, "title": work.title, "status": "running",
+    # As it is now: a stop (or a short turn's end) may have come during the start.
+    try:
+        now = store.get(work.ref)
+    except Exception:  # noqa: BLE001
+        now = None
+    status = now.status if now is not None and now.status != "starting" else "running"
+    return {"ok": True, "ref": work.ref, "title": work.title, "status": status,
             "link": _link(work.ref, started.session_id, work_broker.profile_of(home)),
             "note": f"Started {work.ref}: {work.title}. It works in the background; its result comes back to you "
                     "as a work update. Don't wait for it."}
@@ -1212,6 +1218,10 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     text = str(args.get("text") or "").strip()
     if not text:
         return {"ok": False, "ref": work.ref, "error": "missing", "note": "Say what to send."}
+    if work.status == "starting":
+        # Its brief may not be in yet, and a reply mustn't land before it.
+        return {"ok": False, "ref": work.ref, "error": "starting",
+                "note": f"{work.ref} is still being started. Send it this once it's running."}
     if not work.session_id:
         return {"ok": False, "ref": work.ref, "error": "not_now",
                 "note": f"{work.ref} never got a chat, so there's nothing to send to. work_start it again, with new=true if it says similar work is open."}
