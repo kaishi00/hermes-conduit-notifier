@@ -9,15 +9,22 @@ one push per turn, under the user's own notification settings, so a phone
 on Generic or Chat names still shows none of the words. It never sends a
 push of its own; a reply that sends none ([SILENT], a muted job) sends none
 with them either.
+
+A ``key`` names what the notification is about ("report"): the next one
+this profile writes with the same key, from any chat or scheduled job,
+replaces it on the phone instead of adding another (#1579). ``quiet``
+makes that update land in Notification Center without a sound or a
+banner (the push's level is passive).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from . import client
 
@@ -27,6 +34,9 @@ TOOL_NAME = "conduit_notify"
 TOOLSET = "conduit"
 MAX_TITLE_CHARS = 60
 MAX_BODY_CHARS = 300
+MAX_KEY_CHARS = 40
+# Letters, digits and - _ . : / in a key; anything else becomes "-".
+_KEY_JUNK = re.compile(r"[^\w.:/-]+")
 # A heading the turn's push never took (the turn died first) isn't one a
 # later turn of the chat should carry.
 KEEP_S = 2 * 60 * 60
@@ -42,7 +52,9 @@ SCHEMA: dict[str, Any] = {
         "what this turn actually found or did. It goes with your final reply, so still end the turn with the "
         "full answer, and it follows the user's notification settings: they may see only the chat's name. A Pulse "
         "check writes its own notification, so this one isn't used there. It doesn't ring; to call the user, use "
-        "conduit_call_user."
+        "conduit_call_user. To update a notification you sent earlier instead of adding another (\"Report in "
+        "progress\", later \"Report ready\"), give both the same key; a key is shared by this profile's chats and "
+        "scheduled jobs. Set quiet for an update that shouldn't make a sound or show a banner."
     ),
     "parameters": {
         "type": "object",
@@ -51,17 +63,34 @@ SCHEMA: dict[str, Any] = {
                       "description": f"What happened, in a few words (up to {MAX_TITLE_CHARS} characters)."},
             "body": {"type": "string", "maxLength": MAX_BODY_CHARS,
                      "description": f"The result in a sentence or two (up to {MAX_BODY_CHARS} characters)."},
+            "key": {"type": "string", "maxLength": MAX_KEY_CHARS,
+                    "description": ("Optional. A short name for what this is about (\"report\", \"backup\"). A later "
+                                    "notification with the same key replaces this one on the phone. Leave it out "
+                                    "for a new notification.")},
+            "quiet": {"type": "boolean",
+                      "description": ("Optional. True: no sound or banner, the notification only appears (or "
+                                      "updates) in Notification Center.")},
         },
         "required": ["title", "body"],
     },
 }
 
+
+
+class Headline(NamedTuple):
+    """What a turn wrote for its push."""
+    title: str
+    body: str
+    key: str = ""
+    quiet: bool = False
+
+
 _lock = threading.Lock()
-# session id -> (title, body, kept at)
-_kept: dict[str, tuple[str, str, float]] = {}
-# session id -> (turn id, (title, body)): what a turn's push took, for a
+# session id -> (what the turn wrote, kept at)
+_kept: dict[str, tuple[Headline, float]] = {}
+# session id -> (turn id, headline): what a turn's push took, for a
 # second report of the same turn, which replaces the first.
-_taken: dict[str, tuple[str, tuple[str, str]]] = {}
+_taken: dict[str, tuple[str, Headline]] = {}
 
 
 def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
@@ -117,25 +146,41 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
     if client.load_state() is None:
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so nothing reaches the phone."}
-    keep(session, title, body)
-    return {"ok": True,
-            "note": ("The notification goes out with your final reply when this turn ends, if the user's "
-                     "settings let a reply notify. End the turn with your full answer as usual.")}
+    key = slot_key(args.get("key"))
+    if args.get("key") not in (None, "") and not key:
+        return {"ok": False, "error": "invalid_key",
+                "note": "Use letters or digits in the key (\"report\"), or leave it out for a new notification."}
+    quiet = args.get("quiet") is True
+    keep(session, title, body, key=key, quiet=quiet)
+    note = ("The notification goes out with your final reply when this turn ends, if the user's "
+            "settings let a reply notify. End the turn with your full answer as usual.")
+    if key:
+        note += (f" It replaces this profile's earlier notification with the key \"{key}\", if it's still showing. A turn "
+                 "that sends no notification (a [SILENT] reply, or the user is watching the chat) leaves the earlier one.")
+    return {"ok": True, "note": note, **({"key": key} if key else {})}
 
 
-def keep(session_id: str, title: str, body: str, now: float | None = None) -> None:
+def slot_key(value: Any) -> str:
+    """A key as the tool keeps it: one line, lower case, short."""
+    if not isinstance(value, str):
+        return ""
+    key = _KEY_JUNK.sub("-", " ".join(value.split()).casefold())[:MAX_KEY_CHARS].strip("-")
+    return key if re.search(r"[^\W_]", key) else ""
+
+
+def keep(session_id: str, title: str, body: str, now: float | None = None, *, key: str = "", quiet: bool = False) -> None:
     """The chat's next reply push carries these; a newer call replaces them."""
     now = time.time() if now is None else now
     with _lock:
         _kept.pop(session_id, None)
-        _kept[session_id] = (title, body, now)
+        _kept[session_id] = (Headline(title, body, key, quiet), now)
         while len(_kept) > MAX_KEPT:
             del _kept[next(iter(_kept))]
 
 
-def take(session_id: str, turn_id: Any = None, now: float | None = None) -> tuple[str, str] | None:
-    """The title and body this chat's turn wrote for its push, once; the
-    same turn reported again gets them again."""
+def take(session_id: str, turn_id: Any = None, now: float | None = None) -> Headline | None:
+    """What this chat's turn wrote for its push, once; the same turn
+    reported again gets it again."""
     now = time.time() if now is None else now
     turn = turn_id if isinstance(turn_id, str) and turn_id else None
     with _lock:
@@ -143,9 +188,9 @@ def take(session_id: str, turn_id: Any = None, now: float | None = None) -> tupl
         if kept is None:
             taken = _taken.get(session_id)
             return taken[1] if turn and taken and taken[0] == turn else None
-        if now - kept[2] > KEEP_S:
+        if now - kept[1] > KEEP_S:
             return None
-        headline = (kept[0], kept[1])
+        headline = kept[0]
         if turn:
             _taken.pop(session_id, None)
             _taken[session_id] = (turn, headline)
@@ -154,12 +199,16 @@ def take(session_id: str, turn_id: Any = None, now: float | None = None) -> tupl
         return headline
 
 
-def drop(session_id: str) -> None:
+def drop(session_id: str) -> str:
     """The turn ended: what it wrote never rides a later turn's reply, even
-    when this one sent none (interrupted, or failed before answering)."""
+    when this one sent none (interrupted, or failed before answering).
+    Returns the key it wrote, if any, for a failure push to replace."""
     with _lock:
-        _kept.pop(session_id, None)
-        _taken.pop(session_id, None)
+        kept = _kept.pop(session_id, None)
+        taken = _taken.pop(session_id, None)
+    if kept is not None:
+        return kept[0].key
+    return taken[1].key if taken is not None else ""
 
 
 def _line(value: Any, limit: int) -> str:

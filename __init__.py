@@ -346,11 +346,16 @@ def _post_llm_call(**kwargs: Any) -> None:
     # What the turn wrote for its push with conduit_notify, taken whatever
     # happens so it never rides a later turn's reply.
     headline = notify_tool.take(session_id, kwargs.get("turn_id"))
+    # Worked out whether or not a push goes: it learns which job a run's
+    # chat belongs to, for a background task that reports later.
+    slot = _slot(session_id, kwargs.get("task_id"), headline.key if headline and not pulse_turn else "",
+                 turn_id=kwargs.get("turn_id"))
     # A Pulse push is titled by what it brings, not by Pulse's hidden chat.
     if pulse_turn and not quiet:
         copy = pulse.push_copy(session_id, kwargs.get("turn_id"), response)
     elif headline and not pulse_turn:
-        copy = {"title": headline[0], "title_label": "response.ready", "body": headline[1], "headline": headline[0]}
+        copy = {"title": headline.title, "title_label": "response.ready", "body": headline.body,
+                "headline": headline.title, **({"level": "passive"} if headline.quiet else {})}
     else:
         copy = {"title": chat_title, "title_label": "response.ready", "body": response}
     ready = None if quiet else push_event(
@@ -367,6 +372,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         count=copy.get("count"),
         level=copy.get("level"),
         private=copy.get("private") is True,
+        slot=slot,
     )
     # A quick reply in a chat Hermes Desktop has selected: the user most
     # likely watched it arrive there (#87); so did one in a chat Conduit has
@@ -401,6 +407,71 @@ def _post_llm_call(**kwargs: Any) -> None:
     for old_session, (old_ready, old_send, old_timer) in overflow:
         _cancel(old_timer)
         _finish_ready(old_session, old_ready, old_send)
+
+
+def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any = None, keep: bool = False) -> str:
+    """Which notification on the phone a turn's end replaces (#1579), when
+    it isn't the chat's own: a conduit_notify key's, shared by this
+    profile's chats and jobs, else a scheduled job's, so each run replaces
+    the last instead of piling up (every run is a chat of its own). Only a
+    run's own turn takes the job's, by its ``cron:<job>:<run>`` task id: a
+    follow-up asked in an older run's chat keeps that chat's. The turn's
+    slot is kept for a background task it started, which reports later,
+    with the job, whose mute the task follows. ``keep`` leaves a slot the
+    turn already took (its reply's) in place."""
+    job = cron_runs.job_id(None, task_id)
+    seed = f"key:{_profile}:{key}" if key else f"cron:{_profile}:{job}" if job else ""
+    if (seed or job) and isinstance(turn_id, str) and turn_id:
+        with _turn_slots_lock:
+            if keep and (session_id, turn_id) in _turn_slots:
+                return _turn_slots[(session_id, turn_id)][0]
+            _turn_slots.pop((session_id, turn_id), None)
+            _turn_slots[(session_id, turn_id)] = (seed, job or "")
+            if key:
+                _key_writers.pop(seed, None)
+                _key_writers[seed] = session_id
+                while len(_key_writers) > MAX_TURN_STARTS:
+                    del _key_writers[next(iter(_key_writers))]
+            if job and (job, session_id) not in _job_run_chats:
+                # The job's newest run is the one whose turn ended first
+                # most recently: a later turn in an older run doesn't take it
+                # back. Runs that overlap are ordered by when they first end,
+                # and the record lives only as long as this process (after a
+                # restart, a run's task reports in its own chat's slot).
+                _job_run_chats[(job, session_id)] = None
+                _job_runs.pop(job, None)
+                _job_runs[job] = session_id
+                for kept in (_job_runs, _job_run_chats):
+                    while len(kept) > MAX_TURN_STARTS:
+                        del kept[next(iter(kept))]
+            while len(_turn_slots) > MAX_TURN_STARTS:
+                del _turn_slots[next(iter(_turn_slots))]
+    return seed
+
+
+def _started_slot(session_id: str, turn_id: Any) -> tuple[str, str]:
+    """The slot, and the scheduled job if any, of the turn that started a
+    background task."""
+    with _turn_slots_lock:
+        slot, job = _turn_slots.get((session_id, turn_id), ("", "")) if isinstance(turn_id, str) else ("", "")
+        # A task from an older run reports in that run's chat: the job's
+        # slot, or the key it wrote, holds the newest run's report, which it
+        # mustn't replace.
+        if (job and _job_runs.get(job) != session_id) or (
+                slot.startswith("key:") and _key_writers.get(slot, session_id) != session_id):
+            slot = ""
+        return slot, job
+
+
+# (chat, turn) -> its slot and job, for a background task the turn started.
+_turn_slots: dict[tuple[str, str], tuple[str, str]] = {}
+# job -> the chat of its newest run, and every (job, chat) seen so far.
+_job_runs: dict[str, str] = {}
+_job_run_chats: dict[tuple[str, str], None] = {}
+# key slot -> the chat that wrote it last, whose notification a task from
+# another chat mustn't replace.
+_key_writers: dict[str, str] = {}
+_turn_slots_lock = threading.Lock()
 
 
 def _turn_end_missed(session_id: str, turn_id: str, live: bool = True) -> None:
@@ -569,8 +640,13 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
-    notify_tool.drop(session_id)
+    # The key the turn wrote with conduit_notify: a failure replaces that
+    # notification too, so a "Report in progress" doesn't outlive it.
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
+    # A Pulse turn keeps its chat's slot: a key is ignored there.
+    written_key = notify_tool.drop(session_id)
+    if pulse_turn:
+        written_key = ""
     _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
     # A turn Hermes doesn't call failed but that didn't complete (it hit the
     # step limit) still answered: its reply goes out, not a failure. A Hermes
@@ -586,6 +662,9 @@ def _on_session_end(**kwargs: Any) -> None:
         _quietly(live_activity.reporter.turn_ended, session_id,
                  "done" if answered else "stopped" if kwargs.get("interrupted") else "failed")
     if answered:
+        # A turn with no reply text skipped post_llm_call: its job and slot
+        # are taken here for a background task it started.
+        _slot(session_id, kwargs.get("task_id"), written_key, turn_id=kwargs.get("turn_id"), keep=True)
         if not _settle_ready(session_id, kwargs.get("turn_id"), "done"):
             calls.turn_ended(session_id, "done", profile=_profile, fallback=None)
         # A voice job's chat leaves Desktop's list once Hermes has answered
@@ -596,6 +675,9 @@ def _on_session_end(**kwargs: Any) -> None:
             logger.debug("conduit_push: voice job archive check failed", exc_info=True)
         return
     _settle_ready(session_id, kwargs.get("turn_id"), "dropped")
+    # Taken before any return: a background task this turn started follows
+    # its job's mute and slot, even when the turn itself sends nothing.
+    slot = _slot(session_id, kwargs.get("task_id"), written_key, turn_id=kwargs.get("turn_id"))
     if kwargs.get("interrupted"):
         calls.turn_ended(session_id, "stopped", profile=_profile, fallback=None)
         return
@@ -617,6 +699,7 @@ def _on_session_end(**kwargs: Any) -> None:
         title=_titled("Turn failed", session_id),
         title_label="turn.failed",
         session_title=_session_title(session_id),
+        slot=slot,
     )
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
         return
@@ -751,8 +834,11 @@ def _subagent_stop(**kwargs: Any) -> None:
     # a background task, notifies. Nor does a nested one, or a muted cron job's.
     # The parent is asked about by id: this hook can run in the child's own
     # run, where Hermes' delegation flag describes the child.
+    # A gateway-owned run's chat (local-…) names its job only through the
+    # turn that started the task.
+    slot, job = _started_slot(parent, kwargs.get("parent_turn_id"))
     if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child_session(parent)
-            or cron_runs.quiet(parent, None)):
+            or cron_runs.quiet(parent, None) or (job and cron_runs.muted(job))):
         return
     status = _text(kwargs.get("child_status")) or "finished"
     # Hermes reports "completed" (else "failed", "timeout", "error"). Only a
@@ -770,6 +856,7 @@ def _subagent_stop(**kwargs: Any) -> None:
         title_label="background_task.finished" if finished else "",
         session_title=_session_title(parent),
         body=summary or ("" if finished else f"A delegated task {status}."),
+        slot=slot,
     ))
 
 
