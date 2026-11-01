@@ -364,6 +364,27 @@ class Broker:
         (self._unbound if held else self._dispatch)("session.interrupt", {"session_id": runtime_id})
         return True
 
+    def approvals(self, session_id: str) -> list[dict]:
+        """The approvals a live session waits on (``approval.pending``), by
+        its stored id; none when it isn't live. Read through the method
+        table, so the client showing the chat keeps its stream."""
+        found = self.live(session_id)
+        if found is None:
+            return []
+        rows = self._unbound("approval.pending", {"session_id": found[0]}).get("approvals")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def answer_approval(self, session_id: str, request_id: str, choice: str) -> bool:
+        """Answers one approval by its request id (``approval.respond``):
+        never another one queued in the same session. False when it's no
+        longer waiting."""
+        found = self.live(session_id)
+        if found is None or not request_id:
+            return False
+        answer = self._unbound("approval.respond", {"session_id": found[0], "choice": choice,
+                                                    "request_id": request_id})
+        return bool(answer.get("resolved"))
+
     def wake(self, chat_id: str, text: str) -> str:
         """A hidden, queued turn into this bot's Bot Chat, the way Pulse
         sends its turns: reopened through the method table with nothing

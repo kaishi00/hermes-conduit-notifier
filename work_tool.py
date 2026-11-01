@@ -2312,7 +2312,10 @@ APP_RESOLVED_ROWS = 50  # a page of the Resolved list
 APP_RESULT_CHARS = 600
 APP_GOAL_CHARS = 300
 APP_TEXT_CHARS = work_store.GOAL_CHARS
-APP_ACTIONS = ("send", "stop", "continue", "check", "pin", "unpin", "resolve", "reopen")
+APP_ACTIONS = ("send", "stop", "continue", "check", "pin", "unpin", "resolve", "reopen", "approve", "deny")
+# Answering the approval a workstream waits on, as its chat's card would.
+APP_APPROVAL = {"approve": "once", "deny": "deny"}
+APP_APPROVAL_TEXT_CHARS = 400
 # The user's own filing: no turn runs, so they need no broker.
 APP_MANAGE = ("pin", "unpin", "resolve", "reopen")
 APP_CONTINUE = ("The user tapped Continue in Conduit for this work. Carry on from where you were, without redoing "
@@ -2377,11 +2380,17 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     # Every open row: active work and work cut off first, then the rest
     # by when it last changed.
     rows = sorted(open_rows, key=lambda work: (not work.active and work.status != "interrupted", -work.updated_at))
-    out["work"] = [_app_row(store, work, on=mode != "off") for work in rows]
+    # A workstream waiting on an approval shows it, read from Hermes in the
+    # process its sessions run in.
+    broker = None
+    if mode != "off" and not work_broker.unavailable_reason() and any(work.status == "needs_you" for work in rows):
+        broker = work_broker.Broker(home)
+    out["work"] = [_app_row(store, work, on=mode != "off", broker=broker) for work in rows]
     return out
 
 
-def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True) -> dict:
+def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
+             broker: Optional[work_broker.Broker] = None) -> dict:
     row = {"ref": work.ref, "kind": work.kind, "status": work.status, "title": work.title,
            "goal": _cut(work.goal, APP_GOAL_CHARS), "session_id": work.session_id,
            "profile": str((work.executor or {}).get("bot") or "") if work.kind == "workstream" else "",
@@ -2402,11 +2411,32 @@ def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True)
             step = open_steps[-1]
             row["step"] = _shown_tool(step["tool"]) + (f": {step['summary']}" if step["summary"] else "")
     row["uncertain"] = _app_uncertain(store, work)
+    row["approval"] = None
+    if on and broker is not None and work.status == "needs_you" and work.session_id and not work.closed_at:
+        row["approval"] = _app_approval(broker, work)
     # With workstreams off the routes refuse every action, so none is offered.
     row["actions"] = _app_actions(work, row["uncertain"]) if on else []
     # How the user files it, apart from what it does next.
     row["manage"] = _app_manage(work) if on else []
     return row
+
+
+def _app_approval(broker: work_broker.Broker, work: work_store.Work) -> Optional[dict]:
+    """The approval the workstream waits on, for its "Needs you" card: the
+    first one Hermes names by its request (one without would be answered by
+    the session's queue, which its chat answers). None when it can't be read."""
+    try:
+        pending = broker.approvals(work.session_id)
+    except Exception:  # noqa: BLE001 — the card offers its chat instead
+        logger.debug("conduit_push: couldn't read a workstream's approvals", exc_info=True)
+        return None
+    for entry in pending:
+        request_id = entry.get("request_id")
+        if isinstance(request_id, str) and request_id:
+            return {"request_id": request_id,
+                    "command": _cut(str(entry.get("command") or ""), APP_APPROVAL_TEXT_CHARS),
+                    "description": _cut(str(entry.get("description") or ""), APP_APPROVAL_TEXT_CHARS)}
+    return None
 
 
 def _app_uncertain(store: work_store.Store, work: work_store.Work) -> bool:
@@ -2542,6 +2572,8 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
     work = store.get(ref)
     if work is None:
         return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's workstreams."}
+    if action in APP_APPROVAL:
+        return _app_answer_approval(store, broker, work, action, body)
     uncertain = _app_uncertain(store, work)
     allowed = _app_actions(work, uncertain)
     if action not in allowed:
@@ -2590,7 +2622,32 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
             store.set_meta(_CHECK + work.ref, "")
     now = store.get(work.ref)
     if now is not None:
-        answer["work"] = _app_row(store, now)
+        answer["work"] = _app_row(store, now, broker=broker)
+    return answer
+
+
+def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work,
+                         action: str, body: dict) -> dict:
+    """Approve once or deny the approval the workstream waits on, by its
+    request id: the one the card showed, never another."""
+    request_id = body.get("request_id") if isinstance(body.get("request_id"), str) else ""
+    if not request_id:
+        return {"ok": False, "ref": work.ref, "error": "missing", "note": "Which approval? Open its chat to answer it."}
+    if work.status != "needs_you":
+        return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
+                "note": f"{work.ref} isn't waiting on that any more."}
+    try:
+        answered = broker.answer_approval(work.session_id, request_id, APP_APPROVAL[action])
+    except work_broker.BrokerError as error:
+        return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes didn't take it: {_cut(str(error), 200)}"}
+    if not answered:
+        return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
+                "note": f"{work.ref} isn't waiting on that any more."}
+    answer = {"ok": True, "ref": work.ref}
+    now = store.get(work.ref)
+    if now is not None:
+        answer["status"] = now.status
+        answer["work"] = _app_row(store, now, broker=broker)
     return answer
 
 

@@ -1483,13 +1483,17 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/send` with `{text, how?}` | `{ok, outcome, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
+| POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
 
 - `work` lists every open (unresolved) row, however old: active work first,
   then the rest by when it last changed. Rows are workstreams, and asks to
   and from other bots (`kind` `ask_out` with `bot`, the bot it's waiting on,
   or `ask_in`). Each row has its status, checklist, the step it's on, its
   last result, `pinned`, `actions` (what you can do with it now) and
-  `manage` (how you can file it).
+  `manage` (how you can file it). A workstream waiting on an approval has
+  `approval` (`request_id`, `command`, `description`), the first one Hermes
+  names by its request; `approve` (once) or `deny` answers that one, never
+  another queued behind it. Its chat still answers it too.
 - Work leaves the list when it's resolved: by you (`resolve`, refused with
   `still_running` while it's at work: stop it first) or by the bot
   (`work_close`). Nothing resolves itself. `resolved=1` lists resolved work,
