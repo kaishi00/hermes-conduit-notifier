@@ -6,6 +6,7 @@ import json
 import pathlib
 import importlib.util
 import sys
+import sqlite3
 from pathlib import Path
 import types
 
@@ -2762,6 +2763,15 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     refused = client.post("/api/plugins/conduit_push/workstreams/W7/stop", json={})
     assert refused.status_code == 404 and refused.json()["code"] == "no_such_work"
     assert client.post("/api/plugins/conduit_push/workstreams/W1/send", content=b"[1]").status_code == 400
+    still = client.post("/api/plugins/conduit_push/workstreams/W1/resolve", json={})
+    assert still.status_code == 409 and still.json()["code"] == "still_running"
+    on.update("W1", status="done")
+    assert client.post("/api/plugins/conduit_push/workstreams/W1/resolve", json={}).json()["work"]["closed"]
+    resolved = client.get("/api/plugins/conduit_push/workstreams", params={"resolved": 1}).json()
+    assert [row["ref"] for row in resolved["work"]] == ["W1"] and resolved["more"] is False
+    before = client.get("/api/plugins/conduit_push/workstreams",
+                        params={"resolved": 1, "before": resolved["work"][0]["closed_at"]}).json()
+    assert before["work"] == [] and client.get("/api/plugins/conduit_push/workstreams").json()["work"] == []
 
 
 def test_the_panel_of_a_bot_with_workstreams_off_recovers_nothing_and_offers_nothing(on, hermes, monkeypatch):
@@ -2794,11 +2804,20 @@ def test_stopping_cut_off_work_keeps_the_warning_for_a_later_continue(on, hermes
     assert not work.app_list(on.home)["work"][0]["uncertain"]
 
 
+def backdate(store, ref, days):
+    with sqlite3.connect(store.path) as con:
+        con.execute("UPDATE work SET updated_at = updated_at - ?, created_at = created_at - ? WHERE ref = ?",
+                    (days * 86400, days * 86400, ref))
+
+
 def test_open_work_shows_however_long_ago_it_last_changed(on, hermes, monkeypatch):
     start()
-    monkeypatch.setattr(work, "APP_RECENT_S", -86400.0)  # nothing counts as recent
-    row, = work.app_list(on.home)["work"]
-    assert row["ref"] == "W1" and row["status"] == "running"
+    start(title="Disk space", instructions="Check disk space on the NAS.")
+    on.update("W2", status="done", last_result="7.6G free.")
+    backdate(on, "W1", 30)
+    backdate(on, "W2", 400)  # settled and a year old, but nobody resolved it
+    listed = work.app_list(on.home)
+    assert [row["ref"] for row in listed["work"]] == ["W1", "W2"] and listed["work"][0]["status"] == "running"
 
 
 def test_a_reply_too_long_is_refused_whole_not_cut(on, hermes):
@@ -2828,7 +2847,6 @@ def test_a_reply_from_conduit_a_restart_cut_off_is_resent_or_handed_back(on, her
 
 
 def test_the_panel_lists_every_open_row_the_strip_counts_and_what_changed_last(on, hermes, monkeypatch):
-    monkeypatch.setattr(work, "APP_ROWS", 2)
     store = store_mod.Store(on.home)
     for n in range(4):
         store.add("ask_out", title=f"Ask {n}", status="waiting")
@@ -2837,13 +2855,18 @@ def test_the_panel_lists_every_open_row_the_strip_counts_and_what_changed_last(o
     store.update(old.ref, closed_at=1.0)  # created first, changed last
     for row in newer:
         store.update(row.ref, closed_at=1.0)
+    settled = [store.add("ask_out", title=f"Settled {n}", status="done") for n in range(3)]
+    store.update(settled[0].ref, title="Settled 0, changed")  # created first, changed last
     store.update(old.ref, title="Old answer, changed")
     listed = work.app_list(on.home)
-    assert listed["counts"]["waiting"] == 4
-    open_refs = [row["ref"] for row in listed["work"] if not row["closed"]]
-    assert len(open_refs) == 4  # past APP_ROWS: every open row is listed
-    closed = [row["ref"] for row in listed["work"] if row["closed"]]
-    assert len(closed) == 2 and closed[0] == old.ref
+    assert listed["counts"]["waiting"] == 4 and listed["resolved_count"] == 4
+    refs = [row["ref"] for row in listed["work"]]
+    assert not any(row["closed"] for row in listed["work"])  # resolved work has its own list
+    # Every open row: those still at it, then the settled ones by when they
+    # last changed.
+    assert len(refs) == 7 and refs[4] == settled[0].ref
+    resolved = work.app_list(on.home, resolved=True)
+    assert len(resolved["work"]) == 4 and not resolved["more"]
 
 
 def test_stopped_work_with_a_step_to_check_stays_listed_however_old(on, hermes, monkeypatch):
@@ -2853,7 +2876,7 @@ def test_stopped_work_with_a_step_to_check_stays_listed_however_old(on, hermes, 
     restart(hermes, monkeypatch)
     call("work_list")
     work.app_act(on.home, "W1", "stop")
-    monkeypatch.setattr(work, "APP_RECENT_S", -86400.0)  # nothing counts as recent
+    backdate(on, "W1", 30)
     row, = work.app_list(on.home)["work"]
     assert row["status"] == "stopped" and row["actions"] == ["check", "continue", "send"]
 
@@ -3031,3 +3054,127 @@ def test_a_turn_beginning_moves_a_start_on_to_running(on, hermes):
     on.update("W1", status="starting")
     work.turn_started(WORKER_1)
     assert on.get("W1").status == "running"
+
+
+def test_the_user_pins_resolves_and_reopens_work_without_a_turn(on, hermes):
+    start()
+    on.update("W1", status="done", last_result="Found it.")
+    row, = work.app_list(on.home)["work"]
+    assert row["manage"] == ["pin", "resolve"] and not row["pinned"]
+    hermes.calls.clear()
+    on.mark_seen(["W1"])
+    pinned = work.app_act(on.home, "W1", "pin")
+    assert pinned["ok"] and pinned["work"]["pinned"] and pinned["work"]["manage"] == ["unpin", "resolve"]
+    assert not on.get("W1").changed_since_seen  # a pin isn't news for the coordinator
+    resolved = work.app_act(on.home, "W1", "resolve")
+    assert resolved["ok"] and resolved["work"]["closed"] and resolved["work"]["resolved_by"] == "user"
+    assert not resolved["work"]["pinned"] and resolved["work"]["manage"] == ["reopen"]
+    assert resolved["work"]["actions"] == []  # reopened first, then replied to
+    listed = work.app_list(on.home)
+    assert listed["work"] == [] and listed["resolved_count"] == 1
+    assert listed["workstream_sessions"] == [on.get("W1").session_id]  # its chat stays out of Chats
+    row, = work.app_list(on.home, resolved=True)["work"]
+    assert row["ref"] == "W1" and row["resolved_by"] == "user"
+    assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "not_now"
+    assert work.app_act(on.home, "W1", "pin")["error"] == "not_now"
+    on.mark_seen(["W1"])
+    reopened = work.app_act(on.home, "W1", "reopen")
+    assert reopened["ok"] and not reopened["work"]["closed"] and reopened["work"]["resolved_by"] == ""
+    assert "send" in reopened["work"]["actions"]
+    assert hermes.calls == []  # filing runs nothing
+    # The coordinator hears it's back.
+    note = work.digest(BOT_CHAT)
+    assert "W1" in note and "the user reopened it" in note
+
+
+def test_work_still_at_it_isnt_resolved(on, hermes):
+    start()
+    row, = work.app_list(on.home)["work"]
+    assert row["manage"] == ["pin"]
+    answer = work.app_act(on.home, "W1", "resolve")
+    assert answer["error"] == "still_running" and "Stop it first" in answer["note"]
+    assert not on.get("W1").closed_at
+    assert work.app_act(on.home, "W1", "reopen")["error"] == "not_now"
+    assert work.app_act(on.home, "W9", "pin")["error"] == "no_such_work"
+
+
+def test_asks_are_filed_too(on, hermes):
+    store = store_mod.Store(on.home)
+    waiting = store.add("ask_out", title="Ask Nahida", status="waiting")
+    answered = store.add("ask_out", title="Asked Nahida", status="done")
+    rows = {row["ref"]: row for row in work.app_list(on.home)["work"]}
+    assert rows[waiting.ref]["manage"] == ["pin"] and rows[answered.ref]["manage"] == ["pin", "resolve"]
+    assert work.app_act(on.home, waiting.ref, "resolve")["error"] == "still_running"
+    assert work.app_act(on.home, answered.ref, "resolve")["ok"]
+
+
+def test_the_bot_cant_close_work_the_user_pinned_or_reopened(on, hermes):
+    start()
+    on.update("W1", status="done", last_result="Found it.")
+    work.app_act(on.home, "W1", "pin")
+    assert call("work_close", {"ref": "W1"})["error"] == "pinned"
+    work.app_act(on.home, "W1", "unpin")
+    closed = call("work_close", {"ref": "W1"})
+    assert closed["ok"] and on.get("W1").resolved_by == "bot"
+    row, = work.app_list(on.home, resolved=True)["work"]
+    assert row["resolved_by"] == "bot"
+    work.app_act(on.home, "W1", "reopen")
+    assert call("work_close", {"ref": "W1"})["error"] == "reopened"
+    # Once it runs again, the bot may close it when it's done.
+    on.update("W1", turn_at=on.get("W1").reopened_at + 1)
+    assert call("work_close", {"ref": "W1"})["ok"]
+
+
+def test_work_send_reopening_resolved_work_clears_who_resolved_it(on, hermes):
+    start()
+    on.update("W1", status="done", last_result="Found it.")
+    work.app_act(on.home, "W1", "resolve")
+    assert call("work_send", {"ref": "W1", "text": "One more thing."})["ok"]
+    now = on.get("W1")
+    assert not now.closed_at and now.resolved_by == ""
+
+
+def test_the_resolved_list_pages_last_resolved_first(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "APP_RESOLVED_ROWS", 2)
+    store = store_mod.Store(on.home)
+    refs = [store.add("ask_out", title=f"Answer {n}", status="done").ref for n in range(3)]
+    for n, ref in enumerate(refs):
+        store.update(ref, closed_at=100.0 + n)
+    first = work.app_list(on.home, resolved=True)
+    assert [row["ref"] for row in first["work"]] == [refs[2], refs[1]] and first["more"]
+    rest = work.app_list(on.home, resolved=True, before=first["work"][-1]["closed_at"])
+    assert [row["ref"] for row in rest["work"]] == [refs[0]] and not rest["more"]
+
+
+def test_filing_is_offered_nothing_with_workstreams_off(on, hermes):
+    start()
+    on.update("W1", status="done")
+    on.set_policy("off")
+    work._policy_cache.clear()
+    row, = work.app_list(on.home)["work"]
+    assert row["manage"] == [] and work.app_act(on.home, "W1", "resolve")["error"] == "off"
+
+
+def test_the_bot_cant_withdraw_or_decline_an_ask_the_user_pinned(on, hermes):
+    store = store_mod.Store(on.home)
+    waiting = store.add("ask_out", title="Ask Nahida", status="waiting")
+    asked = store.add("ask_in", title="Nahida asks", status="running")
+    for ask in (waiting, asked):
+        work.app_act(on.home, ask.ref, "pin")
+        assert call("work_close", {"ref": ask.ref})["error"] == "pinned"
+        assert not on.get(ask.ref).closed_at
+        work.app_act(on.home, ask.ref, "unpin")
+    assert call("work_close", {"ref": waiting.ref})["ok"]
+    assert on.get(waiting.ref).resolved_by == "bot"
+    # Closed without its answer: it can't be taken up again.
+    row, = work.app_list(on.home, resolved=True)["work"]
+    assert row["manage"] == [] and work.app_act(on.home, waiting.ref, "reopen")["error"] == "not_now"
+
+
+def test_a_turn_reopening_resolved_work_clears_who_resolved_it(on, hermes):
+    start()
+    on.update("W1", status="done", last_result="Found it.")
+    work.app_act(on.home, "W1", "resolve")
+    work.turn_started(WORKER_1)
+    now = on.get("W1")
+    assert not now.closed_at and now.resolved_by == "" and now.status == "running"
