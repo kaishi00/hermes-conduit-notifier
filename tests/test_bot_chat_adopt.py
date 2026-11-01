@@ -138,9 +138,17 @@ def test_the_child_script_compiles():
     compile(adopt_mod.CHILD, "<bot_chat_adopt child>", "exec")
 
 
-def test_a_padded_title_is_still_the_bot_chat(tmp_path):
-    sid = _store(tmp_path, title=" Bot Chat\n")
-    assert adopt_mod.legacy_bot_chat(tmp_path) == sid
+def test_only_the_title_hermes_delivers_to_counts(tmp_path):
+    _store(tmp_path, title=" Bot Chat\n")  # Hermes' relay looks the chat up by its exact title
+    assert adopt_mod.legacy_bot_chat(tmp_path) is None
+
+
+def test_a_child_that_says_nothing_reports_its_last_error_line(tmp_path):
+    sid = _store(tmp_path)
+    run = lambda argv, env, **kwargs: SimpleNamespace(  # noqa: E731
+        stdout="", stderr="Traceback ...\nTypeError: discover_gateway_endpoint() got an unexpected keyword\n")
+    assert adopt_mod.adopt(tmp_path, sid, run=run) == (
+        "failed: TypeError: discover_gateway_endpoint() got an unexpected keyword")
 
 
 def test_a_store_unreadable_after_the_child_isnt_counted_as_moved(tmp_path, monkeypatch):

@@ -78,9 +78,10 @@ def legacy_bot_chat(home: Path) -> Optional[str]:
         columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
         if not {"id", "title", "source"} <= columns:
             return None
-        # Trimmed, as Desktop and Conduit find it; the newest when two match.
-        row = db.execute("SELECT * FROM sessions WHERE TRIM(title, ?) = ? ORDER BY rowid DESC LIMIT 1",
-                         (" \t\r\n", TITLE)).fetchone()
+        # The exact title, as Hermes' relay finds the chat it delivers to
+        # (SessionDB.get_session_by_title): that's the chat a refusal names.
+        row = db.execute("SELECT * FROM sessions WHERE title = ? ORDER BY rowid DESC LIMIT 1",
+                         (TITLE,)).fetchone()
         if row is None:
             return None
         row = dict(row)
@@ -152,7 +153,10 @@ try:
 except Exception as error:
     say("unsupported", detail=type(error).__name__)
 
-discovery = discover_gateway_endpoint(home, timeout=5)
+try:
+    discovery = discover_gateway_endpoint(home, timeout=5)
+except Exception as error:
+    say("failed", detail="discovery: " + type(error).__name__)
 if getattr(discovery, "state", None) != "ready" or getattr(discovery, "endpoint", None) is None:
     say("no_gateway", detail=str(getattr(discovery, "state", "")))
 
@@ -185,9 +189,14 @@ def adopt(home: Path, session_id: str, run: Callable[..., Any] = subprocess.run)
     try:
         done = run([sys.executable, "-c", CHILD, str(home), session_id], env=env, capture_output=True,
                    text=True, timeout=CHILD_TIMEOUT_S, check=False)
-        answer = json.loads((done.stdout or "").strip().splitlines()[-1])
+        lines = (done.stdout or "").strip().splitlines()
+        if not lines:
+            last = ((getattr(done, "stderr", "") or "").strip().splitlines() or ["no answer"])[-1]
+            raise RuntimeError(last[:200])
+        answer = json.loads(lines[-1])
     except Exception as error:  # noqa: BLE001 — a reason, never a crash
-        answer = {"status": "failed", "detail": type(error).__name__}
+        detail = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+        answer = {"status": "failed", "detail": detail}
     if not isinstance(answer, dict):
         answer = {"status": "failed", "detail": "answer"}
     after = legacy_bot_chat(home)
