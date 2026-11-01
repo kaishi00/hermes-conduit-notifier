@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 import yaml
 
-from conftest import COPY_IGNORE, PLUGIN, READY_TIMEOUT_S, ROOT, _free_port, _hermes_bin
+from conftest import COPY_IGNORE, PLUGIN, READY_TIMEOUT_S, ROOT, FakeSpeechServer, _free_port, _hermes_bin
 
 WORDS = 10
 WORD_DELAY_S = 0.4
@@ -117,9 +117,10 @@ class _FakeModel(BaseHTTPRequestHandler):
 class Listener:
     """The gateway's listener: Conduit's socket, signed in with the Webapp's session token."""
 
-    def __init__(self, port: int, home: Path) -> None:
+    def __init__(self, port: int, home: Path, speech: FakeSpeechServer) -> None:
         self.port = port
         self.home = home
+        self.speech = speech
 
     @property
     def token(self) -> str:
@@ -270,6 +271,7 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
     hermes = _hermes_bin()
     home = tmp_path_factory.mktemp("hermes-gateway-home")
     model = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModel)
+    speech = FakeSpeechServer()
     env = {**os.environ, "HERMES_HOME": str(home), "NO_COLOR": "1"}
     log_path = home / "gateway.log"
     log = None
@@ -280,10 +282,13 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
         log = log_path.open("w")
         threading.Thread(target=model.serve_forever, daemon=True).start()
         serving = True
+        speech.start()
         shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
         (home / "config.yaml").write_text(yaml.safe_dump({
             "plugins": {"enabled": [PLUGIN]},
             "webapp": {"enabled": True, "port": port},
+            # A speech server to relay to, so a signed plugin socket shows it got past sign-in.
+            "voice": {"speech_server": {"url": speech.url("listener")}},
             # Any switch on a chat with context asks first, so the confirm exchange can be tried.
             "model": {"default": "fake-model", "provider": "custom", "switch_context_confirm_tokens": 1,
                       "base_url": f"http://127.0.0.1:{model.server_address[1]}/v1", "api_key": "fake"},
@@ -302,7 +307,7 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
                         if resp.status == 200:
                             break
             time.sleep(0.5)
-        yield Listener(port, home)
+        yield Listener(port, home, speech)
     finally:
         if proc is not None:
             with contextlib.suppress(ProcessLookupError):
@@ -319,6 +324,7 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
         if serving:
             model.shutdown()
         model.server_close()
+        speech.stop()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):
             print(log_path.read_text()[-8000:])
 
@@ -331,9 +337,19 @@ def test_ready_names_the_session_authority_and_the_plugin_is_served(listener):
     # The listener mounts the dashboard, so the plugin's capabilities route answers on it.
     assert listener.plugin_get("capabilities") == 200
     # And the speech-server socket keeps the dashboard's sign-in: the plugin closes one
-    # without the session token with 4401, and lets one with it past the check.
+    # without the session token with 4401, and relays one with it to the speech server.
     assert asyncio.run(_socket_close(listener, "speech-server/socket", signed=False)) == 4401
-    assert asyncio.run(_socket_close(listener, "speech-server/socket", signed=True)) != 4401
+    assert asyncio.run(_socket_first_frame(listener, "speech-server/socket")) == {"type": "ready"}
+    assert listener.speech.paths == ["/listener"]
+
+
+async def _socket_first_frame(listener: "Listener", path: str) -> Any:
+    """The first frame a signed plugin socket brings back."""
+    from websockets.asyncio.client import connect
+
+    async with connect(f"ws://127.0.0.1:{listener.port}/api/plugins/{PLUGIN}/{path}?token={listener.token}",
+                       open_timeout=15, proxy=None) as ws:
+        return json.loads(await asyncio.wait_for(ws.recv(), 15))
 
 
 async def _socket_close(listener: "Listener", path: str, signed: bool) -> Optional[int]:
@@ -377,12 +393,17 @@ def test_a_turn_in_conduits_authority_shapes(listener):
         assert _refusal(stale) == "stale_generation", stale
 
         await sock.result("prompt.submit", _submit(sid, "second"))
+        # Done when the chat is idle with a reply after "second", however the steer ran.
         deadline = time.monotonic() + 60
-        while sum(1 for e in sock.events if e.get("type") == "message.complete" and e.get("session_id") == sid) < 2:
-            assert time.monotonic() < deadline, "the second turn never completed"
-            await asyncio.sleep(0.2)
+        while True:
+            full = await sock.result("session.resume", _resume(sid, omit_messages=False))
+            roles = [(m.get("role"), m.get("text") or m.get("content")) for m in full["messages"]]
+            asked = [i for i, (role, text) in enumerate(roles) if role == "user" and text == "second"]
+            if full.get("running") is False and asked and any(r == "assistant" for r, _ in roles[asked[-1]:]):
+                break
+            assert time.monotonic() < deadline, f"the second turn never completed: {roles}"
+            await asyncio.sleep(0.5)
 
-        full = await sock.result("session.resume", _resume(sid, omit_messages=False))
         replies = [m for m in full["messages"] if m.get("role") == "assistant"]
         assert len(replies) >= 2 and all(isinstance(m.get("row_id"), int) for m in replies), full["messages"]
         through = replies[0]["row_id"]
@@ -415,8 +436,9 @@ def test_a_turn_in_conduits_authority_shapes(listener):
         assert compressed["operation"] == "compress" and compressed.get("status"), compressed
         assert isinstance((compressed.get("summary") or {}).get("headline"), str), compressed
 
-        pending = await sock.result("approval.pending", {"session_id": sid})
-        assert pending.get("approvals") == [], pending
+        # A chat this short has nothing to compress, and Hermes says so: the verb ran and
+        # left the rows as they were (a real compression needs a long chat and a real model).
+        assert compressed["status"] == "noop" and compressed["summary"].get("noop") is True, compressed
 
     listener.run(script)
 
@@ -460,6 +482,11 @@ def test_prompts_are_answered_from_a_socket_that_never_saw_them_asked(listener):
             prompts = snapshot["prompts"]
             assert len(prompts) == 1 and prompts[0].get("prompt_id"), snapshot
             assert isinstance(prompts[0].get("execution_generation"), int), prompts
+            if method == "approval.respond":
+                # Conduit fills a card's id from approval.pending: the same id.
+                pending = await sock.result("approval.pending", {"session_id": sid})
+                ids = [a.get("id") or a.get("request_id") or a.get("prompt_id") for a in pending.get("approvals") or []]
+                assert prompts[0]["prompt_id"] in ids, pending
             done = await sock.result(method, {"session_id": sid, "prompt_id": prompts[0]["prompt_id"],
                                               "execution_generation": prompts[0]["execution_generation"], **answer})
             assert done.get("status") == "resolved", done

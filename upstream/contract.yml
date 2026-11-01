@@ -99,9 +99,11 @@ notes:
     them apart; the authority takes its own shapes for the same verbs (submission_id,
     execution_generation, session.mutate for renames, branches, compression and model picks) and
     refuses the dashboard's before running anything, which Conduit's one resend relies on.
-    The plugin's routes answer there, but the features that look up a chat's live session in the
-    dashboard's chat registry (Predictions, Watch jobs, Local Live's Hermes turns, takeover,
-    turn-surface) don't find the authority's chats until they're ported (an open gap in the entry).
+    The plugin's capabilities route and its signed speech-server socket answer there (checked), but
+    the features that look up a chat's live session in the dashboard's chat registry don't find the
+    authority's chats until they're ported (an open gap in the entry): Predictions says the chat
+    isn't open, takeover reads every chat as free, and Watch jobs, Local Live's Hermes turns and
+    turn-surface miss them.
 
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
