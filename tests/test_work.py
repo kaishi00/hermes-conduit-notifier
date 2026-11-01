@@ -1636,21 +1636,80 @@ def _chat_db(home, rows):
 
     with sqlite3.connect(home / "state.db") as con:
         con.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
-                    "content TEXT, display_kind TEXT)")
+                    "content TEXT, display_kind TEXT, active INTEGER NOT NULL DEFAULT 1)")
         con.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, "
                     "end_reason TEXT)")
         con.executemany("INSERT INTO messages (session_id, role, content, display_kind) VALUES (?, ?, ?, ?)", rows)
 
 
-def test_the_brief_quotes_the_users_own_last_words(on, hermes, home):
-    _chat_db(home, [(BOT_CHAT, "user", "Delete the old backups in /srv, yes all of them", None),
-                    (BOT_CHAT, "assistant", "On it.", None),
-                    (BOT_CHAT, "user", "Work update from your workstreams. W9 finished.", "hidden"),
+def test_the_brief_quotes_the_message_the_bot_chat_is_answering(on, hermes, home):
+    _chat_db(home, [(BOT_CHAT, "user", "Something older", None),
+                    (BOT_CHAT, "assistant", "Done.", None),
+                    (BOT_CHAT, "user", "Delete the old backups in /srv,\nyes all of them", None),
                     (OTHER_CHAT, "user", "Something else", None)])
     start("Old backups", "Remove the old backups in /srv.")
     brief = _brief_text(hermes)
-    assert "«Delete the old backups in /srv, yes all of them»" in brief
-    assert "W9 finished" not in brief and "Something else" not in brief
+    assert "«Delete the old backups in /srv,\nyes all of them»" in brief and "as they wrote it (" in brief
+    assert "Something older" not in brief and "Something else" not in brief
+
+
+def test_a_start_from_a_work_update_quotes_no_older_message(on, hermes, home):
+    _chat_db(home, [(BOT_CHAT, "user", "Fix the login bug", None),
+                    (BOT_CHAT, "assistant", "Started W9.", None),
+                    (BOT_CHAT, "user", "Work update from your workstreams. W9 finished.", "hidden")])
+    start("Deploy", "Deploy the fix.")
+    brief = _brief_text(hermes)
+    assert "Fix the login bug" not in brief and "W9 finished" not in brief and "is answering now" not in brief
+
+
+def test_an_inactive_user_row_isnt_quoted(on, hermes, home):
+    _chat_db(home, [(BOT_CHAT, "user", "Keep this", None)])
+    import sqlite3
+
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("INSERT INTO messages (session_id, role, content, active) VALUES (?, 'user', 'Rewound', 0)",
+                    (BOT_CHAT,))
+    start()
+    brief = _brief_text(hermes)
+    assert "«Keep this»" in brief and "Rewound" not in brief
+
+
+def test_a_long_message_is_cut_and_says_so(on, hermes, home):
+    _chat_db(home, [(BOT_CHAT, "user", "y" * 2000, None)])
+    start()
+    brief = _brief_text(hermes)
+    assert "shortened to 1500 characters" in brief and "«" + "y" * 1499 + "…»" in brief
+
+
+def test_notes_grow_to_the_cap_refuse_an_empty_replace_and_clear(on, hermes):
+    assert call("work_note", {"text": "x" * 2990})["ok"]
+    assert call("work_note", {"text": "one more line"})["error"] == "too_long"
+    assert call("work_note", {"text": "", "how": "replace"})["error"] == "missing"
+    assert call("work_note", {"how": "clear"})["notes"] == ""
+    assert call("work_note", {"text": "fresh"})["notes"] == "- fresh"
+
+
+def test_unreadable_notes_dont_hold_a_slot(on, hermes, home):
+    path = work._notes_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe bad")
+    assert start()["ok"]
+    assert "notes on the user's work" not in _brief_text(hermes)
+
+
+def test_a_brief_that_fails_settles_the_row(on, hermes, monkeypatch):
+    def broken(*args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(work, "_brief", broken)
+    assert start()["error"] == "hermes"
+    assert on.get("W1").status == "failed"
+
+
+def test_a_config_hermes_cant_read_counts_as_manual(on, hermes, home):
+    (home / "config.yaml").write_text("approvals: [unclosed\n")
+    start()
+    assert "only the user's own words count as their go-ahead" in _brief_text(hermes)
 
 
 @pytest.mark.parametrize("mode, expected, absent", [

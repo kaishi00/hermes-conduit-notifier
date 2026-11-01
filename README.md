@@ -1402,10 +1402,12 @@ she tells you about. It's off until you turn it on for a bot:
   session id, so a bot only ever reaches its own work. `work_ask` and
   `work_reply` (asks between bots) say they aren't available yet.
 - Every new workstream's brief carries the coordinator's notes (`work_note`,
-  kept in `<profile>/conduit/work-notes.md`) and your own last message to the
-  Bot Chat, quoted as yours. What counts as your go-ahead there follows the
+  kept in `<profile>/conduit/work-notes.md`, labelled as data, never as your
+  go-ahead) and the message of yours the Bot Chat is answering, quoted as
+  yours. A start from a work update quotes nothing, so an older message never
+  passes for a go-ahead. What counts as your go-ahead there follows the
   bot's `approvals.mode`: under manual, only your own words do (your quoted
-  message, or what you write in the workstream), never the coordinator's
+  message when it covers the step, or what you write in the workstream), never the coordinator's
   instructions alone; under smart, Hermes' approvals decide; under off, the
   brief is enough.
 - Strict leaves the coordinator the work tools, `clarify` and `memory`;
