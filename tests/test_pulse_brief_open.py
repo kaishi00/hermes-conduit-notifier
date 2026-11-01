@@ -124,3 +124,25 @@ def test_when_all_it_keeps_open_is_on_cards_the_brief_says_so(live):
     card_about(live, rapids, now - 20 * 3600)
     text = brief(live, now)
     assert pulse.brief.NOTHING_NEW_OPEN in text and "RAPIDS" not in text
+
+
+def test_a_card_with_nothing_to_key_on_keeps_its_entry_out_by_its_words(live):
+    # Kwan's birthday on Tuesday's card came from the model with no ref (Eric, 2026-10-31).
+    phone_home(live.home)
+    now = at(14, 7)
+    live.store.add_cards([{"kind": pulse.store.NOTICED, "level": "screen", "topic": "reminder",
+                           "news": "File taxes by 31 October.", "created_at": now - 2 * 86400}])
+    text = brief(live, now)
+    assert "File taxes" not in text and "Buy milk" in text
+
+
+def test_a_remembered_item_whose_refless_card_is_open_stays_out_by_its_words(live):
+    live.store.set("memory", True)
+    now = at(14, 7)
+    commitment(live, "The user will get their RAPIDS ID card.", due_at=at(20, 12), words="RAPIDS ID card",
+               said_at=now - 7200)
+    commitment(live, said_at=now - 7200)
+    live.store.add_cards([{"kind": pulse.store.NOTICED, "level": "screen", "topic": "commitment",
+                           "news": "Get the RAPIDS ID card on Tuesday 20 October.", "created_at": now - 86400}])
+    text = brief(live, now)
+    assert "RAPIDS" not in text and "renew their passport" in text

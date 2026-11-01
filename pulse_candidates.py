@@ -554,14 +554,20 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     done, put away or rated not useful. That card says it still, so nothing
     makes another (Eric, 2026-10-29: "if it's still open, why are we
     repeating it?"). Only on the day it's due may one come again, once
-    (due_again), so a deadline can't slip by behind an earlier card."""
+    (due_again), so a deadline can't slip by behind an earlier card. A card
+    with no item or ref (the model found it in a chat) counts by its words:
+    an open card of the same kind from the last 30 days that names the same
+    person or thing on the same day (same_subject)."""
     about = lambda row: (row["item_id"] if row["origin"] == MEMORY and row.get("item_id") is not None else None,
                          str(row.get("ref") or "") if str(row.get("ref") or "").startswith((REMINDER, EVENT)) else "")
     keys = [about(row) for row in rows]
+    keyed = lambda card: card["item_id"] is not None or str(card.get("ref") or "").startswith((REMINDER, EVENT))
     cards = pulse_store.open_cards_about([item for item, _ in keys if item is not None],
                                          [ref for _, ref in keys if ref], (store.NOTICED, "followup"))
-    if not cards:
-        return []
+    # A card with no item or ref (the model found it, or it came before refs)
+    # is matched by what it says (Eric, 2026-10-31: Kwan's birthday again,
+    # Tuesday's card still open, both from the model with nothing to key on).
+    worded = pulse_store.open_cards_on([str(row.get("kind") or "") for row in rows], now - SAID_WINDOW_S)
     by_item: dict[int, list[dict]] = {}
     by_ref: dict[str, list[dict]] = {}
     for card in cards:
@@ -572,12 +578,119 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     out = []
     for row, (item, ref) in zip(rows, keys):
         found = (by_item.get(item, []) if item is not None else []) + (by_ref.get(ref, []) if ref else [])
+        # The look ahead's own dates and deadlines (their own refs) keep their lead times.
+        own = str(row.get("ref") or "")
+        if not found and row.get("text") and (not own or own.startswith((REMINDER, EVENT))):
+            # A remembered item or reminder of its own isn't another's: it
+            # only counts a card that has nothing to key on.
+            found = [card for card in worded
+                     if card["topic"] == row.get("kind") and not (keyed(card) and (item is not None or ref))
+                     and same_subject(card["news"], str(row["text"]))]
         if not found:
             continue
         if due_again(row, max(card["created_at"] for card in found), now, due=_due_point(pulse_store, row)):
             continue  # its day: once more
         out.append(row)
     return out
+
+
+# How far back an open card is matched by its words (still_open).
+SAID_WINDOW_S = 30 * 86400.0
+_MONTHS = ("january february march april may june july august september october november december").split()
+_DATE_WORDS = frozenset(
+    "monday tuesday wednesday thursday friday saturday sunday jan feb mar apr jun jul aug sep sept oct nov dec".split()
+    + _MONTHS)
+# Short weekdays, counted only capitalised ("Fri 6 November", not "sat").
+_SHORT_DAYS = {"mon": "monday", "tue": "tuesday", "tues": "tuesday", "wed": "wednesday", "weds": "wednesday",
+               "thu": "thursday", "thur": "thursday", "thurs": "thursday", "fri": "friday", "sat": "saturday",
+               "sun": "sunday"}
+# Verbs a line starts with ("Send Mara the deck"): never a name, and no help
+# telling two things apart.
+_VERBS = frozenset(
+    "remember buy send get book call check follow file renew pay sign bring take meet read submit cancel order "
+    "pick return schedule email text ask tell write finish fix update prepare confirm register apply collect "
+    "drop visit see go make set remind plan review look keep attend join start stop move pack wish".split())
+# Capitalised words that start a sentence rather than name something.
+_STARTERS = _VERBS | frozenset(
+    "the a an your you i it its this that there these those pulse hermes today tomorrow tonight don't "
+    "reminder birthday happy worth time next".split())
+# Words too common to tell two things apart when neither names anyone.
+_COMMON = frozenset(
+    "user user's will their they them have with from that this need needs should would could about before "
+    "after until when what which there here been being into onto over your yours just also still then than "
+    "more some time today tomorrow week weeks days".split())
+_ISO_DAY = re.compile(r"(?<!\d)\d{4}-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2})?)?(?!\d)")  # "2026-11-06T18:00" too
+# A clock time ("18:00", "18.00", "6 pm"), a year, or an age ("21st birthday").
+_NOT_A_DAY = re.compile(r"(?<!\d)\d{1,2}[:.]\d{2}(?!\d)|\b\d{1,2}\s*(?:am|pm|a\.m\.|p\.m\.)(?!\w)|\b\d{4}\b"
+                        r"|\b\d{1,3}(?:st|nd|rd|th)\s+(?=birthday|anniversary)", re.IGNORECASE)
+
+
+def _marks(text: str) -> tuple[list[str], set[str], set[str], set[str]]:
+    """What ``text`` names in order (capitalised words, possessive 's dropped), its
+    days of the month (1 to 31, "6th" as 6; an ISO date as its day and
+    month; years and clock times left out), its other date words (weekdays,
+    months) and its longer plain words."""
+    text = _ISO_DAY.sub(lambda m: f" {int(m.group(2))} {_MONTHS[int(m.group(1)) - 1]} "
+                        if 1 <= int(m.group(1)) <= 12 else " ", text)
+    text = _NOT_A_DAY.sub(" ", text)
+    names, days, dates, words = [], set(), set(), set()
+    for word in re.findall(r"\w+(?:['\u2019]\w+)?", text):
+        bare = re.sub(r"['\u2019]s$", "", word).casefold()
+        number = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?", bare)
+        if number:
+            if 1 <= int(number.group(1)) <= 31:
+                days.add(str(int(number.group(1))))
+        elif any(char.isdigit() for char in bare):
+            continue
+        elif bare in _DATE_WORDS and (bare != "may" or (word[0] == "M" and bare == word.casefold())):
+            dates.add(bare)  # "you may" and "May's birthday" aren't the month
+        elif bare in _SHORT_DAYS and word[0].isupper():
+            dates.add(_SHORT_DAYS[bare])
+        elif word[0].isupper() and bare not in _STARTERS:
+            if bare not in names:
+                names.append(bare)
+        elif len(bare) >= 4 and bare not in _COMMON:
+            words.add(bare)
+    return names, days, dates, words
+
+
+def _month_set(dates: set[str]) -> set[int]:
+    """The months among ``dates`` ("nov" and "november" alike)."""
+    return {index for index, month in enumerate(_MONTHS) for word in dates
+            if word == month or (len(word) >= 3 and month.startswith(word))}
+
+
+def same_subject(said: str, text: str) -> bool:
+    """Whether ``text`` is about what an earlier card ``said``. It names no
+    one the card doesn't, and its first name is the card's first (so Anna
+    Ho's birthday isn't Ho's either way round, and Long's isn't Kwan's,
+    while "Kwan" is still Kwan Cheung Ho); naming no one, it shares two
+    plain words with the card ("renew", "passport"). And it's on the same
+    day: the same day of the month when both give one (so a passport on the
+    20th isn't a birthday on the 6th, nor the 6th of December the 6th of
+    November), else a weekday or month in common
+    and a plain word that isn't a verb like "send" (Mara's deck on Friday
+    isn't her budget). A capitalised word the other has in lower case
+    ("Dentist") isn't a name. Two things for one person on the same day
+    count as one until the day before it's due (due_again)."""
+    names_a, days_a, dates_a, words_a = _marks(said)
+    names_b, days_b, dates_b, words_b = _marks(text)
+    # A capitalised word the other text has as a plain word isn't a name
+    # ("Dentist appointment for Kwan" and "Kwan's dentist appointment").
+    names_a, names_b = [n for n in names_a if n not in words_b], [n for n in names_b if n not in words_a]
+    if names_b and names_a:
+        alike = set(names_b) <= set(names_a) and names_b[0] == names_a[0]
+    elif names_b:
+        alike = False
+    else:
+        alike = len((set(names_a) | words_a) & words_b) >= 2
+    months_a, months_b = (_month_set(dates_a), _month_set(dates_b))
+    if days_a and days_b:  # the 6th of December isn't the 6th of November
+        dated = bool(days_a & days_b) and (not months_a or not months_b or bool(months_a & months_b))
+    else:
+        weekdays = (dates_a & dates_b) - set(_MONTHS) - {month[:3] for month in _MONTHS} - {"sept"}
+        dated = bool(weekdays or months_a & months_b) and bool((words_a & words_b) - _VERBS)
+    return alike and dated
 
 
 def on_cards(pulse_store: store.PulseStore, now: float, zone: Optional[tzinfo], *, items: Sequence[dict] = (),
@@ -587,14 +700,29 @@ def on_cards(pulse_store: store.PulseStore, now: float, zone: Optional[tzinfo], 
     the brief): of the remembered ``items`` and the phone's ``reminders`` and
     calendar ``events``, those whose card is still open (still_open: on the
     day it's due one more may come, once, as in a report) and the reminders
-    and entries put away for good. Item ids, and REMINDER and EVENT refs."""
-    rows = ([{"origin": MEMORY, "item_id": item["id"], "due_at": item.get("due_at")} for item in items]
-            + [{"origin": MODEL, "item_id": None, "ref": reminder_ref(reminder),
+    and entries put away for good. Item ids, and REMINDER and EVENT refs,
+    else the card's words (same_subject)."""
+    rows = ([{"origin": MEMORY, "item_id": item["id"], "due_at": item.get("due_at"), "kind": item.get("kind"),
+              "text": _said_as(item.get("text"), item.get("due_at"), zone)} for item in items]
+            + [{"origin": MODEL, "item_id": None, "ref": reminder_ref(reminder), "kind": "reminder",
                 "due_at": _phone_due(reminder.get("due"), zone)} for reminder in reminders if reminder.get("id")]
-            + [{"origin": MODEL, "item_id": None, "ref": event_ref(event),
+            + [{"origin": MODEL, "item_id": None, "ref": event_ref(event), "kind": "date",
                 "due_at": _due(str(event.get("start") or "")[:10], zone)} for event in events if event.get("id")])
+    for row, entry in zip(rows[len(items):], [*[r for r in reminders if r.get("id")], *[e for e in events if e.get("id")]]):
+        row["text"] = _said_as(entry.get("title"), row["due_at"], zone)
     said = {row["item_id"] if row["origin"] == MEMORY else row["ref"] for row in still_open(pulse_store, rows, now)}
     return said | reminders_raised(pulse_store, [str(row.get("ref") or "") for row in rows], now)[1]
+
+
+def _said_as(text: Any, due_at: Optional[float], zone: Optional[tzinfo]) -> str:
+    """``text`` with the day it's due, as a card would say it ("Friday 6
+    November"), so an open card with nothing to key on can be matched by
+    its words (same_subject)."""
+    text = str(text or "").strip()
+    if not text or due_at is None:
+        return text
+    day = datetime.fromtimestamp(due_at, zone or timezone.utc)
+    return f"{text} {day:%A} {day.day} {day:%B}"
 
 
 def _due_point(pulse_store: store.PulseStore, row: dict) -> Optional[float]:
