@@ -113,7 +113,9 @@ CREATE TABLE IF NOT EXISTS outbox (
 
 _JSON_FIELDS = ("requested_by", "executor", "reply_to", "progress")
 # Columns added after a registry's first version: (name, definition).
-_ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL NOT NULL DEFAULT 0"))
+_ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL NOT NULL DEFAULT 0"),
+                  ("pinned_at", "REAL NOT NULL DEFAULT 0"), ("resolved_by", "TEXT NOT NULL DEFAULT ''"),
+                  ("reopened_at", "REAL NOT NULL DEFAULT 0"))
 # A workstream holding one of its bot's running slots: closed or not, its
 # session is still at work.
 _RUNNING = "kind = 'workstream' AND status IN ('starting', 'running', 'needs_you')"
@@ -147,6 +149,13 @@ class Work:
     # When the workstream's latest turn started: a restart reads the steps
     # since then as the turn it stopped.
     turn_at: float = 0.0
+    # The user pinned it in Conduit's Work panel (0: not pinned).
+    pinned_at: float = 0.0
+    # Who resolved it (closed it): "user" from the Work panel, "bot" with
+    # work_close; empty while it's open.
+    resolved_by: str = ""
+    # When the user last reopened it from the Work panel's Resolved list.
+    reopened_at: float = 0.0
 
     @property
     def active(self) -> bool:
@@ -335,6 +344,28 @@ class Store:
             rows = con.execute(query, params).fetchall()
         return [_work(row) for row in rows]
 
+    def resolved(self, *, before: float | None = None, limit: int = 50) -> list[Work]:
+        """Closed rows, last closed first; ``before``: only those closed
+        before that time (the next page)."""
+        if not self.path.is_file():
+            return []
+        query = "SELECT * FROM work WHERE closed_at > 0"
+        params: tuple = ()
+        if before is not None:
+            query += " AND closed_at < ?"
+            params = (before,)
+        query += " ORDER BY closed_at DESC, created_at DESC LIMIT ?"
+        with self._db(write=False) as con:
+            rows = con.execute(query, (*params, limit)).fetchall()
+        return [_work(row) for row in rows]
+
+    def count(self, *, closed: bool) -> int:
+        """How many rows are closed (``closed``) or open."""
+        if not self.path.is_file():
+            return 0
+        with self._db(write=False) as con:
+            return con.execute("SELECT COUNT(*) FROM work WHERE closed_at " + ("> 0" if closed else "= 0")).fetchone()[0]
+
     def by_ask(self, ask_id: Any, kind: str) -> Optional[Work]:
         """The row of this kind an ask between bots shares its id with."""
         if not isinstance(ask_id, str) or not ask_id or not self.path.is_file():
@@ -367,7 +398,8 @@ class Store:
             running = con.execute(f"SELECT COUNT(*) FROM work WHERE {_RUNNING} AND ref != ?", (ref,)).fetchone()[0]
             if running >= running_limit:
                 return False
-            changed = con.execute("UPDATE work SET status = 'running', closed_at = 0, error = '', updated_at = ? "
+            changed = con.execute("UPDATE work SET status = 'running', closed_at = 0, resolved_by = '', error = '', "
+                                  "updated_at = ? "
                                   "WHERE ref = ?" + (" AND closed_at = 0" if if_open else ""),
                                   (time.time(), ref)).rowcount
         return bool(changed)
@@ -379,7 +411,7 @@ class Store:
         The row as written, or None when nothing was (no row, or not in
         those states)."""
         allowed = {"session_id", "status", "last_result", "error", "title", "goal", "cwd", "repo", "seen_at",
-                   "closed_at", "turn_at", *_JSON_FIELDS}
+                   "closed_at", "turn_at", "pinned_at", "resolved_by", "reopened_at", *_JSON_FIELDS}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown fields {sorted(unknown)}")
@@ -390,9 +422,9 @@ class Store:
         if "title" in fields:
             fields["title"] = _clip(fields["title"], TITLE_CHARS)
         values = {key: (json.dumps(value) if key in _JSON_FIELDS else value) for key, value in fields.items()}
-        # Seen marks and a worker's checklist aren't changes the
-        # coordinator's "new since your last turn" is about.
-        if set(fields) - {"seen_at", "progress", "turn_at"}:
+        # Seen marks, a worker's checklist and the user's pin aren't changes
+        # the coordinator's "new since your last turn" is about.
+        if set(fields) - {"seen_at", "progress", "turn_at", "pinned_at"}:
             values["updated_at"] = time.time()
         if not values:
             return self.get(ref)

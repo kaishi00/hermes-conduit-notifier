@@ -1478,15 +1478,26 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, work}` |
+| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, resolved_count, unlisted, work}` |
+| GET | `/api/plugins/conduit_push/workstreams?resolved=1&before=<closed_at>` | `{ok, ..., work, more}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/send` with `{text, how?}` | `{ok, outcome, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
+| POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
 
-- `work` lists active work first, then what changed in the last week:
-  workstreams, and asks to and from other bots (`kind` `ask_out` with `bot`,
-  the bot it's waiting on, or `ask_in`). Each row has its status, checklist,
-  the step it's on, its last result, and `actions`: what you can do with it
-  now. `counts` has `working`, `needs_you` (approvals, questions and work a
+- `work` lists every open (unresolved) row, however old: active work first,
+  then the rest by when it last changed; past 100 settled rows the oldest
+  are left out and counted in `unlisted`. Rows are workstreams, and asks to
+  and from other bots (`kind` `ask_out` with `bot`, the bot it's waiting on,
+  or `ask_in`). Each row has its status, checklist, the step it's on, its
+  last result, `pinned`, `actions` (what you can do with it now) and
+  `manage` (how you can file it).
+- Work leaves the list when it's resolved: by you (`resolve`, refused with
+  `still_running` while it's at work: stop it first) or by the bot
+  (`work_close`). Nothing resolves itself. `resolved=1` lists resolved work,
+  last resolved first, 50 at a time, with `closed_at` and `resolved_by`
+  (`user` or `bot`); `reopen` brings a row back and tells the coordinator.
+  The bot can't close work you pinned, or work you reopened until it runs
+  again. Resolving unpins it. `counts` has `working`, `needs_you` (approvals, questions and work a
   restart left for you), `ready` and `waiting` (asks to other bots).
 - `check` (Check first) is offered when a restart cut off a step that can
   change things (`uncertain`): the workstream is asked to find out whether
@@ -1496,7 +1507,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   offers nothing until its first turn begins, and Stop once it has been
   starting for two minutes since its chat was made.
 - A refusal has `code` and `detail`: a 4xx for `no_such_work`, `not_now`,
-  `starting`, `busy`, `open_elsewhere`, `off`, `missing`, `unknown_action`
+  `starting`, `still_running`, `busy`, `open_elsewhere`, `off`, `missing`, `unknown_action`
   and `too_long`, a 502 (`hermes`) when Hermes refused it, and a 503
   (`unavailable`) when the session API isn't in this process.
 
