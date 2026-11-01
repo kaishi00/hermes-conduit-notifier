@@ -274,7 +274,9 @@ _wake_lock = threading.Lock()
 # (home, coordinator) -> (lines waiting, the timer that sends them)
 _wakes: dict[tuple[str, str], tuple[list[str], Any]] = {}
 _swept: set[str] = set()
-_sweep_lock = threading.Lock()
+_sweep_lock = threading.RLock()
+# Homes whose sweep is under way (in this thread, as the lock is held).
+_sweeping: set[str] = set()
 _PROCESS_STARTED = time.time()
 # Workstreams a work_send may be redirecting: the superseded turn's end
 # (interrupted) leaves them running for the redirected turn to settle.
@@ -533,6 +535,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
                 logger.warning("conduit_push: stopping a workstream failed", exc_info=True)
                 error = type(error).__name__
             return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't stop it: {error}"}
+        # A stop ends the continued turn too: the next restart may continue it again.
+        store.set_meta(_CONTINUED + work.ref, "")
         if stopped:
             return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
                     "note": f"Stopped {work.ref}: {work.title}. work_send continues it."}
@@ -1252,30 +1256,41 @@ def _sweep(home: Path, store: work_store.Store, broker: Optional[work_broker.Bro
     key = str(home)
     if key in _swept:
         return
-    # Held until the sweep is written, so a second sweep waits for it; a row
-    # made after the live set was read is left out of it.
+    # Held until recovery has settled, so a start or send from another
+    # thread waits for it (marked swept only then); a row made after the
+    # live set was read is left out of it. Reentrant, and a call from inside
+    # the sweep itself returns.
     with _sweep_lock:
-        if key in _swept:
+        if key in _swept or key in _sweeping:
             return
+        _sweeping.add(key)
         try:
-            broker = broker or work_broker.Broker(home)
-            read_at = time.time()
-            live = broker.live_session_ids()
-        except work_broker.BrokerError:
-            return
-        # Only rows from before this process: a restart stopped those, and a
-        # start this process is making (its session not made yet) is left alone.
-        stopped = store.interrupt_running(live, before=min(read_at, _PROCESS_STARTED))
-        _swept.add(key)
-        if stopped:
-            logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
-        # Still under the lock: a start or send waits for recovery to settle.
-        for step, run in (("recovering", lambda: _recover(home, store, broker, stopped)),
-                          ("replaying the outbox", lambda: _replay(home, store, broker))):
-            try:
-                run()
-            except Exception:  # noqa: BLE001 — the digest still shows the work as it is
-                logger.warning("conduit_push: %s after a restart failed", step, exc_info=True)
+            if _sweep_once(home, store, broker):
+                _swept.add(key)
+        finally:
+            _sweeping.discard(key)
+
+
+def _sweep_once(home: Path, store: work_store.Store, broker: Optional[work_broker.Broker]) -> bool:
+    """False when the session host can't be read yet (tried again later)."""
+    try:
+        broker = broker or work_broker.Broker(home)
+        read_at = time.time()
+        live = broker.live_session_ids()
+    except work_broker.BrokerError:
+        return False
+    # Only rows from before this process: a restart stopped those, and a
+    # start this process is making (its session not made yet) is left alone.
+    stopped = store.interrupt_running(live, before=min(read_at, _PROCESS_STARTED))
+    if stopped:
+        logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
+    for step, run in (("recovering", lambda: _recover(home, store, broker, stopped)),
+                      ("replaying the outbox", lambda: _replay(home, store, broker))):
+        try:
+            run()
+        except Exception:  # noqa: BLE001 — the digest still shows the work as it is
+            logger.warning("conduit_push: %s after a restart failed", step, exc_info=True)
+    return True
 
 
 # Recovery after a restart (C.7): recover the work, never re-run it blindly
@@ -1286,7 +1301,18 @@ def _sweep(home: Path, store: work_store.Store, broker: Optional[work_broker.Bro
 # one that changes things.
 READ_TOOLS = frozenset({"read_file", "search_files", "web_search", "web_extract", "session_search", "skills_list",
                         "skill_view", "conduit_health", "conduit_location", "conduit_inbox", "clarify", "todo",
-                        "work_progress", *BRIDGE})
+                        "work_progress", "tool_search", "tool_describe"})
+# A bridged step's journal name: this, then the tools its tool_call calls.
+BRIDGED = "tool_call:"
+
+
+def _reads_only(tool: str) -> bool:
+    """A step that changes nothing: a read, or a tool_call whose every call
+    is one (a call that can't be read counts as a change)."""
+    if tool.startswith(BRIDGED):
+        names = [name for name in tool[len(BRIDGED):].split(",") if name]
+        return bool(names) and all(name in READ_TOOLS for name in names)
+    return tool in READ_TOOLS
 # Meta key: a workstream continued after a restart, until a turn of it ends.
 _CONTINUED = "continued:"
 # How old a send the outbox still looks into after a restart.
@@ -1307,15 +1333,20 @@ def _recover(home: Path, store: work_store.Store, broker: Optional[work_broker.B
     user, and the coordinator says so. Hermes' own re-run of the turn is
     retired either way."""
     mode = store.after_restart()
+    missed = _take_unjournaled(home)
     for ref in refs:
         work = store.get(ref)
         if work is None or not work.session_id:
             continue
         steps = [step for step in store.steps(ref, limit=500) if step["started_at"] >= (work.turn_at or 0.0)]
-        uncertain = [step for step in steps if step["tool"] not in READ_TOOLS
+        uncertain = [step for step in steps if not _reads_only(step["tool"])
                      and (not step["ended_at"] or step["outcome"] == "timed_out")]
+        gap = missed.get(work.session_id)
+        if gap and float(gap.get("at") or 0) >= (work.turn_at or 0.0):
+            uncertain.append({"tool": str(gap.get("tool") or "a tool"),
+                              "summary": "its journal entry couldn't be written"})
         finished = [step for step in steps if step["ended_at"] and step["outcome"] == "ok"
-                    and step["tool"] not in READ_TOOLS]
+                    and not _reads_only(step["tool"])]
         store.close_open_steps(ref, "interrupted")
         _retire_auto_continue(home, work.session_id)
         if uncertain:
@@ -1356,6 +1387,48 @@ def _recover(home: Path, store: work_store.Store, broker: Optional[work_broker.B
             _queue_wake(home, _bot_chat_of(home) or work.coordinator, line)
 
 
+# Steps whose journal row couldn't be written, by session, kept in a file
+# of their own (in the bot's conduit/ folder) for recovery to count.
+_UNJOURNALED_FILE = "work-unjournaled.json"
+_unjournaled_lock = threading.Lock()
+
+
+def _note_unjournaled(home: Path, session_id: str, tool: str) -> None:
+    """Written outside the registry, which is what just failed."""
+    path = Path(home) / "conduit" / _UNJOURNALED_FILE
+    with _unjournaled_lock:
+        try:
+            data = _read_unjournaled(path)
+            data[session_id] = {"at": time.time(), "tool": tool}
+            newest = dict(sorted(data.items(), key=lambda item: item[1].get("at", 0), reverse=True)[:200])
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps(newest), encoding="utf-8")
+            temp.replace(path)
+        except Exception:  # noqa: BLE001
+            logger.warning("conduit_push: couldn't note a workstream step its journal missed", exc_info=True)
+
+
+def _read_unjournaled(path: Path) -> dict[str, dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError):
+        return {}
+    return {key: value for key, value in data.items() if isinstance(value, dict)} if isinstance(data, dict) else {}
+
+
+def _take_unjournaled(home: Path) -> dict[str, dict]:
+    """The missed steps, emptied as recovery reads them."""
+    path = Path(home) / "conduit" / _UNJOURNALED_FILE
+    with _unjournaled_lock:
+        data = _read_unjournaled(path)
+        if data:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return data
+
+
 def _retire_auto_continue(home: Path, session_id: str) -> None:
     """Hermes re-runs a crash-killed turn when its chat is reopened soon
     after (``desktop.auto_continue``): for a workstream that's the blind
@@ -1387,7 +1460,10 @@ def _replay(home: Path, store: work_store.Store, broker: Optional[work_broker.Br
     resend there would start a turn of its own)."""
     oldest = time.time() - REPLAY_MAX_S
     for row in store.outbox_pending():
-        if not oldest <= row["created_at"] < _PROCESS_STARTED:
+        if row["created_at"] >= _PROCESS_STARTED:
+            continue  # this process's own, still under way
+        if row["created_at"] < oldest:
+            store.outbox_done(row["id"], "expired")
             continue
         kind = row["kind"]
         if kind in ("line", "line_ask"):
@@ -1453,6 +1529,14 @@ def start_recovery(home: Optional[Path] = None) -> None:
     home = home or _home()
     if home is None or not work_store.exists(home) or policy(home) == "off":
         return
+    # Now, before a client can reopen a chat: Hermes re-runs a crash-killed
+    # turn on its resume, which could come before the sweep below.
+    try:
+        for work in work_store.Store(home).list(include_closed=False, limit=200):
+            if work.status in _RUNNING_STATES and work.session_id:
+                _retire_auto_continue(home, work.session_id)
+    except Exception:  # noqa: BLE001 — the sweep still retires them
+        logger.debug("conduit_push: couldn't retire workstream turn markers at load", exc_info=True)
 
     def run() -> None:
         deadline = time.monotonic() + RECOVERY_WAIT_S
@@ -1639,11 +1723,27 @@ def step_started(session_id: Any, tool_name: Any, args: Any, *, turn_id: Any = N
                     _unjournaled.clear()
                 _unjournaled.add(str(tool_call_id))
         return
-    home, work = _workstream(session_id)
+    tool = str(tool_name or "")
+    if tool == "tool_call":
+        # Journaled under the tools it calls, so recovery can tell a bridged
+        # read from a bridged write.
+        from . import pulse_tools
+
+        tool = BRIDGED + ",".join(_cut(called, 60) for called, _ in pulse_tools.called(args))[:200]
+    home, work, unreadable = _lookup(session_id)
     if work is None or home is None:
+        if unreadable and home is not None and not _reads_only(tool):
+            _note_unjournaled(home, str(session_id), tool)
         return
-    work_store.Store(home).step_started(work.ref, work.session_id, str(tool_name or ""), turn_id=str(turn_id or ""),
-                                        tool_call_id=str(tool_call_id or ""), summary=_summary(args))
+    try:
+        work_store.Store(home).step_started(work.ref, work.session_id, tool, turn_id=str(turn_id or ""),
+                                            tool_call_id=str(tool_call_id or ""), summary=_summary(args))
+    except Exception:
+        # The step runs anyway: recovery mustn't read its missing row as
+        # nothing in flight.
+        if not _reads_only(tool):
+            _note_unjournaled(home, work.session_id, tool)
+        raise
 
 
 def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, status: Any = None,
@@ -1662,7 +1762,7 @@ def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, sta
     if outcome not in ("ok", "error", "cancelled", "timed_out", "blocked"):
         outcome = "error" if error_type else outcome[:20]
     work_store.Store(home).step_ended(work.ref, tool=str(tool_name or ""), tool_call_id=str(tool_call_id or ""),
-                                      outcome=outcome)
+                                      outcome=outcome, prefix=BRIDGED if tool_name == "tool_call" else "")
 
 
 def turn_started(session_id: Any) -> bool:
@@ -1959,6 +2059,8 @@ def _send_wake(home: Path, coordinator: str) -> None:
             store.outbox_done(line_item, "accepted")
     except Exception as error:  # noqa: BLE001 — the digest still carries it on the next turn
         store.outbox_done(item, "refused")
+        for line_item in items:
+            store.outbox_done(line_item, "refused")
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
 
 

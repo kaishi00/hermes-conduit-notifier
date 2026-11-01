@@ -2063,6 +2063,99 @@ def test_hermes_own_rerun_of_the_turn_is_retired(on, hermes, monkeypatch):
     assert cleared == [WORKER_1]
 
 
+def test_a_bridged_write_cut_off_is_uncertain_and_a_bridged_read_isnt(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    work.step_started(WORKER_1, "tool_call", {"name": "web_search", "arguments": {"query": "x"}}, tool_call_id="b1")
+    work.step_ended(WORKER_1, "tool_call", tool_call_id="b1")
+    work.step_started(WORKER_1, "tool_call", {"name": "terminal", "arguments": {"command": "./deploy.sh"}},
+                      tool_call_id="b2")
+    assert [step["tool"] for step in on.steps("W1", open_only=True)] == ["tool_call:terminal"]
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
+
+
+def test_only_bridged_reads_open_is_continued(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    work.step_started(WORKER_1, "tool_call", {"name": "read_file", "arguments": {"path": "a"}}, tool_call_id="b1")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert len(submitted_to(hermes, WORKER_1)) == 1
+
+
+def test_a_step_the_journal_missed_counts_as_uncertain(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+
+    def locked(self, *args, **kwargs):
+        raise store_mod.sqlite3.OperationalError("database is locked")
+
+    real = store_mod.Store.step_started
+    monkeypatch.setattr(store_mod.Store, "step_started", locked)
+    with pytest.raises(store_mod.sqlite3.OperationalError):
+        work.step_started(WORKER_1, "terminal", {"command": "./deploy.sh"}, tool_call_id="c1")
+    with pytest.raises(store_mod.sqlite3.OperationalError):
+        work.step_started(WORKER_1, "read_file", {"path": "a"}, tool_call_id="c2")
+    assert list(work._read_unjournaled(on.path.parent / work._UNJOURNALED_FILE)) == [WORKER_1]
+    monkeypatch.setattr(store_mod.Store, "step_started", real)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and "couldn't be written" in on.get("W1").error
+
+
+def test_a_send_waits_for_recovery_to_settle(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    seen = []
+    real = work._recover
+
+    def recover(home, *args):
+        seen.append(str(home) in work._swept)
+        return real(home, *args)
+
+    monkeypatch.setattr(work, "_recover", recover)
+    call("work_list")
+    assert seen == [False]  # marked swept only after it, so another caller waits on the lock
+
+
+def test_a_stop_lets_a_later_restart_continue_it_again(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert len(submitted_to(hermes, WORKER_1)) == 1
+    call("work_stop", {"ref": "W1"})
+    assert not on.get_meta(work._CONTINUED + "W1")
+
+
+def test_outbox_rows_past_the_replay_window_expire(on, hermes, monkeypatch):
+    item = on.outbox_add("", "line", BOT_CHAT, "- W9 old")
+    with on._db() as con:
+        con.execute("UPDATE outbox SET created_at = ? WHERE id = ?", (__import__("time").time() - 7 * 3600, item))
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert item not in [row["id"] for row in on.outbox_pending()]
+    work.flush_wakes()
+    assert submitted_to(hermes, BOT_CHAT) == []
+
+
+def test_markers_are_retired_at_load_before_a_client_can_resume(on, hermes, home, monkeypatch):
+    cleared = []
+    markers = types.ModuleType("tui_gateway.turn_marker")
+    markers.read_turn_marker = lambda home, key: {"writer_pid": 1, "prompt": "x"}
+    markers.marker_writer_state = lambda marker: "dead"
+    markers.clear_turn_marker = lambda home, key: cleared.append(key)
+    monkeypatch.setitem(sys.modules, "tui_gateway.turn_marker", markers)
+    start()
+    monkeypatch.setattr(work, "RECOVERY_WAIT_S", 0)
+    monkeypatch.setattr(work.work_broker, "server", lambda: None)
+    work.start_recovery(home)
+    assert cleared == [WORKER_1]
+
+
 def test_update_lines_a_restart_caught_in_the_batch_go_out_again(on, hermes, monkeypatch):
     item = on.outbox_add("", "line", BOT_CHAT, "- W9 “Old job” finished. In short: all good.")
     restart(hermes, monkeypatch)

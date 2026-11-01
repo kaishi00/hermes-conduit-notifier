@@ -1448,7 +1448,9 @@ she tells you about. It's off until you turn it on for a bot:
   was in flight when it stopped (only lookups, or nothing at all), it's
   continued once with a note saying which steps already finished; a second
   restart before a turn of it ends leaves it for you. If a step that can
-  change things was cut off (a command, a file write, a send), it waits: the
+  change things was cut off (a command, a file write, a send; a `tool_call`
+  counts by the tools it calls, and a step whose journal entry couldn't be
+  written counts as one), it waits: the
   Bot Chat tells you, with a note it can `work_send` to check whether that
   step took effect. `work on --after-restart ask` leaves every interrupted
   workstream for you to decide. Hermes' own re-run of a crash-killed turn

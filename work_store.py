@@ -438,14 +438,18 @@ class Store:
                 (ref, session_id, turn_id, tool_call_id, tool, _clip(summary, STEP_SUMMARY_CHARS), time.time()))
             return int(cursor.lastrowid)
 
-    def step_ended(self, ref: str, *, tool: str, tool_call_id: str = "", outcome: str = "ok") -> bool:
+    def step_ended(self, ref: str, *, tool: str, tool_call_id: str = "", outcome: str = "ok", prefix: str = "") -> bool:
         """Closes the step: by its call id, else the oldest open step of that
-        tool. False when no open step matched."""
+        tool (or, with a prefix, journaled under a name that starts with it).
+        False when no open step matched."""
         with self._db() as con:
             row = None
             if tool_call_id:
                 row = con.execute("SELECT id FROM steps WHERE ref = ? AND tool_call_id = ? AND ended_at = 0 "
                                   "ORDER BY id LIMIT 1", (ref, tool_call_id)).fetchone()
+            if row is None and prefix:
+                row = con.execute("SELECT id FROM steps WHERE ref = ? AND substr(tool, 1, ?) = ? AND ended_at = 0 "
+                                  "ORDER BY id LIMIT 1", (ref, len(prefix), prefix)).fetchone()
             if row is None:
                 row = con.execute("SELECT id FROM steps WHERE ref = ? AND tool = ? AND ended_at = 0 "
                                   "ORDER BY id LIMIT 1", (ref, tool)).fetchone()
