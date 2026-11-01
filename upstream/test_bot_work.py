@@ -15,6 +15,8 @@ its Bot Chat as a hidden turn, it answers with work_reply, and the answer
 comes back to the asking Bot Chat. Under ``plugins.isolation: host`` the tool
 answers with the reason. After a restart, Hermes' own re-run of a crash-killed
 workstream turn is retired (acceptance test 6), and a live sibling's marker kept.
+Hermes' turn stopper, which a clean shutdown runs, is watched on both its
+paths, so a workstream it stops is recovered rather than taken for a user's stop.
 """
 
 from __future__ import annotations
@@ -432,3 +434,44 @@ def test_a_restart_retires_hermes_own_rerun_of_a_workstream_turn(tmp_path: Path)
                           timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
     assert done.returncode == 0, done.stderr[-2000:]
     assert json.loads(done.stdout.strip().splitlines()[-1]) == {"crashed": False, "sibling": True}
+
+
+SHUTDOWN_PROBE = r"""
+import importlib.util, json, signal, sys
+from pathlib import Path
+
+root, out = Path(sys.argv[1]), Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("conduit_push", root / "__init__.py",
+                                              submodule_search_locations=[str(root)])
+package = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push"] = package
+spec.loader.exec_module(package)
+from conduit_push import work_tool
+from tui_gateway import server, session_reaper  # the server takes over stdout, so the result goes to a file
+
+seen = {"watched": work_tool._watch_shutdown()}
+# The SIGTERM path: Hermes' handler stops the turns, then hands over to the
+# handler it chained (uvicorn's); a no-op stands in for it here.
+session_reaper._exit_flush_prev_handlers[signal.SIGTERM] = lambda signum, frame: None
+session_reaper._handle_exit_flush_signal(signal.SIGTERM, None)
+seen["sigterm"] = work_tool._shutting_down.is_set()
+work_tool._shutting_down.clear()
+server._shutdown_sessions()  # the exit path (atexit)
+seen["exit"] = work_tool._shutting_down.is_set()
+out.write_text(json.dumps(seen))
+"""
+
+
+def test_a_clean_shutdown_is_told_from_a_users_stop(tmp_path: Path) -> None:
+    """Hermes interrupts every running turn on its way out, and those turns
+    end as a user's stop does. The plugin watches the turn stopper on the
+    SIGTERM path and the exit path, so a workstream a clean restart stops is
+    left for the next process's recovery."""
+    home = tmp_path / "home"
+    home.mkdir()
+    python = Path(_hermes_bin()).with_name("python")
+    out = tmp_path / "seen.json"
+    done = subprocess.run([str(python), "-c", SHUTDOWN_PROBE, str(ROOT), str(out)], capture_output=True, text=True,
+                          timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
+    assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
+    assert json.loads(out.read_text()) == {"watched": True, "sigterm": True, "exit": True}

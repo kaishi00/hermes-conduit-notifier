@@ -139,6 +139,7 @@ def hermes(home, monkeypatch):
     work._turn_began.clear()
     work._replies.clear()
     work._redirecting.clear()
+    work._shutting_down.clear()
     return fake
 
 
@@ -2021,6 +2022,7 @@ def restart(hermes, monkeypatch):
     """The dashboard came back: no session is live, and this process started
     after everything in the registry."""
     hermes._sessions.clear()
+    work._shutting_down.clear()  # a new process
     monkeypatch.setattr(work, "_swept", set())
     monkeypatch.setattr(work, "_PROCESS_STARTED", __import__("time").time() + 1)
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends
@@ -2212,7 +2214,11 @@ def test_markers_are_retired_at_load_with_workstreams_off(on, hermes, home, monk
     monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: threads.append(k) or types.SimpleNamespace(
         start=lambda: None))
     work.start_recovery(home)
-    assert cleared == [WORKER_1] and threads == []  # the sweep itself waits for the bot to turn it on
+    assert cleared == [WORKER_1]
+    swept = []
+    monkeypatch.setattr(work, "_sweep", lambda *a: swept.append(a))
+    threads[0]["target"]()  # it watches for a clean shutdown, but doesn't sweep
+    assert swept == []
 
 
 def test_a_long_bridged_batch_with_a_write_at_the_end_is_uncertain(on, hermes, monkeypatch):
@@ -2389,6 +2395,82 @@ def test_a_continue_that_cant_be_written_leaves_the_work_interrupted(on, hermes,
     monkeypatch.setattr(store_mod.Store, "outbox_add", locked)
     call("work_list")
     assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
+
+
+def hermes_stops_turns(monkeypatch, stop):
+    """Hermes' turn stopper, which it runs on its way out (SIGTERM, exit)."""
+    reaper = types.ModuleType("tui_gateway.session_reaper")
+    reaper._stop_turns_before_exit = stop
+    monkeypatch.setitem(sys.modules, "tui_gateway.session_reaper", reaper)
+    return reaper
+
+
+def test_a_clean_restart_is_recovered_like_a_crash(on, hermes, monkeypatch):
+    def stop():
+        work.step_ended(WORKER_1, "read_file", tool_call_id="c2", status="error")
+        work.turn_finished(WORKER_1, failed=False, interrupted=True)
+
+    reaper = hermes_stops_turns(monkeypatch, stop)
+    start()
+    work.turn_started(WORKER_1)
+    work.step_started(WORKER_1, "read_file", {"path": "a.log"}, tool_call_id="c1")
+    work.step_ended(WORKER_1, "read_file", tool_call_id="c1", status="ok")
+    work.step_started(WORKER_1, "read_file", {"path": "b.log"}, tool_call_id="c2")
+    reaper._stop_turns_before_exit()
+    assert on.get("W1").status == "running"  # not taken for the user's stop
+    restart(hermes, monkeypatch)
+    call("work_list")
+    sent, = submitted_to(hermes, WORKER_1)
+    assert "Hermes restarted" in sent["text"]
+
+
+def test_a_change_a_clean_restart_cut_off_waits_for_the_user(on, hermes, monkeypatch):
+    def stop():
+        work.step_ended(WORKER_1, "terminal", tool_call_id="c1", status="error")
+        work.turn_finished(WORKER_1, failed=False, interrupted=True)
+
+    reaper = hermes_stops_turns(monkeypatch, stop)
+    start()
+    work.turn_started(WORKER_1)
+    work.step_started(WORKER_1, "terminal", {"command": "./deploy.sh"}, tool_call_id="c1")
+    reaper._stop_turns_before_exit()
+    assert on.steps("W1", open_only=True)  # it may have taken effect
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == []
+    assert on.get("W1").status == "interrupted" and "during terminal" in on.get("W1").error
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "whether to check first" in wake["text"]
+
+
+def test_a_users_stop_still_leaves_the_work_interrupted(on, hermes, monkeypatch):
+    hermes_stops_turns(monkeypatch, lambda: None)
+    start()
+    work.turn_started(WORKER_1)
+    work.turn_finished(WORKER_1, failed=False, interrupted=True)
+    assert on.get("W1").status == "interrupted"
+
+
+def test_a_workstream_cant_save_to_the_bots_memory(on, hermes):
+    start()
+    block = work.tool_block(WORKER_1, "memory", {"action": "add", "content": "x"})
+    assert block == {"action": "block", "message": work.MEMORY_IN_WORKSTREAM}
+    bridged = work.tool_block(WORKER_1, "tool_call", {"name": "memory", "arguments": {"action": "add"}})
+    assert bridged["action"] == "block"
+    assert work.tool_block(BOT_CHAT, "memory", {"action": "add"}) is None
+    assert work.tool_block(OTHER_CHAT, "memory", {"action": "add"}) is None
+
+
+def test_work_from_before_turns_were_stamped_isnt_told_its_brief_was_cut_off(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    work.step_started(WORKER_1, "read_file", {"path": "a.log"}, tool_call_id="c1")
+    work.step_ended(WORKER_1, "read_file", tool_call_id="c1", status="ok")
+    on.update("W1", turn_at=0.0, status="needs_you")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert "brief" not in (on.get("W1").error or "")
 
 
 def test_a_bridged_step_is_shown_by_the_tools_it_called(on, hermes, monkeypatch):
