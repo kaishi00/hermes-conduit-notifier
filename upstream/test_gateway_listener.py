@@ -674,3 +674,23 @@ def test_pulse_sends_its_turn_into_its_chat_on_the_authority(listener):
     # On Pulse's model: the guarded switch was confirmed with its token.
     assert any(r["model"] == "fake-model-2" for r in _FakeModel.seen
                if "PULSE check in" in json.dumps(r["messages"])), [r["model"] for r in _FakeModel.seen[-3:]]
+
+
+
+def test_bot_chat_create_and_redirect_in_conduits_shapes(listener):
+    async def script(sock: ConduitSocket) -> None:
+        # HermesClient.createBotChatSession on the authority: born hidden, following the profile.
+        bot = await sock.result("session.create", {**_create(), "title": "Bot Chat", "hidden": True,
+                                                   "follow_profile_config": True})
+        assert bot["session_id"] and bot["stored_session_id"], bot
+
+        # A redirect answers one of the words SessionRedirectOutcome reads.
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        await sock.result("prompt.submit", _submit(sid, "first"))
+        start = await sock.event(sid, "message.start")
+        redirected = await sock.result("session.redirect", {
+            "session_id": sid, "execution_generation": start["execution_generation"], "text": "do this instead"})
+        assert redirected["status"] in {"redirected", "queued", "rejected"}, redirected
+        await sock.event(sid, "message.complete")
+
+    listener.run(script)
