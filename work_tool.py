@@ -122,8 +122,8 @@ SCHEMAS: dict[str, dict] = {
                         "work that's already on it."),
         "parameters": {"type": "object", "properties": {
             "filter": {"type": "string", "enum": ["active", "recent", "all"],
-                       "description": "active (default): still working or waiting; recent: also finished; all: "
-                                      "also closed."},
+                       "description": "active (default): still working, waiting, or ready for the user to "
+                                      "look at; recent: also finished; all: also closed."},
             "query": {"type": "string", "description": "Only work whose title or goal has these words."}},
             "required": []},
     },
@@ -246,7 +246,10 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
         def handler(args: Any, session_id: Any = None, _name: str = name, **_: Any) -> str:
             return handle(_name, args, session_id=session_id)
 
-        tool = {"name": name, "toolset": TOOLSET, "schema": schema, "handler": handler, "check_fn": available}
+        # A workstream's own tool stays offered while the bot has work at
+        # all, so turning workstreams off doesn't take it from a running one.
+        check = has_registry if name in WORKER_TOOLS else available
+        tool = {"name": name, "toolset": TOOLSET, "schema": schema, "handler": handler, "check_fn": check}
         try:
             try:
                 ctx.register_tool(**tool, description=schema["description"], emoji=EMOJI[name])

@@ -47,7 +47,8 @@ KINDS = ("workstream", "ask_out", "ask_in")
 # something for the user to look at (a draft, a diff); "interrupted": a
 # restart stopped it mid-turn.
 STATUSES = ("starting", "running", "needs_you", "waiting", "ready", "done", "failed", "stopped", "interrupted")
-ACTIVE = ("starting", "running", "needs_you", "waiting")
+# "ready" stays active: it waits on the user to look, until it's closed.
+ACTIVE = ("starting", "running", "needs_you", "waiting", "ready")
 RESULT_CHARS = 2000
 TITLE_CHARS = 80
 GOAL_CHARS = 1000

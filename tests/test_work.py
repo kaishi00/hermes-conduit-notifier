@@ -1553,3 +1553,27 @@ def test_a_checklist_when_the_registry_cant_be_read_says_to_try_again(on, hermes
     monkeypatch.setattr(store_mod.Store, "by_session", lambda self, session_id: (_ for _ in ()).throw(
         store_mod.sqlite3.OperationalError("database is locked")))
     assert call("work_progress", {"steps": ["x"]}, session_id=WORKER)["error"] == "unavailable"
+
+
+def test_a_ready_result_stays_in_the_active_list_until_closed(on, hermes):
+    start()
+    call("work_progress", {"ready": True}, session_id=WORKER)
+    work.turn_ended(WORKER, "Here's the draft.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    assert [row["ref"] for row in call("work_list")["work"]] == ["W1"]
+    work.digest(BOT_CHAT)
+    assert "W1" in work.digest(BOT_CHAT)  # still there once seen
+    call("work_close", {"ref": "W1"})
+    assert call("work_list")["work"] == []
+
+
+def test_the_checklist_tool_stays_offered_while_the_bot_has_work(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_pinned_home", work._pinned_home)
+    monkeypatch.setattr(work, "_is_child", work._is_child)
+    registered = {}
+    ctx = types.SimpleNamespace(register_tool=lambda **tool: registered.update({tool["name"]: tool}))
+    work.register(ctx, is_child=lambda session_id: False)
+    on.set_policy("off")
+    work._policy_cache.clear()
+    assert registered["work_progress"]["check_fn"]() is True
+    assert registered["work_start"]["check_fn"]() is False
