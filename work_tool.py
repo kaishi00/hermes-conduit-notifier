@@ -114,6 +114,9 @@ POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. S
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get questions and work through work_ask, which "
                        "queues it for that bot's coordinator and brings its answer back to you. Use work_ask "
                        'instead, like tool_call {"name": "work_ask", "arguments": {"bot": "Nahida", "text": "..."}}.')
+MESSAGE_AGENT_IN_WORKSTREAM = ("A workstream doesn't message other bots itself, so nothing was sent. Say in your "
+                               "report which bot and what you need, and end your turn: your coordinator asks it "
+                               "for you, and the answer comes back here.")
 BRIDGE_BLOCK = ("That tool_call couldn't be read, so it didn't run. Give it the tool's name and its arguments as an "
                 'object, like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": '
                 '"Find out why the login page is slow."}}, and never put a tool_call inside another.')
@@ -1676,7 +1679,8 @@ def start_recovery(home: Optional[Path] = None) -> None:
 
 def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[dict[str, str]]:
     """The bot's policy for its Bot Chat: a block for a tool the coordinator
-    doesn't run itself, else None. Never blocks outside a coordinator."""
+    doesn't run itself, else None. Outside a coordinator it blocks only a
+    workstream's message_agent (other bots are asked through the Bot Chat)."""
     name = str(tool_name or "")
     home = _home()
     if home is None:
@@ -1704,6 +1708,10 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     # whose title can't be read.
     titled = _titled_bot_chat(session_id, home) if has_id else None
     if titled is False:
+        # A workstream reaches other bots only through its coordinator,
+        # whose asks carry the loop guard and the limits.
+        if MESSAGE_AGENT in names and is_workstream(session_id):
+            return {"action": "block", "message": MESSAGE_AGENT_IN_WORKSTREAM}
         return None
     for called in names:
         if called in allowed:
