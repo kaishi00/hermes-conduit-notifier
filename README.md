@@ -1397,10 +1397,24 @@ she tells you about. It's off until you turn it on for a bot:
     hermes -p <bot> conduit-push work off
 
 - The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
-  `work_read`, `work_close` and `work_note` (behind Hermes' Tool Search). They answer only
-  in that bot's canonical Bot Chat, and name work by ref (W1, W2), never by
-  session id, so a bot only ever reaches its own work. `work_ask` and
-  `work_reply` (asks between bots) say they aren't available yet.
+  `work_read`, `work_close`, `work_note`, `work_ask` and `work_reply` (behind
+  Hermes' Tool Search). They answer only in that bot's canonical Bot Chat, and
+  name work by ref (W1, W2 for workstreams, A1, A2 for asks), never by session
+  id, so a bot only ever reaches its own work.
+- Bots work together coordinator to coordinator. `work_ask` asks another of
+  your bots on this Hermes (by its name or profile) for an answer or a piece
+  of work: it's an `ask_out` row in the asking bot's registry and an `ask_in`
+  row in the other's, sharing one id, and it reaches the other bot's Bot Chat
+  as a hidden, queued turn (after anything it's doing with you; nothing holds
+  its chat). That bot answers with `work_reply`, itself or with one of its
+  workstreams' reports, and the answer goes back where the ask said: into
+  the asking bot's workstream named in `for` as a queued turn, or to its Bot
+  Chat as a work update. Closing an ask unanswered tells the bot that asked.
+  What one bot asks or answers reaches the other as data, never as your
+  go-ahead; each bot does the work with its own tools and its own approvals.
+  The other bot needs workstreams on too. A chain of asks can't come back to
+  a bot already in it, goes at most two bots deep, and one bot can ask
+  another 10 times an hour.
 - Every new workstream's brief carries the coordinator's notes (`work_note`,
   kept in `<profile>/conduit/work-notes.md`, labelled as data, never as your
   go-ahead) and the message of yours the Bot Chat is answering, quoted as
@@ -1414,7 +1428,7 @@ she tells you about. It's off until you turn it on for a bot:
 - Strict leaves the coordinator the work tools, `clarify` and `memory`;
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
   health, location and inbox). `message_agent` is refused there in favour of
-  asks between bots.
+  `work_ask`.
 - A workstream writes its report for you, in its own chat, which you can open
   and answer. The Bot Chat's update carries a short line of it and the chat's
   link (`work_read` gives the coordinator up to 2,000 characters of it).
