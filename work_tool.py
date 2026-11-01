@@ -594,6 +594,9 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
     if work.status in ("starting", "running", "needs_you"):
         # Nothing was running, so the row's turn has ended (its end may
         # have come while this stop was marked): it stays stopped.
+        if work.status == "starting":
+            # Or its brief's turn hasn't begun yet: when it does, it's stopped.
+            store.set_meta(_STOPPED_START + work.ref, str(time.time()))
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
                 "note": f"{work.ref} wasn't working on anything; it's marked stopped. work_send continues it."}
     store.update(work.ref, status=work.status, only_if=("stopped",))
@@ -808,7 +811,8 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         # The user stopped it while Hermes was still starting it: its brief's
         # turn may begin only now, so it's stopped again, and stays stopped.
         try:
-            broker.stop(started.session_id)
+            if not broker.stop(started.session_id):
+                store.set_meta(_STOPPED_START + work.ref, str(time.time()))  # its turn, when it begins
         except Exception:  # noqa: BLE001 — its row says stopped; a turn that runs anyway settles it
             logger.warning("conduit_push: stopping a stopped start failed", exc_info=True)
         store.update(work.ref, status="stopped")
@@ -1262,6 +1266,7 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
     """Words into a workstream, through the outbox: running work takes them
     as ``how`` says, idle work starts a turn with them (a slot allowing)."""
     home = store.home
+    store.set_meta(_STOPPED_START + work.ref, "")  # sent words start it again
     item = store.outbox_add(work.ref, kind, work.session_id, words)
     # Marked running first: a turn that ends before the send returns then
     # settles the row, and nothing after the send puts it back. Idle work
@@ -1421,6 +1426,11 @@ def _reads_only(tool: str) -> bool:
     return tool in READ_TOOLS
 # Meta key: a workstream continued after a restart, until a turn of it ends.
 _CONTINUED = "continued:"
+# Meta key: a start stopped before its brief's turn began (the time of the
+# stop), so that turn, beginning late, is stopped too rather than undoing
+# the stop. A send clears it, and it lapses after _STOPPED_START_S.
+_STOPPED_START = "stopped_start:"
+_STOPPED_START_S = 600.0
 # Meta key: what Check first asks a workstream a restart cut off during a
 # step that can change things, until a turn of it starts.
 _CHECK = "check:"
@@ -2083,6 +2093,29 @@ def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, sta
                                       outcome=outcome, prefix=BRIDGED if tool_name == "tool_call" else "")
 
 
+def _stopped_before_its_turn(home: Path, work: work_store.Work) -> bool:
+    store = work_store.Store(home)
+    try:
+        at = float(store.get_meta(_STOPPED_START + work.ref) or 0)
+    except ValueError:
+        at = 0.0
+    if not at:
+        return False
+    store.set_meta(_STOPPED_START + work.ref, "")  # one turn: the brief's
+    return time.time() - at < _STOPPED_START_S
+
+
+def _stop_late_turn(home: Path, session_id: str) -> None:
+    """Off the hook's thread: the turn is still beginning."""
+    try:
+        for _ in range(20):
+            if work_broker.Broker(home).stop(session_id):
+                return
+            time.sleep(0.25)
+    except Exception:  # noqa: BLE001 — its row says stopped; its end settles nothing
+        logger.warning("conduit_push: stopping a stopped start's turn failed", exc_info=True)
+
+
 def turn_started(session_id: Any) -> bool:
     """A workstream's turn starts. One that starts after its row settled or
     was interrupted (a follow-up queued behind the last turn, or the user
@@ -2103,6 +2136,12 @@ def turn_started(session_id: Any) -> bool:
     if work_store.Store(home).get_meta(_CHECK + work.ref):
         work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
+    if work.status == "stopped" and _stopped_before_its_turn(home, work):
+        # The user stopped this start before its brief's turn began: that
+        # turn is the start's, so it's stopped too, and the row stays stopped.
+        threading.Thread(target=_stop_late_turn, args=(home, str(session_id)),
+                         name="conduit-work-stop", daemon=True).start()
+        return True
     if work.status not in _RUNNING_STATES or work.status == "starting":
         # A turn of it began, so its brief went in. Already running in Hermes, so it takes its slot even past the limit;
         # work_start and work_send keep to the count.

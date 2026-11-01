@@ -2877,6 +2877,20 @@ def test_a_start_still_starting_after_two_minutes_can_be_stopped(on, hermes, mon
     assert answer["ok"] and answer["work"]["status"] == "stopped"
 
 
+def test_a_stuck_start_stopped_before_its_turn_stays_stopped_when_the_turn_begins(on, hermes, monkeypatch):
+    start()
+    on.update("W1", status="starting")
+    monkeypatch.setattr(work, "_STARTING_STUCK_SECONDS", -1.0)
+    stops = []
+    monkeypatch.setattr(work, "_stop_late_turn", lambda home, session_id: stops.append(session_id))
+    monkeypatch.setattr(broker_mod.Broker, "stop", lambda self, session_id: False)  # its turn hasn't begun
+    assert work.app_act(on.home, "W1", "stop")["ok"]
+    assert work.turn_started(WORKER_1)  # the brief's turn begins late
+    assert on.get("W1").status == "stopped" and stops == [WORKER_1]
+    assert work.turn_started(WORKER_1)  # a later turn (the user writing in its chat) runs it again
+    assert on.get("W1").status == "running"
+
+
 def test_a_start_stopped_while_hermes_was_starting_it_says_stopped(on, hermes, monkeypatch):
     original = broker_mod.Broker.start
 
