@@ -129,6 +129,26 @@ def test_a_refused_submit_leaves_no_surface_for_the_next_turn(gateway):
     assert turn_surface.note(False, "again", session_id="drop-1")
 
 
+def test_a_turn_the_authority_starts_at_once_keeps_its_surface(gateway):
+    chats, answers, _connections = gateway
+    answers["prompt.submit"] = {"result": {"status": "started"}}
+    _call(chats, Transport(), "prompt.submit", {"session_id": "start-1", "text": "now"})
+    assert turn_surface.note(False, "now", session_id="start-1")
+    answers["prompt.submit"] = {"result": {"status": "terminal"}}
+    _call(chats, Transport(), "prompt.submit", {"session_id": "start-2", "text": "done"})
+    assert turn_surface.note(False, "done", session_id="start-2") is None
+
+
+def test_a_closed_link_opens_no_new_connection(gateway):
+    chats, _answers, connections = gateway
+    transport = Transport()
+    link = chats.link(transport)
+    link.close()
+    answer = link.call({"jsonrpc": "2.0", "id": "r1", "method": "session.create", "params": {}})
+    assert "closed" in answer["error"]["message"]
+    assert connections == []
+
+
 def test_a_call_that_times_out_is_cancelled_and_says_it_may_have_started(gateway):
     chats, _answers, _connections = gateway
     started = []
@@ -257,14 +277,15 @@ def test_pulse_sends_on_the_authority_with_its_model(monkeypatch):
                 if "confirm" in frame["params"]["payload"]:
                     return {"result": {"model": "fake-model-2"}}
                 return {"result": {"status": "confirmation_required", "confirm": "tok"}}
-            return {"result": {"status": "queued"}}
+            return {"result": {"status": "started"}}
 
         def release(self, transport):
             calls.append(("release", None))
 
     monkeypatch.setattr(pulse_host, "_authority_chats", lambda: Chats())
     sent = pulse_host.send("pulse-1", "check in", profile="pulsebot", model={"provider": "custom", "model": "fake-model-2"})
-    assert sent == pulse_host.Sent(True, "queued", "queued")
+    # The authority started it at once: Pulse reads it as the TUI gateway's "streaming".
+    assert sent == pulse_host.Sent(True, "streaming", "started")
     methods = [method for method, _ in calls]
     assert methods == ["session.resume", "session.mutate", "session.mutate", "prompt.submit", "release"]
     assert calls[0][1] == {"session_id": "pulse-1", "omit_messages": True, "profile": "pulsebot"}

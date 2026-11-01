@@ -102,7 +102,8 @@ notes:
     The plugin's capabilities route and its signed speech-server socket answer there (checked). The
     plugin's chat features find the authority's chats there (gateway_chats.py): the gateway is
     gateway.run_api._ACTIVE_RUNNER, a chat is authority.sessions[id] (all_authorities), its agent
-    the runner's resident one (Predictions), and turn-surface keeps Conduit's report by session id.
+    the runner's resident one (Predictions, which answer only while the gateway holds that agent),
+    and turn-surface keeps Conduit's report by session id.
     Watch jobs, a Watch call's Local Live chat and Pulse's turns drive their own chats through a
     gateway.session_controls.AuthorityConnection of their own on the gateway's loop
     (runner._gateway_loop), translating the TUI gateway's shapes both ways (approval.settled reads

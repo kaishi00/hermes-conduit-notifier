@@ -259,7 +259,9 @@ def _send_on_authority(chats: Any, chat_id: str, text: str, *, profile: str = ""
         if not isinstance(submitted, dict) or submitted.get("error"):
             return Sent(False, "", f"the chat refused the turn: {_message(submitted)}")
         result = submitted.get("result") if isinstance(submitted.get("result"), dict) else {}
-        return Sent(True, "queued", str(result.get("status") or ""))
+        status = str(result.get("status") or "")
+        # The authority's "started" is the TUI gateway's "streaming": the turn runs now.
+        return Sent(True, "streaming" if status == "started" else "queued", status)
     finally:
         # The turn is the authority's once admitted; Pulse's view of the chat ends.
         chats.release(transport)
@@ -292,5 +294,6 @@ def _use_model_on_authority(call: Callable[[str, dict], Any], sid: str, snapshot
             if answer.get("status") != "confirmation_required" or not answer.get("confirm"):
                 return
             payload = {**payload, "confirm": answer["confirm"]}
+        logger.warning("conduit_push: Pulse's chat stayed on its own model: %s wasn't confirmed", name)
     except Exception:  # noqa: BLE001 — the turn goes on the chat's own model
         logger.warning("conduit_push: Pulse couldn't put its chat on %s", name, exc_info=True)

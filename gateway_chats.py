@@ -102,11 +102,12 @@ def authority_agent(session_id: Any) -> Optional[tuple]:
     if found is None:
         return None
     gateway, authority, live = found
-    try:
-        with authority_scope(authority):
+    # A scope that fails raises to the caller: it isn't a missing agent.
+    with authority_scope(authority):
+        try:
             agent = gateway._resident_agent_for(gateway._session_key_for_source(live.source))
-    except Exception:  # noqa: BLE001 — no agent to read
-        return None
+        except Exception:  # noqa: BLE001 — no agent to read
+            return None
     return (authority, agent) if agent is not None else None
 
 
@@ -199,8 +200,10 @@ class _AuthorityLink:
             self._drop_surface(method, params)
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"{method} gave no answer"}}
         if method == "prompt.submit" and (response.get("error") or str(
-                (response.get("result") or {}).get("status") or "queued").lower() != "queued"):
-            # No turn of that text is coming: its surface line would wait for the next one.
+                (response.get("result") or {}).get("status") or "").lower() == "terminal"):
+            # No turn of that text is coming (refused, or settled without one): its
+            # surface line would wait for the next one. "queued", "started" and
+            # "unknown" each have the turn still to run.
             self._drop_surface(method, params)
         return self._answer(method, params, shaped, response)
 
@@ -209,12 +212,22 @@ class _AuthorityLink:
             self.chats.drop_surface(params.get("session_id"), params.get("text"))
 
     async def _dispatch(self, request: dict) -> Any:
-        if self.connection is None:
+        connection = self.connection
+        if connection is None:
+            if self._closed:
+                raise ConnectionError("This transport's connection to the authority is closed")
             connection = self.chats.connect(self)
             with self.lock:
-                if self.connection is None:
+                stale = self._closed or self.connection is not None
+                if not stale:
                     self.connection = connection
-        return await self.connection.dispatch(request)
+            if stale:
+                # Closed meanwhile, or another call connected first: this one goes unused.
+                await connection.close()
+                if self._closed:
+                    raise ConnectionError("This transport's connection to the authority is closed")
+                connection = self.connection
+        return await connection.dispatch(request)
 
     def _generation(self, sid: str) -> int:
         with self.lock:
