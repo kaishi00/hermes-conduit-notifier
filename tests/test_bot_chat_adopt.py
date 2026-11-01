@@ -136,3 +136,40 @@ def test_a_refusal_is_reported(tmp_path):
 
 def test_the_child_script_compiles():
     compile(adopt_mod.CHILD, "<bot_chat_adopt child>", "exec")
+
+
+def test_a_padded_title_is_still_the_bot_chat(tmp_path):
+    sid = _store(tmp_path, title=" Bot Chat\n")
+    assert adopt_mod.legacy_bot_chat(tmp_path) == sid
+
+
+def test_a_store_unreadable_after_the_child_isnt_counted_as_moved(tmp_path, monkeypatch):
+    sid = _store(tmp_path)
+    reads = iter([adopt_mod.UNREADABLE])
+    monkeypatch.setattr(adopt_mod, "legacy_bot_chat", lambda home: next(reads))
+    run = lambda argv, env, **kwargs: SimpleNamespace(stdout='[]\n')  # noqa: E731 — not an object either
+    assert adopt_mod.adopt(tmp_path, sid, run=run).startswith("unknown")
+
+
+def test_one_profiles_failure_doesnt_stop_the_others(tmp_path):
+    _store(tmp_path / "profiles" / "a")
+    later = _store(tmp_path / "profiles" / "b", sid="b_chat")
+    calls = []
+
+    def flaky(home, sid):
+        calls.append(sid)
+        if home.name == "a":
+            raise RuntimeError("boom")
+        return "adopted"
+
+    assert adopt_mod.sweep(tmp_path, now=0.0, adopt_one=flaky) == {str(tmp_path / "profiles" / "b"): "adopted"}
+    assert later in calls
+
+
+def test_a_stopped_sweep_tries_no_more_profiles(tmp_path):
+    import threading
+
+    _store(tmp_path / "profiles" / "a")
+    stop = threading.Event()
+    stop.set()
+    assert adopt_mod.sweep(tmp_path, now=0.0, adopt_one=lambda home, sid: "adopted", stop=stop) == {}

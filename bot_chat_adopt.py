@@ -18,6 +18,12 @@ makes that first move itself. This does it instead, the way Hermes' own
 never starting a gateway. One sweep runs in this host's long-lived process
 that holds the lock: soon after it starts, then every SWEEP_S, and a profile
 whose move was refused waits longer each time.
+
+A dashboard session keeps its lease until the session closes (its client
+goes away and Hermes reaps it), so an open chat can stay held for hours.
+The first pass runs a minute after this process starts: after a restart no
+session holds a lease until a client sends its first turn again, which is
+when the move reliably finds the chat free.
 """
 
 from __future__ import annotations
@@ -53,22 +59,28 @@ _lock_handle: Any = None
 _backoff: dict[str, tuple[float, float]] = {}
 
 
+UNREADABLE = "?"  # legacy_bot_chat couldn't tell
+
+
 def legacy_bot_chat(home: Path) -> Optional[str]:
-    """The id of the profile's Bot Chat when it still waits for its move, or
-    None (no Bot Chat, already the gateway's, or unreadable). Read-only."""
-    path = Path(home) / "state.db"
+    """The id of the profile's Bot Chat when it still waits for its move,
+    None when there's nothing to move (no Bot Chat, or already the
+    gateway's), or UNREADABLE. Read-only."""
+    path = Path(home).resolve() / "state.db"
     if not path.is_file():
         return None
     try:
         db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
     except sqlite3.Error:
-        return None
+        return UNREADABLE
     try:
         db.row_factory = sqlite3.Row
         columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
         if not {"id", "title", "source"} <= columns:
             return None
-        row = db.execute("SELECT * FROM sessions WHERE title = ?", (TITLE,)).fetchone()
+        # Trimmed, as Desktop and Conduit find it; the newest when two match.
+        row = db.execute("SELECT * FROM sessions WHERE TRIM(title, ?) = ? ORDER BY rowid DESC LIMIT 1",
+                         (" \t\r\n", TITLE)).fetchone()
         if row is None:
             return None
         row = dict(row)
@@ -80,7 +92,7 @@ def legacy_bot_chat(home: Path) -> Optional[str]:
                            (POLICY_PREFIX + row["id"], LEGACY_PREFIX + row["id"])).fetchone()
         return None if bound else str(row["id"])
     except sqlite3.Error:
-        return None
+        return UNREADABLE
     finally:
         db.close()
 
@@ -174,8 +186,13 @@ def adopt(home: Path, session_id: str, run: Callable[..., Any] = subprocess.run)
         answer = json.loads((done.stdout or "").strip().splitlines()[-1])
     except Exception as error:  # noqa: BLE001 — a reason, never a crash
         answer = {"status": "failed", "detail": type(error).__name__}
-    if legacy_bot_chat(home) is None:
+    if not isinstance(answer, dict):
+        answer = {"status": "failed", "detail": "answer"}
+    after = legacy_bot_chat(home)
+    if after is None:
         return "adopted"
+    if after == UNREADABLE:
+        return "unknown: the store couldn't be read afterwards"
     return f"{answer.get('status', 'failed')}: {answer.get('detail', '')}".rstrip(": ")
 
 
@@ -189,30 +206,42 @@ def homes(root: Path) -> list[Path]:
     return found
 
 
-def sweep(root: Path, now: Optional[float] = None, adopt_one: Callable[[Path, str], str] = None) -> dict[str, str]:
+def sweep(root: Path, now: Optional[float] = None, adopt_one: Callable[[Path, str], str] = None,
+          stop: Optional[threading.Event] = None) -> dict[str, str]:
     """One pass over the host's profiles: {home: outcome} for each Bot Chat it tried."""
     now = time.time() if now is None else now
     adopt_one = adopt_one or adopt
     tried: dict[str, str] = {}
     for home in homes(root):
-        key = str(home)
-        session_id = legacy_bot_chat(home)
-        if session_id is None:
-            _backoff.pop(key, None)
-            continue
-        due, wait = _backoff.get(key, (0.0, SWEEP_S))
-        if now < due or held_by_live_process(home, session_id):
-            continue
-        outcome = adopt_one(home, session_id)
-        tried[key] = outcome
-        if outcome == "adopted":
-            _backoff.pop(key, None)
-            logger.info("conduit_push: moved %s's Bot Chat under its gateway, so other bots can reach it",
-                        home.name)
-        else:
-            _backoff[key] = (now + wait, min(wait * 2, RETRY_MAX_S))
-            logger.info("conduit_push: %s's Bot Chat isn't under its gateway yet (%s)", home.name, outcome)
+        if stop is not None and stop.is_set():
+            break
+        try:
+            _sweep_one(home, now, adopt_one, tried)
+        except Exception:  # noqa: BLE001 — one profile never stops the others
+            logger.warning("conduit_push: Bot Chat move failed for %s", home.name, exc_info=True)
     return tried
+
+
+def _sweep_one(home: Path, now: float, adopt_one: Callable[[Path, str], str], tried: dict[str, str]) -> None:
+    key = str(home)
+    session_id = legacy_bot_chat(home)
+    if session_id is None:
+        _backoff.pop(key, None)
+        return
+    if session_id == UNREADABLE:
+        return
+    due, wait = _backoff.get(key, (0.0, SWEEP_S))
+    if now < due or held_by_live_process(home, session_id):
+        return
+    outcome = adopt_one(home, session_id)
+    tried[key] = outcome
+    if outcome == "adopted":
+        _backoff.pop(key, None)
+        logger.info("conduit_push: moved %s's Bot Chat under its gateway, so other bots can reach it",
+                    home.name)
+    else:
+        _backoff[key] = (now + wait, min(wait * 2, RETRY_MAX_S))
+        logger.info("conduit_push: %s's Bot Chat isn't under its gateway yet (%s)", home.name, outcome)
 
 
 def _take_lock(root: Path) -> bool:
@@ -236,7 +265,7 @@ def _run(root: Path, stop: threading.Event) -> None:
         return
     while True:
         try:
-            sweep(root)
+            sweep(root, stop=stop)
         except Exception:  # noqa: BLE001 — the next pass tries again
             logger.warning("conduit_push: Bot Chat move sweep failed", exc_info=True)
         if stop.wait(SWEEP_S):
@@ -259,6 +288,8 @@ def stop(timeout: float = 1.0) -> None:
     thread = _thread
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout)
+        if thread.is_alive():
+            return  # a child still running: the lock stays with this load until it ends
     if _lock_handle is not None:
         try:
             _lock_handle.close()
