@@ -376,12 +376,13 @@ async def _socket_close(listener: "Listener", path: str) -> Optional[int]:
     async with connect(f"ws://127.0.0.1:{listener.port}/api/plugins/{PLUGIN}/{path}",
                        open_timeout=15, proxy=None) as ws:
         try:
-            # Whatever comes first, the close code is what tells.
-            while True:
-                await asyncio.wait_for(ws.recv(), 10)
+            # Whatever comes first, the close code is what tells, within 15 s overall.
+            async with asyncio.timeout(15):
+                while True:
+                    await ws.recv()
         except ConnectionClosed:
             return ws.close_code
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
 
