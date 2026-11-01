@@ -83,7 +83,10 @@ notes:
     live sessions. upstream/test_bot_work.py runs it on the launch profile and a secondary one.
     After a restart, tui_gateway.turn_marker (read_turn_marker, marker_writer_state,
     clear_turn_marker) retires Hermes' own re-run of a crash-killed workstream turn, so recovery
-    decides from the journal instead; without it a cut-off step could run twice.
+    decides from the journal instead; without it a cut-off step could run twice. The turn stopper
+    a clean shutdown runs, _stop_turns_before_exit (in tui_gateway.session_reaper, for the SIGTERM
+    handler, and in tui_gateway.server, for _shutdown_sessions), is wrapped to mark the shutdown:
+    without it a clean restart's stopped workstream is taken for a user's stop and never recovered.
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the

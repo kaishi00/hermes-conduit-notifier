@@ -1442,13 +1442,17 @@ she tells you about. It's off until you turn it on for a bot:
   at first (a draft, a diff) as ready. `work_progress` stays offered while
   the bot has a registry, so turning workstreams off doesn't take it from one
   that's running; anywhere but a workstream it answers that it's only for one.
+  A workstream doesn't save to the bot's `memory`: what's worth keeping goes
+  in its report, and the coordinator decides what to remember.
 - A workstream's turn sends no push of its own: the Bot Chat's reply about it
   is the one push. Its approvals and questions still come from the workstream.
 - Up to 2 run at once per bot (`--max-running`). The registry is
   `<profile>/conduit/workstreams.db`, with a journal of each workstream's
   tool steps and an outbox of every turn sent into a chat.
-- After a restart, work that was running is marked interrupted and sorted by
-  its journal, once the dashboard is up. If nothing that could change things
+- After a restart, a clean one or a crash, work that was running is marked
+  interrupted and sorted by its journal, once the dashboard is up. (A clean
+  restart's own stop isn't taken for yours, and a step it cut off counts as
+  never finished.) If nothing that could change things
   was in flight when it stopped (only lookups, or nothing at all), it's
   continued once with a note saying which steps already finished; a second
   restart before a turn of it ends leaves it for you. If a step that can

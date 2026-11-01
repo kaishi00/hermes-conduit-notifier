@@ -41,9 +41,11 @@ in it, goes at most two bots deep, and each pair of bots has an hourly cap.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -114,6 +116,9 @@ POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. S
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get questions and work through work_ask, which "
                        "queues it for that bot's coordinator and brings its answer back to you. Use work_ask "
                        'instead, like tool_call {"name": "work_ask", "arguments": {"bot": "Nahida", "text": "..."}}.')
+MEMORY = "memory"
+MEMORY_IN_WORKSTREAM = ("A workstream doesn't save to this bot's memory, so nothing was saved. Put what's worth "
+                        "keeping in your report: your coordinator decides what to remember.")
 MESSAGE_AGENT_IN_WORKSTREAM = ("A workstream doesn't message other bots itself, so nothing was sent. Say in your "
                                "report which bot and what you need, and end your turn: your coordinator asks it "
                                "for you, and the answer comes back here.")
@@ -1414,7 +1419,9 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     finished = [step for step in steps if step["ended_at"] and step["outcome"] == "ok"
                 and not _reads_only(step["tool"])]
     store.close_open_steps(ref, "interrupted")
-    briefs = store.outbox_rows(ref, "start") if not work.turn_at and work.session_id else []
+    # A row from before turns were stamped can still have run: its steps say so.
+    began = bool(work.turn_at) or bool(store.steps(ref, limit=1))
+    briefs = store.outbox_rows(ref, "start") if not began and work.session_id else []
     if any(row["accepted_at"] or _in_transcript(home, work.session_id, row["text"]) for row in briefs):
         # Hermes took the brief, but no turn of it was seen to start: it may
         # have begun. Never sent again; the user decides.
@@ -1422,7 +1429,7 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
         line = (f"- {ref} “{work.title}” was cut off by a restart just as Hermes took its brief, so it may have "
                 "started. It wasn't continued or sent again. Ask the user whether to work_read it first or "
                 "work_send it to carry on.")
-    elif not work.turn_at:
+    elif not began:
         # Its brief never reached it (the restart came before or while the
         # session was made): there's no turn to continue.
         store.update(ref, error="its start was cut off by a restart, before the brief was sent")
@@ -1640,6 +1647,47 @@ def _in_transcript(home: Path, session_id: str, text: str) -> bool:
     return row is not None
 
 
+_shutting_down = threading.Event()
+# Each profile's copy of the plugin is its own module, with its own event:
+# the one wrapper marks the stopper's modules too, which every copy reads.
+_SHUTDOWN_MARK = "_conduit_shutting_down"
+
+
+def _is_shutting_down() -> bool:
+    return _shutting_down.is_set() or any(getattr(sys.modules.get(name), _SHUTDOWN_MARK, False) is True
+                                          for name in _SHUTDOWN_MODULES)
+_SHUTDOWN_HOOK = "_stop_turns_before_exit"
+_SHUTDOWN_MODULES = ("tui_gateway.session_reaper", "tui_gateway.server")
+
+
+def _watch_shutdown() -> bool:
+    """Hermes interrupts every running turn on its way out (on SIGTERM, and
+    again at exit), and those turns end as interrupted, as a user's stop
+    does. Its turn stopper is wrapped to say so first, so turn_finished
+    leaves them for the next process's sweep. True once both its paths are
+    watched."""
+    watched = True
+    for name in _SHUTDOWN_MODULES:
+        module = sys.modules.get(name)
+        original = getattr(module, _SHUTDOWN_HOOK, None) if module is not None else None
+        if not callable(original):
+            watched = False  # not loaded yet, or Hermes moved it: checked again on each workstream turn
+            continue
+        if getattr(original, "_conduit_watch", False):
+            continue
+
+        def stopping(*args: Any, _original: Any = original, **kwargs: Any) -> Any:
+            _shutting_down.set()
+            for marked in _SHUTDOWN_MODULES:
+                with contextlib.suppress(Exception):
+                    setattr(sys.modules[marked], _SHUTDOWN_MARK, True)
+            return _original(*args, **kwargs)
+
+        stopping._conduit_watch = True  # type: ignore[attr-defined]
+        setattr(module, _SHUTDOWN_HOOK, stopping)
+    return watched
+
+
 def start_recovery(home: Optional[Path] = None) -> None:
     """After a restart nothing may call the bot's tools for a while, so a
     bot whose workstreams are on sweeps once the session host is up,
@@ -1659,15 +1707,18 @@ def start_recovery(home: Optional[Path] = None) -> None:
                         _load_verdicts[(str(home), work.session_id)] = verdict
     except Exception:  # noqa: BLE001 — the sweep still retires them
         logger.debug("conduit_push: couldn't retire workstream turn markers at load", exc_info=True)
-    if policy(home) == "off":
-        return
-
     def run() -> None:
         deadline = time.monotonic() + RECOVERY_WAIT_S
         while work_broker.server() is None:
             if time.monotonic() > deadline:
                 return
             time.sleep(RECOVERY_POLL_S)
+        # Whatever the policy: turning workstreams off doesn't stop one that's running.
+        if not _watch_shutdown():
+            logger.warning("conduit_push: Hermes' turn stopper wasn't found, so a workstream a clean restart "
+                           "stops is left interrupted rather than recovered")
+        if policy(home) == "off":
+            return
         try:
             _sweep(home, work_store.Store(home))
         except Exception:  # noqa: BLE001
@@ -1682,7 +1733,8 @@ def start_recovery(home: Optional[Path] = None) -> None:
 def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[dict[str, str]]:
     """The bot's policy for its Bot Chat: a block for a tool the coordinator
     doesn't run itself, else None. Outside a coordinator it blocks only a
-    workstream's message_agent (other bots are asked through the Bot Chat)."""
+    workstream's message_agent (other bots are asked through the Bot Chat)
+    and its memory (the coordinator keeps what it reports)."""
     name = str(tool_name or "")
     home = _home()
     if home is None:
@@ -1690,14 +1742,19 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     mode = policy(home)
     # A fork of the Bot Chat (its review, /btw) runs under its id and is
     # held to the same policy; a subagent never reaches here.
-    if mode == "off":
-        return None
-    allowed = LOOKUPS if mode == "lookups" else STRICT
     names = [name]
     if name == "tool_call":
         from . import pulse_tools
 
         names = [called for called, _ in pulse_tools.called(args)]
+    if mode == "off":
+        # Turning workstreams off doesn't stop one that's running, nor what it may not do.
+        if name == "tool_call" and (not names or any(called in BRIDGE for called in names)):
+            _, work, unreadable = _lookup(session_id, home)
+            return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
+        return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
+    allowed = LOOKUPS if mode == "lookups" else STRICT
+    if name == "tool_call":
         # A bridged call that names nothing readable, or bridges again, is
         # held: Hermes runs what's inside without asking this hook again.
         if not names or any(called in BRIDGE for called in names):
@@ -1707,6 +1764,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             # never sees.
             _, work, unreadable = _lookup(session_id, home)
             return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
+    held = _workstream_block(session_id, home, names, {MEMORY})
+    if held is not None:
+        return held
     if all(called in allowed for called in names):
         return None  # allowed in any chat: which one this is doesn't matter
     has_id = isinstance(session_id, str) and session_id.strip()
@@ -1734,6 +1794,22 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         if called == MESSAGE_AGENT:
             return {"action": "block", "message": MESSAGE_AGENT_BLOCK}
         return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
+    return None
+
+
+def _workstream_block(session_id: Any, home: Path, names: list[str], kept: set[str]) -> Optional[dict[str, str]]:
+    """What a workstream may not call itself, of ``kept``: the bot's memory
+    (the coordinator remembers what it reports) and other bots (its
+    coordinator asks them). Held when the registry can't be read, unless the
+    chat is known to be the Bot Chat."""
+    if not kept.intersection(names) or not isinstance(session_id, str) or not session_id.strip():
+        return None
+    _, work, unreadable = _lookup(session_id, home)
+    if work is not None:
+        return {"action": "block",
+                "message": MEMORY_IN_WORKSTREAM if MEMORY in kept.intersection(names) else MESSAGE_AGENT_IN_WORKSTREAM}
+    if unreadable and _titled_bot_chat(session_id, home) is not True:
+        return {"action": "block", "message": CHECK_FAILED}
     return None
 
 
@@ -1901,6 +1977,8 @@ def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, sta
     outcome = str(status or "") or ("error" if error_type else "ok")
     if outcome not in ("ok", "error", "cancelled", "timed_out", "blocked"):
         outcome = "error" if error_type else outcome[:20]
+    if _is_shutting_down() and str(status or "") != "ok":
+        return  # cut off by the shutdown: it may have taken effect, so it stays open for recovery
     work_store.Store(home).step_ended(work.ref, tool=str(tool_name or ""), tool_call_id=str(tool_call_id or ""),
                                       outcome=outcome, prefix=BRIDGED if tool_name == "tool_call" else "")
 
@@ -1922,6 +2000,7 @@ def turn_started(session_id: Any) -> bool:
         _turn_began[str(session_id)] = began
     # On disk too: after a restart, the steps since then are the turn it stopped.
     work_store.Store(home).update(work.ref, turn_at=began)
+    _watch_shutdown()  # so a restart during it is told from a user's stop
     if work.status not in _RUNNING_STATES:
         # Already running in Hermes, so it takes its slot even past the limit;
         # work_start and work_send keep to the count.
@@ -1986,6 +2065,10 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
             _redirecting.discard((str(home), work.ref))
         if redirected:
             return True  # a work_send redirected it: the new turn runs, and settles it
+        if _is_shutting_down():
+            # Hermes stopped it on its way out: a restart, not the user. Left
+            # running, so the next process's sweep recovers it.
+            return True
         # Not a work_stop or a redirect: the user stopped it from the chat
         # itself. It stays interrupted, its slot free.
         store.update(work.ref, status="interrupted", last_result=text, only_if=_SETTLES)
