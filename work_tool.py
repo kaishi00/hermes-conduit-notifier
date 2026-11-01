@@ -1701,8 +1701,12 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         # A bridged call that names nothing readable, or bridges again, is
         # held: Hermes runs what's inside without asking this hook again.
         if not names or any(called in BRIDGE for called in names):
-            return {"action": "block", "message": BRIDGE_BLOCK} if _titled_bot_chat(session_id, home) is not False \
-                else None
+            if _titled_bot_chat(session_id, home) is not False:
+                return {"action": "block", "message": BRIDGE_BLOCK}
+            # A workstream's could hide a message_agent its refusal below
+            # never sees.
+            _, work, unreadable = _lookup(session_id, home)
+            return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
     if all(called in allowed for called in names):
         return None  # allowed in any chat: which one this is doesn't matter
     has_id = isinstance(session_id, str) and session_id.strip()

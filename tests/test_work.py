@@ -353,7 +353,10 @@ def test_a_workstream_cant_message_other_bots_directly(bots, hermes, monkeypatch
     assert block["action"] == "block" and "your coordinator asks it for you" in block["message"]
     bridged = work.tool_block("20261031_work_1", "tool_call", {"name": "message_agent", "arguments": {}})
     assert bridged["action"] == "block"
+    nested = {"name": "tool_call", "arguments": {"name": "message_agent", "arguments": {"agent": "nahida"}}}
+    assert work.tool_block("20261031_work_1", "tool_call", nested)["action"] == "block"
     assert work.tool_block(OTHER_CHAT, "message_agent", {}) is None  # an ordinary chat is left alone
+    assert work.tool_block(OTHER_CHAT, "tool_call", nested) is None
 
 
 def test_message_agent_is_held_when_the_registry_cant_be_read(bots, hermes, monkeypatch):
