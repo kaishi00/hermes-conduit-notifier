@@ -2295,6 +2295,13 @@ def test_a_start_cut_off_before_its_brief_isnt_continued(on, hermes, monkeypatch
     assert submitted_to(hermes, WORKER_1) == [] and "before the brief was sent" in on.get("W1").error
     work.flush_wakes()
     assert "work_send it the instructions again" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+    # Nothing ran, so the panel offers no Continue or Check first: a reply is its brief.
+    row, = work.app_list(on.home)["work"]
+    assert row["actions"] == ["stop", "send"] and work.app_act(on.home, "W1", "continue")["error"] == "not_now"
+    hermes.calls.clear()
+    assert work.app_act(on.home, "W1", "send", {"text": "Find out why the login page is slow."})["ok"]
+    work.turn_started(WORKER_1)
+    assert on.get("W1").error == ""
 
 
 def test_a_start_whose_brief_hermes_took_isnt_sent_again(on, hermes, monkeypatch):
@@ -2818,3 +2825,22 @@ def test_a_reply_from_conduit_a_restart_cut_off_is_resent_or_handed_back(on, her
     work.flush_wakes()
     wake, = submitted_to(hermes, BOT_CHAT)
     assert "The user's message from Conduit to W2" in wake["text"] and "Also the NAS logs." in wake["text"]
+
+
+def test_the_panel_lists_every_open_row_the_strip_counts_and_what_changed_last(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "APP_ROWS", 2)
+    store = store_mod.Store(on.home)
+    for n in range(4):
+        store.add("ask_out", title=f"Ask {n}", status="waiting")
+    old = store.add("ask_out", title="Old answer", status="done")
+    newer = [store.add("ask_out", title=f"Answer {n}", status="done") for n in range(3)]
+    store.update(old.ref, closed_at=1.0)  # created first, changed last
+    for row in newer:
+        store.update(row.ref, closed_at=1.0)
+    store.update(old.ref, title="Old answer, changed")
+    listed = work.app_list(on.home)
+    assert listed["counts"]["waiting"] == 4
+    open_refs = [row["ref"] for row in listed["work"] if not row["closed"]]
+    assert len(open_refs) == 4  # past APP_ROWS: every open row is listed
+    closed = [row["ref"] for row in listed["work"] if row["closed"]]
+    assert len(closed) == 2 and closed[0] == old.ref

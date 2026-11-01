@@ -1389,6 +1389,9 @@ _CONTINUED = "continued:"
 # Meta key: what Check first asks a workstream a restart cut off during a
 # step that can change things, until a turn of it starts.
 _CHECK = "check:"
+# The error on a workstream a restart cut off before its brief was sent:
+# nothing ran, so there's nothing to continue or check, only to brief.
+_BRIEF_UNSENT = "its start was cut off by a restart, before the brief was sent"
 # How old a send the outbox still looks into after a restart.
 REPLAY_MAX_S = 6 * 3600.0
 RECOVERY_WAIT_S = 900.0
@@ -1477,7 +1480,7 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     elif not began:
         # Its brief never reached it (the restart came before or while the
         # session was made): there's no turn to continue.
-        store.update(ref, error="its start was cut off by a restart, before the brief was sent")
+        store.update(ref, error=_BRIEF_UNSENT)
         line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before its brief was sent, so "
                 "nothing ran. work_send it the instructions again to start it.")
     elif uncertain:
@@ -2055,6 +2058,8 @@ def turn_started(session_id: Any) -> bool:
         # work_start and work_send keep to the count.
         work_store.Store(home).update(work.ref, status="running", closed_at=0.0, error="",
                                       only_if=(work.status,))
+    elif work.error == _BRIEF_UNSENT:
+        work_store.Store(home).update(work.ref, error="")  # its brief came, and a turn of it ran
     if (work.progress or {}).get("ready"):
         # A new turn: its own result says again whether it's for the user to look at.
         work_store.Store(home).update(work.ref, progress={**work.progress, "ready": False})
@@ -2202,7 +2207,6 @@ def answered(session_id: Any) -> None:
 # of a bot's work, and the user's own actions on it, which skip the model.
 
 APP_ROWS = 40
-APP_OPEN_ROWS = 500
 APP_RECENT_S = 7 * 86400.0
 APP_RESULT_CHARS = 600
 APP_GOAL_CHARS = 300
@@ -2243,12 +2247,14 @@ def app_list(home: Path) -> dict:
     def still_open(work: work_store.Work) -> bool:
         return work.active or (work.status == "interrupted" and not work.closed_at)
 
-    # Every open row, however old, then what changed in the last week.
-    rows = {work.ref: work for work in store.list(limit=APP_OPEN_ROWS) if still_open(work)}
-    for work in store.list(include_closed=True, changed_since=cutoff, limit=APP_ROWS):
-        rows.setdefault(work.ref, work)
-    rows = list(rows.values())
-    rows.sort(key=lambda work: (not still_open(work), -work.updated_at))
+    # Every open row, however old, so the panel lists all the strip counts,
+    # then the APP_ROWS that changed last in the last week.
+    open_rows = [work for work in store.list(limit=-1) if still_open(work)]
+    listed = {work.ref for work in open_rows}
+    recent = [work for work in store.list(include_closed=True, changed_since=cutoff, limit=APP_ROWS + len(listed),
+                                          by_change=True) if work.ref not in listed][:APP_ROWS]
+    open_rows.sort(key=lambda work: -work.updated_at)
+    rows = open_rows + recent
     counts = out["counts"]
     for work in rows:
         if work.closed_at:
@@ -2261,7 +2267,7 @@ def app_list(home: Path) -> dict:
             counts["ready"] += 1
         elif work.kind == "ask_out" and work.status == "waiting":
             counts["waiting"] += 1
-    out["work"] = [_app_row(store, work, on=mode != "off") for work in rows[:APP_ROWS]]
+    out["work"] = [_app_row(store, work, on=mode != "off") for work in rows]
     return out
 
 
@@ -2300,6 +2306,9 @@ def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
         return []
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
+    if work.status in ("interrupted", "stopped") and work.error == _BRIEF_UNSENT:
+        # Nothing ran: the user's reply is its brief.
+        return ["stop", "send"] if work.status == "interrupted" else ["send"]
     if work.status == "interrupted":
         return ["check", "continue", "stop", "send"] if uncertain else ["continue", "stop", "send"]
     if work.status == "stopped":
