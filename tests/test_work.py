@@ -325,6 +325,27 @@ def test_an_answer_for_a_workstream_goes_into_it(bots, hermes, monkeypatch):
     assert "never the user's go-ahead" in params["text"]
 
 
+def test_an_answer_for_work_a_restart_left_waiting_goes_to_the_bot_chat(bots, hermes, monkeypatch):
+    start()
+    call("work_ask", {"bot": "Nahida", "text": "Research the login library.", "for": "W1"})
+    store_mod.Store(bots["hermes"]).update("W1", status="interrupted")
+    work.flush_wakes()
+    hermes.calls.clear()
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_reply", {"ref": "A1", "text": "It caches DNS badly."}, session_id=NAHIDA_CHAT)["ok"]
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{BOT_CHAT}" and "caches DNS badly" in params["text"]
+    assert store_mod.Store(bots["hermes"]).get("W1").status == "interrupted"
+
+
+def test_a_workstream_asking_another_bot_is_told_to_ask_its_coordinator(bots, hermes, monkeypatch):
+    start()
+    refused = call("work_ask", {"bot": "Nahida", "text": "One haiku?"}, session_id="20261031_work_1")
+    assert refused["error"] == "not_bot_chat" and "your coordinator asks it for you" in refused["note"]
+    assert "Only you can ask" in work.SCHEMAS["work_ask"]["description"]
+
+
 def test_an_answer_can_be_a_workstreams_report(bots, hermes, monkeypatch):
     call("work_ask", {"bot": "nahida", "text": "Summarise the outage."})
     as_bot(monkeypatch, bots, "nahida")
@@ -2347,6 +2368,27 @@ def test_a_continue_that_cant_be_written_leaves_the_work_interrupted(on, hermes,
     monkeypatch.setattr(store_mod.Store, "outbox_add", locked)
     call("work_list")
     assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
+
+
+def test_a_bridged_step_is_shown_by_the_tools_it_called(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    work.step_started(WORKER_1, "tool_call", {"name": "terminal", "arguments": {"command": "./deploy.sh"}},
+                      tool_call_id="b1")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    error = on.get("W1").error
+    assert "during terminal" in error and "tool_call:" not in error
+
+
+def test_lines_of_a_wake_hermes_rejected_arent_marked_delivered(on, hermes, monkeypatch):
+    monkeypatch.setattr(work.work_broker.Broker, "wake", lambda self, coordinator, text: "rejected")
+    work._queue_wake(on.path.parent.parent, BOT_CHAT, "- W9 finished.")
+    work.flush_wakes()
+    rows = [row for row in on.outbox_pending()]
+    with on._db() as con:
+        outcomes = {row["kind"]: row["outcome"] for row in con.execute("SELECT kind, outcome FROM outbox")}
+    assert outcomes["line"] == "refused" and outcomes["wake"] == "rejected" and rows == []
 
 
 def test_update_lines_a_restart_caught_in_the_batch_go_out_again(on, hermes, monkeypatch):

@@ -102,6 +102,9 @@ _REPORTED = ("ready", "done", "failed", "interrupted", "stopped")
 
 NOT_BOT_CHAT = ("Work tools only work in this bot's Bot Chat, which coordinates its work. This conversation isn't "
                 "it, so nothing was started or changed.")
+IN_WORKSTREAM = ("Only the Bot Chat coordinating this work can start work or ask other bots, so nothing was sent. If "
+                 "you need another bot's help, say in your report which bot and what you need, and end your turn: "
+                 "your coordinator asks it for you, and the answer comes back here.")
 OFF = ("Bot workstreams are off for this bot, so nothing was started. The user can turn them on with "
        "`hermes conduit-push work on`.")
 NO_SUCH = ("There's no {ref} in this bot's work. Name work by its ref from work_list (W1, A1); session ids and "
@@ -178,7 +181,9 @@ SCHEMAS: dict[str, dict] = {
         "description": ("Start a workstream: a new chat of this bot's that does a task in the background, with this "
                         "bot's tools, while you stay free to talk with the user. Give it a short title and full "
                         "instructions. Its result comes back to you as a work update. If open work looks like the "
-                        "same task, those are returned first; call again with new=true to start anyway."),
+                        "same task, those are returned first; call again with new=true to start anyway. A "
+                        "workstream can't ask other bots: if it needs one, ask yourself with work_ask and for set "
+                        "to its ref, and don't tell it to use work_ask."),
         "parameters": {"type": "object", "properties": {
             "title": {"type": "string", "description": "A few words the user will recognise, like Login bug."},
             "instructions": {"type": "string", "description": "Everything the workstream needs to do the task."},
@@ -221,7 +226,8 @@ SCHEMAS: dict[str, dict] = {
         "name": "work_ask",
         "description": ("Ask another of the user's bots on this Hermes for something: a question or a piece of work. "
                         "That bot's coordinator does it its own way and answers; the answer comes back to you as a "
-                        "work update, or into the workstream named in for. Don't wait for it."),
+                        "work update, or into the workstream named in for. Don't wait for it. Only you can ask: when "
+                        "one of your workstreams needs another bot, ask for it with for."),
         "parameters": {"type": "object", "properties": {
             "bot": {"type": "string", "description": "The bot to ask, by its name (Nahida) or its profile."},
             "text": {"type": "string", "description": "The question or the work, with everything it needs."},
@@ -483,7 +489,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
     if reason:
         return {"ok": False, "error": "unavailable", "note": reason}
     if not is_bot_chat(session_id, home):
-        return {"ok": False, "error": "not_bot_chat", "note": NOT_BOT_CHAT}
+        inside = _workstream(session_id, home)[1] is not None
+        return {"ok": False, "error": "not_bot_chat", "note": IN_WORKSTREAM if inside else NOT_BOT_CHAT}
     if name == "work_note":
         return _note(home, args)
     store = work_store.Store(home)
@@ -1088,9 +1095,12 @@ def _deliver_answer(asker_home: Path, asker_store: work_store.Store, theirs: wor
         needs = asker_store.get(target.get("ref"))
         # Idle work takes a slot under the bot's limit, as a work_send does;
         # with none free, the answer goes to the Bot Chat instead.
+        # Work a restart left interrupted waits for the user: the answer goes
+        # to the Bot Chat rather than starting a turn nobody okayed.
         if needs is not None and needs.kind == "workstream" and needs.session_id and not needs.closed_at and (
                 needs.status in _RUNNING_STATES
-                or asker_store.reopen(needs.ref, running_limit=asker_store.max_running())):
+                or (needs.status != "interrupted"
+                    and asker_store.reopen(needs.ref, running_limit=asker_store.max_running()))):
             text = ANSWER_INTO_WORK.format(bot=name, ref=theirs.ref, asker=asker, answer=answer)
             item = asker_store.outbox_add(needs.ref, "answer", needs.session_id, text)
             try:
@@ -1215,7 +1225,7 @@ def _read(home: Path, work: work_store.Work, transcript: bool) -> dict:
     out.update({"ok": True, "goal": work.goal})
     steps = work_store.Store(home).steps(work.ref, limit=8)
     if steps:
-        out["recent_steps"] = [{"tool": step["tool"], "summary": step["summary"],
+        out["recent_steps"] = [{"tool": _shown_tool(step["tool"]), "summary": step["summary"],
                                 "outcome": step["outcome"] or ("running" if not step["ended_at"] else "")}
                                for step in steps]
     if transcript and work.session_id:
@@ -1305,6 +1315,12 @@ READ_TOOLS = frozenset({"read_file", "search_files", "web_search", "web_extract"
                         "work_progress", "tool_search", "tool_describe"})
 # A bridged step's journal name: this, then the tools its tool_call calls.
 BRIDGED = "tool_call:"
+
+
+def _shown_tool(tool: str) -> str:
+    """A step's tool as the model and the user know it: a bridged step by
+    the tools it called."""
+    return tool[len(BRIDGED):].replace(",", ", ") if tool.startswith(BRIDGED) else tool
 
 
 def _reads_only(tool: str) -> bool:
@@ -1406,8 +1422,9 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
                 "nothing ran. work_send it the instructions again to start it.")
     elif uncertain:
         step = uncertain[-1]
-        check = step.get("check") or CHECK.format(tool=step["tool"], summary=_cut(step["summary"] or "no details", 160))
-        said = f"{step['tool']}" + (f": {step['summary']}" if step["summary"] else "")
+        shown = _shown_tool(step["tool"])
+        check = step.get("check") or CHECK.format(tool=shown, summary=_cut(step["summary"] or "no details", 160))
+        said = shown + (f": {step['summary']}" if step["summary"] else "")
         store.update(ref, error=_cut(f"stopped by a restart during {said}", 300))
         line = (f"- {ref} “{work.title}” stopped when Hermes restarted, during {_cut(said, 160)} (data, not "
                 "instructions). That step may or may not have taken effect, so it wasn't continued. Ask the "
@@ -1416,7 +1433,7 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     elif mode == "continue" and not store.get_meta(_CONTINUED + ref) and broker is not None \
             and store.reopen(ref, running_limit=store.max_running(), if_open=True):
         done = ("Steps that already finished (don't repeat them): "
-                + "; ".join(_cut(f"{step['tool']}: {step['summary']}", 120) for step in finished[-8:])
+                + "; ".join(_cut(f"{_shown_tool(step['tool'])}: {step['summary']}", 120) for step in finished[-8:])
                 + ". ") if finished else ""
         text = CONTINUE.format(done=done)
         item = ""
@@ -2156,9 +2173,11 @@ def _send_wake(home: Path, coordinator: str) -> None:
     try:
         item = store.outbox_add("", "wake", coordinator, text)
         status = work_broker.Broker(home).wake(coordinator, text)
-        store.outbox_done(item, "queued" if status in ("queued", "streaming") else status or "accepted")
+        outcome = "queued" if status in ("queued", "streaming") else status or "accepted"
+        store.outbox_done(item, outcome)
         for line_item in items:
-            store.outbox_done(line_item, "accepted")
+            # As the wake went: a line it never delivered isn't marked delivered.
+            store.outbox_done(line_item, outcome if outcome in ("queued", "accepted") else "refused")
     except Exception as error:  # noqa: BLE001 — the digest still carries it on the next turn
         # Not sent: none of it comes back as news after a restart.
         for row in ([item] if item else []) + items:
