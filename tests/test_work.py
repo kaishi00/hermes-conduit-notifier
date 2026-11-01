@@ -2234,12 +2234,58 @@ def test_recovery_doesnt_reopen_work_closed_meanwhile(on, hermes, monkeypatch):
 
 
 def test_a_start_cut_off_before_its_brief_isnt_continued(on, hermes, monkeypatch):
-    start()  # its turn never started
+    start()  # its turn never started, and Hermes never took the brief
+    with on._db() as con:
+        con.execute("UPDATE outbox SET accepted_at = 0, outcome = '' WHERE kind = 'start'")
     restart(hermes, monkeypatch)
     call("work_list")
     assert submitted_to(hermes, WORKER_1) == [] and "before the brief was sent" in on.get("W1").error
     work.flush_wakes()
     assert "work_send it the instructions again" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+
+
+def test_a_start_whose_brief_hermes_took_isnt_sent_again(on, hermes, monkeypatch):
+    start()  # Hermes took the brief; the restart came before its turn was seen
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and "just as its brief was taken" in on.get("W1").error
+    work.flush_wakes()
+    assert "it may have started" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+
+
+def test_a_continue_note_left_pending_is_never_resent(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    old = on.outbox_add("W1", "continue", WORKER_1, "an older continue note")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    sent, = submitted_to(hermes, WORKER_1)  # only this recovery's own
+    assert sent["text"] != "an older continue note" and old not in {row["id"] for row in on.outbox_pending()}
+
+
+def test_a_marker_that_cant_be_cleared_holds_the_work(on, hermes, monkeypatch):
+    markers = types.ModuleType("tui_gateway.turn_marker")
+    markers.read_turn_marker = lambda home, key: {"writer_pid": 1, "prompt": "x"}
+    markers.marker_writer_state = lambda marker: "dead"
+
+    def broken(home, key):
+        raise PermissionError("read-only")
+
+    markers.clear_turn_marker = broken
+    monkeypatch.setitem(sys.modules, "tui_gateway.turn_marker", markers)
+    start()
+    work.turn_started(WORKER_1)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == [] and "crash marker" in on.get("W1").error
+
+
+def test_a_start_cut_off_before_its_session_was_stored_is_told(on, hermes, monkeypatch):
+    start()
+    on.update("W1", session_id="", status="starting")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert "before the brief was sent" in on.get("W1").error
 
 
 def test_a_continue_that_cant_be_written_leaves_the_work_interrupted(on, hermes, monkeypatch):

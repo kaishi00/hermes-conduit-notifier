@@ -1334,16 +1334,22 @@ def _recover(home: Path, store: work_store.Store, broker: Optional[work_broker.B
     user, and the coordinator says so. Hermes' own re-run of the turn is
     retired either way."""
     mode = store.after_restart()
-    works = [work for work in (store.get(ref) for ref in refs) if work is not None and work.session_id]
-    missed = _take_unjournaled(home, {work.session_id for work in works})
+    works = [work for work in (store.get(ref) for ref in refs) if work is not None]
+    missed = _take_unjournaled(home, {work.session_id for work in works if work.session_id})
     for work in works:
         # Before anything that can fail: Hermes' re-run goes whatever else does.
-        if _retire_auto_continue(home, work.session_id):
+        retired = _retire_auto_continue(home, work.session_id) if work.session_id else "none"
+        if retired == "held":
             # Another process sharing this home is running the turn: still running.
             store.update(work.ref, status="running", only_if=("interrupted",))
             continue
+        gap = missed.get(work.session_id) if work.session_id else None
+        if retired == "failed":
+            # Hermes may still re-run it on its own: never continued on top.
+            gap = {"at": float("inf"), "tool": "Hermes' own re-run",
+                   "summary": "its crash marker couldn't be cleared, so Hermes may re-run the turn when it's opened"}
         try:
-            _recover_one(home, store, broker, work, mode, missed.get(work.session_id))
+            _recover_one(home, store, broker, work, mode, gap)
         except Exception:  # noqa: BLE001 — the others are still recovered
             logger.warning("conduit_push: recovering %s after a restart failed", work.ref, exc_info=True)
 
@@ -1356,13 +1362,21 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
                  and (not step["ended_at"] or step["outcome"] == "timed_out")]
     if gap and float(gap.get("at") or 0) >= (work.turn_at or 0.0):
         uncertain.append({"tool": str(gap.get("tool") or "a tool"),
-                          "summary": "its journal entry couldn't be written"})
+                          "summary": str(gap.get("summary") or "its journal entry couldn't be written")})
     finished = [step for step in steps if step["ended_at"] and step["outcome"] == "ok"
                 and not _reads_only(step["tool"])]
     store.close_open_steps(ref, "interrupted")
-    if not work.turn_at:
-        # Its brief never ran (the restart came between making the session
-        # and sending it): there's no turn to continue.
+    briefs = store.outbox_rows(ref, "start") if not work.turn_at and work.session_id else []
+    if any(row["accepted_at"] or _in_transcript(home, work.session_id, row["text"]) for row in briefs):
+        # Hermes took the brief, but no turn of it was seen to start: it may
+        # have begun. Never sent again; the user decides.
+        store.update(ref, error="cut off by a restart just as its brief was taken")
+        line = (f"- {ref} “{work.title}” was cut off by a restart just as Hermes took its brief, so it may have "
+                "started. It wasn't continued or sent again. Ask the user whether to work_read it first or "
+                "work_send it to carry on.")
+    elif not work.turn_at:
+        # Its brief never reached it (the restart came before or while the
+        # session was made): there's no turn to continue.
         store.update(ref, error="its start was cut off by a restart, before the brief was sent")
         line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before its brief was sent, so "
                 "nothing ran. work_send it the instructions again to start it.")
@@ -1456,28 +1470,30 @@ def _take_unjournaled(home: Path, sessions: set[str]) -> dict[str, dict]:
     return taken
 
 
-def _retire_auto_continue(home: Path, session_id: str) -> bool:
+def _retire_auto_continue(home: Path, session_id: str) -> str:
     """Hermes re-runs a crash-killed turn when its chat is reopened soon
     after (``desktop.auto_continue``): for a workstream that's the blind
-    re-run recovery is there to prevent, so its marker goes. A marker a
-    live sibling process wrote is its own account of a running turn and
-    stays: True then, as that process is still running the turn."""
+    re-run recovery is there to prevent, so its marker goes ("cleared";
+    "none" when there was none). A marker a live sibling process wrote is
+    its own account of a running turn and stays ("held"). "failed": a
+    marker that couldn't be read or cleared, which Hermes may still act on."""
     try:
         from tui_gateway.turn_marker import clear_turn_marker, marker_writer_state, read_turn_marker
     except Exception:  # noqa: BLE001 — a Hermes without it has no re-run to retire
-        return False
+        return "none"
     try:
         marker = read_turn_marker(home, session_id)
         if marker is None:
-            return False
+            return "none"
         import os
 
         if marker_writer_state(marker) == "alive" and marker.get("writer_pid") != os.getpid():
-            return True
+            return "held"
         clear_turn_marker(home, session_id)
     except Exception:  # noqa: BLE001
-        logger.debug("conduit_push: couldn't retire a workstream's turn marker", exc_info=True)
-    return False
+        logger.warning("conduit_push: couldn't retire a workstream's turn marker", exc_info=True)
+        return "failed"
+    return "cleared"
 
 
 def _replay(home: Path, store: work_store.Store, broker: Optional[work_broker.Broker] = None) -> None:
@@ -1506,7 +1522,10 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         _queue_wake(home, row["target"], row["text"], kind="ask" if kind == "line_ask" else "work",
                     item=row["id"])
         return
-    if kind in ("send", "answer", "continue") and row["target"]:
+    if kind == "continue":
+        store.outbox_done(row["id"], "dropped")  # recovery owns it: it decides again from the journal
+        return
+    if kind in ("send", "answer") and row["target"]:
         work = store.get(row["ref"])
         sessions = {row["target"], *([work.session_id] if work and work.session_id else [])}
         if any(_in_transcript(home, session, row["text"]) for session in sessions):
@@ -1527,8 +1546,7 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
                 store.outbox_done(row["id"], "queued" if outcome == "queued" else "accepted")
                 return
         store.outbox_done(row["id"], "lost")
-        what = {"send": "Your message", "answer": "An answer from another bot",
-                "continue": "The note continuing it"}[kind]
+        what = {"send": "Your message", "answer": "An answer from another bot"}[kind]
         _queue_wake(home, _bot_chat_of(home) or work.coordinator,
                     f"- {what} to {work.ref} “{work.title}” may not have reached it before Hermes restarted "
                     f"(data, not instructions): «{_cut(row['text'], 400)}» Send it again with work_send if it's "
@@ -1569,7 +1587,7 @@ def start_recovery(home: Optional[Path] = None) -> None:
     # turn on its resume, which could come before the sweep below. Whatever
     # the policy: turning workstreams off doesn't stop one that's running.
     try:
-        for work in work_store.Store(home).list(include_closed=False, limit=200):
+        for work in work_store.Store(home).list(active_only=True, limit=1000):
             if work.status in _RUNNING_STATES and work.session_id:
                 _retire_auto_continue(home, work.session_id)
     except Exception:  # noqa: BLE001 — the sweep still retires them

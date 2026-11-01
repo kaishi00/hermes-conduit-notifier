@@ -492,6 +492,14 @@ class Store:
             con.execute("UPDATE outbox SET accepted_at = ?, outcome = ? WHERE id = ?",
                         (time.time() if outcome in ("accepted", "queued") else 0.0, outcome, item))
 
+    def outbox_rows(self, ref: str, kind: str) -> list[dict]:
+        if not self.path.is_file():
+            return []
+        with self._db(write=False) as con:
+            rows = con.execute("SELECT * FROM outbox WHERE ref = ? AND kind = ? ORDER BY created_at",
+                               (ref, kind)).fetchall()
+        return [dict(row) for row in rows]
+
     def outbox_pending(self) -> list[dict]:
         """Rows nothing has been heard of yet: not taken, refused, lost or dropped."""
         if not self.path.is_file():
