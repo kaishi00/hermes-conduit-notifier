@@ -1405,7 +1405,8 @@ she tells you about. It's off until you turn it on for a bot:
   kept in `<profile>/conduit/work-notes.md`, labelled as data, never as your
   go-ahead) and the message of yours the Bot Chat is answering, quoted as
   yours. A start from a work update quotes nothing, so an older message never
-  passes for a go-ahead. What counts as your go-ahead there follows the
+  passes for a go-ahead; a `work_send` quotes it the same way, so a yes you
+  give in the Bot Chat reaches the workstream as yours. What counts as your go-ahead there follows the
   bot's `approvals.mode`: under manual, only your own words do (your quoted
   message when it covers the step, or what you write in the workstream), never the coordinator's
   instructions alone; under smart, Hermes' approvals decide; under off, the

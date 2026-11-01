@@ -1442,6 +1442,7 @@ def test_a_messy_checklist_is_tidied(on, hermes):
 
 def test_a_ready_result_settles_as_ready_and_says_so(on, hermes):
     start()
+    work.turn_started(WORKER)
     hermes.live(BOT_CHAT, transport=object())
     hermes.calls.clear()
     call("work_progress", {"steps": [{"step": "Draft the email", "state": "done"}], "ready": True},
@@ -1513,6 +1514,7 @@ def test_steps_as_a_json_string_are_read_and_nonsense_is_refused(on, hermes):
 
 def test_a_ready_result_without_a_report_is_still_ready(on, hermes):
     start()
+    work.turn_started(WORKER)
     hermes.live(BOT_CHAT, transport=object())
     hermes.calls.clear()
     call("work_progress", {"steps": [{"step": "Write the file", "state": "done"}], "ready": True}, session_id=WORKER)
@@ -1564,6 +1566,7 @@ def test_a_checklist_when_the_registry_cant_be_read_says_to_try_again(on, hermes
 
 def test_a_ready_result_stays_in_the_active_list_until_closed(on, hermes):
     start()
+    work.turn_started(WORKER)
     call("work_progress", {"ready": True}, session_id=WORKER)
     work.turn_ended(WORKER, "Here's the draft.")
     work.turn_finished(WORKER, failed=False, interrupted=False)
@@ -1660,6 +1663,30 @@ def test_a_start_from_a_work_update_quotes_no_older_message(on, hermes, home):
     start("Deploy", "Deploy the fix.")
     brief = _brief_text(hermes)
     assert "Fix the login bug" not in brief and "W9 finished" not in brief and "is answering now" not in brief
+
+
+def test_a_send_carries_the_users_words_as_theirs(on, hermes, home):
+    start()
+    work.turn_ended(WORKER, "Ready to deploy.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    _chat_db(home, [(BOT_CHAT, "user", "yes, deploy it", None)])
+    hermes.calls.clear()
+    assert call("work_send", {"ref": "W1", "text": "The user says go ahead."})["ok"]
+    sent = hermes.calls[-1][1]["text"]
+    assert "passes on:\nThe user says go ahead." in sent and "«yes, deploy it»" in sent
+    _chat_db(home, [(BOT_CHAT, "user", "Work update from your workstreams. W1 finished.", "hidden")])
+    hermes.calls.clear()
+    call("work_send", {"ref": "W1", "text": "More."})
+    assert "More." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
+
+
+def test_a_ready_mark_with_no_recorded_turn_start_isnt_taken(on, hermes):
+    start()
+    call("work_progress", {"ready": True}, session_id=WORKER)
+    work._turn_began.clear()
+    work.turn_ended(WORKER, "A plain answer.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    assert on.get("W1").status == "done"
 
 
 def test_an_inactive_user_row_isnt_quoted(on, hermes, home):
