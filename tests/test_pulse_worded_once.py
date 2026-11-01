@@ -80,6 +80,15 @@ def test_its_day_still_brings_it_once(live):
     ("Kwan's birthday is 2026-11-06.", "Kwan's birthday is Friday 6 November.", True),
     (TUESDAY, "Kwan Cheung Ho", False),
     (TUESDAY, "Kwan Cheung Ho's passport renewal is due 20 November.", False),
+    ("Anna Ho's birthday is Friday 6 November.", "Ho's birthday is Friday 6 November.", False),
+    ("Send Mara the deck by Friday.", "Send Mara the budget by Friday.", False),
+    ("Send Mara the deck by Friday.", "Mara's deck is due Friday.", True),
+    ("Kwan's birthday, Friday 6 November.", "Remind Kwan's birthday, Friday 6 November.", True),
+    ("Kwan's party is 2026-11-06T18:00.", "Kwan's party is Friday 6 November.", True),
+    ("Kwan's party is 2026-11-11T18:00.", "Kwan's party is Friday 6 November.", False),
+    ("Kwan's birthday is 6 November.", "Kwan's dentist appointment is 6 December.", False),
+    ("Kwan's birthday is 6 Nov.", "Kwan's birthday, 6 November.", True),
+    ("Kwan's birthday is Friday 6 November.", "Kwan's piano lesson is on Friday.", False),
 ])
 def test_same_subject(said, text, same):
     assert candidates.same_subject(said, text) is same

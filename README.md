@@ -2982,6 +2982,19 @@ How Pulse knows what a card is about:
   is its own. Before, a birthday on the calendar could come up on several
   days as it got closer, and again from the report when the look ahead
   held it for a shop.
+- **A card with nothing to key on** (0.122.4+; the model found it in a
+  chat, or it came before keys) counts by its words. While it's open and
+  no older than 30 days, a new one of the same kind is left out when it
+  names no one the card doesn't name, starts with the same name (so a
+  relative sharing a surname isn't the same person), and is on the same
+  day: the same day of the month when both give one, years and clock
+  times aside (and the same month when both name one), else a weekday
+  or month plus a plain word in common. One
+  that names no one needs two plain words in common with the card. The
+  look ahead's own dates and deadlines keep their lead times, and the
+  morning brief matches its remembered items, reminders and entries
+  this way too. Before, a birthday the model had found came up again
+  while Tuesday's card for it was still open.
 - **In one run**, two cards about the same reminder or entry make one.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)

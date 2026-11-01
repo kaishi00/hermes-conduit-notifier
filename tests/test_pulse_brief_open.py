@@ -134,3 +134,15 @@ def test_a_card_with_nothing_to_key_on_keeps_its_entry_out_by_its_words(live):
                            "news": "File taxes by 31 October.", "created_at": now - 2 * 86400}])
     text = brief(live, now)
     assert "File taxes" not in text and "Buy milk" in text
+
+
+def test_a_remembered_item_whose_refless_card_is_open_stays_out_by_its_words(live):
+    live.store.set("memory", True)
+    now = at(14, 7)
+    commitment(live, "The user will get their RAPIDS ID card.", due_at=at(20, 12), words="RAPIDS ID card",
+               said_at=now - 7200)
+    commitment(live, said_at=now - 7200)
+    live.store.add_cards([{"kind": pulse.store.NOTICED, "level": "screen", "topic": "commitment",
+                           "news": "Get the RAPIDS ID card on Tuesday 20 October.", "created_at": now - 86400}])
+    text = brief(live, now)
+    assert "RAPIDS" not in text and "renew their passport" in text

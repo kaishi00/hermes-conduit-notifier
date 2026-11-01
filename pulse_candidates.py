@@ -601,25 +601,26 @@ _STARTERS = frozenset(
     "the a an your you i it its this that there these those pulse hermes today tomorrow tonight remember don't "
     "buy send get book call check follow reminder birthday happy worth time next "
     "file renew pay sign bring take meet read submit cancel order pick return schedule email text ask tell "
-    "write finish fix update prepare confirm register apply collect drop visit see go make set".split())
+    "write finish fix update prepare confirm register apply collect drop visit see go make set remind plan "
+    "review look keep attend join start stop move pack wish".split())
 # Words too common to tell two things apart when neither names anyone.
 _COMMON = frozenset(
     "user user's will their they them have with from that this need needs should would could about before "
     "after until when what which there here been being into onto over your yours just also still then than "
     "more some time today tomorrow week weeks days".split())
-_ISO_DAY = re.compile(r"\b\d{4}-(\d{2})-(\d{2})\b")
-_NOT_A_DAY = re.compile(r"\b\d{1,2}:\d{2}\b|\b\d{4}\b")  # a clock time or a year
+_ISO_DAY = re.compile(r"(?<!\d)\d{4}-(\d{2})-(\d{2})(?!\d)")  # "2026-11-06T18:00" too
+_NOT_A_DAY = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?!\d)|\b\d{4}\b")  # a clock time or a year
 
 
-def _marks(text: str) -> tuple[set[str], set[str], set[str], set[str]]:
-    """What ``text`` names (capitalised words, possessive 's dropped), its
+def _marks(text: str) -> tuple[list[str], set[str], set[str], set[str]]:
+    """What ``text`` names in order (capitalised words, possessive 's dropped), its
     days of the month (1 to 31, "6th" as 6; an ISO date as its day and
     month; years and clock times left out), its other date words (weekdays,
     months) and its longer plain words."""
-    text = _ISO_DAY.sub(lambda m: f"{int(m.group(2))} {_MONTHS[int(m.group(1)) - 1]}"
-                        if 1 <= int(m.group(1)) <= 12 else "", text)
+    text = _ISO_DAY.sub(lambda m: f" {int(m.group(2))} {_MONTHS[int(m.group(1)) - 1]} "
+                        if 1 <= int(m.group(1)) <= 12 else " ", text)
     text = _NOT_A_DAY.sub(" ", text)
-    names, days, dates, words = set(), set(), set(), set()
+    names, days, dates, words = [], set(), set(), set()
     for word in re.findall(r"\w+(?:['\u2019]\w+)?", text):
         bare = re.sub(r"['\u2019]s$", "", word).casefold()
         number = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?", bare)
@@ -631,26 +632,41 @@ def _marks(text: str) -> tuple[set[str], set[str], set[str], set[str]]:
         elif bare in _DATE_WORDS and (bare != "may" or word[0] == "M"):  # "you may", not May
             dates.add(bare)
         elif word[0].isupper() and bare not in _STARTERS:
-            names.add(bare)
+            if bare not in names:
+                names.append(bare)
         elif len(bare) >= 4 and bare not in _COMMON:
             words.add(bare)
     return names, days, dates, words
 
 
+def _month_set(dates: set[str]) -> set[int]:
+    """The months among ``dates`` ("nov" and "november" alike)."""
+    return {index for index, month in enumerate(_MONTHS) for word in dates
+            if word == month or (len(word) >= 3 and month.startswith(word))}
+
+
 def same_subject(said: str, text: str) -> bool:
     """Whether ``text`` is about what an earlier card ``said``. It names no
-    one the card doesn't (so Anna Ho's birthday isn't Ho's, and Long's isn't
-    Kwan's); naming no one, it shares two plain words with the card ("renew",
-    "passport"). And it's on the same day: the same day of the month when
-    both give one (so a passport on the 20th isn't a birthday on the 6th),
-    else a weekday or month in common."""
+    one the card doesn't, and its first name is the card's first (so Anna
+    Ho's birthday isn't Ho's either way round, and Long's isn't Kwan's,
+    while "Kwan" is still Kwan Cheung Ho); naming no one, it shares two
+    plain words with the card ("renew", "passport"). And it's on the same
+    day: the same day of the month when both give one (so a passport on the
+    20th isn't a birthday on the 6th, nor the 6th of December the 6th of
+    November), else a weekday or month in common
+    and a plain word that isn't a verb like "send" (Mara's deck on Friday
+    isn't her budget)."""
     names_a, days_a, dates_a, words_a = _marks(said)
     names_b, days_b, dates_b, words_b = _marks(text)
     if names_b:
-        alike = names_b <= names_a
+        alike = set(names_b) <= set(names_a) and names_b[0] == names_a[0]
     else:
-        alike = len((names_a | words_a) & words_b) >= 2
-    dated = bool(days_a & days_b) if days_a and days_b else bool(dates_a & dates_b)
+        alike = len((set(names_a) | words_a) & words_b) >= 2
+    months_a, months_b = (_month_set(dates_a), _month_set(dates_b))
+    if days_a and days_b:  # the 6th of December isn't the 6th of November
+        dated = bool(days_a & days_b) and (not months_a or not months_b or bool(months_a & months_b))
+    else:
+        dated = bool(dates_a & dates_b) and bool((words_a & words_b) - _STARTERS)
     return alike and dated
 
 
