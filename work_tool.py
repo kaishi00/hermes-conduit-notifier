@@ -1218,8 +1218,19 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     # the Bot Chat reaches a worker that only takes the user's words. Read
     # from the Bot Chat this call came from: after a compression the one the
     # work started from holds only older messages.
-    words = FOLLOW_UP.format(bot=bot, text=text) + _quoted_words(home, bot, coordinator)
+    words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + _quoted_words(home, bot, coordinator))
     return _deliver(store, broker, work, words, how)
+
+
+def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: str) -> str:
+    """For a start a restart cut off before its brief went in, the brief
+    first: nothing ran, so the words alone would start it with no task."""
+    if work.error != _BRIEF_UNSENT:
+        return words
+    briefs = store.outbox_rows(work.ref, "start")
+    if not briefs or not briefs[-1]["text"]:
+        return words
+    return f"{briefs[-1]['text']}\n\n{words}"
 
 
 def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, words: str, how: str,
@@ -1488,7 +1499,8 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
         # session was made): there's no turn to continue.
         store.update(ref, error=_BRIEF_UNSENT)
         line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before its brief was sent, so "
-                "nothing ran. work_send it the instructions again to start it.")
+                "nothing ran. " + ("work_send it a word to start it; its brief goes in first." if work.session_id
+                                   else "It never got a chat, so work_start it again."))
     elif uncertain:
         step = uncertain[-1]
         shown = _shown_tool(step["tool"])
@@ -2316,8 +2328,9 @@ def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
     if work.kind != "workstream" or not work.session_id:
         return []
     if work.status == "starting":
-        # Its brief may not be in yet: a reply now could land before it.
-        return ["stop"]
+        # Its brief may not be in yet: a reply could land before it, and a
+        # stop be undone as the brief's turn begins. It's running in moments.
+        return []
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
     if work.status in ("interrupted", "stopped") and work.error == _BRIEF_UNSENT:
@@ -2386,6 +2399,9 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
             answer = {"ok": True, "ref": work.ref, "status": "stopped"}
         else:
             answer = _stop(store, broker, work)
+            if answer.get("ok"):
+                # The tool's note names work_send; the user continues it here.
+                answer["note"] = f"Stopped {work.ref}. Continue it, or reply, when you're ready."
     else:
         if action == "send":
             text = body.get("text").strip() if isinstance(body.get("text"), str) else ""
@@ -2398,9 +2414,7 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
             words = text
             if work.error == _BRIEF_UNSENT:
                 # Nothing ran: the brief it never had goes in, with the reply.
-                briefs = store.outbox_rows(work.ref, "start")
-                if briefs and briefs[-1]["text"]:
-                    words = f"{briefs[-1]['text']}\n\nThe user adds, from Conduit:\n{text}"
+                words = _with_unsent_brief(store, work, f"The user adds, from Conduit:\n{text}")
             how = body.get("how") if body.get("how") in ("auto", "add", "after") else "auto"
         elif action == "check":
             words = APP_CHECK.format(check=store.get_meta(_CHECK + work.ref) or APP_CHECK_DEFAULT)

@@ -2294,7 +2294,7 @@ def test_a_start_cut_off_before_its_brief_isnt_continued(on, hermes, monkeypatch
     call("work_list")
     assert submitted_to(hermes, WORKER_1) == [] and "before the brief was sent" in on.get("W1").error
     work.flush_wakes()
-    assert "work_send it the instructions again" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+    assert "work_send it a word to start it; its brief goes in first" in submitted_to(hermes, BOT_CHAT)[0]["text"]
     # Nothing ran, so the panel offers no Continue or Check first: a reply is its brief.
     row, = work.app_list(on.home)["work"]
     assert row["actions"] == ["stop", "send"] and work.app_act(on.home, "W1", "continue")["error"] == "not_now"
@@ -2862,7 +2862,7 @@ def test_a_start_offers_no_reply_until_its_turn_begins(on, hermes):
     start()
     on.update("W1", status="starting")
     row, = work.app_list(on.home)["work"]
-    assert row["actions"] == ["stop"]
+    assert row["actions"] == []
     assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "not_now"
 
 
@@ -2926,3 +2926,24 @@ def test_work_that_never_got_a_session_says_so(on, hermes):
     store = store_mod.Store(on.home)
     row = store.add("workstream", title="Never started", status="interrupted")
     assert work.app_act(on.home, row.ref, "send", {"text": "Go"})["error"] == "not_now"
+
+
+def test_the_coordinators_send_to_an_unbriefed_start_carries_the_brief(on, hermes, monkeypatch):
+    start()
+    with on._db() as con:
+        con.execute("UPDATE outbox SET accepted_at = 0, outcome = '' WHERE kind = 'start'")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    hermes.calls.clear()
+    assert call("work_send", {"ref": "W1", "text": "Go ahead."})["ok"]
+    sent, = submitted_to(hermes, WORKER_1)
+    assert sent["text"].startswith(on.outbox_rows("W1", "start")[-1]["text"]) and "Go ahead." in sent["text"]
+
+
+def test_a_start_that_never_got_a_chat_is_started_again(on, hermes, monkeypatch):
+    store = store_mod.Store(on.home)
+    store.add("workstream", title="Never started", status="running", coordinator=BOT_CHAT)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    assert "never got a chat, so work_start it again" in submitted_to(hermes, BOT_CHAT)[0]["text"]
