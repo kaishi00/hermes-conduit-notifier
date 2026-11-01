@@ -270,13 +270,16 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
     hermes = _hermes_bin()
     home = tmp_path_factory.mktemp("hermes-gateway-home")
     model = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModel)
-    port = _free_port()
     env = {**os.environ, "HERMES_HOME": str(home), "NO_COLOR": "1"}
     log_path = home / "gateway.log"
-    log = log_path.open("w")
+    log = None
     proc: Optional[subprocess.Popen] = None
+    serving = False
     try:
+        port = _free_port()
+        log = log_path.open("w")
         threading.Thread(target=model.serve_forever, daemon=True).start()
+        serving = True
         shutil.copytree(ROOT, home / "plugins" / PLUGIN, ignore=COPY_IGNORE)
         (home / "config.yaml").write_text(yaml.safe_dump({
             "plugins": {"enabled": [PLUGIN]},
@@ -311,8 +314,10 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
                     os.killpg(proc.pid, signal.SIGKILL)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(15)
-        log.close()
-        model.shutdown()
+        if log is not None:
+            log.close()
+        if serving:
+            model.shutdown()
         model.server_close()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):
             print(log_path.read_text()[-8000:])

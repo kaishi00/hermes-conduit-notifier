@@ -13,7 +13,8 @@ name: Upstream contract
 #   the newest release. A failure opens or updates an `upstream-break` issue,
 #   one per test and failure signature (upstream/report.py), so a known
 #   failure doesn't open a new issue for every canary.
-# - By hand: any Hermes tag or commit.
+# - By hand: any Hermes tag or commit. Give a canary as its tag (with +canary), so the
+#   Webapp leg fails rather than skips when the listener is missing.
 
 on:
   pull_request:
