@@ -2460,6 +2460,29 @@ def test_a_workstream_cant_save_to_the_bots_memory(on, hermes):
     assert bridged["action"] == "block"
     assert work.tool_block(BOT_CHAT, "memory", {"action": "add"}) is None
     assert work.tool_block(OTHER_CHAT, "memory", {"action": "add"}) is None
+    on.set_policy("off")  # turning it off doesn't stop the one that's running
+    work._policy_cache.clear()
+    assert work.tool_block(WORKER_1, "memory", {"action": "add"})["message"] == work.MEMORY_IN_WORKSTREAM
+    assert work.tool_block(WORKER_1, "message_agent", {"agent": "nahida"})["message"] == \
+        work.MESSAGE_AGENT_IN_WORKSTREAM
+    assert work.tool_block(OTHER_CHAT, "memory", {"action": "add"}) is None
+
+
+def test_memory_is_held_when_neither_the_registry_nor_the_title_can_be_read(on, hermes, monkeypatch):
+    start()
+    monkeypatch.setattr(store_mod.Store, "by_session", lambda self, session_id: (_ for _ in ()).throw(
+        store_mod.sqlite3.OperationalError("database is locked")))
+    monkeypatch.setattr(work, "_titled_bot_chat", lambda session_id, home=None: None)
+    assert work.tool_block(WORKER_1, "memory", {"action": "add"})["message"] == work.CHECK_FAILED
+
+
+def test_a_step_the_shutdown_ends_without_a_status_stays_open(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    work.step_started(WORKER_1, "terminal", {"command": "./deploy.sh"}, tool_call_id="c1")
+    work._shutting_down.set()
+    work.step_ended(WORKER_1, "terminal", tool_call_id="c1")
+    assert on.steps("W1", open_only=True)
 
 
 def test_work_from_before_turns_were_stamped_isnt_told_its_brief_was_cut_off(on, hermes, monkeypatch):

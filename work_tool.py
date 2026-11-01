@@ -1655,15 +1655,16 @@ def _watch_shutdown() -> bool:
     """Hermes interrupts every running turn on its way out (on SIGTERM, and
     again at exit), and those turns end as interrupted, as a user's stop
     does. Its turn stopper is wrapped to say so first, so turn_finished
-    leaves them for the next process's sweep. True once it's watched."""
-    watched = False
+    leaves them for the next process's sweep. True once both its paths are
+    watched."""
+    watched = True
     for name in _SHUTDOWN_MODULES:
         module = sys.modules.get(name)
         original = getattr(module, _SHUTDOWN_HOOK, None) if module is not None else None
         if not callable(original):
+            watched = False  # not loaded yet, or Hermes moved it: checked again on each workstream turn
             continue
         if getattr(original, "_conduit_watch", False):
-            watched = True
             continue
 
         def stopping(*args: Any, _original: Any = original, **kwargs: Any) -> Any:
@@ -1672,7 +1673,6 @@ def _watch_shutdown() -> bool:
 
         stopping._conduit_watch = True  # type: ignore[attr-defined]
         setattr(module, _SHUTDOWN_HOOK, stopping)
-        watched = True
     return watched
 
 
@@ -1730,14 +1730,16 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     mode = policy(home)
     # A fork of the Bot Chat (its review, /btw) runs under its id and is
     # held to the same policy; a subagent never reaches here.
-    if mode == "off":
-        return None
-    allowed = LOOKUPS if mode == "lookups" else STRICT
     names = [name]
     if name == "tool_call":
         from . import pulse_tools
 
         names = [called for called, _ in pulse_tools.called(args)]
+    if mode == "off":
+        # Turning workstreams off doesn't stop one that's running, nor what it may not do.
+        return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
+    allowed = LOOKUPS if mode == "lookups" else STRICT
+    if name == "tool_call":
         # A bridged call that names nothing readable, or bridges again, is
         # held: Hermes runs what's inside without asking this hook again.
         if not names or any(called in BRIDGE for called in names):
@@ -1747,13 +1749,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             # never sees.
             _, work, unreadable = _lookup(session_id, home)
             return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
-    if MEMORY in names and isinstance(session_id, str) and session_id.strip():
-        # The coordinator remembers what a workstream reports, not the worker.
-        _, work, unreadable = _lookup(session_id, home)
-        if work is not None:
-            return {"action": "block", "message": MEMORY_IN_WORKSTREAM}
-        if unreadable and _titled_bot_chat(session_id, home) is False:
-            return {"action": "block", "message": CHECK_FAILED}
+    held = _workstream_block(session_id, home, names, {MEMORY})
+    if held is not None:
+        return held
     if all(called in allowed for called in names):
         return None  # allowed in any chat: which one this is doesn't matter
     has_id = isinstance(session_id, str) and session_id.strip()
@@ -1781,6 +1779,22 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         if called == MESSAGE_AGENT:
             return {"action": "block", "message": MESSAGE_AGENT_BLOCK}
         return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
+    return None
+
+
+def _workstream_block(session_id: Any, home: Path, names: list[str], kept: set[str]) -> Optional[dict[str, str]]:
+    """What a workstream may not call itself, of ``kept``: the bot's memory
+    (the coordinator remembers what it reports) and other bots (its
+    coordinator asks them). Held when the registry can't be read, unless the
+    chat is known to be the Bot Chat."""
+    if not kept.intersection(names) or not isinstance(session_id, str) or not session_id.strip():
+        return None
+    _, work, unreadable = _lookup(session_id, home)
+    if work is not None:
+        return {"action": "block",
+                "message": MEMORY_IN_WORKSTREAM if MEMORY in kept.intersection(names) else MESSAGE_AGENT_IN_WORKSTREAM}
+    if unreadable and _titled_bot_chat(session_id, home) is not True:
+        return {"action": "block", "message": CHECK_FAILED}
     return None
 
 
@@ -1948,7 +1962,7 @@ def step_ended(session_id: Any, tool_name: Any, *, tool_call_id: Any = None, sta
     outcome = str(status or "") or ("error" if error_type else "ok")
     if outcome not in ("ok", "error", "cancelled", "timed_out", "blocked"):
         outcome = "error" if error_type else outcome[:20]
-    if outcome != "ok" and _shutting_down.is_set():
+    if _shutting_down.is_set() and str(status or "") != "ok":
         return  # cut off by the shutdown: it may have taken effect, so it stays open for recovery
     work_store.Store(home).step_ended(work.ref, tool=str(tool_name or ""), tool_call_id=str(tool_call_id or ""),
                                       outcome=outcome, prefix=BRIDGED if tool_name == "tool_call" else "")
