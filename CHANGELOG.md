@@ -18,7 +18,8 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 - Pulse's "still want it?" card for something open over a week now says
   what it's about. It used to say only "It has been over a week and
-  nothing shows it happened". Cards already on the Pulse screen say it too.
+  nothing shows it happened". Cards already on the Pulse screen or waiting
+  for the morning brief say it too.
 
 ## 0.123.2 (2026-11-01)
 

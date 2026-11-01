@@ -216,19 +216,8 @@ _NOTE = ("This turn was started by Pulse, the part of Hermes that keeps what Her
          "only pass on what the message says")
 # While Pulse looks things up first, pulse_tools.look_note follows LOOK_NOTE.
 NOTE, LOOK_NOTE = _NOTE + ". Don't use any tools.", _NOTE + " and what you look up about it."
-STALE_NEWS = "It has been over a week and nothing shows it happened."
-
-
-def stale_news(text: Any, kind: str = "") -> str:
-    """The week-old "still want it?" as its card says it: what was said
-    first, so the card stands on its own (Eric, 2026-11-01: "none of them
-    really tell me what it is"). ``text``: the item's; a watch waits a
-    month."""
-    what = _clip(text, 300).rstrip(" .")
-    span = "month" if kind == WATCH else "week"
-    if not what:
-        return STALE_NEWS
-    return f"{what}. That was over a {span} ago, and nothing shows it happened. Still want it?"
+# The week-old ask (learning.stale_news says it on its card).
+STALE_NEWS, stale_news = learning.STALE_NEWS, learning.stale_news
 # Added after the user rated a follow-up "already knew".
 SEEN_INSTRUCTION = ("\n\nThe user doesn't want to hear what they already saw: when that chat shows they already "
                     "know the news (Hermes told them there and they answered, or they said it themselves), "

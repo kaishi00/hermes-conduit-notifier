@@ -415,9 +415,7 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
     entries = []
     for card in cards:
         entry = pulse_learning.card_entry(card, marks.get(card["id"]))
-        if entry["kind"] == pulse_followup.FOLLOWUP and entry["news"] == pulse_followup.STALE_NEWS:
-            # A week-old ask made before it named what it's about.
-            entry["news"] = pulse_followup.stale_news(entry["title"])
+        entry["news"] = pulse_learning.shown_news(pulse_store, card)  # a week-old ask names what it's about
         task = workers.get((card.get("profile") or "", card.get("chat_id") or ""))
         if task is not None:
             entry["kanban_task"] = task
