@@ -2844,3 +2844,28 @@ def test_the_panel_lists_every_open_row_the_strip_counts_and_what_changed_last(o
     assert len(open_refs) == 4  # past APP_ROWS: every open row is listed
     closed = [row["ref"] for row in listed["work"] if row["closed"]]
     assert len(closed) == 2 and closed[0] == old.ref
+
+
+def test_stopped_work_with_a_step_to_check_stays_listed_however_old(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER_1)
+    on.step_started("W1", WORKER_1, "terminal", tool_call_id="c1", summary="command: ./deploy.sh")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.app_act(on.home, "W1", "stop")
+    monkeypatch.setattr(work, "APP_RECENT_S", -86400.0)  # nothing counts as recent
+    row, = work.app_list(on.home)["work"]
+    assert row["status"] == "stopped" and row["actions"] == ["check", "continue", "send"]
+
+
+def test_a_start_offers_no_reply_until_its_turn_begins(on, hermes):
+    start()
+    on.update("W1", status="starting")
+    row, = work.app_list(on.home)["work"]
+    assert row["actions"] == ["stop"]
+    assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "not_now"
+
+
+def test_a_reply_that_isnt_text_is_refused(on, hermes):
+    start()
+    assert work.app_act(on.home, "W1", "send", {"text": ["Try", "this"]})["error"] == "missing"

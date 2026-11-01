@@ -2243,9 +2243,10 @@ def app_list(home: Path) -> dict:
             logger.debug("conduit_push: work sweep failed", exc_info=True)
     out["max_running"] = store.max_running()
     cutoff = time.time() - APP_RECENT_S
-    # Work a restart cut off waits on the user, so it stays with the open work.
+    # Work a restart cut off waits on the user, so it stays with the open
+    # work, as does stopped work with a step still to check.
     def still_open(work: work_store.Work) -> bool:
-        return work.active or (work.status == "interrupted" and not work.closed_at)
+        return work.active or (not work.closed_at and (work.status == "interrupted" or _app_uncertain(store, work)))
 
     # Every open row, however old, so the panel lists all the strip counts,
     # then the APP_ROWS that changed last in the last week.
@@ -2304,6 +2305,9 @@ def _app_uncertain(store: work_store.Store, work: work_store.Work) -> bool:
 def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
     if work.kind != "workstream" or not work.session_id:
         return []
+    if work.status == "starting":
+        # Its brief may not be in yet: a reply now could land before it.
+        return ["stop"]
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
     if work.status in ("interrupted", "stopped") and work.error == _BRIEF_UNSENT:
@@ -2349,13 +2353,17 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
         if work.status == "interrupted":
             # Nothing runs: the user decided it stays stopped.
             # Its check stays: a later Continue still says the step may have run.
-            store.update(work.ref, status="stopped", only_if=("interrupted",))
+            if store.update(work.ref, status="stopped", only_if=("interrupted",)) is None:
+                now = store.get(work.ref)
+                status = now.status if now else work.status
+                return {"ok": False, "ref": work.ref, "error": "not_now", "status": status,
+                        "note": f"{work.ref} is {status.replace('_', ' ')} now, so it wasn't stopped."}
             answer = {"ok": True, "ref": work.ref, "status": "stopped"}
         else:
             answer = _stop(store, broker, work)
     else:
         if action == "send":
-            text = str(body.get("text") or "").strip()
+            text = body.get("text").strip() if isinstance(body.get("text"), str) else ""
             if not text:
                 return {"ok": False, "ref": work.ref, "error": "missing", "note": "Type what to send."}
             if len(text) > APP_TEXT_CHARS:

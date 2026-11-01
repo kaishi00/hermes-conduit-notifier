@@ -28,8 +28,12 @@ WORKSTREAMS_WINDOW_S = 60.0
 REFUSAL_STATUS = {"no_such_work": 404, "missing": 400, "unknown_action": 404, "off": 409, "busy": 409,
                   "not_now": 409, "starting": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502}
 
+# The panel's reads and the user's actions count apart, so reading often
+# never holds up a Stop.
 _workstreams_limiter = core._MintLimiter(WORKSTREAMS_LIMIT, WORKSTREAMS_WINDOW_S,
                                          message="Too many work requests; try again shortly")
+_workstream_actions_limiter = core._MintLimiter(WORKSTREAMS_LIMIT, WORKSTREAMS_WINDOW_S,
+                                                message="Too many work actions; try again shortly")
 
 
 def _work_tool() -> Any:
@@ -47,10 +51,10 @@ def workstreams_act(ref: str, action: str, body: Optional[dict]) -> Dict[str, An
     return _work_tool().app_act(core._calls_home(), ref, action, body)
 
 
-async def _workstreams_route(route: str, profile: Optional[str], fn: Any) -> Any:
+async def _workstreams_route(route: str, profile: Optional[str], fn: Any, limiter: Any = None) -> Any:
     no_store = {"Cache-Control": "no-store"}
     try:
-        answer = await core._run_scoped(profile, core._limited(_workstreams_limiter, profile, fn))
+        answer = await core._run_scoped(profile, core._limited(limiter or _workstreams_limiter, profile, fn))
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
     except HTTPException as exc:
@@ -92,4 +96,5 @@ async def post_workstream_action(ref: str, action: str, request: Request, respon
     body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
-    return await _workstreams_route("workstream action", profile, lambda: workstreams_act(ref, action, body))
+    return await _workstreams_route("workstream action", profile, lambda: workstreams_act(ref, action, body),
+                                    _workstream_actions_limiter)
