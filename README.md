@@ -1478,7 +1478,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, resolved_count, unlisted, work}` |
+| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, resolved_count, unlisted, workstream_sessions, work}` |
 | GET | `/api/plugins/conduit_push/workstreams?resolved=1&before=<closed_at>` | `{ok, ..., work, more}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/send` with `{text, how?}` | `{ok, outcome, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
@@ -1497,7 +1497,9 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   last resolved first, 50 at a time, with `closed_at` and `resolved_by`
   (`user` or `bot`); `reopen` brings a row back and tells the coordinator.
   The bot can't close work you pinned, or work you reopened until it runs
-  again. Resolving unpins it. `counts` has `working`, `needs_you` (approvals, questions and work a
+  again. Resolving unpins it.
+- `workstream_sessions` names every workstream's chat, resolved ones too, so
+  Conduit keeps them out of its chat lists. `counts` has `working`, `needs_you` (approvals, questions and work a
   restart left for you), `ready` and `waiting` (asks to other bots).
 - `check` (Check first) is offered when a restart cut off a step that can
   change things (`uncertain`): the workstream is asked to find out whether

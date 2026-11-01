@@ -3073,6 +3073,7 @@ def test_the_user_pins_resolves_and_reopens_work_without_a_turn(on, hermes):
     assert resolved["work"]["actions"] == []  # reopened first, then replied to
     listed = work.app_list(on.home)
     assert listed["work"] == [] and listed["resolved_count"] == 1
+    assert listed["workstream_sessions"] == [on.get("W1").session_id]  # its chat stays out of Chats
     row, = work.app_list(on.home, resolved=True)["work"]
     assert row["ref"] == "W1" and row["resolved_by"] == "user"
     assert work.app_act(on.home, "W1", "send", {"text": "Hi"})["error"] == "not_now"

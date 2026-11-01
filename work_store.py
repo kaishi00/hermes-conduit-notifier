@@ -359,6 +359,14 @@ class Store:
             rows = con.execute(query, (*params, limit)).fetchall()
         return [_work(row) for row in rows]
 
+    def session_ids(self) -> list[str]:
+        """Every workstream's chat, open or resolved."""
+        if not self.path.is_file():
+            return []
+        with self._db(write=False) as con:
+            rows = con.execute("SELECT session_id FROM work WHERE kind = 'workstream' AND session_id != ''").fetchall()
+        return [row[0] for row in rows]
+
     def count(self, *, closed: bool) -> int:
         """How many rows are closed (``closed``) or open."""
         if not self.path.is_file():

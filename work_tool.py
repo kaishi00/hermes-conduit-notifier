@@ -2335,7 +2335,8 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     mode = policy(home)
     out = {"policy": mode, "bot": _bot_name(home), "bot_chat": _bot_chat_of(home), "work": [],
            "counts": {"working": 0, "needs_you": 0, "ready": 0, "waiting": 0},
-           "max_running": work_store.DEFAULT_MAX_RUNNING, "resolved_count": 0, "unlisted": 0}
+           "max_running": work_store.DEFAULT_MAX_RUNNING, "resolved_count": 0, "unlisted": 0,
+           "workstream_sessions": []}
     if resolved:
         out["more"] = False
     if not work_store.exists(home):
@@ -2350,6 +2351,9 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
             logger.debug("conduit_push: work sweep failed", exc_info=True)
     out["max_running"] = store.max_running()
     out["resolved_count"] = store.count(closed=True)
+    # Every workstream's chat, listed or not, so Conduit keeps a resolved
+    # one out of its chat lists as Hermes does.
+    out["workstream_sessions"] = store.session_ids()
     # Open work stays listed however old: it leaves when the user or the
     # bot resolves it (nothing resolves itself, Eric 2026-11-01).
     open_rows = store.list(limit=-1, by_change=True)
