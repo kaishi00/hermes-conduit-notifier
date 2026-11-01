@@ -2946,4 +2946,32 @@ def test_a_start_that_never_got_a_chat_is_started_again(on, hermes, monkeypatch)
     restart(hermes, monkeypatch)
     call("work_list")
     work.flush_wakes()
-    assert "never got a chat, so work_start it again" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+    assert "before it got a chat, so nothing ran and it's closed" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+    assert store.get("W1").closed_at
+    assert call("work_start", {"title": "Never started", "instructions": "Again."})["ok"]  # not taken for W1
+
+
+def test_a_send_to_work_with_no_chat_is_refused(on, hermes):
+    store_mod.Store(on.home).add("workstream", title="No chat", status="stopped", coordinator=BOT_CHAT)
+    hermes.calls.clear()
+    assert call("work_send", {"ref": "W1", "text": "Go"})["error"] == "not_now" and hermes.calls == []
+
+
+def test_every_stop_from_the_panel_tells_the_user_how_to_go_on(on, hermes, monkeypatch):
+    start()
+    hermes._sessions["rt-20261031_work_1"]["running"] = True
+    assert work.app_act(on.home, "W1", "stop")["note"].startswith("Stopped W1. Continue it")
+    start(title="Disk space", instructions="Check disk space on the NAS.")
+    work.turn_started("rt-20261031_work_2")
+    on.step_started("W2", "rt-20261031_work_2", "read_file", tool_call_id="c1", summary="path: df.txt")
+    store_mod.Store(on.home).set_after_restart("ask")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert work.app_act(on.home, "W2", "stop")["note"].startswith("Stopped W2. Continue it")
+
+
+def test_a_turn_beginning_moves_a_start_on_to_running(on, hermes):
+    start()
+    on.update("W1", status="starting")
+    work.turn_started(WORKER_1)
+    assert on.get("W1").status == "running"

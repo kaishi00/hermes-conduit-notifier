@@ -1212,6 +1212,9 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     text = str(args.get("text") or "").strip()
     if not text:
         return {"ok": False, "ref": work.ref, "error": "missing", "note": "Say what to send."}
+    if not work.session_id:
+        return {"ok": False, "ref": work.ref, "error": "not_now",
+                "note": f"{work.ref} never got a chat, so there's nothing to send to. work_start it again."}
     how = args.get("how") if args.get("how") in ("auto", "add", "after") else "auto"
     bot = _bot_name(home)
     # The user's own words go along, quoted as theirs, so a go-ahead given in
@@ -1497,10 +1500,16 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     elif not began:
         # Its brief never reached it (the restart came before or while the
         # session was made): there's no turn to continue.
-        store.update(ref, error=_BRIEF_UNSENT)
-        line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before its brief was sent, so "
-                "nothing ran. " + ("work_send it a word to start it; its brief goes in first." if work.session_id
-                                   else "It never got a chat, so work_start it again."))
+        if work.session_id:
+            store.update(ref, error=_BRIEF_UNSENT)
+            line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before its brief was sent, so "
+                    "nothing ran. work_send it a word to start it; its brief goes in first.")
+        else:
+            # No chat to send to: closed, so a new work_start of it isn't
+            # taken for the same work.
+            store.update(ref, error=_BRIEF_UNSENT, closed_at=time.time())
+            line = (f"- {ref} “{work.title}” was being started when Hermes restarted, before it got a chat, so "
+                    "nothing ran and it's closed. work_start it again if it's still needed.")
     elif uncertain:
         step = uncertain[-1]
         shown = _shown_tool(step["tool"])
@@ -2073,8 +2082,8 @@ def turn_started(session_id: Any) -> bool:
     if work_store.Store(home).get_meta(_CHECK + work.ref):
         work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
-    if work.status not in _RUNNING_STATES:
-        # Already running in Hermes, so it takes its slot even past the limit;
+    if work.status not in _RUNNING_STATES or work.status == "starting":
+        # A turn of it began, so its brief went in. Already running in Hermes, so it takes its slot even past the limit;
         # work_start and work_send keep to the count.
         work_store.Store(home).update(work.ref, status="running", closed_at=0.0, error="",
                                       only_if=(work.status,))
@@ -2399,9 +2408,9 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
             answer = {"ok": True, "ref": work.ref, "status": "stopped"}
         else:
             answer = _stop(store, broker, work)
-            if answer.get("ok"):
-                # The tool's note names work_send; the user continues it here.
-                answer["note"] = f"Stopped {work.ref}. Continue it, or reply, when you're ready."
+        if answer.get("ok"):
+            # The tool's note names work_send; the user continues it here.
+            answer["note"] = f"Stopped {work.ref}. Continue it, or reply, when you're ready."
     else:
         if action == "send":
             text = body.get("text").strip() if isinstance(body.get("text"), str) else ""
