@@ -207,6 +207,21 @@ def record_for_authority(report: Report, clock: Callable[[], float] = time.monot
             chats.pop(next(iter(chats)))
 
 
+def discard_for_authority(session_id: str, text: str) -> None:
+    """Forgets the report kept for ``text``'s turn in ``session_id``, a turn
+    the gateway's session authority refused."""
+    lock, chats = _authority_store()
+    with lock:
+        session = chats.get(session_id)
+        kept = session.get(KEY) if isinstance(session, dict) else None
+        if isinstance(kept, dict) and text_sha256(text) in kept:
+            kept = dict(kept)
+            kept.pop(text_sha256(text))
+            session[KEY] = kept
+            if not kept:
+                chats.pop(session_id, None)
+
+
 def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float]
                         ) -> Optional[Tuple[str, Optional[str]]]:
     if not isinstance(session_id, str) or not session_id:

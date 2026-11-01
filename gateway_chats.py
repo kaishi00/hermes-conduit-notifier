@@ -26,6 +26,7 @@ its gateway runs: a copy this plugin imported would be a private one.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import importlib
 import logging
 import sys
@@ -86,10 +87,12 @@ def authority_scope(authority: Any) -> Any:
     """The scope of the profile that owns ``authority`` (its config and
     secrets), as the authority's own handlers read them; none without one."""
     scope = getattr(sys.modules.get("gateway.session_authorities"), "owner_scope", None)
-    try:
-        return scope(authority) if callable(scope) else nullcontext()
-    except Exception:  # noqa: BLE001
+    if not callable(scope):
+        # A Hermes without per-profile scopes reads one profile's settings.
         return nullcontext()
+    # A scope that fails raises: reading the gateway's default profile instead
+    # would answer with another profile's model and secrets.
+    return scope(authority)
 
 
 def authority_agent(session_id: Any) -> Optional[tuple]:
@@ -185,10 +188,25 @@ class _AuthorityLink:
             response = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": rid, "method": shaped[0],
                                                       "params": shaped[1]}))
         except Exception as exc:  # noqa: BLE001 — reported as the call's error
-            return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": str(exc)[:300] or type(exc).__name__}}
+            if isinstance(exc, TimeoutError):
+                # It may have reached the authority, so a turn may be coming.
+                message = f"{method} timed out; it may still have started"
+            else:
+                self._drop_surface(method, params)
+                message = str(exc)[:300] or type(exc).__name__
+            return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": message}}
         if not isinstance(response, dict):
+            self._drop_surface(method, params)
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"{method} gave no answer"}}
+        if method == "prompt.submit" and (response.get("error") or str(
+                (response.get("result") or {}).get("status") or "queued").lower() != "queued"):
+            # No turn of that text is coming: its surface line would wait for the next one.
+            self._drop_surface(method, params)
         return self._answer(method, params, shaped, response)
+
+    def _drop_surface(self, method: Any, params: Dict[str, Any]) -> None:
+        if method == "prompt.submit":
+            self.chats.drop_surface(params.get("session_id"), params.get("text"))
 
     async def _dispatch(self, request: dict) -> Any:
         if self.connection is None:
@@ -202,7 +220,9 @@ class _AuthorityLink:
         with self.lock:
             known = self.generations.get(sid)
         if known is None:
-            snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": "conduit-fences", "method": "session.resume",
+            # Its own id: two chats' controls on one connection read their fences at once.
+            snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": f"conduit-fences-{uuid.uuid4().hex}",
+                                                      "method": "session.resume",
                                                       "params": {"session_id": sid, "omit_messages": True}}))
             result = snapshot.get("result") if isinstance(snapshot, dict) else None
             self._note_snapshot(result)
@@ -353,10 +373,27 @@ class _AuthorityChats:
             coroutine.close()
             raise RuntimeError("The gateway's loop can't take this call" if running is not loop
                                else "Called on the gateway's own loop")
-        return asyncio.run_coroutine_threadsafe(coroutine, loop).result(timeout)
+        future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        try:
+            return future.result(timeout)
+        except concurrent.futures.TimeoutError:
+            # Nobody waits for it now; a call already in the authority's hands
+            # may still have taken effect, which the caller's error says.
+            future.cancel()
+            raise TimeoutError(f"no answer within {timeout:g} s") from None
 
     def release(self, transport: Any) -> None:
         release(transport)
+
+    @staticmethod
+    def drop_surface(session_id: Any, text: Any) -> None:
+        """Forgets the surface noted for a turn the authority didn't take."""
+        if not isinstance(session_id, str) or not session_id or not isinstance(text, str):
+            return
+        try:
+            _sibling("turn_surface").discard_for_authority(session_id, text)
+        except Exception:  # noqa: BLE001 — it expires on its own
+            logger.debug("Conduit: a refused turn's surface couldn't be dropped", exc_info=True)
 
     @staticmethod
     def note_surface(transport: Any, session_id: str, text: Any) -> None:

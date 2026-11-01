@@ -116,6 +116,52 @@ def test_a_submit_gets_its_own_admission_and_names_the_watch(gateway, monkeypatc
     assert kept == {"session_id": "s1", "surface": "watch", "entry": "spoken"}
 
 
+def test_a_refused_submit_leaves_no_surface_for_the_next_turn(gateway):
+    chats, answers, _connections = gateway
+    answers["prompt.submit"] = {"error": {"code": 4009, "message": "busy", "data": {"reason": "busy"}}}
+    transport = Transport()
+    refused = _call(chats, transport, "prompt.submit", {"session_id": "drop-1", "text": "again"})
+    assert refused["error"]
+    # The same text typed later isn't read as the Watch's.
+    assert turn_surface.note(False, "again", session_id="drop-1") is None
+    answers["prompt.submit"] = {"result": {"status": "queued"}}
+    _call(chats, transport, "prompt.submit", {"session_id": "drop-1", "text": "again"})
+    assert turn_surface.note(False, "again", session_id="drop-1")
+
+
+def test_a_call_that_times_out_is_cancelled_and_says_it_may_have_started(gateway):
+    chats, _answers, _connections = gateway
+    started = []
+
+    async def slow():
+        started.append(True)
+        await asyncio.sleep(30)
+
+    with pytest.raises(TimeoutError, match="no answer within"):
+        chats.run(slow(), timeout=0.2)
+    assert started
+    chats.connect = lambda link: types.SimpleNamespace(dispatch=lambda request: slow())
+    original = chats.run
+    chats.run = lambda coroutine: original(coroutine, timeout=0.2)
+    answer = _call(chats, Transport(), "session.interrupt", {"session_id": "s9"})
+    assert answer["error"]["message"].endswith("timed out; it may still have started")
+
+
+def test_a_failing_owner_scope_fails_closed(monkeypatch):
+    module = types.ModuleType("gateway.session_authorities")
+
+    def owner_scope(authority):
+        raise RuntimeError("no such profile")
+
+    module.owner_scope = owner_scope
+    monkeypatch.setitem(sys.modules, "gateway.session_authorities", module)
+    with pytest.raises(RuntimeError, match="no such profile"):
+        gateway_chats.authority_scope(object())
+    monkeypatch.setitem(sys.modules, "gateway.session_authorities", types.ModuleType("gateway.session_authorities"))
+    with gateway_chats.authority_scope(object()):
+        pass
+
+
 def test_approvals_read_in_the_tui_gateways_words(gateway):
     chats, answers, connections = gateway
     answers["approval.respond"] = {"result": {"status": "resolved", "prompt_id": "p1"}}
