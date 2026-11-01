@@ -1491,9 +1491,12 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   or `ask_in`). Each row has its status, checklist, the step it's on, its
   last result, `pinned`, `actions` (what you can do with it now) and
   `manage` (how you can file it). A workstream waiting on an approval has
-  `approval` (`request_id`, `command`, `description`), the first one Hermes
-  names by its request; `approve` (once) or `deny` answers that one, never
-  another queued behind it. Its chat still answers it too.
+  `approval` (`request_id`, `command`, `description`, `approvable`), the
+  first one Hermes names by its request; `approve` (once) or `deny` answers
+  that one, never another queued behind it. The command comes whole, as
+  written; one that is empty or longer than 2,000 characters is cut, with
+  `approvable` false, and only denied there (`approve` is refused with
+  `deny_only`). Its chat still answers it too.
 - Work leaves the list when it's resolved: by you (`resolve`, refused with
   `still_running` while it's at work: stop it first) or by the bot
   (`work_close`). Nothing resolves itself. `resolved=1` lists resolved work,

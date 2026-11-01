@@ -2644,14 +2644,14 @@ def test_a_needs_you_card_answers_its_approval_by_its_request(on, hermes):
     ]
     row, = work.app_list(on.home)["work"]
     assert row["approval"] == {"request_id": "appr-2", "command": "rm -f /tmp/conduit-approval-test.txt",
-                               "description": "delete a file"}
+                               "description": "delete a file", "approvable": True}
     # Read through the method table: the chat's own stream stays bound.
     _, params, transport = hermes.named("approval.pending")[-1]
     assert params == {"session_id": "rt-20261031_work_1"} and transport is None
     assert work.app_act(on.home, "W1", "approve")["error"] == "missing"
     assert work.app_act(on.home, "W1", "approve", {"request_id": "appr-9"})["error"] == "not_now"
     answer = work.app_act(on.home, "W1", "approve", {"request_id": "appr-2"})
-    assert answer["ok"]
+    assert answer["ok"] and answer["work"]["approval"] is None  # answered, though the hook hasn't run
     _, params, _ = hermes.named("approval.respond")[-1]
     assert params == {"session_id": "rt-20261031_work_1", "choice": "once", "request_id": "appr-2"}
     assert len(hermes.pending[WORKER_1]) == 1  # the chat's own one is untouched
@@ -2659,6 +2659,30 @@ def test_a_needs_you_card_answers_its_approval_by_its_request(on, hermes):
     plugin._post_approval_response(session_id=WORKER_1, session_key=WORKER_1, choice="once")
     assert on.get("W1").status == "running" and work.app_list(on.home)["work"][0]["approval"] is None
     assert work.app_act(on.home, "W1", "deny", {"request_id": "appr-2"})["error"] == "not_now"
+
+
+@pytest.mark.parametrize("command", ["", "  ", "x" * (work.APP_APPROVAL_COMMAND_CHARS + 1)])
+def test_a_command_the_card_cant_show_whole_is_denied_only(on, hermes, command):
+    start()
+    work.needs_you(WORKER_1, "run a script")
+    hermes.pending[WORKER_1] = [{"request_id": "appr-3", "command": command, "description": "run a script"}]
+    row, = work.app_list(on.home)["work"]
+    assert row["approval"]["request_id"] == "appr-3" and row["approval"]["approvable"] is False
+    assert len(row["approval"]["command"]) <= work.APP_APPROVAL_COMMAND_CHARS + 1
+    assert work.app_act(on.home, "W1", "approve", {"request_id": "appr-3"})["error"] == "deny_only"
+    assert not hermes.named("approval.respond")
+    assert work.app_act(on.home, "W1", "deny", {"request_id": "appr-3"})["ok"]
+    _, params, _ = hermes.named("approval.respond")[-1]
+    assert params["choice"] == "deny" and params["request_id"] == "appr-3"
+
+
+def test_a_multi_line_command_keeps_its_lines_on_the_card(on, hermes):
+    start()
+    work.needs_you(WORKER_1, "run a script")
+    script = "cd /tmp\nrm -f a.txt\n  rm -f b.txt"
+    hermes.pending[WORKER_1] = [{"request_id": "appr-4", "command": script, "description": "run a script"}]
+    row, = work.app_list(on.home)["work"]
+    assert row["approval"]["command"] == script and row["approval"]["approvable"]
 
 
 def test_the_work_panel_is_empty_for_a_bot_without_workstreams(home, hermes):
