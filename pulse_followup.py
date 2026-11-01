@@ -217,6 +217,18 @@ _NOTE = ("This turn was started by Pulse, the part of Hermes that keeps what Her
 # While Pulse looks things up first, pulse_tools.look_note follows LOOK_NOTE.
 NOTE, LOOK_NOTE = _NOTE + ". Don't use any tools.", _NOTE + " and what you look up about it."
 STALE_NEWS = "It has been over a week and nothing shows it happened."
+
+
+def stale_news(text: Any, kind: str = "") -> str:
+    """The week-old "still want it?" as its card says it: what was said
+    first, so the card stands on its own (Eric, 2026-11-01: "none of them
+    really tell me what it is"). ``text``: the item's; a watch waits a
+    month."""
+    what = _clip(text, 300).rstrip(" .")
+    span = "month" if kind == WATCH else "week"
+    if not what:
+        return STALE_NEWS
+    return f"{what}. That was over a {span} ago, and nothing shows it happened. Still want it?"
 # Added after the user rated a follow-up "already knew".
 SEEN_INSTRUCTION = ("\n\nThe user doesn't want to hear what they already saw: when that chat shows they already "
                     "know the news (Hermes told them there and they answered, or they said it themselves), "
@@ -1578,7 +1590,9 @@ def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float,
     note = held_note(followup_timing(followup) if timing is None else timing, loudness)
     if note:
         why = f"{why}{'' if not why or why[-1] in '.!?…' else '.'} {note}".strip()
-    learning.add_card(pulse_store, kind=FOLLOWUP, item=item, level_name=loudness, news=followup["news"], why=why,
+    # The week-old ask names what it's about; the follow-up row keeps STALE_NEWS as its mark.
+    news = stale_news(item.get("text"), item.get("kind") or "") if followup["news"] == STALE_NEWS else followup["news"]
+    learning.add_card(pulse_store, kind=FOLLOWUP, item=item, level_name=loudness, news=news, why=why,
                       chat_title=chat_title(home, item) if home is not None else "", now=now,
                       learned=pulse_store.learned(now).factor(attrs), place=attrs["place"], band=attrs["band"],
                       looked=looked)
