@@ -14,7 +14,8 @@ The other half is the resend: a request Conduit built before it read
 authority's when refused. That is only safe while the authority refuses the
 dashboard's shape before anything runs, so that is checked too.
 
-A Hermes without the Webapp (before 2026-10-25) skips these. A small fake
+A Hermes release without the Webapp (before 2026-10-25) skips these; a
+canary without it fails, since that is the break this leg is here to catch. A small fake
 model server answers the turns, slowly enough that a steer finds one running.
 """
 
@@ -149,7 +150,9 @@ class Listener:
                 return await script(sock)
             finally:
                 reader.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                # read() keeps a dropped socket's error to the calls it fails, so the
+                # script's own assertion is the failure reported.
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await reader
 
 
@@ -164,18 +167,29 @@ class ConduitSocket:
         self._event_seen = asyncio.Event()
 
     async def read(self) -> None:
-        async for raw in self.ws:
-            frame = json.loads(raw)
-            future = self._pending.pop(frame.get("id"), None) if "id" in frame else None
-            if future is not None:
+        try:
+            async for raw in self.ws:
+                self._take(json.loads(raw))
+        except Exception as exc:  # noqa: BLE001 — every waiting call fails with it at once
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(ConnectionError(f"the socket closed: {exc!r}"))
+            self._pending.clear()
+
+    def _take(self, frame: Dict[str, Any]) -> None:
+        # A frame with a method is an event (or a request of the server's),
+        # never the answer to one of ours, even when its id collides.
+        if "method" not in frame and ("result" in frame or "error" in frame):
+            future = self._pending.pop(frame.get("id"), None)
+            if future is not None and not future.done():
                 future.set_result(frame)
-            elif frame.get("method") == "event":
-                params = frame.get("params") or {}
-                if params.get("type") == "gateway.ready":
-                    self.ready_payload = params.get("payload") or {}
-                    self.ready.set()
-                self.events.append(params)
-                self._event_seen.set()
+        elif frame.get("method") == "event":
+            params = frame.get("params") or {}
+            if params.get("type") == "gateway.ready":
+                self.ready_payload = params.get("payload") or {}
+                self.ready.set()
+            self.events.append(params)
+            self._event_seen.set()
 
     async def call(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """The whole answer frame: ``result`` or ``error``."""
@@ -193,12 +207,13 @@ class ConduitSocket:
     async def event(self, session_id: str, kind: str, timeout: float = 60) -> Dict[str, Any]:
         deadline = time.monotonic() + timeout
         while True:
+            # Cleared before the scan, so an event that lands during it still wakes the wait.
+            self._event_seen.clear()
             for event in self.events:
                 if event.get("type") == kind and event.get("session_id") == session_id:
                     return event
             remaining = deadline - time.monotonic()
             assert remaining > 0, f"no {kind} for {session_id}; saw {[e.get('type') for e in self.events]}"
-            self._event_seen.clear()
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._event_seen.wait(), remaining)
 
@@ -238,6 +253,8 @@ def _mutate(snapshot: Dict[str, Any], session_id: str, operation: str, payload: 
 @pytest.fixture(scope="module")
 def listener(tmp_path_factory: pytest.TempPathFactory):
     if importlib.util.find_spec("gateway.webapp_listener") is None:
+        if "+canary" in os.environ.get("HERMES_REF", ""):
+            pytest.fail("this canary has no gateway.webapp_listener: Conduit's Webapp support needs a look")
         pytest.skip("this Hermes has no Webapp listener (before 2026-10-25)")
     hermes = _hermes_bin()
     home = tmp_path_factory.mktemp("hermes-gateway-home")
@@ -255,9 +272,10 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
     env = {**os.environ, "HERMES_HOME": str(home), "NO_COLOR": "1"}
     log_path = home / "gateway.log"
     log = log_path.open("w")
-    proc = subprocess.Popen([hermes, "gateway", "run"], env=env, stdout=log, stderr=subprocess.STDOUT,
-                            start_new_session=True)
+    proc: Optional[subprocess.Popen] = None
     try:
+        proc = subprocess.Popen([hermes, "gateway", "run"], env=env, stdout=log, stderr=subprocess.STDOUT,
+                                start_new_session=True)
         deadline = time.monotonic() + READY_TIMEOUT_S
         while True:
             if proc.poll() is not None:
@@ -272,17 +290,19 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
             time.sleep(0.5)
         yield Listener(port, home)
     finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(20)
-        except subprocess.TimeoutExpired:
+        if proc is not None:
             with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(15)
+                os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(20)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(15)
         log.close()
         model.shutdown()
+        model.server_close()
         if os.environ.get("UPSTREAM_CONTRACT_LOG"):
             print(log_path.read_text()[-8000:])
 
@@ -294,6 +314,24 @@ def test_ready_names_the_session_authority_and_the_plugin_is_served(listener):
     assert listener.run(script).get("session_authority") is True
     # The listener mounts the dashboard, so the plugin's routes answer on it too.
     assert listener.plugin_get("capabilities") == 200
+    # And its sockets keep the dashboard's sign-in: one without a token is refused.
+    assert asyncio.run(_socket_refused(listener, "speech-server/socket")), "an unsigned plugin socket opened"
+
+
+async def _socket_refused(listener: "Listener", path: str) -> bool:
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import ConnectionClosed, InvalidHandshake
+
+    try:
+        async with connect(f"ws://127.0.0.1:{listener.port}/api/plugins/{PLUGIN}/{path}",
+                           open_timeout=15, proxy=None) as ws:
+            try:
+                await asyncio.wait_for(ws.recv(), 10)
+            except ConnectionClosed:
+                return True
+            return False
+    except (InvalidHandshake, OSError):
+        return True
 
 
 def test_a_turn_in_conduits_authority_shapes(listener):
@@ -310,7 +348,7 @@ def test_a_turn_in_conduits_authority_shapes(listener):
         # A steer names the running turn by the generation its events carry.
         steered = await sock.result("session.steer", {"session_id": sid, "execution_generation": generation,
                                                        "text": "keep it short"})
-        assert steered["status"] in {"queued", "rejected"}, steered
+        assert steered["status"] == "queued", steered
         await sock.event(sid, "message.complete")
 
         # A turn that ended: the old generation is stale, and the refusal says so.
@@ -352,10 +390,12 @@ def test_a_turn_in_conduits_authority_shapes(listener):
 
         compressed = await sock.result("session.mutate", _mutate(snapshot, sid, "compress",
                                                                   {"focus": "names"}, fences_generation=True))
-        assert compressed["operation"] == "compress", compressed
+        # What Conduit's SessionCompressResult reads: a status and the summary's headline.
+        assert compressed["operation"] == "compress" and compressed.get("status"), compressed
+        assert isinstance((compressed.get("summary") or {}).get("headline"), str), compressed
 
         pending = await sock.result("approval.pending", {"session_id": sid})
-        assert isinstance(pending, dict), pending
+        assert pending.get("approvals") == [], pending
 
     listener.run(script)
 
@@ -366,18 +406,19 @@ def test_dashboard_shapes_are_refused_before_anything_runs(listener):
 
     async def script(sock: ConduitSocket) -> None:
         dashboard_create = await sock.call("session.create", {"cols": 96, "source": "desktop"})
-        assert "error" in dashboard_create, dashboard_create
+        assert _refusal(dashboard_create) == "invalid_params", dashboard_create
 
         sid = (await sock.result("session.create", _create()))["session_id"]
         no_id = await sock.call("prompt.submit", {"session_id": sid, "text": "hello"})
-        assert "error" in no_id, no_id
+        assert _refusal(no_id) == "invalid_params", no_id
         with_images = await sock.call("session.resume", {**_resume(sid, omit_messages=False), "inline_images": False})
-        assert "error" in with_images, with_images
+        assert _refusal(with_images) == "invalid_params", with_images
         for method in ("session.title", "session.compress"):
             missing = await sock.call(method, {"session_id": sid})
             assert missing.get("error", {}).get("code") == -32601, (method, missing)
 
-        await asyncio.sleep(1)
+        # A turn the refused prompt had started would show within the fake model's first words.
+        await asyncio.sleep(3)
         snapshot = await sock.result("session.resume", _resume(sid, omit_messages=True))
         assert snapshot["message_count"] == 0 and snapshot["running"] is False, snapshot
         assert not [e for e in sock.events if e.get("type") == "message.start" and e.get("session_id") == sid]

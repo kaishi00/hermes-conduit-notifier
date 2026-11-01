@@ -106,6 +106,9 @@ jobs:
           fi
 
       - name: Run the contract tests
+        env:
+          # The leg that needs the Webapp fails on a canary without it rather than skipping.
+          HERMES_REF: ${{ matrix.ref }}
         run: |
           hermes="$RUNNER_TEMP/hermes"
           HERMES_BIN="$hermes/.venv/bin/hermes" "$hermes/.venv/bin/python" -m pytest \
