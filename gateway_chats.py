@@ -314,7 +314,7 @@ class _AuthorityLink:
             with self.lock:
                 self.generations.pop(sid, None)
             return {**response, "error": None, "result": {} if method == "session.interrupt" else {"status": "rejected"}}
-        if not error and method == "session.create":
+        if not error and method in ("session.create", "session.resume"):
             self._note_snapshot(response.get("result"))
         return response
 
@@ -348,6 +348,9 @@ class _AuthorityChats:
         with self.lock:
             link = getattr(transport, "_conduit_authority_link", None)
             if link is None or link.closed or link.chats is not self:
+                if link is not None and not link.closed:
+                    # The gateway's runner was replaced: the old link's view ends.
+                    link.close()
                 link = _AuthorityLink(self, transport)
                 transport._conduit_authority_link = link
                 self.links.add(link)
@@ -382,10 +385,12 @@ class _AuthorityChats:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
-        if loop is None or loop.is_closed() or running is loop:
+        if loop is None or loop.is_closed():
             coroutine.close()
-            raise RuntimeError("The gateway's loop can't take this call" if running is not loop
-                               else "Called on the gateway's own loop")
+            raise RuntimeError("The gateway's loop isn't running")
+        if running is loop:
+            coroutine.close()
+            raise RuntimeError("Called on the gateway's own loop")
         future = asyncio.run_coroutine_threadsafe(coroutine, loop)
         try:
             return future.result(timeout)

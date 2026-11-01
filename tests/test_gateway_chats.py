@@ -139,6 +139,17 @@ def test_a_turn_the_authority_starts_at_once_keeps_its_surface(gateway):
     assert turn_surface.note(False, "done", session_id="start-2") is None
 
 
+def test_a_resumed_chat_detaches_on_close(gateway):
+    chats, answers, connections = gateway
+    answers["session.resume"] = {"result": {"session_id": "r1", "execution_generation": 4, "subscription_id": "sub-r"}}
+    transport = Transport()
+    _call(chats, transport, "session.resume", {"session_id": "r1"})
+    assert chats._sessions.get("r1") == {"transport": transport}
+    _call(chats, transport, "session.close", {"session_id": "r1"})
+    assert connections[0].requests[-1]["method"] == "session.detach"
+    assert connections[0].requests[-1]["params"] == {"session_id": "r1", "subscription_id": "sub-r"}
+
+
 def test_a_closed_link_opens_no_new_connection(gateway):
     chats, _answers, connections = gateway
     transport = Transport()

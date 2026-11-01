@@ -20,7 +20,8 @@ checks it). The format is fixed, because Conduit reads it:
   instead of `hermes dashboard`, Predictions said the chat isn't open,
   Watch jobs and a Watch call's Hermes chat ran where the phone couldn't
   see them, Pulse sent nothing, and messages from CarPlay or the Watch lost
-  the note saying where they came from. They all work there now.
+  the note saying where they came from. They all work there now; Predictions
+  answer while Hermes still holds the chat, up to an hour after its last reply.
 
 ## 0.124.0 (2026-11-01)
 
