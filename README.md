@@ -1410,7 +1410,11 @@ she tells you about. It's off until you turn it on for a bot:
   its chat). That bot answers with `work_reply`, itself or with one of its
   workstreams' reports, and the answer goes back where the ask said: into
   the asking bot's workstream named in `for` as a queued turn, or to its Bot
-  Chat as a work update. Closing an ask unanswered tells the bot that asked.
+  Chat as a work update (to the Bot Chat too while that workstream is
+  interrupted, by a restart or by you stopping its turn). Only the Bot Chat asks: a workstream that
+  needs another bot says so in its report, and the coordinator asks for it
+  (`message_agent` is refused in a workstream too).
+  Closing an ask unanswered tells the bot that asked.
   What one bot asks or answers reaches the other as data, never as your
   go-ahead; each bot does the work with its own tools and its own approvals.
   The other bot needs workstreams on too. A chain of asks can't come back to
