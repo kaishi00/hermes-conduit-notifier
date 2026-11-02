@@ -135,7 +135,8 @@ async def post_workstreams_settings(request: Request, response: Response, profil
 @router.post("/workstreams/adopt")
 async def post_workstreams_adopt(request: Request, response: Response, profile: Optional[str] = None) -> Any:
     """A voice call's job, kept in its bot's registry (M5): {"session_id",
-    "title", "via": "phone" or "watch", "goal"?}, right after the phone
+    "title", "via": "phone" or "watch", "goal"?, "chat"?, "result"?, "call"?
+    (the call's own id, which its call-ended names too)}, right after the phone
     made the job's session. The call follows the job as before; the row
     shows in the Work panel marked as a call's (``from_call``), settles with
     its turns, never wakes the Bot Chat (unless "chat", below, is the Bot

@@ -4282,3 +4282,14 @@ def test_a_failed_bot_chat_call_job_shows_its_error_during_the_call(on, hermes, 
     row = on.get("W1")
     assert row.status == "failed" and row.error
     assert row.error[:20] in work.digest(BOT_CHAT)
+
+
+def test_a_save_leaves_a_named_calls_hold_to_its_own_end(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-b")
+    work.call_ended(on.home, BOT_CHAT)  # a save, of this call or another
+    assert work._call_on(on.home, BOT_CHAT)
+    work.call_ended(on.home, BOT_CHAT, call="call-b")
+    assert not work._call_on(on.home, BOT_CHAT)
+    # An id that isn't one short token names no call.
+    assert work._call_id("a b") == "" and work._call_id("x" * 101) == "" and work._call_id(" c1 ") == "c1"
