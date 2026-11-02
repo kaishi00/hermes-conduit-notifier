@@ -6,6 +6,7 @@ import json
 import pathlib
 import importlib.util
 import sys
+import time
 import sqlite3
 from pathlib import Path
 import types
@@ -4031,6 +4032,10 @@ def test_a_bot_chat_calls_workstream_reports_once_the_call_is_saved(on, hermes, 
     assert not submitted_to(hermes, BOT_CHAT), "the call speaks it first"
     assert not work.call_ended(on.home, OTHER_CHAT)
     assert work.call_ended(on.home, BOT_CHAT)
+    for _ in range(200):
+        if submitted_to(hermes, BOT_CHAT):
+            break
+        time.sleep(0.01)
     wake, = submitted_to(hermes, BOT_CHAT)
     assert "W1" in wake["text"]
 
@@ -4050,3 +4055,24 @@ def test_a_call_kept_with_another_chat_keeps_its_jobs_the_calls(on, hermes):
     kept = adopt(chat=OTHER_CHAT)
     assert kept["work"]["from_call"] == "phone" and on.get("W1").coordinator == ""
     assert adopt(session_id="20261102_voice_job_2", chat=["x"])["error"] == "invalid"
+
+
+def test_a_refused_bot_chat_adopt_holds_nothing(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    own = on.get("W1").session_id
+    assert adopt(session_id=own, chat=BOT_CHAT)["error"] == "taken"
+    assert not work._call_on(on.home, BOT_CHAT)
+
+
+def test_a_bot_chat_calls_workstream_a_restart_caught_unseen_gets_its_task(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(goal="Is it raining in Lyon?", chat=BOT_CHAT)
+    _chat_db(on.home, [(OTHER_CHAT, "user", "Something else", None)])
+    restart(hermes, monkeypatch)  # before its first turn was seen
+    call("work_list")
+    assert on.get("W1").error != work._BRIEF_UNSENT
+    hermes.calls.clear()
+    assert work.app_act(on.home, "W1", "send", {"text": "Try again please."})["ok"]
+    sent = [args.get("text", "") for _, args, _ in hermes.calls if args.get("session_id", "").endswith(CALL_JOB)]
+    assert sent and "Is it raining in Lyon?" in sent[-1]

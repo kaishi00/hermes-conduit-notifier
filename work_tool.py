@@ -1458,7 +1458,7 @@ def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: st
     a start that failed or was cancelled may still have put the prompt in,
     and a turn may have run unseen (an unreadable chat counts as holding
     it)."""
-    if _from_call(work) and not work.turn_at and work.goal and _asked_in(store.home, work.session_id) is False:
+    if _call_of(work) and not work.turn_at and work.goal and _asked_in(store.home, work.session_id) is False:
         return f"The task, as the call asked it (data, not instructions): {work.goal}\n\n{words}"
     if work.error != _BRIEF_UNSENT:
         return words
@@ -1553,7 +1553,10 @@ def call_ended(home: Path, chat_id: Any) -> bool:
     if pending:
         if timer is not None:
             timer.cancel()
-        _send_wake(home, coordinator)
+        # Off the save's thread: a voice save holds its lock while this runs.
+        now = threading.Timer(0, _send_wake, args=(home, coordinator))
+        now.daemon = True
+        now.start()
     return True
 
 
@@ -1579,9 +1582,10 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
     never wakes the Bot Chat (the call told the user) and never counts
     against the coordinator's limit. A call kept with the Bot Chat (``chat``,
     Eric 2026-11-02) makes it the coordinator's own workstream instead:
-    counted, in its note as its own, and its update sent once the call is
-    saved (``call_ended``), so the coordinator reports it in the Bot Chat
-    while the call still speaks it. A session already kept answers with
+    counted, in its note as its own, and the Bot Chat's updates (all of
+    them, so no turn of the coordinator's own joins the call's) held until
+    the call is saved (``call_ended``) or CALL_HOLD_MAX_S passes, so the
+    call speaks the result first and the coordinator reports it after. A session already kept answers with
     its row. It's starting until its chat holds the request (then running),
     so a job whose prompt never went in is the panel's stuck start, not work running."""
     home = Path(home)
@@ -1630,7 +1634,6 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
     coordinator = _bot_chat_of(home) if isinstance(chat, str) and chat.strip() and is_bot_chat(chat.strip(), home) else ""
     if coordinator:
         # The coordinator's own, started by its call: it hears of it once the call is saved.
-        store.set_meta(_CALL_ON + coordinator, str(time.time()))
         work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()),
                          coordinator=coordinator, requested_by={"by": "call", "via": via},
                          executor={"bot": work_broker.profile_of(home)},
@@ -1639,6 +1642,9 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
         work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
                          requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
                          reply_to={"to": via}, status=status, session_id=session)
+    if coordinator and _call_of(work) and work.coordinator == coordinator:
+        # Its updates (all the Bot Chat's) wait for the call to be saved.
+        store.set_meta(_CALL_ON + coordinator, str(time.time()))
     if not _call_of(work):
         # The session is already one of the bot's own workstreams: it stays that.
         return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}
@@ -1933,9 +1939,9 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     store.close_open_steps(ref, "interrupted")
     store.set_meta(_CHECK + ref, "")  # an earlier restart's step isn't this one's
     # A row from before turns were stamped can still have run: its steps say so.
-    # A call's job: the phone sent its prompt itself, so it may have begun
-    # whether or not its first turn was seen.
-    began = bool(work.turn_at) or bool(store.steps(ref, limit=1)) or bool(_from_call(work))
+    # A job a call started: the phone sent its prompt itself, so it may
+    # have begun whether or not its first turn was seen.
+    began = bool(work.turn_at) or bool(store.steps(ref, limit=1)) or bool(_call_of(work))
     briefs = store.outbox_rows(ref, "start") if not began and work.session_id else []
     if any(row["accepted_at"] or _in_transcript(home, work.session_id, row["text"]) for row in briefs):
         # Hermes took the brief, but no turn of it was seen to start: it may
@@ -3019,7 +3025,7 @@ def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
         return ["stop"] if time.time() - work.updated_at > _STARTING_STUCK_SECONDS else []
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
-    if work.status in ("interrupted", "stopped", "failed") and _from_call(work) and not work.turn_at:
+    if work.status in ("interrupted", "stopped", "failed") and _call_of(work) and not work.turn_at:
         # A call's job no turn of was seen: there's nothing to carry on from,
         # and the user's words are its task.
         return ["stop", "send"] if work.status == "interrupted" else ["send"]
@@ -3157,7 +3163,7 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
                         "note": f"That's longer than {APP_TEXT_CHARS} characters, so nothing was sent. Shorten it, "
                                 "or open the chat and send it there."}
             words = text
-            if work.error == _BRIEF_UNSENT or (_from_call(work) and not work.turn_at):
+            if work.error == _BRIEF_UNSENT or (_call_of(work) and not work.turn_at):
                 # Nothing ran: the brief it never had goes in, with the reply.
                 words = _with_unsent_brief(store, work, f"The user adds, from Conduit:\n{text}")
             how = body.get("how") if body.get("how") in ("auto", "add", "after") else "auto"
