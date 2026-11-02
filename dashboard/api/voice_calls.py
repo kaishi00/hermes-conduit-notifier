@@ -952,7 +952,8 @@ def _call_left_chat(chat_id: str) -> None:
         tool = core._plugin_package_module("work_tool")
         (tool.copy_for(core._calls_home()) or tool).call_ended(core._calls_home(), chat_id)
     except Exception:  # noqa: BLE001 — the turns are stored; the hold ends on its own
-        logger.debug("Couldn't tell the bot's work a call ended", exc_info=True)
+        logger.warning("Couldn't tell the bot's work a call ended; its held updates go when the hold runs "
+                       "out", exc_info=True)
 
 
 @router.post("/voice/sessions")

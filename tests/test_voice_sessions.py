@@ -709,6 +709,17 @@ def test_an_attached_call_makes_no_session_and_leaves_the_chat_alone(client, her
         {"role": "assistant", "text": "hello", "at": 1_780_000_001}]}]
 
 
+def test_a_saved_attached_call_releases_its_bots_held_updates(client, hermes, monkeypatch):
+    chat(hermes)
+    ended = []
+    monkeypatch.setattr(api.voice_calls, "_call_left_chat", ended.append)
+    save(client, chat_id="chat-1", turns=turns(("user", "hi"), ("assistant", "hello")))
+    # A retry that stores nothing new still says the call is over.
+    save(client, chat_id="chat-1", turns=turns(("user", "hi"), ("assistant", "hello")))
+    save(client, turns=turns(("user", "standalone")))
+    assert ended == ["chat-1", "chat-1"]
+
+
 def test_an_attached_call_continues_and_skips_replays(client, hermes):
     chat(hermes)
     save(client, chat_id="chat-1", turns=turns(("user", "a"), ("assistant", "b")))

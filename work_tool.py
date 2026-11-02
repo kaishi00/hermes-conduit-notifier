@@ -1560,7 +1560,7 @@ def _call_on(home: Path, coordinator: str) -> bool:
     workstream and hasn't been saved), within CALL_HOLD_MAX_S."""
     try:
         began = float(work_store.Store(home).get_meta(_CALL_ON + coordinator) or 0)
-    except (ValueError, Exception):  # noqa: BLE001 — unknown: not held
+    except Exception:  # noqa: BLE001 — unknown: not held
         return False
     return bool(began) and time.time() - began < CALL_HOLD_MAX_S
 
@@ -2012,7 +2012,8 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
         line = (f"- {ref} “{work.title}” stopped when Hermes restarted, with nothing uncertain in flight; it "
                 f"wasn't continued because {why}. work_send continues it.")
     if not work.closed_at and work.coordinator:
-        _queue_wake(home, _bot_chat_of(home) or work.coordinator, line)
+        _queue_wake(home, _bot_chat_of(home) or work.coordinator, line,
+                    kind="call" if _call_of(work) else "work")
 
 
 # What the load-time marker pass found that the sweep must still act on
@@ -2125,9 +2126,10 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         store.outbox_done(row["id"], "expired")
         return
     kind = row["kind"]
-    if kind in ("line", "line_ask"):
-        _queue_wake(home, row["target"], row["text"], kind="ask" if kind == "line_ask" else "work",
-                    item=row["id"])
+    if kind in ("line", "line_ask", "line_call"):
+        # A call's held line is held again while that call is still on.
+        _queue_wake(home, row["target"], row["text"],
+                    kind={"line_ask": "ask", "line_call": "call"}.get(kind, "work"), item=row["id"])
         return
     if kind == "continue":
         store.outbox_done(row["id"], "dropped")  # recovery owns it: it decides again from the journal
@@ -3333,7 +3335,7 @@ def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", ite
     if kind == "call" and _call_on(home, coordinator):
         if not item:
             try:
-                item = work_store.Store(home).outbox_add("", "line", coordinator, line)
+                item = work_store.Store(home).outbox_add("", "line_call", coordinator, line)
             except Exception:  # noqa: BLE001 — the digest still carries the work
                 logger.debug("conduit_push: couldn't keep a work update line", exc_info=True)
                 item = ""

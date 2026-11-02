@@ -4110,3 +4110,66 @@ def test_a_repeated_adopt_after_the_call_was_saved_holds_nothing(on, hermes, mon
     assert work.call_ended(on.home, BOT_CHAT)
     adopt(chat=BOT_CHAT)
     assert not work._call_on(on.home, BOT_CHAT)
+
+
+def _forget_holds():
+    """A new process: the held lines are only in the outbox now."""
+    for timer in list(work._call_checks.values()):
+        if timer is not None:
+            timer.cancel()
+    work._call_checks.clear()
+    work._call_held.clear()
+
+
+def _finish(session_id, result):
+    work.turn_started(session_id)
+    work.turn_ended(session_id, result)
+    work.turn_finished(session_id, failed=False, interrupted=False)
+
+
+def test_a_bot_chat_calls_held_update_stays_held_across_a_restart(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    _finish(CALL_JOB, "Rain from three.")
+    assert [row["kind"] for row in on.outbox_pending()] == ["line_call"]
+    _forget_holds()
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    assert not submitted_to(hermes, BOT_CHAT), "the call is still on"
+    assert work.call_ended(on.home, BOT_CHAT)
+    for _ in range(200):
+        if submitted_to(hermes, BOT_CHAT):
+            break
+        time.sleep(0.01)
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"]
+
+
+def test_a_bot_chat_calls_restart_line_waits_for_the_call(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    work.turn_started(CALL_JOB)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    assert not submitted_to(hermes, BOT_CHAT), "its restart line waits for the call too"
+    assert any(row["kind"] == "line_call" for row in on.outbox_pending())
+
+
+def test_a_bot_chat_calls_held_update_goes_when_the_hold_runs_out(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "CALL_HOLD_RETRY_S", 0.02)
+    adopt(chat=BOT_CHAT)
+    _finish(CALL_JOB, "Rain from three.")
+    work.flush_wakes()
+    assert not submitted_to(hermes, BOT_CHAT)
+    monkeypatch.setattr(work, "CALL_HOLD_MAX_S", 0.0)  # two hours on, the call never saved
+    for _ in range(200):
+        if not work._call_held:
+            break
+        time.sleep(0.01)
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"]
