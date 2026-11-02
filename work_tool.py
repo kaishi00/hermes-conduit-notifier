@@ -397,14 +397,16 @@ def _store(home: Optional[Path] = None) -> Optional[work_store.Store]:
 
 def policy(home: Optional[Path] = None) -> str:
     """This bot's setting: on (strict) unless the user turned it off or
-    picked lookups (M3: on for every bot). A registry that exists but can't
+    picked lookups (M3: on for every bot where workstreams can run). A registry that exists but can't
     be read is "strict": the coordinator's limits hold until it can be read
     again."""
     home = home or _home()
     if home is None:
         return "off"
     if not work_store.exists(home):
-        return work_store.DEFAULT_POLICY
+        # The default holds only where workstreams can run: a bot the user
+        # never set up keeps its Bot Chat's tools on a Hermes that can't.
+        return "off" if work_broker.unavailable_reason() else work_store.DEFAULT_POLICY
     key = str(home)
     now = time.monotonic()
     hit = _policy_cache.get(key)
@@ -935,8 +937,9 @@ def end_bypasses(home: Path) -> int:
     """Once approvals in workstreams are back on: turns the bypass off now
     in every session this turned it on in (``_yolo``), so a turn the user
     starts there directly, not only the next one through Conduit, asks
-    again. Best effort: a mark Hermes didn't take stays, and that
-    workstream's next send tries again first. Returns how many are left."""
+    again. A resolved one isn't reopened for it. Best effort: a mark left
+    (resolved, or Hermes didn't take it) is turned back first by that
+    workstream's next send. Returns how many are left."""
     home = Path(home)
     store = work_store.Store(home)
     if workstream_approvals(home) == "off":
@@ -949,6 +952,8 @@ def end_bypasses(home: Path) -> int:
         if found is None or not found.session_id:
             _yolo_sent(store, ref, False)  # no session left to carry it
             continue
+        if found.closed_at:
+            continue  # resolved: not reopened for this; a reopen's next send turns it back first
         try:
             broker = broker or work_broker.Broker(home)
             broker.end_bypass(found.session_id)

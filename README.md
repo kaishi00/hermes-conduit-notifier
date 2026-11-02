@@ -1442,8 +1442,9 @@ in Conduit (Edit Bot > Work) or here:
   per-session `/yolo`, set before each turn the plugin sends and kept on its
   session row, never process-wide) and drops the rule from the brief.
   Switching back in Edit Bot turns it on again at once in the sessions the
-  plugin turned it off in, so a turn you start there yourself asks too (with
-  `--approvals`, at each one's next turn through Conduit).
+  plugin turned it off in, so a turn you start there yourself asks too. A
+  resolved workstream, or a change made with `--approvals`, turns back at
+  its next turn through Conduit.
 - Strict leaves the coordinator the work tools, `clarify` and `memory`;
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
   health, location and inbox). `message_agent` is refused there in favour of

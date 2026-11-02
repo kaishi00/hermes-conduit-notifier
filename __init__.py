@@ -150,7 +150,7 @@ def register(ctx: Any) -> None:
     room_free_busy.register(ctx, is_child=_is_child)
     link_ask_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     # Bot workstreams (designs/bot-mode-coordinator): a bot's Bot Chat
-    # coordinates work sessions of its own; off until turned on per bot.
+    # coordinates work sessions of its own; on for every bot unless turned off.
     work_tool.register(ctx, is_child=_is_child)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)

@@ -252,6 +252,18 @@ def test_on_by_default_for_every_bot(home, hermes):
     assert start()["ok"] and store_mod.Store(home).get("W1").status == "running"
 
 
+def test_the_default_leaves_a_bot_chat_as_it_was_where_workstreams_cant_run(home, monkeypatch):
+    monkeypatch.setattr(titles, "_read", lambda h, key: "Bot Chat")
+    monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat")
+    monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
+    assert work.policy(home) == "off" and not work.available()
+    assert work.tool_block(BOT_CHAT, "terminal") is None  # not sent to a work_start that can't run
+    store_mod.Store(home).set_policy("strict")  # the user's own choice stands
+    work._policy_cache.clear()
+    assert work.policy(home) == "strict"
+
+
 def test_a_chat_whose_title_cant_be_read_is_held_only_once_the_bot_has_work(home, hermes, monkeypatch):
     def unreadable(h, key):
         raise sqlite3.OperationalError("locked")
@@ -2813,6 +2825,19 @@ def test_turning_approvals_back_on_reaches_a_workstream_that_isnt_live(home, her
     assert not store_mod.Store(home).meta_keys("yolo_set:")
 
 
+def test_turning_approvals_back_on_leaves_resolved_work_to_its_next_send(home, hermes):
+    store = store_mod.Store(home)
+    store.set_workstream_approvals("off")
+    start()
+    store.update("W1", status="done")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    assert work.app_act(home, "W1", "resolve", {})["ok"]
+    hermes._sessions.pop("rt-20261031_work_1")
+    hermes.calls.clear()
+    work.app_set_settings(home, {"workstream_approvals": "chats"})
+    assert hermes.named("session.resume") == [] and store.meta_keys("yolo_set:")
+
+
 def test_approvals_off_needs_no_session_bypass_when_hermes_never_asks(home, hermes):
     store_mod.Store(home).set_workstream_approvals("off")
     _hermes_approvals(home, "off")
@@ -3045,6 +3070,40 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     bad = client.post("/api/plugins/conduit_push/workstreams/settings", json={"max_running": 99})
     assert bad.status_code == 400 and bad.json()["code"] == "invalid"
     assert client.post("/api/plugins/conduit_push/workstreams/settings", content=b"[1]").status_code == 400
+
+
+def test_a_settings_change_lands_in_the_named_bots_own_registry(on, hermes, monkeypatch, tmp_path):
+    import contextlib
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    spec = importlib.util.spec_from_file_location("conduit_plugin_api_workstreams_profile",
+                                                  ROOT / "dashboard" / "plugin_api.py")
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    second = tmp_path / "profiles" / "nahida"
+    second.mkdir(parents=True)
+    homes = {None: on.home, "nahida": second}
+    scoped = []
+
+    @contextlib.contextmanager
+    def scope(profile):
+        scoped.append(profile)
+        yield
+
+    monkeypatch.setattr(api.workstreams, "_work_tool", lambda: work)
+    monkeypatch.setattr(api.core, "_profile_scope", scope)
+    monkeypatch.setattr(api.core, "_calls_home", lambda: homes[scoped[-1] or None])
+    client = TestClient(FastAPI())
+    client.app.include_router(api.router, prefix="/api/plugins/conduit_push")
+    changed = client.post("/api/plugins/conduit_push/workstreams/settings?conduit_profile=nahida",
+                          json={"workstream_approvals": "ask", "max_running": 3})
+    assert changed.status_code == 200 and changed.json()["workstream_approvals"] == "ask"
+    assert scoped == ["nahida"]
+    assert store_mod.Store(second).workstream_approvals() == "ask" and store_mod.Store(second).max_running() == 3
+    assert on.workstream_approvals() == "chats" and on.max_running() != 3  # the launch profile's untouched
+    shown = client.get("/api/plugins/conduit_push/workstreams/settings", params={"conduit_profile": "nahida"})
+    assert shown.json()["max_running"] == 3
 
 
 def test_the_panel_of_a_bot_with_workstreams_off_recovers_nothing_and_offers_nothing(on, hermes, monkeypatch):
