@@ -150,7 +150,7 @@ def register(ctx: Any) -> None:
     room_free_busy.register(ctx, is_child=_is_child)
     link_ask_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     # Bot workstreams (designs/bot-mode-coordinator): a bot's Bot Chat
-    # coordinates work sessions of its own; off until turned on per bot.
+    # coordinates work sessions of its own; on for every bot unless turned off.
     work_tool.register(ctx, is_child=_is_child)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
@@ -315,7 +315,7 @@ def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
         return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"))
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
-        # Only a bot that turned workstreams on can have a coordinator to hold.
+        # Only a bot that has had work (on by default otherwise) is held when its check fails.
         return {"action": "block", "message": work_tool.CHECK_FAILED} if work_tool.has_registry() else None
 
 

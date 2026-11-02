@@ -87,6 +87,11 @@ notes:
     a clean shutdown runs, _stop_turns_before_exit (in tui_gateway.session_reaper, for the SIGTERM
     handler, and in tui_gateway.server, for _shutdown_sessions), is wrapped to mark the shutdown:
     without it a clean restart's stopped workstream is taken for a user's stop and never recovered.
+    Don't Ask approvals in workstreams (Edit Bot > Work) call config.set with key=yolo and
+    scope=session on the workstream's live session before each turn: Hermes' per-session /yolo,
+    kept on the session row, never process-wide (the call always names a live session). Turning
+    it on fails quietly (Hermes keeps asking); turning it off stops the send and is retried, except
+    on a Hermes without config.set, where nothing was ever turned on.
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
@@ -446,4 +451,6 @@ routes:
   - GET /workspace/search
   - POST /workspace/{action}
   - GET /workstreams
+  - GET /workstreams/settings
+  - POST /workstreams/settings
   - POST /workstreams/{ref}/{action}

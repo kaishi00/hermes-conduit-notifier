@@ -54,7 +54,8 @@ they run:
     rooms                 Room files, room pictures and the room planner
     workspace             Artifacts and workspace files
     workstreams           Bot workstreams: the Work panel, and Reply, Stop,
-                          Continue and Check first on a workstream
+                          Continue and Check first on a workstream, and
+                          the bot's work settings (Edit Bot > Work)
     capabilities          Capabilities: the features this plugin serves, as
                           Conduit reads them
     self_update           Self restart and self update

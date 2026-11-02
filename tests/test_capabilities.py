@@ -150,6 +150,7 @@ def test_every_capability_names_a_served_route_family():
         "room-free-busy": "/rooms/choices",
         "link-asks": "/links/rules",
         "bot-workstreams": "/workstreams",
+        "bot-work-settings": "/workstreams/settings",
     }
     assert set(prefixes) == set(api.capabilities.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

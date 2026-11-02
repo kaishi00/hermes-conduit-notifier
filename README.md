@@ -1389,13 +1389,15 @@ call ends without them too (the log says so each time). A call that isn't saved
 A bot's Bot Chat can coordinate work sessions of its own: you ask Furina for
 something, she starts a workstream (a hidden chat on her own profile) and stays
 free to talk while it runs, and its result comes back to her as a work update
-she tells you about. It's off until you turn it on for a bot:
+she tells you about. It's on for every bot (strict) until you turn it off,
+in Conduit (Edit Bot > Work) or here:
 
+    hermes -p <bot> conduit-push work off
     hermes -p <bot> conduit-push work on            # strict: she only coordinates
     hermes -p <bot> conduit-push work on --policy lookups   # she may also look things up
     hermes -p <bot> conduit-push work on --after-restart ask  # after a restart, ask before continuing
+    hermes -p <bot> conduit-push work on --approvals ask    # workstreams ask before what can't be undone
     hermes -p <bot> conduit-push work status
-    hermes -p <bot> conduit-push work off
 
 - The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
   `work_read`, `work_close`, `work_note`, `work_ask` and `work_reply` (behind
@@ -1430,6 +1432,19 @@ she tells you about. It's off until you turn it on for a bot:
   message when it covers the step, or what you write in the workstream), never the coordinator's
   instructions alone; under smart, Hermes' approvals decide; under off, the
   brief is enough.
+- Workstreams can have approvals of their own (Edit Bot > Work, or
+  `--approvals`): `chats` (the default) follows the bot's `approvals.mode`;
+  `ask` holds them to your own words before a step that can't be undone,
+  with Hermes' approval prompts too where the bot's chats have them (on a
+  bot whose approvals are off in Hermes, the rule in the brief is all there
+  is: Hermes can't ask in one session while its config says off); `off`
+  turns Hermes' approvals off in each workstream's own session (Hermes'
+  per-session `/yolo`, set before each turn the plugin sends and kept on its
+  session row, never process-wide) and drops the rule from the brief.
+  Switching back in Edit Bot turns it on again at once in the sessions the
+  plugin turned it off in, so a turn you start there yourself asks too. A
+  resolved workstream, or a change made with `--approvals`, turns back at
+  its next turn through Conduit.
 - Strict leaves the coordinator the work tools, `clarify` and `memory`;
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
   health, location and inbox). `message_agent` is refused there in favour of
@@ -1484,6 +1499,8 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
+| GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, unavailable}` |
+| POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals}` | the settings as they are now |
 
 - `work` lists every open (unresolved) row, however old: active work first,
   then the rest by when it last changed. Rows are workstreams, and asks to
