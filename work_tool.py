@@ -921,9 +921,14 @@ def _yolo(home: Path, store: work_store.Store, ref: str) -> Optional[bool]:
 
 def _yolo_sent(store: work_store.Store, ref: str, yolo: Optional[bool]) -> None:
     """After a start or send that set ``yolo``: an "off" Hermes took ends
-    the mark that says this turned it on."""
-    if yolo is False:
+    the mark that says this turned it on. Never raises: the send already
+    happened, and a mark left behind only costs one more "off" next turn."""
+    if yolo is not False:
+        return
+    try:
         store.set_meta(_YOLO_SET + ref, "")
+    except Exception:  # noqa: BLE001 — what the send did stands
+        logger.warning("conduit_push: couldn't clear a workstream's approvals mark", exc_info=True)
 
 
 def _users_words(home: Path, coordinator: str) -> str:

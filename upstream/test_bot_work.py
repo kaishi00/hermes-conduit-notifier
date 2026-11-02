@@ -475,3 +475,53 @@ def test_a_clean_shutdown_is_told_from_a_users_stop(tmp_path: Path) -> None:
                           timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
     assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
     assert json.loads(out.read_text()) == {"watched": True, "sigterm": True, "exit": True}
+
+
+YOLO_PROBE = r"""
+import importlib.util, json, os, sys
+from pathlib import Path
+
+root, home, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location("conduit_push", root / "__init__.py",
+                                              submodule_search_locations=[str(root)])
+package = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push"] = package
+spec.loader.exec_module(package)
+from conduit_push import work_broker
+from tools import approval
+from tui_gateway import server  # the server takes over stdout, so the result goes to a file
+
+server._sessions["rt-work"] = {"session_key": "s-work", "agent": None}
+server._sessions["rt-chat"] = {"session_key": "s-chat", "agent": None}
+broker = work_broker.Broker(home, server)
+seen = {}
+broker._set_yolo("rt-work", True, broker._unbound)
+seen["on"] = [approval.is_session_yolo_enabled("s-work"), approval.is_session_yolo_enabled("s-chat"),
+              os.environ.get("HERMES_YOLO_MODE")]
+broker._set_yolo("rt-work", False, broker._unbound)
+seen["off"] = approval.is_session_yolo_enabled("s-work")
+try:
+    broker._set_yolo("rt-gone", False, broker._unbound)
+    seen["gone"] = "accepted"
+except work_broker.BrokerError:
+    seen["gone"] = "refused"
+seen["process"] = os.environ.get("HERMES_YOLO_MODE")
+out.write_text(json.dumps(seen))
+"""
+
+
+def test_dont_ask_turns_approvals_off_in_one_session_only(tmp_path: Path) -> None:
+    """Edit Bot > Work's Don't Ask (M3): the broker's session-scoped
+    config.set yolo turns Hermes' approvals off in the named workstream's
+    session only, never another chat's or the process's, turns them back on,
+    and is refused for a session Hermes no longer holds rather than widened
+    to the whole process."""
+    home = tmp_path / "home"
+    home.mkdir()
+    python = Path(_hermes_bin()).with_name("python")
+    out = tmp_path / "seen.json"
+    done = subprocess.run([str(python), "-c", YOLO_PROBE, str(ROOT), str(home), str(out)], capture_output=True,
+                          text=True, timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
+    assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
+    assert json.loads(out.read_text()) == {
+        "on": [True, False, None], "off": False, "gone": "refused", "process": None}

@@ -315,7 +315,7 @@ def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
         return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"))
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
-        # Only a bot that turned workstreams on can have a coordinator to hold.
+        # Only a bot that has had work (on by default otherwise) is held when its check fails.
         return {"action": "block", "message": work_tool.CHECK_FAILED} if work_tool.has_registry() else None
 
 

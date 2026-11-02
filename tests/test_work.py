@@ -2838,6 +2838,33 @@ def test_a_hermes_without_config_set_never_dead_ends_a_workstream(home, hermes):
     assert hermes.named("config.set") == []  # nothing left to turn off
 
 
+def test_any_failure_turning_the_bypass_on_still_starts_the_work(home, hermes, monkeypatch):
+    store_mod.Store(home).set_workstream_approvals("off")
+
+    def broken(params):
+        raise RuntimeError("config.set blew up")
+
+    monkeypatch.setattr(hermes, "config_set", broken)
+    assert start()["ok"] and hermes.named("prompt.submit")
+
+
+def test_a_mark_that_cant_be_cleared_doesnt_undo_a_delivered_send(home, hermes, monkeypatch):
+    store_mod.Store(home).set_workstream_approvals("off")
+    start()
+    work.app_set_settings(home, {"workstream_approvals": "chats"})
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    real = store_mod.Store.set_meta
+
+    def locked(self, key, value):
+        if key.startswith("yolo_set:"):
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, key, value)
+
+    monkeypatch.setattr(store_mod.Store, "set_meta", locked)
+    answer = work.app_act(home, "W1", "send", {"text": "One more thing."})
+    assert answer["ok"] and submitted_to(hermes, WORKER_1)[-1]["text"] == "One more thing."
+
+
 def test_a_bypass_that_cant_be_turned_on_still_starts_the_work(home, hermes):
     store_mod.Store(home).set_workstream_approvals("off")
     hermes.refuse["config.set"] = {"code": 5001, "message": "nope"}
