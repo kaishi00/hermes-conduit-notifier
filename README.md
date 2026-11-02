@@ -1434,13 +1434,15 @@ in Conduit (Edit Bot > Work) or here:
   kept as they start; the phone keeps its own with `POST /workstreams/adopt`.
   A bot whose workstreams are off keeps none. A call kept with the Bot Chat
   is a conversation with the coordinator, so its jobs are the coordinator's
-  own workstreams (`started_in_call` in `work_list`): they count against the
-  limit, and while the call is on, the Bot Chat's updates (all of them, so
-  no turn of the coordinator's joins the call's) wait until the call is
-  saved, at most three hours: the call speaks each result first and the
-  coordinator reports it in the Bot Chat after. A call that's never saved
-  with the chat (Classic, or a phone that quit mid-call) holds them the
-  full three hours.
+  own workstreams (`started_in_call` in `work_list`). They count against the
+  limit but are never refused for it (the call already started them), and
+  they follow the workstreams' rules: no memory or other bots, which the
+  coordinator handles. Their updates wait while the call is on, until it's
+  saved with the chat or two hours pass, so the call speaks each result
+  first and the coordinator reports it in the Bot Chat after; the Bot
+  Chat's other updates go as usual. A call that's never saved with the
+  chat (Classic, or a phone that quit mid-call) holds them the full two
+  hours.
 - Bots work together coordinator to coordinator. `work_ask` asks another of
   your bots on this Hermes (by its name or profile) for an answer or a piece
   of work: it's an `ask_out` row in the asking bot's registry and an `ask_in`

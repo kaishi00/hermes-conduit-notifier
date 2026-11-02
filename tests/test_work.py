@@ -4088,3 +4088,25 @@ def test_a_calls_job_whose_turn_ended_before_it_was_kept_is_settled(on, hermes, 
     adopt(session_id="20261102_voice_job_2", chat=BOT_CHAT, result="Disks are fine.")
     assert on.get("W2").status in ("done", "ready")
     assert adopt(session_id="20261102_voice_job_3", result=["x"])["error"] == "invalid"
+
+
+def test_a_bot_chat_calls_hold_keeps_other_work_flowing(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    worker = on.get("W1").session_id
+    adopt(chat=BOT_CHAT)
+    work.turn_started(worker)
+    work.turn_ended(worker, "Login is fixed.")
+    work.turn_finished(worker, failed=False, interrupted=False)
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"] and "W2" not in wake["text"]
+
+
+def test_a_repeated_adopt_after_the_call_was_saved_holds_nothing(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    assert work._call_on(on.home, BOT_CHAT)
+    assert work.call_ended(on.home, BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    assert not work._call_on(on.home, BOT_CHAT)

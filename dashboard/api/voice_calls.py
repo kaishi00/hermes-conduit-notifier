@@ -963,10 +963,15 @@ async def post_voice_session(request: Request, response: Response, profile: Opti
 
     def ended(session_id: str, engine: str, messages: list, chat_call: bool = False) -> None:
         _queue_voice_call_end(profile, session_id, engine, messages, chat_call=chat_call)
-        if chat_call:
-            _call_left_chat(session_id)
 
-    return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body, on_end=ended), "save"))}
+    def save() -> Dict[str, Any]:
+        saved = save_voice_turns(body, on_end=ended)
+        if saved.get("chat_id"):
+            # Saved with its chat, so the call is over, a retry with nothing new included.
+            _call_left_chat(saved["chat_id"])
+        return saved
+
+    return {"ok": True, **(await _run_voice(profile, save, "save"))}
 
 
 @router.get("/voice/chat-calls")

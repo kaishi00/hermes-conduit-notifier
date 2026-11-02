@@ -79,7 +79,7 @@ WAKE_BUSY_RETRY_S = 2.0
 WAKE_BUSY_MAX_S = 600.0
 # How long a Bot Chat's updates wait for the call kept with it to be saved
 # (its workstreams' results are the call's to speak first); after that they go.
-CALL_HOLD_MAX_S = 3 * 3600.0
+CALL_HOLD_MAX_S = 2 * 3600.0
 CALL_HOLD_RETRY_S = 30.0
 DIGEST_ITEMS = 12
 _LOST_REPLY = "Your message may not have reached it before Hermes restarted"
@@ -1548,15 +1548,10 @@ def call_ended(home: Path, chat_id: Any) -> bool:
         return False
     coordinator = _bot_chat_of(home) or chat_id.strip()
     work_store.Store(home).set_meta(_CALL_ON + coordinator, "")
-    with _wake_lock:
-        pending, timer = _wakes.get((str(home), coordinator), ([], None))
-    if pending:
-        if timer is not None:
-            timer.cancel()
-        # Off the save's thread: a voice save holds its lock while this runs.
-        now = threading.Timer(0, _send_wake, args=(home, coordinator))
-        now.daemon = True
-        now.start()
+    # Off the save's thread: a voice save holds its lock while this runs.
+    now = threading.Timer(0, _release_call_lines, args=(home, coordinator))
+    now.daemon = True
+    now.start()
     return True
 
 
@@ -1583,10 +1578,10 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
     never wakes the Bot Chat (the call told the user) and never counts
     against the coordinator's limit. A call kept with the Bot Chat (``chat``,
     Eric 2026-11-02) makes it the coordinator's own workstream instead:
-    counted, in its note as its own, and the Bot Chat's updates (all of
-    them, so no turn of the coordinator's own joins the call's) held until
-    the call is saved (``call_ended``) or CALL_HOLD_MAX_S passes, so the
-    call speaks the result first and the coordinator reports it after.
+    counted (never refused: the call started it), in its note as its own,
+    and its updates held until the call is saved (``call_ended``) or
+    CALL_HOLD_MAX_S passes, so the call speaks the result first and the
+    coordinator reports it after.
     ``result``: the reply of a turn that already ended before the phone
     adopted it (its hooks found no row then), so the row settles with it. A session already kept answers with
     its row. It's starting until its chat holds the request (then running),
@@ -1645,8 +1640,8 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
         work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
                          requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
                          reply_to={"to": via}, status=status, session_id=session)
-    if coordinator and _call_of(work) and work.coordinator == coordinator:
-        # Its updates (all the Bot Chat's) wait for the call to be saved.
+    if coordinator and _call_of(work) and work.coordinator == coordinator and work.created_at >= began:
+        # Its updates wait for the call to be saved.
         store.set_meta(_CALL_ON + coordinator, str(time.time()))
     if not _call_of(work):
         # The session is already one of the bot's own workstreams: it stays that.
@@ -2731,7 +2726,7 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     # A turn that ended on its own: a later restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
     if not work.closed_at and work.coordinator:
-        _queue_wake(home, work.coordinator, line)
+        _queue_wake(home, work.coordinator, line, kind="call" if _call_of(work) else "work")
     return True
 
 
@@ -2748,7 +2743,8 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
     if stored is not None and not interrupted and not work.closed_at and work.coordinator:
         link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
         _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” was stopped as it finished. In short: "
-                                            f"{_cut(text, WAKE_REPORT_CHARS)}" + (f" {link}" if link else ""))
+                                            f"{_cut(text, WAKE_REPORT_CHARS)}" + (f" {link}" if link else ""),
+                    kind="call" if _call_of(work) else "work")
 
 
 # The states a turn's end settles: working, waiting on the user, or a turn
@@ -2786,7 +2782,8 @@ def needs_you(session_id: Any, description: Any = None) -> None:
     what = _cut(description, 160) if isinstance(description, str) and description.strip() else "an approval"
     if work.coordinator:
         _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” is waiting on the user ({what}). The "
-                                            "request reaches them from that workstream; you can't answer it.")
+                                            "request reaches them from that workstream; you can't answer it.",
+                    kind="call" if _call_of(work) else "work")
 
 
 def answered(session_id: Any) -> None:
@@ -3326,10 +3323,29 @@ def _settings_line(home: Path, store: work_store.Store) -> str:
 
 def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", item: str = "") -> None:
     """A line for a Bot Chat's next work update, batched; ``kind`` "ask"
-    for an ask from another bot (its turn says how to answer). Each line is
-    in the outbox until its update is sent, so one a restart caught in the
-    batch goes out again (``_replay``); ``item`` is that row when it does."""
+    for an ask from another bot (its turn says how to answer), "call" for
+    a workstream a call kept with the Bot Chat started: held while that
+    call is on (its result is the call's to speak first), then batched.
+    Each line is in the outbox until its update is sent, so one a restart
+    caught in the batch goes out again (``_replay``); ``item`` is that row
+    when it does."""
     key = (str(home), coordinator)
+    if kind == "call" and _call_on(home, coordinator):
+        if not item:
+            try:
+                item = work_store.Store(home).outbox_add("", "line", coordinator, line)
+            except Exception:  # noqa: BLE001 — the digest still carries the work
+                logger.debug("conduit_push: couldn't keep a work update line", exc_info=True)
+                item = ""
+        with _wake_lock:
+            _call_held.setdefault(key, []).append((line, item))
+            start = key not in _call_checks
+            if start:
+                _call_checks[key] = None
+        if start:
+            _check_call_hold(home, coordinator, first=True)
+        return
+    kind = "work" if kind == "call" else kind
     if not item:
         try:
             item = work_store.Store(home).outbox_add("", "line_ask" if kind == "ask" else "line", coordinator, line)
@@ -3352,6 +3368,33 @@ def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", ite
             _wakes[key] = (lines, timer)
 
 
+def _check_call_hold(home: Path, coordinator: str, first: bool = False) -> None:
+    """Releases a call's held lines once the call is over (or its hold ran
+    out); asks again in CALL_HOLD_RETRY_S while it's on."""
+    key = (str(home), coordinator)
+    if not first and not _call_on(home, coordinator):
+        _release_call_lines(home, coordinator)
+        return
+    timer = threading.Timer(CALL_HOLD_RETRY_S, _check_call_hold, args=(home, coordinator))
+    timer.daemon = True
+    with _wake_lock:
+        if key not in _call_checks:
+            return  # released meanwhile
+        _call_checks[key] = timer
+    timer.start()
+
+
+def _release_call_lines(home: Path, coordinator: str) -> None:
+    key = (str(home), coordinator)
+    with _wake_lock:
+        held = _call_held.pop(key, [])
+        timer = _call_checks.pop(key, None)
+    if timer is not None:
+        timer.cancel()
+    for line, item in held:
+        _queue_wake(home, coordinator, line, item=item)
+
+
 def _send_wake(home: Path, coordinator: str) -> None:
     key = (str(home), coordinator)
     with _wake_lock:
@@ -3367,23 +3410,20 @@ def _send_wake(home: Path, coordinator: str) -> None:
     if not lines:
         return
     now = time.monotonic()
-    on_call = _call_on(home, coordinator)
-    if on_call or (_coordinator_busy(home, coordinator) and now - (held_since or now) < WAKE_BUSY_MAX_S):
+    if _coordinator_busy(home, coordinator) and now - (held_since or now) < WAKE_BUSY_MAX_S:
         with _wake_lock:
             # Lines queued meanwhile join these; their own timer (if any) finds them gone.
             more, timer = _wakes.pop(key, ([], None))
             if timer is not None:
                 timer.cancel()
-            retry = threading.Timer(CALL_HOLD_RETRY_S if on_call else WAKE_BUSY_RETRY_S, _send_wake,
-                                    args=(home, coordinator))
+            retry = threading.Timer(WAKE_BUSY_RETRY_S, _send_wake, args=(home, coordinator))
             retry.daemon = True
             _wakes[key] = (lines + more, retry)
             if asks:
                 _wake_asks.setdefault(key, set()).update(asks)
             if items:
                 _wake_items[key] = items + _wake_items.get(key, [])
-            # A call's hold isn't the busy hold's: it starts that clock only when it ends.
-            _wake_held[key] = held_since or (None if on_call else now)
+            _wake_held[key] = held_since or now
             retry.start()
         return
     # A turn that starts between the check and the send still gets this
@@ -3427,6 +3467,10 @@ _wake_items: dict[tuple[str, str], list[str]] = {}
 _finished: set[str] = set()
 # When each held update first found its Bot Chat busy.
 _wake_held: dict[tuple[str, str], float] = {}
+# Lines (and outbox rows) of a call's workstreams, held while the call
+# kept with that Bot Chat is on, and the timer that checks on it.
+_call_held: dict[tuple[str, str], list[tuple[str, str]]] = {}
+_call_checks: dict[tuple[str, str], Any] = {}
 
 
 def _coordinator_busy(home: Path, coordinator: str) -> bool:
@@ -3445,6 +3489,9 @@ def stop() -> None:
         pending = list(_wakes.values())
         _wakes.clear()
         _wake_held.clear()
+        checks = list(_call_checks.values())
+        _call_checks.clear()
+        _call_held.clear()
         _wake_asks.clear()
         _wake_items.clear()
         _load_verdicts.clear()
@@ -3454,6 +3501,9 @@ def stop() -> None:
         _replies.clear()
         _redirecting.clear()
     for _, timer in pending:
+        if timer is not None:
+            timer.cancel()
+    for timer in checks:
         if timer is not None:
             timer.cancel()
 
