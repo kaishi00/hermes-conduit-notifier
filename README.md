@@ -1530,7 +1530,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
 | GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, unavailable}` |
 | POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals}` | the settings as they are now |
-| POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?}` (`via`: `phone` or `watch`) | `{ok, ref, adopted, work}`; the same session again answers with its row, `adopted` false; `off` (409) when the bot's workstreams are off |
+| POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?}` (`via`: `phone` or `watch`) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `off` (409) when the bot's workstreams are off |
 
 - `work` lists every open (unresolved) row, however old: active work first,
   then the rest by when it last changed. Rows are workstreams, and asks to
@@ -1564,7 +1564,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   offers nothing until its first turn begins, and Stop once it has been
   starting for two minutes since its chat was made.
 - A refusal has `code` and `detail`: a 4xx for `no_such_work`, `not_now`,
-  `starting`, `still_running`, `busy`, `open_elsewhere`, `off`, `missing`, `unknown_action`
+  `starting`, `still_running`, `busy`, `open_elsewhere`, `off`, `taken`, `missing`, `unknown_action`
   and `too_long`, a 502 (`hermes`) when Hermes refused it, and a 503
   (`unavailable`) when the session API isn't in this process.
 

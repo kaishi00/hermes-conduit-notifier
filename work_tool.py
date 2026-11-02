@@ -78,6 +78,7 @@ WAKE_BATCH_S = 3.0
 WAKE_BUSY_RETRY_S = 2.0
 WAKE_BUSY_MAX_S = 600.0
 DIGEST_ITEMS = 12
+_LOST_REPLY = "Your message may not have reached it before Hermes restarted"
 DIGEST_CALL_ITEMS = 6  # a call's jobs, listed after the bot's own work
 DIGEST_RESULT_CHARS = 240
 READ_MESSAGES = 12
@@ -2050,10 +2051,12 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
             # A call's job has no coordinator to tell: its row says so, for
             # the Work panel, rather than the message going missing unseen.
             store.outbox_done(row["id"], "lost")
+            lost = (f"{_LOST_REPLY}: «{_cut(row['text'], 200)}» "
+                    "Send it again if it's still needed.")
             if store.get_meta(_CHECK + work.ref):
-                return  # its error names the step a restart cut off, which Continue checks first
-            store.update(work.ref, error=_cut(f"Your message may not have reached it before Hermes restarted: "
-                                              f"«{_cut(row['text'], 200)}» Send it again if it's still needed.", 300))
+                # After the step a restart cut off, which Continue reads first.
+                lost = f"{_cut(work.error, 200)}. {lost}"
+            store.update(work.ref, error=_cut(lost, 400))
             return
         # A call's job has no coordinator, but the bot that sent to it is told as any sender is.
         if work is None or work.closed_at or not (work.coordinator or (kind == "send" and _from_call(work))):
@@ -3057,7 +3060,8 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
             how = "after"
         else:
             step = ("its first steps" if work.error == _BRIEF_TAKEN
-                    else work.error.removeprefix("stopped by a restart during ") if work.error else "")
+                    else work.error.removeprefix("stopped by a restart during ").split(f". {_LOST_REPLY}")[0]
+                    if work.error else "")
             words = APP_CONTINUE_UNCERTAIN.format(step=step or "a step") if uncertain else APP_CONTINUE
             how = "after"
         answer = _deliver(store, broker, work, words, how, kind="user_send")

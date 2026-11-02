@@ -2144,3 +2144,18 @@ def test_an_approval_from_a_cancelled_turn_isnt_the_waiting_requests(monkeypatch
     assert len(server.methods("prompt.submit")) == 1
     assert grant.jobs.jobs["watch-2"].status == "starting"
     assert grant.jobs.jobs["watch-2"].approval is None
+
+
+def test_a_kept_job_cancelled_as_its_prompt_went_in_is_settled_in_its_registry(monkeypatch, tmp_path):
+    failed = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None, adopt=lambda *args, **kwargs: None,
+                                 call_start_failed=lambda home, sid, error: failed.append((sid, error)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    def cancel_on_submit(params):
+        api.watch_jobs.run_watch_job_call(grant, "cancel_job", {})
+        return {"status": "started"}
+    grant.jobs.server.results["prompt.submit"] = cancel_on_submit
+    assert start(grant, "Check the build logs")["status"] == "not_started"
+    assert failed == [("st-1", "cancelled before it started")]

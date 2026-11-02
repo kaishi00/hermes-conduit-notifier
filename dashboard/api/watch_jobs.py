@@ -862,6 +862,8 @@ class _WatchJobs:
                     "message": f"Hermes couldn't start the job: {job.error}"}
         if cancelled:
             # cancel_job got there while it started, and said so.
+            if kept:
+                _registry_start_failed(profile, job.stored_session_id or job.session_id, "cancelled before it started")
             self._close_session(job)
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": f"{job.title} was cancelled before it started."}

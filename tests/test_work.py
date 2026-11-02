@@ -3925,4 +3925,10 @@ def test_a_lost_reply_keeps_the_cut_off_step_a_calls_job_checks_first(on, hermes
     on.outbox_add("W1", "user_send", CALL_JOB, "And tomorrow?")
     restart(hermes, monkeypatch)
     call("work_list")
-    assert on.get("W1").error.startswith("stopped by a restart during")
+    error = on.get("W1").error
+    assert error.startswith("stopped by a restart during terminal") and "And tomorrow?" in error
+    # Continue names the step, not the lost reply.
+    hermes.calls.clear()
+    work.app_act(on.home, "W1", "continue", {})
+    sent = " ".join(item["text"] for item in submitted_to(hermes, CALL_JOB))
+    assert "systemctl restart nginx" in sent and "And tomorrow?" not in sent

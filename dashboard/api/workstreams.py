@@ -27,7 +27,7 @@ WORKSTREAMS_WINDOW_S = 60.0
 # A refusal's code -> its HTTP status. The body has the code, so Conduit
 # words it, and the note.
 REFUSAL_STATUS = {"no_such_work": 404, "missing": 400, "unknown_action": 404, "off": 409, "busy": 409,
-                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502, "invalid": 400}
+                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502, "invalid": 400, "taken": 409}
 
 # The panel's reads and the user's actions count apart, so reading often
 # never holds up a Stop.
@@ -138,8 +138,9 @@ async def post_workstreams_adopt(request: Request, response: Response, profile: 
     made the job's session. The call follows the job as before; the row
     shows in the Work panel marked as a call's (``from_call``), settles with
     its turns, never wakes the Bot Chat and waits for the user after a
-    restart. The same session again answers with its row (``adopted``
-    false); a bot whose work is off is a 409 (``off``)."""
+    restart. The same call's session again answers with its row
+    (``adopted`` false); one of the bot's own workstreams' sessions is a 409
+    (``taken``), and so is a bot whose work is off (``off``)."""
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
     body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
