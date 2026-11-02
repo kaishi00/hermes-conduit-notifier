@@ -773,6 +773,32 @@ def test_saved_servers_hermes_cant_list_now_block_the_setup(hermes, monkeypatch,
     assert _ceiling(hermes) == before and len(hermes.config_writes) == writes
 
 
+def test_naming_servers_hermes_cant_list_now_is_the_same_refusal(hermes, monkeypatch):
+    # Not "isn't turned on": the server may well be on, and the setup can't tell yet.
+    _servers(hermes, {"github": GITHUB})
+    monkeypatch.setattr(hermes, "mcp_servers", lambda home: None)
+    with pytest.raises(setup.SetupError) as refused:
+        _apply(hermes, mcp_servers=["github"])
+    assert refused.value.code == "mcp_unreadable" and refused.value.status == 409
+    assert hermes.config_writes == []
+    _apply(hermes, ceiling=["web"], mcp_servers=[])
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
+
+
+def test_named_servers_fit_in_the_ceiling_kept_with_them(hermes):
+    extra = [f"t{index:02}" for index in range(62)]
+    hermes.toolsets += [(name, name, name) for name in extra]
+    for name in extra:
+        hermes.tools[name] = [name]
+    _servers(hermes, {"github": GITHUB, "notes": NOTES, "wiki": GITHUB})
+    _apply(hermes, ceiling=extra)
+    with pytest.raises(setup.SetupError) as refused:
+        _apply(hermes, mcp_servers=["github", "notes", "wiki"])
+    assert refused.value.code == "bad_mcp_servers"
+    _apply(hermes, mcp_servers=["github", "notes"])
+    assert {"github", "notes"} <= set(_ceiling(hermes))
+
+
 def test_a_ceiling_without_servers_doesnt_need_them_listed(hermes, monkeypatch):
     _apply(hermes, ceiling=["web"])
     monkeypatch.setattr(hermes, "mcp_servers", lambda home: None)

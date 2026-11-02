@@ -615,8 +615,17 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
     # A saved server Hermes turned off since may be named again, so it stays chosen (and off): Conduit has no
     # switch for it and sends it along.
     kept = saved_mcp if NO_MCP not in (saved or []) else set()
-    asked_mcp = None if mcp_servers is None else _checked_mcp(
-        mcp_servers, sorted({*mcp_offered, *kept}), MAX_CEILING - len(asked or []))
+    if listed_mcp is None and isinstance(mcp_servers, list) and mcp_servers:
+        # Named now, while Hermes can't list them: the server may well be on, so the answer is the same as for
+        # saved ones, not "isn't turned on".
+        if not any(blocker["code"] == "mcp_unreadable" for blocker in blockers):
+            blockers.append({"code": "mcp_unreadable", "message": (
+                f"This Hermes couldn't list profile {profile}'s MCP servers just now, so the room ceiling can't name "
+                "them yet. Check its mcp_servers in config.yaml, then try again.")})
+        mcp_servers = None
+    # The servers share the ceiling's bound with the toolsets kept beside them, saved ones included.
+    room = MAX_CEILING - len([name for name in target if name in ids])
+    asked_mcp = None if mcp_servers is None else _checked_mcp(mcp_servers, sorted({*mcp_offered, *kept}), room)
     # A saved list naming no server Hermes still has would get every enabled one (Hermes' _merge_mcp_servers),
     # so a server gone from the profile is dropped, and with none left no_mcp is back. A saved one turned off
     # stays: Hermes keeps it off.
