@@ -24,7 +24,8 @@ checks it). The format is fixed, because Conduit reads it:
   answer there only while Hermes still holds the chat, up to an hour after
   its last reply; a chat opened after Hermes restarts gets none until it
   replies again.
-- A message Hermes refused, or that Conduit never sent, no longer leaves its
+- A message Hermes refused, or that Conduit never sent (Conduit takes its
+  note back when the send fails), no longer leaves its
   "sent from CarPlay" (or iPhone, Watch...) note waiting, where the same words
   sent from another app in that chat could pick it up. One whose answer was
   lost on the way keeps it, since Hermes may have taken it, and on Hermes'
