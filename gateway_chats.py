@@ -256,8 +256,26 @@ class _AuthorityLink:
         with self.lock:
             if type(result.get("execution_generation")) is int:
                 self.generations[sid] = result["execution_generation"]
+            replaced = None
             if isinstance(result.get("subscription_id"), str):
+                replaced = self.subscriptions.get(sid)
                 self.subscriptions[sid] = result["subscription_id"]
+        if replaced and replaced != result.get("subscription_id"):
+            # A second view of the chat on this connection (a resume for its
+            # fences): the older one ends, so a close detaches all there is.
+            self._detach_later(sid, replaced)
+
+    def _detach_later(self, sid: str, subscription: str) -> None:
+        connection = self.connection
+        loop = getattr(self.chats.runner, "_gateway_loop", None)
+        if connection is None or loop is None or loop.is_closed():
+            return
+        request = {"jsonrpc": "2.0", "id": f"conduit-detach-{uuid.uuid4().hex}", "method": "session.detach",
+                   "params": {"session_id": sid, "subscription_id": subscription}}
+        try:
+            asyncio.run_coroutine_threadsafe(connection.dispatch(request), loop)
+        except Exception:  # noqa: BLE001 — the view ends with the connection
+            logger.debug("Conduit: detaching an older view failed", exc_info=True)
 
     def _request(self, method: Any, params: Dict[str, Any]) -> Any:
         """The request in the authority's shape, or ``{"result": …}`` when
@@ -303,7 +321,9 @@ class _AuthorityLink:
 
     def _answer(self, method: Any, params: Dict[str, Any], shaped: Any, response: dict) -> dict:
         error = response.get("error")
-        reason = ((error.get("data") or {}).get("reason") or error.get("message")) if isinstance(error, dict) else None
+        data = error.get("data") if isinstance(error, dict) else None
+        reason = ((data.get("reason") if isinstance(data, dict) else None) or error.get("message")) \
+            if isinstance(error, dict) else None
         if method == "approval.respond":
             prompt_id = shaped[1].get("prompt_id")
             if not error or reason == "stale_generation":
@@ -314,7 +334,8 @@ class _AuthorityLink:
                 # The turn that asked has ended: nothing was waiting.
                 return {**response, "error": None, "result": {"resolved": 0}}
             if not error:
-                status = str((response.get("result") or {}).get("status") or "").lower()
+                answered = response.get("result") if isinstance(response.get("result"), dict) else {}
+                status = str(answered.get("status") or "").lower()
                 return {**response, "result": {"resolved": 1 if status == "resolved" else 0}}
         if method in ("session.steer", "session.redirect", "session.interrupt") and reason == "stale_generation":
             # The turn it named has ended: nothing is running to steer or stop.
@@ -409,6 +430,8 @@ class _AuthorityChats:
         try:
             return future.result(timeout)
         except concurrent.futures.TimeoutError:
+            if future.done():
+                raise  # the call's own error, not this wait's
             # Nobody waits for it now; a call already in the authority's hands
             # may still have taken effect, which the caller's error says.
             future.cancel()

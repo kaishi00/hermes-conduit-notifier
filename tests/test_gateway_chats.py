@@ -341,3 +341,26 @@ def test_a_failed_detach_keeps_the_view_to_close_again(gateway):
     _call(chats, transport, "session.close", {"session_id": "d1"})
     detaches = [r for r in connections[0].requests if r["method"] == "session.detach"]
     assert len(detaches) == 2 and detaches[1]["params"]["subscription_id"] == "sub-d"
+
+
+def test_a_second_view_of_a_chat_detaches_the_first(gateway):
+    chats, answers, connections = gateway
+    subs = iter(["sub-1", "sub-2"])
+    answers["session.resume"] = lambda request: {"result": {"session_id": "v1", "execution_generation": 1,
+                                                            "subscription_id": next(subs)}}
+    transport = Transport()
+    _call(chats, transport, "session.resume", {"session_id": "v1"})
+    _call(chats, transport, "session.resume", {"session_id": "v1"})
+    deadline = __import__("time").monotonic() + 5
+    while not any(r["method"] == "session.detach" for r in connections[0].requests):
+        assert __import__("time").monotonic() < deadline
+        __import__("time").sleep(0.01)
+    detach = next(r for r in connections[0].requests if r["method"] == "session.detach")
+    assert detach["params"] == {"session_id": "v1", "subscription_id": "sub-1"}
+
+
+def test_an_error_with_odd_data_is_still_an_answer(gateway):
+    chats, answers, _connections = gateway
+    answers["session.steer"] = {"error": {"code": 1, "message": "nope", "data": "text"}}
+    answer = _call(chats, Transport(), "session.steer", {"session_id": "o1", "text": "x"})
+    assert answer["error"]["message"] == "nope"
