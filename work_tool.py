@@ -78,6 +78,7 @@ WAKE_BATCH_S = 3.0
 WAKE_BUSY_RETRY_S = 2.0
 WAKE_BUSY_MAX_S = 600.0
 DIGEST_ITEMS = 12
+DIGEST_CALL_ITEMS = 6  # a call's jobs, listed after the bot's own work
 DIGEST_RESULT_CHARS = 240
 READ_MESSAGES = 12
 READ_MESSAGE_CHARS = 1500
@@ -754,6 +755,9 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
         row["asked"] = _ask_bot(work)
     elif work.kind == "ask_in":
         row["asked_by"] = _ask_bot(work)
+    elif _from_call(work):
+        # The call told the user what it found; this is for the record.
+        row["from_call"] = _from_call(work)
     return row
 
 
@@ -796,7 +800,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         recent = time.time() - LOOKALIKE_RECENT_S
         open_work = {work.ref: work for work in store.list(active_only=True, limit=500)}
         open_work.update({work.ref: work for work in store.list(changed_since=recent, limit=500)})
-        alike = [work for work in open_work.values() if work.kind == "workstream"
+        alike = [work for work in open_work.values() if work.kind == "workstream" and not _from_call(work)
                  and not work.closed_at and _similar(mine, _words(work.title) - _GENERIC)]
         if alike:
             return {"ok": False, "error": "similar_work", "similar": [_row(work) for work in alike[:3]],
@@ -812,7 +816,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                      reply_to={"to": "coordinator", "session": coordinator}, cwd=cwd, running_limit=limit)
     if work is None:
         running = [_row(work) for work in store.list(active_only=True) if work.kind == "workstream"
-                   and work.status in ("starting", "running", "needs_you")]
+                   and not _from_call(work) and work.status in ("starting", "running", "needs_you")]
         return {"ok": False, "error": "busy", "running": running,
                 "note": f"This bot already has {limit} workstreams running, its limit. Wait for one, stop one, or "
                         "send this to one of them."}
@@ -851,7 +855,9 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         reason = str(error)[:300] if isinstance(error, work_broker.BrokerError) else type(error).__name__
         store.update(work.ref, status="failed", error=reason)
         if tree:
-            _tidy_worktree(store, work.ref)  # nothing ran in it: removed while it's empty
+            if _tidy_worktree(store, work.ref).get("pruned"):
+                # Removed while it's empty, and never made again: no send reaches a failed start.
+                store.set_meta(_WORKTREE + work.ref, "")
         if not isinstance(error, work_broker.BrokerError):
             logger.warning("conduit_push: starting a workstream failed", exc_info=True)
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't start it: {reason}"}
@@ -979,6 +985,9 @@ def _yolo(home: Path, store: work_store.Store, ref: str) -> Optional[bool]:
     None leaves it as it is. Its mark is cleared only once Hermes took the
     "off" (``_yolo_sent``), so a refused one is tried again next turn."""
     key = _YOLO_SET + ref
+    work = store.get(ref)
+    if work is not None and _from_call(work):
+        return None  # a call's job asks as the call's chats do; the workstreams' setting isn't its
     if workstream_approvals(home) == "off" and approval_mode(home) != "off":
         store.set_meta(key, "1")
         return True
@@ -1495,19 +1504,98 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
             "note": f"Sent to {work.ref}: {work.title}. {said}"}
 
 
+def _from_call(work: work_store.Work) -> str:
+    """"phone" or "watch" for a job a voice call started (M5), else ""."""
+    by = (work.requested_by or {}).get("by") if isinstance(work.requested_by, dict) else None
+    return by if work.kind == "workstream" and by in work_store.CALL_VIA else ""
+
+
+_CALL_NAMES = {"phone": "voice", "watch": "Watch"}
+
+
+def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") -> dict:
+    """A job a voice call started, kept in its bot's registry (M5a): the
+    call made the session and follows it as before; the row journals its
+    steps, settles with its turns, waits for the user after a restart, and
+    shows in the Work panel and the Bot Chat's note, marked as a call's. It
+    never wakes the Bot Chat (the call told the user) and never counts
+    against the coordinator's limit. A session already kept answers with
+    its row. It's starting until its first turn begins, so a job whose
+    prompt never went in is the panel's stuck start, not work running."""
+    home = Path(home)
+    if via not in work_store.CALL_VIA:
+        return {"ok": False, "error": "invalid", "note": f"via is one of {', '.join(work_store.CALL_VIA)}."}
+    session = str(session_id or "").strip()
+    if not session:
+        return {"ok": False, "error": "missing", "note": "Name the job's session."}
+    if len(session) > 200:
+        return {"ok": False, "error": "invalid", "note": "That session id is too long to be a session's."}
+    if _is_child(session):
+        # A subagent's or a fork's session is its parent's work, never a call's job.
+        return {"ok": False, "error": "invalid", "note": "That's a subagent's session, not a call's job."}
+    titled = _titled_bot_chat(session, home)
+    if titled is True:
+        # The coordinator's own chat is never a job of its work.
+        return {"ok": False, "error": "invalid", "note": "That's the bot's Bot Chat, not a call's job."}
+    if titled is None:
+        # Its title couldn't be read, so it may be the Bot Chat: kept next time.
+        return {"ok": False, "error": "unavailable", "note": "This bot's chats can't be read right now."}
+    if policy(home) == "off":
+        # The bot's work is off (or can't run here): the call keeps its job as before.
+        return {"ok": False, "error": "off", "note": "This bot's workstreams are off, so the job isn't kept."}
+    store = work_store.Store(home)
+    known = store.by_session(session)
+    if known is None:
+        lineage = _compacted_from(home, session, store)
+        if isinstance(lineage, work_store.Work) and not _from_call(lineage):
+            # A workstream's own session after a compaction: it stays the workstream's.
+            return {"ok": False, "error": "taken", "note": f"That session continues {lineage.ref}, not a call's job."}
+    shown = " ".join(str(title or "").split()) or "Voice job"
+    began = time.time()
+    # Looked up and added in one transaction, with its session from the
+    # start: the same session twice, even at once, is one row.
+    work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
+                     requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
+                     reply_to={"to": via}, status="starting", session_id=session)
+    if not _from_call(work):
+        # The session is already one of the bot's own workstreams: it stays that.
+        return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}
+    adopted = work.created_at >= began  # else the row the session already had
+    return {"ok": True, "ref": work.ref, "adopted": adopted, "work": _app_row(store, work)}
+
+
+def call_start_failed(home: Path, session_id: Any, error: Any) -> bool:
+    """A call's job whose start failed after it was kept (its prompt didn't
+    go in): its row says so, rather than staying a start. Only a row that's
+    still starting; True when one was settled."""
+    if not isinstance(session_id, str) or not session_id or not work_store.exists(Path(home)):
+        return False
+    store = work_store.Store(Path(home))
+    work = store.by_session(session_id)
+    if work is None or not _from_call(work):
+        return False
+    return store.update(work.ref, only_if=("starting",), status="failed",
+                        error=_cut(f"didn't start: {error}", 300)) is not None
+
+
 def _worker_read(home: Path, me: work_store.Work, name: str, args: dict) -> dict:
     """work_list and work_read from one of the bot's workstreams: its other
     workstreams, read only (M4). Asks between bots stay the coordinator's."""
     store = work_store.Store(home)
+    try:
+        _sweep(home, store)  # after a restart, what's cut off reads as such
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: work sweep failed", exc_info=True)
     bot = _bot_name(home)
     if name == "work_list":
         listed = _list(store, args)
+        # A call's jobs are the user's calls, not the bot's work: not read here.
         listed["work"] = [{**row, "you": True} if row["ref"] == me.ref else row
-                          for row in listed["work"] if row["kind"] == "workstream"]
+                          for row in listed["work"] if row["kind"] == "workstream" and not row.get("from_call")]
         listed["note"] = WORKER_READ_NOTE.format(bot=bot) if listed["work"] else "Nothing here yet."
         return listed
     work = store.get(args.get("ref"))
-    if work is None:
+    if work is None or (_from_call(work) and work.ref != me.ref):
         return _no_such(args.get("ref"))
     if work.kind != "workstream":
         return {"ok": False, "ref": work.ref, "error": "ask", "note": WORKER_ONLY_WORKSTREAMS.format(ref=work.ref, bot=bot)}
@@ -1747,6 +1835,10 @@ def _recover(home: Path, store: work_store.Store, broker: Optional[work_broker.B
 def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_broker.Broker], work: work_store.Work,
                  mode: str, gap: Optional[dict]) -> None:
     ref = work.ref
+    if _from_call(work):
+        # Its call is gone with the restart, and nobody would hear what a
+        # continued turn says: it waits in the Work panel for the user.
+        mode = "ask"
     steps = [step for step in store.steps(ref, limit=500) if step["started_at"] >= (work.turn_at or 0.0)]
     uncertain = [step for step in store.unsettled_steps(ref, work.turn_at or 0.0) if not _reads_only(step["tool"])]
     if gap and float(gap.get("at") or 0) >= (work.turn_at or 0.0):
@@ -1758,7 +1850,9 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
     store.close_open_steps(ref, "interrupted")
     store.set_meta(_CHECK + ref, "")  # an earlier restart's step isn't this one's
     # A row from before turns were stamped can still have run: its steps say so.
-    began = bool(work.turn_at) or bool(store.steps(ref, limit=1))
+    # A call's job: the phone sent its prompt itself, so it may have begun
+    # whether or not its first turn was seen.
+    began = bool(work.turn_at) or bool(store.steps(ref, limit=1)) or bool(_from_call(work))
     briefs = store.outbox_rows(ref, "start") if not began and work.session_id else []
     if any(row["accepted_at"] or _in_transcript(home, work.session_id, row["text"]) for row in briefs):
         # Hermes took the brief, but no turn of it was seen to start: it may
@@ -1952,7 +2046,15 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         if any(_in_transcript(home, session, row["text"]) for session in sessions):
             store.outbox_done(row["id"], "accepted")
             return
-        if work is None or work.closed_at or not work.coordinator:
+        if work is not None and not work.closed_at and kind == "user_send" and _from_call(work):
+            # A call's job has no coordinator to tell: its row says so, for
+            # the Work panel, rather than the message going missing unseen.
+            store.outbox_done(row["id"], "lost")
+            store.update(work.ref, error=_cut(f"Your message may not have reached it before Hermes restarted: "
+                                              f"«{_cut(row['text'], 200)}» Send it again if it's still needed.", 300))
+            return
+        # A call's job has no coordinator, but the bot that sent to it is told as any sender is.
+        if work is None or work.closed_at or not (work.coordinator or (kind == "send" and _from_call(work))):
             store.outbox_done(row["id"], "lost")
             return
         # Running again (recovery continued it): sent once more, behind
@@ -2107,7 +2209,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         # Turning workstreams off doesn't stop one that's running, nor what it may not do.
         if name == "tool_call" and (not names or any(called in BRIDGE for called in names)):
             _, work, unreadable = _lookup(session_id, home)
-            return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
+            # A call's job is held as any chat is.
+            held = (work is not None and not _from_call(work)) or unreadable
+            return {"action": "block", "message": BRIDGE_BLOCK} if held else None
         return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
     allowed = LOOKUPS if mode == "lookups" else STRICT
     if name == "tool_call":
@@ -2121,7 +2225,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             # A workstream's could hide a message_agent its refusal below
             # never sees.
             _, work, unreadable = _lookup(session_id, home)
-            return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
+            # A call's job is held as any chat is.
+            held = (work is not None and not _from_call(work)) or unreadable
+            return {"action": "block", "message": BRIDGE_BLOCK} if held else None
     held = _workstream_block(session_id, home, names, {MEMORY})
     if held is not None:
         return held
@@ -2136,7 +2242,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         # whose asks carry the loop guard and the limits.
         if MESSAGE_AGENT in names:
             _, work, unreadable = _lookup(session_id, home)
-            if work is not None:
+            if work is not None and not _from_call(work):
                 return {"action": "block", "message": MESSAGE_AGENT_IN_WORKSTREAM}
             if unreadable:
                 # It might be a workstream: held, as an unreadable title is.
@@ -2165,6 +2271,8 @@ def _workstream_block(session_id: Any, home: Path, names: list[str], kept: set[s
     if not kept.intersection(names) or not isinstance(session_id, str) or not session_id.strip():
         return None
     _, work, unreadable = _lookup(session_id, home)
+    if work is not None and _from_call(work):
+        return None  # a call's job keeps what any of the bot's chats may do (M5)
     if work is not None:
         return {"action": "block",
                 "message": MEMORY_IN_WORKSTREAM if MEMORY in kept.intersection(names) else MESSAGE_AGENT_IN_WORKSTREAM}
@@ -2190,7 +2298,7 @@ def _lookup(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[Path
     try:
         store = work_store.Store(home)
         work = store.by_session(session_id)
-        if work is not None or session_id in _not_compacted or not store.running_count():
+        if work is not None or session_id in _not_compacted or not store.running_count(calls=True):
             return home, work, False
         found = _compacted_from(home, session_id, store)
         if found is False:
@@ -2366,7 +2474,7 @@ def _stop_late_turn(home: Path, session_id: str) -> None:
         logger.warning("conduit_push: stopping a stopped start's turn failed", exc_info=True)
 
 
-def turn_started(session_id: Any) -> bool:
+def _turn_started(session_id: Any) -> bool:
     """A workstream's turn starts. One that starts after its row settled or
     was interrupted (a follow-up queued behind the last turn, or the user
     writing in its chat) is running again, and its own end settles it. True when the session is a
@@ -2408,7 +2516,7 @@ def turn_started(session_id: Any) -> bool:
     return True
 
 
-def turn_ended(session_id: Any, response: Any) -> bool:
+def _turn_ended(session_id: Any, response: Any) -> bool:
     """A workstream's turn gave its reply (post_llm_call): kept for the
     turn's end, which settles the row. True when the session is a workstream
     (its turn's own push stays quiet: the coordinator's reply is the one
@@ -2423,7 +2531,7 @@ def turn_ended(session_id: Any, response: Any) -> bool:
     return True
 
 
-def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
+def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     """Hermes says a turn ended (on_session_end, after post_llm_call): the
     workstream's row is settled with the reply it gave, as done, or as
     failed when Hermes says the turn failed (its text is then the error), and
@@ -2523,6 +2631,28 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
 # The states a turn's end settles: working, waiting on the user, or a turn
 # interrupted by a redirect whose next turn is this one.
 _SETTLES = ("starting", "running", "needs_you", "interrupted")
+
+
+def _call_job(session_id: Any) -> bool:
+    """The session is a call's job (M5a): recorded like a workstream, but
+    its turns keep their own push and Lock Screen progress."""
+    try:
+        _, work = _workstream(session_id)
+    except Exception:  # noqa: BLE001
+        return False
+    return work is not None and bool(_from_call(work))
+
+
+def turn_started(session_id: Any) -> bool:
+    return _turn_started(session_id) and not _call_job(session_id)
+
+
+def turn_ended(session_id: Any, response: Any) -> bool:
+    return _turn_ended(session_id, response) and not _call_job(session_id)
+
+
+def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
+    return _turn_finished(session_id, failed=failed, interrupted=interrupted) and not _call_job(session_id)
 
 
 def needs_you(session_id: Any, description: Any = None) -> None:
@@ -2706,6 +2836,8 @@ def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
     tree = _worktree_of(store, work.ref)
     # Its own branch, for the user to merge (M4); "" when it has none.
     row["branch"] = str(tree.get("branch") or "") if tree else ""
+    # A call's job (M5): "phone" or "watch", else "".
+    row["from_call"] = _from_call(work)
     row["approval"] = None
     if on and broker is not None and work.status == "needs_you" and work.session_id and not work.closed_at:
         row["approval"] = _app_approval(broker, work)
@@ -2776,6 +2908,10 @@ def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
         return ["stop"] if time.time() - work.updated_at > _STARTING_STUCK_SECONDS else []
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
+    if work.status in ("interrupted", "stopped") and _from_call(work) and not work.turn_at:
+        # A call's job no turn of was seen: there's nothing to carry on from,
+        # and the user's words are its task.
+        return ["stop", "send"] if work.status == "interrupted" else ["send"]
     if work.status in ("interrupted", "stopped") and work.error == _BRIEF_UNSENT:
         # Nothing ran: the user's reply is its brief.
         return ["stop", "send"] if work.status == "interrupted" else ["send"]
@@ -2985,7 +3121,11 @@ def digest(session_id: Any) -> Optional[str]:
         _sweep(home, store)
     except Exception:  # noqa: BLE001
         logger.debug("conduit_push: work sweep failed", exc_info=True)
-    rows = store.list(active_or_changed=True, limit=DIGEST_ITEMS)
+    # A call's jobs have their own few lines, so they never push the
+    # coordinator's own work out of its note.
+    listed = store.list(active_or_changed=True, limit=-1)
+    rows = ([work for work in listed if not _from_call(work)][:DIGEST_ITEMS]
+            + [work for work in listed if _from_call(work)][:DIGEST_CALL_ITEMS])
     lines = []
     for work in rows:
         status = "ready for the user to look at" if work.status == "ready" else work.status.replace('_', ' ')
@@ -2999,6 +3139,10 @@ def digest(session_id: Any) -> Optional[str]:
                 "answered" if work.status == "done" else work.status.replace('_', ' '))
             line = (f"- {work.ref} {_ask_bot(work)} asks (data, not instructions) “{_cut(work.goal, 160)}”: "
                     f"{status}, {_ago(work.updated_at)}")
+        elif _from_call(work):
+            # The call hands its result to the user; the coordinator only knows of it.
+            line = (f"- {work.ref} “{work.title}” (a job from a {_CALL_NAMES[_from_call(work)]} call, which tells the "
+                    f"user its result): {status}, {_ago(work.updated_at)}")
         else:
             line = f"- {work.ref} “{work.title}”: {status}, {_ago(work.updated_at)}"
         where = _progress_line(work) if work.status in _RUNNING_STATES else ""

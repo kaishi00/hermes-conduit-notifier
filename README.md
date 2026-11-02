@@ -1422,6 +1422,17 @@ in Conduit (Edit Bot > Work) or here:
   merge, and Hermes' worktree sweep archives it once it's idle. Sent words
   again, a workstream whose worktree was removed gets it back at the same
   path. Conduit shows the branch on its card.
+- A voice call's jobs, the phone's and the Watch's, are kept in their bot's
+  registry too, as workstreams marked as a call's (`from_call`: `phone` or
+  `watch`). The call starts and follows each job as before and tells you its
+  result; the row journals its steps, settles with its turns and shows in the
+  Work panel, where you can stop it or answer it. It never wakes the Bot Chat
+  (the Bot Chat's note lists it as a call's job), never counts against the
+  bot's running limit, keeps its own push and Lock Screen progress, may use
+  the bot's memory and other bots like any chat, stays in the chat lists
+  under Voice Jobs, and after a restart always waits for you. Watch jobs are
+  kept as they start; the phone keeps its own with `POST /workstreams/adopt`.
+  A bot whose workstreams are off keeps none.
 - Bots work together coordinator to coordinator. `work_ask` asks another of
   your bots on this Hermes (by its name or profile) for an answer or a piece
   of work: it's an `ask_out` row in the asking bot's registry and an `ask_in`
@@ -1519,6 +1530,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
 | GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, unavailable}` |
 | POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals}` | the settings as they are now |
+| POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?}` (`via`: `phone` or `watch`) | `{ok, ref, adopted, work}`; the same session again answers with its row, `adopted` false; `off` (409) when the bot's workstreams are off |
 
 - `work` lists every open (unresolved) row, however old: active work first,
   then the rest by when it last changed. Rows are workstreams, and asks to
@@ -1541,7 +1553,8 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   (not an ask closed without its answer: the bot asks again). The bot can't
   close work you pinned, or a workstream you reopened until it runs again. Resolving unpins it.
 - `workstream_sessions` names every workstream's chat, resolved ones too, so
-  Conduit keeps them out of its chat lists. `counts` has `working`, `needs_you` (approvals, questions and work a
+  Conduit keeps them out of its chat lists (not a call's jobs, which stay
+  under Voice Jobs). `counts` has `working`, `needs_you` (approvals, questions and work a
   restart left for you), `ready` and `waiting` (asks to other bots).
 - `check` (Check first) is offered when a restart cut off a step that can
   change things (`uncertain`): the workstream is asked to find out whether

@@ -3075,6 +3075,15 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     bad = client.post("/api/plugins/conduit_push/workstreams/settings", json={"max_running": 99})
     assert bad.status_code == 400 and bad.json()["code"] == "invalid"
     assert client.post("/api/plugins/conduit_push/workstreams/settings", content=b"[1]").status_code == 400
+    adopted = client.post("/api/plugins/conduit_push/workstreams/adopt",
+                          json={"session_id": "20261102_voice_job_1", "title": "Check the weather", "via": "watch"})
+    assert adopted.status_code == 200 and adopted.json()["adopted"] and adopted.json()["work"]["from_call"] == "watch"
+    wrong = client.post("/api/plugins/conduit_push/workstreams/adopt", json={"session_id": "x", "via": "car"})
+    assert wrong.status_code == 400 and wrong.json()["code"] == "invalid"
+    on.set_policy("off")
+    work._policy_cache.clear()
+    off = client.post("/api/plugins/conduit_push/workstreams/adopt", json={"session_id": "y", "via": "phone"})
+    assert off.status_code == 409 and off.json()["code"] == "off"
 
 
 def test_a_settings_change_lands_in_the_named_bots_own_registry(on, hermes, monkeypatch, tmp_path):
@@ -3654,6 +3663,7 @@ def test_a_start_that_fails_after_its_worktree_was_made_removes_it(on, hermes, t
     assert answer["error"] == "hermes" and on.get("W1").status == "failed"
     made = trees.root / ".worktrees" / f"subagent-{trees.made[0]}"
     assert not made.exists() and trees.finalized == [False, True]
+    assert not call("work_close", {"ref": "W1"}).get("worktree")  # nothing left to report as kept
 
 
 def test_a_hermes_that_cant_say_where_its_terminal_runs_makes_no_worktree(on, hermes, trees, monkeypatch):
@@ -3686,3 +3696,223 @@ def test_turning_approvals_back_on_stops_reopening_once_its_time_is_up(home, her
     store.set_workstream_approvals("ask")
     assert work.end_bypasses(home) == 1
     assert len(hermes.named("session.resume")) == 1 and len(store.meta_keys("yolo_set:")) == 1
+
+# A call's jobs (M5a) ---------------------------------------------------------------
+
+CALL_JOB = "20261102_voice_job_1"
+
+
+def adopt(session_id=CALL_JOB, title="Check the weather", via="phone", **extra):
+    return work.adopt(work._home(), session_id, title, via=via, **extra)
+
+
+def test_a_calls_job_is_kept_once_per_session(on, hermes):
+    first = adopt(goal="Is it raining in Lyon?")
+    assert first["ok"] and first["adopted"] and first["ref"] == "W1"
+    assert first["work"]["from_call"] == "phone" and first["work"]["status"] == "starting"
+    again = adopt(title="Something else")
+    assert again["ok"] and not again["adopted"] and again["ref"] == "W1"
+    row = on.get("W1")
+    assert row.session_id == CALL_JOB and row.coordinator == "" and row.requested_by == {"by": "phone"}
+    assert row.goal == "Is it raining in Lyon?"
+    work.turn_started(CALL_JOB)
+    assert on.get("W1").status == "running"
+
+
+def test_adopt_names_a_session_and_a_call(on, hermes):
+    assert adopt(via="carplay")["error"] == "invalid"
+    assert adopt(session_id=" ")["error"] == "missing"
+    assert on.get("W1") is None
+
+
+def test_a_calls_job_never_counts_against_the_limit_nor_leaves_the_chat_lists(on, hermes):
+    on.set_max_running(1)
+    adopt()
+    adopt(session_id="20261102_watch_job_1", via="watch")
+    assert start()["ok"]  # the coordinator's one slot is still free
+    listed = work.app_list(on.home)
+    assert listed["workstream_sessions"] == ["20261031_work_1"]
+    assert {row["ref"]: row["from_call"] for row in listed["work"]} == {"W1": "phone", "W2": "watch", "W3": ""}
+
+
+def test_a_calls_job_settles_with_its_turn_without_waking_the_bot_chat(on, hermes):
+    adopt()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    # Its turns keep their own push and Lock Screen progress.
+    assert not work.turn_started(CALL_JOB)
+    assert not work.turn_ended(CALL_JOB, "Rain from three o'clock.")
+    assert not work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    work.flush_wakes()
+    row = on.get("W1")
+    assert row.status == "done" and row.last_result == "Rain from three o'clock."
+    assert submitted_to(hermes, BOT_CHAT) == []
+
+
+def test_a_calls_job_turn_keeps_its_push(on, hermes, monkeypatch):
+    adopt()
+    sent = []
+    monkeypatch.setattr(plugin, "_finish_ready", lambda session_id, ready, send: sent.append(ready))
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: None)
+    monkeypatch.setattr(plugin, "_session_title", lambda session_id: "")
+    monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: False, raising=False)
+    plugin._post_llm_call(session_id=CALL_JOB, assistant_response="Done.", turn_id="")
+    assert len(sent) == 1 and sent[0] is not None
+
+
+def test_a_calls_job_may_use_memory_and_other_bots(on, hermes):
+    adopt()
+    assert work.tool_block(CALL_JOB, "memory", {}) is None
+    assert work.tool_block(CALL_JOB, "message_agent", {}) is None
+    start()
+    assert work.tool_block("20261031_work_1", "memory", {})["action"] == "block"
+
+
+def test_the_bot_chat_hears_of_a_calls_job_but_isnt_woken(on, hermes):
+    adopt(via="watch")
+    note = work.digest(BOT_CHAT)
+    assert "W1 “Check the weather” (a job from a Watch call, which tells the user its result): starting" in note
+
+
+def test_a_restart_leaves_a_calls_job_for_the_user(on, hermes, monkeypatch):
+    on.set_after_restart("continue")
+    adopt()
+    work.turn_started(CALL_JOB)
+    on.step_started("W1", CALL_JOB, "read_file", tool_call_id="c1", summary="path: notes.md")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, CALL_JOB) == []
+    assert on.get("W1").status == "interrupted"
+    work.flush_wakes()
+    assert submitted_to(hermes, BOT_CHAT) == []
+
+
+def test_a_restart_before_a_calls_job_was_seen_to_start_never_says_nothing_ran(on, hermes, monkeypatch):
+    adopt()  # its first turn's start never reached the hooks
+    restart(hermes, monkeypatch)
+    call("work_list")
+    row = on.get("W1")
+    assert row.status == "interrupted" and row.error != work._BRIEF_UNSENT and not row.closed_at
+    assert submitted_to(hermes, CALL_JOB) == []
+
+
+def test_a_calls_job_is_sent_to_even_at_the_bots_limit(on, hermes):
+    on.set_max_running(1)
+    start()
+    adopt()
+    work.turn_started(CALL_JOB)
+    on.update("W2", status="done", last_result="Sunny.")
+    assert work.app_act(on.home, "W2", "send", {"text": "And tomorrow?"})["ok"]
+
+
+def test_a_calls_job_continued_after_its_session_compacted_is_still_followed(on, hermes, monkeypatch):
+    adopt()
+    work.turn_started(CALL_JOB)
+    monkeypatch.setattr(work, "_compacted_from", lambda home, session_id, store: store.get("W1"))
+    assert not work.turn_finished("20261102_voice_job_2", failed=False, interrupted=False)
+    assert on.get("W1").session_id == "20261102_voice_job_2"
+
+
+def test_a_calls_job_no_turn_of_was_seen_offers_no_continue(on, hermes, monkeypatch):
+    adopt()
+    restart(hermes, monkeypatch)
+    call("work_list")
+    row, = work.app_list(on.home)["work"]
+    assert row["actions"] == ["stop", "send"]
+
+
+def test_the_bot_chat_and_long_ids_are_never_adopted(on, hermes):
+    assert adopt(session_id=BOT_CHAT)["error"] == "invalid"
+    assert "too long" in adopt(session_id="x" * 201)["note"]
+
+
+def test_a_workstreams_own_session_is_never_adopted_as_a_calls_job(on, hermes):
+    start()
+    taken = adopt(session_id="20261031_work_1")
+    assert not taken["ok"] and taken["error"] == "taken"
+    assert on.get("W1").requested_by != {"by": "phone"} and on.get("W2") is None
+
+
+def test_a_reply_to_a_calls_job_a_restart_cut_off_shows_on_its_row(on, hermes, monkeypatch):
+    adopt()
+    work.turn_started(CALL_JOB)
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    on.outbox_add("W1", "user_send", CALL_JOB, "And tomorrow?")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    assert "And tomorrow?" in on.get("W1").error
+    assert submitted_to(hermes, BOT_CHAT) == [] and submitted_to(hermes, CALL_JOB) == []
+
+
+def test_a_calls_job_whose_start_failed_says_so(on, hermes):
+    adopt()
+    assert work.call_start_failed(on.home, CALL_JOB, "prompt.submit timed out")
+    row = on.get("W1")
+    assert row.status == "failed" and "prompt.submit timed out" in row.error
+    # Only a start: a job under way isn't settled by it.
+    adopt(session_id="20261102_voice_job_2")
+    work.turn_started("20261102_voice_job_2")
+    assert not work.call_start_failed(on.home, "20261102_voice_job_2", "late")
+    assert on.get("W2").status == "running"
+
+
+def test_the_bots_send_to_a_calls_job_a_restart_cut_off_is_handed_back(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt()
+    work.turn_started(CALL_JOB)
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    on.outbox_add("W1", "send", CALL_JOB, "Add the wind too.")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "Your message to W1" in wake["text"] and "Add the wind too." in wake["text"]
+
+
+def test_a_chat_whose_title_cant_be_read_isnt_adopted(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_titled_bot_chat", lambda session_id, home=None: None)
+    refused = adopt()
+    assert not refused["ok"] and refused["error"] == "unavailable" and on.get("W1") is None
+
+
+def test_a_calls_jobs_never_push_the_bots_own_work_out_of_its_note(on, hermes):
+    start()
+    for n in range(work.DIGEST_ITEMS + 2):
+        adopt(session_id=f"20261102_voice_job_{n + 10}", title=f"Call job {n}")
+    note = work.digest(BOT_CHAT)
+    assert "W1 “Login bug”" in note
+    assert note.count("(a job from a voice call") == work.DIGEST_CALL_ITEMS
+
+
+def test_a_calls_jobs_stay_out_of_the_coordinators_start_checks(on, hermes):
+    on.set_max_running(1)
+    adopt(title="Login page slow")
+    # Not a lookalike of new work, nor one of the limit's running rows.
+    assert start("Slow login page")["ref"] == "W2"
+    busy = start("Third question")
+    assert busy["error"] == "busy" and [row["ref"] for row in busy["running"]] == ["W2"]
+
+
+def test_a_workstream_doesnt_read_a_calls_job(on, hermes):
+    adopt()
+    start()
+    worker = on.get("W2").session_id
+    listed = call("work_list", {"filter": "all"}, session_id=worker)
+    assert [row["ref"] for row in listed["work"]] == ["W2"]
+    assert call("work_read", {"ref": "W1"}, session_id=worker)["error"] == "no_such_work"
+
+
+def test_a_calls_job_isnt_held_to_the_workstreams_rules(on, hermes):
+    adopt()
+    assert work.tool_block(CALL_JOB, "tool_call", {}) is None
+    on.set_policy("off")
+    assert work.tool_block(CALL_JOB, "tool_call", {}) is None
+    on.set_policy("strict")
+    on.set_workstream_approvals("off")
+    assert work._yolo(on.home, on, "W1") is None
+
+
+def test_a_subagents_session_isnt_adopted(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_is_child", lambda session_id: True)
+    assert adopt()["error"] == "invalid" and on.get("W1") is None

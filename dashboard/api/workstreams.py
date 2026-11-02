@@ -62,6 +62,11 @@ def workstreams_set_settings(body: Optional[dict]) -> Dict[str, Any]:
     return _work_tool().app_set_settings(core._calls_home(), body)
 
 
+def workstreams_adopt(body: dict) -> Dict[str, Any]:
+    return _work_tool().adopt(core._calls_home(), body.get("session_id"), body.get("title"),
+                              via=str(body.get("via") or ""), goal=body.get("goal") or "")
+
+
 async def _workstreams_route(route: str, profile: Optional[str], fn: Any, limiter: Any = None) -> Any:
     no_store = {"Cache-Control": "no-store"}
     try:
@@ -123,6 +128,24 @@ async def post_workstreams_settings(request: Request, response: Response, profil
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
     return await _workstreams_route("workstreams settings", profile, lambda: workstreams_set_settings(body),
+                                    _workstream_actions_limiter)
+
+
+@router.post("/workstreams/adopt")
+async def post_workstreams_adopt(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """A voice call's job, kept in its bot's registry (M5): {"session_id",
+    "title", "via": "phone" or "watch", "goal"?}, right after the phone
+    made the job's session. The call follows the job as before; the row
+    shows in the Work panel marked as a call's (``from_call``), settles with
+    its turns, never wakes the Bot Chat and waits for the user after a
+    restart. The same session again answers with its row (``adopted``
+    false); a bot whose work is off is a 409 (``off``)."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route("workstreams adopt", profile, lambda: workstreams_adopt(body),
                                     _workstream_actions_limiter)
 
 
