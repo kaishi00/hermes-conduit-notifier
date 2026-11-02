@@ -4272,3 +4272,13 @@ def test_work_read_during_the_call_doesnt_give_the_held_result(on, hermes, monke
     assert "Rain from three." not in str(call("work_read", {"ref": "W1"}))
     assert work.call_ended(on.home, BOT_CHAT, call="call-a")
     assert "Rain from three." in str(call("work_read", {"ref": "W1"}))
+
+
+def test_a_failed_bot_chat_call_job_shows_its_error_during_the_call(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-a")
+    work.turn_started(CALL_JOB)
+    work.turn_finished(CALL_JOB, failed=True, interrupted=False)
+    row = on.get("W1")
+    assert row.status == "failed" and row.error
+    assert row.error[:20] in work.digest(BOT_CHAT)
