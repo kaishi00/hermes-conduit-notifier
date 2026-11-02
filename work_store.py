@@ -302,7 +302,8 @@ class Store:
         now = time.time()
         with self._db() as con:
             if session_id:
-                kept = con.execute("SELECT * FROM work WHERE session_id = ? ORDER BY created_at LIMIT 1",
+                kept = con.execute("SELECT * FROM work WHERE session_id = ? AND kind = 'workstream' "
+                                   "ORDER BY created_at LIMIT 1",
                                    (session_id,)).fetchone()
                 if kept is not None:
                     return _work(kept)
