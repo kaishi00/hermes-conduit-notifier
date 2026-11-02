@@ -64,7 +64,8 @@ def workstreams_set_settings(body: Optional[dict]) -> Dict[str, Any]:
 
 def workstreams_adopt(body: dict) -> Dict[str, Any]:
     return _work_tool().adopt(core._calls_home(), body.get("session_id"), body.get("title"),
-                              via=str(body.get("via") or ""), goal=body.get("goal") or "")
+                              via=str(body.get("via") or ""), goal=body.get("goal") or "", chat=body.get("chat"),
+                              result=body.get("result"), call=body.get("call"))
 
 
 async def _workstreams_route(route: str, profile: Optional[str], fn: Any, limiter: Any = None) -> Any:
@@ -134,11 +135,15 @@ async def post_workstreams_settings(request: Request, response: Response, profil
 @router.post("/workstreams/adopt")
 async def post_workstreams_adopt(request: Request, response: Response, profile: Optional[str] = None) -> Any:
     """A voice call's job, kept in its bot's registry (M5): {"session_id",
-    "title", "via": "phone" or "watch", "goal"?}, right after the phone
+    "title", "via": "phone" or "watch", "goal"?, "chat"?, "result"?, "call"?
+    (the call's own id, which its call-ended names too)}, right after the phone
     made the job's session. The call follows the job as before; the row
     shows in the Work panel marked as a call's (``from_call``), settles with
-    its turns, never wakes the Bot Chat and waits for the user after a
-    restart. The same call's session again answers with its row
+    its turns, never wakes the Bot Chat (unless "chat", below, is the Bot
+    Chat) and waits for the user after a restart. With "chat" the Bot Chat
+    the call is kept with, the job is the coordinator's own workstream
+    instead, whose update waits until the call is saved; "result" settles a
+    turn that already ended. The same call's session again answers with its row
     (``adopted`` false); one of the bot's own workstreams' sessions is a 409
     (``taken``), and so is a bot whose work is off (``off``)."""
     response.headers["Cache-Control"] = "no-store"
@@ -148,6 +153,30 @@ async def post_workstreams_adopt(request: Request, response: Response, profile: 
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
     return await _workstreams_route("workstreams adopt", profile, lambda: workstreams_adopt(body),
                                     _workstream_actions_limiter)
+
+
+@router.post("/workstreams/call-ended")
+async def post_workstreams_call_ended(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """A call kept with a chat ended ({"chat", "call"?}), in any voice mode: when the
+    chat is the Bot Chat, what the call's workstreams held goes out after
+    CALL_END_GRACE_S (its saved turns land first). ``call`` is the same id
+    the call's adopts named: only that call's end releases a hold armed with
+    it (a save, which names no call, releases only an unnamed one, from an
+    app that sends no ``call``). ``bot_chat`` says whether the chat is the
+    Bot Chat (whose release, if the hold is this call's, is then on its way)."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    call = body.get("call") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or not isinstance(body.get("chat"), str) or not body["chat"].strip() \
+            or (call is not None and not (isinstance(call, str) and (not call.strip() or _work_tool()._call_id(call)))):
+        raise HTTPException(status_code=400, detail="Expected {\"chat\", \"call\"?}", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route(
+        "workstreams call ended", profile,
+        lambda: {"ok": True, "bot_chat": bool(_work_tool().call_ended(
+            core._calls_home(), body["chat"], after=_work_tool().CALL_END_GRACE_S,
+            call=call or ""))},
+        _workstream_actions_limiter)
 
 
 @router.post("/workstreams/{ref}/{action}")

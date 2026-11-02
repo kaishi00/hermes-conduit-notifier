@@ -229,6 +229,9 @@ ROUTE_CAPABILITIES = (
     # POST /workstreams/adopt: a voice call's job kept in its bot's registry,
     # in the Work panel marked as a call's (Bot workstreams M5).
     "work-adopt",
+    # POST /workstreams/call-ended: a call kept with the Bot Chat ended in
+    # any voice mode, so the updates its workstreams held go out.
+    "work-call-ended",
 )
 
 

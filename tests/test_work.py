@@ -6,6 +6,7 @@ import json
 import pathlib
 import importlib.util
 import sys
+import time
 import sqlite3
 from pathlib import Path
 import types
@@ -3084,6 +3085,20 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     work._policy_cache.clear()
     off = client.post("/api/plugins/conduit_push/workstreams/adopt", json={"session_id": "y", "via": "phone"})
     assert off.status_code == 409 and off.json()["code"] == "off"
+    # A Bot Chat call's end, in any voice mode, releases its hold.
+    on.set_policy("strict")
+    work._policy_cache.clear()
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "CALL_END_GRACE_S", 0.0)
+    adopt(session_id="20261102_voice_job_9", chat=BOT_CHAT)
+    assert work._call_on(on.home, BOT_CHAT)
+    ended = client.post("/api/plugins/conduit_push/workstreams/call-ended", json={"chat": BOT_CHAT})
+    assert ended.status_code == 200 and ended.json()["bot_chat"] and not work._call_on(on.home, BOT_CHAT)
+    again = client.post("/api/plugins/conduit_push/workstreams/call-ended", json={"chat": OTHER_CHAT})
+    assert again.status_code == 200 and not again.json()["bot_chat"]
+    assert client.post("/api/plugins/conduit_push/workstreams/call-ended", json={}).status_code == 400
+    assert client.post("/api/plugins/conduit_push/workstreams/call-ended",
+                       json={"chat": BOT_CHAT, "call": 5}).status_code == 400
 
 
 def test_a_settings_change_lands_in_the_named_bots_own_registry(on, hermes, monkeypatch, tmp_path):
@@ -4001,3 +4016,283 @@ def test_a_calls_job_adopted_after_its_turn_began_is_running(on, hermes):
     work.turn_ended(CALL_JOB, "Rain from three.")
     work.turn_finished(CALL_JOB, failed=False, interrupted=False)
     assert on.get("W1").status == "done"
+
+
+# A call kept with the Bot Chat: its jobs are the coordinator's (Eric 2026-11-02) -----
+
+def test_a_bot_chat_calls_job_is_the_coordinators_workstream(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    kept = adopt(goal="Is it raining in Lyon?", chat=BOT_CHAT)
+    assert kept["ok"] and kept["adopted"]
+    row = on.get("W1")
+    assert row.coordinator == BOT_CHAT and not work._from_call(row) and work._call_of(row) == "phone"
+    assert kept["work"]["call"] == "phone" and not kept["work"]["from_call"]
+    listed, = [item for item in call("work_list")["work"] if item["ref"] == "W1"]
+    assert listed["started_in_call"] == "phone" and "from_call" not in listed
+    # Its chat is a workstream's, out of the chat lists.
+    assert CALL_JOB in work.app_list(on.home)["workstream_sessions"]
+    # The same session again is the same row.
+    again = adopt(chat=BOT_CHAT)
+    assert again["ok"] and not again["adopted"] and again["ref"] == "W1"
+
+
+def test_a_bot_chat_calls_workstream_reports_once_the_call_is_saved(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    work.turn_started(CALL_JOB)
+    work.turn_ended(CALL_JOB, "Rain from three.")
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    work.flush_wakes()
+    assert not submitted_to(hermes, BOT_CHAT), "the call speaks it first"
+    assert not work.call_ended(on.home, OTHER_CHAT)
+    assert work.call_ended(on.home, BOT_CHAT)
+    for _ in range(200):
+        if submitted_to(hermes, BOT_CHAT):
+            break
+        time.sleep(0.01)
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"]
+
+
+def test_a_bot_chat_calls_hold_ends_on_its_own(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "CALL_HOLD_MAX_S", 0.0)
+    adopt(chat=BOT_CHAT)
+    work.turn_started(CALL_JOB)
+    work.turn_ended(CALL_JOB, "Rain from three.")
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    work.flush_wakes()
+    assert len(submitted_to(hermes, BOT_CHAT)) == 1
+
+
+def test_a_call_kept_with_another_chat_keeps_its_jobs_the_calls(on, hermes):
+    kept = adopt(chat=OTHER_CHAT)
+    assert kept["work"]["from_call"] == "phone" and on.get("W1").coordinator == ""
+    assert adopt(session_id="20261102_voice_job_2", chat=["x"])["error"] == "invalid"
+
+
+def test_a_refused_bot_chat_adopt_holds_nothing(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    own = on.get("W1").session_id
+    assert adopt(session_id=own, chat=BOT_CHAT)["error"] == "taken"
+    assert not work._call_on(on.home, BOT_CHAT)
+
+
+def test_a_bot_chat_calls_workstream_a_restart_caught_unseen_gets_its_task(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(goal="Is it raining in Lyon?", chat=BOT_CHAT)
+    _chat_db(on.home, [(OTHER_CHAT, "user", "Something else", None)])
+    restart(hermes, monkeypatch)  # before its first turn was seen
+    call("work_list")
+    assert on.get("W1").error != work._BRIEF_UNSENT
+    hermes.calls.clear()
+    assert work.app_act(on.home, "W1", "send", {"text": "Try again please."})["ok"]
+    sent = [args.get("text", "") for _, args, _ in hermes.calls if args.get("session_id", "").endswith(CALL_JOB)]
+    assert sent and "Is it raining in Lyon?" in sent[-1]
+
+
+def test_a_calls_job_whose_turn_ended_before_it_was_kept_is_settled(on, hermes, monkeypatch):
+    _chat_db(on.home, [(CALL_JOB, "user", "Is it raining?", None)])
+    kept = adopt(result="Rain from three.")
+    assert kept["work"]["status"] == "done" and "Rain from three." in on.get("W1").last_result
+    # A Bot Chat call's: the coordinator hears of it once the call is saved.
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    _chat_db(on.home, [("20261102_voice_job_2", "user", "Check the disks", None)])
+    adopt(session_id="20261102_voice_job_2", chat=BOT_CHAT, result="Disks are fine.")
+    assert on.get("W2").status in ("done", "ready")
+    assert adopt(session_id="20261102_voice_job_3", result=["x"])["error"] == "invalid"
+
+
+def test_a_bot_chat_calls_hold_keeps_other_work_flowing(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    worker = on.get("W1").session_id
+    adopt(chat=BOT_CHAT)
+    work.turn_started(worker)
+    work.turn_ended(worker, "Login is fixed.")
+    work.turn_finished(worker, failed=False, interrupted=False)
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"] and "W2" not in wake["text"]
+
+
+def test_a_repeated_adopt_after_the_call_was_saved_holds_nothing(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    assert work._call_on(on.home, BOT_CHAT)
+    assert work.call_ended(on.home, BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    assert not work._call_on(on.home, BOT_CHAT)
+
+
+def _forget_holds():
+    """A new process: the held lines are only in the outbox now."""
+    for timer in list(work._call_checks.values()):
+        if timer is not None:
+            timer.cancel()
+    work._call_checks.clear()
+    work._call_held.clear()
+
+
+def _finish(session_id, result):
+    work.turn_started(session_id)
+    work.turn_ended(session_id, result)
+    work.turn_finished(session_id, failed=False, interrupted=False)
+
+
+def test_a_bot_chat_calls_held_update_stays_held_across_a_restart(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    _finish(CALL_JOB, "Rain from three.")
+    assert [row["kind"] for row in on.outbox_pending()] == ["line_call"]
+    _forget_holds()
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    assert not submitted_to(hermes, BOT_CHAT), "the call is still on"
+    assert work.call_ended(on.home, BOT_CHAT)
+    for _ in range(200):
+        if submitted_to(hermes, BOT_CHAT):
+            break
+        time.sleep(0.01)
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"]
+
+
+def test_a_bot_chat_calls_restart_line_waits_for_the_call(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    work.turn_started(CALL_JOB)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    assert not submitted_to(hermes, BOT_CHAT), "its restart line waits for the call too"
+    assert any(row["kind"] == "line_call" for row in on.outbox_pending())
+
+
+def test_a_bot_chat_calls_held_update_goes_when_the_hold_runs_out(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "CALL_HOLD_RETRY_S", 0.02)
+    adopt(chat=BOT_CHAT)
+    _finish(CALL_JOB, "Rain from three.")
+    work.flush_wakes()
+    assert not submitted_to(hermes, BOT_CHAT)
+    monkeypatch.setattr(work, "CALL_HOLD_MAX_S", 0.0)  # two hours on, the call never saved
+    for _ in range(200):
+        if not work._call_held:
+            break
+        time.sleep(0.01)
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"]
+
+
+def test_a_calls_job_kept_with_its_reply_settles_when_its_chat_cant_be_read(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_asked_in", lambda home, session: None)
+    kept = adopt(result="Rain from three.")
+    assert kept["work"]["status"] == "done" and "Rain from three." in on.get("W1").last_result
+
+
+def test_a_bot_chat_turn_during_the_call_doesnt_get_the_held_result(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    _finish(CALL_JOB, "Rain from three.")
+    during = work.digest(BOT_CHAT)
+    assert "W1" in during and "Rain from three." not in during and "tells the user its result first" in during
+    assert work.call_ended(on.home, BOT_CHAT)
+    assert "Rain from three." in work.digest(BOT_CHAT)
+
+
+def test_a_save_releases_the_hold_when_the_bot_chat_cant_be_read(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    monkeypatch.setattr(work, "is_bot_chat", lambda chat, home: False)
+    assert work.call_ended(on.home, BOT_CHAT)
+    assert not work._call_on(on.home, BOT_CHAT)
+    assert not work.call_ended(on.home, OTHER_CHAT)
+
+
+def test_a_calls_end_from_the_phone_waits_for_its_save(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    assert work.call_ended(on.home, BOT_CHAT, after=0.05)
+    assert work._call_on(on.home, BOT_CHAT), "the call's save goes first"
+    for _ in range(200):
+        if not work._call_on(on.home, BOT_CHAT):
+            break
+        time.sleep(0.01)
+    assert not work._call_on(on.home, BOT_CHAT)
+
+
+def test_an_earlier_calls_end_leaves_a_later_calls_hold(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    ended_at = time.time() - 1
+    assert work.call_ended(on.home, BOT_CHAT)  # call A over
+    adopt(session_id="20261102_voice_job_2", chat=BOT_CHAT)  # call B's job
+    work.call_ended(on.home, BOT_CHAT, before=ended_at)  # A's late end isn't B's
+    assert work._call_on(on.home, BOT_CHAT)
+
+
+def test_a_bot_chat_calls_job_waits_when_the_chats_title_cant_be_read(on, hermes, monkeypatch):
+    real = work._titled_bot_chat
+    monkeypatch.setattr(work, "_titled_bot_chat", lambda chat, home=None: None if chat == BOT_CHAT else real(chat, home))
+    assert adopt(chat=BOT_CHAT)["error"] == "unavailable"
+    assert on.get("W1") is None
+
+
+def test_a_bot_chat_calls_job_waits_when_the_bot_chat_cant_be_found(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_titled_bot_chat", lambda chat, home=None: chat == BOT_CHAT)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: "")
+    assert adopt(chat=BOT_CHAT)["error"] == "unavailable"
+
+
+def test_a_calls_end_releases_only_its_own_hold(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-b")
+    assert work.call_ended(on.home, BOT_CHAT, call="call-a")
+    assert work._call_on(on.home, BOT_CHAT), "call A's end isn't call B's"
+    assert work.call_ended(on.home, BOT_CHAT, call="call-b")
+    assert not work._call_on(on.home, BOT_CHAT)
+
+
+def test_a_job_kept_after_its_call_ended_holds_nothing(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-a")
+    assert work.call_ended(on.home, BOT_CHAT, call="call-a")
+    adopt(session_id="20261102_voice_job_2", chat=BOT_CHAT, call="call-a")  # its retry, late
+    assert not work._call_on(on.home, BOT_CHAT)
+    assert adopt(session_id="20261102_voice_job_3", chat=BOT_CHAT, call=["x"])["error"] == "invalid"
+
+
+def test_work_read_during_the_call_doesnt_give_the_held_result(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-a")
+    _finish(CALL_JOB, "Rain from three.")
+    assert "Rain from three." not in str(call("work_read", {"ref": "W1"}))
+    assert work.call_ended(on.home, BOT_CHAT, call="call-a")
+    assert "Rain from three." in str(call("work_read", {"ref": "W1"}))
+
+
+def test_a_failed_bot_chat_call_job_shows_its_error_during_the_call(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-a")
+    work.turn_started(CALL_JOB)
+    work.turn_finished(CALL_JOB, failed=True, interrupted=False)
+    row = on.get("W1")
+    assert row.status == "failed" and row.error
+    assert row.error[:20] in work.digest(BOT_CHAT)
+
+
+def test_a_save_leaves_a_named_calls_hold_to_its_own_end(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-b")
+    work.call_ended(on.home, BOT_CHAT)  # a save, of this call or another
+    assert work._call_on(on.home, BOT_CHAT)
+    work.call_ended(on.home, BOT_CHAT, call="call-b")
+    assert not work._call_on(on.home, BOT_CHAT)
+    # An id that isn't one short token names no call.
+    assert work._call_id("a b") == "" and work._call_id("x" * 101) == "" and work._call_id(" c1 ") == "c1"
+    assert adopt(session_id="20261102_voice_job_7", chat=BOT_CHAT, call="a b")["error"] == "invalid"
