@@ -968,7 +968,8 @@ async def post_voice_session(request: Request, response: Response, profile: Opti
     def save() -> Dict[str, Any]:
         saved = save_voice_turns(body, on_end=ended)
         if saved.get("chat_id"):
-            # Saved with its chat, so the call is over, a retry with nothing new included.
+            # Saved with its chat, so the call is over, a retry with nothing new included:
+            # an unnamed hold ends here; a named one (the app sent `call`) ends with its call-ended.
             _call_left_chat(saved["chat_id"])
         return saved
 

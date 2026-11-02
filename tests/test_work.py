@@ -3093,9 +3093,9 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     adopt(session_id="20261102_voice_job_9", chat=BOT_CHAT)
     assert work._call_on(on.home, BOT_CHAT)
     ended = client.post("/api/plugins/conduit_push/workstreams/call-ended", json={"chat": BOT_CHAT})
-    assert ended.status_code == 200 and ended.json()["released"] and not work._call_on(on.home, BOT_CHAT)
+    assert ended.status_code == 200 and ended.json()["bot_chat"] and not work._call_on(on.home, BOT_CHAT)
     again = client.post("/api/plugins/conduit_push/workstreams/call-ended", json={"chat": OTHER_CHAT})
-    assert again.status_code == 200 and not again.json()["released"]
+    assert again.status_code == 200 and not again.json()["bot_chat"]
     assert client.post("/api/plugins/conduit_push/workstreams/call-ended", json={}).status_code == 400
 
 
