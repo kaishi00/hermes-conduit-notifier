@@ -258,9 +258,11 @@ def test_a_chat_whose_title_cant_be_read_is_held_only_once_the_bot_has_work(home
 
     monkeypatch.setattr(titles, "read_or_raise", unreadable)
     assert work.tool_block(OTHER_CHAT, "terminal") is None  # on by default, never used
+    assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "tool_call"}) is None
     store_mod.Store(home).set_policy("strict")
     work._title_cache.clear()
     assert work.tool_block(OTHER_CHAT, "terminal")["message"] == work.CHECK_FAILED
+    assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "tool_call"})["message"] == work.BRIDGE_BLOCK
 
 
 def test_turned_off_nothing_is_started(home, hermes):
@@ -2817,6 +2819,10 @@ def test_a_bypass_that_cant_be_turned_off_stops_the_send(home, hermes):
     hermes.calls.clear()
     assert work.app_act(home, "W1", "send", {"text": "One more thing."})["ok"] is False
     assert submitted_to(hermes, WORKER_1) == []  # nothing went in with approvals still off
+    del hermes.refuse["config.set"]
+    assert work.app_act(home, "W1", "send", {"text": "One more thing."})["ok"]  # tried again
+    assert hermes.named("config.set")[-1][1]["value"] == "off"
+    assert hermes._sessions["rt-20261031_work_1"]["yolo"] is False
 
 
 def test_a_bypass_that_cant_be_turned_on_still_starts_the_work(home, hermes):
@@ -2831,6 +2837,9 @@ def test_the_digest_tells_the_bot_how_its_work_is_set_up(on, hermes):
     digest = work.digest(BOT_CHAT)
     assert "Edit Bot > Work" in digest and "up to 3 workstreams at once" in digest
     assert "ask the user before a step that can't be undone" in digest
+    on.set_workstream_approvals("chats")
+    _hermes_approvals(on.home, "off")
+    assert "they don't ask for approval" in work.digest(BOT_CHAT)
 
 
 def test_reply_in_a_workstream_sends_the_users_own_words_with_no_bot_chat_turn(on, hermes):

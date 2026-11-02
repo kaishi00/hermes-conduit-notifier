@@ -910,15 +910,20 @@ def _yolo(home: Path, store: work_store.Store, ref: str) -> Optional[bool]:
     turn: on when the user turned approvals off for workstreams of a bot
     whose chats still ask; off again once they turn it back, only for a
     session this set it on (a /yolo the user typed there stays theirs);
-    None leaves it as it is."""
+    None leaves it as it is. Its mark is cleared only once Hermes took the
+    "off" (``_yolo_sent``), so a refused one is tried again next turn."""
     key = _YOLO_SET + ref
     if workstream_approvals(home) == "off" and approval_mode(home) != "off":
         store.set_meta(key, "1")
         return True
-    if store.get_meta(key):
-        store.set_meta(key, "")
-        return False
-    return None
+    return False if store.get_meta(key) else None
+
+
+def _yolo_sent(store: work_store.Store, ref: str, yolo: Optional[bool]) -> None:
+    """After a start or send that set ``yolo``: an "off" Hermes took ends
+    the mark that says this turned it on."""
+    if yolo is False:
+        store.set_meta(_YOLO_SET + ref, "")
 
 
 def _users_words(home: Path, coordinator: str) -> str:
@@ -1231,8 +1236,9 @@ def _deliver_answer(asker_home: Path, asker_store: work_store.Store, theirs: wor
             text = ANSWER_INTO_WORK.format(bot=name, ref=theirs.ref, asker=asker, answer=answer)
             item = asker_store.outbox_add(needs.ref, "answer", needs.session_id, text)
             try:
-                outcome, tip = work_broker.Broker(asker_home).send(
-                    needs.session_id, text, "after", yolo=_yolo(asker_home, asker_store, needs.ref))
+                yolo = _yolo(asker_home, asker_store, needs.ref)
+                outcome, tip = work_broker.Broker(asker_home).send(needs.session_id, text, "after", yolo=yolo)
+                _yolo_sent(asker_store, needs.ref, yolo)
             except Exception as error:  # noqa: BLE001 — it goes to the asking Bot Chat instead
                 asker_store.outbox_done(item, "refused")
                 if needs.status not in _RUNNING_STATES:
@@ -1347,7 +1353,9 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
         with _wake_lock:
             _redirecting.add(pending)
     try:
-        outcome, tip = broker.send(work.session_id, words, how, yolo=_yolo(home, store, work.ref))
+        yolo = _yolo(home, store, work.ref)
+        outcome, tip = broker.send(work.session_id, words, how, yolo=yolo)
+        _yolo_sent(store, work.ref, yolo)
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
         with _wake_lock:
             _redirecting.discard(pending)
@@ -1629,7 +1637,9 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
             item = store.outbox_add(ref, "continue", work.session_id, text)
             # Before the send: a crash once Hermes has it must not continue it again.
             store.set_meta(_CONTINUED + ref, str(time.time()))
-            outcome, tip = broker.send(work.session_id, text, "after", yolo=_yolo(home, store, ref))
+            yolo = _yolo(home, store, ref)
+            outcome, tip = broker.send(work.session_id, text, "after", yolo=yolo)
+            _yolo_sent(store, ref, yolo)
         except Exception as error:  # noqa: BLE001 — it stays interrupted, for the user to continue
             store.set_meta(_CONTINUED + ref, "")
             store.update(ref, status="interrupted", only_if=("running",))
@@ -1783,7 +1793,9 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         # okayed after the restart, so the coordinator decides.
         if work.status in _RUNNING_STATES and broker is not None:
             try:
-                outcome, _ = broker.send(work.session_id, row["text"], "after", yolo=_yolo(home, store, work.ref))
+                yolo = _yolo(home, store, work.ref)
+                outcome, _ = broker.send(work.session_id, row["text"], "after", yolo=yolo)
+                _yolo_sent(store, work.ref, yolo)
             except Exception:  # noqa: BLE001 — handed back below
                 logger.warning("conduit_push: resending to %s after a restart failed", work.ref, exc_info=True)
             else:
@@ -1934,7 +1946,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         # A bridged call that names nothing readable, or bridges again, is
         # held: Hermes runs what's inside without asking this hook again.
         if not names or any(called in BRIDGE for called in names):
-            if _titled_bot_chat(session_id, home) is not False:
+            titled = _titled_bot_chat(session_id, home)
+            # An unreadable title holds it only once the bot has work, as below.
+            if titled is True or (titled is None and work_store.exists(home)):
                 return {"action": "block", "message": BRIDGE_BLOCK}
             # A workstream's could hide a message_agent its refusal below
             # never sees.
@@ -2849,6 +2863,8 @@ def _settings_line(home: Path, store: work_store.Store) -> str:
     """How the user set this bot's work up, so the bot can say so when
     asked; it doesn't change them itself."""
     setting = workstream_approvals(home)
+    if setting == "chats":
+        setting = "off" if approval_mode(home) == "off" else "chats"
     approvals = {"off": "they don't ask for approval",
                  "ask": "they ask the user before a step that can't be undone"}.get(
         setting, "they ask for approval as this bot's chats do")
