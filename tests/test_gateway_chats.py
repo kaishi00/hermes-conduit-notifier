@@ -306,9 +306,13 @@ def test_pulse_sends_on_the_authority_with_its_model(monkeypatch):
     assert pulse_host.on_authority() and pulse_host.available()
 
 
-def test_an_authority_report_lives_a_minute():
+def test_an_authority_report_waits_for_a_queued_turn():
     now = [1000.0]
     report = turn_surface.Report("auth-old", turn_surface.text_sha256("yes"), "watch", "spoken")
+    turn_surface.record_for_authority(report, clock=lambda: now[0])
+    # Queued behind a long turn: it runs minutes later and still gets its line.
+    now[0] += 300
+    assert turn_surface._take_for_authority("auth-old", "yes", lambda: now[0])
     turn_surface.record_for_authority(report, clock=lambda: now[0])
     now[0] += turn_surface.AUTHORITY_FRESH_S + 1
     assert turn_surface._take_for_authority("auth-old", "yes", lambda: now[0]) is None

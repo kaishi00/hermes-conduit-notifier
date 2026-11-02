@@ -32,10 +32,10 @@ turn runs from the admitted message, not on the socket that sent it, so it
 can't tell Conduit's from another client's. The report is kept here instead,
 by the chat's session id (``record_for_authority``, one map for the process),
 and the turn whose session and text match it takes it: only Conduit reports,
-for the exact text it is about to send in that chat. So the same words sent
-from another client within ``AUTHORITY_FRESH_S`` of a send of Conduit's that
-never became a turn would take its line; the short life keeps that window
-small.
+for the exact text it is about to send in that chat. A send the authority
+refused drops its report; one of Conduit's own sends that never reached the
+authority leaves it, so the same words sent from another client in that chat
+within ``AUTHORITY_FRESH_S`` would take its line.
 
 Standalone (no imports from the plugin package): the dashboard loads it from
 its file, the plugin imports it.
@@ -54,10 +54,9 @@ from typing import Any, Callable, Optional, Tuple
 KEY = "conduit_turn_surface"
 # A message queued behind a long turn may wait this long before it runs.
 FRESH_S = 900.0
-# On the gateway's listener a report isn't tied to Conduit's socket, so a
-# refused send's report could label another client's same words: Conduit
-# sends right after reporting, so it lives a minute there.
-AUTHORITY_FRESH_S = 60.0
+# On the gateway's listener too: a message queued behind a long turn runs
+# late. A send the authority refused drops its report (gateway_chats.py).
+AUTHORITY_FRESH_S = FRESH_S
 # Reports kept per chat; the oldest goes first.
 MAX_KEPT = 8
 MAX_SESSION_ID_CHARS = 200

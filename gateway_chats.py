@@ -183,6 +183,7 @@ class _AuthorityLink:
         rid = frame.get("id")
         method = frame.get("method")
         params = dict(frame.get("params") or {})
+        shaped: Any = None
         try:
             shaped = self._request(method, params)
             if isinstance(shaped, dict) and "result" in shaped:
@@ -190,6 +191,10 @@ class _AuthorityLink:
             response = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": rid, "method": shaped[0],
                                                       "params": shaped[1]}))
         except Exception as exc:  # noqa: BLE001 — reported as the call's error
+            if method == "session.close" and isinstance(shaped, tuple) and shaped[1].get("subscription_id"):
+                # Not detached: keep the view's subscription for another try.
+                with self.lock:
+                    self.subscriptions.setdefault(params.get("session_id"), shaped[1]["subscription_id"])
             if isinstance(exc, TimeoutError):
                 # It may have reached the authority, so a turn may be coming.
                 message = f"{method} timed out; it may still have started"
