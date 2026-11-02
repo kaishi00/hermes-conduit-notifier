@@ -281,6 +281,32 @@ async def post_turn_surface(request: Request, response: Response) -> Dict[str, A
     return {"ok": True, "recorded": recorded}
 
 
+def discard_turn_surface(body: Any) -> bool:
+    """Forgets the report of a send Conduit says failed; False when none was
+    kept. Raises ValueError for a body that isn't one."""
+    module = _turn_surface()
+    session_id, digest = module.parse_discard(body)
+    if core._authority_session(session_id) is not None:
+        return module.discard_digest_for_authority(session_id, digest)
+    server = watch_jobs._tui_session_api()
+    session = server._sessions.get(session_id) if server is not None else None
+    return module.discard(session, digest) if isinstance(session, dict) else False
+
+
+@router.post("/turn-surface/discard")
+async def post_turn_surface_discard(request: Request, response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    body = await core._read_json_body(request, TURN_SURFACE_MAX_BODY_BYTES)
+    try:
+        discarded = discard_turn_surface(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc), headers=no_store)
+    except Exception as exc:
+        raise core._unexpected("turn-surface", exc, feature="Turn surface")
+    return {"ok": True, "discarded": discarded}
+
+
 # --- Predictions (predict.py) -------------------------------------------------
 #
 # Conduit's opt-in Predictive features ask about a chat open on this host:

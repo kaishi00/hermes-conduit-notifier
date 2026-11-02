@@ -35,9 +35,9 @@ by the chat's session id (``record_for_authority``, one map for the process),
 and the turn whose session and text match it takes it: only Conduit reports,
 for the exact text it is about to send in that chat. A send of the
 plugin's own (Watch jobs, a Watch call's chat) that the authority refused
-drops its report. One the app sent on its own socket that the authority
-refused, or that never reached it, leaves it, as a refused send on the
-dashboard leaves its report on Hermes' record: the same words sent from
+drops its report, and Conduit drops the report of a send of its own that
+failed (``POST /turn-surface/discard``, on either server). One that seemed
+to go but never reached Hermes still waits: the same words sent from
 another client in that chat within ``AUTHORITY_FRESH_S`` would take its line.
 
 Standalone (no imports from the plugin package): the dashboard loads it from
@@ -216,19 +216,51 @@ def record_for_authority(report: Report, clock: Callable[[], float] = time.monot
             chats.pop(next(iter(chats)))
 
 
-def discard_for_authority(session_id: str, text: str) -> None:
+def discard_for_authority(session_id: str, text: str) -> bool:
     """Forgets the report kept for ``text``'s turn in ``session_id``, a turn
     the gateway's session authority refused."""
+    return discard_digest_for_authority(session_id, text_sha256(text))
+
+
+def discard_digest_for_authority(session_id: str, digest: str) -> bool:
+    """Forgets the report kept for the turn of the text hashing to
+    ``digest`` in ``session_id``; True when there was one."""
     lock, chats = _authority_store()
     with lock:
         session = chats.get(session_id)
-        kept = session.get(KEY) if isinstance(session, dict) else None
-        if isinstance(kept, dict) and text_sha256(text) in kept:
-            kept = dict(kept)
-            kept.pop(text_sha256(text))
-            session[KEY] = kept
-            if not kept:
-                chats.pop(session_id, None)
+        if not isinstance(session, dict) or not discard(session, digest):
+            return False
+        if not session.get(KEY):
+            chats.pop(session_id, None)
+        return True
+
+
+def discard(session: dict, digest: str) -> bool:
+    """Forgets the report on ``session`` (Hermes' record) for the text hashing
+    to ``digest``; True when there was one. Conduit's send that failed: no
+    turn of that text is coming, so the report would wait for another."""
+    kept = session.get(KEY)
+    if not isinstance(kept, dict) or digest not in kept:
+        return False
+    kept = dict(kept)
+    kept.pop(digest)
+    # One assignment, as ``record`` writes it.
+    session[KEY] = kept
+    return True
+
+
+def parse_discard(body: Any) -> Tuple[str, str]:
+    """A discard route's body: ``(session id, text digest)``. Raises
+    ValueError, with what's wrong, for anything else."""
+    if not isinstance(body, dict):
+        raise ValueError("body must be an object")
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > MAX_SESSION_ID_CHARS:
+        raise ValueError("session_id must be a chat's runtime session id")
+    digest = body.get("text_sha256")
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ValueError("text_sha256 must be the lowercase hex SHA-256 of the message's text")
+    return session_id.strip(), digest
 
 
 def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float]

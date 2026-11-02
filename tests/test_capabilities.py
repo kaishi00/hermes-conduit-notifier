@@ -62,6 +62,7 @@ def test_every_capability_names_a_served_route_family():
         "local-live-read-back": "/local-live/socket",
         "desktop-views": "/sessions/desktop-views",
         "turn-surface": "/turn-surface",
+        "turn-surface-discard": "/turn-surface/discard",
         "history-page": "/sessions/history-page",
         "hermes-calls": "/calls",
         "hermes-call-presence": "/calls/presence",

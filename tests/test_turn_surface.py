@@ -293,3 +293,29 @@ def test_on_the_listener_a_report_is_kept_for_the_authoritys_turn(gateway, clien
     # A chat the authority doesn't have open keeps nothing.
     assert client.post(f"{BASE}/turn-surface", json=_report("watch", session_id="auth-2")).json() == {
         "ok": True, "recorded": False}
+
+
+def test_a_failed_send_discards_its_report(gateway, client):
+    client.post(f"{BASE}/turn-surface", json=_report("carplay", "yes", "spoken"))
+    body = {"session_id": "rt-1", "text_sha256": surfaces.text_sha256("yes")}
+    assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": True}
+    # The turn of those words then takes no line.
+    assert gateway.turn(CONDUIT, "yes") == ""
+    assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": False}
+    assert client.post(f"{BASE}/turn-surface/discard", json={"session_id": "rt-1"}).status_code == 400
+
+
+def test_on_the_listener_a_failed_send_discards_its_report(gateway, client, monkeypatch):
+    authority = types.SimpleNamespace(sessions={"auth-1": types.SimpleNamespace(source="src")})
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace(session_authority=authority)
+    authorities = types.ModuleType("gateway.session_authorities")
+    authorities.all_authorities = lambda runner: [authority]
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    monkeypatch.setitem(sys.modules, "gateway.session_authorities", authorities)
+    monkeypatch.delitem(sys.__dict__, surfaces._AUTHORITY_STORE, raising=False)
+
+    client.post(f"{BASE}/turn-surface", json=_report("iphone", "yes", "typed", session_id="auth-1"))
+    body = {"session_id": "auth-1", "text_sha256": surfaces.text_sha256("yes")}
+    assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": True}
+    assert surfaces.note(False, "yes", session_id="auth-1") is None

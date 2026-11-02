@@ -388,3 +388,19 @@ def test_an_error_with_odd_data_is_still_an_answer(gateway):
     answers["session.resume"] = {"result": {"session_id": "o1", "execution_generation": 1}}
     answer = _call(chats, Transport(), "session.steer", {"session_id": "o1", "text": "x"})
     assert answer["error"]["message"] == "nope"
+
+
+def test_under_the_gateway_pulse_never_uses_the_listeners_tui_registry(monkeypatch):
+    # The listener loads the TUI gateway too, but its chats are the authority's.
+    server = types.ModuleType("tui_gateway.server")
+    server._methods = {pulse_host.RESUME: lambda *a: None, pulse_host.SUBMIT: lambda *a: None}
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.delitem(sys.modules, "gateway.run_api", raising=False)
+    assert pulse_host._methods() is server._methods
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    assert pulse_host._methods() is None
+    # The authority can't be reached: unavailable, not the TUI registry.
+    monkeypatch.setattr(pulse_host, "_authority_chats", lambda: None)
+    assert not pulse_host.available()

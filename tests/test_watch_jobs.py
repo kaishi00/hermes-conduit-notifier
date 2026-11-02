@@ -2115,3 +2115,25 @@ def test_an_approval_from_a_cancelled_turn_isnt_the_waiting_requests(monkeypatch
     assert len(server.methods("prompt.submit")) == 1
     assert grant.jobs.jobs["watch-2"].status == "starting"
     assert grant.jobs.jobs["watch-2"].approval is None
+
+
+def test_under_the_gateway_watch_jobs_use_the_authority_not_the_tui_registry(monkeypatch):
+    # hermes-conduit#1618: the listener loads the TUI gateway, whose chats no client sees.
+    server = types.ModuleType("tui_gateway.server")
+    server.dispatch = lambda req, transport=None: None
+    server._sessions = {}
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.delitem(sys.modules, "gateway.run_api", raising=False)
+    assert api.watch_jobs._tui_session_api() is server
+    assert api.watch_jobs._hermes_session_api() is server
+
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    authority_api = object()
+    monkeypatch.setattr(api.core, "_authority_session_api", lambda: authority_api)
+    assert api.watch_jobs._tui_session_api() is None
+    assert api.watch_jobs._hermes_session_api() is authority_api
+    # No authority to reach: no chats, never the TUI registry.
+    monkeypatch.setattr(api.core, "_authority_session_api", lambda: None)
+    assert api.watch_jobs._hermes_session_api() is None

@@ -443,6 +443,7 @@ routes:
   - GET /speech-server/status
   - POST /speech-server/test
   - POST /turn-surface
+  - POST /turn-surface/discard
   - GET /voice-tools
   - POST /voice-tools/call
   - POST /voice/archive
