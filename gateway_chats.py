@@ -182,7 +182,7 @@ class _AuthorityLink:
     def call(self, frame: dict) -> dict:
         rid = frame.get("id")
         method = frame.get("method")
-        params = dict(frame.get("params") or {})
+        params = dict(frame.get("params")) if isinstance(frame.get("params"), dict) else {}
         shaped: Any = None
         try:
             shaped = self._request(method, params)
