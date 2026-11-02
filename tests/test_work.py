@@ -3089,6 +3089,7 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     on.set_policy("strict")
     work._policy_cache.clear()
     monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "CALL_END_GRACE_S", 0.0)
     adopt(session_id="20261102_voice_job_9", chat=BOT_CHAT)
     assert work._call_on(on.home, BOT_CHAT)
     ended = client.post("/api/plugins/conduit_push/workstreams/call-ended", json={"chat": BOT_CHAT})
@@ -4209,3 +4210,15 @@ def test_a_save_releases_the_hold_when_the_bot_chat_cant_be_read(on, hermes, mon
     assert work.call_ended(on.home, BOT_CHAT)
     assert not work._call_on(on.home, BOT_CHAT)
     assert not work.call_ended(on.home, OTHER_CHAT)
+
+
+def test_a_calls_end_from_the_phone_waits_for_its_save(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    assert work.call_ended(on.home, BOT_CHAT, after=0.05)
+    assert work._call_on(on.home, BOT_CHAT), "the call's save goes first"
+    for _ in range(200):
+        if not work._call_on(on.home, BOT_CHAT):
+            break
+        time.sleep(0.01)
+    assert not work._call_on(on.home, BOT_CHAT)

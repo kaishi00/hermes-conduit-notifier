@@ -81,6 +81,9 @@ WAKE_BUSY_MAX_S = 600.0
 # (its workstreams' results are the call's to speak first); after that they go.
 CALL_HOLD_MAX_S = 2 * 3600.0
 CALL_HOLD_RETRY_S = 30.0
+# The phone's end of a call releases its hold this long after, so the
+# call's own turns, saved as it ends, land in the Bot Chat first.
+CALL_END_GRACE_S = 15.0
 DIGEST_ITEMS = 12
 _LOST_REPLY = "Your message may not have reached it before Hermes restarted"
 DIGEST_CALL_ITEMS = 6  # a call's jobs, listed after the bot's own work
@@ -1538,9 +1541,11 @@ def _call_of(work: work_store.Work) -> str:
         and by.get("via") in work_store.CALL_VIA else ""
 
 
-def call_ended(home: Path, chat_id: Any) -> bool:
-    """A call kept with the Bot Chat was saved, so it's over: the updates
-    its workstreams held go out now. True when it was the Bot Chat's."""
+def call_ended(home: Path, chat_id: Any, after: float = 0.0) -> bool:
+    """A call kept with the Bot Chat was saved, or ended, so it's over: the
+    updates its workstreams held go out, ``after`` seconds from now (the
+    phone's end of a call comes as its turns are saved, which go first).
+    True when it was the Bot Chat's."""
     home = Path(home)
     if not isinstance(chat_id, str) or not chat_id.strip() or not work_store.exists(home):
         return False
@@ -1548,6 +1553,11 @@ def call_ended(home: Path, chat_id: Any) -> bool:
     # The chat a hold was set for is the Bot Chat, even when its title can't be read now.
     if not store.get_meta(_CALL_ON + chat_id.strip()) and not is_bot_chat(chat_id.strip(), home):
         return False
+    if after > 0:
+        later = threading.Timer(after, call_ended, args=(home, chat_id))
+        later.daemon = True
+        later.start()
+        return True
     coordinator = _bot_chat_of(home) or chat_id.strip()
     store.set_meta(_CALL_ON + coordinator, "")
     # Off the save's thread: a voice save holds its lock while this runs.
