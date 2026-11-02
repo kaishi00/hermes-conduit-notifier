@@ -750,7 +750,12 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
         row["closed"] = True
     # A running turn's result would be the last turn's.
     if work.last_result and work.status in _REPORTED:
-        row["result"] = _cut(work.last_result, result_chars)
+        home = _home() if _call_of(work) and not _from_call(work) and work.coordinator else None
+        if home is not None and _call_on(home, work.coordinator):
+            # The call that started it says it first, as the note holds it.
+            row["result"] = "held: the call that started it tells the user first; you'll get it once the call ends"
+        else:
+            row["result"] = _cut(work.last_result, result_chars)
     steps = (work.progress or {}).get("steps")
     if steps:
         # The workstream's own words: data, as its report is.
@@ -1541,33 +1546,38 @@ def _call_of(work: work_store.Work) -> str:
         and by.get("via") in work_store.CALL_VIA else ""
 
 
-def call_ended(home: Path, chat_id: Any, after: float = 0.0, before: Optional[float] = None) -> bool:
+def call_ended(home: Path, chat_id: Any, after: float = 0.0, before: Optional[float] = None,
+               call: Any = "") -> bool:
     """A call kept with the Bot Chat was saved, or ended, so it's over: the
     updates its workstreams held go out, ``after`` seconds from now (the
     phone's end of a call comes as its turns are saved, which go first).
-    True when it was the Bot Chat's. ``before``: the end's own time, so a
-    later call's hold set meanwhile stays."""
+    True when it was the Bot Chat's. ``call``: the call's own id, so only
+    its hold ends (and a job of it kept later arms none); without one,
+    ``before`` (the end's own time) keeps a later call's hold."""
     home = Path(home)
     if not isinstance(chat_id, str) or not chat_id.strip() or not work_store.exists(home):
         return False
+    call = call.strip() if isinstance(call, str) else ""
     store = work_store.Store(home)
-    if before is not None:
-        try:
-            began = float(store.get_meta(_CALL_ON + (_bot_chat_of(home) or chat_id.strip())) or 0)
-        except ValueError:
-            began = 0.0
-        if began > before:
-            return False  # another call on the Bot Chat since: its hold is its own
     # The chat a hold was set for is the Bot Chat, even when its title can't be read now.
     if not store.get_meta(_CALL_ON + chat_id.strip()) and not is_bot_chat(chat_id.strip(), home):
         return False
+    coordinator = _bot_chat_of(home) or chat_id.strip()
+    if call:
+        ended = store.get_meta(_CALL_ENDED + coordinator).split()
+        if call not in ended:
+            store.set_meta(_CALL_ENDED + coordinator, " ".join((ended + [call])[-8:]))
+    began, holder = _call_hold(store, coordinator)
+    if call and holder and holder != call:
+        return True  # another call's hold: it ends with that call
+    if not call and before is not None and began > before:
+        return True  # another call on the Bot Chat since: its hold is its own
     if after > 0:
         later = threading.Timer(after, call_ended, args=(home, chat_id),
-                                kwargs={"before": time.time() if before is None else before})
+                                kwargs={"before": time.time() if before is None else before, "call": call})
         later.daemon = True
         later.start()
         return True
-    coordinator = _bot_chat_of(home) or chat_id.strip()
     store.set_meta(_CALL_ON + coordinator, "")
     # Off the save's thread: a voice save holds its lock while this runs.
     now = threading.Timer(0, _release_call_lines, args=(home, coordinator))
@@ -1576,22 +1586,32 @@ def call_ended(home: Path, chat_id: Any, after: float = 0.0, before: Optional[fl
     return True
 
 
+def _call_hold(store: work_store.Store, coordinator: str) -> tuple[float, str]:
+    """When the Bot Chat's hold began (0 for none) and the call it's for ('' unknown)."""
+    began, _, holder = (store.get_meta(_CALL_ON + coordinator) or "").partition("|")
+    try:
+        return float(began or 0), holder
+    except ValueError:
+        return 0.0, ""
+
+
 def _call_on(home: Path, coordinator: str) -> bool:
     """Whether a call kept with this Bot Chat is still going (it started a
     workstream and hasn't been saved), within CALL_HOLD_MAX_S."""
     try:
-        began = float(work_store.Store(home).get_meta(_CALL_ON + coordinator) or 0)
+        began, _ = _call_hold(work_store.Store(home), coordinator)
     except Exception:  # noqa: BLE001 — unknown: not held
         return False
     return bool(began) and time.time() - began < CALL_HOLD_MAX_S
 
 
+_CALL_ENDED = "call_ended:"
 _CALL_ON = "call_on:"
 _CALL_NAMES = {"phone": "voice", "watch": "Watch"}
 
 
 def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", chat: Any = None,
-          result: Any = None) -> dict:
+          result: Any = None, call: Any = None) -> dict:
     """A job a voice call started, kept in its bot's registry (M5a): the
     call made the session and follows it as before; the row journals its
     steps, settles with its turns, waits for the user after a restart, and
@@ -1604,12 +1624,14 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
     CALL_HOLD_MAX_S passes, so the call speaks the result first and the
     coordinator reports it after.
     ``result``: the reply of a turn that already ended before the phone
-    adopted it (its hooks found no row then), so the row settles with it. A session already kept answers with
+    adopted it (its hooks found no row then), so the row settles with it.
+    ``call``: the call's own id, so its end releases only its hold, and a
+    job of a call already over arms none. A session already kept answers with
     its row. It's starting until its chat holds the request (then running),
     so a job whose prompt never went in is the panel's stuck start, not work running."""
     home = Path(home)
-    if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal, chat, result)):
-        return {"ok": False, "error": "invalid", "note": "session_id, title, goal, chat and result are text."}
+    if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal, chat, result, call)):
+        return {"ok": False, "error": "invalid", "note": "session_id, title, goal, chat, result and call are text."}
     if via not in work_store.CALL_VIA:
         return {"ok": False, "error": "invalid", "note": f"via is one of {', '.join(work_store.CALL_VIA)}."}
     session = str(session_id or "").strip()
@@ -1669,9 +1691,11 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
         work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
                          requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
                          reply_to={"to": via}, status=status, session_id=session)
-    if coordinator and _call_of(work) and work.coordinator == coordinator and work.created_at >= began:
-        # Its updates wait for the call to be saved.
-        store.set_meta(_CALL_ON + coordinator, str(time.time()))
+    call = call.strip() if isinstance(call, str) else ""
+    if coordinator and _call_of(work) and work.coordinator == coordinator and work.created_at >= began \
+            and call not in store.get_meta(_CALL_ENDED + coordinator).split():
+        # Its updates wait for the call to end (one already over, kept late, arms none).
+        store.set_meta(_CALL_ON + coordinator, f"{time.time()}|{call}" if call else str(time.time()))
     if not _call_of(work):
         # The session is already one of the bot's own workstreams: it stays that.
         return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}

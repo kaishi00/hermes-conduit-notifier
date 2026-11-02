@@ -65,7 +65,7 @@ def workstreams_set_settings(body: Optional[dict]) -> Dict[str, Any]:
 def workstreams_adopt(body: dict) -> Dict[str, Any]:
     return _work_tool().adopt(core._calls_home(), body.get("session_id"), body.get("title"),
                               via=str(body.get("via") or ""), goal=body.get("goal") or "", chat=body.get("chat"),
-                              result=body.get("result"))
+                              result=body.get("result"), call=body.get("call"))
 
 
 async def _workstreams_route(route: str, profile: Optional[str], fn: Any, limiter: Any = None) -> Any:
@@ -156,7 +156,7 @@ async def post_workstreams_adopt(request: Request, response: Response, profile: 
 
 @router.post("/workstreams/call-ended")
 async def post_workstreams_call_ended(request: Request, response: Response, profile: Optional[str] = None) -> Any:
-    """A call kept with a chat ended ({"chat"}), in any voice mode: when the
+    """A call kept with a chat ended ({"chat", "call"?}), in any voice mode: when the
     chat is the Bot Chat, what the call's workstreams held goes out now. A
     call that saves its turns with the chat says so with that save too;
     this covers one that doesn't (Classic writes its turns into the chat).
@@ -169,7 +169,8 @@ async def post_workstreams_call_ended(request: Request, response: Response, prof
     return await _workstreams_route(
         "workstreams call ended", profile,
         lambda: {"ok": True, "released": bool(_work_tool().call_ended(
-            core._calls_home(), body["chat"], after=_work_tool().CALL_END_GRACE_S))},
+            core._calls_home(), body["chat"], after=_work_tool().CALL_END_GRACE_S,
+            call=body.get("call") if isinstance(body.get("call"), str) else ""))},
         _workstream_actions_limiter)
 
 

@@ -4230,7 +4230,7 @@ def test_an_earlier_calls_end_leaves_a_later_calls_hold(on, hermes, monkeypatch)
     ended_at = time.time() - 1
     assert work.call_ended(on.home, BOT_CHAT)  # call A over
     adopt(session_id="20261102_voice_job_2", chat=BOT_CHAT)  # call B's job
-    assert not work.call_ended(on.home, BOT_CHAT, before=ended_at), "A's late end isn't B's"
+    work.call_ended(on.home, BOT_CHAT, before=ended_at)  # A's late end isn't B's
     assert work._call_on(on.home, BOT_CHAT)
 
 
@@ -4245,3 +4245,30 @@ def test_a_bot_chat_calls_job_waits_when_the_bot_chat_cant_be_found(on, hermes, 
     monkeypatch.setattr(work, "_titled_bot_chat", lambda chat, home=None: chat == BOT_CHAT)
     monkeypatch.setattr(work, "_bot_chat_of", lambda home: "")
     assert adopt(chat=BOT_CHAT)["error"] == "unavailable"
+
+
+def test_a_calls_end_releases_only_its_own_hold(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-b")
+    assert work.call_ended(on.home, BOT_CHAT, call="call-a")
+    assert work._call_on(on.home, BOT_CHAT), "call A's end isn't call B's"
+    assert work.call_ended(on.home, BOT_CHAT, call="call-b")
+    assert not work._call_on(on.home, BOT_CHAT)
+
+
+def test_a_job_kept_after_its_call_ended_holds_nothing(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-a")
+    assert work.call_ended(on.home, BOT_CHAT, call="call-a")
+    adopt(session_id="20261102_voice_job_2", chat=BOT_CHAT, call="call-a")  # its retry, late
+    assert not work._call_on(on.home, BOT_CHAT)
+    assert adopt(session_id="20261102_voice_job_3", chat=BOT_CHAT, call=["x"])["error"] == "invalid"
+
+
+def test_work_read_during_the_call_doesnt_give_the_held_result(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT, call="call-a")
+    _finish(CALL_JOB, "Rain from three.")
+    assert "Rain from three." not in str(call("work_read", {"ref": "W1"}))
+    assert work.call_ended(on.home, BOT_CHAT, call="call-a")
+    assert "Rain from three." in str(call("work_read", {"ref": "W1"}))
