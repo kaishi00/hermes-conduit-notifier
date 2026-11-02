@@ -97,6 +97,18 @@ def test_replies_are_ranked_checked_and_capped():
     assert all(0.1 <= r["p"] <= 1 for r in result["replies"])
 
 
+def test_a_reply_conduit_would_drop_never_takes_a_place():
+    # Conduit drops a guess over 200 characters rather than cut it short
+    # (issue 1670): a 250-character one kept here would take one of the
+    # `count` places and leave the user a chip short.
+    text = '{"replies":[{"text":"%s","p":0.9},{"text":"%s","p":0.8},{"text":"Short","p":0.5}]}' % (
+        "y" * 250, "z" * 200)
+    result = predict.answer(_request(kind="replies", count=2), text)
+    assert [len(r["text"]) for r in result["replies"]] == [200, 5]
+    draft = predict.answer(_request(kind="draft", draft="Can you", count=2), text)
+    assert [len(r["text"]) for r in draft["replies"]] == [200, 5]
+
+
 def test_an_answer_that_isnt_json_suggests_nothing():
     result = predict.answer(_request(kind="replies"), "I think they'll say thanks.")
     assert result == {"parsed": False, "replies": []}
