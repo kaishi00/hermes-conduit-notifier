@@ -122,13 +122,14 @@ _JSON_FIELDS = ("requested_by", "executor", "reply_to", "progress")
 _ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL NOT NULL DEFAULT 0"),
                   ("pinned_at", "REAL NOT NULL DEFAULT 0"), ("resolved_by", "TEXT NOT NULL DEFAULT ''"),
                   ("reopened_at", "REAL NOT NULL DEFAULT 0"))
-# A workstream holding one of its bot's running slots: closed or not, its
-# session is still at work.
 # Who can start a job of their own that's kept here too (M5): a call's
 # job runs as the call says, never under the coordinator's limit.
 CALL_VIA = ("phone", "watch")
 _FROM_CALL = "COALESCE(json_extract(requested_by, '$.by'), '') IN ('phone', 'watch')"
-_RUNNING = f"kind = 'workstream' AND status IN ('starting', 'running', 'needs_you') AND NOT ({_FROM_CALL})"
+# A workstream at work, a call's job's too: closed or not, its session is still at it.
+_AT_WORK = "kind = 'workstream' AND status IN ('starting', 'running', 'needs_you')"
+# A workstream holding one of its bot's running slots (a call's job holds none).
+_RUNNING = f"{_AT_WORK} AND NOT ({_FROM_CALL})"
 
 
 @dataclass
@@ -284,12 +285,15 @@ class Store:
 
     def add(self, kind: str, *, title: str, goal: str = "", coordinator: str = "", requested_by: Optional[dict] = None,
             executor: Optional[dict] = None, reply_to: Optional[dict] = None, ask_id: str = "", cwd: str = "",
-            repo: str = "", status: str = "starting", running_limit: Optional[int] = None) -> Optional[Work]:
+            repo: str = "", status: str = "starting", running_limit: Optional[int] = None,
+            session_id: str = "") -> Optional[Work]:
         """A new row under the next ref of its kind, with a fresh idempotency
         key for the session it will start (Hermes answers a repeated create
         under it with the same session; a new start is a new row and key).
         With ``running_limit``, None instead when that many
-        workstreams are running already, counted in the same transaction."""
+        workstreams are running already, counted in the same transaction.
+        With ``session_id``, the row has it from the start, and a row that
+        already has it answers instead (one row per session)."""
         if kind not in KINDS:
             raise ValueError(f"unknown kind {kind}")
         if status not in STATUSES:
@@ -297,6 +301,11 @@ class Store:
         letter = "W" if kind == "workstream" else "A"
         now = time.time()
         with self._db() as con:
+            if session_id:
+                kept = con.execute("SELECT * FROM work WHERE session_id = ? ORDER BY created_at LIMIT 1",
+                                   (session_id,)).fetchone()
+                if kept is not None:
+                    return _work(kept)
             if running_limit is not None:
                 running = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_RUNNING}").fetchone()["n"]
                 if running >= running_limit:
@@ -310,7 +319,7 @@ class Store:
                         goal=_clip(goal, GOAL_CHARS), coordinator=coordinator, requested_by=requested_by or {},
                         executor=executor or {}, reply_to=reply_to or {}, ask_id=ask_id,
                         idempotency_key=f"conduit-work-{uuid.uuid4().hex}", cwd=cwd, repo=repo, created_at=now,
-                        updated_at=now, seen_at=now)
+                        updated_at=now, seen_at=now, session_id=session_id)
             con.execute(
                 "INSERT INTO work (ref, kind, session_id, coordinator, requested_by, executor, reply_to, ask_id, "
                 "idempotency_key, title, goal, status, last_result, error, cwd, repo, created_at, updated_at, "
@@ -422,11 +431,12 @@ class Store:
                                (kind, since)).fetchall()
         return [_work(row) for row in rows]
 
-    def running_count(self) -> int:
+    def running_count(self, *, calls: bool = False) -> int:
+        """Workstreams holding a slot; ``calls``: a call's jobs at work too."""
         if not self.path.is_file():
             return 0
         with self._db(write=False) as con:
-            row = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_RUNNING}").fetchone()
+            row = con.execute(f"SELECT COUNT(*) AS n FROM work WHERE {_AT_WORK if calls else _RUNNING}").fetchone()
         return int(row["n"])
 
     def reopen(self, ref: str, *, running_limit: int, if_open: bool = False) -> bool:
@@ -434,8 +444,10 @@ class Store:
         counted in the same transaction (as ``add`` does). ``if_open``: not
         one that's been closed (a send reopens it; recovery doesn't)."""
         with self._db() as con:
+            # A call's job holds no slot, so the limit never keeps it waiting.
+            mine = con.execute(f"SELECT {_FROM_CALL} FROM work WHERE ref = ?", (ref,)).fetchone()
             running = con.execute(f"SELECT COUNT(*) FROM work WHERE {_RUNNING} AND ref != ?", (ref,)).fetchone()[0]
-            if running >= running_limit:
+            if running >= running_limit and not (mine and mine[0]):
                 return False
             changed = con.execute("UPDATE work SET status = 'running', closed_at = 0, resolved_by = '', error = '', "
                                   "updated_at = ? "

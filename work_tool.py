@@ -854,8 +854,9 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         reason = str(error)[:300] if isinstance(error, work_broker.BrokerError) else type(error).__name__
         store.update(work.ref, status="failed", error=reason)
         if tree:
-            _tidy_worktree(store, work.ref)  # nothing ran in it: removed while it's empty
-            store.set_meta(_WORKTREE + work.ref, "")  # and never made again: no send reaches a failed start
+            if _tidy_worktree(store, work.ref).get("pruned"):
+                # Removed while it's empty, and never made again: no send reaches a failed start.
+                store.set_meta(_WORKTREE + work.ref, "")
         if not isinstance(error, work_broker.BrokerError):
             logger.warning("conduit_push: starting a workstream failed", exc_info=True)
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't start it: {reason}"}
@@ -1521,21 +1522,26 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
     if via not in work_store.CALL_VIA:
         return {"ok": False, "error": "invalid", "note": f"via is one of {', '.join(work_store.CALL_VIA)}."}
     session = str(session_id or "").strip()
-    if not session or len(session) > 200:
+    if not session:
         return {"ok": False, "error": "missing", "note": "Name the job's session."}
+    if len(session) > 200:
+        return {"ok": False, "error": "invalid", "note": "That session id is too long to be a session's."}
+    if is_bot_chat(session, home):
+        # The coordinator's own chat is never a job of its work.
+        return {"ok": False, "error": "invalid", "note": "That's the bot's Bot Chat, not a call's job."}
     if policy(home) == "off":
         # The bot's work is off (or can't run here): the call keeps its job as before.
         return {"ok": False, "error": "off", "note": "This bot's workstreams are off, so the job isn't kept."}
     store = work_store.Store(home)
-    kept = store.by_session(session)
-    if kept is not None:
-        return {"ok": True, "ref": kept.ref, "adopted": False, "work": _app_row(store, kept)}
     shown = " ".join(str(title or "").split()) or "Voice job"
+    began = time.time()
+    # Looked up and added in one transaction, with its session from the
+    # start: the same session twice, even at once, is one row.
     work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
                      requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
-                     reply_to={"to": via}, status="starting")
-    work = store.update(work.ref, session_id=session) or work
-    return {"ok": True, "ref": work.ref, "adopted": True, "work": _app_row(store, work)}
+                     reply_to={"to": via}, status="starting", session_id=session)
+    adopted = work.created_at >= began  # else the row the session already had
+    return {"ok": True, "ref": work.ref, "adopted": adopted, "work": _app_row(store, work)}
 
 
 def _worker_read(home: Path, me: work_store.Work, name: str, args: dict) -> dict:
@@ -2245,7 +2251,7 @@ def _lookup(session_id: Any, home: Optional[Path] = None) -> tuple[Optional[Path
     try:
         store = work_store.Store(home)
         work = store.by_session(session_id)
-        if work is not None or session_id in _not_compacted or not store.running_count():
+        if work is not None or session_id in _not_compacted or not store.running_count(calls=True):
             return home, work, False
         found = _compacted_from(home, session_id, store)
         if found is False:
@@ -2855,6 +2861,10 @@ def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
         return ["stop"] if time.time() - work.updated_at > _STARTING_STUCK_SECONDS else []
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
+    if work.status in ("interrupted", "stopped") and _from_call(work) and not work.turn_at:
+        # A call's job no turn of was seen: there's nothing to carry on from,
+        # and the user's words are its task.
+        return ["stop", "send"] if work.status == "interrupted" else ["send"]
     if work.status in ("interrupted", "stopped") and work.error == _BRIEF_UNSENT:
         # Nothing ran: the user's reply is its brief.
         return ["stop", "send"] if work.status == "interrupted" else ["send"]

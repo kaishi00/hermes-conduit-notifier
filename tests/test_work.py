@@ -3794,3 +3794,33 @@ def test_a_restart_before_a_calls_job_was_seen_to_start_never_says_nothing_ran(o
     row = on.get("W1")
     assert row.status == "interrupted" and row.error != work._BRIEF_UNSENT and not row.closed_at
     assert submitted_to(hermes, CALL_JOB) == []
+
+
+def test_a_calls_job_is_sent_to_even_at_the_bots_limit(on, hermes):
+    on.set_max_running(1)
+    start()
+    adopt()
+    work.turn_started(CALL_JOB)
+    on.update("W2", status="done", last_result="Sunny.")
+    assert work.app_act(on.home, "W2", "send", {"text": "And tomorrow?"})["ok"]
+
+
+def test_a_calls_job_continued_after_its_session_compacted_is_still_followed(on, hermes, monkeypatch):
+    adopt()
+    work.turn_started(CALL_JOB)
+    monkeypatch.setattr(work, "_compacted_from", lambda home, session_id, store: store.get("W1"))
+    assert not work.turn_finished("20261102_voice_job_2", failed=False, interrupted=False)
+    assert on.get("W1").session_id == "20261102_voice_job_2"
+
+
+def test_a_calls_job_no_turn_of_was_seen_offers_no_continue(on, hermes, monkeypatch):
+    adopt()
+    restart(hermes, monkeypatch)
+    call("work_list")
+    row, = work.app_list(on.home)["work"]
+    assert row["actions"] == ["stop", "send"]
+
+
+def test_the_bot_chat_and_long_ids_are_never_adopted(on, hermes):
+    assert adopt(session_id=BOT_CHAT)["error"] == "invalid"
+    assert "too long" in adopt(session_id="x" * 201)["note"]
