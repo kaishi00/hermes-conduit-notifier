@@ -173,7 +173,7 @@ def test_a_call_that_times_out_is_cancelled_and_says_it_may_have_started(gateway
     assert started
     chats.connect = lambda link: types.SimpleNamespace(dispatch=lambda request: slow())
     original = chats.run
-    chats.run = lambda coroutine: original(coroutine, timeout=0.2)
+    chats.run = lambda coroutine, timeout=None: original(coroutine, timeout=0.2)
     transport = Transport()
     chats.link(transport).generations["s9"] = 3
     answer = _call(chats, transport, "session.interrupt", {"session_id": "s9"})
@@ -221,7 +221,7 @@ def test_an_ended_turn_answers_as_nothing_running(gateway):
     chats, answers, connections = gateway
     stale = {"error": {"code": 4001, "message": "stale_generation", "data": {"reason": "stale_generation"}}}
     answers.update({"session.steer": stale, "session.interrupt": stale, "approval.respond": stale,
-                    "session.resume": {"result": {"session_id": "s1", "execution_generation": 2}}})
+                    "session.resume": {"result": {"session_id": "s1", "running": False, "execution_generation": 2}}})
     transport = Transport()
     chats.link(transport).write(_event("s1", "approval.request", {"prompt_id": "p1"}))
     assert _call(chats, transport, "session.steer", {"session_id": "s1", "text": "x"})["result"] == {"status": "rejected"}
@@ -424,3 +424,25 @@ def test_a_control_refused_on_a_lagging_fence_reads_the_chat_and_goes_again(gate
     answers["session.steer"] = stale
     answers["session.resume"] = {"result": {"session_id": "s8", "running": False, "execution_generation": 2}}
     assert _call(chats, transport, "session.steer", {"session_id": "s8", "text": "x"})["result"] == {"status": "rejected"}
+
+    # Refused again while a turn runs: the turn changed, and nothing was stopped.
+    link.generations["s9"] = 2
+    answers["session.interrupt"] = stale
+    answers["session.resume"] = {"result": {"session_id": "s9", "running": True, "execution_generation": 4}}
+    missed = _call(chats, transport, "session.interrupt", {"session_id": "s9"})
+    assert "nothing was sent to the new one" in missed["error"]["message"], missed
+
+
+def test_a_callers_budget_holds_the_listeners_wait(gateway, monkeypatch):
+    chats, answers, connections = gateway
+    answers["session.create"] = {"result": {"session_id": "s1", "execution_generation": 1}}
+    waits = []
+    run = chats.run
+
+    def timed(coroutine, timeout=gateway_chats.AUTHORITY_RPC_TIMEOUT_S):
+        waits.append(timeout)
+        return run(coroutine, timeout)
+
+    monkeypatch.setattr(chats, "run", timed)
+    chats.dispatch({"jsonrpc": "2.0", "id": "r1", "method": "session.create", "params": {}}, Transport(), timeout=20)
+    assert waits[-1] == 20

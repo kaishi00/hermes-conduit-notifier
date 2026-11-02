@@ -27,7 +27,8 @@ checks it). The format is fixed, because Conduit reads it:
 - A message Hermes refused, or that Conduit never sent, no longer leaves its
   "sent from CarPlay" (or iPhone, Watch...) note waiting, where the same words
   sent from another app in that chat could pick it up. One whose answer was
-  lost on the way keeps it, since Hermes may have taken it.
+  lost on the way keeps it, since Hermes may have taken it, and on Hermes'
+  Webapp a note left behind still lapses after 15 minutes.
 
 ## 0.124.0 (2026-11-01)
 

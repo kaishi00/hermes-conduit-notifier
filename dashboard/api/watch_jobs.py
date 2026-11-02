@@ -453,8 +453,12 @@ class _WatchJobs:
             rid = f"conduit-watch-{self.grant.grant_id[:8]}-{self._rpc_ids}"
             waiter = self._waiters[rid] = _RpcWaiter()
         try:
-            response = self.server.dispatch({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
-                                            self.transport)
+            frame = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+            if getattr(self.server, "takes_timeout", False):
+                # The gateway's own listener answers in the call: hold it to this budget.
+                response = self.server.dispatch(frame, self.transport, timeout=timeout)
+            else:
+                response = self.server.dispatch(frame, self.transport)
             if response is None:
                 # A slow method answers from Hermes' worker pool.
                 if not waiter.done.wait(timeout):

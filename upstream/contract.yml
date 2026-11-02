@@ -35,6 +35,13 @@ watch_paths:
   - hermes_state_mutations.py
   - tui_gateway/ws.py
   - tui_gateway/contracts/
+  # gateway_chats.py reads all_authorities, owner_scope and each authority's sessions
+  # through sys.modules, which the scanner can't see; a rename there would fall back
+  # to the default profile's settings for Predictions.
+  - gateway/session_authorities.py
+  # Hermes' legacy fallback that serves Conduit's host verbs (projects, profiles, MCP)
+  # on the listener (test_conduits_host_verbs_answer_on_the_listener).
+  - tui_gateway/ws_legacy_fallback.py
 
 # Words that make a changed hunk worth a closer look.
 keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,

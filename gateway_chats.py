@@ -211,28 +211,36 @@ class _AuthorityLink:
         return {**frame, "params": {**params, "type": kind, "payload": payload}}
 
     # The plugin's requests.
-    def call(self, frame: dict) -> dict:
+    def call(self, frame: dict, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> dict:
         rid = frame.get("id")
         method = frame.get("method")
         params = dict(frame.get("params")) if isinstance(frame.get("params"), dict) else {}
         shaped: Any = None
         sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
-        with self.lock:
-            fence_was_cached = sid in self.generations
         try:
             shaped = self._request(method, dict(params))
             if isinstance(shaped, dict) and "result" in shaped:
                 return {"jsonrpc": "2.0", "id": rid, "result": shaped["result"]}
             response = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": rid, "method": shaped[0],
-                                                      "params": shaped[1]}))
-            if method in _TURN_CONTROLS and fence_was_cached and _reason(response) == "stale_generation":
-                # The fence came from events that may lag a newer turn: read
-                # the chat and go once more. Refused again, nothing runs.
+                                                      "params": shaped[1]}), timeout)
+            if method in _TURN_CONTROLS and _reason(response) == "stale_generation":
+                # The fence came from events that may lag a newer turn, or a
+                # turn ended and another began since the read: read the chat
+                # and go once more. Refused again, it's nothing to stop only
+                # if the chat has no turn running now.
                 with self.lock:
                     self.generations.pop(sid, None)
                 shaped = self._request(method, dict(params))
                 response = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": rid, "method": shaped[0],
-                                                          "params": shaped[1]}))
+                                                          "params": shaped[1]}), timeout)
+                if _reason(response) == "stale_generation" and self._still_running(sid):
+                    # Refused again while a turn runs: the turn changed under the
+                    # retry, so nothing was steered or stopped.
+                    with self.lock:
+                        self.generations.pop(sid, None)
+                    return {"jsonrpc": "2.0", "id": rid, "error": {
+                        "code": -32000,
+                        "message": f"{method} missed: the chat's turn changed, and nothing was sent to the new one"}}
         except Exception as exc:  # noqa: BLE001 — reported as the call's error
             if method == "session.close" and isinstance(shaped, tuple) and shaped[1].get("subscription_id"):
                 # Not detached: keep the view's subscription for another try.
@@ -306,6 +314,20 @@ class _AuthorityLink:
                 # nothing running (an interrupt "done" while the turn goes on).
                 raise RuntimeError("Hermes didn't say which turn the chat is running")
         return known
+
+    def _still_running(self, sid: str) -> bool:
+        """Whether the chat runs a turn now; one that can't be read counts as running,
+        so a refusal is never reported as nothing to stop."""
+        try:
+            snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
+                                                      "id": f"conduit-running-{uuid.uuid4().hex}",
+                                                      "method": "session.resume",
+                                                      "params": {"session_id": sid, "omit_messages": True}}))
+        except Exception:  # noqa: BLE001 — unknown reads as running
+            return True
+        result = snapshot.get("result") if isinstance(snapshot, dict) else None
+        self._note_snapshot(result)
+        return not (isinstance(result, dict) and result.get("running") is False)
 
     def _note_snapshot(self, result: Any) -> None:
         if not isinstance(result, dict) or not isinstance(result.get("session_id"), str):
@@ -451,8 +473,11 @@ class _AuthorityChats:
                 self.links.add(link)
             return link
 
-    def dispatch(self, frame: dict, transport: Any) -> dict:
-        return self.link(transport).call(frame)
+    # Callers with their own budget pass it to dispatch (the TUI registry's takes none).
+    takes_timeout = True
+
+    def dispatch(self, frame: dict, transport: Any, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> dict:
+        return self.link(transport).call(frame, timeout)
 
     def get(self, session_id: Any, default: Any = None) -> Any:
         """As the TUI gateway's chat record, only which transport views the
