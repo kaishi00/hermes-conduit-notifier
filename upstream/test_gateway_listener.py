@@ -696,3 +696,30 @@ def test_bot_chat_create_and_redirect_in_conduits_shapes(listener):
         await sock.event(sid, "message.complete")
 
     listener.run(script)
+
+
+# A 1x1 PNG.
+_PIXEL = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGA"
+          "WjR9awAAAABJRU5ErkJggg==")
+
+
+def test_a_staged_picture_reaches_the_turn_its_prompt_names(listener):
+    """The authority only stages an image; Conduit names it in the prompt's attachments."""
+    text = "what is in this picture"
+
+    async def script(sock: ConduitSocket) -> None:
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        staged = await sock.result("image.attach_bytes", {"session_id": sid, "content_base64": _PIXEL,
+                                                          "filename": "pixel.png"})
+        assert staged.get("path") and staged.get("mime") == "image/png", staged
+        await sock.result("prompt.submit", {**_submit(sid, text),
+                                            "attachments": [{"path": staged["path"], "mime": staged["mime"]}]})
+        await sock.event(sid, "message.complete")
+
+    before = len(_FakeModel.seen)
+    listener.run(script)
+    # The picture reaches a model: the turn's own, or (for a model that can't see,
+    # like this one) the vision step that describes it for the turn.
+    seen = json.dumps(_FakeModel.seen[before:])
+    assert _PIXEL[:40] in seen, "the staged picture never reached a model"
+
