@@ -324,3 +324,18 @@ def test_on_the_listener_a_chat_whose_agent_was_let_go_says_so(gateway, client, 
     assert response.status_code == 404
     assert "agent isn't loaded" in response.text
     assert not gateway.asked
+
+
+def test_on_the_listener_a_failed_agent_lookup_isnt_read_as_a_let_go_agent(gateway, client, monkeypatch):
+    authority = _listener(monkeypatch, gateway, None)
+    runner = sys.modules["gateway.run_api"]._ACTIVE_RUNNER
+
+    def broken(key):
+        raise AttributeError("renamed")
+
+    runner._resident_agent_for = broken
+    response = client.post(f"{BASE}/predict", json={"session_id": "auth-1", "kind": "replies"})
+    assert response.status_code == 502
+    assert "couldn't read the chat's agent" in response.text
+    assert "isn't loaded" not in response.text
+    assert not gateway.asked and authority

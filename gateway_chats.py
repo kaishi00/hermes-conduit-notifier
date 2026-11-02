@@ -102,14 +102,20 @@ def authority_agent(session_id: Any) -> Optional[tuple]:
     if found is None:
         return None
     gateway, authority, live = found
-    # A scope that fails raises to the caller: it isn't a missing agent.
+    # A scope or lookup that fails raises to the caller: it isn't a missing
+    # agent, and saying the agent isn't loaded would tell the user the wrong
+    # thing.
     with authority_scope(authority):
         try:
             agent = gateway._resident_agent_for(gateway._session_key_for_source(live.source))
-        except Exception:  # noqa: BLE001 — Hermes changed how it keeps agents
+        except Exception as exc:  # noqa: BLE001 — Hermes changed how it keeps agents
             logger.warning("Conduit: couldn't read the gateway's agent for a chat", exc_info=True)
-            return None
+            raise AgentLookupError("Conduit couldn't read the chat's agent on this Hermes") from exc
     return (authority, agent) if agent is not None else None
+
+
+class AgentLookupError(RuntimeError):
+    """The gateway's agent for a chat couldn't be read (not: it has none)."""
 
 
 class _AuthorityLink:

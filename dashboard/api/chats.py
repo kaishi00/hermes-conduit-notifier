@@ -397,7 +397,14 @@ def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:
         request = module.parse(body)
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
-    authority = core._authority_agent(request.session_id)
+    try:
+        authority = core._authority_agent(request.session_id)
+    except RuntimeError as exc:
+        # The lookup itself failed (a Hermes that changed how it keeps
+        # agents), not a chat whose agent was let go.
+        if type(exc).__name__ != "AgentLookupError":
+            raise
+        raise core.TokenError(502, str(exc))
     if authority is None and core._authority_session(request.session_id) is not None:
         # Open on the gateway's listener, but the gateway let its agent go (idle
         # for its cache's hour): no turn to predict after, as a closed chat.
