@@ -1541,20 +1541,29 @@ def _call_of(work: work_store.Work) -> str:
         and by.get("via") in work_store.CALL_VIA else ""
 
 
-def call_ended(home: Path, chat_id: Any, after: float = 0.0) -> bool:
+def call_ended(home: Path, chat_id: Any, after: float = 0.0, before: Optional[float] = None) -> bool:
     """A call kept with the Bot Chat was saved, or ended, so it's over: the
     updates its workstreams held go out, ``after`` seconds from now (the
     phone's end of a call comes as its turns are saved, which go first).
-    True when it was the Bot Chat's."""
+    True when it was the Bot Chat's. ``before``: the end's own time, so a
+    later call's hold set meanwhile stays."""
     home = Path(home)
     if not isinstance(chat_id, str) or not chat_id.strip() or not work_store.exists(home):
         return False
     store = work_store.Store(home)
+    if before is not None:
+        try:
+            began = float(store.get_meta(_CALL_ON + (_bot_chat_of(home) or chat_id.strip())) or 0)
+        except ValueError:
+            began = 0.0
+        if began > before:
+            return False  # another call on the Bot Chat since: its hold is its own
     # The chat a hold was set for is the Bot Chat, even when its title can't be read now.
     if not store.get_meta(_CALL_ON + chat_id.strip()) and not is_bot_chat(chat_id.strip(), home):
         return False
     if after > 0:
-        later = threading.Timer(after, call_ended, args=(home, chat_id))
+        later = threading.Timer(after, call_ended, args=(home, chat_id),
+                                kwargs={"before": time.time() if before is None else before})
         later.daemon = True
         later.start()
         return True
@@ -1642,7 +1651,11 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
     # request is running, and its turn's end settles it.
     # One kept with its reply had its turn, whatever its chat shows yet.
     status = "running" if isinstance(result, str) or _asked_in(home, session) else "starting"
-    coordinator = _bot_chat_of(home) if isinstance(chat, str) and chat.strip() and is_bot_chat(chat.strip(), home) else ""
+    asked = _titled_bot_chat(chat.strip(), home) if isinstance(chat, str) and chat.strip() else False
+    if asked is None:
+        # Whether the call's chat is the Bot Chat can't be read: kept next time.
+        return {"ok": False, "error": "unavailable", "note": "This bot's chats can't be read right now."}
+    coordinator = _bot_chat_of(home) if asked is True else ""
     if coordinator:
         # The coordinator's own, started by its call: it hears of it once the call is saved.
         work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()),

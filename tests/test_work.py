@@ -4222,3 +4222,20 @@ def test_a_calls_end_from_the_phone_waits_for_its_save(on, hermes, monkeypatch):
             break
         time.sleep(0.01)
     assert not work._call_on(on.home, BOT_CHAT)
+
+
+def test_an_earlier_calls_end_leaves_a_later_calls_hold(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    ended_at = time.time() - 1
+    assert work.call_ended(on.home, BOT_CHAT)  # call A over
+    adopt(session_id="20261102_voice_job_2", chat=BOT_CHAT)  # call B's job
+    assert not work.call_ended(on.home, BOT_CHAT, before=ended_at), "A's late end isn't B's"
+    assert work._call_on(on.home, BOT_CHAT)
+
+
+def test_a_bot_chat_calls_job_waits_when_the_chats_title_cant_be_read(on, hermes, monkeypatch):
+    real = work._titled_bot_chat
+    monkeypatch.setattr(work, "_titled_bot_chat", lambda chat, home=None: None if chat == BOT_CHAT else real(chat, home))
+    assert adopt(chat=BOT_CHAT)["error"] == "unavailable"
+    assert on.get("W1") is None
