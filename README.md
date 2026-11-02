@@ -36,6 +36,14 @@ hermes -p coder gateway restart
 hermes -p coder conduit-push pair YYYYY-YYYYY
 ```
 
+`plugins enable` finds only a plugin in the profile's own `plugins/` folder.
+A profile made without `--clone` has none until the dashboard links it, which
+it does only for a profile that turned the plugin on, so for such a profile
+add `conduit_push` to `plugins.enabled` in its `config.yaml` instead (and take it
+out of `plugins.disabled` if it is there), then
+restart as above. Until then Hermes answers that profile's plugin requests
+with "Plugin not found", and Conduit says so on the screen that asked.
+
 A profile's chats load plugins from that profile's own `plugins/` folder
 only, so with plugin 0.122.2+ the dashboard links every profile that turns
 the plugin on to the main install (`~/.hermes/plugins/conduit_push`) when it
@@ -1616,7 +1624,7 @@ a file path; a file the user asks for still goes (0.115.1+).
   result), and a turn that merges several queued messages, or one Hermes
   rewrote, gets no line. The plugin's own Watch jobs and call chats name
   the Watch themselves.
-- On the gateway's own listener (`hermes webapp`, 0.125.0+) there is no such
+- On the gateway's own listener (`hermes webapp`, 0.126.0+) there is no such
   record and a turn can't be tied to the socket that sent it, so the plugin
   keeps the report itself, by session id, and the chat's next turn with that
   text takes it, for 15 minutes.
@@ -1626,7 +1634,7 @@ a file path; a file the user asks for still goes (0.115.1+).
   sends it after a send Hermes refused or that never left the phone, so the
   same words sent from another app in that chat don't take its line. A send
   whose answer was only lost keeps its report, since Hermes may have taken
-  it. Capability `turn-surface-discard` (0.125.0+).
+  it. Capability `turn-surface-discard` (0.126.0+).
 - `prompt.submit` refuses keys Hermes doesn't know, so the value can't ride
   there. With the gateway out of this process (`plugins.isolation: host`, a
   compute host) the route answers `"recorded": false`, and a turn on a chat
@@ -3477,6 +3485,7 @@ the setup saves it exactly. One command sets a profile up:
 hermes conduit-push rooms setup                               # says what it changes, asks, saves, restarts the gateway
 hermes -p mona conduit-push rooms setup --ceiling web,vision  # only these toolsets
 hermes conduit-push rooms setup --ceiling "" --no-restart --yes   # no tools; you restart the gateway
+hermes conduit-push rooms setup --mcp github,notes               # also these MCP servers (plugin 0.125+)
 ```
 
 It changes only what needs it:
@@ -3519,6 +3528,29 @@ It changes only what needs it:
   before it saves; new rooms use the new ceiling. With no toolsets at all,
   Hermes' log says once that the API server has no valid toolsets: that's
   the empty ceiling.
+- **MCP servers** (plugin 0.125+): none, unless you name some of the
+  profile's enabled MCP servers with `--mcp` (or in Conduit's setup). Then the
+  ceiling lists them in place of `no_mcp`, which Hermes reads as an
+  allowlist, so a server added later still stays out. Their tools still run
+  only in rooms whose Custom choice names them (`rooms set --tools custom
+  --tool mcp__github__search_issues`, Hermes' `mcp__<server>__<tool>`
+  names); no other choice allows them. Each server is yours to choose, on your
+  own host, and its own approvals still apply. `--mcp ""` takes them all out and
+  puts `no_mcp` back. Without `--mcp`, the servers saved before stay, even
+  when `--ceiling` changes the toolsets, and `--mcp` may name a saved server
+  you've turned off since, which keeps it chosen and off. A chosen server you take out of
+  Hermes is dropped from the ceiling on the next setup, and with none left,
+  `no_mcp` is back: Hermes would give a list naming no server it has every
+  enabled one. Until then the setup isn't ready, and rooms already started
+  stop hearing the agent, as for any ceiling change. A chosen server you turn
+  off stays chosen and stays off. When a ceiling names servers, or you name
+  some, and Hermes can't list the profile's MCP servers just then, the setup
+  stops (`mcp_unreadable`) and leaves the ceiling as it is. Servers count
+  toward the ceiling's 64 names with the toolsets kept beside them. A server named like any Hermes toolset (`web`,
+  or `memory`, which rooms leave out) can't be
+  chosen, since the ceiling couldn't tell the two apart, and once servers
+  are named, a saved toolset this Hermes no longer has is dropped for the
+  same reason.
 - **Approvals**: off becomes manual, since rooms refuse a profile that runs
   tools without asking.
 - **The gateway** restarts when the API server isn't running, to start it:
@@ -3545,7 +3577,8 @@ capability:
 
 - `GET /rooms/setup`: `{"ready", "needs", "changes", "blockers", "profile",
   "api_server": {"enabled", "key_set", "profile_key_set", "address",
-  "running", "error"}, "ceiling", "choices", "approvals", "policy"}`.
+  "running", "error"}, "ceiling", "choices", "mcp_servers", "mcp_choices",
+  "approvals", "policy"}`.
   `needs` lists what a POST would do, in its order (`api_server`, `ceiling`,
   `plugin_tools`, `approvals`, `restart`), `changes` what it would change
   (`api_server_key`, `profile_key`, `api_server_port`, `api_server_enabled`,
@@ -3555,11 +3588,14 @@ capability:
   uses the API server's), `address` is where the API server runs, or will
   once set up, and `error` why it isn't running while the gateway is, such
   as its port being taken. `choices` are the toolsets the ceiling can name
-  (`{"id", "label", "description"}`), and `policy` is the profile's room
+  (`{"id", "label", "description"}`), `mcp_servers` the MCP servers it names
+  and `mcp_choices` the profile's enabled ones it can (`{"id"}`, plugin
+  0.125+; an older plugin has neither), and `policy` is the profile's room
   policy as Hermes reads it now (`enabled_toolsets`, `approval_mode`,
   `policy_digest` and the rest), or null.
-- `POST /rooms/setup` with `{"ceiling": [...], "interrupt": false}`, both
-  optional: the same, after the writes, with `changed` (what it changed, by
+- `POST /rooms/setup` with `{"ceiling": [...], "mcp_servers": [...],
+  "interrupt": false}`, all optional (without `mcp_servers`, the saved ones
+  stay): the same, after the writes, with `changed` (what it changed, by
   the same names as `changes`) and, when it needs one, `restart`:
   `{"started", "busy", "error"}`. The restart is Hermes' own after a
   settings save, `busy` while chats run on the gateway, unless `interrupt`
@@ -3571,8 +3607,8 @@ capability:
   environment, Hermes' plugin host flag among it. `restart.error` then says
   to restart it on the host or update Conduit.
 
-A refusal carries `detail` and a `code`: `bad_ceiling` and `bad_request`
-(400), a blocker's code (409), `bad_config` (409, a `config.yaml` setting the
+A refusal carries `detail` and a `code`: `bad_ceiling`, `bad_mcp_servers`
+(an MCP server the profile hasn't turned on) and `bad_request` (400), a blocker's code (409), `bad_config` (409, a `config.yaml` setting the
 setup saves under isn't a section) and `unsupported` (501, a Hermes without
 what the setup calls). The routes answer 30 reads a minute and 6 setups in 10
 minutes.
@@ -4176,11 +4212,11 @@ The static site source lives in [`docs/`](docs/).
 
 ## Development
 
-The runtime uses only the Python standard library plus Hermes APIs. CI ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs the plugin, relay and mailbox tests on every PR and every push to main. To run them locally:
+The runtime uses only the Python standard library plus Hermes APIs. CI ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs the plugin, relay and mailbox tests on every PR and every push to main (the Pulse persona suite only when Pulse changes, and daily). To run them locally:
 
 ```bash
 pip install -r tests/requirements.txt
-python -m pytest --rootdir=tests tests
+python -m pytest --rootdir=tests tests -n auto --dist worksteal
 (cd relay && npm test)
 (cd mailbox && npm test)
 ```

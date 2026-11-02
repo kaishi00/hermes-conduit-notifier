@@ -149,6 +149,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     rooms.add_argument("--ceiling", metavar="TOOLSET,...",
                        help="for setup: the toolsets rooms may use on this profile, comma-separated (empty: none); "
                             "without it, the ones saved before, or web, vision, X search and past-chat search")
+    rooms.add_argument("--mcp", metavar="SERVER,...",
+                       help="for setup: MCP servers of this profile's that rooms may use, comma-separated (empty: "
+                            "none, the default); their tools run only in rooms whose --tools custom names them")
     rooms.add_argument("--no-restart", dest="no_restart", action="store_true",
                        help="for setup: don't restart the gateway; say how to")
     rooms.add_argument("--tools", choices=["talk", "look", "data", "custom"],
@@ -761,10 +764,13 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
     ceiling = None
     if args.ceiling is not None:
         ceiling = [name.strip() for name in str(args.ceiling).split(",") if name.strip()]
+    mcp_servers = None
+    if getattr(args, "mcp", None) is not None:
+        mcp_servers = [name.strip() for name in str(args.mcp).split(",") if name.strip()]
     restart = "hermes gateway restart" if profile == "default" else "hermes -p default gateway restart"
     try:
         hermes = room_setup.Hermes.load()
-        state = room_setup.state(hermes, home, profile, ceiling=ceiling)
+        state = room_setup.state(hermes, home, profile, ceiling=ceiling, mcp_servers=mcp_servers)
     except room_setup.SetupError as error:
         print(f"Couldn't set it up: {error}")
         return 1
@@ -775,11 +781,12 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
         return 1
     labels = {choice["id"]: choice["label"] for choice in state["choices"]}
     tools = ", ".join(_printable(labels.get(name, name)) for name in state["ceiling"]) or "none: agents only talk"
+    servers = ", ".join(_printable(name) for name in state["mcp_servers"]) or "none"
     server = state["api_server"]
     changes = state["changes"]
     if not state["needs"]:
         print(f"This Hermes is already set up for rooms (profile {profile}): its API server runs at "
-              f"{server['address']}, and rooms can use {tools}.")
+              f"{server['address']}, and rooms can use {tools}, with MCP servers: {servers}.")
         return 0
     print(f"Setting this Hermes up for rooms with other people's agents (profile {profile}):")
     if "api_server_key" in changes:
@@ -800,7 +807,13 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
     others = [_printable(choice["label"]) for choice in state["choices"] if choice["id"] not in state["ceiling"]]
     if others:
         print(f"  Others you can add with --ceiling: {', '.join(others)}.")
-    if ceiling is not None and "ceiling" in changes \
+    print(f"- MCP servers: {servers}." + (" Their tools run only in rooms whose Custom choice names them."
+                                          if state["mcp_servers"] else ""))
+    other_servers = [_printable(choice["id"]) for choice in state["mcp_choices"]
+                     if choice["id"] not in state["mcp_servers"]]
+    if other_servers:
+        print(f"  Others you can add with --mcp: {', '.join(other_servers)}.")
+    if (ceiling is not None or mcp_servers is not None) and "ceiling" in changes \
             and "ceiling" not in room_setup.state(hermes, home, profile)["changes"]:
         # A ceiling the setup saved before: each room pins its members'
         # tools when it starts (designs/cross-owner-agents, decision 13).
@@ -823,7 +836,7 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
             print("Cancelled.")
             return 0
     try:
-        after = room_setup.apply(hermes, home, profile, ceiling=ceiling)
+        after = room_setup.apply(hermes, home, profile, ceiling=ceiling, mcp_servers=mcp_servers)
     except (room_setup.SetupError, OSError, ValueError, RuntimeError) as error:
         print(f"Couldn't set it up: {error}")
         return 1

@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.125.0 (2026-11-01)
+## 0.126.0 (2026-11-02)
 
 ### Fixes
 - On a host where Conduit connects to Hermes' Webapp (`hermes webapp`)
@@ -30,6 +30,14 @@ checks it). The format is fixed, because Conduit reads it:
   sent from another app in that chat could pick it up. One whose answer was
   lost on the way keeps it, since Hermes may have taken it, and on Hermes'
   Webapp a note left behind still lapses after 15 minutes.
+
+## 0.125.0 (2026-11-02)
+
+### New and improved
+- Linked Rooms: you can let your agent use MCP servers you choose in rooms
+  with people you've linked. They stay off unless you pick them in the room
+  setup, a server added later stays out, and their tools work only in rooms
+  where Custom names them.
 
 ## 0.124.0 (2026-11-01)
 

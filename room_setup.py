@@ -8,7 +8,10 @@ gives a named profile a key of its own for it (the API server serves a
 profile only with that profile's key), saves the profile's ceiling exactly
 (``no_mcp``, and every plugin toolset marked known, so a later MCP server,
 plugin or Hermes update doesn't change the digest), and makes approvals
-manual over off, which rooms refuse.
+manual over off, which rooms refuse. An owner may name MCP servers of the
+profile's for the ceiling (notifier #500): then it lists them in place of
+``no_mcp``, which Hermes reads as an allowlist, so a later server still
+stays out, and their tools run only where a room's Custom choice names them.
 
 It writes only what changes something, and what it can't fix (YOLO mode, a
 managed install, a setting an administrator pinned, a profile the host
@@ -58,6 +61,8 @@ SETTINGS_ONLY = frozenset({"stt"})
 # and Search my past chats.
 DEFAULT_CEILING = ("session_search", "vision", "web", "x_search")
 MAX_CEILING = 64
+# Hermes' own spelling of an MCP server as a toolset (tools/mcp_tool_registration).
+MCP_PREFIX = "mcp-"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8642
@@ -122,6 +127,9 @@ class Hermes:
     served: Callable[[Path], Optional[str]]
     runtime_status: Callable[[Path], Optional[Mapping[str, Any]]]
     gateway_live: Callable[[Mapping[str, Any]], bool]
+    # A profile's MCP servers: the enabled ones and every one its config names, or None from a Hermes that can't
+    # say (it offers none, and a ceiling naming some stays as it is).
+    mcp_servers: Callable[[Path], Optional[tuple[set, set]]] = lambda home: None
 
     @classmethod
     def load(cls, env_scope: Optional[Callable[[Path], Any]] = None) -> "Hermes":
@@ -162,6 +170,21 @@ class Hermes:
             logger.warning("Linked Rooms setup is off on this Hermes: it has no %s", ", ".join(missing))
             raise SetupError("unsupported", "This Hermes is missing what Linked Rooms setup needs; update Hermes",
                              501)
+        try:
+            enabled_mcp = getattr(importlib.import_module("hermes_cli.tools_config"), "enabled_mcp_server_names",
+                                  None)
+        except ImportError:
+            enabled_mcp = None
+
+        def mcp_servers(home: Path) -> Optional[tuple[set, set]]:
+            if not callable(enabled_mcp):
+                return None
+            config = effective_config(Path(home) / "config.yaml")
+            configured = config.get("mcp_servers") if isinstance(config, Mapping) else None
+            named = {str(name) for name in configured} if isinstance(configured, Mapping) else set()
+            with as_home(Path(home)):
+                enabled = {str(name) for name in enabled_mcp(dict(config) if isinstance(config, Mapping) else {})}
+            return enabled, named | enabled
 
         @contextmanager
         def as_home(home: Path) -> Iterator[None]:
@@ -200,6 +223,7 @@ class Hermes:
             served=served,
             runtime_status=lambda root: read_status(Path(root) / STATUS_FILE),
             gateway_live=lambda record: bool(pid_live(record)) and not stale(record),
+            mcp_servers=mcp_servers,
         )
 
 
@@ -425,6 +449,45 @@ def _checked_ceiling(ceiling: Any, choices: list[dict]) -> list[str]:
     return sorted(names)
 
 
+def _mcp_choices(hermes: Hermes, home: Path) -> Optional[tuple[list[str], set]]:
+    """The profile's enabled MCP servers a ceiling can name, and every server it has, or None when Hermes can't
+    say. A server named like any Hermes toolset (one rooms leave out too) or Conduit's own isn't offered: the
+    ceiling couldn't tell them apart."""
+    try:
+        listed = hermes.mcp_servers(Path(home))
+        if listed is None:
+            return None
+        enabled, known = listed
+    except Exception as exc:  # noqa: BLE001 - unknown: nothing offered, and a saved list stays as it is
+        logger.warning("Linked Rooms setup couldn't list this profile's MCP servers (%s)", type(exc).__name__)
+        return None
+    try:
+        toolsets = {str((list(row) + [""])[0]) for row in hermes.toolsets()}
+    except Exception:  # noqa: BLE001 - _choices already read them, so this doesn't happen
+        toolsets = set()
+    try:
+        toolsets |= {str(name) for name in hermes.builtin_toolsets()} | {str(name) for name in hermes.plugin_toolsets()}
+    except Exception:  # noqa: BLE001
+        pass
+    taken = toolsets | _ALWAYS | {OWN_TOOLSET} | SETTINGS_ONLY
+    offered = sorted(str(name) for name in enabled if str(name) not in taken and not str(name).startswith(MCP_PREFIX))
+    return offered, {str(name) for name in {*known, *enabled}} - taken
+
+
+def _checked_mcp(value: Any, offered: list[str], room: int) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(name, str) for name in value):
+        raise SetupError("bad_mcp_servers", "The room ceiling's MCP servers are a list of server names")
+    names = {name.strip() for name in value}
+    if len(names) > room:
+        raise SetupError("bad_mcp_servers", f"The room ceiling names at most {MAX_CEILING} toolsets and MCP servers")
+    for name in sorted(names):
+        if name not in offered:
+            others = ", ".join(offered) or "none"
+            raise SetupError("bad_mcp_servers", f"{name[:64]!r} isn't an MCP server this profile has turned on; "
+                                                f"the ones it can name are {others}")
+    return sorted(names)
+
+
 def _strings(value: Any) -> Optional[list[str]]:
     return [str(item) for item in value] if isinstance(value, list) else None
 
@@ -437,6 +500,8 @@ class _Plan:
     server: _Server
     ceiling: list[str]
     choices: list[dict]
+    mcp: list[str]
+    mcp_choices: list[str]
     approvals: str
     profile_writes: dict      # dotted key -> value, in the profile's config.yaml
     root_writes: dict         # dotted key -> value, in the root's config.yaml
@@ -458,11 +523,13 @@ def _approval_mode(value: Any) -> str:
     return "manual"
 
 
-def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
+def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: Any = None) -> _Plan:
     home = Path(home)
     root = room_identity.root_home(home)
     choices = _choices(hermes)
     asked = None if ceiling is None else _checked_ceiling(ceiling, choices)
+    listed_mcp = _mcp_choices(hermes, home)
+    mcp_offered, mcp_known = listed_mcp if listed_mcp is not None else ([], set())
     root_config = hermes.read_config(root / "config.yaml")
     profile_config = root_config if home == root else hermes.read_config(home / "config.yaml")
     env = dict(hermes.read_env(root / ".env"))
@@ -521,13 +588,61 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
 
     # The ceiling, toolsets added later, approvals: the profile's own.
     saved = _strings(_at(profile_config, ("platform_toolsets", PLATFORM)))
-    ours = saved is not None and NO_MCP in saved
+    # The setup's own: with no_mcp, or, once it names MCP servers, with Conduit's room tools.
+    ours = saved is not None and (NO_MCP in saved or ROOMS_TOOLSET in saved)
     default = [name for name in DEFAULT_CEILING if name in {choice["id"] for choice in choices}]
-    target = asked if asked is not None else (sorted(name for name in saved if name not in _ALWAYS) if ours
-                                              else default)
+    saved_mcp: set[str] = set()
+    saved_rest: list[str] = []
+    for name in (saved if ours else []):
+        bare = name[len(MCP_PREFIX):] if name.startswith(MCP_PREFIX) and name not in mcp_known else name
+        if bare in mcp_known:
+            saved_mcp.add(bare)
+        elif name not in _ALWAYS:
+            saved_rest.append(name)
+    ids = {choice["id"] for choice in choices}
+    # Servers saved before, which this Hermes can't list now (a saved name that's no toolset may be one): the ceiling
+    # stays as it is, and nothing is written until it can.
+    unreadable = listed_mcp is None and ours and NO_MCP not in saved and any(
+        name not in ids and name not in _ALWAYS for name in saved)
+    if unreadable:
+        blockers.append({"code": "mcp_unreadable", "message": (
+            f"Profile {profile}'s room ceiling names MCP servers, and this Hermes couldn't list its MCP servers just "
+            "now, so the setup leaves the ceiling as it is. Check its mcp_servers in config.yaml, then try again.")})
+        saved_rest = [name for name in saved_rest if name in ids]
+    elif ours and NO_MCP not in saved:
+        # Once the ceiling names servers, a name that's neither a toolset nor a server Hermes has may be a server
+        # taken out, and would be one again if it came back.
+        saved_rest = [name for name in saved_rest if name in ids]
+    target = asked if asked is not None else (sorted(saved_rest) if ours else default)
+    # A saved server Hermes turned off since may be named again, so it stays chosen (and off): Conduit has no
+    # switch for it and sends it along.
+    kept = saved_mcp if NO_MCP not in (saved or []) else set()
+    if listed_mcp is None and isinstance(mcp_servers, list) and mcp_servers:
+        # Named now, while Hermes can't list them: the server may well be on, so the answer is the same as for
+        # saved ones, not "isn't turned on".
+        if not any(blocker["code"] == "mcp_unreadable" for blocker in blockers):
+            blockers.append({"code": "mcp_unreadable", "message": (
+                f"This Hermes couldn't list profile {profile}'s MCP servers just now, so the room ceiling can't name "
+                "them yet. Check its mcp_servers in config.yaml, then try again.")})
+        mcp_servers = None
+    # The servers share the ceiling's bound with the toolsets kept beside them, saved ones included.
+    room = MAX_CEILING - len([name for name in target if name in ids])
+    asked_mcp = None if mcp_servers is None else _checked_mcp(mcp_servers, sorted({*mcp_offered, *kept}), room)
+    # A saved list naming no server Hermes still has would get every enabled one (Hermes' _merge_mcp_servers),
+    # so a server gone from the profile is dropped, and with none left no_mcp is back. A saved one turned off
+    # stays: Hermes keeps it off.
+    target_mcp = asked_mcp if asked_mcp is not None else sorted(saved_mcp if NO_MCP not in (saved or []) else ())
+    if target_mcp:
+        target = [name for name in target if name in ids]
+    if len(set(target) - _ALWAYS) + len(target_mcp) > MAX_CEILING:
+        raise SetupError("bad_ceiling", f"The room ceiling names at most {MAX_CEILING} toolsets and MCP servers, "
+                                        "the saved MCP servers included")
+    want_ceiling = sorted({*target, ROOMS_TOOLSET, *target_mcp, *(() if target_mcp else (NO_MCP,))})
+    if unreadable:
+        want_ceiling = saved
     profile_writes: dict = {}
-    if saved != sorted({*target, *_ALWAYS}):
-        profile_writes[f"platform_toolsets.{PLATFORM}"] = sorted({*target, *_ALWAYS})
+    if saved != want_ceiling:
+        profile_writes[f"platform_toolsets.{PLATFORM}"] = want_ceiling
     known = _strings(_at(profile_config, ("known_plugin_toolsets", PLATFORM)))
     want = sorted({*(known or []), *map(str, hermes.plugin_toolsets()), OWN_TOOLSET})
     if known != want:
@@ -572,7 +687,7 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any) -> _Plan:
     if not server.running:
         needs.append("restart")
     return _Plan(root=root, profile_config=profile_config, root_config=root_config, server=server, ceiling=target,
-                 choices=choices, approvals=approvals, profile_writes=profile_writes, root_writes=root_writes,
+                 choices=choices, mcp=list(target_mcp), mcp_choices=mcp_offered, approvals=approvals, profile_writes=profile_writes, root_writes=root_writes,
                  new_key=new_key, profile_key=profile_key, new_profile_key=new_profile_key, new_port=new_port,
                  needs=needs, blockers=blockers, changed=changed)
 
@@ -600,6 +715,9 @@ def _view(hermes: Hermes, home: Path, profile: str, plan: _Plan) -> dict:
         "changes": list(plan.changed),
         "ceiling": list(plan.ceiling),
         "choices": plan.choices,
+        # MCP servers the ceiling names (none: no_mcp), and the profile's enabled ones it can name.
+        "mcp_servers": list(plan.mcp),
+        "mcp_choices": [{"id": name} for name in plan.mcp_choices],
         "approvals": plan.approvals,
         "policy": _policy(hermes, home, profile),
     }
@@ -608,14 +726,16 @@ def _view(hermes: Hermes, home: Path, profile: str, plan: _Plan) -> dict:
 # --- The switch ------------------------------------------------------------------------
 
 
-def state(hermes: Hermes, home: Path, profile: str, ceiling: Any = None) -> dict:
+def state(hermes: Hermes, home: Path, profile: str, ceiling: Any = None, mcp_servers: Any = None) -> dict:
     """What setting ``profile`` up (in ``home``) would do, and what blocks
     it: ``needs`` and ``blockers``; ``ready`` when there's neither. A
-    ``ceiling`` that isn't one is refused (``bad_ceiling``)."""
-    return _view(hermes, home, profile, _plan(hermes, home, profile, ceiling))
+    ``ceiling`` that isn't one is refused (``bad_ceiling``), and MCP servers
+    the profile hasn't turned on (``bad_mcp_servers``). Without
+    ``mcp_servers``, the ones saved before stay."""
+    return _view(hermes, home, profile, _plan(hermes, home, profile, ceiling, mcp_servers))
 
 
-def apply(hermes: Hermes, home: Path, profile: str, ceiling: Any = None) -> dict:
+def apply(hermes: Hermes, home: Path, profile: str, ceiling: Any = None, mcp_servers: Any = None) -> dict:
     """Sets ``profile`` up: the state after the writes, with what they
     ``changed``. A blocker is refused (409) before anything is written; one
     setup at a time per installation."""
@@ -624,7 +744,7 @@ def apply(hermes: Hermes, home: Path, profile: str, ceiling: Any = None) -> dict
     directory = root / room_identity.DIRECTORY
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     with _thread_lock, open(directory / LOCK_NAME, "a+b") as handle, room_identity._exclusive(handle):
-        plan = _plan(hermes, home, profile, ceiling)
+        plan = _plan(hermes, home, profile, ceiling, mcp_servers)
         if plan.blockers:
             first = plan.blockers[0]
             raise SetupError(first["code"], first["message"], 409)
@@ -650,7 +770,7 @@ def apply(hermes: Hermes, home: Path, profile: str, ceiling: Any = None) -> dict
             _save_env(hermes, home, KEY_ENV, secrets.token_hex(32))
         # With the ceiling asked for: a saved one kept may name a toolset
         # this Hermes no longer has, which isn't this setup's to refuse.
-        after = _plan(hermes, home, profile, ceiling)
+        after = _plan(hermes, home, profile, ceiling, mcp_servers)
     if plan.changed:
         logger.info("Linked Rooms setup for profile %s changed: %s", profile, ", ".join(plan.changed))
     return {**_view(hermes, home, profile, after), "changed": list(plan.changed)}
