@@ -41,8 +41,10 @@ MIN_COUNT, MAX_COUNT, DEFAULT_COUNT = 1, 5, 3
 MAX_NEXT = 3
 MAX_NEXT_CHARS = 60
 # The prompt asks for 140; a reply that runs over is kept up to this, and
-# a longer one is left out.
-MAX_REPLY_CHARS = 280
+# a longer one is left out. Conduit drops a chip over 200 characters (it
+# never cuts one short), so one kept past that would take a place and show
+# nothing (issue 1670).
+MAX_REPLY_CHARS = 200
 MAX_WHY_CHARS = 160
 MAX_PLAN_CHARS = 400
 # A guess the model gives under this is left out.

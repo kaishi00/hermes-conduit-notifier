@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.126.1 (2026-11-02)
+
+### Fixes
+- Predictions could show one suggested reply fewer than you chose: a
+  suggestion between 201 and 280 characters took a place, then Conduit left
+  it out as too long for a chip. Those are now left out on the host, so a
+  shorter one takes the place.
+
 ## 0.126.0 (2026-11-02)
 
 ### Fixes
