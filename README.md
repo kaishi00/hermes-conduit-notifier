@@ -1441,8 +1441,9 @@ in Conduit (Edit Bot > Work) or here:
   turns Hermes' approvals off in each workstream's own session (Hermes'
   per-session `/yolo`, set before each turn the plugin sends and kept on its
   session row, never process-wide) and drops the rule from the brief.
-  Switching back turns it on again in the sessions the plugin turned it off
-  in, at their next turn.
+  Switching back in Edit Bot turns it on again at once in the sessions the
+  plugin turned it off in, so a turn you start there yourself asks too (with
+  `--approvals`, at each one's next turn through Conduit).
 - Strict leaves the coordinator the work tools, `clarify` and `memory`;
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
   health, location and inbox). `message_agent` is refused there in favour of

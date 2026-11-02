@@ -224,6 +224,16 @@ class Store:
             row = con.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
 
+    def meta_keys(self, prefix: str) -> list[str]:
+        """The keys that start with ``prefix`` and hold a value."""
+        if not self.path.is_file():
+            return []
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        with self._db(write=False) as con:
+            rows = con.execute("SELECT key FROM meta WHERE key LIKE ? ESCAPE '\\' AND value != ''",
+                               (escaped + "%",)).fetchall()
+        return [row["key"] for row in rows]
+
     def set_meta(self, key: str, value: str) -> None:
         with self._db() as con:
             con.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",

@@ -2790,17 +2790,27 @@ def test_approvals_off_for_workstreams_turns_them_off_in_their_own_session_only(
     assert params["session_id"] == "rt-20261031_work_1" and params["value"] == "on"
     assert "can't be undone" not in _brief(hermes)
     assert hermes._sessions["rt-20261031_work_1"]["yolo"] is True
-    # Back to as its chats: turned on again at its next turn, once.
-    work.app_set_settings(home, {"workstream_approvals": "chats"})
+    # Back to as its chats: turned off at once, so a turn typed there asks too.
     hermes._sessions["rt-20261031_work_1"]["running"] = False
+    hermes.calls.clear()
+    work.app_set_settings(home, {"workstream_approvals": "chats"})
+    (_, params, _), = hermes.named("config.set")
+    assert params["session_id"] == "rt-20261031_work_1" and params["value"] == "off"
+    assert hermes._sessions["rt-20261031_work_1"]["yolo"] is False
     hermes.calls.clear()
     assert work.app_act(home, "W1", "send", {"text": "One more thing."})["ok"]
-    (_, params, _), = hermes.named("config.set")
-    assert params["value"] == "off" and hermes._sessions["rt-20261031_work_1"]["yolo"] is False
-    hermes._sessions["rt-20261031_work_1"]["running"] = False
-    hermes.calls.clear()
-    assert work.app_act(home, "W1", "send", {"text": "And another."})["ok"]
     assert hermes.named("config.set") == []  # a /yolo the user sets there later stays theirs
+
+
+def test_turning_approvals_back_on_reaches_a_workstream_that_isnt_live(home, hermes):
+    store_mod.Store(home).set_workstream_approvals("off")
+    start()
+    hermes._sessions.pop("rt-20261031_work_1")  # closed since; its row keeps the bypass
+    hermes.calls.clear()
+    work.app_set_settings(home, {"workstream_approvals": "ask"})
+    assert hermes.named("session.resume")
+    assert hermes.named("config.set")[-1][1]["value"] == "off"
+    assert not store_mod.Store(home).meta_keys("yolo_set:")
 
 
 def test_approvals_off_needs_no_session_bypass_when_hermes_never_asks(home, hermes):
@@ -2813,9 +2823,10 @@ def test_approvals_off_needs_no_session_bypass_when_hermes_never_asks(home, herm
 def test_a_bypass_that_cant_be_turned_off_stops_the_send(home, hermes):
     store_mod.Store(home).set_workstream_approvals("off")
     start()
-    work.app_set_settings(home, {"workstream_approvals": "chats"})
     hermes._sessions["rt-20261031_work_1"]["running"] = False
     hermes.refuse["config.set"] = {"code": 5001, "message": "nope"}
+    assert work.app_set_settings(home, {"workstream_approvals": "chats"})["ok"]  # the setting is kept
+    assert store_mod.Store(home).meta_keys("yolo_set:")  # and the session still to turn back
     hermes.calls.clear()
     assert work.app_act(home, "W1", "send", {"text": "One more thing."})["ok"] is False
     assert submitted_to(hermes, WORKER_1) == []  # nothing went in with approvals still off

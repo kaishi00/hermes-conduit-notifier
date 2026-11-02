@@ -364,6 +364,14 @@ class Broker:
         status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
         return ("started" if status == "streaming" else "queued"), tip
 
+    def end_bypass(self, session_id: str) -> None:
+        """Turns a session's own approval bypass off between turns (the
+        user turned approvals back on for workstreams), reopening it if it
+        isn't live, so a turn started in it later asks again. Raises when
+        Hermes didn't take it."""
+        runtime_id, _, held = self._open(session_id)
+        self._set_yolo(runtime_id, False, self._unbound if held else self._dispatch)
+
     def _set_yolo(self, runtime_id: str, on: bool, call: Callable[[str, dict], dict]) -> None:
         """The session's own approval bypass (Hermes' per-session /yolo, kept
         on its row so a resume keeps it), never the process-wide one: the

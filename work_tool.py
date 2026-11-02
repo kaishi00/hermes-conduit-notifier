@@ -931,6 +931,35 @@ def _yolo_sent(store: work_store.Store, ref: str, yolo: Optional[bool]) -> None:
         logger.warning("conduit_push: couldn't clear a workstream's approvals mark", exc_info=True)
 
 
+def end_bypasses(home: Path) -> int:
+    """Once approvals in workstreams are back on: turns the bypass off now
+    in every session this turned it on in (``_yolo``), so a turn the user
+    starts there directly, not only the next one through Conduit, asks
+    again. Best effort: a mark Hermes didn't take stays, and that
+    workstream's next send tries again first. Returns how many are left."""
+    home = Path(home)
+    store = work_store.Store(home)
+    if workstream_approvals(home) == "off":
+        return 0
+    refs = [key[len(_YOLO_SET):] for key in store.meta_keys(_YOLO_SET)]
+    left = 0
+    broker = None
+    for ref in refs:
+        found = store.get(ref)
+        if found is None or not found.session_id:
+            _yolo_sent(store, ref, False)  # no session left to carry it
+            continue
+        try:
+            broker = broker or work_broker.Broker(home)
+            broker.end_bypass(found.session_id)
+        except Exception:  # noqa: BLE001 — kept; the next send turns it off first
+            logger.warning("conduit_push: couldn't turn approvals back on in a workstream", exc_info=True)
+            left += 1
+            continue
+        _yolo_sent(store, ref, False)
+    return left
+
+
 def _users_words(home: Path, coordinator: str) -> str:
     """The user's message that started the Bot Chat's current turn, or ''.
 
@@ -2451,6 +2480,7 @@ def app_set_settings(home: Path, body: Optional[dict]) -> dict:
         store.set_after_restart(body["after_restart"])
     if "workstream_approvals" in body:
         store.set_workstream_approvals(body["workstream_approvals"])
+        end_bypasses(home)
     return app_settings(home)
 
 
