@@ -167,13 +167,15 @@ async def post_workstreams_call_ended(request: Request, response: Response, prof
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
     body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
-    if not isinstance(body, dict) or not isinstance(body.get("chat"), str) or not body["chat"].strip():
-        raise HTTPException(status_code=400, detail="Expected {\"chat\"}", headers={"Cache-Control": "no-store"})
+    call = body.get("call") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or not isinstance(body.get("chat"), str) or not body["chat"].strip() \
+            or (call is not None and not (isinstance(call, str) and (not call.strip() or _work_tool()._call_id(call)))):
+        raise HTTPException(status_code=400, detail="Expected {\"chat\", \"call\"?}", headers={"Cache-Control": "no-store"})
     return await _workstreams_route(
         "workstreams call ended", profile,
         lambda: {"ok": True, "bot_chat": bool(_work_tool().call_ended(
             core._calls_home(), body["chat"], after=_work_tool().CALL_END_GRACE_S,
-            call=body.get("call") if isinstance(body.get("call"), str) else ""))},
+            call=call or ""))},
         _workstream_actions_limiter)
 
 

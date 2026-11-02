@@ -3097,6 +3097,8 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     again = client.post("/api/plugins/conduit_push/workstreams/call-ended", json={"chat": OTHER_CHAT})
     assert again.status_code == 200 and not again.json()["bot_chat"]
     assert client.post("/api/plugins/conduit_push/workstreams/call-ended", json={}).status_code == 400
+    assert client.post("/api/plugins/conduit_push/workstreams/call-ended",
+                       json={"chat": BOT_CHAT, "call": 5}).status_code == 400
 
 
 def test_a_settings_change_lands_in_the_named_bots_own_registry(on, hermes, monkeypatch, tmp_path):
@@ -4293,3 +4295,4 @@ def test_a_save_leaves_a_named_calls_hold_to_its_own_end(on, hermes, monkeypatch
     assert not work._call_on(on.home, BOT_CHAT)
     # An id that isn't one short token names no call.
     assert work._call_id("a b") == "" and work._call_id("x" * 101) == "" and work._call_id(" c1 ") == "c1"
+    assert adopt(session_id="20261102_voice_job_7", chat=BOT_CHAT, call="a b")["error"] == "invalid"

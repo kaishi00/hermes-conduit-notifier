@@ -1642,6 +1642,8 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
         return {"ok": False, "error": "invalid", "note": "session_id, title, goal, chat, result and call are text."}
     if via not in work_store.CALL_VIA:
         return {"ok": False, "error": "invalid", "note": f"via is one of {', '.join(work_store.CALL_VIA)}."}
+    if isinstance(call, str) and call.strip() and not _call_id(call):
+        return {"ok": False, "error": "invalid", "note": "call is one short token (no spaces or |, at most 100)."}
     session = str(session_id or "").strip()
     if not session:
         return {"ok": False, "error": "missing", "note": "Name the job's session."}
