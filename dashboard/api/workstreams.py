@@ -27,7 +27,7 @@ WORKSTREAMS_WINDOW_S = 60.0
 # A refusal's code -> its HTTP status. The body has the code, so Conduit
 # words it, and the note.
 REFUSAL_STATUS = {"no_such_work": 404, "missing": 400, "unknown_action": 404, "off": 409, "busy": 409,
-                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502, "invalid": 400}
+                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502, "invalid": 400, "taken": 409}
 
 # The panel's reads and the user's actions count apart, so reading often
 # never holds up a Stop.
@@ -60,6 +60,11 @@ def workstreams_settings() -> Dict[str, Any]:
 
 def workstreams_set_settings(body: Optional[dict]) -> Dict[str, Any]:
     return _work_tool().app_set_settings(core._calls_home(), body)
+
+
+def workstreams_adopt(body: dict) -> Dict[str, Any]:
+    return _work_tool().adopt(core._calls_home(), body.get("session_id"), body.get("title"),
+                              via=str(body.get("via") or ""), goal=body.get("goal") or "")
 
 
 async def _workstreams_route(route: str, profile: Optional[str], fn: Any, limiter: Any = None) -> Any:
@@ -123,6 +128,25 @@ async def post_workstreams_settings(request: Request, response: Response, profil
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
     return await _workstreams_route("workstreams settings", profile, lambda: workstreams_set_settings(body),
+                                    _workstream_actions_limiter)
+
+
+@router.post("/workstreams/adopt")
+async def post_workstreams_adopt(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """A voice call's job, kept in its bot's registry (M5): {"session_id",
+    "title", "via": "phone" or "watch", "goal"?}, right after the phone
+    made the job's session. The call follows the job as before; the row
+    shows in the Work panel marked as a call's (``from_call``), settles with
+    its turns, never wakes the Bot Chat and waits for the user after a
+    restart. The same call's session again answers with its row
+    (``adopted`` false); one of the bot's own workstreams' sessions is a 409
+    (``taken``), and so is a bot whose work is off (``off``)."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route("workstreams adopt", profile, lambda: workstreams_adopt(body),
                                     _workstream_actions_limiter)
 
 

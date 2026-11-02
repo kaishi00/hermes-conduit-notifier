@@ -226,6 +226,9 @@ ROUTE_CAPABILITIES = (
     # > Work shows and changes (on or off, lookups, running at once, after a
     # restart, the workstreams' approvals).
     "bot-work-settings",
+    # POST /workstreams/adopt: a voice call's job kept in its bot's registry,
+    # in the Work panel marked as a call's (Bot workstreams M5).
+    "work-adopt",
 )
 
 

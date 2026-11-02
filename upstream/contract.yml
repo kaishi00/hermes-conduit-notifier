@@ -455,6 +455,7 @@ routes:
   - GET /workspace/search
   - POST /workspace/{action}
   - GET /workstreams
+  - POST /workstreams/adopt
   - GET /workstreams/settings
   - POST /workstreams/settings
   - POST /workstreams/{ref}/{action}
