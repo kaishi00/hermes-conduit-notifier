@@ -445,4 +445,12 @@ def test_a_callers_budget_holds_the_listeners_wait(gateway, monkeypatch):
 
     monkeypatch.setattr(chats, "run", timed)
     chats.dispatch({"jsonrpc": "2.0", "id": "r1", "method": "session.create", "params": {}}, Transport(), timeout=20)
-    assert waits[-1] == 20
+    assert 19 < waits[-1] <= 20
+
+    # A steer that reads its turn first spends the same budget on both.
+    answers["session.resume"] = {"result": {"session_id": "s9", "running": True, "execution_generation": 3}}
+    answers["session.steer"] = {"result": {"status": "queued"}}
+    waits.clear()
+    chats.dispatch({"jsonrpc": "2.0", "id": "r2", "method": "session.steer",
+                    "params": {"session_id": "s9", "text": "x"}}, Transport(), timeout=20)
+    assert len(waits) == 2 and all(wait <= 20 for wait in waits) and waits[1] <= waits[0]

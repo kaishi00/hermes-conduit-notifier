@@ -31,6 +31,7 @@ import importlib
 import logging
 import sys
 import threading
+import time
 import uuid
 import weakref
 from contextlib import nullcontext
@@ -217,12 +218,18 @@ class _AuthorityLink:
         params = dict(frame.get("params")) if isinstance(frame.get("params"), dict) else {}
         shaped: Any = None
         sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
+        # One budget for the whole call: the fence reads and the stale retry
+        # come out of the caller's timeout, never on top of it.
+        deadline = time.monotonic() + timeout
+
+        def left() -> float:
+            return max(0.05, deadline - time.monotonic())
         try:
-            shaped = self._request(method, dict(params))
+            shaped = self._request(method, dict(params), left)
             if isinstance(shaped, dict) and "result" in shaped:
                 return {"jsonrpc": "2.0", "id": rid, "result": shaped["result"]}
             response = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": rid, "method": shaped[0],
-                                                      "params": shaped[1]}), timeout)
+                                                      "params": shaped[1]}), left())
             if method in _TURN_CONTROLS and _reason(response) == "stale_generation":
                 # The fence came from events that may lag a newer turn, or a
                 # turn ended and another began since the read: read the chat
@@ -230,10 +237,10 @@ class _AuthorityLink:
                 # if the chat has no turn running now.
                 with self.lock:
                     self.generations.pop(sid, None)
-                shaped = self._request(method, dict(params))
+                shaped = self._request(method, dict(params), left)
                 response = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": rid, "method": shaped[0],
-                                                          "params": shaped[1]}), timeout)
-                if _reason(response) == "stale_generation" and self._still_running(sid):
+                                                          "params": shaped[1]}), left())
+                if _reason(response) == "stale_generation" and self._still_running(sid, left()):
                     # Refused again while a turn runs: the turn changed under the
                     # retry, so nothing was steered or stopped.
                     with self.lock:
@@ -289,7 +296,7 @@ class _AuthorityLink:
         # (Hermes' session_controls; a gateway restart restarts this process).
         return await connection.dispatch(request)
 
-    def _generation(self, sid: str) -> int:
+    def _generation(self, sid: str, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> int:
         with self.lock:
             known = self.generations.get(sid)
         if known is None:
@@ -298,7 +305,8 @@ class _AuthorityLink:
                 snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                           "id": f"conduit-fences-{uuid.uuid4().hex}",
                                                           "method": "session.resume",
-                                                          "params": {"session_id": sid, "omit_messages": True}}))
+                                                          "params": {"session_id": sid, "omit_messages": True}}),
+                                         timeout)
             except TimeoutError as exc:
                 # Nothing was sent for the control itself: not "may have started".
                 raise RuntimeError("Reading the chat's turn timed out; nothing was sent") from exc
@@ -315,14 +323,15 @@ class _AuthorityLink:
                 raise RuntimeError("Hermes didn't say which turn the chat is running")
         return known
 
-    def _still_running(self, sid: str) -> bool:
+    def _still_running(self, sid: str, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> bool:
         """Whether the chat runs a turn now; one that can't be read counts as running,
         so a refusal is never reported as nothing to stop."""
         try:
             snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                       "id": f"conduit-running-{uuid.uuid4().hex}",
                                                       "method": "session.resume",
-                                                      "params": {"session_id": sid, "omit_messages": True}}))
+                                                      "params": {"session_id": sid, "omit_messages": True}}),
+                                     timeout)
         except Exception:  # noqa: BLE001 — unknown reads as running
             return True
         result = snapshot.get("result") if isinstance(snapshot, dict) else None
@@ -359,7 +368,7 @@ class _AuthorityLink:
             return
         future.add_done_callback(_log_failed_detach)
 
-    def _request(self, method: Any, params: Dict[str, Any]) -> Any:
+    def _request(self, method: Any, params: Dict[str, Any], left: Any = None) -> Any:
         """The request in the authority's shape, or ``{"result": …}`` when
         nothing needs asking."""
         sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
@@ -379,7 +388,7 @@ class _AuthorityLink:
             self.chats.note_surface(self.transport, sid, params.get("text"))
             return method, params
         if method in ("session.interrupt", "session.steer", "session.redirect"):
-            params["execution_generation"] = self._generation(sid)
+            params["execution_generation"] = self._generation(sid, left() if left else AUTHORITY_RPC_TIMEOUT_S)
             return method, params
         if method == "approval.respond":
             wanted = params.pop("request_id", None)
