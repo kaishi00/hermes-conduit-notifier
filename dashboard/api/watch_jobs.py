@@ -293,6 +293,20 @@ def _keep_in_registry(profile: Optional[str], session_id: str, title: str, instr
         logger.warning("Keeping a Watch job in its bot's work registry failed", exc_info=True)
 
 
+def _registry_start_failed(profile: Optional[str], session_id: str, error: str) -> None:
+    """A kept job whose prompt didn't go in: its registry row says it failed,
+    as the model was told, rather than staying a start. Best effort."""
+    if not session_id:
+        return
+    try:
+        home = core._profile_dir(profile) if profile else core._calls_home()
+        tool = core._plugin_package_module("work_tool")
+        tool = tool.copy_for(home) or tool
+        tool.call_start_failed(home, session_id, error)
+    except Exception:  # noqa: BLE001
+        logger.warning("Settling a Watch job's failed start in its bot's work registry failed", exc_info=True)
+
+
 class _WatchJob:
     def __init__(self, job_id: str, title: str, profile: Optional[str] = None) -> None:
         self.job_id = job_id
@@ -788,6 +802,8 @@ class _WatchJobs:
 
     def _start_session(self, job: "_WatchJob", instructions: str) -> Dict[str, Any]:
         """Creates the job's Hermes chat and submits its task; the start's answer."""
+        kept = False  # in its bot's work registry, whose row a failure then settles
+        profile: Optional[str] = None
         try:
             # A job on another profile runs on that profile's own model, as
             # the phone's does: the voice-job model is this profile's.
@@ -816,6 +832,7 @@ class _WatchJobs:
             if not cancelled:
                 # Before its turn, so the turn's hooks find its row.
                 _keep_in_registry(profile, job.stored_session_id or sid, job.title, instructions)
+                kept = True
                 self.rpc("prompt.submit", {"session_id": sid, "text": WATCH_JOB_PROMPT.format(instructions=instructions)})
                 with self.lock:
                     job.turn_open = True
@@ -834,6 +851,9 @@ class _WatchJobs:
                 self.changed.notify_all()
             if not isinstance(exc, WatchJobError):
                 watch_tools._log_watch_failure("Starting a Watch job failed", exc)
+            if kept:
+                _registry_start_failed(profile, job.stored_session_id or job.session_id,
+                                       job.error or type(exc).__name__)
             self._close_session(job)
             if job.status == "cancelled":
                 return {"ok": True, "status": "not_started", "title": job.title,

@@ -1533,6 +1533,12 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
         # The bot's work is off (or can't run here): the call keeps its job as before.
         return {"ok": False, "error": "off", "note": "This bot's workstreams are off, so the job isn't kept."}
     store = work_store.Store(home)
+    known = store.by_session(session)
+    if known is None:
+        lineage = _compacted_from(home, session, store)
+        if isinstance(lineage, work_store.Work) and not _from_call(lineage):
+            # A workstream's own session after a compaction: it stays the workstream's.
+            return {"ok": False, "error": "taken", "note": f"That session continues {lineage.ref}, not a call's job."}
     shown = " ".join(str(title or "").split()) or "Voice job"
     began = time.time()
     # Looked up and added in one transaction, with its session from the
@@ -1540,8 +1546,25 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
     work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
                      requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
                      reply_to={"to": via}, status="starting", session_id=session)
+    if not _from_call(work):
+        # The session is already one of the bot's own workstreams: it stays that.
+        return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}
     adopted = work.created_at >= began  # else the row the session already had
     return {"ok": True, "ref": work.ref, "adopted": adopted, "work": _app_row(store, work)}
+
+
+def call_start_failed(home: Path, session_id: Any, error: Any) -> bool:
+    """A call's job whose start failed after it was kept (its prompt didn't
+    go in): its row says so, rather than staying a start. Only a row that's
+    still starting; True when one was settled."""
+    if not isinstance(session_id, str) or not session_id or not work_store.exists(Path(home)):
+        return False
+    store = work_store.Store(Path(home))
+    work = store.by_session(session_id)
+    if work is None or not _from_call(work):
+        return False
+    return store.update(work.ref, only_if=("starting",), status="failed",
+                        error=_cut(f"didn't start: {error}", 300)) is not None
 
 
 def _worker_read(home: Path, me: work_store.Work, name: str, args: dict) -> dict:
@@ -2010,6 +2033,13 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         sessions = {row["target"], *([work.session_id] if work and work.session_id else [])}
         if any(_in_transcript(home, session, row["text"]) for session in sessions):
             store.outbox_done(row["id"], "accepted")
+            return
+        if work is not None and not work.closed_at and kind == "user_send" and _from_call(work):
+            # A call's job has no coordinator to tell: its row says so, for
+            # the Work panel, rather than the message going missing unseen.
+            store.outbox_done(row["id"], "lost")
+            store.update(work.ref, error=_cut(f"Your message may not have reached it before Hermes restarted: "
+                                              f"«{_cut(row['text'], 200)}» Send it again if it's still needed.", 300))
             return
         if work is None or work.closed_at or not work.coordinator:
             store.outbox_done(row["id"], "lost")

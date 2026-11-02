@@ -266,6 +266,19 @@ def test_a_job_is_kept_in_its_bots_work_registry_before_its_turn(monkeypatch, tm
     assert start(grant, "And the tests")["status"] == "started"
 
 
+
+def test_a_kept_job_whose_prompt_failed_is_settled_in_its_registry(monkeypatch, tmp_path):
+    failed = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None, adopt=lambda *args, **kwargs: None,
+                                 call_start_failed=lambda home, sid, error: failed.append((home, sid, error)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    grant.jobs.server.fail["prompt.submit"] = "model not configured"
+    assert start(grant, "Check the build logs")["status"] == "not_started"
+    assert failed and failed[0][:2] == (tmp_path / "profiles" / "coder", "st-1")
+
+
 def test_a_job_title_mirrors_the_phones():
     assert api.watch_jobs.watch_job_title("  a   b ") == "a b"
     long = "word " * 20

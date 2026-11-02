@@ -3824,3 +3824,34 @@ def test_a_calls_job_no_turn_of_was_seen_offers_no_continue(on, hermes, monkeypa
 def test_the_bot_chat_and_long_ids_are_never_adopted(on, hermes):
     assert adopt(session_id=BOT_CHAT)["error"] == "invalid"
     assert "too long" in adopt(session_id="x" * 201)["note"]
+
+
+def test_a_workstreams_own_session_is_never_adopted_as_a_calls_job(on, hermes):
+    start()
+    taken = adopt(session_id="20261031_work_1")
+    assert not taken["ok"] and taken["error"] == "taken"
+    assert on.get("W1").requested_by != {"by": "phone"} and on.get("W2") is None
+
+
+def test_a_reply_to_a_calls_job_a_restart_cut_off_shows_on_its_row(on, hermes, monkeypatch):
+    adopt()
+    work.turn_started(CALL_JOB)
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    on.outbox_add("W1", "user_send", CALL_JOB, "And tomorrow?")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    assert "And tomorrow?" in on.get("W1").error
+    assert submitted_to(hermes, BOT_CHAT) == [] and submitted_to(hermes, CALL_JOB) == []
+
+
+def test_a_calls_job_whose_start_failed_says_so(on, hermes):
+    adopt()
+    assert work.call_start_failed(on.home, CALL_JOB, "prompt.submit timed out")
+    row = on.get("W1")
+    assert row.status == "failed" and "prompt.submit timed out" in row.error
+    # Only a start: a job under way isn't settled by it.
+    adopt(session_id="20261102_voice_job_2")
+    work.turn_started("20261102_voice_job_2")
+    assert not work.call_start_failed(on.home, "20261102_voice_job_2", "late")
+    assert on.get("W2").status == "running"
