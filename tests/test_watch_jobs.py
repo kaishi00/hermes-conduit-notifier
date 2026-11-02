@@ -250,6 +250,22 @@ def test_a_job_is_an_ordinary_hermes_chat_on_the_grants_profile_filed_as_a_voice
     assert scoped == ["coder"]
 
 
+def test_a_job_is_kept_in_its_bots_work_registry_before_its_turn(monkeypatch, tmp_path):
+    kept = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None,
+                                 adopt=lambda home, sid, title, via, goal: kept.append((home, sid, title, via, goal)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    grant.jobs.server.on_create = lambda: kept.append("created")
+    start(grant, "Check the build logs")
+    assert kept[0] == "created"
+    assert kept[1] == (tmp_path / "profiles" / "coder", "st-1", "Check the build logs", "watch", "Check the build logs")
+    # Whatever happens there, the job runs.
+    tool.adopt = lambda *args, **kwargs: 1 / 0
+    assert start(grant, "And the tests")["status"] == "started"
+
+
 def test_a_job_title_mirrors_the_phones():
     assert api.watch_jobs.watch_job_title("  a   b ") == "a b"
     long = "word " * 20

@@ -280,6 +280,19 @@ def _clean_job_profiles(value: Any, *, own: Optional[str],
     return tuple(name for name in names if core._job_profile_on_home(name, ticket_home))
 
 
+def _keep_in_registry(profile: Optional[str], session_id: str, title: str, instructions: str) -> None:
+    """The job kept in its bot's work registry (Bot workstreams M5): the
+    Work panel lists it as a Watch call's, and a restart leaves it for the
+    user. Best effort: the job runs as before whatever happens here."""
+    try:
+        home = core._profile_dir(profile) if profile else core._calls_home()
+        tool = core._plugin_package_module("work_tool")
+        tool = tool.copy_for(home) or tool
+        tool.adopt(home, session_id, title, via="watch", goal=instructions[:2000])
+    except Exception:  # noqa: BLE001
+        logger.warning("Keeping a Watch job in its bot's work registry failed", exc_info=True)
+
+
 class _WatchJob:
     def __init__(self, job_id: str, title: str, profile: Optional[str] = None) -> None:
         self.job_id = job_id
@@ -801,6 +814,8 @@ class _WatchJobs:
                 job.stored_session_id = stored if isinstance(stored, str) else ""
                 cancelled = job.status == "cancelled"
             if not cancelled:
+                # Before its turn, so the turn's hooks find its row.
+                _keep_in_registry(profile, job.stored_session_id or sid, job.title, instructions)
                 self.rpc("prompt.submit", {"session_id": sid, "text": WATCH_JOB_PROMPT.format(instructions=instructions)})
                 with self.lock:
                     job.turn_open = True

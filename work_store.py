@@ -124,7 +124,11 @@ _ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL 
                   ("reopened_at", "REAL NOT NULL DEFAULT 0"))
 # A workstream holding one of its bot's running slots: closed or not, its
 # session is still at work.
-_RUNNING = "kind = 'workstream' AND status IN ('starting', 'running', 'needs_you')"
+# Who can start a job of their own that's kept here too (M5): a call's
+# job runs as the call says, never under the coordinator's limit.
+CALL_VIA = ("phone", "watch")
+_FROM_CALL = "COALESCE(json_extract(requested_by, '$.by'), '') IN ('phone', 'watch')"
+_RUNNING = f"kind = 'workstream' AND status IN ('starting', 'running', 'needs_you') AND NOT ({_FROM_CALL})"
 
 
 @dataclass
@@ -385,11 +389,13 @@ class Store:
         return [_work(row) for row in rows]
 
     def session_ids(self) -> list[str]:
-        """Every workstream's chat, open or resolved."""
+        """Every workstream's chat, open or resolved, but a call's job's."""
         if not self.path.is_file():
             return []
         with self._db(write=False) as con:
-            rows = con.execute("SELECT session_id FROM work WHERE kind = 'workstream' AND session_id != ''").fetchall()
+            # A call's job stays in the chat lists, under Voice Jobs.
+            rows = con.execute("SELECT session_id FROM work WHERE kind = 'workstream' AND session_id != '' "
+                               f"AND NOT ({_FROM_CALL})").fetchall()
         return [row[0] for row in rows]
 
     def count(self, *, closed: bool) -> int:
