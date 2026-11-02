@@ -3,7 +3,11 @@ listener, as its features do (upstream/test_gateway_listener.py). The plugin
 runs them from its Watch calls and Pulse's loop, which a test can't reach
 without the relay and a Watch, so these call the same code: the session API
 Watch jobs and a Watch call's Local Live chat use, the Local Live chat itself,
-and Pulse's send. Each runs off the gateway's loop, as the plugin's do."""
+and Pulse's send. Each runs off the gateway's loop, as the plugin's do.
+
+Never install this outside the upstream harness: its routes send turns into
+any chat with no sign-in check. It isn't shipped (upstream/ stays out of the
+plugin's copy)."""
 
 from __future__ import annotations
 

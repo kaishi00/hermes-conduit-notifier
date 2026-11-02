@@ -427,7 +427,9 @@ def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:
         authority = core._authority_agent(request.session_id)
     except RuntimeError as exc:
         # The lookup itself failed (a Hermes that changed how it keeps
-        # agents), not a chat whose agent was let go.
+        # agents), not a chat whose agent was let go. Matched by name: the
+        # dashboard loads its own copy of gateway_chats, so the class
+        # isn't the plugin's; the name is the contract between the copies.
         if type(exc).__name__ != "AgentLookupError":
             raise
         raise core.TokenError(502, str(exc))
