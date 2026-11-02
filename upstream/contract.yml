@@ -92,6 +92,10 @@ notes:
     kept on the session row, never process-wide (the call always names a live session). Turning
     it on fails quietly (Hermes keeps asking); turning it off stops the send and is retried, except
     on a Hermes without config.set, where nothing was ever turned on.
+    A coding workstream's worktree (work_start worktree=true, M4) is Hermes' own subagent
+    worktree: tools.subagent_worktree's resolve_repo_root, local_backend_active,
+    create_subagent_worktree and finalize_subagent_worktree (prune=False to look, prune=True only
+    for an empty one). Without them work_start refuses worktree=true and starts nothing.
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
@@ -200,7 +204,7 @@ imports:
   plugins.memory:
     required: ["load_memory_provider"]
   tools:
-    optional: ["voice_live"]
+    optional: ["subagent_worktree", "voice_live"]
   tools.approval:
     required: ["list_gateway_approvals", "resolve_gateway_approval"]
     optional: ["_get_approval_timeout"]
