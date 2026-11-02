@@ -2,7 +2,7 @@
 C.6, C.8). A bot's work as Conduit's Work strip and panel show it, and the
 user's own actions on a workstream, which skip the Bot Chat's model: Reply
 in W3, Stop, Continue and Check first, and how they file it: Pin, Resolve
-and Reopen.
+and Reopen; and the bot's work settings, which Edit Bot > Work changes.
 
 A bot's work is driven in this process (Hermes' session API), so Conduit
 names a secondary bot with ?conduit_profile= (PLG-3 sends a ?profile= route
@@ -27,7 +27,7 @@ WORKSTREAMS_WINDOW_S = 60.0
 # A refusal's code -> its HTTP status. The body has the code, so Conduit
 # words it, and the note.
 REFUSAL_STATUS = {"no_such_work": 404, "missing": 400, "unknown_action": 404, "off": 409, "busy": 409,
-                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502}
+                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502, "invalid": 400}
 
 # The panel's reads and the user's actions count apart, so reading often
 # never holds up a Stop.
@@ -52,6 +52,14 @@ def workstreams_list(resolved: bool = False, before: Optional[float] = None) -> 
 
 def workstreams_act(ref: str, action: str, body: Optional[dict]) -> Dict[str, Any]:
     return _work_tool().app_act(core._calls_home(), ref, action, body)
+
+
+def workstreams_settings() -> Dict[str, Any]:
+    return _work_tool().app_settings(core._calls_home())
+
+
+def workstreams_set_settings(body: Optional[dict]) -> Dict[str, Any]:
+    return _work_tool().app_set_settings(core._calls_home(), body)
 
 
 async def _workstreams_route(route: str, profile: Optional[str], fn: Any, limiter: Any = None) -> Any:
@@ -89,6 +97,33 @@ async def get_workstreams(request: Request, response: Response, profile: Optiona
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
     return await _workstreams_route("workstreams", profile, lambda: workstreams_list(resolved, before))
+
+
+@router.get("/workstreams/settings")
+async def get_workstreams_settings(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """The bot's work settings for Edit Bot > Work: ``policy`` (off, strict
+    or lookups), ``max_running`` and ``max_running_limit``,
+    ``after_restart`` (continue or ask), ``workstream_approvals`` (chats,
+    ask or off), ``chat_approvals`` (the bot's approval mode in Hermes) and
+    ``unavailable`` (why workstreams can't run on this Hermes, or '')."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    return await _workstreams_route("workstreams settings", profile, workstreams_settings)
+
+
+@router.post("/workstreams/settings")
+async def post_workstreams_settings(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """The user's change from Edit Bot > Work: any of ``policy``,
+    ``max_running``, ``after_restart`` and ``workstream_approvals``. The
+    answer is the settings as they are now; a value out of range is a 400
+    (``invalid``) and changes nothing."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route("workstreams settings", profile, lambda: workstreams_set_settings(body),
+                                    _workstream_actions_limiter)
 
 
 @router.post("/workstreams/{ref}/{action}")

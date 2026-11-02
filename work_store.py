@@ -37,12 +37,18 @@ SCHEMA_VERSION = 1
 # today's Bot Chat; "strict" keeps only the work tools, clarify and memory;
 # "lookups" adds read-only lookups.
 POLICIES = ("off", "strict", "lookups")
-DEFAULT_POLICY = "off"
+# On for every bot until the user turns it off (C.4, M3): strict, as M0 picked.
+DEFAULT_POLICY = "strict"
 DEFAULT_MAX_RUNNING = 2
 # What a restart does with a workstream it stopped that had nothing
 # uncertain in flight (C.7): continue it once, or only tell the coordinator.
 AFTER_RESTART = ("continue", "ask")
 DEFAULT_AFTER_RESTART = "continue"
+# What counts as the user's go-ahead in the bot's workstreams (C.11, M3):
+# "chats" follows the bot's approval mode in Hermes, "ask" holds them to the
+# user's own words whatever Hermes does, "off" lets them run without asking.
+WORKSTREAM_APPROVALS = ("chats", "ask", "off")
+DEFAULT_WORKSTREAM_APPROVALS = "chats"
 MAX_RUNNING_LIMIT = 6
 
 KINDS = ("workstream", "ask_out", "ask_in")
@@ -250,6 +256,15 @@ class Store:
         if value not in AFTER_RESTART:
             raise ValueError(f"after_restart must be one of {', '.join(AFTER_RESTART)}")
         self.set_meta("after_restart", value)
+
+    def workstream_approvals(self) -> str:
+        value = self.get_meta("workstream_approvals", DEFAULT_WORKSTREAM_APPROVALS)
+        return value if value in WORKSTREAM_APPROVALS else DEFAULT_WORKSTREAM_APPROVALS
+
+    def set_workstream_approvals(self, value: str) -> None:
+        if value not in WORKSTREAM_APPROVALS:
+            raise ValueError(f"workstream_approvals must be one of {', '.join(WORKSTREAM_APPROVALS)}")
+        self.set_meta("workstream_approvals", value)
 
     # Work
 

@@ -61,6 +61,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     work.add_argument("--after-restart", choices=["continue", "ask"], default=None,
                       help="for on: a workstream a restart cut off with nothing uncertain in flight is continued "
                            "once (continue, the default) or left for the coordinator to ask about (ask)")
+    work.add_argument("--approvals", choices=["chats", "ask", "off"], default=None,
+                      help="for on: what the bot's workstreams ask approval for: as its chats do in Hermes (chats, "
+                           "the default), the user's own go-ahead before a step that can't be undone (ask), or "
+                           "nothing (off)")
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
                                                  "dates, ahead, inbox, look, where, private, claims, spots")
@@ -411,10 +415,11 @@ def _work(args: argparse.Namespace) -> int:
     home = Path(get_hermes_home())
     action = args.work_action
     try:
-        if action in ("status", "off") and not work_store.exists(home):
-            # Never turned on: said so without leaving a registry behind.
-            print("Bot workstreams: off (never turned on). `hermes conduit-push work on` to start them for this "
-                  "bot.")
+        if action == "status" and not work_store.exists(home):
+            # On by default: said so without leaving a registry behind.
+            print(f"Bot workstreams: {work_store.DEFAULT_POLICY} (on by default; the coordinator only "
+                  f"coordinates; up to {work_store.DEFAULT_MAX_RUNNING} running at once). No work yet. "
+                  "`hermes conduit-push work off` turns them off for this bot.")
             code = 0
         else:
             code = _work_on_registry(work_store.Store(home), args, action)
@@ -440,13 +445,16 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
             store.set_max_running(args.max_running)
         if getattr(args, "after_restart", None):
             store.set_after_restart(args.after_restart)
+        if getattr(args, "approvals", None):
+            store.set_workstream_approvals(args.approvals)
     elif action == "off":
         store.set_policy("off")
     mode = store.policy()
     print(f"Bot workstreams: {mode if mode != 'off' else 'off'}"
           + (f" (the coordinator {'may also look things up' if mode == 'lookups' else 'only coordinates'}; "
              f"up to {store.max_running()} running at once; after a restart, safe work is "
-             f"{'continued' if store.after_restart() == 'continue' else 'left to ask about'})"
+             f"{'continued' if store.after_restart() == 'continue' else 'left to ask about'}; workstream "
+             f"approvals: {store.workstream_approvals()})"
              if mode != "off" else ""))
     if action == "status":
         for work in store.list(include_closed=False, limit=20):

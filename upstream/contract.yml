@@ -446,4 +446,6 @@ routes:
   - GET /workspace/search
   - POST /workspace/{action}
   - GET /workstreams
+  - GET /workstreams/settings
+  - POST /workstreams/settings
   - POST /workstreams/{ref}/{action}

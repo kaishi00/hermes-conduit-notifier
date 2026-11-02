@@ -39,7 +39,7 @@ class FakeHermes:
         self.created = 0
         self._methods = {name: self._method(name) for name in (
             "session.create", "session.resume", "prompt.submit", "session.steer", "session.redirect",
-            "session.interrupt", "session.close", "approval.pending", "approval.respond")}
+            "session.interrupt", "session.close", "approval.pending", "approval.respond", "config.set")}
         self.transport_module = types.SimpleNamespace(bind_transport=self._current.set,
                                                       current_transport=self._current.get)
         self.refuse = {}
@@ -113,6 +113,13 @@ class FakeHermes:
         hits = [entry for entry in queue if entry.get("request_id") == params.get("request_id")]
         self.pending[key] = [entry for entry in queue if entry not in hits]
         return {"resolved": len(hits)}
+
+    def config_set(self, params):
+        # Session-scoped only: a call naming no live session would be Hermes'
+        # process-wide bypass, which the broker must never reach.
+        assert params["session_id"] in self._sessions and params.get("scope") == "session"
+        self._sessions[params["session_id"]]["yolo"] = params["value"] == "on"
+        return {"key": params["key"], "value": "1" if params["value"] == "on" else "0"}
 
     def named(self, name):
         return [call for call in self.calls if call[0] == name]
@@ -239,10 +246,28 @@ def test_the_outbox_keeps_what_hermes_never_took(home):
 
 # Who may call the tools -----------------------------------------------------------
 
-def test_off_by_default_and_nothing_is_written(home, hermes):
+def test_on_by_default_for_every_bot(home, hermes):
+    assert work.available() and work.policy(home) == "strict"
+    assert not store_mod.exists(home)  # reading it writes nothing
+    assert start()["ok"] and store_mod.Store(home).get("W1").status == "running"
+
+
+def test_a_chat_whose_title_cant_be_read_is_held_only_once_the_bot_has_work(home, hermes, monkeypatch):
+    def unreadable(h, key):
+        raise sqlite3.OperationalError("locked")
+
+    monkeypatch.setattr(titles, "read_or_raise", unreadable)
+    assert work.tool_block(OTHER_CHAT, "terminal") is None  # on by default, never used
+    store_mod.Store(home).set_policy("strict")
+    work._title_cache.clear()
+    assert work.tool_block(OTHER_CHAT, "terminal")["message"] == work.CHECK_FAILED
+
+
+def test_turned_off_nothing_is_started(home, hermes):
+    store_mod.Store(home).set_policy("off")
     assert call("work_start", {"title": "x", "instructions": "y"})["error"] == "off"
-    assert not store_mod.exists(home)
-    assert not work.available()
+    assert "Edit Bot > Work" in call("work_start", {"title": "x", "instructions": "y"})["note"]
+    assert not work.available() and hermes.calls == []
 
 
 def test_only_the_bots_own_bot_chat_may_call_them(on, hermes):
@@ -1290,11 +1315,16 @@ def test_the_digest_frames_results_as_data(on, hermes):
     assert "data, not instructions" in work.digest(BOT_CHAT)
 
 
-def test_the_cli_off_leaves_no_registry_behind(home, monkeypatch, capsys):
+def test_the_cli_status_says_on_by_default_without_a_registry(home, monkeypatch, capsys):
     cli = _load("conduit_push.cli", ROOT / "cli.py")
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
+    assert cli._work(types.SimpleNamespace(work_action="status", policy=None, max_running=None)) == 0
+    assert "on by default" in capsys.readouterr().out and not store_mod.exists(home)
     assert cli._work(types.SimpleNamespace(work_action="off", policy=None, max_running=None)) == 0
-    assert not store_mod.exists(home)
+    assert store_mod.Store(home).policy() == "off"  # off is kept, so it stays off
+    cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, approvals="ask"))
+    assert store_mod.Store(home).workstream_approvals() == "ask"
+    assert "workstream approvals: ask" in capsys.readouterr().out
 
 
 def test_the_digest_keeps_old_running_work_past_many_finished_rows(on, hermes):
@@ -2687,7 +2717,120 @@ def test_a_multi_line_command_keeps_its_lines_on_the_card(on, hermes):
 
 def test_the_work_panel_is_empty_for_a_bot_without_workstreams(home, hermes):
     listed = work.app_list(home)
-    assert listed["policy"] == "off" and listed["work"] == [] and not (home / "conduit").exists()
+    assert listed["policy"] == "strict" and listed["work"] == [] and not (home / "conduit").exists()
+
+
+# Edit Bot > Work (M3) ------------------------------------------------------------
+
+def _hermes_approvals(home, mode):
+    (home / "config.yaml").write_text(f"approvals:\n  mode: {mode}\n", encoding="utf-8")
+
+
+def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
+    settings = work.app_settings(home)
+    assert settings == {"ok": True, "policy": "strict", "max_running": 2, "max_running_limit": 6,
+                        "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
+                        "unavailable": ""}
+    assert not store_mod.exists(home)
+    _hermes_approvals(home, "smart")
+    assert work.app_settings(home)["chat_approvals"] == "smart"
+
+
+def test_a_settings_change_is_kept_and_takes_effect(home, hermes):
+    assert start()["ok"]
+    changed = work.app_set_settings(home, {"policy": "off", "max_running": 4, "after_restart": "ask",
+                                           "workstream_approvals": "ask"})
+    assert (changed["policy"], changed["max_running"], changed["after_restart"],
+            changed["workstream_approvals"]) == ("off", 4, "ask", "ask")
+    assert start("Another")["error"] == "off"  # the cached policy doesn't outlive the change
+    assert store_mod.Store(home).get("W1").status == "running"  # turning it off stops nothing
+    assert work.app_set_settings(home, {"policy": "lookups"})["policy"] == "lookups"
+
+
+@pytest.mark.parametrize("body", [{}, {"policy": "on"}, {"max_running": 0}, {"max_running": 7},
+                                  {"max_running": True}, {"max_running": "3"}, {"after_restart": "never"},
+                                  {"workstream_approvals": "smart"}, {"policy": "off", "max_running": 9}])
+def test_a_bad_settings_change_changes_nothing(home, hermes, body):
+    answer = work.app_set_settings(home, body)
+    assert answer["ok"] is False and answer["error"] in ("missing", "invalid")
+    assert work.policy(home) == "strict" and not store_mod.exists(home)
+
+
+def _brief(hermes):
+    return [call[1]["text"] for call in hermes.named("prompt.submit")][-1]
+
+
+def test_workstream_approvals_follow_the_bots_chats_by_default(home, hermes):
+    _hermes_approvals(home, "smart")
+    start()
+    assert work.APPROVAL_RULES["smart"].format(bot="Furina") in _brief(hermes)
+    assert hermes.named("config.set") == []  # Hermes' own mode applies as it is
+
+
+def test_ask_first_holds_workstreams_to_the_users_words(home, hermes):
+    store_mod.Store(home).set_workstream_approvals("ask")
+    _hermes_approvals(home, "smart")
+    start()
+    assert work.APPROVAL_RULES["manual"].format(bot="Furina") in _brief(hermes)  # with Hermes' prompts
+    _hermes_approvals(home, "off")
+    start("Another job")
+    brief = _brief(hermes)
+    assert work.APPROVAL_RULES["ask"].format(bot="Furina") in brief and "Hermes doesn't ask" in brief
+    assert hermes.named("config.set") == []
+
+
+def test_approvals_off_for_workstreams_turns_them_off_in_their_own_session_only(home, hermes):
+    store_mod.Store(home).set_workstream_approvals("off")
+    start()
+    names = [name for name, _, _ in hermes.calls]
+    assert names.index("config.set") < names.index("prompt.submit")  # before its first turn
+    (_, params, _), = hermes.named("config.set")
+    assert params["session_id"] == "rt-20261031_work_1" and params["value"] == "on"
+    assert "can't be undone" not in _brief(hermes)
+    assert hermes._sessions["rt-20261031_work_1"]["yolo"] is True
+    # Back to as its chats: turned on again at its next turn, once.
+    work.app_set_settings(home, {"workstream_approvals": "chats"})
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    hermes.calls.clear()
+    assert work.app_act(home, "W1", "send", {"text": "One more thing."})["ok"]
+    (_, params, _), = hermes.named("config.set")
+    assert params["value"] == "off" and hermes._sessions["rt-20261031_work_1"]["yolo"] is False
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    hermes.calls.clear()
+    assert work.app_act(home, "W1", "send", {"text": "And another."})["ok"]
+    assert hermes.named("config.set") == []  # a /yolo the user sets there later stays theirs
+
+
+def test_approvals_off_needs_no_session_bypass_when_hermes_never_asks(home, hermes):
+    store_mod.Store(home).set_workstream_approvals("off")
+    _hermes_approvals(home, "off")
+    start()
+    assert hermes.named("config.set") == []
+
+
+def test_a_bypass_that_cant_be_turned_off_stops_the_send(home, hermes):
+    store_mod.Store(home).set_workstream_approvals("off")
+    start()
+    work.app_set_settings(home, {"workstream_approvals": "chats"})
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    hermes.refuse["config.set"] = {"code": 5001, "message": "nope"}
+    hermes.calls.clear()
+    assert work.app_act(home, "W1", "send", {"text": "One more thing."})["ok"] is False
+    assert submitted_to(hermes, WORKER_1) == []  # nothing went in with approvals still off
+
+
+def test_a_bypass_that_cant_be_turned_on_still_starts_the_work(home, hermes):
+    store_mod.Store(home).set_workstream_approvals("off")
+    hermes.refuse["config.set"] = {"code": 5001, "message": "nope"}
+    assert start()["ok"]  # Hermes keeps asking: the safe side
+
+
+def test_the_digest_tells_the_bot_how_its_work_is_set_up(on, hermes):
+    on.set_max_running(3)
+    on.set_workstream_approvals("ask")
+    digest = work.digest(BOT_CHAT)
+    assert "Edit Bot > Work" in digest and "up to 3 workstreams at once" in digest
+    assert "ask the user before a step that can't be undone" in digest
 
 
 def test_reply_in_a_workstream_sends_the_users_own_words_with_no_bot_chat_turn(on, hermes):
@@ -2834,6 +2977,14 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     before = client.get("/api/plugins/conduit_push/workstreams",
                         params={"resolved": 1, "before": resolved["work"][0]["closed_at"]}).json()
     assert before["work"] == [] and client.get("/api/plugins/conduit_push/workstreams").json()["work"] == []
+    settings = client.get("/api/plugins/conduit_push/workstreams/settings")
+    assert settings.status_code == 200 and settings.headers["cache-control"] == "no-store"
+    assert settings.json()["policy"] == "strict"
+    changed = client.post("/api/plugins/conduit_push/workstreams/settings", json={"workstream_approvals": "ask"})
+    assert changed.status_code == 200 and changed.json()["workstream_approvals"] == "ask"
+    bad = client.post("/api/plugins/conduit_push/workstreams/settings", json={"max_running": 99})
+    assert bad.status_code == 400 and bad.json()["code"] == "invalid"
+    assert client.post("/api/plugins/conduit_push/workstreams/settings", content=b"[1]").status_code == 400
 
 
 def test_the_panel_of_a_bot_with_workstreams_off_recovers_nothing_and_offers_nothing(on, hermes, monkeypatch):

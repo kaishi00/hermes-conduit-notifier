@@ -23,6 +23,7 @@ broker says so instead of starting a second, private host.
 from __future__ import annotations
 
 import contextvars
+import logging
 import os
 import sys
 import threading
@@ -30,6 +31,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 RPC_TIMEOUT_S = 30.0
 CALL_TIMEOUT_S = 45.0
@@ -252,10 +255,11 @@ class Broker:
                 if isinstance(record, dict) and not record.get("_finalized")}
 
     def start(self, *, title: str, prompt: str, idempotency_key: str, cwd: str = "",
-              created: Optional[Callable[[str], None]] = None) -> Started:
+              created: Optional[Callable[[str], None]] = None, yolo: Optional[bool] = None) -> Started:
         """A new hidden session on this bot's profile, with ``prompt`` as its
         first turn. ``created`` hears its stored id before the prompt goes in (or
-        right after, when Hermes names it only then).
+        right after, when Hermes names it only then). ``yolo``: the session's
+        own approval bypass, set before its first turn (None leaves it).
         Anything that fails once the session exists ends it again (its turn
         interrupted, the session closed), so no session runs outside the
         registry."""
@@ -277,6 +281,8 @@ class Broker:
             if stored and created is not None:
                 created(stored)
                 told = True
+            if yolo is not None:
+                self._set_yolo(runtime_id, yolo, self._dispatch)
             self._dispatch("prompt.submit", {"session_id": runtime_id, "text": prompt})
             stored = stored or self._stored_id(runtime_id)
             if not stored:
@@ -319,13 +325,17 @@ class Broker:
         tip = resumed.get("stored_session_id")
         return runtime_id, tip if isinstance(tip, str) and tip else session_id, False
 
-    def send(self, session_id: str, text: str, how: str = "auto") -> tuple[str, str]:
+    def send(self, session_id: str, text: str, how: str = "auto",
+             yolo: Optional[bool] = None) -> tuple[str, str]:
         """Words into a session: ``auto`` (running: redirect, idle: a new
         turn), ``add`` (steered into the running turn) or ``after`` (queued
         behind it). Returns (what Hermes did, the stored id at the tip):
-        "started", "redirected", "steered" or "queued"."""
+        "started", "redirected", "steered" or "queued". ``yolo``: the
+        session's own approval bypass, set before the words go in."""
         runtime_id, tip, held = self._open(session_id)
         call = self._unbound if held else self._dispatch
+        if yolo is not None:
+            self._set_yolo(runtime_id, yolo, call)
         found = self.live(tip) or self.live(session_id)
         running = bool(found and found[1].get("running"))
         if how == "after" or (running and how not in ("auto", "add")):
@@ -353,6 +363,23 @@ class Broker:
                 return status, tip
         status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
         return ("started" if status == "streaming" else "queued"), tip
+
+    def _set_yolo(self, runtime_id: str, on: bool, call: Callable[[str, dict], dict]) -> None:
+        """The session's own approval bypass (Hermes' per-session /yolo, kept
+        on its row so a resume keeps it), never the process-wide one: the
+        call always names the live session, and Hermes refuses a stale one
+        instead of widening it. Turning it on can fail quietly (Hermes keeps
+        asking, the safe side); turning it off can't."""
+        if not runtime_id:
+            raise BrokerError("no session to set approvals on")
+        try:
+            call("config.set", {"session_id": runtime_id, "key": "yolo", "value": "on" if on else "off",
+                                "scope": "session", **self._profile_params()})
+        except BrokerError:
+            if not on:
+                raise
+            logger.warning("conduit_push: couldn't turn off approvals in a workstream; Hermes still asks",
+                           exc_info=True)
 
     def stop(self, session_id: str) -> bool:
         """Interrupts the session's turn; False when it isn't running."""

@@ -222,6 +222,10 @@ ROUTE_CAPABILITIES = (
     # on a workstream (Reply, Stop, Continue, Check first), ?conduit_profile=
     # included (Bot workstreams).
     "bot-workstreams",
+    # GET/POST /workstreams/settings: the bot's work settings, which Edit Bot
+    # > Work shows and changes (on or off, lookups, running at once, after a
+    # restart, the workstreams' approvals).
+    "bot-work-settings",
 )
 
 
