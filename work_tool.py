@@ -800,7 +800,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         recent = time.time() - LOOKALIKE_RECENT_S
         open_work = {work.ref: work for work in store.list(active_only=True, limit=500)}
         open_work.update({work.ref: work for work in store.list(changed_since=recent, limit=500)})
-        alike = [work for work in open_work.values() if work.kind == "workstream"
+        alike = [work for work in open_work.values() if work.kind == "workstream" and not _from_call(work)
                  and not work.closed_at and _similar(mine, _words(work.title) - _GENERIC)]
         if alike:
             return {"ok": False, "error": "similar_work", "similar": [_row(work) for work in alike[:3]],
@@ -816,7 +816,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                      reply_to={"to": "coordinator", "session": coordinator}, cwd=cwd, running_limit=limit)
     if work is None:
         running = [_row(work) for work in store.list(active_only=True) if work.kind == "workstream"
-                   and work.status in ("starting", "running", "needs_you")]
+                   and not _from_call(work) and work.status in ("starting", "running", "needs_you")]
         return {"ok": False, "error": "busy", "running": running,
                 "note": f"This bot already has {limit} workstreams running, its limit. Wait for one, stop one, or "
                         "send this to one of them."}
@@ -985,6 +985,9 @@ def _yolo(home: Path, store: work_store.Store, ref: str) -> Optional[bool]:
     None leaves it as it is. Its mark is cleared only once Hermes took the
     "off" (``_yolo_sent``), so a refused one is tried again next turn."""
     key = _YOLO_SET + ref
+    work = store.get(ref)
+    if work is not None and _from_call(work):
+        return None  # a call's job asks as the call's chats do; the workstreams' setting isn't its
     if workstream_approvals(home) == "off" and approval_mode(home) != "off":
         store.set_meta(key, "1")
         return True
@@ -1527,7 +1530,10 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
         return {"ok": False, "error": "missing", "note": "Name the job's session."}
     if len(session) > 200:
         return {"ok": False, "error": "invalid", "note": "That session id is too long to be a session's."}
-    titled = False if _is_child(session) else _titled_bot_chat(session, home)
+    if _is_child(session):
+        # A subagent's or a fork's session is its parent's work, never a call's job.
+        return {"ok": False, "error": "invalid", "note": "That's a subagent's session, not a call's job."}
+    titled = _titled_bot_chat(session, home)
     if titled is True:
         # The coordinator's own chat is never a job of its work.
         return {"ok": False, "error": "invalid", "note": "That's the bot's Bot Chat, not a call's job."}
@@ -1583,12 +1589,13 @@ def _worker_read(home: Path, me: work_store.Work, name: str, args: dict) -> dict
     bot = _bot_name(home)
     if name == "work_list":
         listed = _list(store, args)
+        # A call's jobs are the user's calls, not the bot's work: not read here.
         listed["work"] = [{**row, "you": True} if row["ref"] == me.ref else row
-                          for row in listed["work"] if row["kind"] == "workstream"]
+                          for row in listed["work"] if row["kind"] == "workstream" and not row.get("from_call")]
         listed["note"] = WORKER_READ_NOTE.format(bot=bot) if listed["work"] else "Nothing here yet."
         return listed
     work = store.get(args.get("ref"))
-    if work is None:
+    if work is None or (_from_call(work) and work.ref != me.ref):
         return _no_such(args.get("ref"))
     if work.kind != "workstream":
         return {"ok": False, "ref": work.ref, "error": "ask", "note": WORKER_ONLY_WORKSTREAMS.format(ref=work.ref, bot=bot)}
@@ -2202,7 +2209,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
         # Turning workstreams off doesn't stop one that's running, nor what it may not do.
         if name == "tool_call" and (not names or any(called in BRIDGE for called in names)):
             _, work, unreadable = _lookup(session_id, home)
-            return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
+            # A call's job is held as any chat is.
+            held = (work is not None and not _from_call(work)) or unreadable
+            return {"action": "block", "message": BRIDGE_BLOCK} if held else None
         return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
     allowed = LOOKUPS if mode == "lookups" else STRICT
     if name == "tool_call":
@@ -2216,7 +2225,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             # A workstream's could hide a message_agent its refusal below
             # never sees.
             _, work, unreadable = _lookup(session_id, home)
-            return {"action": "block", "message": BRIDGE_BLOCK} if work is not None or unreadable else None
+            # A call's job is held as any chat is.
+            held = (work is not None and not _from_call(work)) or unreadable
+            return {"action": "block", "message": BRIDGE_BLOCK} if held else None
     held = _workstream_block(session_id, home, names, {MEMORY})
     if held is not None:
         return held

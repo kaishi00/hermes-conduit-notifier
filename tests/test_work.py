@@ -3883,3 +3883,36 @@ def test_a_calls_jobs_never_push_the_bots_own_work_out_of_its_note(on, hermes):
     note = work.digest(BOT_CHAT)
     assert "W1 “Login bug”" in note
     assert note.count("(a job from a voice call") == work.DIGEST_CALL_ITEMS
+
+
+def test_a_calls_jobs_stay_out_of_the_coordinators_start_checks(on, hermes):
+    on.set_max_running(1)
+    adopt(title="Login page slow")
+    # Not a lookalike of new work, nor one of the limit's running rows.
+    assert start("Slow login page")["ref"] == "W2"
+    busy = start("Third question")
+    assert busy["error"] == "busy" and [row["ref"] for row in busy["running"]] == ["W2"]
+
+
+def test_a_workstream_doesnt_read_a_calls_job(on, hermes):
+    adopt()
+    start()
+    worker = on.get("W2").session_id
+    listed = call("work_list", {"filter": "all"}, session_id=worker)
+    assert [row["ref"] for row in listed["work"]] == ["W2"]
+    assert call("work_read", {"ref": "W1"}, session_id=worker)["error"] == "no_such_work"
+
+
+def test_a_calls_job_isnt_held_to_the_workstreams_rules(on, hermes):
+    adopt()
+    assert work.tool_block(CALL_JOB, "tool_call", {}) is None
+    on.set_policy("off")
+    assert work.tool_block(CALL_JOB, "tool_call", {}) is None
+    on.set_policy("strict")
+    on.set_workstream_approvals("off")
+    assert work._yolo(on.home, on, "W1") is None
+
+
+def test_a_subagents_session_isnt_adopted(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_is_child", lambda session_id: True)
+    assert adopt()["error"] == "invalid" and on.get("W1") is None
