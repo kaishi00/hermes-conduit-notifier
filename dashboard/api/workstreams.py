@@ -97,7 +97,8 @@ async def post_workstream_action(ref: str, action: str, request: Request, respon
     """The user's action on workstream ``ref``: ``send`` ({"text", "how"?}:
     their words go straight in, as if typed in its chat), ``stop``,
     ``continue`` or ``check`` (Check first, after a restart cut off a step
-    that can change things); or ``pin``, ``unpin``, ``resolve`` (work
+    that can change things), ``approve`` or ``deny`` ({"request_id"}: the
+    approval its "Needs you" card shows); or ``pin``, ``unpin``, ``resolve`` (work
     still at it is refused, ``still_running``) and ``reopen``, for asks
     too. The answer has the row as it is now
     (``work``); a refusal is a 4xx with ``code`` and ``detail``."""
