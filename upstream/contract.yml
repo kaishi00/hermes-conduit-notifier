@@ -26,6 +26,22 @@ watch_paths:
   - hermes_cli/gateway_runtime*.py
   - gateway/session_local_migration.py
   - hermes_cli/active_sessions.py
+  # Conduit's chat socket on the gateway's own listener (test_gateway_listener.py).
+  - gateway/run_api.py
+  - gateway/webapp_listener.py
+  - gateway/session_controls.py
+  - gateway/session_contract.py
+  - gateway/session_mutations.py
+  - hermes_state_mutations.py
+  - tui_gateway/ws.py
+  - tui_gateway/contracts/
+  # gateway_chats.py reads all_authorities, owner_scope and each authority's sessions
+  # through sys.modules, which the scanner can't see; a rename there would fall back
+  # to the default profile's settings for Predictions.
+  - gateway/session_authorities.py
+  # Hermes' legacy fallback that serves Conduit's host verbs (projects, profiles, MCP)
+  # on the listener (test_conduits_host_verbs_answer_on_the_listener).
+  - tui_gateway/ws_legacy_fallback.py
 
 # Words that make a changed hunk worth a closer look.
 keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,
@@ -84,7 +100,22 @@ notes:
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
     update can't confirm, so hosts stay on the old version (hermes-conduit#1500).
-
+  chats on the gateway's listener: >-
+    Conduit's chat socket, when its address is the gateway's own listener (the Webapp) instead of
+    hermes dashboard (feature map: "Two Hermes servers"). gateway.ready's session_authority tells
+    them apart; the authority takes its own shapes for the same verbs (submission_id,
+    execution_generation, session.mutate for renames, branches, compression and model picks) and
+    refuses the dashboard's before running anything, which Conduit's one resend relies on.
+    The plugin's capabilities route and its signed speech-server socket answer there (checked). The
+    plugin's chat features find the authority's chats there (gateway_chats.py): the gateway is
+    gateway.run_api._ACTIVE_RUNNER, a chat is authority.sessions[id] (all_authorities), its agent
+    the runner's resident one (Predictions, which answer only while the gateway holds that agent),
+    and turn-surface keeps Conduit's report by session id.
+    Watch jobs, a Watch call's Local Live chat and Pulse's turns drive their own chats through a
+    gateway.session_controls.AuthorityConnection of their own on the gateway's loop
+    (runner._gateway_loop), translating the TUI gateway's shapes both ways (approval.settled reads
+    as approval.cancelled). Each is checked with listener_driver/'s test-only routes.
+    Desktop views report not observing there: the authority has no Desktop selection to read.
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
 # passes (upstream fixed it: review the workaround) or fails differently.
@@ -132,6 +163,8 @@ imports:
     optional: ["BasePlatformAdapter"]
   gateway.response_filters:
     optional: ["is_autonomous_silence_response"]
+  gateway.session_controls:
+    required: ["AuthorityConnection"]
   hermes_cli:
     optional: ["active_sessions", "lifecycle"]
   hermes_cli._launchers:
@@ -233,6 +266,7 @@ module_paths:
   - gateway/config
   - gateway/platforms/base
   - gateway/response_filters
+  - gateway/session_controls
   - hermes_cli
   - hermes_cli/_launchers
   - hermes_cli/active_sessions
@@ -416,6 +450,7 @@ routes:
   - GET /speech-server/status
   - POST /speech-server/test
   - POST /turn-surface
+  - POST /turn-surface/discard
   - GET /voice-tools
   - POST /voice-tools/call
   - POST /voice/archive

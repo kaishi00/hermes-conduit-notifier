@@ -634,7 +634,11 @@ def _run(stopped: threading.Event) -> None:
 def _hosts_chats() -> bool:
     """Whether this process hosts Conduit's chats: the dashboard (or `hermes
     serve`) publishes a session host to plugins, and its method table is
-    loaded. The messaging gateway and the CLI have neither."""
+    loaded; a gateway serving its own listener (the Webapp) runs them on its
+    session authority (hermes-conduit#1618). The messaging gateway alone and
+    the CLI have neither."""
+    if host.on_authority():
+        return True
     manager = getattr(_ctx, "_manager", None)
     return bool(getattr(manager, "has_tui_message_injector", False)) and host.available()
 

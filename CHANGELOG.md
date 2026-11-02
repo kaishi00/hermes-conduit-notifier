@@ -13,6 +13,24 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.126.0 (2026-11-02)
+
+### Fixes
+- On a host where Conduit connects to Hermes' Webapp (`hermes webapp`)
+  instead of `hermes dashboard`, Predictions said the chat isn't open,
+  Watch jobs and a Watch call's Hermes chat ran where the phone couldn't
+  see them, Pulse sent nothing, and messages from CarPlay or the Watch lost
+  the note saying where they came from. Those work there now. Predictions
+  answer there only while Hermes still holds the chat, up to an hour after
+  its last reply; a chat opened after Hermes restarts gets none until it
+  replies again.
+- A message Hermes refused, or that Conduit never sent (Conduit takes its
+  note back when the send fails), no longer leaves its
+  "sent from CarPlay" (or iPhone, Watch...) note waiting, where the same words
+  sent from another app in that chat could pick it up. One whose answer was
+  lost on the way keeps it, since Hermes may have taken it, and on Hermes'
+  Webapp a note left behind still lapses after 15 minutes.
+
 ## 0.125.0 (2026-11-02)
 
 ### New and improved

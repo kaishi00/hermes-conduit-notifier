@@ -1624,6 +1624,17 @@ a file path; a file the user asks for still goes (0.115.1+).
   result), and a turn that merges several queued messages, or one Hermes
   rewrote, gets no line. The plugin's own Watch jobs and call chats name
   the Watch themselves.
+- On the gateway's own listener (`hermes webapp`, 0.126.0+) there is no such
+  record and a turn can't be tied to the socket that sent it, so the plugin
+  keeps the report itself, by session id, and the chat's next turn with that
+  text takes it, for 15 minutes.
+- `POST /api/plugins/conduit_push/turn-surface/discard` with
+  `{"session_id": "<runtime session id>", "text_sha256": "<hex>"}` answers
+  `{"ok": true, "discarded": true}` (or `false` when none was kept): Conduit
+  sends it after a send Hermes refused or that never left the phone, so the
+  same words sent from another app in that chat don't take its line. A send
+  whose answer was only lost keeps its report, since Hermes may have taken
+  it. Capability `turn-surface-discard` (0.126.0+).
 - `prompt.submit` refuses keys Hermes doesn't know, so the value can't ride
   there. With the gateway out of this process (`plugins.isolation: host`, a
   compute host) the route answers `"recorded": false`, and a turn on a chat

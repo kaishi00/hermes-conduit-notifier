@@ -10,6 +10,9 @@ process that hosts those sessions.
 
 Everything here goes through the host's method table. A Hermes without it
 (or without either method) reports itself unavailable instead of failing.
+On the gateway's own listener (the Webapp, hermes-conduit#1618) the chats are
+its session authority's: the turn goes there (gateway_chats.py), in the
+authority's shapes, and nobody holds a chat there, so there is no takeover.
 
 The chat is Pulse's own, so when another surface holds it (Hermes Desktop
 keeps a chat it has open, and Hermes refuses anyone else's turn with
@@ -48,9 +51,28 @@ class Sent:
     detail: str = ""
 
 
+def _authority_chats() -> Any:
+    """The gateway's session authority in this process (gateway_chats.py), or None."""
+    try:
+        from . import gateway_chats
+        return gateway_chats.session_api()
+    except Exception:  # noqa: BLE001 — a partial install: no chats to send into
+        logger.warning("conduit_push: Pulse couldn't reach the gateway's session authority", exc_info=True)
+        return None
+
+
+def _gateway_runs_here() -> bool:
+    return getattr(sys.modules.get("gateway.run_api"), "_ACTIVE_RUNNER", None) is not None
+
+
 def _methods() -> Optional[dict[str, Callable[..., Any]]]:
     # Only a process that already runs the session host has it loaded;
-    # importing it anywhere else would start one.
+    # importing it anywhere else would start one. A gateway's listener loads
+    # it too, but its chats are the authority's.
+    if _gateway_runs_here():
+        # Never the listener's TUI registry, even when the authority can't be
+        # reached: its users never see those chats.
+        return None
     server = sys.modules.get("tui_gateway.server")
     if server is None:
         return None
@@ -60,8 +82,13 @@ def _methods() -> Optional[dict[str, Callable[..., Any]]]:
     return methods
 
 
+def on_authority() -> bool:
+    """Whether this process runs Conduit's chats on a gateway's session authority."""
+    return _authority_chats() is not None
+
+
 def available() -> bool:
-    return _methods() is not None
+    return _authority_chats() is not None or _methods() is not None
 
 
 def take_over(session_ids: list[str]) -> str:
@@ -114,6 +141,9 @@ def send(chat_id: str, text: str, *, profile: str = "", model: Optional[dict] = 
     ({"provider", "model"}), the chat is put on that model first, as its
     own model picker would (a busy chat takes it at its next turn). It is
     the chat's model after the turn too: Pulse's chat runs on Pulse's model."""
+    chats = _authority_chats()
+    if chats is not None:
+        return _send_on_authority(chats, chat_id, text, profile=profile, model=model)
     methods = _methods()
     if methods is None:
         return Sent(False, "", "this Hermes has no session host to send through")
@@ -196,3 +226,85 @@ def _message(response: Any) -> str:
     if isinstance(error, dict):
         return str(error.get("message") or error.get("code") or "unknown error")[:200]
     return "unknown error"
+
+
+class _Unheard:
+    """Pulse's connection on the authority: it follows none of the chat's events."""
+
+    def write(self, obj: Any) -> bool:
+        return True
+
+
+def _send_on_authority(chats: Any, chat_id: str, text: str, *, profile: str = "",
+                       model: Optional[dict] = None) -> Sent:
+    """``send`` on the gateway's listener: the authority takes the turn in its
+    FIFO behind any running one (it has no busy refusal): queued, or
+    streaming when the authority starts it at once."""
+    transport = _Unheard()
+
+    def call(method: str, params: dict[str, Any]) -> Any:
+        return chats.dispatch({"jsonrpc": "2.0", "id": f"pulse-{uuid.uuid4().hex[:12]}", "method": method,
+                               "params": params}, transport)
+
+    try:
+        params: dict[str, Any] = {"session_id": chat_id, "omit_messages": True}
+        if profile and profile != "default":
+            params["profile"] = profile
+        resumed = call(RESUME, params)
+        if not isinstance(resumed, dict) or resumed.get("error"):
+            return Sent(False, "", f"couldn't open the chat: {_message(resumed)}")
+        snapshot = resumed.get("result") if isinstance(resumed.get("result"), dict) else {}
+        sid = str(snapshot.get("session_id") or "")
+        if not sid:
+            return Sent(False, "", "couldn't open the chat: no session id came back")
+        if model:
+            _use_model_on_authority(call, sid, snapshot, model, profile)
+        submit: dict[str, Any] = {"session_id": sid, "text": text, "display_kind": "hidden"}
+        if "profile" in params:
+            submit["profile"] = params["profile"]
+        submitted = call(SUBMIT, submit)
+        if not isinstance(submitted, dict) or submitted.get("error"):
+            return Sent(False, "", f"the chat refused the turn: {_message(submitted)}")
+        result = submitted.get("result") if isinstance(submitted.get("result"), dict) else {}
+        status = str(result.get("status") or "")
+        if status == "terminal":
+            return Sent(False, "", "the chat settled the turn without running it")
+        # The authority's "started" is the TUI gateway's "streaming": the turn runs now.
+        return Sent(True, "streaming" if status == "started" else "queued", status)
+    finally:
+        # The turn is the authority's once admitted; Pulse's view of the chat ends.
+        chats.release(transport)
+
+
+def _use_model_on_authority(call: Callable[[str, dict], Any], sid: str, snapshot: dict, model: dict,
+                            profile: str) -> None:
+    """``_use_model`` on the authority: a ``session.mutate`` fenced by the
+    chat's revision and generation, answered with its confirm token when the
+    authority asks first (the user picked the model in Settings > Pulse)."""
+    name, provider = str(model.get("model") or ""), str(model.get("provider") or "")
+    info = snapshot.get("info") if isinstance(snapshot.get("info"), dict) else {}
+    if info.get("model") == name and (not provider or info.get("provider") == provider):
+        return
+    if not plain_flag_value(name) or (provider and not plain_flag_value(provider)):
+        return
+    payload: dict[str, Any] = {"model": name, **({"provider": provider} if provider else {})}
+    try:
+        for _ in range(2):
+            params: dict[str, Any] = {"session_id": sid, "request_id": uuid.uuid4().hex, "operation": "model",
+                                      "payload": payload, "expected_revision": snapshot.get("revision"),
+                                      "expected_generation": snapshot.get("execution_generation")}
+            if profile and profile != "default":
+                params["profile"] = profile
+            result = call("session.mutate", params)
+            answer = result.get("result") if isinstance(result, dict) else None
+            if not isinstance(answer, dict):
+                logger.warning("conduit_push: Pulse couldn't put its chat on %s: %s", name, _message(result))
+                return
+            if answer.get("status") != "confirmation_required" or not answer.get("confirm"):
+                if answer.get("status") not in (None, "applied", "noop", "ok"):
+                    logger.warning("conduit_push: Pulse couldn't put its chat on %s: %s", name, answer.get("status"))
+                return
+            payload = {**payload, "confirm": answer["confirm"]}
+        logger.warning("conduit_push: Pulse's chat stayed on its own model: %s wasn't confirmed", name)
+    except Exception:  # noqa: BLE001 — the turn goes on the chat's own model
+        logger.warning("conduit_push: Pulse couldn't put its chat on %s", name, exc_info=True)

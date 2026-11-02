@@ -158,12 +158,23 @@ class WatchJobError(Exception):
 
 
 def _hermes_session_api() -> Any:
-    """Hermes' session API module when it serves this process's chats, else None.
+    """Hermes' session API when it serves this process's chats, else None: the
+    gateway's session authority on its own listener (core._AuthorityChats, in
+    the TUI gateway's shapes), else the dashboard's TUI gateway."""
+    authority = core._authority_session_api()
+    return authority if authority is not None else _tui_session_api()
+
+
+def _tui_session_api() -> Any:
+    """The dashboard's TUI gateway module when it serves this process's chats,
+    else None (a gateway's listener runs them on its authority).
 
     Only a module the dashboard itself loaded counts: importing it here (a
     plugin host process, an older Hermes) would make a second, private
     registry whose chats the app never sees.
     """
+    if core._gateway_runner() is not None:
+        return None
     server = sys.modules.get("tui_gateway.server")
     if server is None or not callable(getattr(server, "dispatch", None)):
         return None
@@ -396,6 +407,7 @@ class _WatchJobTransport:
 
     def close(self) -> None:
         self._closed = True
+        core._release_authority_link(self)
 
 
 class _RpcWaiter:
@@ -441,8 +453,12 @@ class _WatchJobs:
             rid = f"conduit-watch-{self.grant.grant_id[:8]}-{self._rpc_ids}"
             waiter = self._waiters[rid] = _RpcWaiter()
         try:
-            response = self.server.dispatch({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
-                                            self.transport)
+            frame = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+            if getattr(self.server, "takes_timeout", False):
+                # The gateway's own listener answers in the call: hold it to this budget.
+                response = self.server.dispatch(frame, self.transport, timeout=timeout)
+            else:
+                response = self.server.dispatch(frame, self.transport)
             if response is None:
                 # A slow method answers from Hermes' worker pool.
                 if not waiter.done.wait(timeout):
