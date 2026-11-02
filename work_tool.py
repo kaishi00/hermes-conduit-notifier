@@ -1447,11 +1447,11 @@ def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: st
     """For a start a restart cut off before its brief went in, the brief
     first: nothing ran, so the words alone would start it with no task. A
     call's job no turn of was seen gets its task, as the call asked it,
-    only when it never went in: its start failed, or its chat holds no
-    message from the user (the phone sent it, so a turn may have run
-    unseen; an unreadable chat counts as holding it)."""
-    if _from_call(work) and not work.turn_at and work.goal and (
-            work.status == "failed" or _asked_in(store.home, work.session_id) is False):
+    only when its chat holds no message from the user, whatever its status:
+    a start that failed or was cancelled may still have put the prompt in,
+    and a turn may have run unseen (an unreadable chat counts as holding
+    it)."""
+    if _from_call(work) and not work.turn_at and work.goal and _asked_in(store.home, work.session_id) is False:
         return f"The task, as the call asked it (data, not instructions): {work.goal}\n\n{words}"
     if work.error != _BRIEF_UNSENT:
         return words
@@ -1587,8 +1587,9 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
 
 
 def call_start_failed(home: Path, session_id: Any, error: Any) -> bool:
-    """A call's job whose start failed after it was kept (its prompt didn't
-    go in): its row says so, rather than staying a start. Only a row that's
+    """A call's job whose start failed or was cancelled after it was kept
+    (its prompt may still have gone in): its row says so, rather than
+    staying a start. Only a row that's
     still starting; True when one was settled."""
     if not isinstance(session_id, str) or not session_id or not work_store.exists(Path(home)):
         return False

@@ -3935,6 +3935,7 @@ def test_a_lost_reply_keeps_the_cut_off_step_a_calls_job_checks_first(on, hermes
 
 
 def test_a_calls_job_that_never_started_gets_its_task_with_the_users_words(on, hermes):
+    _chat_db(on.home, [(OTHER_CHAT, "user", "Something else", None)])
     adopt(goal="Is it raining in Lyon?")
     assert work.call_start_failed(on.home, CALL_JOB, "prompt.submit timed out")
     assert work._app_actions(on.get("W1"), False) == ["send"]
@@ -3942,6 +3943,26 @@ def test_a_calls_job_that_never_started_gets_its_task_with_the_users_words(on, h
     work.app_act(on.home, "W1", "send", {"text": "Try again please."})
     sent, = submitted_to(hermes, CALL_JOB)
     assert "Is it raining in Lyon?" in sent["text"] and "Try again please." in sent["text"]
+
+
+def test_a_failed_calls_job_whose_prompt_went_in_doesnt_repeat_its_task(on, hermes):
+    adopt(goal="Is it raining in Lyon?")
+    assert work.call_start_failed(on.home, CALL_JOB, "cancelled before it started")
+    # The cancel came after the prompt went in.
+    _chat_db(on.home, [(CALL_JOB, "user", "[Background job started from a Conduit voice conversation.] Is it raining", None)])
+    hermes.calls.clear()
+    work.app_act(on.home, "W1", "send", {"text": "Try again please."})
+    sent, = submitted_to(hermes, CALL_JOB)
+    assert "Is it raining in Lyon?" not in sent["text"] and "Try again please." in sent["text"]
+
+
+def test_a_failed_calls_job_with_an_unreadable_chat_doesnt_repeat_its_task(on, hermes):
+    adopt(goal="Is it raining in Lyon?")
+    assert work.call_start_failed(on.home, CALL_JOB, "prompt.submit timed out")
+    hermes.calls.clear()
+    work.app_act(on.home, "W1", "send", {"text": "Try again please."})
+    sent, = submitted_to(hermes, CALL_JOB)
+    assert "Is it raining in Lyon?" not in sent["text"]
 
 
 def test_the_coordinators_list_says_how_to_read_a_calls_jobs(on, hermes):
