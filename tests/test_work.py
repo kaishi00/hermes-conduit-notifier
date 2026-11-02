@@ -4179,3 +4179,22 @@ def test_a_calls_job_kept_with_its_reply_settles_when_its_chat_cant_be_read(on, 
     monkeypatch.setattr(work, "_asked_in", lambda home, session: None)
     kept = adopt(result="Rain from three.")
     assert kept["work"]["status"] == "done" and "Rain from three." in on.get("W1").last_result
+
+
+def test_a_bot_chat_turn_during_the_call_doesnt_get_the_held_result(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    _finish(CALL_JOB, "Rain from three.")
+    during = work.digest(BOT_CHAT)
+    assert "W1" in during and "Rain from three." not in during and "tells the user its result first" in during
+    assert work.call_ended(on.home, BOT_CHAT)
+    assert "Rain from three." in work.digest(BOT_CHAT)
+
+
+def test_a_save_releases_the_hold_when_the_bot_chat_cant_be_read(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    monkeypatch.setattr(work, "is_bot_chat", lambda chat, home: False)
+    assert work.call_ended(on.home, BOT_CHAT)
+    assert not work._call_on(on.home, BOT_CHAT)
+    assert not work.call_ended(on.home, OTHER_CHAT)

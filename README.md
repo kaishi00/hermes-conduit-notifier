@@ -1439,8 +1439,9 @@ in Conduit (Edit Bot > Work) or here:
   they follow the workstreams' rules: no memory or other bots, which the
   coordinator handles. Their updates wait while the call is on, until it's
   saved with the chat or two hours pass, so the call speaks each result
-  first and the coordinator reports it in the Bot Chat after; the Bot
-  Chat's other updates go as usual. A call that's never saved with the
+  first and the coordinator reports it in the Bot Chat after (its note
+  leaves their results out until then too); the Bot Chat's other updates
+  go as usual. A call that's never saved with the
   chat (Classic, or a phone that quit mid-call) holds them the full two
   hours.
 - Bots work together coordinator to coordinator. `work_ask` asks another of
