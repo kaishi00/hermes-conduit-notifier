@@ -1628,7 +1628,8 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
     # The phone adopts once Hermes took the request, so its turn may have
     # begun (its hooks finding no row yet): one whose chat holds the
     # request is running, and its turn's end settles it.
-    status = "running" if _asked_in(home, session) else "starting"
+    # One kept with its reply had its turn, whatever its chat shows yet.
+    status = "running" if isinstance(result, str) or _asked_in(home, session) else "starting"
     coordinator = _bot_chat_of(home) if isinstance(chat, str) and chat.strip() and is_bot_chat(chat.strip(), home) else ""
     if coordinator:
         # The coordinator's own, started by its call: it hears of it once the call is saved.

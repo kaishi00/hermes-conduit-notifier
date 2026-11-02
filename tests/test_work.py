@@ -4173,3 +4173,9 @@ def test_a_bot_chat_calls_held_update_goes_when_the_hold_runs_out(on, hermes, mo
     work.flush_wakes()
     wake, = submitted_to(hermes, BOT_CHAT)
     assert "W1" in wake["text"]
+
+
+def test_a_calls_job_kept_with_its_reply_settles_when_its_chat_cant_be_read(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_asked_in", lambda home, session: None)
+    kept = adopt(result="Rain from three.")
+    assert kept["work"]["status"] == "done" and "Rain from three." in on.get("W1").last_result

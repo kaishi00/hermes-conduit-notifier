@@ -138,10 +138,11 @@ async def post_workstreams_adopt(request: Request, response: Response, profile: 
     "title", "via": "phone" or "watch", "goal"?}, right after the phone
     made the job's session. The call follows the job as before; the row
     shows in the Work panel marked as a call's (``from_call``), settles with
-    its turns, never wakes the Bot Chat and waits for the user after a
-    restart. With "chat" the Bot Chat the call is kept with, the job is the
-    coordinator's own workstream instead, whose update waits until the call
-    is saved; "result" settles a turn that already ended. The same call's session again answers with its row
+    its turns, never wakes the Bot Chat (unless "chat", below, is the Bot
+    Chat) and waits for the user after a restart. With "chat" the Bot Chat
+    the call is kept with, the job is the coordinator's own workstream
+    instead, whose update waits until the call is saved; "result" settles a
+    turn that already ended. The same call's session again answers with its row
     (``adopted`` false); one of the bot's own workstreams' sessions is a 409
     (``taken``), and so is a bot whose work is off (``off``)."""
     response.headers["Cache-Control"] = "no-store"
