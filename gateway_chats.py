@@ -62,6 +62,7 @@ def _authorities(gateway: Any) -> list:
     try:
         found = lister(gateway) if callable(lister) else [getattr(gateway, "session_authority", None)]
     except Exception:  # noqa: BLE001 — none readable: none
+        logger.warning("Conduit: couldn't list the gateway's session authorities", exc_info=True)
         return []
     return [authority for authority in found if authority is not None]
 
@@ -76,7 +77,8 @@ def authority_session(session_id: Any) -> Optional[tuple]:
         sessions = getattr(authority, "sessions", None)
         try:
             live = sessions.get(session_id) if callable(getattr(sessions, "get", None)) else None
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — read as not open there, said in the log
+            logger.warning("Conduit: couldn't read a chat from the gateway's session authority", exc_info=True)
             live = None
         if live is not None:
             return gateway, authority, live
@@ -112,6 +114,18 @@ def authority_agent(session_id: Any) -> Optional[tuple]:
             logger.warning("Conduit: couldn't read the gateway's agent for a chat", exc_info=True)
             raise AgentLookupError("Conduit couldn't read the chat's agent on this Hermes") from exc
     return (authority, agent) if agent is not None else None
+
+
+_TURN_CONTROLS = ("session.steer", "session.redirect", "session.interrupt")
+
+
+def _reason(response: Any) -> Optional[str]:
+    """An error answer's refusal reason (``data.reason``, else its message)."""
+    error = response.get("error") if isinstance(response, dict) else None
+    if not isinstance(error, dict):
+        return None
+    data = error.get("data")
+    return (data.get("reason") if isinstance(data, dict) else None) or error.get("message")
 
 
 def _log_failed_detach(future: Any) -> None:
@@ -202,12 +216,23 @@ class _AuthorityLink:
         method = frame.get("method")
         params = dict(frame.get("params")) if isinstance(frame.get("params"), dict) else {}
         shaped: Any = None
+        sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
+        with self.lock:
+            fence_was_cached = sid in self.generations
         try:
-            shaped = self._request(method, params)
+            shaped = self._request(method, dict(params))
             if isinstance(shaped, dict) and "result" in shaped:
                 return {"jsonrpc": "2.0", "id": rid, "result": shaped["result"]}
             response = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": rid, "method": shaped[0],
                                                       "params": shaped[1]}))
+            if method in _TURN_CONTROLS and fence_was_cached and _reason(response) == "stale_generation":
+                # The fence came from events that may lag a newer turn: read
+                # the chat and go once more. Refused again, nothing runs.
+                with self.lock:
+                    self.generations.pop(sid, None)
+                shaped = self._request(method, dict(params))
+                response = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": rid, "method": shaped[0],
+                                                          "params": shaped[1]}))
         except Exception as exc:  # noqa: BLE001 — reported as the call's error
             if method == "session.close" and isinstance(shaped, tuple) and shaped[1].get("subscription_id"):
                 # Not detached: keep the view's subscription for another try.
@@ -353,9 +378,7 @@ class _AuthorityLink:
 
     def _answer(self, method: Any, params: Dict[str, Any], shaped: Any, response: dict) -> dict:
         error = response.get("error")
-        data = error.get("data") if isinstance(error, dict) else None
-        reason = ((data.get("reason") if isinstance(data, dict) else None) or error.get("message")) \
-            if isinstance(error, dict) else None
+        reason = _reason(response)
         if method == "approval.respond":
             prompt_id = shaped[1].get("prompt_id")
             if not error or reason == "stale_generation":

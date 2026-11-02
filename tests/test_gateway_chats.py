@@ -404,3 +404,23 @@ def test_under_the_gateway_pulse_never_uses_the_listeners_tui_registry(monkeypat
     # The authority can't be reached: unavailable, not the TUI registry.
     monkeypatch.setattr(pulse_host, "_authority_chats", lambda: None)
     assert not pulse_host.available()
+
+
+def test_a_control_refused_on_a_lagging_fence_reads_the_chat_and_goes_again(gateway):
+    chats, answers, connections = gateway
+    transport = Transport()
+    link = chats.link(transport)
+    link.generations["s7"] = 3  # from events that missed a newer turn
+    stale = {"error": {"code": 4001, "message": "stale_generation", "data": {"reason": "stale_generation"}}}
+    answers["session.interrupt"] = lambda request: (
+        stale if request["params"]["execution_generation"] == 3 else {"result": {}})
+    answers["session.resume"] = {"result": {"session_id": "s7", "running": True, "execution_generation": 5}}
+    assert _call(chats, transport, "session.interrupt", {"session_id": "s7"})["result"] == {}
+    sent = [(r["method"], r["params"].get("execution_generation")) for r in connections[0].requests]
+    assert sent == [("session.interrupt", 3), ("session.resume", None), ("session.interrupt", 5)]
+
+    # Refused again after the read: nothing runs.
+    link.generations["s8"] = 2
+    answers["session.steer"] = stale
+    answers["session.resume"] = {"result": {"session_id": "s8", "running": False, "execution_generation": 2}}
+    assert _call(chats, transport, "session.steer", {"session_id": "s8", "text": "x"})["result"] == {"status": "rejected"}
