@@ -2825,6 +2825,19 @@ def test_a_bypass_that_cant_be_turned_off_stops_the_send(home, hermes):
     assert hermes._sessions["rt-20261031_work_1"]["yolo"] is False
 
 
+def test_a_hermes_without_config_set_never_dead_ends_a_workstream(home, hermes):
+    store_mod.Store(home).set_workstream_approvals("off")
+    hermes.refuse["config.set"] = {"code": -32601, "message": "unknown method config.set"}
+    assert start()["ok"]
+    work.app_set_settings(home, {"workstream_approvals": "chats"})
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    assert work.app_act(home, "W1", "send", {"text": "One more thing."})["ok"]
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    hermes.calls.clear()
+    assert work.app_act(home, "W1", "send", {"text": "And another."})["ok"]
+    assert hermes.named("config.set") == []  # nothing left to turn off
+
+
 def test_a_bypass_that_cant_be_turned_on_still_starts_the_work(home, hermes):
     store_mod.Store(home).set_workstream_approvals("off")
     hermes.refuse["config.set"] = {"code": 5001, "message": "nope"}

@@ -375,8 +375,9 @@ class Broker:
         try:
             call("config.set", {"session_id": runtime_id, "key": "yolo", "value": "on" if on else "off",
                                 "scope": "session", **self._profile_params()})
-        except BrokerError:
-            if not on:
+        except BrokerError as error:
+            # A Hermes without config.set never turned it on, so there's nothing to turn off.
+            if not on and not error.unsupported:
                 raise
             logger.warning("conduit_push: couldn't turn off approvals in a workstream; Hermes still asks",
                            exc_info=True)
