@@ -3951,6 +3951,7 @@ def test_the_coordinators_list_says_how_to_read_a_calls_jobs(on, hermes):
 
 def test_adopt_takes_only_text(on, hermes):
     assert work.adopt(work._home(), ["x"], "t", via="phone")["error"] == "invalid"
+    assert work.adopt(work._home(), "s1", "t", via="phone", goal={"a": 1})["error"] == "invalid"
     assert on.get("W1") is None
 
 
@@ -3960,3 +3961,14 @@ def test_a_calls_job_after_a_compaction_keeps_its_row(on, hermes, monkeypatch):
     moved = adopt(session_id="20261102_voice_job_1b")
     assert moved["ok"] and not moved["adopted"] and moved["ref"] == "W1"
     assert on.get("W1").session_id == "20261102_voice_job_1b" and on.get("W2") is None
+
+
+def test_a_send_to_a_calls_job_whose_prompt_went_in_doesnt_repeat_its_task(on, hermes, monkeypatch):
+    adopt(goal="Is it raining in Lyon?")
+    _chat_db(on.home, [(CALL_JOB, "user", "[Background job started from a Conduit voice conversation.] Is it raining", None)])
+    restart(hermes, monkeypatch)  # before its first turn was seen
+    call("work_list")
+    hermes.calls.clear()
+    work.app_act(on.home, "W1", "send", {"text": "And tomorrow?"})
+    sent, = submitted_to(hermes, CALL_JOB)
+    assert "Is it raining in Lyon?" not in sent["text"] and "And tomorrow?" in sent["text"]

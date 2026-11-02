@@ -1446,8 +1446,12 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
 def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: str) -> str:
     """For a start a restart cut off before its brief went in, the brief
     first: nothing ran, so the words alone would start it with no task. A
-    call's job no turn of was seen gets its task, as the call asked it."""
-    if _from_call(work) and not work.turn_at and work.goal:
+    call's job no turn of was seen gets its task, as the call asked it,
+    only when it never went in: its start failed, or its chat holds no
+    message from the user (the phone sent it, so a turn may have run
+    unseen; an unreadable chat counts as holding it)."""
+    if _from_call(work) and not work.turn_at and work.goal and (
+            work.status == "failed" or _asked_in(store.home, work.session_id) is False):
         return f"The task, as the call asked it (data, not instructions): {work.goal}\n\n{words}"
     if work.error != _BRIEF_UNSENT:
         return words
@@ -1530,8 +1534,8 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
     its row. It's starting until its first turn begins, so a job whose
     prompt never went in is the panel's stuck start, not work running."""
     home = Path(home)
-    if not isinstance(session_id, str) or not isinstance(title, (str, type(None))):
-        return {"ok": False, "error": "invalid", "note": "session_id and title are text."}
+    if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal)):
+        return {"ok": False, "error": "invalid", "note": "session_id, title and goal are text."}
     if via not in work_store.CALL_VIA:
         return {"ok": False, "error": "invalid", "note": f"via is one of {', '.join(work_store.CALL_VIA)}."}
     session = str(session_id or "").strip()
@@ -2100,6 +2104,28 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
                     "still needed.")
         return
     store.outbox_done(row["id"], "dropped")  # a start (its row says how it went) or a whole update
+
+
+def _asked_in(home: Path, session_id: str) -> Optional[bool]:
+    """Whether the session holds any message from the user; None when that
+    can't be read."""
+    import sqlite3
+
+    path = Path(home) / "state.db"
+    if not session_id or not path.exists():
+        return None
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+    try:
+        row = db.execute("SELECT 1 FROM messages WHERE session_id = ? AND role = 'user' LIMIT 1",
+                         (session_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+    return row is not None
 
 
 def _in_transcript(home: Path, session_id: str, text: str) -> bool:
