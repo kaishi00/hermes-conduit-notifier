@@ -286,7 +286,9 @@ def discard_turn_surface(body: Any) -> bool:
     kept. Raises ValueError for a body that isn't one."""
     module = _turn_surface()
     session_id, digest = module.parse_discard(body)
-    if core._authority_session(session_id) is not None:
+    if core._gateway_runner() is not None:
+        # The gateway's listener: its reports are the plugin's own, kept
+        # whether or not the chat is still live there.
         return module.discard_digest_for_authority(session_id, digest)
     server = watch_jobs._tui_session_api()
     session = server._sessions.get(session_id) if server is not None else None

@@ -276,6 +276,9 @@ class _AuthorityLink:
                 if self._closed:
                     raise ConnectionError("This transport's connection to the authority is closed")
                 connection = self.connection
+        # An in-process AuthorityConnection over the authority object, not a
+        # socket: it doesn't drop on its own, and lives as long as this link
+        # (Hermes' session_controls; a gateway restart restarts this process).
         return await connection.dispatch(request)
 
     def _generation(self, sid: str) -> int:
