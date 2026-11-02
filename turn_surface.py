@@ -33,10 +33,12 @@ turn runs from the admitted message, not on the socket that sent it, so it
 can't tell Conduit's from another client's. The report is kept here instead,
 by the chat's session id (``record_for_authority``, one map for the process),
 and the turn whose session and text match it takes it: only Conduit reports,
-for the exact text it is about to send in that chat. A send the authority
-refused drops its report; one of Conduit's own sends that never reached the
-authority leaves it, so the same words sent from another client in that chat
-within ``AUTHORITY_FRESH_S`` would take its line.
+for the exact text it is about to send in that chat. A send of the
+plugin's own (Watch jobs, a Watch call's chat) that the authority refused
+drops its report. One the app sent on its own socket that the authority
+refused, or that never reached it, leaves it, as a refused send on the
+dashboard leaves its report on Hermes' record: the same words sent from
+another client in that chat within ``AUTHORITY_FRESH_S`` would take its line.
 
 Standalone (no imports from the plugin package): the dashboard loads it from
 its file, the plugin imports it.

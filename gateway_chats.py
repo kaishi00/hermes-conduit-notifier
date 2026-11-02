@@ -114,6 +114,12 @@ def authority_agent(session_id: Any) -> Optional[tuple]:
     return (authority, agent) if agent is not None else None
 
 
+def _log_failed_detach(future: Any) -> None:
+    # The older view stays open until the link closes.
+    if not future.cancelled() and future.exception() is not None:
+        logger.warning("Conduit: detaching an older view of a chat failed", exc_info=future.exception())
+
+
 class AgentLookupError(RuntimeError):
     """The gateway's agent for a chat couldn't be read (not: it has none)."""
 
@@ -279,9 +285,11 @@ class _AuthorityLink:
         request = {"jsonrpc": "2.0", "id": f"conduit-detach-{uuid.uuid4().hex}", "method": "session.detach",
                    "params": {"session_id": sid, "subscription_id": subscription}}
         try:
-            asyncio.run_coroutine_threadsafe(connection.dispatch(request), loop)
+            future = asyncio.run_coroutine_threadsafe(connection.dispatch(request), loop)
         except Exception:  # noqa: BLE001 — the view ends with the connection
             logger.debug("Conduit: detaching an older view failed", exc_info=True)
+            return
+        future.add_done_callback(_log_failed_detach)
 
     def _request(self, method: Any, params: Dict[str, Any]) -> Any:
         """The request in the authority's shape, or ``{"result": …}`` when
