@@ -154,6 +154,24 @@ async def post_workstreams_adopt(request: Request, response: Response, profile: 
                                     _workstream_actions_limiter)
 
 
+@router.post("/workstreams/call-ended")
+async def post_workstreams_call_ended(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """A call kept with a chat ended ({"chat"}), in any voice mode: when the
+    chat is the Bot Chat, what the call's workstreams held goes out now. A
+    call that saves its turns with the chat says so with that save too;
+    this covers one that doesn't (Classic writes its turns into the chat).
+    ``released`` says whether a hold was the Bot Chat's."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    if not isinstance(body, dict) or not isinstance(body.get("chat"), str) or not body["chat"].strip():
+        raise HTTPException(status_code=400, detail="Expected {\"chat\"}", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route(
+        "workstreams call ended", profile,
+        lambda: {"ok": True, "released": bool(_work_tool().call_ended(core._calls_home(), body["chat"]))},
+        _workstream_actions_limiter)
+
+
 @router.post("/workstreams/{ref}/{action}")
 async def post_workstream_action(ref: str, action: str, request: Request, response: Response,
                                  profile: Optional[str] = None) -> Any:

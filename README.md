@@ -1439,12 +1439,13 @@ in Conduit (Edit Bot > Work) or here:
   they follow the workstreams' rules: no memory or other bots, which the
   coordinator handles. Their updates wait while a call is on in the Bot
   Chat (any call there, so a turn of the coordinator's never lands in it
-  mid-call), until it's saved with the chat or two hours pass, so the call speaks each result
-  first and the coordinator reports it in the Bot Chat after (its note
+  mid-call), until it ends or two hours pass, so the call speaks each
+  result first and the coordinator reports it in the Bot Chat after (its note
   leaves their results out until then too); the Bot Chat's other updates
-  go as usual. A call that's never saved with the
-  chat (Classic, or a phone that quit mid-call) holds them the full two
-  hours.
+  go as usual. The phone also says when any such call ends
+  (`POST /workstreams/call-ended`), Classic's included, which writes its
+  turns into the chat rather than saving them; only a phone that quit
+  mid-call leaves them held the full two hours.
 - Bots work together coordinator to coordinator. `work_ask` asks another of
   your bots on this Hermes (by its name or profile) for an answer or a piece
   of work: it's an `ask_out` row in the asking bot's registry and an `ask_in`
@@ -1543,6 +1544,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, unavailable}` |
 | POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals}` | the settings as they are now |
 | POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?, chat?, result?}` (`via`: `phone` or `watch`; `result`: the reply of a turn that ended before the phone kept it, which settles the row; `chat`: the chat the call is kept with, so the Bot Chat's makes it the coordinator's workstream, `call` on its row) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title`, `goal`, `chat` or `result` isn't text; `off` (409) when the bot's workstreams are off |
+| POST | `/api/plugins/conduit_push/workstreams/call-ended` with `{chat}` (a call kept with that chat ended, in any voice mode) | `{ok, released}`; `released` is true when the chat is the Bot Chat, whose call's workstreams send their held updates now; 400 without `chat` |
 
 - `work` lists every open (unresolved) row, however old: active work first,
   then the rest by when it last changed. Rows are workstreams, and asks to

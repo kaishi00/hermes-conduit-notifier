@@ -3085,6 +3085,17 @@ def test_the_work_routes_answer_for_the_named_bot(on, hermes, monkeypatch):
     work._policy_cache.clear()
     off = client.post("/api/plugins/conduit_push/workstreams/adopt", json={"session_id": "y", "via": "phone"})
     assert off.status_code == 409 and off.json()["code"] == "off"
+    # A Bot Chat call's end, in any voice mode, releases its hold.
+    on.set_policy("strict")
+    work._policy_cache.clear()
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(session_id="20261102_voice_job_9", chat=BOT_CHAT)
+    assert work._call_on(on.home, BOT_CHAT)
+    ended = client.post("/api/plugins/conduit_push/workstreams/call-ended", json={"chat": BOT_CHAT})
+    assert ended.status_code == 200 and ended.json()["released"] and not work._call_on(on.home, BOT_CHAT)
+    again = client.post("/api/plugins/conduit_push/workstreams/call-ended", json={"chat": OTHER_CHAT})
+    assert again.status_code == 200 and not again.json()["released"]
+    assert client.post("/api/plugins/conduit_push/workstreams/call-ended", json={}).status_code == 400
 
 
 def test_a_settings_change_lands_in_the_named_bots_own_registry(on, hermes, monkeypatch, tmp_path):
