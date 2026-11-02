@@ -75,22 +75,31 @@ jobs:
         with:
           persist-credentials: false
           # A pull_request checkout is the merge commit: HEAD^1 is the base.
-          # A push to main is one squash merge: HEAD^1 is main before it.
+          # A push is compared with the commit it replaced, fetched below.
           fetch-depth: 2
 
       - name: Does the change touch Pulse
         # Any pulse*.py, a Pulse test, the shared fixtures, the test
         # requirements or this workflow. Fails closed: a diff it can't read
         # runs the suite. A change elsewhere that breaks it shows up in the
-        # daily run.
+        # daily run. A push counts every commit it brought (from the commit
+        # it replaced), and a push with no earlier commit runs the suite.
         id: pulse
         env:
           EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           run=true
-          if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "push" ]; then
-            if changed=$(git -c core.quotePath=false diff --name-only HEAD^1 HEAD) && [ -n "$changed" ] \
+          base=''
+          if [ "$EVENT" = "pull_request" ]; then
+            base=HEAD^1
+          elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "${BEFORE//0/}" != "" ] \
+            && git fetch --no-tags --depth=1 origin "$BEFORE"; then
+            base=$BEFORE
+          fi
+          if [ -n "$base" ]; then
+            if changed=$(git -c core.quotePath=false diff --name-only "$base" HEAD) && [ -n "$changed" ] \
               && ! printf '%s\n' "$changed" \
                 | grep -E '(^|/)pulse[^/]*\.py$|^tests/test_pulse[^/]*\.py$|^tests/conftest\.py$|^tests/requirements\.txt$|^\.github/workflows/tests\.yml$' >/dev/null; then
               run=false
