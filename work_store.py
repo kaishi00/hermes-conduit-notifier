@@ -350,7 +350,7 @@ class Store:
 
     def list(self, *, active_only: bool = False, include_closed: bool = False, limit: int = 50,
              active_or_changed: bool = False, changed_since: float | None = None,
-             by_change: bool = False) -> list[Work]:
+             by_change: bool = False, calls: Optional[bool] = None) -> list[Work]:
         """Newest first (``by_change``: last changed first). A ``limit`` of
         -1 takes every row. ``active_or_changed``: open rows that are active
         or changed since the coordinator last saw them, chosen before the
@@ -368,6 +368,9 @@ class Store:
             where.append("closed_at = 0")
         if changed_since is not None:
             where.append("updated_at >= ?")
+        if calls is not None:
+            # Only a call's jobs (True), or only the rest (False).
+            where.append(_FROM_CALL if calls else f"NOT ({_FROM_CALL})")
         if where:
             query += " WHERE " + " AND ".join(where)
         order = "updated_at DESC, created_at DESC" if by_change else "created_at DESC"
