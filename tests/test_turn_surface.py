@@ -268,3 +268,28 @@ def test_a_subagent_turn_leaves_the_report_alone(gateway, client):
 def test_no_gateway_in_this_process_means_no_line(monkeypatch):
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     assert surfaces.note(True, "hi", CONDUIT) is None
+
+
+# --- On the gateway's own listener (hermes-conduit#1618) -----------------------
+
+def test_on_the_listener_a_report_is_kept_for_the_authoritys_turn(gateway, client, monkeypatch):
+    authority = types.SimpleNamespace(sessions={"auth-1": types.SimpleNamespace(source="src")})
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace(session_authority=authority)
+    authorities = types.ModuleType("gateway.session_authorities")
+    authorities.all_authorities = lambda runner: [authority]
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    monkeypatch.setitem(sys.modules, "gateway.session_authorities", authorities)
+    monkeypatch.delitem(sys.__dict__, surfaces._AUTHORITY_STORE, raising=False)
+
+    response = client.post(f"{BASE}/turn-surface", json=_report("watch", "Call Mum", "spoken", session_id="auth-1"))
+    assert response.json() == {"ok": True, "recorded": True}
+    # Not on the TUI gateway's record: the authority runs this chat.
+    assert surfaces.KEY not in gateway.session
+    line = surfaces.note(True, "Call Mum", session_id="auth-1")
+    assert line and "Apple Watch" in line
+    # Taken once.
+    assert surfaces.note(True, "Call Mum", session_id="auth-1") is None
+    # A chat the authority doesn't have open keeps nothing.
+    assert client.post(f"{BASE}/turn-surface", json=_report("watch", session_id="auth-2")).json() == {
+        "ok": True, "recorded": False}

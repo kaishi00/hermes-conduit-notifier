@@ -19,7 +19,8 @@ plugin's own Watch transports name their surface themselves.
 Matching the text keeps the line on the message it describes: a message
 that steered or redirected a turn already running never becomes a turn of
 its own, so its report labels nothing (not a goal's next step, not a
-background result), and two queued messages each keep their own. A turn
+background result), and two queued messages with different words each
+keep their own (two with the same words share one report). A turn
 whose text Hermes changed, or that merges several messages, gets no line.
 It counts only when the turn came from Conduit's socket, and a report older
 than ``FRESH_S`` counts as none. Under plugin isolation or a turn on a
