@@ -174,8 +174,13 @@ def test_a_call_that_times_out_is_cancelled_and_says_it_may_have_started(gateway
     chats.connect = lambda link: types.SimpleNamespace(dispatch=lambda request: slow())
     original = chats.run
     chats.run = lambda coroutine: original(coroutine, timeout=0.2)
-    answer = _call(chats, Transport(), "session.interrupt", {"session_id": "s9"})
+    transport = Transport()
+    chats.link(transport).generations["s9"] = 3
+    answer = _call(chats, transport, "session.interrupt", {"session_id": "s9"})
     assert answer["error"]["message"].endswith("timed out; it may still have started")
+    # Reading the chat's turn timed out: the control itself never went.
+    answer = _call(chats, transport, "session.interrupt", {"session_id": "s10"})
+    assert answer["error"]["message"] == "Reading the chat's turn timed out; nothing was sent"
 
 
 def test_a_failing_owner_scope_fails_closed(monkeypatch):
@@ -215,7 +220,8 @@ def test_approvals_read_in_the_tui_gateways_words(gateway):
 def test_an_ended_turn_answers_as_nothing_running(gateway):
     chats, answers, connections = gateway
     stale = {"error": {"code": 4001, "message": "stale_generation", "data": {"reason": "stale_generation"}}}
-    answers.update({"session.steer": stale, "session.interrupt": stale, "approval.respond": stale})
+    answers.update({"session.steer": stale, "session.interrupt": stale, "approval.respond": stale,
+                    "session.resume": {"result": {"session_id": "s1", "execution_generation": 2}}})
     transport = Transport()
     chats.link(transport).write(_event("s1", "approval.request", {"prompt_id": "p1"}))
     assert _call(chats, transport, "session.steer", {"session_id": "s1", "text": "x"})["result"] == {"status": "rejected"}
@@ -231,6 +237,23 @@ def test_an_unknown_generation_is_read_from_the_chat(gateway):
     _call(chats, transport, "session.interrupt", {"session_id": "s2"})
     assert [r["method"] for r in connections[0].requests] == ["session.resume", "session.interrupt"]
     assert connections[0].requests[-1]["params"]["execution_generation"] == 7
+
+
+def test_a_running_turn_the_chat_doesnt_name_sends_no_control(gateway):
+    chats, answers, connections = gateway
+    # A fence of 0 would be refused as stale and read as nothing running.
+    answers["session.resume"] = {"result": {"session_id": "s3", "running": True}}
+    answer = _call(chats, Transport(), "session.interrupt", {"session_id": "s3"})
+    assert answer["error"]["message"] == "Hermes didn't say which turn the chat is running"
+    assert [r["method"] for r in connections[0].requests] == ["session.resume"]
+    # A refused read is no fence either.
+    answers["session.resume"] = {"error": {"code": 4001, "message": "not_found"}}
+    assert "error" in _call(chats, Transport(), "session.steer", {"session_id": "s3", "text": "x"})
+    # Nothing running: the control goes, and its refusal reads as nothing running.
+    answers["session.resume"] = {"result": {"session_id": "s4", "running": False}}
+    answers["session.interrupt"] = {"error": {"code": 4001, "message": "stale_generation",
+                                              "data": {"reason": "stale_generation"}}}
+    assert _call(chats, Transport(), "session.interrupt", {"session_id": "s4"})["result"] == {}
 
 
 def test_a_released_transport_closes_its_connection(gateway):
@@ -362,5 +385,6 @@ def test_a_second_view_of_a_chat_detaches_the_first(gateway):
 def test_an_error_with_odd_data_is_still_an_answer(gateway):
     chats, answers, _connections = gateway
     answers["session.steer"] = {"error": {"code": 1, "message": "nope", "data": "text"}}
+    answers["session.resume"] = {"result": {"session_id": "o1", "execution_generation": 1}}
     answer = _call(chats, Transport(), "session.steer", {"session_id": "o1", "text": "x"})
     assert answer["error"]["message"] == "nope"

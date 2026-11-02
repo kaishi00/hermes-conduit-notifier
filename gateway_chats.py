@@ -120,6 +120,12 @@ def _log_failed_detach(future: Any) -> None:
         logger.warning("Conduit: detaching an older view of a chat failed", exc_info=future.exception())
 
 
+def _log_failed_close(future: Any) -> None:
+    # The authority drops a dead connection's views itself.
+    if not future.cancelled() and future.exception() is not None:
+        logger.debug("Conduit: closing an authority connection failed", exc_info=future.exception())
+
+
 class AgentLookupError(RuntimeError):
     """The gateway's agent for a chat couldn't be read (not: it has none)."""
 
@@ -252,14 +258,26 @@ class _AuthorityLink:
             known = self.generations.get(sid)
         if known is None:
             # Its own id: two chats' controls on one connection read their fences at once.
-            snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0", "id": f"conduit-fences-{uuid.uuid4().hex}",
-                                                      "method": "session.resume",
-                                                      "params": {"session_id": sid, "omit_messages": True}}))
+            try:
+                snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
+                                                          "id": f"conduit-fences-{uuid.uuid4().hex}",
+                                                          "method": "session.resume",
+                                                          "params": {"session_id": sid, "omit_messages": True}}))
+            except TimeoutError as exc:
+                # Nothing was sent for the control itself: not "may have started".
+                raise RuntimeError("Reading the chat's turn timed out; nothing was sent") from exc
             result = snapshot.get("result") if isinstance(snapshot, dict) else None
             self._note_snapshot(result)
             with self.lock:
                 known = self.generations.get(sid)
-        return known or 0
+            if known is None:
+                if isinstance(result, dict) and result.get("running") is False:
+                    # Nothing runs: any fence reads as nothing to steer or stop.
+                    return 0
+                # A fence of 0 against a running turn would read its refusal as
+                # nothing running (an interrupt "done" while the turn goes on).
+                raise RuntimeError("Hermes didn't say which turn the chat is running")
+        return known
 
     def _note_snapshot(self, result: Any) -> None:
         if not isinstance(result, dict) or not isinstance(result.get("session_id"), str):
@@ -376,9 +394,11 @@ class _AuthorityLink:
         if connection is None or loop is None or loop.is_closed():
             return
         try:
-            asyncio.run_coroutine_threadsafe(connection.close(), loop)
+            future = asyncio.run_coroutine_threadsafe(connection.close(), loop)
         except Exception:  # noqa: BLE001 — the authority drops a dead connection's views itself
             logger.debug("Conduit: closing an authority connection failed", exc_info=True)
+            return
+        future.add_done_callback(_log_failed_close)
 
 
 class _AuthorityChats:
