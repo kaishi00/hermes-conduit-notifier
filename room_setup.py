@@ -477,9 +477,9 @@ def _mcp_choices(hermes: Hermes, home: Path) -> Optional[tuple[list[str], set]]:
 def _checked_mcp(value: Any, offered: list[str], room: int) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(name, str) for name in value):
         raise SetupError("bad_mcp_servers", "The room ceiling's MCP servers are a list of server names")
-    if len(value) > room:
-        raise SetupError("bad_mcp_servers", f"The room ceiling names at most {MAX_CEILING} toolsets and MCP servers")
     names = {name.strip() for name in value}
+    if len(names) > room:
+        raise SetupError("bad_mcp_servers", f"The room ceiling names at most {MAX_CEILING} toolsets and MCP servers")
     for name in sorted(names):
         if name not in offered:
             others = ", ".join(offered) or "none"
@@ -600,13 +600,15 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
         elif name not in _ALWAYS:
             saved_rest.append(name)
     ids = {choice["id"] for choice in choices}
-    if listed_mcp is None and ours and NO_MCP not in saved:
-        # Servers saved before, which this Hermes can't list now: the ceiling stays as it is, and nothing is written
-        # until it can.
+    # Servers saved before, which this Hermes can't list now (a saved name that's no toolset may be one): the ceiling
+    # stays as it is, and nothing is written until it can.
+    unreadable = listed_mcp is None and ours and NO_MCP not in saved and any(
+        name not in ids and name not in _ALWAYS for name in saved)
+    if unreadable:
         blockers.append({"code": "mcp_unreadable", "message": (
             f"Profile {profile}'s room ceiling names MCP servers, and this Hermes couldn't list its MCP servers just "
             "now, so the setup leaves the ceiling as it is. Check its mcp_servers in config.yaml, then try again.")})
-        saved_rest = [name for name in saved if name not in _ALWAYS]
+        saved_rest = [name for name in saved_rest if name in ids]
     elif ours and NO_MCP not in saved:
         # Once the ceiling names servers, a name that's neither a toolset nor a server Hermes has may be a server
         # taken out, and would be one again if it came back.
@@ -632,7 +634,12 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
     target_mcp = asked_mcp if asked_mcp is not None else sorted(saved_mcp if NO_MCP not in (saved or []) else ())
     if target_mcp:
         target = [name for name in target if name in ids]
+    if len(set(target) - _ALWAYS) + len(target_mcp) > MAX_CEILING:
+        raise SetupError("bad_ceiling", f"The room ceiling names at most {MAX_CEILING} toolsets and MCP servers, "
+                                        "the saved MCP servers included")
     want_ceiling = sorted({*target, ROOMS_TOOLSET, *target_mcp, *(() if target_mcp else (NO_MCP,))})
+    if unreadable:
+        want_ceiling = saved
     profile_writes: dict = {}
     if saved != want_ceiling:
         profile_writes[f"platform_toolsets.{PLATFORM}"] = want_ceiling

@@ -730,7 +730,8 @@ def test_a_server_spelled_with_its_toolset_name_counts_as_chosen(hermes):
     assert _ceiling(hermes) == ["conduit_rooms", "github", "web"]
 
 
-@pytest.mark.parametrize("mcp_servers", [["nope"], ["off"], "github", [3], ["github"] * 65, {"github": True},
+@pytest.mark.parametrize("mcp_servers", [["nope"], ["off"], "github", [3], [f"s{index}" for index in range(65)],
+                                         {"github": True},
                                          ["web"], ["no_mcp"]])
 def test_an_mcp_server_hermes_doesnt_offer_is_refused(hermes, mcp_servers):
     _servers(hermes, {"github": GITHUB, "off": {**NOTES, "enabled": False}, "web": GITHUB})
@@ -766,6 +767,7 @@ def test_saved_servers_hermes_cant_list_now_block_the_setup(hermes, monkeypatch,
     monkeypatch.setattr(hermes, "mcp_servers", broken)
     state = _state(hermes)
     assert [blocker["code"] for blocker in state["blockers"]] == ["mcp_unreadable"] and not state["ready"]
+    assert state["ceiling"] == ["web"] and "ceiling" not in state["needs"]
     for kwargs in ({}, {"ceiling": ["vision"]}):
         with pytest.raises(setup.SetupError) as refused:
             _apply(hermes, **kwargs)
@@ -783,6 +785,40 @@ def test_naming_servers_hermes_cant_list_now_is_the_same_refusal(hermes, monkeyp
     assert hermes.config_writes == []
     _apply(hermes, ceiling=["web"], mcp_servers=[])
     assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
+
+
+def test_a_saved_ceiling_naming_only_toolsets_doesnt_need_servers_listed(hermes, monkeypatch):
+    # Without no_mcp, Hermes would give it every enabled server, so the setup puts no_mcp back.
+    _write(hermes.root / "config.yaml", {**_yaml(hermes.root / "config.yaml"),
+                                         "platform_toolsets": {"api_server": ["conduit_rooms", "web"]}})
+    monkeypatch.setattr(hermes, "mcp_servers", lambda home: None)
+    assert _state(hermes)["blockers"] == []
+    _apply(hermes)
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
+
+
+def test_saved_servers_fit_in_a_ceiling_given_without_them(hermes):
+    extra = [f"t{index:02}" for index in range(63)]
+    hermes.toolsets += [(name, name, name) for name in extra]
+    for name in extra:
+        hermes.tools[name] = [name]
+    _servers(hermes, {"github": GITHUB, "notes": NOTES})
+    _apply(hermes, ceiling=["web"], mcp_servers=["github", "notes"])
+    with pytest.raises(setup.SetupError) as refused:
+        _apply(hermes, ceiling=extra)
+    assert refused.value.code == "bad_ceiling" and "MCP servers" in str(refused.value)
+    _apply(hermes, ceiling=extra[:62])
+    assert {"github", "notes"} <= set(_ceiling(hermes))
+
+
+def test_a_server_named_twice_counts_once(hermes):
+    extra = [f"t{index:02}" for index in range(63)]
+    hermes.toolsets += [(name, name, name) for name in extra]
+    for name in extra:
+        hermes.tools[name] = [name]
+    _servers(hermes, {"github": GITHUB})
+    _apply(hermes, ceiling=extra, mcp_servers=["github", "github"])
+    assert "github" in _ceiling(hermes)
 
 
 def test_named_servers_fit_in_the_ceiling_kept_with_them(hermes):
