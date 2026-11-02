@@ -127,9 +127,9 @@ class Hermes:
     served: Callable[[Path], Optional[str]]
     runtime_status: Callable[[Path], Optional[Mapping[str, Any]]]
     gateway_live: Callable[[Mapping[str, Any]], bool]
-    # A profile's MCP servers: the enabled ones and every one its config names. A Hermes that can't say has none
-    # to offer.
-    mcp_servers: Callable[[Path], tuple[set, set]] = lambda home: (set(), set())
+    # A profile's MCP servers: the enabled ones and every one its config names, or None from a Hermes that can't
+    # say (it offers none, and a ceiling naming some stays as it is).
+    mcp_servers: Callable[[Path], Optional[tuple[set, set]]] = lambda home: None
 
     @classmethod
     def load(cls, env_scope: Optional[Callable[[Path], Any]] = None) -> "Hermes":
@@ -176,9 +176,9 @@ class Hermes:
         except ImportError:
             enabled_mcp = None
 
-        def mcp_servers(home: Path) -> tuple[set, set]:
+        def mcp_servers(home: Path) -> Optional[tuple[set, set]]:
             if not callable(enabled_mcp):
-                return set(), set()
+                return None
             config = effective_config(Path(home) / "config.yaml")
             configured = config.get("mcp_servers") if isinstance(config, Mapping) else None
             named = {str(name) for name in configured} if isinstance(configured, Mapping) else set()
@@ -449,15 +449,27 @@ def _checked_ceiling(ceiling: Any, choices: list[dict]) -> list[str]:
     return sorted(names)
 
 
-def _mcp_choices(hermes: Hermes, home: Path, choices: list[dict]) -> tuple[list[str], set]:
-    """The profile's enabled MCP servers a ceiling can name, and every server it has. A server named like a
-    toolset or Conduit's own isn't offered: the ceiling couldn't tell them apart."""
+def _mcp_choices(hermes: Hermes, home: Path) -> Optional[tuple[list[str], set]]:
+    """The profile's enabled MCP servers a ceiling can name, and every server it has, or None when Hermes can't
+    say. A server named like any Hermes toolset (one rooms leave out too) or Conduit's own isn't offered: the
+    ceiling couldn't tell them apart."""
     try:
-        enabled, known = hermes.mcp_servers(Path(home))
-    except Exception as exc:  # noqa: BLE001 - none offered, and none kept
+        listed = hermes.mcp_servers(Path(home))
+        if listed is None:
+            return None
+        enabled, known = listed
+    except Exception as exc:  # noqa: BLE001 - unknown: nothing offered, and a saved list stays as it is
         logger.warning("Linked Rooms setup couldn't list this profile's MCP servers (%s)", type(exc).__name__)
-        return [], set()
-    taken = {choice["id"] for choice in choices} | _ALWAYS | {OWN_TOOLSET} | SETTINGS_ONLY
+        return None
+    try:
+        toolsets = {str((list(row) + [""])[0]) for row in hermes.toolsets()}
+    except Exception:  # noqa: BLE001 - _choices already read them, so this doesn't happen
+        toolsets = set()
+    try:
+        toolsets |= {str(name) for name in hermes.builtin_toolsets()} | {str(name) for name in hermes.plugin_toolsets()}
+    except Exception:  # noqa: BLE001
+        pass
+    taken = toolsets | _ALWAYS | {OWN_TOOLSET} | SETTINGS_ONLY
     offered = sorted(str(name) for name in enabled if str(name) not in taken and not str(name).startswith(MCP_PREFIX))
     return offered, {str(name) for name in {*known, *enabled}} - taken
 
@@ -516,7 +528,8 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
     root = room_identity.root_home(home)
     choices = _choices(hermes)
     asked = None if ceiling is None else _checked_ceiling(ceiling, choices)
-    mcp_offered, mcp_known = _mcp_choices(hermes, home, choices)
+    listed_mcp = _mcp_choices(hermes, home)
+    mcp_offered, mcp_known = listed_mcp if listed_mcp is not None else ([], set())
     root_config = hermes.read_config(root / "config.yaml")
     profile_config = root_config if home == root else hermes.read_config(home / "config.yaml")
     env = dict(hermes.read_env(root / ".env"))
@@ -587,7 +600,14 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
         elif name not in _ALWAYS:
             saved_rest.append(name)
     ids = {choice["id"] for choice in choices}
-    if ours and NO_MCP not in saved:
+    if listed_mcp is None and ours and NO_MCP not in saved:
+        # Servers saved before, which this Hermes can't list now: the ceiling stays as it is, and nothing is written
+        # until it can.
+        blockers.append({"code": "mcp_unreadable", "message": (
+            f"Profile {profile}'s room ceiling names MCP servers, and this Hermes couldn't list its MCP servers just "
+            "now, so the setup leaves the ceiling as it is. Check its mcp_servers in config.yaml, then try again.")})
+        saved_rest = [name for name in saved if name not in _ALWAYS]
+    elif ours and NO_MCP not in saved:
         # Once the ceiling names servers, a name that's neither a toolset nor a server Hermes has may be a server
         # taken out, and would be one again if it came back.
         saved_rest = [name for name in saved_rest if name in ids]

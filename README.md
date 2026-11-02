@@ -3532,7 +3532,10 @@ It changes only what needs it:
   `no_mcp` is back: Hermes would give a list naming no server it has every
   enabled one. Until then the setup isn't ready, and rooms already started
   stop hearing the agent, as for any ceiling change. A chosen server you turn
-  off stays chosen and stays off. A server named like a toolset (`web`) can't be
+  off stays chosen and stays off. When a ceiling names servers and Hermes can't list the
+  profile's MCP servers just then, the setup stops (`mcp_unreadable`) and
+  leaves the ceiling as it is. A server named like any Hermes toolset (`web`,
+  or `memory`, which rooms leave out) can't be
   chosen, since the ceiling couldn't tell the two apart, and once servers
   are named, a saved toolset this Hermes no longer has is dropped for the
   same reason.

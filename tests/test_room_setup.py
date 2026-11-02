@@ -745,6 +745,41 @@ def test_a_server_named_like_a_toolset_isnt_offered(hermes):
     assert _state(hermes)["mcp_choices"] == [{"id": "github"}]
 
 
+def test_a_server_named_like_a_toolset_rooms_leave_out_isnt_offered(hermes):
+    hermes.toolsets += [("memory", "🧠 Memory", "persistent memory")]
+    hermes.tools["memory"] = ["memory"]
+    _servers(hermes, {"memory": NOTES, "discord": GITHUB, "stt": NOTES, "github": GITHUB})
+    assert _state(hermes)["mcp_choices"] == [{"id": "github"}]
+
+
+@pytest.mark.parametrize("fails", ["raises", "unlisted"])
+def test_saved_servers_hermes_cant_list_now_block_the_setup(hermes, monkeypatch, fails):
+    _servers(hermes, {"github": GITHUB})
+    _apply(hermes, ceiling=["web"], mcp_servers=["github"])
+    before = _ceiling(hermes)
+    writes = len(hermes.config_writes)
+
+    def broken(home):
+        if fails == "raises":
+            raise OSError("config.yaml unreadable")
+        return None
+    monkeypatch.setattr(hermes, "mcp_servers", broken)
+    state = _state(hermes)
+    assert [blocker["code"] for blocker in state["blockers"]] == ["mcp_unreadable"] and not state["ready"]
+    for kwargs in ({}, {"ceiling": ["vision"]}):
+        with pytest.raises(setup.SetupError) as refused:
+            _apply(hermes, **kwargs)
+        assert refused.value.code == "mcp_unreadable" and refused.value.status == 409
+    assert _ceiling(hermes) == before and len(hermes.config_writes) == writes
+
+
+def test_a_ceiling_without_servers_doesnt_need_them_listed(hermes, monkeypatch):
+    _apply(hermes, ceiling=["web"])
+    monkeypatch.setattr(hermes, "mcp_servers", lambda home: None)
+    state = _state(hermes)
+    assert state["blockers"] == [] and state["mcp_choices"] == [] and "ceiling" not in state["needs"]
+
+
 def test_each_profile_offers_its_own_servers(hermes):
     _servers(hermes, {"github": GITHUB})
     _servers(hermes, {"notes": NOTES}, profile="laifu")
