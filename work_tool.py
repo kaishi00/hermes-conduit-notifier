@@ -78,6 +78,7 @@ WAKE_BATCH_S = 3.0
 WAKE_BUSY_RETRY_S = 2.0
 WAKE_BUSY_MAX_S = 600.0
 DIGEST_ITEMS = 12
+DIGEST_CALL_ITEMS = 6  # a call's jobs, listed after the bot's own work
 DIGEST_RESULT_CHARS = 240
 READ_MESSAGES = 12
 READ_MESSAGE_CHARS = 1500
@@ -1526,9 +1527,13 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
         return {"ok": False, "error": "missing", "note": "Name the job's session."}
     if len(session) > 200:
         return {"ok": False, "error": "invalid", "note": "That session id is too long to be a session's."}
-    if is_bot_chat(session, home):
+    titled = False if _is_child(session) else _titled_bot_chat(session, home)
+    if titled is True:
         # The coordinator's own chat is never a job of its work.
         return {"ok": False, "error": "invalid", "note": "That's the bot's Bot Chat, not a call's job."}
+    if titled is None:
+        # Its title couldn't be read, so it may be the Bot Chat: kept next time.
+        return {"ok": False, "error": "unavailable", "note": "This bot's chats can't be read right now."}
     if policy(home) == "off":
         # The bot's work is off (or can't run here): the call keeps its job as before.
         return {"ok": False, "error": "off", "note": "This bot's workstreams are off, so the job isn't kept."}
@@ -2041,7 +2046,8 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
             store.update(work.ref, error=_cut(f"Your message may not have reached it before Hermes restarted: "
                                               f"«{_cut(row['text'], 200)}» Send it again if it's still needed.", 300))
             return
-        if work is None or work.closed_at or not work.coordinator:
+        # A call's job has no coordinator, but the bot that sent to it is told as any sender is.
+        if work is None or work.closed_at or not (work.coordinator or (kind == "send" and _from_call(work))):
             store.outbox_done(row["id"], "lost")
             return
         # Running again (recovery continued it): sent once more, behind
@@ -3104,7 +3110,11 @@ def digest(session_id: Any) -> Optional[str]:
         _sweep(home, store)
     except Exception:  # noqa: BLE001
         logger.debug("conduit_push: work sweep failed", exc_info=True)
-    rows = store.list(active_or_changed=True, limit=DIGEST_ITEMS)
+    # A call's jobs have their own few lines, so they never push the
+    # coordinator's own work out of its note.
+    listed = store.list(active_or_changed=True, limit=-1)
+    rows = ([work for work in listed if not _from_call(work)][:DIGEST_ITEMS]
+            + [work for work in listed if _from_call(work)][:DIGEST_CALL_ITEMS])
     lines = []
     for work in rows:
         status = "ready for the user to look at" if work.status == "ready" else work.status.replace('_', ' ')

@@ -3855,3 +3855,31 @@ def test_a_calls_job_whose_start_failed_says_so(on, hermes):
     work.turn_started("20261102_voice_job_2")
     assert not work.call_start_failed(on.home, "20261102_voice_job_2", "late")
     assert on.get("W2").status == "running"
+
+
+def test_the_bots_send_to_a_calls_job_a_restart_cut_off_is_handed_back(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt()
+    work.turn_started(CALL_JOB)
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    on.outbox_add("W1", "send", CALL_JOB, "Add the wind too.")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "Your message to W1" in wake["text"] and "Add the wind too." in wake["text"]
+
+
+def test_a_chat_whose_title_cant_be_read_isnt_adopted(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_titled_bot_chat", lambda session_id, home=None: None)
+    refused = adopt()
+    assert not refused["ok"] and refused["error"] == "unavailable" and on.get("W1") is None
+
+
+def test_a_calls_jobs_never_push_the_bots_own_work_out_of_its_note(on, hermes):
+    start()
+    for n in range(work.DIGEST_ITEMS + 2):
+        adopt(session_id=f"20261102_voice_job_{n + 10}", title=f"Call job {n}")
+    note = work.digest(BOT_CHAT)
+    assert "W1 “Login bug”" in note
+    assert note.count("(a job from a voice call") == work.DIGEST_CALL_ITEMS
