@@ -323,3 +323,17 @@ def test_a_refused_answer_keeps_its_prompt_to_try_again(gateway):
     assert _call(chats, transport, "approval.respond", {"session_id": "s1", "request_id": "p1", "choice": "bogus"})["error"]
     answers["approval.respond"] = {"result": {"status": "resolved", "prompt_id": "p1"}}
     assert _call(chats, transport, "approval.respond", {"session_id": "s1", "request_id": "p1", "choice": "once"})["result"] == {"resolved": 1}
+
+
+def test_a_failed_detach_keeps_the_view_to_close_again(gateway):
+    chats, answers, connections = gateway
+    answers["session.resume"] = {"result": {"session_id": "d1", "execution_generation": 1, "subscription_id": "sub-d"}}
+    transport = Transport()
+    _call(chats, transport, "session.resume", {"session_id": "d1"})
+    answers["session.detach"] = {"error": {"code": 5000, "message": "storage_unavailable",
+                                           "data": {"reason": "storage_unavailable"}}}
+    assert _call(chats, transport, "session.close", {"session_id": "d1"})["error"]
+    answers["session.detach"] = {"result": {}}
+    _call(chats, transport, "session.close", {"session_id": "d1"})
+    detaches = [r for r in connections[0].requests if r["method"] == "session.detach"]
+    assert len(detaches) == 2 and detaches[1]["params"]["subscription_id"] == "sub-d"

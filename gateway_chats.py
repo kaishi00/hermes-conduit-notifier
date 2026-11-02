@@ -200,8 +200,8 @@ class _AuthorityLink:
         if not isinstance(response, dict):
             self._drop_surface(method, params)
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"{method} gave no answer"}}
-        if method == "prompt.submit" and (response.get("error") or str(
-                (response.get("result") or {}).get("status") or "").lower() == "terminal"):
+        result = response.get("result") if isinstance(response.get("result"), dict) else {}
+        if method == "prompt.submit" and (response.get("error") or str(result.get("status") or "").lower() == "terminal"):
             # No turn of that text is coming (refused, or settled without one): its
             # surface line would wait for the next one. "queued", "started" and
             # "unknown" each have the turn still to run.
@@ -317,6 +317,12 @@ class _AuthorityLink:
             with self.lock:
                 self.generations.pop(sid, None)
             return {**response, "error": None, "result": {} if method == "session.interrupt" else {"status": "rejected"}}
+        if method == "session.close" and error:
+            # Not detached: keep the view's subscription for another try.
+            subscription = shaped[1].get("subscription_id")
+            if subscription:
+                with self.lock:
+                    self.subscriptions.setdefault(params.get("session_id"), subscription)
         if not error and method in ("session.create", "session.resume"):
             self._note_snapshot(response.get("result"))
         return response
