@@ -1404,6 +1404,24 @@ in Conduit (Edit Bot > Work) or here:
   Hermes' Tool Search). They answer only in that bot's canonical Bot Chat, and
   name work by ref (W1, W2 for workstreams, A1, A2 for asks), never by session
   id, so a bot only ever reaches its own work.
+- A workstream can read the bot's other workstreams with `work_list` and
+  `work_read` (read only, and not the asks between bots), so it can use what
+  another found or made without the coordinator passing it on. It can't send
+  to, stop or start work; if it needs another workstream to do something, it
+  says so in its report.
+- `work_start` with `cwd` records the git repository that folder is in. When
+  other running work is in the same repository, the coordinator is told and
+  the new workstream's brief names them, so it leaves their changes alone.
+  With `worktree: true` the workstream works in a git worktree of its own
+  instead, on a branch of its own: Hermes' own subagent worktree
+  (`<repo>/.worktrees/subagent-work-<bot>-<ref>-…`, branch
+  `hermes-subagent/…`), on Hermes' local terminal only. A folder outside a
+  repository, or a terminal on docker, ssh or modal, starts nothing and says
+  why. Resolving the workstream removes its worktree only when it holds
+  nothing (no commits, a clean tree); one with work in it is kept for you to
+  merge, and Hermes' worktree sweep archives it once it's idle. Sent words
+  again, a workstream whose worktree was removed gets it back at the same
+  path. Conduit shows the branch on its card.
 - Bots work together coordinator to coordinator. `work_ask` asks another of
   your bots on this Hermes (by its name or profile) for an answer or a piece
   of work: it's an `ask_out` row in the asking bot's registry and an `ask_in`
@@ -1507,7 +1525,8 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   and from other bots (`kind` `ask_out` with `bot`, the bot it's waiting on,
   or `ask_in`). Each row has its status, checklist, the step it's on, its
   last result, `pinned`, `actions` (what you can do with it now) and
-  `manage` (how you can file it). A workstream waiting on an approval has
+  `manage` (how you can file it). A workstream has `branch`, its worktree's
+  branch, or "" when it has none. A workstream waiting on an approval has
   `approval` (`request_id`, `command`, `description`, `approvable`), the
   first one Hermes names by its request; `approve` (once) or `deny` answers
   that one, never another queued behind it. The command comes whole, as

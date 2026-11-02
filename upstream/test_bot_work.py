@@ -525,3 +525,58 @@ def test_dont_ask_turns_approvals_off_in_one_session_only(tmp_path: Path) -> Non
     assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
     assert json.loads(out.read_text()) == {
         "on": [True, False, None], "off": False, "gone": "refused", "process": None}
+
+
+WORKTREE_PROBE = r"""
+import importlib.util, json, os, subprocess, sys
+from pathlib import Path
+
+root, repo, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location("conduit_push", root / "__init__.py",
+                                              submodule_search_locations=[str(root)])
+package = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push"] = package
+spec.loader.exec_module(package)
+from conduit_push import work_trees
+
+seen = {"repo": work_trees.repo_root(str(repo / "src")) == str(repo.resolve())}
+info = work_trees.create(str(repo / "src"), work_trees.name_for("second", "W3", "abc123"))
+path = Path(info["path"])
+branches = subprocess.run(["git", "branch", "--list", info["branch"]], cwd=repo, capture_output=True, text=True)
+seen["made"] = [path.is_dir(), path.parent.name == ".worktrees", bool(branches.stdout.strip())]
+seen["clean"] = work_trees.tidy(info).get("pruned") is True and not path.exists()
+seen["back"] = work_trees.restore(info) and path.is_dir()
+(path / "new.txt").write_text("work")
+kept = work_trees.tidy(info)
+seen["kept"] = [kept.get("pruned"), kept.get("dirty"), path.is_dir()]
+try:
+    work_trees.create(str(repo.parent), "nope")
+    seen["outside"] = "made"
+except work_trees.WorktreeError as error:
+    seen["outside"] = str(error) == work_trees.NOT_A_REPO
+out.write_text(json.dumps(seen))
+"""
+
+
+def test_a_workstreams_worktree_is_hermes_own(tmp_path: Path) -> None:
+    """M4: a coding workstream's worktree is made with Hermes' own subagent
+    worktree code (tools/subagent_worktree.py) on its own branch, removed on
+    resolve only when it holds nothing, made again at the same path when
+    the workstream is sent words again, and refused outside a repository."""
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    git = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t"}
+    (repo / "src" / "a.txt").write_text("a")
+    for argv in (["git", "init", "-q"], ["git", "add", "."], ["git", "commit", "-qm", "first"]):
+        subprocess.run(argv, cwd=repo, check=True, env=git, capture_output=True)
+    python = Path(_hermes_bin()).with_name("python")
+    out = tmp_path / "seen.json"
+    done = subprocess.run([str(python), "-c", WORKTREE_PROBE, str(ROOT), str(repo), str(out)], capture_output=True,
+                          text=True, timeout=120, env={**git, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
+    assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
+    assert json.loads(out.read_text()) == {
+        "repo": True, "made": [True, True, True], "clean": True, "back": True, "kept": [False, True, True],
+        "outside": True}

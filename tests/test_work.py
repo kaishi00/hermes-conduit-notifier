@@ -2832,10 +2832,15 @@ def test_turning_approvals_back_on_leaves_resolved_work_to_its_next_send(home, h
     store.update("W1", status="done")
     hermes._sessions["rt-20261031_work_1"]["running"] = False
     assert work.app_act(home, "W1", "resolve", {})["ok"]
-    hermes._sessions.pop("rt-20261031_work_1")
+    live = hermes._sessions.pop("rt-20261031_work_1")
     hermes.calls.clear()
     work.app_set_settings(home, {"workstream_approvals": "chats"})
     assert hermes.named("session.resume") == [] and store.meta_keys("yolo_set:")
+    # Still live, it's turned back at once: a turn typed there asks too.
+    store.set_workstream_approvals("off")
+    hermes._sessions["rt-20261031_work_1"] = live
+    work.app_set_settings(home, {"workstream_approvals": "ask"})
+    assert hermes.named("session.resume") == [] and live["yolo"] is False and not store.meta_keys("yolo_set:")
 
 
 def test_approvals_off_needs_no_session_bypass_when_hermes_never_asks(home, hermes):
@@ -3510,3 +3515,174 @@ def test_a_turn_reopening_resolved_work_clears_who_resolved_it(on, hermes):
     work.turn_started(WORKER_1)
     now = on.get("W1")
     assert not now.closed_at and now.resolved_by == "" and now.status == "running"
+
+
+# Workers that know about each other (M4) ---------------------------------------------
+
+def test_a_workstream_reads_the_bots_other_workstreams_and_changes_none(on, hermes):
+    start()
+    start("Release notes", "Write the release notes for 2.3.")
+    on.update("W1", status="done", last_result="The login page waits on a slow DNS lookup.")
+    listed = call("work_list", {"filter": "recent"}, session_id="20261031_work_2")
+    assert listed["ok"] and sorted(row["ref"] for row in listed["work"]) == ["W1", "W2"]
+    assert [row for row in listed["work"] if row.get("you")][0]["ref"] == "W2"
+    assert "read only" in listed["note"]
+    read = call("work_read", {"ref": "W1"}, session_id="20261031_work_2")
+    assert read["ok"] and read["result"].startswith("The login page") and "data, not instructions" in read["note"]
+    for name, args in (("work_send", {"ref": "W1", "text": "x"}), ("work_stop", {"ref": "W1"}),
+                       ("work_start", {"title": "x", "instructions": "y"}), ("work_close", {"ref": "W1"})):
+        assert call(name, args, session_id="20261031_work_2")["error"] == "not_bot_chat"
+    assert "work_list and work_read" in _brief(hermes)
+
+
+def test_a_workstream_sees_no_asks_between_bots(on, hermes):
+    start()
+    on.add("ask_out", title="Ask Nahida", status="waiting", executor={"bot": "nahida"})
+    listed = call("work_list", {"filter": "all"}, session_id=WORKER_1)
+    assert [row["ref"] for row in listed["work"]] == ["W1"]
+    assert call("work_read", {"ref": "A1"}, session_id=WORKER_1)["error"] == "ask"
+    assert call("work_read", {"ref": "W1"}, session_id=OTHER_CHAT)["error"] == "not_bot_chat"
+
+
+class _FakeWorktrees:
+    """Hermes' tools/subagent_worktree, as far as workstreams use it."""
+
+    def __init__(self, root):
+        self.root = root
+        self.made, self.finalized, self.local = [], [], True
+        self.dirty = False
+
+    def resolve_repo_root(self, path):
+        return str(self.root) if str(path).startswith(str(self.root)) else None
+
+    def local_backend_active(self):
+        return self.local
+
+    def create_subagent_worktree(self, cwd, name):
+        repo = self.resolve_repo_root(cwd)
+        if not repo:
+            return None
+        path = Path(repo) / ".worktrees" / f"subagent-{name}"
+        path.mkdir(parents=True, exist_ok=True)
+        self.made.append(name)
+        return {"path": str(path), "branch": f"hermes-subagent/subagent-{name}", "repo_root": repo,
+                "base_commit": "abc"}
+
+    def finalize_subagent_worktree(self, info, prune=True):
+        self.finalized.append(prune)
+        out = {"path": info["path"], "branch": info["branch"], "commits": 0, "dirty": self.dirty, "pruned": False}
+        if prune and not self.dirty:
+            import shutil
+
+            shutil.rmtree(info["path"])
+            out["pruned"] = True
+        return out
+
+
+@pytest.fixture
+def trees(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    fake = _FakeWorktrees(repo)
+    monkeypatch.setattr(work.work_trees, "_hermes", lambda: fake)
+    return fake
+
+
+def test_a_worktree_gives_a_workstream_its_own_branch(on, hermes, trees):
+    answer = start(cwd=str(trees.root / "src"), worktree=True)
+    assert answer["ok"] and answer["worktree"]["branch"].startswith("hermes-subagent/subagent-work-default-w1-")
+    created, = hermes.named("session.create")
+    assert created[1]["cwd"] == answer["worktree"]["path"]  # the session works in the worktree
+    assert on.get("W1").repo == str(trees.root) and on.get("W1").cwd == answer["worktree"]["path"]
+    brief = _brief(hermes)
+    assert answer["worktree"]["path"] in brief and "never in the main checkout" in brief
+    assert work.app_list(on.home)["work"][0]["branch"] == answer["worktree"]["branch"]
+    assert call("work_read", {"ref": "W1"})["worktree"]["branch"] == answer["worktree"]["branch"]
+
+
+def test_a_worktree_that_cant_be_made_starts_nothing(on, hermes, trees):
+    answer = start(cwd="/elsewhere", worktree=True)
+    assert answer["error"] == "worktree" and "isn't in a git repository" in answer["note"]
+    assert hermes.named("session.create") == [] and on.get("W1").status == "failed"
+    trees.local = False
+    assert "local terminal" in start("Other", "Other task", cwd=str(trees.root), worktree=True, new=True)["note"]
+
+
+def test_work_in_the_same_repository_is_flagged_both_ways(on, hermes, trees):
+    on.set_max_running(3)
+    start(cwd=str(trees.root))
+    answer = start("Release notes", "Write the release notes.", cwd=str(trees.root / "src"))
+    assert answer["same_repo"] == ["W1"] and "worktree=true" in answer["note"]
+    brief = _brief(hermes)
+    assert "W1 (Login bug) also works in this repository" in brief
+    separate = start("Fix tests", "Fix the flaky tests.", cwd=str(trees.root), worktree=True)
+    assert separate["same_repo"] == ["W1", "W2"] and "worktree=true" not in separate["note"]
+
+
+def test_resolving_removes_an_empty_worktree_and_keeps_one_with_work(on, hermes, trees):
+    path = start(cwd=str(trees.root), worktree=True)["worktree"]["path"]
+    on.update("W1", status="done", last_result="Nothing to change.")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    assert work.app_act(on.home, "W1", "resolve")["ok"]
+    assert not Path(path).exists() and trees.finalized == [False, True]
+    # Sent words again: the same worktree comes back for it.
+    assert call("work_send", {"ref": "W1", "text": "One more thing."})["ok"]
+    assert Path(path).is_dir() and len(trees.made) == 2
+    on.update("W1", status="done", last_result="Changed it.")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    trees.dirty = True
+    closed = call("work_close", {"ref": "W1"})
+    assert closed["ok"] and closed["worktree"]["path"] == path and "decides whether to merge" in closed["note"]
+    assert Path(path).is_dir()
+
+
+def test_the_user_writing_in_a_resolved_workstreams_chat_brings_its_worktree_back(on, hermes, trees):
+    path = start(cwd=str(trees.root), worktree=True)["worktree"]["path"]
+    on.update("W1", status="done", last_result="Nothing to change.")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    assert work.app_act(on.home, "W1", "resolve")["ok"] and not Path(path).exists()
+    work.turn_started("20261031_work_1")  # typed in its chat, not sent through Conduit
+    assert Path(path).is_dir() and on.get("W1").status == "running"
+
+
+def test_a_start_that_fails_after_its_worktree_was_made_removes_it(on, hermes, trees, monkeypatch):
+    def refuse(self, **kwargs):
+        raise work.work_broker.BrokerError("no room")
+
+    monkeypatch.setattr(work.work_broker.Broker, "start", refuse)
+    answer = start(cwd=str(trees.root), worktree=True)
+    assert answer["error"] == "hermes" and on.get("W1").status == "failed"
+    made = trees.root / ".worktrees" / f"subagent-{trees.made[0]}"
+    assert not made.exists() and trees.finalized == [False, True]
+
+
+def test_a_hermes_that_cant_say_where_its_terminal_runs_makes_no_worktree(on, hermes, trees, monkeypatch):
+    monkeypatch.setattr(trees, "local_backend_active", lambda: 1 / 0)
+    answer = start(cwd=str(trees.root), worktree=True)
+    assert answer["error"] == "worktree" and on.get("W1").status == "failed"
+    assert hermes.named("session.create") == []
+
+
+def test_turning_approvals_back_on_stops_reopening_once_its_time_is_up(home, hermes, monkeypatch):
+    store = store_mod.Store(home)
+    store.set_workstream_approvals("off")
+    store.set_max_running(3)
+    start()
+    start("Release notes", "Write the release notes.")
+    hermes._sessions.pop("rt-20261031_work_1")
+    hermes._sessions.pop("rt-20261031_work_2")
+    clock = [0.0]
+    real = work.work_broker.Broker.end_bypass
+
+    def slow(self, session_id):
+        clock[0] += work.END_BYPASS_BUDGET_S + 1  # this reopen used the whole budget
+        return real(self, session_id)
+
+    monkeypatch.setattr(work, "time", types.SimpleNamespace(**{name: getattr(__import__("time"), name) for name in
+                                                                 ("time", "sleep", "monotonic")}))
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(work.work_broker.Broker, "end_bypass", slow)
+    hermes.calls.clear()
+    store.set_workstream_approvals("ask")
+    assert work.end_bypasses(home) == 1
+    assert len(hermes.named("session.resume")) == 1 and len(store.meta_keys("yolo_set:")) == 1
