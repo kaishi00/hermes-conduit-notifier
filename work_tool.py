@@ -1574,7 +1574,8 @@ _CALL_ON = "call_on:"
 _CALL_NAMES = {"phone": "voice", "watch": "Watch"}
 
 
-def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", chat: Any = None) -> dict:
+def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", chat: Any = None,
+          result: Any = None) -> dict:
     """A job a voice call started, kept in its bot's registry (M5a): the
     call made the session and follows it as before; the row journals its
     steps, settles with its turns, waits for the user after a restart, and
@@ -1585,12 +1586,14 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
     counted, in its note as its own, and the Bot Chat's updates (all of
     them, so no turn of the coordinator's own joins the call's) held until
     the call is saved (``call_ended``) or CALL_HOLD_MAX_S passes, so the
-    call speaks the result first and the coordinator reports it after. A session already kept answers with
+    call speaks the result first and the coordinator reports it after.
+    ``result``: the reply of a turn that already ended before the phone
+    adopted it (its hooks found no row then), so the row settles with it. A session already kept answers with
     its row. It's starting until its chat holds the request (then running),
     so a job whose prompt never went in is the panel's stuck start, not work running."""
     home = Path(home)
-    if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal, chat)):
-        return {"ok": False, "error": "invalid", "note": "session_id, title, goal and chat are text."}
+    if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal, chat, result)):
+        return {"ok": False, "error": "invalid", "note": "session_id, title, goal, chat and result are text."}
     if via not in work_store.CALL_VIA:
         return {"ok": False, "error": "invalid", "note": f"via is one of {', '.join(work_store.CALL_VIA)}."}
     session = str(session_id or "").strip()
@@ -1649,6 +1652,11 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
         # The session is already one of the bot's own workstreams: it stays that.
         return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}
     adopted = work.created_at >= began  # else the row the session already had
+    if adopted and isinstance(result, str) and work.status == "running":
+        # Its turn ended before it was kept: settled as its end would have.
+        _turn_ended(session, result)
+        _turn_finished(session, failed=False, interrupted=False)
+        work = store.get(work.ref) or work
     return {"ok": True, "ref": work.ref, "adopted": adopted, "work": _app_row(store, work)}
 
 

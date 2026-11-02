@@ -4076,3 +4076,15 @@ def test_a_bot_chat_calls_workstream_a_restart_caught_unseen_gets_its_task(on, h
     assert work.app_act(on.home, "W1", "send", {"text": "Try again please."})["ok"]
     sent = [args.get("text", "") for _, args, _ in hermes.calls if args.get("session_id", "").endswith(CALL_JOB)]
     assert sent and "Is it raining in Lyon?" in sent[-1]
+
+
+def test_a_calls_job_whose_turn_ended_before_it_was_kept_is_settled(on, hermes, monkeypatch):
+    _chat_db(on.home, [(CALL_JOB, "user", "Is it raining?", None)])
+    kept = adopt(result="Rain from three.")
+    assert kept["work"]["status"] == "done" and "Rain from three." in on.get("W1").last_result
+    # A Bot Chat call's: the coordinator hears of it once the call is saved.
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    _chat_db(on.home, [("20261102_voice_job_2", "user", "Check the disks", None)])
+    adopt(session_id="20261102_voice_job_2", chat=BOT_CHAT, result="Disks are fine.")
+    assert on.get("W2").status in ("done", "ready")
+    assert adopt(session_id="20261102_voice_job_3", result=["x"])["error"] == "invalid"
