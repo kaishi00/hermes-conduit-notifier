@@ -999,9 +999,12 @@ def end_bypasses(home: Path) -> int:
     """Once approvals in workstreams are back on: turns the bypass off now
     in every session this turned it on in (``_yolo``), so a turn the user
     starts there directly, not only the next one through Conduit, asks
-    again. A resolved one isn't reopened for it. Best effort: a mark left
-    (resolved, or Hermes didn't take it) is turned back first by that
-    workstream's next send. Returns how many are left."""
+    again. A live session is always reached; one that isn't is reopened
+    for it only while the workstream is open, and only within
+    END_BYPASS_BUDGET_S, so the user's save never waits on a pile of
+    reopens. Best effort: a mark left (Hermes didn't take it, or it waits)
+    is turned back first by that workstream's next send. Returns how many
+    are left."""
     home = Path(home)
     store = work_store.Store(home)
     if workstream_approvals(home) == "off":
@@ -1009,15 +1012,17 @@ def end_bypasses(home: Path) -> int:
     refs = [key[len(_YOLO_SET):] for key in store.meta_keys(_YOLO_SET)]
     left = 0
     broker = None
+    until = time.monotonic() + END_BYPASS_BUDGET_S
     for ref in refs:
         found = store.get(ref)
         if found is None or not found.session_id:
             _yolo_sent(store, ref, False)  # no session left to carry it
             continue
-        if found.closed_at:
-            continue  # resolved: not reopened for this; a reopen's next send turns it back first
         try:
             broker = broker or work_broker.Broker(home)
+            if broker.live(found.session_id) is None and (found.closed_at or time.monotonic() > until):
+                left += 1  # resolved, or out of time: its next send turns it back first
+                continue
             broker.end_bypass(found.session_id)
         except Exception:  # noqa: BLE001 — kept; the next send turns it off first
             logger.warning("conduit_push: couldn't turn approvals back on in a workstream", exc_info=True)
@@ -1629,6 +1634,9 @@ _CONTINUED = "continued:"
 # stop), so that turn, beginning late, is stopped too rather than undoing
 # the stop. A send clears it, and it lapses after _STOPPED_START_S.
 _STOPPED_START = "stopped_start:"
+# How long a settings change spends reopening workstreams to turn
+# approvals back on in them (end_bypasses); live ones are always reached.
+END_BYPASS_BUDGET_S = 20.0
 # A workstream whose session this turned approvals off in (_yolo).
 _YOLO_SET = "yolo_set:"
 # A workstream's own git worktree (work_trees), as JSON.

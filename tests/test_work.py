@@ -2832,10 +2832,15 @@ def test_turning_approvals_back_on_leaves_resolved_work_to_its_next_send(home, h
     store.update("W1", status="done")
     hermes._sessions["rt-20261031_work_1"]["running"] = False
     assert work.app_act(home, "W1", "resolve", {})["ok"]
-    hermes._sessions.pop("rt-20261031_work_1")
+    live = hermes._sessions.pop("rt-20261031_work_1")
     hermes.calls.clear()
     work.app_set_settings(home, {"workstream_approvals": "chats"})
     assert hermes.named("session.resume") == [] and store.meta_keys("yolo_set:")
+    # Still live, it's turned back at once: a turn typed there asks too.
+    store.set_workstream_approvals("off")
+    hermes._sessions["rt-20261031_work_1"] = live
+    work.app_set_settings(home, {"workstream_approvals": "ask"})
+    assert hermes.named("session.resume") == [] and live["yolo"] is False and not store.meta_keys("yolo_set:")
 
 
 def test_approvals_off_needs_no_session_bypass_when_hermes_never_asks(home, hermes):

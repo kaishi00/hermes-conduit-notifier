@@ -387,8 +387,8 @@ class Broker:
             # A Hermes without config.set never turned it on, so there's nothing to turn off.
             if not on and not (isinstance(error, BrokerError) and error.unsupported):
                 raise
-            logger.warning("conduit_push: couldn't turn off approvals in a workstream; Hermes still asks",
-                           exc_info=True)
+            logger.warning("conduit_push: couldn't turn %s approvals in a workstream%s", "off" if on else "on",
+                           "; Hermes still asks" if on else "; Hermes never turned them off", exc_info=True)
 
     def stop(self, session_id: str) -> bool:
         """Interrupts the session's turn; False when it isn't running."""
