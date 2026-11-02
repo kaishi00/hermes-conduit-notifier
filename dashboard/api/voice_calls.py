@@ -945,6 +945,16 @@ async def _voice_body(request: Request) -> Dict[str, Any]:
     return body
 
 
+def _call_left_chat(chat_id: str) -> None:
+    """A call kept with a chat was saved, so it's over: a Bot Chat's
+    workstreams the call started send their updates now (bot workstreams)."""
+    try:
+        tool = core._plugin_package_module("work_tool")
+        (tool.copy_for(core._calls_home()) or tool).call_ended(core._calls_home(), chat_id)
+    except Exception:  # noqa: BLE001 — the turns are stored; the hold ends on its own
+        logger.debug("Couldn't tell the bot's work a call ended", exc_info=True)
+
+
 @router.post("/voice/sessions")
 async def post_voice_session(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
@@ -953,6 +963,8 @@ async def post_voice_session(request: Request, response: Response, profile: Opti
 
     def ended(session_id: str, engine: str, messages: list, chat_call: bool = False) -> None:
         _queue_voice_call_end(profile, session_id, engine, messages, chat_call=chat_call)
+        if chat_call:
+            _call_left_chat(session_id)
 
     return {"ok": True, **(await _run_voice(profile, lambda: save_voice_turns(body, on_end=ended), "save"))}
 

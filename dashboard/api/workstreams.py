@@ -64,7 +64,7 @@ def workstreams_set_settings(body: Optional[dict]) -> Dict[str, Any]:
 
 def workstreams_adopt(body: dict) -> Dict[str, Any]:
     return _work_tool().adopt(core._calls_home(), body.get("session_id"), body.get("title"),
-                              via=str(body.get("via") or ""), goal=body.get("goal") or "")
+                              via=str(body.get("via") or ""), goal=body.get("goal") or "", chat=body.get("chat"))
 
 
 async def _workstreams_route(route: str, profile: Optional[str], fn: Any, limiter: Any = None) -> Any:

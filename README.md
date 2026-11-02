@@ -1432,7 +1432,12 @@ in Conduit (Edit Bot > Work) or here:
   the bot's memory and other bots like any chat, stays in the chat lists
   under Voice Jobs, and after a restart always waits for you. Watch jobs are
   kept as they start; the phone keeps its own with `POST /workstreams/adopt`.
-  A bot whose workstreams are off keeps none.
+  A bot whose workstreams are off keeps none. A call kept with the Bot Chat
+  is a conversation with the coordinator, so its jobs are the coordinator's
+  own workstreams (`started_in_call` in `work_list`): they count against the
+  limit, and their updates wait until the call is saved (at most three
+  hours), so the call speaks each result first and the coordinator reports
+  it in the Bot Chat after.
 - Bots work together coordinator to coordinator. `work_ask` asks another of
   your bots on this Hermes (by its name or profile) for an answer or a piece
   of work: it's an `ask_out` row in the asking bot's registry and an `ask_in`
@@ -1530,7 +1535,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
 | GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, unavailable}` |
 | POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals}` | the settings as they are now |
-| POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?}` (`via`: `phone` or `watch`) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title` or `goal` isn't text; `off` (409) when the bot's workstreams are off |
+| POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?, chat?}` (`via`: `phone` or `watch`; `chat`: the chat the call is kept with, so the Bot Chat's makes it the coordinator's workstream, `call` on its row) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title`, `goal` or `chat` isn't text; `off` (409) when the bot's workstreams are off |
 
 - `work` lists every open (unresolved) row, however old: active work first,
   then the rest by when it last changed. Rows are workstreams, and asks to

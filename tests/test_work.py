@@ -4001,3 +4001,52 @@ def test_a_calls_job_adopted_after_its_turn_began_is_running(on, hermes):
     work.turn_ended(CALL_JOB, "Rain from three.")
     work.turn_finished(CALL_JOB, failed=False, interrupted=False)
     assert on.get("W1").status == "done"
+
+
+# A call kept with the Bot Chat: its jobs are the coordinator's (Eric 2026-11-02) -----
+
+def test_a_bot_chat_calls_job_is_the_coordinators_workstream(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    kept = adopt(goal="Is it raining in Lyon?", chat=BOT_CHAT)
+    assert kept["ok"] and kept["adopted"]
+    row = on.get("W1")
+    assert row.coordinator == BOT_CHAT and not work._from_call(row) and work._call_of(row) == "phone"
+    assert kept["work"]["call"] == "phone" and not kept["work"]["from_call"]
+    listed, = [item for item in call("work_list")["work"] if item["ref"] == "W1"]
+    assert listed["started_in_call"] == "phone" and "from_call" not in listed
+    # Its chat is a workstream's, out of the chat lists.
+    assert CALL_JOB in work.app_list(on.home)["workstream_sessions"]
+    # The same session again is the same row.
+    again = adopt(chat=BOT_CHAT)
+    assert again["ok"] and not again["adopted"] and again["ref"] == "W1"
+
+
+def test_a_bot_chat_calls_workstream_reports_once_the_call_is_saved(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    adopt(chat=BOT_CHAT)
+    work.turn_started(CALL_JOB)
+    work.turn_ended(CALL_JOB, "Rain from three.")
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    work.flush_wakes()
+    assert not submitted_to(hermes, BOT_CHAT), "the call speaks it first"
+    assert not work.call_ended(on.home, OTHER_CHAT)
+    assert work.call_ended(on.home, BOT_CHAT)
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "W1" in wake["text"]
+
+
+def test_a_bot_chat_calls_hold_ends_on_its_own(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    monkeypatch.setattr(work, "CALL_HOLD_MAX_S", 0.0)
+    adopt(chat=BOT_CHAT)
+    work.turn_started(CALL_JOB)
+    work.turn_ended(CALL_JOB, "Rain from three.")
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    work.flush_wakes()
+    assert len(submitted_to(hermes, BOT_CHAT)) == 1
+
+
+def test_a_call_kept_with_another_chat_keeps_its_jobs_the_calls(on, hermes):
+    kept = adopt(chat=OTHER_CHAT)
+    assert kept["work"]["from_call"] == "phone" and on.get("W1").coordinator == ""
+    assert adopt(session_id="20261102_voice_job_2", chat=["x"])["error"] == "invalid"

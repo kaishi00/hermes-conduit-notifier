@@ -77,6 +77,10 @@ WAKE_BATCH_S = 3.0
 # this often, for at most this long, then sent queued anyway.
 WAKE_BUSY_RETRY_S = 2.0
 WAKE_BUSY_MAX_S = 600.0
+# How long a Bot Chat's updates wait for the call kept with it to be saved
+# (its workstreams' results are the call's to speak first); after that they go.
+CALL_HOLD_MAX_S = 3 * 3600.0
+CALL_HOLD_RETRY_S = 30.0
 DIGEST_ITEMS = 12
 _LOST_REPLY = "Your message may not have reached it before Hermes restarted"
 DIGEST_CALL_ITEMS = 6  # a call's jobs, listed after the bot's own work
@@ -759,6 +763,9 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
     elif _from_call(work):
         # The call told the user what it found; this is for the record.
         row["from_call"] = _from_call(work)
+    elif _call_of(work):
+        # Yours, started by the user's call in your chat: the call spoke its result too.
+        row["started_in_call"] = _call_of(work)
     return row
 
 
@@ -1521,21 +1528,65 @@ def _from_call(work: work_store.Work) -> str:
     return by if work.kind == "workstream" and by in work_store.CALL_VIA else ""
 
 
+def _call_of(work: work_store.Work) -> str:
+    """"phone" or "watch" for any job a call started: a call's job, or a
+    coordinator's workstream a call kept with the Bot Chat started."""
+    if _from_call(work):
+        return _from_call(work)
+    by = work.requested_by if isinstance(work.requested_by, dict) else {}
+    return by.get("via") if work.kind == "workstream" and by.get("by") == "call" \
+        and by.get("via") in work_store.CALL_VIA else ""
+
+
+def call_ended(home: Path, chat_id: Any) -> bool:
+    """A call kept with the Bot Chat was saved, so it's over: the updates
+    its workstreams held go out now. True when it was the Bot Chat's."""
+    home = Path(home)
+    if not isinstance(chat_id, str) or not chat_id.strip() or not work_store.exists(home):
+        return False
+    if not is_bot_chat(chat_id.strip(), home):
+        return False
+    coordinator = _bot_chat_of(home) or chat_id.strip()
+    work_store.Store(home).set_meta(_CALL_ON + coordinator, "")
+    with _wake_lock:
+        pending, timer = _wakes.get((str(home), coordinator), ([], None))
+    if pending:
+        if timer is not None:
+            timer.cancel()
+        _send_wake(home, coordinator)
+    return True
+
+
+def _call_on(home: Path, coordinator: str) -> bool:
+    """Whether a call kept with this Bot Chat is still going (it started a
+    workstream and hasn't been saved), within CALL_HOLD_MAX_S."""
+    try:
+        began = float(work_store.Store(home).get_meta(_CALL_ON + coordinator) or 0)
+    except (ValueError, Exception):  # noqa: BLE001 — unknown: not held
+        return False
+    return bool(began) and time.time() - began < CALL_HOLD_MAX_S
+
+
+_CALL_ON = "call_on:"
 _CALL_NAMES = {"phone": "voice", "watch": "Watch"}
 
 
-def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") -> dict:
+def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", chat: Any = None) -> dict:
     """A job a voice call started, kept in its bot's registry (M5a): the
     call made the session and follows it as before; the row journals its
     steps, settles with its turns, waits for the user after a restart, and
     shows in the Work panel and the Bot Chat's note, marked as a call's. It
     never wakes the Bot Chat (the call told the user) and never counts
-    against the coordinator's limit. A session already kept answers with
+    against the coordinator's limit. A call kept with the Bot Chat (``chat``,
+    Eric 2026-11-02) makes it the coordinator's own workstream instead:
+    counted, in its note as its own, and its update sent once the call is
+    saved (``call_ended``), so the coordinator reports it in the Bot Chat
+    while the call still speaks it. A session already kept answers with
     its row. It's starting until its chat holds the request (then running),
     so a job whose prompt never went in is the panel's stuck start, not work running."""
     home = Path(home)
-    if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal)):
-        return {"ok": False, "error": "invalid", "note": "session_id, title and goal are text."}
+    if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal, chat)):
+        return {"ok": False, "error": "invalid", "note": "session_id, title, goal and chat are text."}
     if via not in work_store.CALL_VIA:
         return {"ok": False, "error": "invalid", "note": f"via is one of {', '.join(work_store.CALL_VIA)}."}
     session = str(session_id or "").strip()
@@ -1560,7 +1611,7 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
     known = store.by_session(session)
     if known is None:
         lineage = _compacted_from(home, session, store)
-        if isinstance(lineage, work_store.Work) and not _from_call(lineage):
+        if isinstance(lineage, work_store.Work) and not _call_of(lineage):
             # A workstream's own session after a compaction: it stays the workstream's.
             return {"ok": False, "error": "taken", "note": f"That session continues {lineage.ref}, not a call's job."}
         if isinstance(lineage, work_store.Work):
@@ -1576,10 +1627,19 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
     # begun (its hooks finding no row yet): one whose chat holds the
     # request is running, and its turn's end settles it.
     status = "running" if _asked_in(home, session) else "starting"
-    work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
-                     requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
-                     reply_to={"to": via}, status=status, session_id=session)
-    if not _from_call(work):
+    coordinator = _bot_chat_of(home) if isinstance(chat, str) and chat.strip() and is_bot_chat(chat.strip(), home) else ""
+    if coordinator:
+        # The coordinator's own, started by its call: it hears of it once the call is saved.
+        store.set_meta(_CALL_ON + coordinator, str(time.time()))
+        work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()),
+                         coordinator=coordinator, requested_by={"by": "call", "via": via},
+                         executor={"bot": work_broker.profile_of(home)},
+                         reply_to={"to": "coordinator", "session": coordinator}, status=status, session_id=session)
+    else:
+        work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
+                         requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
+                         reply_to={"to": via}, status=status, session_id=session)
+    if not _call_of(work):
         # The session is already one of the bot's own workstreams: it stays that.
         return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}
     adopted = work.created_at >= began  # else the row the session already had
@@ -1595,7 +1655,7 @@ def call_start_failed(home: Path, session_id: Any, error: Any) -> bool:
         return False
     store = work_store.Store(Path(home))
     work = store.by_session(session_id)
-    if work is None or not _from_call(work):
+    if work is None or not _call_of(work):
         return False
     return store.update(work.ref, only_if=("starting",), status="failed",
                         error=_cut(f"didn't start: {error}", 300)) is not None
@@ -2887,6 +2947,8 @@ def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
     row["branch"] = str(tree.get("branch") or "") if tree else ""
     # A call's job (M5): "phone" or "watch", else "".
     row["from_call"] = _from_call(work)
+    # A coordinator's workstream a call started: the phone stops its job with it.
+    row["call"] = _call_of(work) if not row["from_call"] else ""
     row["approval"] = None
     if on and broker is not None and work.status == "needs_you" and work.session_id and not work.closed_at:
         row["approval"] = _app_approval(broker, work)
@@ -3291,20 +3353,23 @@ def _send_wake(home: Path, coordinator: str) -> None:
     if not lines:
         return
     now = time.monotonic()
-    if _coordinator_busy(home, coordinator) and now - (held_since or now) < WAKE_BUSY_MAX_S:
+    on_call = _call_on(home, coordinator)
+    if on_call or (_coordinator_busy(home, coordinator) and now - (held_since or now) < WAKE_BUSY_MAX_S):
         with _wake_lock:
             # Lines queued meanwhile join these; their own timer (if any) finds them gone.
             more, timer = _wakes.pop(key, ([], None))
             if timer is not None:
                 timer.cancel()
-            retry = threading.Timer(WAKE_BUSY_RETRY_S, _send_wake, args=(home, coordinator))
+            retry = threading.Timer(CALL_HOLD_RETRY_S if on_call else WAKE_BUSY_RETRY_S, _send_wake,
+                                    args=(home, coordinator))
             retry.daemon = True
             _wakes[key] = (lines + more, retry)
             if asks:
                 _wake_asks.setdefault(key, set()).update(asks)
             if items:
                 _wake_items[key] = items + _wake_items.get(key, [])
-            _wake_held[key] = held_since or now
+            # A call's hold isn't the busy hold's: it starts that clock only when it ends.
+            _wake_held[key] = held_since or (None if on_call else now)
             retry.start()
         return
     # A turn that starts between the check and the send still gets this
