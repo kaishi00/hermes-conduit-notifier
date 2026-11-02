@@ -238,8 +238,8 @@ class _Unheard:
 def _send_on_authority(chats: Any, chat_id: str, text: str, *, profile: str = "",
                        model: Optional[dict] = None) -> Sent:
     """``send`` on the gateway's listener: the authority takes the turn in its
-    FIFO behind any running one (it has no busy refusal), so it always reads
-    as queued."""
+    FIFO behind any running one (it has no busy refusal): queued, or
+    streaming when the authority starts it at once."""
     transport = _Unheard()
 
     def call(method: str, params: dict[str, Any]) -> Any:

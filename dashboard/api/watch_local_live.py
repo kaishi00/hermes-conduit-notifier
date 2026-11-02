@@ -345,8 +345,12 @@ class _WatchCallChat:
             rid = f"conduit-watch-call-{self.rid_tag}-{self._rpc_ids}"
             waiter = self._waiters[rid] = watch_jobs._RpcWaiter()
         try:
-            response = self.server.dispatch({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
-                                            self.transport)
+            frame = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+            if getattr(self.server, "takes_timeout", False):
+                # The gateway's own listener answers in the call: hold it to this budget.
+                response = self.server.dispatch(frame, self.transport, timeout=timeout)
+            else:
+                response = self.server.dispatch(frame, self.transport)
             if response is None:
                 if not waiter.done.wait(timeout):
                     raise watch_jobs.WatchJobError(f"{method} timed out")

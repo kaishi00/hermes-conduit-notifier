@@ -319,3 +319,22 @@ def test_on_the_listener_a_failed_send_discards_its_report(gateway, client, monk
     body = {"session_id": "auth-1", "text_sha256": surfaces.text_sha256("yes")}
     assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": True}
     assert surfaces.note(False, "yes", session_id="auth-1") is None
+
+
+def test_a_watch_turns_listener_requests_keep_their_own_budget():
+    # The gateway's own listener answers in the call: each Watch request
+    # hands it the time it was given, not the listener's own wait.
+    class Listener:
+        takes_timeout = True
+
+        def __init__(self):
+            self.waits = []
+
+        def dispatch(self, frame, transport, timeout=None):
+            self.waits.append(timeout)
+            return {"jsonrpc": "2.0", "id": frame["id"], "result": {"ok": True}}
+
+    listener = Listener()
+    chat = api.watch_local_live._WatchCallChat(listener, None)
+    assert chat.rpc("session.steer", {"session_id": "s1"}, timeout=7) == {"ok": True}
+    assert listener.waits == [7]

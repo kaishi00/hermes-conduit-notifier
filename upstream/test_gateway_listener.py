@@ -226,7 +226,9 @@ class ConduitSocket:
         # A frame with a method is an event (or a request of the server's),
         # never the answer to one of ours, even when its id collides.
         if "method" not in frame and ("result" in frame or "error" in frame):
-            future = self._pending.pop(frame.get("id"), None)
+            rid = frame.get("id")
+            # An id no call of ours could have sent (a list, an object) answers none of them.
+            future = self._pending.pop(rid, None) if isinstance(rid, (str, int)) else None
             if future is not None and not future.done():
                 future.set_result(frame)
         elif frame.get("method") == "event":
@@ -739,7 +741,17 @@ def test_conduits_host_verbs_answer_on_the_listener(listener):
         assert "soul" in await sock.result("profiles.describe", {"name": "default"})
         assert "found" in await sock.result("profiles.get_asset", {"name": "default", "asset": "avatar"})
         assert "servers" in await sock.result("mcp.servers.list", {"profile": "default"})
-        assert "servers" in await sock.result("mcp.catalog", {"profile": "default"})
+        catalog = await sock.result("mcp.catalog", {"profile": "default"})
+        preset = catalog["servers"][0]["name"]
+        # Bot MCP setup's writes: a catalog preset added, then its key kept.
+        await sock.result("mcp.servers.add", {"profile": "default", "name": preset, "preset": preset})
+        await sock.result("mcp.servers.set_api_key", {"profile": "default", "name": preset,
+                                                      "env_var": "CONDUIT_PROBE_KEY", "value": "probe"})
+        listed = await sock.result("mcp.servers.list", {"profile": "default"})
+        assert preset in json.dumps(listed["servers"]), listed
         assert "paused" in await sock.result("delegation.status", {})
+        # The agents' hold-new-delegates toggle, there and back.
+        assert (await sock.result("delegation.pause", {"paused": True}))["paused"] is True
+        assert (await sock.result("delegation.pause", {"paused": False}))["paused"] is False
 
     listener.run(script)

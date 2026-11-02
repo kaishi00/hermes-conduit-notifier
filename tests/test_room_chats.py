@@ -105,6 +105,28 @@ def notes(side, sender, name="laifu"):
                               send=sender, clock=side.clock, reader=reader(side, name))
 
 
+def test_notes_go_through_the_session_hosts_send_by_default(side, monkeypatch):
+    # On the gateway's own listener pulse_host sends to the authority, so a
+    # listening agent's notes reach the chat its owner sees there too.
+    import importlib
+
+    pulse_host = importlib.import_module("conduit_push.pulse_host")
+    sender = Sender()
+    monkeypatch.setattr(pulse_host, "send", sender)
+    monkeypatch.setattr(pulse_host, "available", lambda: True)
+    room_id = started(side)
+    listening(side, room_id)
+    user(side, room_id, "Zoo on Saturday?")
+    say(side, room_id, "The 22nd works.")
+    copied(side)
+    store(side, "laifu").set(room_id, "chat-a")
+    side.clock.now += chats_module.QUIET_S + 60
+    chats_module.Notes(side.tmp_path / "laifu", profile_home=lambda profile: home(side, "laifu", profile),
+                       clock=side.clock, reader=reader(side, "laifu")).pass_once()
+    [(chat_id, _, profile)] = sender.sent
+    assert (chat_id, profile) == ("chat-a", "default")
+
+
 def test_a_quiet_listening_room_gets_notes_once(side):
     room_id = started(side)
     listening(side, room_id)
