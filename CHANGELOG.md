@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.125.0 (2026-11-02)
+
+### New and improved
+- Linked Rooms: you can let your agent use MCP servers you choose in rooms
+  with people you've linked. They stay off unless you pick them in the room
+  setup, a server added later stays out, and their tools work only in rooms
+  where Custom names them.
+
 ## 0.124.0 (2026-11-01)
 
 ### New and improved

@@ -818,14 +818,15 @@ def room_setup(profile: Optional[str], body: Any = _ROOM_SETUP_READ) -> Dict[str
     read = body is _ROOM_SETUP_READ
     if not read:
         if not isinstance(body, dict):
-            raise core.TokenError(400, 'Expected {"ceiling": [...], "interrupt": false}', "bad_request")
+            raise core.TokenError(400, 'Expected {"ceiling": [...], "mcp_servers": [...], "interrupt": false}',
+                                  "bad_request")
         if not isinstance(body.get("interrupt", False), bool):
             raise core.TokenError(400, "interrupt is true or false", "bad_request")
     try:
         hermes = _room_setup_hermes(module)
         if read:
             return module.state(hermes, home, name)
-        answer = module.apply(hermes, home, name, ceiling=body.get("ceiling"))
+        answer = module.apply(hermes, home, name, ceiling=body.get("ceiling"), mcp_servers=body.get("mcp_servers"))
     except module.SetupError as exc:
         raise core.TokenError(exc.status, str(exc), exc.code)
     if "restart" in answer["needs"]:
@@ -861,7 +862,8 @@ async def get_room_setup(request: Request, response: Response, profile: Optional
 @router.post("/rooms/setup")
 async def post_room_setup(request: Request, response: Response, profile: Optional[str] = None) -> Any:
     """Sets this Hermes up for rooms, with ``ceiling`` (the saved one, or
-    the default, without it), and restarts the gateway when the API server
+    the default, without it) and ``mcp_servers`` (the profile's MCP servers
+    it names; the saved ones without it), and restarts the gateway when the API server
     isn't running: ``restart.busy`` while chats run, which ``interrupt``
     overrides."""
     response.headers["Cache-Control"] = "no-store"
