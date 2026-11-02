@@ -137,12 +137,27 @@ class FakeHermes:
         config = _yaml(home / "config.yaml")
         saved = (config.get("platform_toolsets") or {}).get("api_server")
         named = [name for name in saved if name != "no_mcp"] if isinstance(saved, list) else ["hermes-api-server"]
+        # _merge_mcp_servers: listed servers are an allowlist (a disabled one stays off), no_mcp turns them all
+        # off, and a list naming none of them gets every enabled one.
+        enabled, known = self.mcp_servers(home)
+        if isinstance(saved, list) and "no_mcp" not in saved:
+            listed = {name for name in named if name in known}
+            named = [name for name in named if name not in known or name in enabled]
+            if not listed:
+                named = sorted({*named, *enabled})
         mode = (config.get("approvals") or {}).get("mode", "manual")
         mode = "off" if mode is False else str(mode).lower()
         unsigned = {"version": 1, "target_profile": profile, "enabled_toolsets": sorted({*named, "bot_room"}),
                     "approval_mode": mode, "max_iterations": 90}
         digest = hashlib.sha256(json.dumps(unsigned, sort_keys=True).encode()).hexdigest()
         return {**unsigned, "policy_digest": digest}
+
+    def mcp_servers(self, home):
+        # enabled_mcp_server_names and config.yaml's mcp_servers, from the profile's own config.
+        servers = _yaml(home / "config.yaml").get("mcp_servers") or {}
+        enabled = {name for name, server in servers.items() if isinstance(server, dict)
+                   and server.get("enabled", True) is not False}
+        return enabled, set(servers)
 
     def adapter(self):
         return setup.Hermes(
@@ -158,7 +173,7 @@ class FakeHermes:
             builtin_toolsets=lambda: set(BUILTIN), allowed=lambda name: name not in {"discord"},
             label=_label, policy=self.policy, served=lambda home: self.not_served.get(home),
             runtime_status=lambda root: self.status if root == self.root else None,
-            gateway_live=lambda record: bool(record.get("live")))
+            gateway_live=lambda record: bool(record.get("live")), mcp_servers=self.mcp_servers)
 
 
 class Ports:
@@ -613,6 +628,140 @@ def test_choices_leave_out_toolsets_rooms_never_use(hermes):
     with pytest.raises(setup.SetupError) as refused:
         _apply(hermes, ceiling=["memory"])
     assert refused.value.code == "bad_ceiling" and hermes.config_writes == []
+
+
+# --- MCP servers (notifier #500) ----------------------------------------------------------
+
+
+def _servers(hermes, servers, profile="default"):
+    path = hermes.home(profile) / "config.yaml"
+    config = _yaml(path)
+    config["mcp_servers"] = servers
+    _write(path, config)
+
+
+GITHUB = {"url": "https://mcp.example/github"}
+NOTES = {"command": "notes-mcp"}
+
+
+def test_mcp_servers_stay_out_unless_the_owner_names_them(hermes):
+    _servers(hermes, {"github": GITHUB, "notes": NOTES})
+    state = _state(hermes)
+    assert state["mcp_servers"] == [] and state["mcp_choices"] == [{"id": "github"}, {"id": "notes"}]
+    after = _apply(hermes)
+    assert "no_mcp" in _ceiling(hermes) and after["mcp_servers"] == []
+    assert not {"github", "notes"} & set(after["policy"]["enabled_toolsets"])
+
+
+def test_an_owner_can_allow_chosen_mcp_servers(hermes):
+    _servers(hermes, {"github": GITHUB, "notes": NOTES})
+    after = _apply(hermes, ceiling=["web"], mcp_servers=["github"])
+    assert _ceiling(hermes) == ["conduit_rooms", "github", "web"]
+    assert after["mcp_servers"] == ["github"] and after["ceiling"] == ["web"]
+    assert after["policy"]["enabled_toolsets"] == ["bot_room", "conduit_rooms", "github", "web"]
+    assert "ceiling" in after["changed"] and "ceiling" not in after["needs"]
+    # A server added later stays out: the ceiling is an allowlist now.
+    _servers(hermes, {"github": GITHUB, "notes": NOTES, "mail": {"command": "mail-mcp"}})
+    state = _state(hermes)
+    assert state["mcp_servers"] == ["github"] and "ceiling" not in state["needs"]
+    assert "mail" not in state["policy"]["enabled_toolsets"]
+
+
+def test_a_ceiling_given_without_mcp_servers_keeps_the_chosen_ones(hermes):
+    # An older Conduit posts only the toolsets.
+    _servers(hermes, {"github": GITHUB})
+    _apply(hermes, mcp_servers=["github"])
+    after = _apply(hermes, ceiling=["vision"])
+    assert _ceiling(hermes) == ["conduit_rooms", "github", "vision"] and after["mcp_servers"] == ["github"]
+
+
+def test_no_mcp_servers_puts_no_mcp_back(hermes):
+    _servers(hermes, {"github": GITHUB})
+    _apply(hermes, ceiling=["web"], mcp_servers=["github"])
+    after = _apply(hermes, mcp_servers=[])
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"] and after["mcp_servers"] == []
+
+
+def test_a_chosen_server_taken_out_of_hermes_turns_mcp_off(hermes):
+    # Hermes gives a list naming no known server every enabled one, so the setup never leaves one like that.
+    _servers(hermes, {"github": GITHUB, "notes": NOTES})
+    _apply(hermes, ceiling=["web"], mcp_servers=["github"])
+    _servers(hermes, {"notes": NOTES})
+    state = _state(hermes)
+    assert state["mcp_servers"] == [] and "ceiling" in state["needs"] and not state["ready"]
+    _apply(hermes)
+    assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "web"]
+
+
+def test_a_chosen_server_turned_off_in_hermes_stays_chosen_and_off(hermes):
+    _servers(hermes, {"github": GITHUB, "notes": NOTES})
+    _apply(hermes, mcp_servers=["github"])
+    _servers(hermes, {"github": {**GITHUB, "enabled": False}, "notes": NOTES})
+    state = _state(hermes)
+    assert state["mcp_servers"] == ["github"] and "ceiling" not in state["needs"]
+    assert not {"github", "notes"} & set(state["policy"]["enabled_toolsets"])
+    assert state["mcp_choices"] == [{"id": "notes"}]
+    # Conduit sends it along with a change, and it stays chosen; one that wasn't chosen can't be named.
+    after = _apply(hermes, mcp_servers=["github", "notes"])
+    assert after["mcp_servers"] == ["github", "notes"] and "github" in _ceiling(hermes)
+    assert "github" not in after["policy"]["enabled_toolsets"]
+    _servers(hermes, {"github": {**GITHUB, "enabled": False}, "notes": NOTES, "off": {**NOTES, "enabled": False}})
+    with pytest.raises(setup.SetupError) as refused:
+        _apply(hermes, mcp_servers=["github", "off"])
+    assert refused.value.code == "bad_mcp_servers"
+
+
+def test_a_toolset_hermes_no_longer_has_goes_once_servers_are_named(hermes):
+    # It can't be told from a server taken out, which would be allowed again if it came back.
+    _servers(hermes, {"github": GITHUB})
+    _apply(hermes, ceiling=["web", "a2a"])
+    hermes.toolsets = [row for row in hermes.toolsets if row[0] != "a2a"]
+    _apply(hermes, mcp_servers=["github"])
+    assert _ceiling(hermes) == ["conduit_rooms", "github", "web"]
+
+
+def test_a_server_spelled_with_its_toolset_name_counts_as_chosen(hermes):
+    _servers(hermes, {"github": GITHUB})
+    _write(hermes.root / "config.yaml", {**_yaml(hermes.root / "config.yaml"),
+                                         "platform_toolsets": {"api_server": ["conduit_rooms", "mcp-github", "web"]}})
+    state = _state(hermes)
+    assert state["mcp_servers"] == ["github"] and state["ceiling"] == ["web"]
+    _apply(hermes)
+    assert _ceiling(hermes) == ["conduit_rooms", "github", "web"]
+
+
+@pytest.mark.parametrize("mcp_servers", [["nope"], ["off"], "github", [3], ["github"] * 65, {"github": True},
+                                         ["web"], ["no_mcp"]])
+def test_an_mcp_server_hermes_doesnt_offer_is_refused(hermes, mcp_servers):
+    _servers(hermes, {"github": GITHUB, "off": {**NOTES, "enabled": False}, "web": GITHUB})
+    with pytest.raises(setup.SetupError) as refused:
+        _apply(hermes, mcp_servers=mcp_servers)
+    assert refused.value.code == "bad_mcp_servers" and refused.value.status == 400
+    assert hermes.config_writes == [] and hermes.env_writes == []
+
+
+def test_a_server_named_like_a_toolset_isnt_offered(hermes):
+    _servers(hermes, {"web": GITHUB, "conduit": NOTES, "conduit_rooms": NOTES, "github": GITHUB})
+    assert _state(hermes)["mcp_choices"] == [{"id": "github"}]
+
+
+def test_each_profile_offers_its_own_servers(hermes):
+    _servers(hermes, {"github": GITHUB})
+    _servers(hermes, {"notes": NOTES}, profile="laifu")
+    assert _state(hermes, "laifu")["mcp_choices"] == [{"id": "notes"}]
+    with pytest.raises(setup.SetupError):
+        _apply(hermes, "laifu", mcp_servers=["github"])
+
+
+def test_a_hermes_that_cant_list_mcp_servers_offers_none(hermes):
+    _servers(hermes, {"github": GITHUB})
+    adapter = hermes.adapter()
+    plain = setup.Hermes(**{name: getattr(adapter, name) for name in setup.Hermes.__dataclass_fields__
+                            if name != "mcp_servers"})
+    home = hermes.home("default")
+    assert setup.state(plain, home, "default")["mcp_choices"] == []
+    with pytest.raises(setup.SetupError):
+        setup.apply(plain, home, "default", mcp_servers=["github"])
 
 
 # --- Approvals and what the switch can't fix ----------------------------------------------
@@ -1093,6 +1242,17 @@ def test_the_setup_route_refuses_with_a_code(client, hermes, payload, code):
     assert hermes.config_writes == [] and hermes.env_writes == []
 
 
+def test_the_setup_route_takes_mcp_servers(client, hermes):
+    _servers(hermes, {"github": GITHUB})
+    body = client.get(f"{BASE}/rooms/setup").json()
+    assert body["mcp_servers"] == [] and body["mcp_choices"] == [{"id": "github"}]
+    response = client.post(f"{BASE}/rooms/setup", json={"mcp_servers": ["github"]})
+    assert response.status_code == 200 and response.json()["mcp_servers"] == ["github"]
+    assert "github" in _ceiling(hermes) and "no_mcp" not in _ceiling(hermes)
+    refused = client.post(f"{BASE}/rooms/setup", json={"mcp_servers": "github"})
+    assert refused.status_code == 400 and refused.json()["code"] == "bad_mcp_servers"
+
+
 @pytest.mark.parametrize("raw", ['["web"]', "null", '"web"', "3"])
 def test_the_setup_route_refuses_what_isnt_an_object(client, hermes, raw):
     response = client.post(f"{BASE}/rooms/setup", content=raw, headers={"Content-Type": "application/json"})
@@ -1136,11 +1296,11 @@ def test_conduit_profile_on_the_rooms_routes_is_a_listed_capability(client):
 # --- CLI --------------------------------------------------------------------------------
 
 
-def _setup_args(ceiling=None, yes=False, no_restart=False):
+def _setup_args(ceiling=None, yes=False, no_restart=False, mcp=None):
     values = {"tools": None, "tool": None, "share": None, "search": None, "takes_part": None, "limit": None,
               "note": None, "room": ""}
     return argparse.Namespace(conduit_push_action="rooms", rooms_action="setup", yes=yes, ceiling=ceiling,
-                              no_restart=no_restart, **values)
+                              no_restart=no_restart, mcp=mcp, **values)
 
 
 @pytest.fixture
@@ -1188,6 +1348,19 @@ def test_cli_setup_with_yes_and_no_restart(cli, hermes, monkeypatch, capsys):
     said = capsys.readouterr().out
     assert "hermes gateway restart" in said and cli.ran == []
     assert _ceiling(hermes) == ["conduit_rooms", "no_mcp", "terminal", "web"]
+
+
+def test_cli_setup_names_mcp_servers(cli, hermes, capsys):
+    _servers(hermes, {"github": GITHUB, "notes": NOTES})
+    assert cli.dispatch(_setup_args(yes=True, no_restart=True)) == 0
+    said = capsys.readouterr().out
+    assert "MCP servers: none" in said and "--mcp" in said and "github, notes" in said
+    assert cli.dispatch(_setup_args(yes=True, no_restart=True, mcp="github")) == 0
+    said = capsys.readouterr().out
+    assert "MCP servers: github" in said and "Others you can add with --mcp: notes" in said
+    assert "github" in _ceiling(hermes) and "no_mcp" not in _ceiling(hermes)
+    assert cli.dispatch(_setup_args(yes=True, no_restart=True, mcp="")) == 0
+    assert "no_mcp" in _ceiling(hermes)
 
 
 def test_cli_setup_says_the_api_server_was_already_in_use(cli, hermes, monkeypatch, capsys):
