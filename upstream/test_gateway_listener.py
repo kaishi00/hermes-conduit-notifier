@@ -723,3 +723,23 @@ def test_a_staged_picture_reaches_the_turn_its_prompt_names(listener):
     seen = json.dumps(_FakeModel.seen[before:])
     assert _PIXEL[:40] in seen, "the staged picture never reached a model"
 
+
+
+def test_conduits_host_verbs_answer_on_the_listener(listener):
+    """Verbs that aren't a chat's (Projects, the Bot profiles card, MCP editing, the agents'
+    pause state) reach Hermes' own handlers through the listener's fallback, in Conduit's shapes."""
+    async def script(sock: ConduitSocket) -> None:
+        created = await sock.result("projects.create", {"name": "Trip", "folders": []})
+        project_id = created["project"]["id"]
+        tree = await sock.result("projects.tree", {"preview_limit": 3})
+        assert "projects" in tree, tree
+        await sock.result("projects.project_sessions", {"project_id": project_id})
+        await sock.result("projects.update", {"id": project_id, "name": "Trips"})
+        await sock.result("projects.delete", {"id": project_id})
+        assert "soul" in await sock.result("profiles.describe", {"name": "default"})
+        assert "found" in await sock.result("profiles.get_asset", {"name": "default", "asset": "avatar"})
+        assert "servers" in await sock.result("mcp.servers.list", {"profile": "default"})
+        assert "servers" in await sock.result("mcp.catalog", {"profile": "default"})
+        assert "paused" in await sock.result("delegation.status", {})
+
+    listener.run(script)
