@@ -850,6 +850,8 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
             store.outbox_done(item, "refused")
         reason = str(error)[:300] if isinstance(error, work_broker.BrokerError) else type(error).__name__
         store.update(work.ref, status="failed", error=reason)
+        if tree:
+            _tidy_worktree(store, work.ref)  # nothing ran in it: removed while it's empty
         if not isinstance(error, work_broker.BrokerError):
             logger.warning("conduit_push: starting a workstream failed", exc_info=True)
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't start it: {reason}"}
@@ -1000,9 +1002,10 @@ def end_bypasses(home: Path) -> int:
     in every session this turned it on in (``_yolo``), so a turn the user
     starts there directly, not only the next one through Conduit, asks
     again. A live session is always reached; one that isn't is reopened
-    for it only while the workstream is open, and only within
-    END_BYPASS_BUDGET_S, so the user's save never waits on a pile of
-    reopens. Best effort: a mark left (Hermes didn't take it, or it waits)
+    for it only while the workstream is open, and only while
+    END_BYPASS_BUDGET_S hasn't run out (checked before each reopen, so one
+    that starts just before can run to its own timeout), so the user's save
+    never waits on a pile of reopens. Best effort: a mark left (Hermes didn't take it, or it waits)
     is turned back first by that workstream's next send. Returns how many
     are left."""
     home = Path(home)
@@ -1665,6 +1668,8 @@ def _tidy_worktree(store: work_store.Store, ref: str) -> dict:
     else kept (what's left is in the answer). Never raises."""
     tree = _worktree_of(store, ref)
     return work_trees.tidy(tree) if tree else {}
+
+
 _STOPPED_START_S = 600.0
 # Meta key: what Check first asks a workstream a restart cut off during a
 # step that can change things, until a turn of it starts.
@@ -2381,6 +2386,9 @@ def turn_started(session_id: Any) -> bool:
     if work_store.Store(home).get_meta(_CHECK + work.ref):
         work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
+    # The user writing in its chat after a resolve removed its worktree:
+    # back before the turn's first tool runs there.
+    _worktree_back(work_store.Store(home), work.ref)
     if work.status == "stopped" and _stopped_before_its_turn(home, work):
         # The user stopped this start before its brief's turn began: that
         # turn is the start's, so it's stopped too, and the row stays stopped.

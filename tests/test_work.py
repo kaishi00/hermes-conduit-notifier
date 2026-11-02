@@ -3634,3 +3634,55 @@ def test_resolving_removes_an_empty_worktree_and_keeps_one_with_work(on, hermes,
     closed = call("work_close", {"ref": "W1"})
     assert closed["ok"] and closed["worktree"]["path"] == path and "decides whether to merge" in closed["note"]
     assert Path(path).is_dir()
+
+
+def test_the_user_writing_in_a_resolved_workstreams_chat_brings_its_worktree_back(on, hermes, trees):
+    path = start(cwd=str(trees.root), worktree=True)["worktree"]["path"]
+    on.update("W1", status="done", last_result="Nothing to change.")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False
+    assert work.app_act(on.home, "W1", "resolve")["ok"] and not Path(path).exists()
+    work.turn_started("20261031_work_1")  # typed in its chat, not sent through Conduit
+    assert Path(path).is_dir() and on.get("W1").status == "running"
+
+
+def test_a_start_that_fails_after_its_worktree_was_made_removes_it(on, hermes, trees, monkeypatch):
+    def refuse(self, **kwargs):
+        raise work.work_broker.BrokerError("no room")
+
+    monkeypatch.setattr(work.work_broker.Broker, "start", refuse)
+    answer = start(cwd=str(trees.root), worktree=True)
+    assert answer["error"] == "hermes" and on.get("W1").status == "failed"
+    made = trees.root / ".worktrees" / f"subagent-{trees.made[0]}"
+    assert not made.exists() and trees.finalized == [False, True]
+
+
+def test_a_hermes_that_cant_say_where_its_terminal_runs_makes_no_worktree(on, hermes, trees, monkeypatch):
+    monkeypatch.setattr(trees, "local_backend_active", lambda: 1 / 0)
+    answer = start(cwd=str(trees.root), worktree=True)
+    assert answer["error"] == "worktree" and on.get("W1").status == "failed"
+    assert hermes.named("session.create") == []
+
+
+def test_turning_approvals_back_on_stops_reopening_once_its_time_is_up(home, hermes, monkeypatch):
+    store = store_mod.Store(home)
+    store.set_workstream_approvals("off")
+    store.set_max_running(3)
+    start()
+    start("Release notes", "Write the release notes.")
+    hermes._sessions.pop("rt-20261031_work_1")
+    hermes._sessions.pop("rt-20261031_work_2")
+    clock = [0.0]
+    real = work.work_broker.Broker.end_bypass
+
+    def slow(self, session_id):
+        clock[0] += work.END_BYPASS_BUDGET_S + 1  # this reopen used the whole budget
+        return real(self, session_id)
+
+    monkeypatch.setattr(work, "time", types.SimpleNamespace(**{name: getattr(__import__("time"), name) for name in
+                                                                 ("time", "sleep", "monotonic")}))
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(work.work_broker.Broker, "end_bypass", slow)
+    hermes.calls.clear()
+    store.set_workstream_approvals("ask")
+    assert work.end_bypasses(home) == 1
+    assert len(hermes.named("session.resume")) == 1 and len(store.meta_keys("yolo_set:")) == 1

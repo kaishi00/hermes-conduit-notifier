@@ -71,7 +71,12 @@ def create(cwd: str, name: str) -> dict:
         raise WorktreeError(NO_HERMES)
     if not cwd:
         raise WorktreeError(NO_FOLDER)
-    if not hermes.local_backend_active():
+    try:
+        local = hermes.local_backend_active()
+    except Exception as error:  # noqa: BLE001 — a Hermes without it, or one that fails: no worktree
+        logger.warning("conduit_push: couldn't tell where Hermes' terminal runs", exc_info=True)
+        raise WorktreeError(FAILED) from error
+    if not local:
         raise WorktreeError(NOT_LOCAL)
     if not repo_root(cwd):
         raise WorktreeError(NOT_A_REPO)
