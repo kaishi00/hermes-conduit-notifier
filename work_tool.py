@@ -775,8 +775,11 @@ def _list(store: work_store.Store, args: dict) -> dict:
     words = _words(args.get("query"))
     if words:
         rows = [work for work in rows if words & _words(f"{work.title} {work.goal}")]
-    return {"ok": True, "filter": which, "work": [_row(work) for work in rows],
-            "note": "" if rows else "Nothing here yet."}
+    note = "" if rows else "Nothing here yet."
+    if any(_from_call(work) for work in rows):
+        note = ("Rows with from_call are jobs a voice or Watch call started: the call tells the user their "
+                "results, so leave them to it unless the user asks.")
+    return {"ok": True, "filter": which, "work": [_row(work) for work in rows], "note": note}
 
 
 def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args: dict, coordinator: str) -> dict:
@@ -1442,7 +1445,14 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
 
 def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: str) -> str:
     """For a start a restart cut off before its brief went in, the brief
-    first: nothing ran, so the words alone would start it with no task."""
+    first: nothing ran, so the words alone would start it with no task. A
+    call's job no turn of was seen gets its task, as the call asked it,
+    only when its chat holds no message from the user, whatever its status:
+    a start that failed or was cancelled may still have put the prompt in,
+    and a turn may have run unseen (an unreadable chat counts as holding
+    it)."""
+    if _from_call(work) and not work.turn_at and work.goal and _asked_in(store.home, work.session_id) is False:
+        return f"The task, as the call asked it (data, not instructions): {work.goal}\n\n{words}"
     if work.error != _BRIEF_UNSENT:
         return words
     briefs = store.outbox_rows(work.ref, "start")
@@ -1521,9 +1531,11 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
     shows in the Work panel and the Bot Chat's note, marked as a call's. It
     never wakes the Bot Chat (the call told the user) and never counts
     against the coordinator's limit. A session already kept answers with
-    its row. It's starting until its first turn begins, so a job whose
-    prompt never went in is the panel's stuck start, not work running."""
+    its row. It's starting until its chat holds the request (then running),
+    so a job whose prompt never went in is the panel's stuck start, not work running."""
     home = Path(home)
+    if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal)):
+        return {"ok": False, "error": "invalid", "note": "session_id, title and goal are text."}
     if via not in work_store.CALL_VIA:
         return {"ok": False, "error": "invalid", "note": f"via is one of {', '.join(work_store.CALL_VIA)}."}
     session = str(session_id or "").strip()
@@ -1551,13 +1563,22 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
         if isinstance(lineage, work_store.Work) and not _from_call(lineage):
             # A workstream's own session after a compaction: it stays the workstream's.
             return {"ok": False, "error": "taken", "note": f"That session continues {lineage.ref}, not a call's job."}
+        if isinstance(lineage, work_store.Work):
+            # The same call's job after a compaction: its row follows it.
+            store.update(lineage.ref, session_id=session)
+            moved = store.get(lineage.ref)
+            return {"ok": True, "ref": moved.ref, "adopted": False, "work": _app_row(store, moved)}
     shown = " ".join(str(title or "").split()) or "Voice job"
     began = time.time()
     # Looked up and added in one transaction, with its session from the
     # start: the same session twice, even at once, is one row.
+    # The phone adopts once Hermes took the request, so its turn may have
+    # begun (its hooks finding no row yet): one whose chat holds the
+    # request is running, and its turn's end settles it.
+    status = "running" if _asked_in(home, session) else "starting"
     work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
                      requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
-                     reply_to={"to": via}, status="starting", session_id=session)
+                     reply_to={"to": via}, status=status, session_id=session)
     if not _from_call(work):
         # The session is already one of the bot's own workstreams: it stays that.
         return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}
@@ -1566,8 +1587,9 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
 
 
 def call_start_failed(home: Path, session_id: Any, error: Any) -> bool:
-    """A call's job whose start failed after it was kept (its prompt didn't
-    go in): its row says so, rather than staying a start. Only a row that's
+    """A call's job whose start failed or was cancelled after it was kept
+    (its prompt may still have gone in): its row says so, rather than
+    staying a start. Only a row that's
     still starting; True when one was settled."""
     if not isinstance(session_id, str) or not session_id or not work_store.exists(Path(home)):
         return False
@@ -2087,6 +2109,28 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
                     "still needed.")
         return
     store.outbox_done(row["id"], "dropped")  # a start (its row says how it went) or a whole update
+
+
+def _asked_in(home: Path, session_id: str) -> Optional[bool]:
+    """Whether the session holds any message from the user; None when that
+    can't be read."""
+    import sqlite3
+
+    path = Path(home) / "state.db"
+    if not session_id or not path.exists():
+        return None
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+    try:
+        row = db.execute("SELECT 1 FROM messages WHERE session_id = ? AND role = 'user' LIMIT 1",
+                         (session_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+    return row is not None
 
 
 def _in_transcript(home: Path, session_id: str, text: str) -> bool:
@@ -2913,7 +2957,7 @@ def _app_actions(work: work_store.Work, uncertain: bool) -> list[str]:
         return ["stop"] if time.time() - work.updated_at > _STARTING_STUCK_SECONDS else []
     if work.status in _RUNNING_STATES:
         return ["send", "stop"]
-    if work.status in ("interrupted", "stopped") and _from_call(work) and not work.turn_at:
+    if work.status in ("interrupted", "stopped", "failed") and _from_call(work) and not work.turn_at:
         # A call's job no turn of was seen: there's nothing to carry on from,
         # and the user's words are its task.
         return ["stop", "send"] if work.status == "interrupted" else ["send"]
@@ -3051,7 +3095,7 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
                         "note": f"That's longer than {APP_TEXT_CHARS} characters, so nothing was sent. Shorten it, "
                                 "or open the chat and send it there."}
             words = text
-            if work.error == _BRIEF_UNSENT:
+            if work.error == _BRIEF_UNSENT or (_from_call(work) and not work.turn_at):
                 # Nothing ran: the brief it never had goes in, with the reply.
                 words = _with_unsent_brief(store, work, f"The user adds, from Conduit:\n{text}")
             how = body.get("how") if body.get("how") in ("auto", "add", "after") else "auto"

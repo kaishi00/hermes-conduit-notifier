@@ -302,7 +302,8 @@ class Store:
         now = time.time()
         with self._db() as con:
             if session_id:
-                kept = con.execute("SELECT * FROM work WHERE session_id = ? ORDER BY created_at LIMIT 1",
+                kept = con.execute("SELECT * FROM work WHERE session_id = ? AND kind = 'workstream' "
+                                   "ORDER BY created_at LIMIT 1",
                                    (session_id,)).fetchone()
                 if kept is not None:
                     return _work(kept)
@@ -344,8 +345,8 @@ class Store:
         if not isinstance(session_id, str) or not session_id or not self.path.is_file():
             return None
         with self._db(write=False) as con:
-            row = con.execute("SELECT * FROM work WHERE session_id = ? AND kind = 'workstream'",
-                              (session_id,)).fetchone()
+            row = con.execute("SELECT * FROM work WHERE session_id = ? AND kind = 'workstream' "
+                              "ORDER BY created_at LIMIT 1", (session_id,)).fetchone()
         return _work(row) if row else None
 
     def list(self, *, active_only: bool = False, include_closed: bool = False, limit: int = 50,

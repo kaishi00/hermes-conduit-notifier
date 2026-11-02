@@ -1530,7 +1530,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
 | GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, unavailable}` |
 | POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals}` | the settings as they are now |
-| POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?}` (`via`: `phone` or `watch`) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `off` (409) when the bot's workstreams are off |
+| POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?}` (`via`: `phone` or `watch`) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title` or `goal` isn't text; `off` (409) when the bot's workstreams are off |
 
 - `work` lists every open (unresolved) row, however old: active work first,
   then the rest by when it last changed. Rows are workstreams, and asks to
