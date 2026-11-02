@@ -1531,8 +1531,8 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
     shows in the Work panel and the Bot Chat's note, marked as a call's. It
     never wakes the Bot Chat (the call told the user) and never counts
     against the coordinator's limit. A session already kept answers with
-    its row. It's starting until its first turn begins, so a job whose
-    prompt never went in is the panel's stuck start, not work running."""
+    its row. It's starting until its chat holds the request (then running),
+    so a job whose prompt never went in is the panel's stuck start, not work running."""
     home = Path(home)
     if not isinstance(session_id, str) or not all(isinstance(value, (str, type(None))) for value in (title, goal)):
         return {"ok": False, "error": "invalid", "note": "session_id, title and goal are text."}
@@ -1572,9 +1572,13 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "") 
     began = time.time()
     # Looked up and added in one transaction, with its session from the
     # start: the same session twice, even at once, is one row.
+    # The phone adopts once Hermes took the request, so its turn may have
+    # begun (its hooks finding no row yet): one whose chat holds the
+    # request is running, and its turn's end settles it.
+    status = "running" if _asked_in(home, session) else "starting"
     work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()), coordinator="",
                      requested_by={"by": via}, executor={"bot": work_broker.profile_of(home)},
-                     reply_to={"to": via}, status="starting", session_id=session)
+                     reply_to={"to": via}, status=status, session_id=session)
     if not _from_call(work):
         # The session is already one of the bot's own workstreams: it stays that.
         return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}

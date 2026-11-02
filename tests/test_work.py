@@ -3972,3 +3972,11 @@ def test_a_send_to_a_calls_job_whose_prompt_went_in_doesnt_repeat_its_task(on, h
     work.app_act(on.home, "W1", "send", {"text": "And tomorrow?"})
     sent, = submitted_to(hermes, CALL_JOB)
     assert "Is it raining in Lyon?" not in sent["text"] and "And tomorrow?" in sent["text"]
+
+
+def test_a_calls_job_adopted_after_its_turn_began_is_running(on, hermes):
+    _chat_db(on.home, [(CALL_JOB, "user", "Is it raining?", None)])
+    assert adopt()["work"]["status"] == "running"
+    work.turn_ended(CALL_JOB, "Rain from three.")
+    work.turn_finished(CALL_JOB, failed=False, interrupted=False)
+    assert on.get("W1").status == "done"
