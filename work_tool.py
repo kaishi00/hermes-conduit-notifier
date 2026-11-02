@@ -1656,6 +1656,9 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
         # Whether the call's chat is the Bot Chat can't be read: kept next time.
         return {"ok": False, "error": "unavailable", "note": "This bot's chats can't be read right now."}
     coordinator = _bot_chat_of(home) if asked is True else ""
+    if asked is True and not coordinator:
+        # Its title is the Bot Chat's but the chat can't be found yet: kept next time.
+        return {"ok": False, "error": "unavailable", "note": "This bot's chats can't be read right now."}
     if coordinator:
         # The coordinator's own, started by its call: it hears of it once the call is saved.
         work = store.add("workstream", title=shown, goal=" ".join(str(goal or "").split()),

@@ -1446,7 +1446,9 @@ in Conduit (Edit Bot > Work) or here:
   (`POST /workstreams/call-ended`), Classic's included, which writes its
   turns into the chat rather than saving them; only a phone that quit
   mid-call, or whose end didn't get through, leaves them held the full two
-  hours. A later call's own hold isn't ended by an earlier call's late end.
+  hours. A later call's own hold isn't ended by an earlier call's late end; the
+  hold is the Bot Chat's, not one call's, so with two calls on it at once
+  either one's save or end releases it.
 - Bots work together coordinator to coordinator. `work_ask` asks another of
   your bots on this Hermes (by its name or profile) for an answer or a piece
   of work: it's an `ask_out` row in the asking bot's registry and an `ask_in`

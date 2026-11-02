@@ -4239,3 +4239,9 @@ def test_a_bot_chat_calls_job_waits_when_the_chats_title_cant_be_read(on, hermes
     monkeypatch.setattr(work, "_titled_bot_chat", lambda chat, home=None: None if chat == BOT_CHAT else real(chat, home))
     assert adopt(chat=BOT_CHAT)["error"] == "unavailable"
     assert on.get("W1") is None
+
+
+def test_a_bot_chat_calls_job_waits_when_the_bot_chat_cant_be_found(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_titled_bot_chat", lambda chat, home=None: chat == BOT_CHAT)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: "")
+    assert adopt(chat=BOT_CHAT)["error"] == "unavailable"
