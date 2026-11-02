@@ -396,12 +396,14 @@ def test_sealed_batch_answers_open_per_question():
     assert opened["answers"] == {"q0": "Red", "q1": "Blue"}
 
 
+# A sealed answer is random each time it's made, so the ids are fixed:
+# pytest-xdist's workers must collect the same test ids.
 @pytest.mark.parametrize("answer", [
     "Yes",  # plaintext from a relay or an old client
     _answer("Yes", request_id="conduit-push-000000000000"),  # replayed from another request
     _answer("Yes", question_id="q1"),  # moved to another question
     _answer("Yes", keys=e2e.derive_keys("f" * 32, bytes(32))),  # another key
-])
+], ids=["plaintext", "other-request", "other-question", "other-key"])
 def test_answers_not_sealed_for_this_request_are_rejected(answer):
     status = {"status": "answered", "answer": answer}
     assert client.opened_answers(status, _state(), "conduit-push-abc123def456") == {"status": "rejected"}

@@ -5,10 +5,18 @@ name: Tests
 # could merge with a failing test, or with a plugin version another PR had
 # already taken on main (two PRs shipped 0.51.5, two 0.62.4).
 
+# The plugin tests run in parallel (pytest-xdist; worksteal, so one slow file
+# doesn't hold a worker while the others idle). The Pulse persona suite
+# (tests/test_pulse_personas.py, about 8 minutes of simulations) runs in its
+# own job: daily, on demand, and on a PR or push that changes Pulse
+# (Eric, 2026-11-02).
+
 on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "30 7 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -21,6 +29,8 @@ permissions:
 jobs:
   plugin:
     name: Plugin
+    # The daily run is the persona suite's alone.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -51,10 +61,74 @@ jobs:
         run: python -m pytest --rootdir=tests tests/test_changelog.py -q
 
       - name: Run the plugin tests
-        run: python -m pytest --rootdir=tests tests -q
+        run: >-
+          python -m pytest --rootdir=tests tests -q
+          -n auto --dist worksteal
+          --ignore=tests/test_pulse_personas.py
+
+  personas:
+    name: Pulse personas
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          # A pull_request checkout is the merge commit: HEAD^1 is the base.
+          # A push is compared with the commit it replaced, fetched below.
+          fetch-depth: 2
+
+      - name: Does the change touch Pulse
+        # Any pulse*.py, a Pulse test, the shared fixtures, the test
+        # requirements or this workflow. Fails closed: a diff it can't read
+        # runs the suite. A change elsewhere that breaks it shows up in the
+        # daily run. A push counts every commit it brought (from the commit
+        # it replaced), and a push with no earlier commit runs the suite.
+        id: pulse
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          run=true
+          base=''
+          if [ "$EVENT" = "pull_request" ]; then
+            base=HEAD^1
+          elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "${BEFORE//0/}" != "" ] \
+            && git fetch --no-tags --depth=1 origin "$BEFORE"; then
+            base=$BEFORE
+          fi
+          if [ -n "$base" ]; then
+            if changed=$(git -c core.quotePath=false diff --name-only "$base" HEAD) && [ -n "$changed" ] \
+              && ! printf '%s\n' "$changed" \
+                | grep -E '(^|/)pulse[^/]*\.py$|^tests/test_pulse[^/]*\.py$|^tests/conftest\.py$|^tests/requirements\.txt$|^\.github/workflows/tests\.yml$' >/dev/null; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "- persona suite: \`$run\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v6
+        if: steps.pulse.outputs.run == 'true'
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Install the test dependencies
+        if: steps.pulse.outputs.run == 'true'
+        run: python -m pip install -r tests/requirements.txt
+
+      - name: Run the persona suite
+        if: steps.pulse.outputs.run == 'true'
+        run: >-
+          python -m pytest --rootdir=tests tests/test_pulse_personas.py -q
+          -n auto --dist worksteal
 
   relay:
     name: Relay
+    # The daily run is the persona suite's alone.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -75,6 +149,8 @@ jobs:
 
   mailbox:
     name: Mailbox
+    # The daily run is the persona suite's alone.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:

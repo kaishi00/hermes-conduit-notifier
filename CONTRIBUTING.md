@@ -79,10 +79,14 @@ before merging. CI fails a PR whose version main already has.
 ## Tests
 
 CI (`.github/workflows/tests.yml`) runs all three suites on every PR and every
-push to main. To run them locally:
+push to main, the plugin's in parallel. The Pulse persona suite
+(`tests/test_pulse_personas.py`, about 8 minutes of simulations) runs in a job
+of its own, on a change to a `pulse*.py`, a Pulse test, `tests/conftest.py`,
+the test requirements or the workflow, and daily (Eric, 2026-11-02). To run
+them locally:
 
     pip install -r tests/requirements.txt
-    python -m pytest --rootdir=tests tests
+    python -m pytest --rootdir=tests tests -n auto --dist worksteal
     (cd relay && npm test)
     (cd mailbox && npm test)
 
