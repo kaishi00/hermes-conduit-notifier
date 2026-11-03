@@ -2369,7 +2369,7 @@ that phone gets the cards; subagents can't use it. Limits:
 
 ### Map and place cards (plugin 0.45+)
 
-`conduit_show` also takes `cards`: up to four maps, places and other cards Conduit draws
+`conduit_show` also takes `cards`: up to 12 maps, places and other cards Conduit draws (four before boards, below)
 natively, in a typed chat as well as on a call. `markdown` is optional with
 cards; without it, the cards' own Markdown (each place with an Apple Maps
 link) is what a phone that doesn't draw cards, or another client, shows.
@@ -2389,12 +2389,15 @@ in the exchange (0.45.1+), so a phone that draws the cards leaves it out.
   `source`, or it's dropped; a place's or person's photo also needs an https
   `url`.
 - **Kept in history.** The tool's answer carries the normalized cards
-  (`{"ok": true, "cards": [...]}`), so the chat's history keeps them and
-  Conduit draws them whenever the chat is opened. With no call screen, a
+  (`{"ok": true, "cards": [...], "markdown": "..."}`), so the chat's history
+  keeps them and Conduit draws them whenever the chat is opened; `markdown`
+  is the cards' own text (0.128+), which Conduit shows in a card's place
+  whenever it can't draw it. With no call screen, a
   Conduit that says `chat-cards` in its exchange's `features` still gets
   the tool, and the card shows in the chat only. A turn that isn't from
   Conduit (Desktop, or a messaging app through Hermes' gateway) is refused
-  with `not_conduit`. A classic `hermes` terminal turn can't be told apart
+  with `not_conduit`, and from 0.128 the answer's `markdown` is the cards'
+  text for Hermes to put in its reply. A classic `hermes` terminal turn can't be told apart
   yet (Hermes doesn't bind its platform for tools), so it isn't refused.
 - **Live calls.** A saved call's assistant turn can carry `cards`
   (`POST /voice/sessions`): kept with a chat's call and returned by
@@ -2448,6 +2451,46 @@ keep only that field.
   Cards shown beside the earlier one stay.
 - A Conduit says `media-cards` and `live-cards` in its exchange when it
   draws them; the same gating as information cards applies.
+
+### Boards (plugin 0.128+)
+
+One `conduit_show` call is a board: up to 12 cards, laid out by Conduit
+(small cards side by side on a wide window), with two more parameters from
+the schema's `board` section.
+
+- **More kinds.** `table` (`columns` and `rows`, up to 6 by 50; a number,
+  blank or null cell becomes text in its place, and a row with the wrong
+  number of cells is dropped; the user sorts by any column), `timeline`
+  (days or phases with timed stops, a stop's `place` opening in Apple Maps),
+  `checklist` (items in optional `group`s, one per text), `list` (things
+  with a `detail`, a `value`, a link and a sourced https photo; `ranked`
+  numbers them), `progress` (goals with a value, a goal above 0 and a unit)
+  and `callout` (a tip, note or warning).
+- **`layout`**: `tabs` shows one card at a time, each card's title its tab;
+  `stack` (the default) one under another.
+- **`next`**: up to four follow-ups, each the message the user would send.
+  A tap sends it as theirs and a long press puts it in the composer. One
+  that starts with `/` or `!`, holds a backtick or an `@` reference, or
+  repeats another is dropped, so a tap can only ever ask.
+- **Exact errors.** The answer's `problems` lists what was dropped or cut
+  and why, by path (`cards[1].table.rows[3]: 1 cells for 2 columns, left
+  out`), so Hermes can fix it and show the board again.
+- **Checklist ticks** are kept in the profile's `conduit-checklists.json`
+  (200 checklists, forgotten after 90 days untouched): Conduit reads a
+  chat's with `GET /boards/checklists?session=<id>` (every id the chat is
+  known by) and sends a checklist's whole state on each tick with
+  `POST /boards/checklists` (`sessions`, `key`: its live name, else its
+  title, else `checklist`, `title`, `items`, `ticked`). Hermes hears a
+  changed checklist once, at the chat's next turn.
+- **Recipes.** The `conduit_push:drawing-boards` skill holds the plans for a
+  trip, a comparison, a dashboard from the user's data and a tracker. On a
+  turn from a Conduit that draws boards, Hermes gets a one-line rule on when
+  to draw one and never to draw data as an HTML `::preview` page.
+- **Older Conduits.** A Conduit says `board-cards` in its exchange when it
+  draws boards. Until every Conduit that draws cards does, the tool leaves
+  the new kinds out, keeps the first four cards, drops `layout` and `next`,
+  and tells Hermes to give the rest in its reply; a call screen's phone
+  without it gets four cards and the Markdown.
 
 ## Health data from Conduit (plugin 0.23+)
 
