@@ -1367,6 +1367,11 @@ def test_a_slow_start_that_fails_is_told_as_news(monkeypatch):
     release.set()
     [item] = news(grant, wait_s=5)["news"]
     assert (item["job_id"], item["status"], item["error"]) == ("watch-1", "failed", "model not configured")
+    # The job is failed (and its news out) a moment before the start's thread
+    # hands the call's job back, so wait for it as the test above waits.
+    deadline = time.monotonic() + 5
+    while grant.jobs.started and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert grant.jobs.started == 0
 
 
