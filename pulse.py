@@ -1518,8 +1518,12 @@ def _probe_due(pulse_store: store.PulseStore, now: float) -> bool:
     return last is None or now - last >= max(interval, 600.0)
 
 
-def home_chat(pulse_store: store.PulseStore, home: Path) -> tuple[Optional[hermes.HomeChat], str]:
-    """The chat Pulse speaks in, and what's wrong when there's none."""
+def home_chat(pulse_store: store.PulseStore, home: Path,
+              looks_elsewhere: bool = False) -> tuple[Optional[hermes.HomeChat], str]:
+    """The chat Pulse speaks in, and what's wrong when there's none.
+    ``looks_elsewhere``: where the problem is shown (Settings > Pulse,
+    ``pulse status``), a chat with its title in another profile is named;
+    the loop's calls skip reading every profile's store."""
     try:
         chat_id = pulse_store.get("home_session_key")
         if chat_id:
@@ -1530,11 +1534,31 @@ def home_chat(pulse_store: store.PulseStore, home: Path) -> tuple[Optional[herme
     except hermes.HermesUnreadable as error:
         return None, f"can't read Hermes's state.db: {error}"
     if not chats:
-        return None, f'Pulse has no chat titled "{title}" yet; set it up in Settings > Pulse'
+        return None, _no_home_chat(home, title, looks_elsewhere)
     problem = ""
     if len(chats) > 1:
         problem = f'{len(chats)} chats are titled "{title}"; using the {"pinned" if chats[0].pinned else "latest"} one'
     elif not chats[0].pinned:
         problem = f'Pulse\'s chat "{title}" isn\'t pinned, so Hermes could prune it; pin it from Settings > Pulse'
     return chats[0], problem
+
+
+def _no_home_chat(home: Path, title: str, looks_elsewhere: bool) -> str:
+    """Why Pulse has no chat: none is titled ``title`` in its profile, and
+    any other profile's chat with that title, which Pulse never reads, is
+    named, so a chat made in the wrong profile is found (issue 1681)."""
+    there = []
+    for name, path in report.profile_homes(home) if looks_elsewhere else ():
+        try:
+            if hermes.find_home_chat(path, title):
+                there.append(name)
+        except hermes.HermesUnreadable as error:
+            logger.debug("Pulse: couldn't look for its chat in profile %s: %s", name, error)
+    if not there:
+        return f'Pulse has no chat titled "{title}" yet; set it up in Settings > Pulse'
+    profile = proposals.profile_name(home)
+    where = " and ".join(f'"{name}"' for name in there)
+    return (f'Pulse runs in profile "{profile}" and has no chat titled "{title}" there '
+            f'({"profile" if len(there) == 1 else "profiles"} {where} {"has" if len(there) == 1 else "have"} one, which this Pulse doesn\'t read); '
+            f'set it up in Settings > Pulse')
 
