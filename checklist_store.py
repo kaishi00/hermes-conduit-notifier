@@ -137,8 +137,11 @@ class ChecklistStore:
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as file:
                 json.dump(state, file, ensure_ascii=False)
+                file.flush()
+                os.fsync(file.fileno())
             os.chmod(temporary, 0o600)
             os.replace(temporary, self.path)
+            _sync_directory(self.path.parent)
         except BaseException:
             try:
                 os.unlink(temporary)
@@ -227,6 +230,21 @@ class ChecklistStore:
             line += f"; still to do: {', '.join(open_items)}.]" if open_items else "; everything is done.]"
             lines.append(line)
         return "\n".join(lines)
+
+
+def _sync_directory(path: Path) -> None:
+    """The rename itself survives a crash (not on Windows, which has no
+    directory handles)."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 @contextmanager

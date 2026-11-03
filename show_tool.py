@@ -259,7 +259,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         # Hermes hears to say the rest.
         problems.append(OLD_BOARD_NOTE.format(count=card_schema.LEGACY_MAX_CARDS))
         cards = cards[:card_schema.LEGACY_MAX_CARDS]
-    elif dropped_extras and cards:
+    elif dropped_extras:
         problems.append(OLD_BOARD_EXTRAS_NOTE.format(what=" and ".join(dropped_extras)))
     no_texts = _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE)
     if no_texts:

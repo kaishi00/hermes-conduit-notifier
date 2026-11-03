@@ -2479,8 +2479,10 @@ the schema's `board` section.
   that starts with `/` or `!`, holds a backtick or an `@` reference, or
   repeats another is dropped, so a tap can only ever ask.
 - **Exact errors.** The answer's `problems` lists what was dropped or cut
-  and why, by path (`cards[1].table.rows[3]: 1 cells for 2 columns, left
-  out`), so Hermes can fix it and show the board again.
+  and why, by path (`next[2]: "/new" isn't a plain message, left
+  out`; a table row by its first cell, `cards[0].table.rows: the row
+  starting "Lisbon" has 1 cells for 2 columns, left out`), so Hermes can fix
+  it and show the board again.
 - **Checklist ticks** are kept in the profile's `conduit-checklists.json`
   (200 checklists, forgotten after 90 days untouched): Conduit reads a
   chat's with `GET /boards/checklists?session=<id>` (every id the chat is

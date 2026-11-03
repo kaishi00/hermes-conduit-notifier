@@ -515,6 +515,13 @@ def test_an_older_conduit_hears_its_tabs_and_follow_ups_were_left_out(tool_home)
                                   "if they matter."]
 
 
+def test_an_older_conduit_hears_of_follow_ups_left_out_without_cards(tool_home):
+    _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards", "info-cards"))
+    answer = _call({"title": "Plain", "markdown": "Hi", "next": ["More"]})
+    assert answer["ok"] is True and "next" not in answer
+    assert any("next left out" in problem for problem in answer["problems"])
+
+
 def test_an_older_conduit_hears_of_a_cut_only_when_cards_were_cut(tool_home):
     _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
     stats = [{"type": "stats", "title": str(index), "stats": [{"label": "N", "value": str(index)}]}
