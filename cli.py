@@ -66,7 +66,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                            "the default), the user's own go-ahead before a step that can't be undone (ask), or "
                            "nothing (off)")
     work.add_argument("--model", default=None, metavar="[PROVIDER:]MODEL",
-                      help="for on: the model new workstreams start on, like anthropic:claude-sonnet-5-5 "
+                      help="for on: the model new workstreams start on, like anthropic:claude-sonnet-5-5; the "
+                           "first colon ends the provider, so a model with one of its own is ollama:qwen3:8b "
                            "(\"bot\": the bot's own, the one its Bot Chat uses, the default)")
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
@@ -451,8 +452,8 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
     # The first colon ends the provider, so a model whose own name has one
     # (qwen3:8b) is named with its provider (ollama:qwen3:8b).
     provider, _, model = picked.partition(":") if ":" in picked else ("", "", picked)
-    if picked and picked.lower() != "bot" and (not model.strip()
-                                               or len(picked) > work_store.WORKSTREAM_MODEL_MAX_CHARS):
+    chosen = {"model": model.strip(), "provider": provider.strip()}
+    if picked and picked.lower() != "bot" and not work_store.model_pick_ok(chosen):
         print("Bot workstreams: --model takes [provider:]model, like anthropic:claude-sonnet-5-5, "
               "or bot for the bot's own. Nothing changed.")
         return 2
@@ -465,8 +466,7 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
         if getattr(args, "approvals", None):
             store.set_workstream_approvals(args.approvals)
         if picked:
-            store.set_workstream_model(None if picked.lower() == "bot" else
-                                       {"model": model.strip(), "provider": provider.strip()})
+            store.set_workstream_model(None if picked.lower() == "bot" else chosen)
     elif action == "off":
         store.set_policy("off")
     mode = store.policy()

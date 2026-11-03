@@ -52,6 +52,18 @@ DEFAULT_WORKSTREAM_APPROVALS = "chats"
 # What Edit Bot > Work's Workstream Model keeps; Hermes' session.create takes the same names.
 WORKSTREAM_MODEL_KEYS = ("model", "provider", "reasoning_effort")
 WORKSTREAM_MODEL_MAX_CHARS = 200
+
+
+def model_pick_ok(picked: Any) -> bool:
+    """A Workstream Model pick both the settings route and the CLI keep: a
+    dict of WORKSTREAM_MODEL_KEYS with a model, each value one short line."""
+    if not isinstance(picked, dict) or set(picked) - set(WORKSTREAM_MODEL_KEYS):
+        return False
+    if not isinstance(picked.get("model"), str) or not picked["model"].strip():
+        return False
+    return all(value is None or (isinstance(value, str) and len(value) <= WORKSTREAM_MODEL_MAX_CHARS
+                                 and value.isprintable())
+               for value in picked.values())
 MAX_RUNNING_LIMIT = 6
 
 KINDS = ("workstream", "ask_out", "ask_in")
@@ -298,7 +310,9 @@ class Store:
                 if isinstance(value.get(key), str) and value[key].strip()}
 
     def set_workstream_model(self, value: Optional[dict]) -> None:
-        """``value`` with a ``model``, or None (or {}) for the bot's own."""
+        """``value`` with a ``model`` (model_pick_ok), or None for the bot's own."""
+        if value is not None and not model_pick_ok(value):
+            raise ValueError("workstream_model needs a model, each value one short line")
         kept = {key: str(value[key]).strip() for key in WORKSTREAM_MODEL_KEYS
                 if isinstance(value, dict) and isinstance(value.get(key), str) and value[key].strip()}
         self.set_meta("workstream_model", json.dumps(kept if kept.get("model") else {}))

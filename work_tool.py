@@ -880,7 +880,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                 store.set_meta(_WORKTREE + work.ref, "")
         if not isinstance(error, work_broker.BrokerError):
             logger.warning("conduit_push: starting a workstream failed", exc_info=True)
-        return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't start it: {reason}"}
+        note = f"Hermes couldn't start it: {reason}"
+        picked = store.workstream_model()
+        if picked:
+            # The user's pick may be the cause: say where it's changed.
+            note += (f" It was started on the workstream model {picked['model']}, which the user picked in Edit "
+                     "Bot > Work; if Hermes can't run that model, they can change it there.")
+        return {"ok": False, "ref": work.ref, "error": "hermes", "note": note}
     # The session runs from here on, so a write that fails now never marks it
     # failed: its row already has the id (`created` stored it inside the
     # start, which ends the session when that fails), and its turn's end
@@ -2956,13 +2962,7 @@ def app_set_settings(home: Path, body: Optional[dict]) -> dict:
 
 
 def _model_pick_ok(picked: Any) -> bool:
-    if not isinstance(picked, dict) or set(picked) - set(work_store.WORKSTREAM_MODEL_KEYS):
-        return False
-    if not isinstance(picked.get("model"), str) or not picked["model"].strip():
-        return False
-    return all(value is None or (isinstance(value, str) and len(value) <= work_store.WORKSTREAM_MODEL_MAX_CHARS
-                                 and "\n" not in value and "\r" not in value)
-               for value in picked.values())
+    return work_store.model_pick_ok(picked)
 
 
 def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = None) -> dict:

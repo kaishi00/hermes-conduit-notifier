@@ -524,7 +524,7 @@ def test_start_makes_a_hidden_titled_session_on_the_bots_own_profile(on, hermes)
     assert "a card with its title and live status" in answer["note"] and "one short sentence" in answer["note"]
 
 
-def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes):
+def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes, monkeypatch):
     # Eric 2026-11-03: a coordinator and its workstreams on different models.
     assert start()["ok"]
     (_, params, _), = hermes.named("session.create")
@@ -545,6 +545,15 @@ def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes):
         refused = work.app_set_settings(home, {"workstream_model": bad})
         assert refused["ok"] is False and refused["error"] == "invalid"
     assert work.app_settings(home)["workstream_model"] is None
+    # A model Hermes can't run fails the start, and the note says where it was picked.
+    work.app_set_settings(home, {"workstream_model": {"model": "claude-sonet-5-5"}, "max_running": 4})
+
+    def refuse(self, **kwargs):
+        raise broker_mod.BrokerError("unknown model claude-sonet-5-5")
+
+    monkeypatch.setattr(broker_mod.Broker, "start", refuse)
+    refused = start("A third")
+    assert refused["ok"] is False and "claude-sonet-5-5" in refused["note"] and "Edit Bot > Work" in refused["note"]
 
 
 def test_a_secondary_bot_starts_on_its_own_profile(tmp_path, monkeypatch, hermes):
@@ -1382,6 +1391,7 @@ def test_the_cli_status_says_on_by_default_without_a_registry(home, monkeypatch,
     # An empty model is refused, and changes nothing.
     cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="anthropic:claude-sonnet-5-5"))
     assert cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="anthropic:")) == 2
+    assert cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="a:x\ny")) == 2
     assert store_mod.Store(home).workstream_model()["model"] == "claude-sonnet-5-5"
     cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="bot"))
     assert store_mod.Store(home).workstream_approvals() == "ask"
