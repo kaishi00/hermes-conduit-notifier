@@ -7,7 +7,8 @@ whether the tool can do what it's asked. A line cut short, or a first
 sentence that doesn't name what the tool does, and the model says it can't
 (hermes-conduit#177: "I can't place a phone call from here", with
 conduit_call_user in the catalog). So each tool's first sentence leads with
-what it does and fits Hermes' cap, which this checks with Hermes' own code.
+what it does and fits Hermes' cap. This checks the cap with Hermes' own code;
+what the sentence says is for review.
 
 Run in a child process with a scratch HERMES_HOME holding a copy of the
 plugin, so loading it touches no real profile.
@@ -57,9 +58,12 @@ def _catalog(tmp_path: Path) -> list:
 
 def test_every_tool_reads_whole_in_the_tool_search_catalog(tmp_path: Path) -> None:
     tools = _catalog(tmp_path)
-    names = {tool["name"] for tool in tools}
-    # The plugin loaded and registered its tools (a broken load lists none).
-    assert {"conduit_call_user", "conduit_call_watch", "conduit_calendar", "conduit_phone"} <= names, names
+    # Every tool plugin.yaml says the plugin provides registered (a broken
+    # load, or one tool that fails to register, lists fewer).
+    provided = set(yaml.safe_load((ROOT / "plugin.yaml").read_text())["provides_tools"])
+    assert {tool["name"] for tool in tools} == provided
+    empty = [tool["name"] for tool in tools if not tool["line"].strip()]
+    assert not empty, f"These tools have no description for the catalog: {empty}"
     cut = [f"{tool['name']}: {tool['line']}" for tool in tools if tool["line"].endswith("…")]
     assert not cut, ("These tools' first sentences are cut in Tool Search's catalog; lead each with what the tool "
                      "does, within Hermes' cap:\n" + "\n".join(cut))
