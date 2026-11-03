@@ -248,7 +248,7 @@ def test_the_outbox_keeps_what_hermes_never_took(home):
 # Who may call the tools -----------------------------------------------------------
 
 def test_on_by_default_for_every_bot(home, hermes):
-    assert work.available() and work.policy(home) == "strict"
+    assert work.available() and work.policy(home) == "lookups"  # Eric 2026-11-03
     assert not store_mod.exists(home)  # reading it writes nothing
     assert start()["ok"] and store_mod.Store(home).get("W1").status == "running"
 
@@ -721,6 +721,23 @@ def test_lookups_allows_read_only_lookups(on, hermes):
     assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"
 
 
+def test_lookups_hands_a_place_rule_to_a_workstream(on, hermes):
+    # Place rules are cron jobs: a write, not a lookup (notifier #521's review).
+    on.set_policy("lookups")
+    assert work.tool_block(BOT_CHAT, "conduit_location", {"action": "now"}) is None
+    for action in ("set_rule", "remove_rule"):
+        assert work.tool_block(BOT_CHAT, "conduit_location", {"action": action})["action"] == "block"
+        bridged = {"name": "conduit_location", "arguments": {"action": action}}
+        assert work.tool_block(BOT_CHAT, "tool_call", bridged)["action"] == "block"
+    assert work.tool_block(BOT_CHAT, "conduit_location", {})["action"] == "block"  # no action read
+    assert work.tool_block(OTHER_CHAT, "conduit_location", {"action": "set_rule"}) is None  # other chats as before
+
+
+def test_a_policy_this_version_doesnt_know_holds_the_bot_chat_to_strict(on):
+    on.set_meta("policy", "newer")
+    assert on.policy() == "strict"
+
+
 def test_lookups_tells_the_coordinator_to_answer_lookups_itself(on, home, hermes):
     # Eric's Gridania test: with "Also look things up" on, the weather still went to a workstream.
     strict = work.digest(BOT_CHAT)
@@ -730,7 +747,7 @@ def test_lookups_tells_the_coordinator_to_answer_lookups_itself(on, home, hermes
     assert "Hand anything that needs tools" not in rules
     assert rules.index("the weather") < rules.index("work_start")
     for tool in ("web_search", "web_extract", "session_search", "conduit_location"):
-        assert tool in rules and work.tool_block(BOT_CHAT, tool, {}) is None
+        assert tool in rules and work.tool_block(BOT_CHAT, tool, {"action": "now"}) is None
 
 
 def test_a_bridged_call_is_checked_by_what_it_calls(on, hermes):
@@ -1384,6 +1401,10 @@ def test_the_cli_status_says_on_by_default_without_a_registry(home, monkeypatch,
     assert cli._work(types.SimpleNamespace(work_action="off", policy=None, max_running=None)) == 0
     assert store_mod.Store(home).policy() == "off"  # off is kept, so it stays off
     cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, approvals="ask"))
+    assert store_mod.Store(home).policy() == "lookups"  # back on with the default
+    cli._work(types.SimpleNamespace(work_action="on", policy="strict", max_running=None))
+    cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None))
+    assert store_mod.Store(home).policy() == "strict"  # a choice stands
     cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="anthropic:claude-sonnet-5-5"))
     assert store_mod.Store(home).workstream_model() == {"model": "claude-sonnet-5-5", "provider": "anthropic"}
     cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="bot"))
@@ -2788,7 +2809,7 @@ def test_a_multi_line_command_keeps_its_lines_on_the_card(on, hermes):
 
 def test_the_work_panel_is_empty_for_a_bot_without_workstreams(home, hermes):
     listed = work.app_list(home)
-    assert listed["policy"] == "strict" and listed["work"] == [] and not (home / "conduit").exists()
+    assert listed["policy"] == "lookups" and listed["work"] == [] and not (home / "conduit").exists()
 
 
 # Edit Bot > Work (M3) ------------------------------------------------------------
@@ -2799,7 +2820,7 @@ def _hermes_approvals(home, mode):
 
 def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
     settings = work.app_settings(home)
-    assert settings == {"ok": True, "policy": "strict", "max_running": 2, "max_running_limit": 6,
+    assert settings == {"ok": True, "policy": "lookups", "max_running": 2, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
                         "workstream_model": None, "unavailable": ""}
     assert not store_mod.exists(home)
@@ -2824,7 +2845,7 @@ def test_a_settings_change_is_kept_and_takes_effect(home, hermes):
 def test_a_bad_settings_change_changes_nothing(home, hermes, body):
     answer = work.app_set_settings(home, body)
     assert answer["ok"] is False and answer["error"] in ("missing", "invalid")
-    assert work.policy(home) == "strict" and not store_mod.exists(home)
+    assert work.policy(home) == "lookups" and not store_mod.exists(home)
 
 
 def _brief(hermes):

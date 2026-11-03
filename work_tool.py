@@ -68,6 +68,9 @@ BRIDGE = frozenset({"tool_search", "tool_describe", "tool_call"})
 STRICT = frozenset({*TOOLS, *WORKER_TOOLS, "clarify", "memory", "conduit_notify", *BRIDGE})
 LOOKUPS = STRICT | frozenset({"session_search", "web_search", "web_extract", "skills_list", "skill_view",
                               "conduit_health", "conduit_location", "conduit_inbox"})
+# The lookup tools' actions that change something: a coordinator on lookups
+# hands these to a workstream like any other tool (place rules are cron jobs).
+LOOKUP_WRITES = {"conduit_location": frozenset({"set_rule", "remove_rule"})}
 # Hermes' own bot-to-bot message: a coordinator gives other bots work with work_ask.
 MESSAGE_AGENT = "message_agent"
 WAKE_BATCH_S = 3.0
@@ -422,8 +425,8 @@ def _store(home: Optional[Path] = None) -> Optional[work_store.Store]:
 
 
 def policy(home: Optional[Path] = None) -> str:
-    """This bot's setting: on (strict) unless the user turned it off or
-    picked lookups (M3: on for every bot where workstreams can run). A registry that exists but can't
+    """This bot's setting: on (lookups) unless the user turned it off or
+    picked strict (M3: on for every bot where workstreams can run). A registry that exists but can't
     be read is "strict": the coordinator's limits hold until it can be read
     again."""
     home = home or _home()
@@ -2404,11 +2407,12 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     mode = policy(home)
     # A fork of the Bot Chat (its review, /btw) runs under its id and is
     # held to the same policy; a subagent never reaches here.
-    names = [name]
+    calls = [(name, args)]
     if name == "tool_call":
         from . import pulse_tools
 
-        names = [called for called, _ in pulse_tools.called(args)]
+        calls = pulse_tools.called(args)
+    names = [called for called, _ in calls]
     if mode == "off":
         # Turning workstreams off doesn't stop one that's running, nor what it may not do.
         if name == "tool_call" and (not names or any(called in BRIDGE for called in names)):
@@ -2435,7 +2439,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     held = _workstream_block(session_id, home, names, {MEMORY})
     if held is not None:
         return held
-    if all(called in allowed for called in names):
+    if all(_allowed(called, called_args, allowed) for called, called_args in calls):
         return None  # allowed in any chat: which one this is doesn't matter
     has_id = isinstance(session_id, str) and session_id.strip()
     # A call that names no chat might be the coordinator's: held like one
@@ -2452,8 +2456,8 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
                 # It might be a workstream: held, as an unreadable title is.
                 return {"action": "block", "message": CHECK_FAILED}
         return None
-    for called in names:
-        if called in allowed:
+    for called, called_args in calls:
+        if _allowed(called, called_args, allowed):
             continue
         if titled is None:
             # Which chat this is couldn't be read: it might be the
@@ -2465,6 +2469,18 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             return {"action": "block", "message": MESSAGE_AGENT_BLOCK}
         return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
     return None
+
+
+def _allowed(called: str, called_args: Any, allowed: frozenset) -> bool:
+    """Whether the coordinator runs this call itself: a tool its policy
+    allows, unless the call is one of a lookup tool's writes."""
+    if called not in allowed:
+        return False
+    writes = LOOKUP_WRITES.get(called)
+    if not writes:
+        return True
+    action = called_args.get("action") if isinstance(called_args, dict) else None
+    return isinstance(action, str) and action not in writes
 
 
 def _workstream_block(session_id: Any, home: Path, names: list[str], kept: set[str]) -> Optional[dict[str, str]]:

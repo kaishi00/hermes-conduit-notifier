@@ -1401,12 +1401,13 @@ call ends without them too (the log says so each time). A call that isn't saved
 A bot's Bot Chat can coordinate work sessions of its own: you ask Furina for
 something, she starts a workstream (a hidden chat on her own profile) and stays
 free to talk while it runs, and its result comes back to her as a work update
-she tells you about. It's on for every bot (strict) until you turn it off,
-in Conduit (Edit Bot > Work) or here:
+she tells you about. It's on for every bot until you turn it off, and she may
+also look things up herself (lookups), so a quick question doesn't start a
+workstream. Change it in Conduit (Edit Bot > Work) or here:
 
     hermes -p <bot> conduit-push work off
-    hermes -p <bot> conduit-push work on            # strict: she only coordinates
-    hermes -p <bot> conduit-push work on --policy lookups   # she may also look things up
+    hermes -p <bot> conduit-push work on            # lookups: she may also look things up
+    hermes -p <bot> conduit-push work on --policy strict    # she only coordinates
     hermes -p <bot> conduit-push work on --after-restart ask  # after a restart, ask before continuing
     hermes -p <bot> conduit-push work on --approvals ask    # workstreams ask before what can't be undone
     hermes -p <bot> conduit-push work on --model anthropic:claude-sonnet-5-5   # new workstreams' model (bot: her own)

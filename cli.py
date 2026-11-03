@@ -56,7 +56,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                                             "(on, off, status)")
     work.add_argument("work_action", choices=["on", "off", "status"])
     work.add_argument("--policy", choices=["strict", "lookups"], default=None,
-                      help="for on: what the coordinator may do itself (default strict)")
+                      help="for on: what the coordinator may do itself (default lookups)")
     work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 2)")
     work.add_argument("--after-restart", choices=["continue", "ask"], default=None,
                       help="for on: a workstream a restart cut off with nothing uncertain in flight is continued "
@@ -424,8 +424,8 @@ def _work(args: argparse.Namespace) -> int:
     try:
         if action == "status" and not work_store.exists(home):
             # On by default: said so without leaving a registry behind.
-            print(f"Bot workstreams: {work_store.DEFAULT_POLICY} (on by default; the coordinator only "
-                  f"coordinates; up to {work_store.DEFAULT_MAX_RUNNING} running at once). No work yet. "
+            print(f"Bot workstreams: {work_store.DEFAULT_POLICY} (on by default; the coordinator "
+                  f"coordinates and may also look things up; up to {work_store.DEFAULT_MAX_RUNNING} running at once). No work yet. "
                   "`hermes conduit-push work off` turns them off for this bot.")
             code = 0
         else:
@@ -461,7 +461,7 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
               "or bot for the bot's own. Nothing changed.")
         return 2
     if action == "on":
-        store.set_policy(args.policy or (store.policy() if store.policy() != "off" else "strict"))
+        store.set_policy(args.policy or (store.policy() if store.policy() != "off" else work_store.DEFAULT_POLICY))
         if args.max_running is not None:
             store.set_max_running(args.max_running)
         if getattr(args, "after_restart", None):
