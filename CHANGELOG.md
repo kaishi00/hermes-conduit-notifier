@@ -13,6 +13,28 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.127.0 (2026-11-03)
+
+### New and improved
+- Bot Mode: a bot's Bot Chat can coordinate work of its own. It starts
+  workstreams (each a chat of its own, with an optional worktree for coding
+  work), follows them, and reports back in the Bot Chat. Conduit shows them
+  in the bot's Work panel and on Bots Home.
+- This is on for every bot after the update. A Bot Chat then only
+  coordinates: its terminal, file and web tools run in a workstream instead
+  of in the Bot Chat itself. Edit Bot > Work lets a bot look things up
+  itself as well, or turns workstreams off so its Bot Chat runs its own
+  tools as before.
+- Bots can ask each other for help and answer, and a workstream picks up
+  again after Hermes restarts.
+- Edit Bot > Work: whether a bot starts workstreams, asks before it does, or
+  never does, and the model its workstreams use.
+- A voice call's "call me when it's done" jobs show in the bot's Work panel,
+  and a Bot Chat call tells you what its coordinator reported.
+- Scheduled jobs delivered to a Bot Chat just show their report by default.
+  Turn on "Let the bot act on it" for a job to have the bot follow up on
+  each run.
+
 ## 0.126.2 (2026-11-03)
 
 ### Fixes

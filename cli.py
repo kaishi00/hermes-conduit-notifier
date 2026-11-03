@@ -9,6 +9,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,23 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "(pushes already on their way then show generic text). The current key keeps working until Conduit "
              "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
+    work = commands.add_parser("work", help="Bot workstreams: this bot's Bot Chat coordinates work sessions of its own "
+                                            "(on, off, status)")
+    work.add_argument("work_action", choices=["on", "off", "status"])
+    work.add_argument("--policy", choices=["strict", "lookups"], default=None,
+                      help="for on: what the coordinator may do itself (default strict)")
+    work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 2)")
+    work.add_argument("--after-restart", choices=["continue", "ask"], default=None,
+                      help="for on: a workstream a restart cut off with nothing uncertain in flight is continued "
+                           "once (continue, the default) or left for the coordinator to ask about (ask)")
+    work.add_argument("--approvals", choices=["chats", "ask", "off"], default=None,
+                      help="for on: what the bot's workstreams ask approval for: as its chats do in Hermes (chats, "
+                           "the default), the user's own go-ahead before a step that can't be undone (ask), or "
+                           "nothing (off)")
+    work.add_argument("--model", default=None, metavar="[PROVIDER:]MODEL",
+                      help="for on: the model new workstreams start on, like anthropic:claude-sonnet-5-5; the "
+                           "first colon ends the provider, so a model with one of its own is ollama:qwen3:8b "
+                           "(\"bot\": the bot's own, the one its Bot Chat uses, the default)")
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
                                                  "dates, ahead, inbox, look, where, private, claims, spots")
@@ -362,6 +380,8 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if action == "pulse":
         return _pulse(args)
+    if action == "work":
+        return _work(args)
     if action == "prefs":
         return _prefs(args)
     if action == "rooms":
@@ -392,6 +412,87 @@ def _pulse_model_line(pulse: Any, pulse_store: Any, home: Path, chat_id: str) ->
         return f"Model: {turns}, for its turns, memory, report lists and follow-up checks"
     return (f"Model: {turns}, for its turns; memory, report lists and follow-up checks run on {named(slot)}, "
             "Hermes's \"Pulse memory\" model")
+
+
+def _work(args: argparse.Namespace) -> int:
+    from hermes_constants import get_hermes_home
+
+    from . import work_store
+
+    home = Path(get_hermes_home())
+    action = args.work_action
+    try:
+        if action == "status" and not work_store.exists(home):
+            # On by default: said so without leaving a registry behind.
+            print(f"Bot workstreams: {work_store.DEFAULT_POLICY} (on by default; the coordinator only "
+                  f"coordinates; up to {work_store.DEFAULT_MAX_RUNNING} running at once). No work yet. "
+                  "`hermes conduit-push work off` turns them off for this bot.")
+            code = 0
+        else:
+            code = _work_on_registry(work_store.Store(home), args, action)
+        # Flushed here, where a reader that left raises inside this guard
+        # rather than at the interpreter's exit.
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # Piped into head: the reader left, and nothing more is printed.
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, sys.stdout.fileno())
+        os.close(null)
+        return 0
+    except Exception as error:  # noqa: BLE001 — a registry that can't be read, said in a line
+        print(f"Bot workstreams: couldn't read this bot's registry ({type(error).__name__}: {error}).")
+        return 1
+
+
+OWN_MODEL = "the bot's own"
+
+
+def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
+    from . import work_store
+
+    picked = (getattr(args, "model", None) or "").strip()
+    # The first colon ends the provider, so a model whose own name has one
+    # (qwen3:8b) is named with its provider (ollama:qwen3:8b).
+    provider, _, model = picked.partition(":") if ":" in picked else ("", "", picked)
+    chosen = {"model": model.strip(), "provider": provider.strip()}
+    if picked and picked.lower() != "bot" and not work_store.model_pick_ok(chosen):
+        print("Bot workstreams: --model takes [provider:]model, like anthropic:claude-sonnet-5-5, "
+              "or bot for the bot's own. Nothing changed.")
+        return 2
+    if action == "on":
+        store.set_policy(args.policy or (store.policy() if store.policy() != "off" else "strict"))
+        if args.max_running is not None:
+            store.set_max_running(args.max_running)
+        if getattr(args, "after_restart", None):
+            store.set_after_restart(args.after_restart)
+        if getattr(args, "approvals", None):
+            store.set_workstream_approvals(args.approvals)
+            # As Edit Bot > Work does: approvals back on reach the running
+            # workstreams now, not only with their next send.
+            try:
+                from . import work_tool
+                work_tool.end_bypasses(store.home)
+            except Exception:  # noqa: BLE001 — each workstream's next send turns it back first
+                pass
+        if picked:
+            store.set_workstream_model(None if picked.lower() == "bot" else chosen)
+    elif action == "off":
+        store.set_policy("off")
+    mode = store.policy()
+    print(f"Bot workstreams: {mode if mode != 'off' else 'off'}"
+          + (f" (the coordinator {'may also look things up' if mode == 'lookups' else 'only coordinates'}; "
+             f"up to {store.max_running()} running at once; after a restart, safe work is "
+             f"{'continued' if store.after_restart() == 'continue' else 'left to ask about'}; workstream "
+             f"approvals: {store.workstream_approvals()}; workstream model: "
+             f"{store.workstream_model().get('model') or OWN_MODEL})"
+             if mode != "off" else ""))
+    if action == "status":
+        for work in store.list(include_closed=False, limit=20):
+            print(f"  {work.ref}  {work.status:<11} {_printable(work.title)}")
+    if action in ("on", "off"):
+        print("Takes effect on the bot's next turn. Its Bot Chat is the coordinator.")
+    return 0
 
 
 def _pulse(args: argparse.Namespace) -> int:

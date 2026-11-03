@@ -1,0 +1,202 @@
+"""Bot workstreams: the Work panel's routes (designs/bot-mode-coordinator
+C.6, C.8). A bot's work as Conduit's Work strip and panel show it, and the
+user's own actions on a workstream, which skip the Bot Chat's model: Reply
+in W3, Stop, Continue and Check first, and how they file it: Pin, Resolve
+and Reopen; and the bot's work settings, which Edit Bot > Work changes.
+
+A bot's work is driven in this process (Hermes' session API), so Conduit
+names a secondary bot with ?conduit_profile= (PLG-3 sends a ?profile= route
+to a plugin host, which has no session API). Each action goes through the
+copy of work_tool Hermes loaded for that bot, whose hooks see its turns.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from fastapi import HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+
+from . import core
+
+router = core.router
+
+WORKSTREAMS_MAX_BODY_BYTES = 16 * 1024
+WORKSTREAMS_LIMIT = 120
+WORKSTREAMS_WINDOW_S = 60.0
+# A refusal's code -> its HTTP status. The body has the code, so Conduit
+# words it, and the note.
+REFUSAL_STATUS = {"no_such_work": 404, "missing": 400, "unknown_action": 404, "off": 409, "busy": 409,
+                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502, "invalid": 400, "taken": 409}
+
+# The panel's reads and the user's actions count apart, so reading often
+# never holds up a Stop.
+_workstreams_limiter = core._MintLimiter(WORKSTREAMS_LIMIT, WORKSTREAMS_WINDOW_S,
+                                         message="Too many work requests; try again shortly")
+_workstream_actions_limiter = core._MintLimiter(WORKSTREAMS_LIMIT, WORKSTREAMS_WINDOW_S,
+                                                message="Too many work actions; try again shortly")
+
+
+def _work_tool() -> Any:
+    """The copy of work_tool Hermes loaded for this request's bot (its hooks
+    see that bot's turns), else the dashboard's own import of it."""
+    tool = core._plugin_package_module("work_tool")
+    return tool.copy_for(core._calls_home()) or tool
+
+
+def workstreams_list(resolved: bool = False, before: Optional[float] = None) -> Dict[str, Any]:
+    if not resolved:
+        return _work_tool().app_list(core._calls_home())
+    return _work_tool().app_list(core._calls_home(), resolved=True, before=before)
+
+
+def workstreams_act(ref: str, action: str, body: Optional[dict]) -> Dict[str, Any]:
+    return _work_tool().app_act(core._calls_home(), ref, action, body)
+
+
+def workstreams_settings() -> Dict[str, Any]:
+    return _work_tool().app_settings(core._calls_home())
+
+
+def workstreams_set_settings(body: Optional[dict]) -> Dict[str, Any]:
+    return _work_tool().app_set_settings(core._calls_home(), body)
+
+
+def workstreams_adopt(body: dict) -> Dict[str, Any]:
+    return _work_tool().adopt(core._calls_home(), body.get("session_id"), body.get("title"),
+                              via=str(body.get("via") or ""), goal=body.get("goal") or "", chat=body.get("chat"),
+                              result=body.get("result"), call=body.get("call"))
+
+
+async def _workstreams_route(route: str, profile: Optional[str], fn: Any, limiter: Any = None) -> Any:
+    no_store = {"Cache-Control": "no-store"}
+    try:
+        answer = await core._run_scoped(profile, core._limited(limiter or _workstreams_limiter, profile, fn))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except HTTPException as exc:
+        # The profile scope's own refusal (an unknown profile) stands.
+        exc.headers = {**(exc.headers or {}), **no_store}
+        raise
+    except Exception as exc:
+        raise core._unexpected(route, exc, feature="Bot workstreams")
+    if answer.get("ok") is False:
+        code = str(answer.get("error") or "refused")
+        return JSONResponse({"detail": answer.get("note") or code, "code": code,
+                             **({"work": answer["work"]} if "work" in answer else {})},
+                            status_code=REFUSAL_STATUS.get(code, 409), headers=no_store)
+    return {**answer, "ok": True}
+
+
+@router.get("/workstreams")
+async def get_workstreams(request: Request, response: Response, profile: Optional[str] = None,
+                          resolved: bool = False, before: Optional[float] = None) -> Any:
+    """The bot's work: ``work``, every open row, active first then by when
+    it last changed (workstreams, and asks to and from other bots), each
+    with its status, checklist, last result, the ``actions`` the user can
+    take and how they can file it (``manage``: pin, unpin, resolve,
+    reopen); ``counts`` for the Work strip (working, needs_you, ready,
+    waiting); ``resolved_count``; ``policy`` ("off" when the bot's
+    workstreams are off) and ``bot_chat``. ``resolved=1``: the Resolved
+    list instead, last resolved first, a page at a time (``before``: the
+    last row's ``closed_at``; ``more`` says there's another page)."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    return await _workstreams_route("workstreams", profile, lambda: workstreams_list(resolved, before))
+
+
+@router.get("/workstreams/settings")
+async def get_workstreams_settings(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """The bot's work settings for Edit Bot > Work: ``policy`` (off, strict
+    or lookups), ``max_running`` and ``max_running_limit``,
+    ``after_restart`` (continue or ask), ``workstream_approvals`` (chats,
+    ask or off), ``chat_approvals`` (the bot's approval mode in Hermes),
+    ``workstream_model`` (the model new workstreams start on, {"model",
+    "provider"?, "reasoning_effort"?}, or null for the bot's own) and
+    ``unavailable`` (why workstreams can't run on this Hermes, or '')."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    return await _workstreams_route("workstreams settings", profile, workstreams_settings)
+
+
+@router.post("/workstreams/settings")
+async def post_workstreams_settings(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """The user's change from Edit Bot > Work: any of ``policy``,
+    ``max_running``, ``after_restart``, ``workstream_approvals`` and
+    ``workstream_model`` (null for the bot's own; new workstreams only). The
+    answer is the settings as they are now; a value out of range is a 400
+    (``invalid``) and changes nothing."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route("workstreams settings", profile, lambda: workstreams_set_settings(body),
+                                    _workstream_actions_limiter)
+
+
+@router.post("/workstreams/adopt")
+async def post_workstreams_adopt(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """A voice call's job, kept in its bot's registry (M5): {"session_id",
+    "title", "via": "phone" or "watch", "goal"?, "chat"?, "result"?, "call"?
+    (the call's own id, which its call-ended names too)}, right after the phone
+    made the job's session. The call follows the job as before; the row
+    shows in the Work panel marked as a call's (``from_call``), settles with
+    its turns, never wakes the Bot Chat (unless "chat", below, is the Bot
+    Chat) and waits for the user after a restart. With "chat" the Bot Chat
+    the call is kept with, the job is the coordinator's own workstream
+    instead, whose update waits until the call is saved; "result" settles a
+    turn that already ended. The same call's session again answers with its row
+    (``adopted`` false); one of the bot's own workstreams' sessions is a 409
+    (``taken``), and so is a bot whose work is off (``off``)."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route("workstreams adopt", profile, lambda: workstreams_adopt(body),
+                                    _workstream_actions_limiter)
+
+
+@router.post("/workstreams/call-ended")
+async def post_workstreams_call_ended(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """A call kept with a chat ended ({"chat", "call"?}), in any voice mode: when the
+    chat is the Bot Chat, what the call's workstreams held goes out after
+    CALL_END_GRACE_S (its saved turns land first). ``call`` is the same id
+    the call's adopts named: only that call's end releases a hold armed with
+    it (a save, which names no call, releases only an unnamed one, from an
+    app that sends no ``call``). ``bot_chat`` says whether the chat is the
+    Bot Chat (whose release, if the hold is this call's, is then on its way)."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    call = body.get("call") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or not isinstance(body.get("chat"), str) or not body["chat"].strip() \
+            or (call is not None and not (isinstance(call, str) and (not call.strip() or _work_tool()._call_id(call)))):
+        raise HTTPException(status_code=400, detail="Expected {\"chat\", \"call\"?}", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route(
+        "workstreams call ended", profile,
+        lambda: {"ok": True, "bot_chat": bool(_work_tool().call_ended(
+            core._calls_home(), body["chat"], after=_work_tool().CALL_END_GRACE_S,
+            call=call or ""))},
+        _workstream_actions_limiter)
+
+
+@router.post("/workstreams/{ref}/{action}")
+async def post_workstream_action(ref: str, action: str, request: Request, response: Response,
+                                 profile: Optional[str] = None) -> Any:
+    """The user's action on workstream ``ref``: ``send`` ({"text", "how"?}:
+    their words go straight in, as if typed in its chat), ``stop``,
+    ``continue`` or ``check`` (Check first, after a restart cut off a step
+    that can change things), ``approve`` or ``deny`` ({"request_id"}: the
+    approval its "Needs you" card shows); or ``pin``, ``unpin``, ``resolve`` (work
+    still at it is refused, ``still_running``) and ``reopen``, for asks
+    too. The answer has the row as it is now
+    (``work``); a refusal is a 4xx with ``code`` and ``detail``."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    return await _workstreams_route("workstream action", profile, lambda: workstreams_act(ref, action, body),
+                                    _workstream_actions_limiter)

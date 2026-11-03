@@ -159,6 +159,9 @@ ROUTE_CAPABILITIES = (
     # POST /self/update runs the whole update on the host and notifies.
     "self-update",
     "cron-notifications",
+    # "act" on /cron/notifications: a job delivered to a Bot Chat just shows
+    # its report there unless it lets the bot act on it (cron_bot_chat).
+    "cron-bot-chat-reports",
     "reply-sources",
     "chat-on-screen",
     # POST /predict, GET /predict: Conduit's Predictive features, answered
@@ -220,6 +223,20 @@ ROUTE_CAPABILITIES = (
     # each Link's rules or its owner (link_asks), and the present store's
     # prompts for them (Linked Rooms).
     "link-asks",
+    # /workstreams: a bot's work for the Work panel and the user's own actions
+    # on a workstream (Reply, Stop, Continue, Check first), ?conduit_profile=
+    # included (Bot workstreams).
+    "bot-workstreams",
+    # GET/POST /workstreams/settings: the bot's work settings, which Edit Bot
+    # > Work shows and changes (on or off, lookups, running at once, after a
+    # restart, the workstreams' approvals).
+    "bot-work-settings",
+    # POST /workstreams/adopt: a voice call's job kept in its bot's registry,
+    # in the Work panel marked as a call's (Bot workstreams M5).
+    "work-adopt",
+    # POST /workstreams/call-ended: a call kept with the Bot Chat ended in
+    # any voice mode, so the updates its workstreams held go out.
+    "work-call-ended",
 )
 
 

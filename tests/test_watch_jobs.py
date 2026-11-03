@@ -250,6 +250,35 @@ def test_a_job_is_an_ordinary_hermes_chat_on_the_grants_profile_filed_as_a_voice
     assert scoped == ["coder"]
 
 
+def test_a_job_is_kept_in_its_bots_work_registry_before_its_turn(monkeypatch, tmp_path):
+    kept = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None,
+                                 adopt=lambda home, sid, title, via, goal: kept.append((home, sid, title, via, goal)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    grant.jobs.server.on_create = lambda: kept.append("created")
+    start(grant, "Check the build logs")
+    assert kept[0] == "created"
+    assert kept[1] == (tmp_path / "profiles" / "coder", "st-1", "Check the build logs", "watch", "Check the build logs")
+    # Whatever happens there, the job runs.
+    tool.adopt = lambda *args, **kwargs: 1 / 0
+    assert start(grant, "And the tests")["status"] == "started"
+
+
+
+def test_a_kept_job_whose_prompt_failed_is_settled_in_its_registry(monkeypatch, tmp_path):
+    failed = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None, adopt=lambda *args, **kwargs: None,
+                                 call_start_failed=lambda home, sid, error: failed.append((home, sid, error)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    grant.jobs.server.fail["prompt.submit"] = "model not configured"
+    assert start(grant, "Check the build logs")["status"] == "not_started"
+    assert failed and failed[0][:2] == (tmp_path / "profiles" / "coder", "st-1")
+
+
 def test_a_job_title_mirrors_the_phones():
     assert api.watch_jobs.watch_job_title("  a   b ") == "a b"
     long = "word " * 20
@@ -2115,6 +2144,21 @@ def test_an_approval_from_a_cancelled_turn_isnt_the_waiting_requests(monkeypatch
     assert len(server.methods("prompt.submit")) == 1
     assert grant.jobs.jobs["watch-2"].status == "starting"
     assert grant.jobs.jobs["watch-2"].approval is None
+
+
+def test_a_kept_job_cancelled_as_its_prompt_went_in_is_settled_in_its_registry(monkeypatch, tmp_path):
+    failed = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None, adopt=lambda *args, **kwargs: None,
+                                 call_start_failed=lambda home, sid, error: failed.append((sid, error)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    def cancel_on_submit(params):
+        api.watch_jobs.run_watch_job_call(grant, "cancel_job", {})
+        return {"status": "started"}
+    grant.jobs.server.results["prompt.submit"] = cancel_on_submit
+    assert start(grant, "Check the build logs")["status"] == "not_started"
+    assert failed == [("st-1", "cancelled before it started")]
 
 
 def test_under_the_gateway_watch_jobs_use_the_authority_not_the_tui_registry(monkeypatch):

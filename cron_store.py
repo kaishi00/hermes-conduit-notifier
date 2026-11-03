@@ -1,5 +1,5 @@
-"""Cron jobs whose runs don't notify: the user's per-job choice in Conduit's
-Cron tab.
+"""Cron jobs whose runs don't notify, and the jobs whose report the bot acts
+on: the user's per-job choices in Conduit's Cron tab.
 
 A cron run ends like any other turn, so the plugin's turn-end hooks would push
 "response ready" (or "turn failed") for every run. The user can turn that off
@@ -10,6 +10,11 @@ never written on, behaves as before.
 Hermes owns the jobs themselves (``cron/jobs.json``); this file only holds
 the ids the user muted, so it needs no Hermes change and survives job edits.
 A deleted job's id just stays until the list is trimmed.
+
+A job delivered to a Bot Chat (``deliver: bot-chat[:<profile>]``) just shows
+its report there unless the user picks "Let the bot act on it" for it, whose
+id is kept under ``act`` (cron_bot_chat, hermes-conduit FEATURE_MAP "Cron
+jobs delivered to a bot"). A job that isn't listed just shows.
 
 State lives in the profile's ``conduit-cron.json`` beside the pairing state.
 The hooks (agent process) and the dashboard routes (dashboard process) both
@@ -39,7 +44,7 @@ except ImportError:  # everything but Windows
 
 FILE_NAME = "conduit-cron.json"
 VERSION = 1
-# More muted jobs than anyone keeps; the oldest choices go first.
+# More jobs in a list than anyone keeps; the oldest choices go first.
 MAX_MUTED = 500
 
 # Hermes mints uuid4().hex[:12] ids; user and legacy ids ("job-1") are real
@@ -81,6 +86,31 @@ class CronStore:
                     muted.pop(next(iter(muted)))
             return list(muted)
 
+    def acting(self) -> list[str]:
+        """The jobs whose Bot Chat report the bot acts on, oldest choice first."""
+        return list(self._load()["act"])
+
+    def lets_act(self, job_id: Any) -> bool:
+        clean = valid_job_id(job_id)
+        return clean is not None and clean in self._load()["act"]
+
+    def set_act(self, job_id: Any, act: Any) -> list[str]:
+        """Whether one job's Bot Chat report starts the bot's turn; returns
+        the acting ids."""
+        clean = valid_job_id(job_id)
+        if clean is None:
+            raise ValueError("job_id must be a cron job id")
+        if not isinstance(act, bool):
+            raise ValueError("act must be true or false")
+        with self._locked() as state:
+            acting = state["act"]
+            acting.pop(clean, None)
+            if act:
+                acting[clean] = self.clock()
+                while len(acting) > MAX_MUTED:
+                    acting.pop(next(iter(acting)))
+            return list(acting)
+
     def _load(self, *, for_write: bool = False) -> dict[str, Any]:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
@@ -118,15 +148,18 @@ class CronStore:
 
 
 def _normalized(raw: Any) -> dict[str, Any]:
-    muted: dict[str, float] = {}
-    entries = raw.get("muted") if isinstance(raw, dict) else None
+    return {"version": VERSION, "muted": _ids(raw, "muted"), "act": _ids(raw, "act")}
+
+
+def _ids(raw: Any, key: str) -> dict[str, float]:
+    ids: dict[str, float] = {}
+    entries = raw.get(key) if isinstance(raw, dict) else None
     if isinstance(entries, dict):
-        for key, at in entries.items():
-            if valid_job_id(key) and isinstance(at, (int, float)) and not isinstance(at, bool):
-                muted[key] = float(at)
+        for job, at in entries.items():
+            if valid_job_id(job) and isinstance(at, (int, float)) and not isinstance(at, bool):
+                ids[job] = float(at)
     # Oldest choice first, so trimming drops the oldest.
-    ordered = dict(sorted(muted.items(), key=lambda item: item[1])[-MAX_MUTED:])
-    return {"version": VERSION, "muted": ordered}
+    return dict(sorted(ids.items(), key=lambda item: item[1])[-MAX_MUTED:])
 
 
 def _encoded(state: dict[str, Any]) -> str:

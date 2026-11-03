@@ -21,6 +21,10 @@ watch_paths:
   - gateway/hosted_room*.py
   - website/docs/user-guide/features/plugins.md
   - website/docs/user-guide/features/extending-the-dashboard.md
+  - tui_gateway/server.py
+  - tui_gateway/transport.py
+  - tui_gateway/methods_session*.py
+  - tui_gateway/methods_prompt.py
   # bot_chat_adopt.py's child (imports inside a string, which the scanner can't see).
   - hermes_cli/gateway_client.py
   - hermes_cli/gateway_runtime*.py
@@ -96,6 +100,44 @@ notes:
     hermes_cli.web_server_files._agent_fs_path, keeps a locked or hosted install's roots inside
     the folder _managed_files_policy names, and keeps out what _is_sensitive_path keeps out of
     Hermes' own file routes.
+  bot workstreams: >-
+    A bot's Bot Chat coordinating work sessions of its own (designs/bot-mode-coordinator, branch
+    bot-workstreams). work_broker drives the dashboard's session API in process, read from
+    sys.modules (so module_paths doesn't list it): tui_gateway.server.dispatch with the broker's
+    own transport for session.create (hidden, idempotency_key, profile; model, provider and
+    reasoning_effort for Edit Bot > Work's Workstream Model, Hermes' per-session override that
+    a resume keeps) and prompt.submit, its
+    _methods with nothing bound for a session another client holds and for the hidden queued
+    work-update turn, and _sessions (session_key, profile_home, running, pending_title) to find
+    live sessions. upstream/test_bot_work.py runs it on the launch profile and a secondary one.
+    After a restart, tui_gateway.turn_marker (read_turn_marker, marker_writer_state,
+    clear_turn_marker) retires Hermes' own re-run of a crash-killed workstream turn, so recovery
+    decides from the journal instead; without it a cut-off step could run twice. The turn stopper
+    a clean shutdown runs, _stop_turns_before_exit (in tui_gateway.session_reaper, for the SIGTERM
+    handler, and in tui_gateway.server, for _shutdown_sessions), is wrapped to mark the shutdown:
+    without it a clean restart's stopped workstream is taken for a user's stop and never recovered.
+    Don't Ask approvals in workstreams (Edit Bot > Work) call config.set with key=yolo and
+    scope=session on the workstream's live session before each turn: Hermes' per-session /yolo,
+    kept on the session row, never process-wide (the call always names a live session). Turning
+    it on fails quietly (Hermes keeps asking); turning it off stops the send and is retried, except
+    on a Hermes without config.set, where nothing was ever turned on.
+    A coding workstream's worktree (work_start worktree=true, M4) is Hermes' own subagent
+    worktree: tools.subagent_worktree's resolve_repo_root, local_backend_active,
+    create_subagent_worktree and finalize_subagent_worktree (prune=False to look, prune=True only
+    for an empty one). Without them work_start refuses worktree=true and starts nothing.
+  cron reports in a Bot Chat: >-
+    A cron job delivered to a Bot Chat just shows its report there unless it lets the bot act
+    (cron_bot_chat; feature map "Cron jobs delivered to a bot", branch bot-workstreams). The plugin
+    replaces cron.scheduler_delivery._deliver_to_bot_chat in the process that runs the jobs (the
+    delivery loop calls it by module name); a job that acts calls Hermes' own. A report finds the
+    Bot Chat with tools.bot_live_delivery._bot_chat_tip and goes in through
+    gateway.session_cron.deliver_to_local_chat (owner_for_home first), as Hermes writes a cron
+    result into a local chat: a note, no turn. Where the owner refuses (a desktop-made Bot Chat its
+    door hasn't adopted) or runs in another process, hermes_state's SessionDB.append_completion_note
+    writes it, once per run. gateway.session_cron is newer than v0.22.5, so it's reached by name
+    and checked first, and without it every job keeps Hermes' turn (the route's shows_reports is
+    false). upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
+    report on the user's next turn.
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
@@ -165,6 +207,8 @@ imports:
     optional: ["is_autonomous_silence_response"]
   gateway.session_controls:
     required: ["AuthorityConnection"]
+  gateway.warning_notifications:
+    required: ["warning_notifications_enabled"]
   hermes_cli:
     optional: ["active_sessions", "lifecycle"]
   hermes_cli._launchers:
@@ -192,7 +236,8 @@ imports:
     required: ["invoke_hook"]
     optional: ["clear_thread_tool_whitelist", "set_thread_tool_whitelist"]
   hermes_cli.profiles:
-    optional: ["get_active_profile_name", "get_profile_dir", "list_profile_names"]
+    required: ["get_profile_dir"]
+    optional: ["get_active_profile_name", "list_profile_names"]
   hermes_cli.tools_config:
     optional: ["_get_platform_tools", "_get_plugin_toolset_keys"]
   hermes_cli.web_routers:
@@ -221,12 +266,14 @@ imports:
   plugins.memory:
     required: ["load_memory_provider"]
   tools:
-    optional: ["voice_live"]
+    optional: ["subagent_worktree", "voice_live"]
   tools.approval:
     required: ["list_gateway_approvals", "resolve_gateway_approval"]
     optional: ["_get_approval_timeout"]
   tools.approval_context:
     optional: ["_get_approval_timeout"]
+  tools.bot_live_delivery:
+    required: ["_bot_chat_tip"]
   tools.clarify_gateway:
     optional: ["get_clarify_timeout"]
   tools.clarify_tool:
@@ -247,6 +294,8 @@ imports:
     optional: ["resolve_xai_http_credentials"]
   tui_gateway:
     optional: ["turn_marker"]
+  tui_gateway.turn_marker:
+    optional: ["clear_turn_marker", "marker_writer_state", "read_turn_marker"]
 
 # Where those modules live upstream (a .py file or a package).
 module_paths:
@@ -267,6 +316,7 @@ module_paths:
   - gateway/platforms/base
   - gateway/response_filters
   - gateway/session_controls
+  - gateway/warning_notifications
   - hermes_cli
   - hermes_cli/_launchers
   - hermes_cli/active_sessions
@@ -296,6 +346,7 @@ module_paths:
   - tools
   - tools/approval
   - tools/approval_context
+  - tools/bot_live_delivery
   - tools/clarify_gateway
   - tools/clarify_tool
   - tools/cronjob_tools
@@ -305,6 +356,7 @@ module_paths:
   - tools/web_tools
   - tools/xai_http
   - tui_gateway
+  - tui_gateway/turn_marker
 
 # The plugin's routes under /api/plugins/conduit_push/, from dashboard/.
 routes:
@@ -470,3 +522,9 @@ routes:
   - GET /workspace/recent
   - GET /workspace/search
   - POST /workspace/{action}
+  - GET /workstreams
+  - POST /workstreams/adopt
+  - POST /workstreams/call-ended
+  - GET /workstreams/settings
+  - POST /workstreams/settings
+  - POST /workstreams/{ref}/{action}

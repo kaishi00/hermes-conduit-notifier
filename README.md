@@ -131,9 +131,13 @@ A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predict
 A cron run notifies like any other turn, with two exceptions:
 
 - A run whose reply is Hermes' cron silence marker doesn't notify, by the same rule Hermes uses to skip delivering it: `[SILENT]` (or `SILENT` / `NO_REPLY`) as the whole reply, on its own first or last line, or opening the reply (`[SILENT] No changes since yesterday`). A marker mid-sentence is real content and still notifies.
-- You can turn a job's notifications off in Conduit's Cron tab. Its runs then send no reply or failure notification (and no automatic alert call; a call you asked for on the job still rings). The muted job ids live in the profile's `conduit-cron.json`; `GET /api/plugins/conduit_push/cron/notifications` lists them (`{"ok": true, "muted": [...]}`) and `PUT` with `{"job_id": "...", "notify": false}` changes one. Capability `cron-notifications`.
+- You can turn a job's notifications off in Conduit's Cron tab. Its runs then send no reply or failure notification (and no automatic alert call; a call you asked for on the job still rings). The muted job ids live in the profile's `conduit-cron.json`; `GET /api/plugins/conduit_push/cron/notifications` lists them (`{"ok": true, "muted": [...], "act": [...], "shows_reports": true}`) and `PUT` with `{"job_id": "...", "notify": false}` changes one. Capability `cron-notifications`.
 
 The plugin tells a cron run by its task id (`cron:<job id>:…`) or its classic session id (`cron_<job id>_<date>_<time>`).
+
+### Cron jobs delivered to a Bot Chat
+
+Hermes delivers a job set to `deliver: bot-chat` (or `bot-chat:<profile>`) as a turn: the bot reads the report, acts on what needs action and summarizes it, a model call every run. With the plugin, such a job **just shows its report** in that bot's Bot Chat instead: it's written into the chat as a note, the way Hermes writes a cron result into a local chat, with no turn and no model call, and the bot sees it as context on its next turn. Pick **Let the bot act on it** for a job in Conduit's job editor to keep Hermes' turn for it. The choice is kept in the job's profile's `conduit-cron.json` beside the muted jobs: `GET /api/plugins/conduit_push/cron/notifications` lists the jobs that let the bot act under `act`, and `PUT` with `{"job_id": "...", "act": true}` changes one. Capability `cron-bot-chat-reports`; the route's `shows_reports` says whether this Hermes can write the note (Hermes v0.22.5 can't, its canary from late October can), and without it every job keeps Hermes' turn and Conduit offers no choice. A report shows only in a Bot Chat that exists.
 
 Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-032)).
 
@@ -1391,6 +1395,206 @@ the next call ends; once three are stuck like that in a profile, that profile's
 calls end without these steps until one finishes, and past 20 calls waiting a
 call ends without them too (the log says so each time). A call that isn't saved
 (saving turned off in Conduit, or no speech from you) ends nothing.
+
+## Bot workstreams
+
+A bot's Bot Chat can coordinate work sessions of its own: you ask Furina for
+something, she starts a workstream (a hidden chat on her own profile) and stays
+free to talk while it runs, and its result comes back to her as a work update
+she tells you about. It's on for every bot (strict) until you turn it off,
+in Conduit (Edit Bot > Work) or here:
+
+    hermes -p <bot> conduit-push work off
+    hermes -p <bot> conduit-push work on            # strict: she only coordinates
+    hermes -p <bot> conduit-push work on --policy lookups   # she may also look things up
+    hermes -p <bot> conduit-push work on --after-restart ask  # after a restart, ask before continuing
+    hermes -p <bot> conduit-push work on --approvals ask    # workstreams ask before what can't be undone
+    hermes -p <bot> conduit-push work on --model anthropic:claude-sonnet-5-5   # new workstreams' model (bot: her own)
+    hermes -p <bot> conduit-push work status
+
+- The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
+  `work_read`, `work_close`, `work_note`, `work_ask` and `work_reply` (behind
+  Hermes' Tool Search). They answer only in that bot's canonical Bot Chat, and
+  name work by ref (W1, W2 for workstreams, A1, A2 for asks), never by session
+  id, so a bot only ever reaches its own work.
+- A workstream can read the bot's other workstreams with `work_list` and
+  `work_read` (read only, and not the asks between bots), so it can use what
+  another found or made without the coordinator passing it on. It can't send
+  to, stop or start work; if it needs another workstream to do something, it
+  says so in its report.
+- `work_start` with `cwd` records the git repository that folder is in. When
+  other running work is in the same repository, the coordinator is told and
+  the new workstream's brief names them, so it leaves their changes alone.
+  With `worktree: true` the workstream works in a git worktree of its own
+  instead, on a branch of its own: Hermes' own subagent worktree
+  (`<repo>/.worktrees/subagent-work-<bot>-<ref>-…`, branch
+  `hermes-subagent/…`), on Hermes' local terminal only. A folder outside a
+  repository, or a terminal on docker, ssh or modal, starts nothing and says
+  why. Resolving the workstream removes its worktree only when it holds
+  nothing (no commits, a clean tree); one with work in it is kept for you to
+  merge, and Hermes' worktree sweep archives it once it's idle. Sent words
+  again, a workstream whose worktree was removed gets it back at the same
+  path. Conduit shows the branch on its card.
+- A voice call's jobs, the phone's and the Watch's, are kept in their bot's
+  registry too, as workstreams marked as a call's (`from_call`: `phone` or
+  `watch`). The call starts and follows each job as before and tells you its
+  result; the row journals its steps, settles with its turns and shows in the
+  Work panel, where you can stop it or answer it. It never wakes the Bot Chat
+  (the Bot Chat's note lists it as a call's job), never counts against the
+  bot's running limit, keeps its own push and Lock Screen progress, may use
+  the bot's memory and other bots like any chat, stays in the chat lists
+  under Voice Jobs, and after a restart always waits for you. Watch jobs are
+  kept as they start; the phone keeps its own with `POST /workstreams/adopt`.
+  A bot whose workstreams are off keeps none. A call kept with the Bot Chat
+  is a conversation with the coordinator, so its jobs are the coordinator's
+  own workstreams (`started_in_call` in `work_list`). They count against the
+  limit but are never refused for it (the call already started them), and
+  they follow the workstreams' rules: no memory or other bots, which the
+  coordinator handles. Their updates wait while a call is on in the Bot
+  Chat (any call there), until it ends or two hours pass, so the call speaks each
+  result first and the coordinator reports it in the Bot Chat after (its note,
+  `work_list` and `work_read` leave their results out until then too); the Bot Chat's other updates
+  go as usual. The phone also says when any such call ends
+  (`POST /workstreams/call-ended`), Classic's included, which writes its
+  turns into the chat rather than saving them; only a phone that quit
+  mid-call, or whose end didn't get through, leaves them held the full two
+  hours. The phone names the call (`call`), so only that call's own end releases
+  its hold (a save doesn't), and a job of a call already over holds nothing.
+- Bots work together coordinator to coordinator. `work_ask` asks another of
+  your bots on this Hermes (by its name or profile) for an answer or a piece
+  of work: it's an `ask_out` row in the asking bot's registry and an `ask_in`
+  row in the other's, sharing one id, and it reaches the other bot's Bot Chat
+  as a hidden, queued turn (after anything it's doing with you; nothing holds
+  its chat). That bot answers with `work_reply`, itself or with one of its
+  workstreams' reports, and the answer goes back where the ask said: into
+  the asking bot's workstream named in `for` as a queued turn, or to its Bot
+  Chat as a work update (to the Bot Chat too while that workstream is
+  interrupted, by a restart or by you stopping its turn). Only the Bot Chat asks: a workstream that
+  needs another bot says so in its report, and the coordinator asks for it
+  (`message_agent` is refused in a workstream too).
+  Closing an ask unanswered tells the bot that asked.
+  What one bot asks or answers reaches the other as data, never as your
+  go-ahead; each bot does the work with its own tools and its own approvals.
+  The other bot needs workstreams on too. A chain of asks can't come back to
+  a bot already in it, goes at most two bots deep, and one bot can ask
+  another 10 times an hour.
+- Every new workstream's brief carries the coordinator's notes (`work_note`,
+  kept in `<profile>/conduit/work-notes.md`, labelled as data, never as your
+  go-ahead) and the message of yours the Bot Chat is answering, quoted as
+  yours. A start from a work update quotes nothing, so an older message never
+  passes for a go-ahead; a `work_send` quotes it the same way, so a yes you
+  give in the Bot Chat reaches the workstream as yours. What counts as your go-ahead there follows the
+  bot's `approvals.mode`: under manual, only your own words do (your quoted
+  message when it covers the step, or what you write in the workstream), never the coordinator's
+  instructions alone; under smart, Hermes' approvals decide; under off, the
+  brief is enough.
+- Workstreams can have approvals of their own (Edit Bot > Work, or
+  `--approvals`): `chats` (the default) follows the bot's `approvals.mode`;
+  `ask` holds them to your own words before a step that can't be undone,
+  with Hermes' approval prompts too where the bot's chats have them (on a
+  bot whose approvals are off in Hermes, the rule in the brief is all there
+  is: Hermes can't ask in one session while its config says off); `off`
+  turns Hermes' approvals off in each workstream's own session (Hermes'
+  per-session `/yolo`, set before each turn the plugin sends and kept on its
+  session row, never process-wide) and drops the rule from the brief.
+  Switching back in Edit Bot turns it on again at once in the sessions the
+  plugin turned it off in, so a turn you start there yourself asks too. A
+  resolved workstream, or a change made with `--approvals`, turns back at
+  its next turn through Conduit.
+- Strict leaves the coordinator the work tools, `clarify` and `memory`;
+  lookups adds read-only lookups (past chats, web search, skills, Conduit's
+  health, location and inbox). `message_agent` is refused there in favour of
+  `work_ask`.
+- A workstream writes its report for you, in its own chat, which you can open
+  and answer. The Bot Chat's update carries a short line of it and the chat's
+  link (`work_read` gives the coordinator up to 2,000 characters of it).
+  A workstream keeps a checklist with `work_progress` (its only work
+  tool), which the Bot Chat's digest shows, and marks a result you should look
+  at first (a draft, a diff) as ready. `work_progress` stays offered while
+  the bot has a registry, so turning workstreams off doesn't take it from one
+  that's running; anywhere but a workstream it answers that it's only for one.
+  A workstream doesn't save to the bot's `memory`: what's worth keeping goes
+  in its report, and the coordinator decides what to remember.
+- A workstream's turn sends no push of its own: the Bot Chat's reply about it
+  is the one push. Its approvals and questions still come from the workstream.
+- Up to 2 run at once per bot (`--max-running`). The registry is
+  `<profile>/conduit/workstreams.db`, with a journal of each workstream's
+  tool steps and an outbox of every turn sent into a chat.
+- After a restart, a clean one or a crash, work that was running is marked
+  interrupted and sorted by its journal, once the dashboard is up. (A clean
+  restart's own stop isn't taken for yours, and a step it cut off counts as
+  never finished.) If nothing that could change things
+  was in flight when it stopped (only lookups, or nothing at all), it's
+  continued once with a note saying which steps already finished; a second
+  restart before a turn of it ends leaves it for you. If a step that can
+  change things was cut off (a command, a file write, a send; a `tool_call`
+  counts by the tools it calls, and a step whose journal entry couldn't be
+  written counts as one), it waits: the
+  Bot Chat tells you, with a note it can `work_send` to check whether that
+  step took effect. `work on --after-restart ask` leaves every interrupted
+  workstream for you to decide. Hermes' own re-run of a crash-killed turn
+  (`desktop.auto_continue`) is retired for workstreams, so nothing is redone
+  blindly. Work updates a restart caught before they went out are sent
+  again. A message into a workstream that Hermes never stored is sent once
+  more if the workstream was continued; if it's stopped or idle it isn't
+  resent behind your back (that would start a turn of its own): the Bot Chat
+  hears it may not have arrived.
+- It needs the Hermes dashboard to run plugins in its own process: under
+  `plugins.isolation: host` the tools answer with that reason.
+
+Conduit's Work panel reads and acts on a bot's work through these routes,
+which skip the Bot Chat's model: your words go straight into the
+workstream, as if typed in its chat, and the coordinator sees the change in
+its next digest. A secondary bot is named with `?conduit_profile=`.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, resolved_count, workstream_sessions, work}` |
+| GET | `/api/plugins/conduit_push/workstreams?resolved=1&before=<closed_at>` | `{ok, ..., work, more}` |
+| POST | `/api/plugins/conduit_push/workstreams/<ref>/send` with `{text, how?}` | `{ok, outcome, work}` |
+| POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
+| POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
+| POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
+| GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, unavailable}` |
+| POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals}` | the settings as they are now |
+| POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?, chat?, result?}` (`via`: `phone` or `watch`; `result`: the reply of a turn that ended before the phone kept it, which settles the row; `chat`: the chat the call is kept with, so the Bot Chat's makes it the coordinator's workstream, `call` on its row; `call`: the call's own id) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title`, `goal`, `chat` or `result` isn't text; `off` (409) when the bot's workstreams are off |
+| POST | `/api/plugins/conduit_push/workstreams/call-ended` with `{chat, call?}` (a call kept with that chat ended, in any voice mode) | `{ok, bot_chat}`; `bot_chat` is true when the chat is the Bot Chat, whose held updates go 15 s later when the hold is this call's (`call`, the id its adopts named); 400 without `chat` |
+
+- `work` lists every open (unresolved) row, however old: active work first,
+  then the rest by when it last changed. Rows are workstreams, and asks to
+  and from other bots (`kind` `ask_out` with `bot`, the bot it's waiting on,
+  or `ask_in`). Each row has its status, checklist, the step it's on, its
+  last result, `pinned`, `actions` (what you can do with it now) and
+  `manage` (how you can file it). A workstream has `branch`, its worktree's
+  branch, or "" when it has none. A workstream waiting on an approval has
+  `approval` (`request_id`, `command`, `description`, `approvable`), the
+  first one Hermes names by its request; `approve` (once) or `deny` answers
+  that one, never another queued behind it. The command comes whole, as
+  written; one that is empty or longer than 2,000 characters is cut, with
+  `approvable` false, and only denied there (`approve` is refused with
+  `deny_only`). Its chat still answers it too.
+- Work leaves the list when it's resolved: by you (`resolve`, refused with
+  `still_running` while it's at work: stop it first) or by the bot
+  (`work_close`). Nothing resolves itself. `resolved=1` lists resolved work,
+  last resolved first, 50 at a time, with `closed_at` and `resolved_by`
+  (`user` or `bot`); `reopen` brings a row back and tells the coordinator
+  (not an ask closed without its answer: the bot asks again). The bot can't
+  close work you pinned, or a workstream you reopened until it runs again. Resolving unpins it.
+- `workstream_sessions` names every workstream's chat, resolved ones too, so
+  Conduit keeps them out of its chat lists (not a call's jobs, which stay
+  under Voice Jobs). `counts` has `working`, `needs_you` (approvals, questions and work a
+  restart left for you), `ready` and `waiting` (asks to other bots).
+- `check` (Check first) is offered when a restart cut off a step that can
+  change things (`uncertain`): the workstream is asked to find out whether
+  that step took effect and change nothing. `continue` after such a cut-off
+  tells the workstream the step may have run, so it checks before running it
+  again. Stopping interrupted work runs nothing. Work that's still starting
+  offers nothing until its first turn begins, and Stop once it has been
+  starting for two minutes since its chat was made.
+- A refusal has `code` and `detail`: a 4xx for `no_such_work`, `not_now`,
+  `starting`, `still_running`, `busy`, `open_elsewhere`, `off`, `taken`, `missing`, `unknown_action`
+  and `too_long`, a 502 (`hermes`) when Hermes refused it, and a 503
+  (`unavailable`) when the session API isn't in this process.
 
 ## Chat takeover
 
