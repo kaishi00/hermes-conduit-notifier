@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.127.6 (2026-11-03)
+
+### Fixes
+- Pulse: on a Hermes older than v0.22.0, Pulse could be on and never run,
+  and Settings asked for a restart that didn't help. It runs there now, and
+  a Hermes that can't run it says so in Settings and in its log.
+
 ## 0.127.5 (2026-11-03)
 
 ### Fixes
