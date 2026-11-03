@@ -34,8 +34,8 @@ POLL_MAX_S = 2.0
 MAX_ANSWERS_SHOWN = 10
 
 DESCRIPTION = (
-    "Ask someone the user has linked their Hermes with (Settings > People) whether they're free on a date, or a "
-    "question, on the user's behalf. Their Hermes answers by the rules they set, or they answer themselves; no agent "
+    "Ask a person the user linked with whether they're free on a date, or a question. "
+    "That's someone the user has linked their Hermes with (Settings > People), asked on the user's behalf. Their Hermes answers by the rules they set, or they answer themselves; no agent "
     "reads it there. action: \"people\" lists whom you can ask; \"ask\" asks one (to: their name, and free_on "
     "{date: YYYY-MM-DD, from and to: HH:MM, optional, in their time zone} or question: one line); \"answers\" lists "
     "this chat's asks and how they went. It waits a little for the answer; when it isn't back yet, it reaches this "

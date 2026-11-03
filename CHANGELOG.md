@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.127.2 (2026-11-03)
+
+### Fixes
+- Hermes could say it can't call you, set an alarm or add a reminder, even
+  with Conduit set up for it: each Conduit tool now opens its description
+  with what it does, short enough for Hermes' tool list to show it whole.
+- Asked to call you when something happens later ("call me when the results
+  are certified"), Hermes could set up a job that only sends a message, or
+  call right away. It now sets up a call watch, checked every few hours for
+  something slow.
+
 ## 0.127.1 (2026-11-03)
 
 ### New and improved
