@@ -2208,9 +2208,10 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   Hermes's own `cronjob` function: named "Call watch: <what>", checked every
   few minutes (picked from `for_minutes`), with a fixed run prompt. A
   one-time event ("call me when the results are certified") is a watch too,
-  checked every few hours through `every_minutes`: it's the only way to call
-  about something after the turn, since a cron job of Hermes' own can't call
-  and `conduit_call_user` rings only when its own turn ends. The same
+  checked every few hours through `every_minutes`. A cron job Hermes makes
+  itself with `cronjob` doesn't get the `conduit` toolset, so it can't call,
+  and `conduit_call_user` rings only when its own turn ends; call watches
+  and place rules set the toolset on their jobs. The same
   `what` is the same watch, so asking again changes it instead of adding
   another. `sync` takes every watch the What's worth a call note describes
   (Conduit's "Have Hermes watch for this"): it changes and adds watches to

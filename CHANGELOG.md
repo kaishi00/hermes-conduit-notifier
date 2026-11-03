@@ -21,8 +21,8 @@ checks it). The format is fixed, because Conduit reads it:
   with what it does, short enough for Hermes' tool list to show it whole.
 - Asked to call you when something happens later ("call me when the results
   are certified"), Hermes could set up a job that only sends a message, or
-  call right away. It now sets up a call watch, checked every few hours for
-  something slow.
+  call right away. It's now told to set up a call watch, checked every few
+  hours for something slow.
 
 ## 0.127.1 (2026-11-03)
 

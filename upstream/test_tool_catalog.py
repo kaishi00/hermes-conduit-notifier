@@ -40,7 +40,10 @@ ours = []
 for entry in registry.get_all_entries():
     if entry.toolset not in json.loads(sys.argv[1]):
         continue
-    ours.append({"name": entry.name, "line": _short_desc(entry.schema.get("description") or "")})
+    description = entry.schema.get("description") or ""
+    # The whole first sentence, uncut, to tell a cut line by, whatever marks it.
+    ours.append({"name": entry.name, "line": _short_desc(description),
+                 "sentence": _short_desc(description, max_chars=1_000_000)})
 print(json.dumps(sorted(ours, key=lambda tool: tool["name"])))
 """
 
@@ -64,6 +67,6 @@ def test_every_tool_reads_whole_in_the_tool_search_catalog(tmp_path: Path) -> No
     assert {tool["name"] for tool in tools} == provided
     empty = [tool["name"] for tool in tools if not tool["line"].strip()]
     assert not empty, f"These tools have no description for the catalog: {empty}"
-    cut = [f"{tool['name']}: {tool['line']}" for tool in tools if tool["line"].endswith("…")]
+    cut = [f"{tool['name']}: {tool['line']}" for tool in tools if tool["line"] != tool["sentence"]]
     assert not cut, ("These tools' first sentences are cut in Tool Search's catalog; lead each with what the tool "
                      "does, within Hermes' cap:\n" + "\n".join(cut))

@@ -41,8 +41,8 @@ SCHEMA: dict[str, Any] = {
         "for news the user would want right away and can't wait for them to look (asked_by_user false; "
         "refused unless the user lets Hermes decide). Never for routine updates. To call when something "
         "happens after this turn (\"call me if the site goes down\", \"call me when the results are "
-        "certified\"), use conduit_call_watch instead: this tool only rings at the end of this turn, and a "
-        "scheduled job of your own can't call. It doesn't ring while the user is in a voice call with you, "
+        "certified\"), use conduit_call_watch instead: this tool only rings at the end of the turn that uses it, "
+        "and a scheduled job you make yourself doesn't get Conduit's tools, so it can't call. It doesn't ring while the user is in a voice call with you, "
         "but a call watch set up during one still calls later. Before calling on your own judgment, load "
         f"skill_view(\"conduit_push:{SKILL_NAME}\")."
     ),
