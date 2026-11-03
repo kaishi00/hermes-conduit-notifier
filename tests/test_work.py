@@ -518,7 +518,7 @@ def test_start_makes_a_hidden_titled_session_on_the_bots_own_profile(on, hermes)
     row = on.get("W1")
     assert row.session_id == "20261031_work_1" and row.coordinator == BOT_CHAT
     assert row.requested_by["via"] == BOT_CHAT and row.reply_to == {"to": "coordinator", "session": BOT_CHAT}
-    assert answer["link"] == "[Open W1](conduit://session/20261031_work_1?profile=default)"
+    assert answer["link"] == "[Open W1](conduit://session/20261031_work_1?profile=default) @session:20261031_work_1"
     assert on.outbox_pending() == []
     # The user sees the start as a card: the coordinator adds to it in a line, never restates it.
     assert "a card with its title and live status" in answer["note"] and "one short sentence" in answer["note"]
@@ -563,10 +563,10 @@ def test_a_secondary_bot_starts_on_its_own_profile(tmp_path, monkeypatch, hermes
     monkeypatch.setattr(work, "_home", lambda: home)
     store_mod.Store(home).set_policy("strict")
     answer = start()
-    assert answer["ok"] and answer["link"].endswith("?profile=nahida)")
+    assert answer["ok"] and answer["link"].endswith("?profile=nahida) @session:nahida/20261031_work_1")
     (_, params, _), = hermes.named("session.create")
     assert params["profile"] == "nahida"
-    assert call("work_list")["work"][0]["link"] == "[Open W1](conduit://session/20261031_work_1?profile=nahida)"
+    assert call("work_list")["work"][0]["link"] == "[Open W1](conduit://session/20261031_work_1?profile=nahida) @session:nahida/20261031_work_1"
 
 
 def test_a_session_on_another_profile_is_refused(on, hermes, monkeypatch):
@@ -683,6 +683,11 @@ def test_an_approval_marks_it_needs_you(on, hermes):
     start()
     work.needs_you("20261031_work_1", "rm -rf build")
     assert on.get("W1").status == "needs_you"
+    # Its links go with it, so a user on Hermes Desktop, which doesn't list
+    # workstreams, can open it there and answer (Eric 2026-11-03).
+    line, = [line for lines, _ in work._wakes.values() for line in lines if "is waiting on the user" in line]
+    assert "(rm -rf build)" in line and "you can't" in line
+    assert line.endswith("[Open W1](conduit://session/20261031_work_1?profile=default) @session:20261031_work_1")
 
 
 def test_the_digest_lists_open_work_once_as_new(on, hermes):

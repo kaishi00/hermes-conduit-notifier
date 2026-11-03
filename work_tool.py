@@ -8,8 +8,8 @@ They answer only in this bot's canonical Bot Chat, and only while the bot's
 setting (``conduit-push work on``) is on. Every one that names work takes a
 ref (W1, A1) from this bot's own registry (work_store), never a session id,
 so a coordinator can't reach a session that isn't its bot's work. (A result
-carries the session's id only inside its ``conduit://session/`` link, for
-the app to open; no work tool takes one.)
+carries the session's id only inside its links, ``conduit://session/`` for
+the app and ``@session:`` for Hermes Desktop; no work tool takes one.)
 
 Around the tools, the plugin's hooks:
 
@@ -784,9 +784,15 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
 
 def _link(ref: str, session_id: str, profile: Any) -> str:
     """The chat's link in the app, on the bot's own profile (Conduit
-    switches to it first, as for a notification)."""
-    query = f"?profile={quote(profile, safe='')}" if isinstance(profile, str) and profile else ""
-    return f"[Open {ref}](conduit://session/{quote(session_id, safe='')}{query})"
+    switches to it first, as for a notification), then Hermes Desktop's
+    session reference (``@session:<profile>/<id>``, the profile left out for
+    the launch one), which Desktop draws as a chip that opens the workstream
+    by its id, joined to it while it runs, approval card and all. Conduit
+    reads the first and leaves the second out of the reply."""
+    named = isinstance(profile, str) and profile
+    query = f"?profile={quote(profile, safe='')}" if named else ""
+    desktop = f"{profile}/{session_id}" if named and profile != "default" else session_id
+    return f"[Open {ref}](conduit://session/{quote(session_id, safe='')}{query}) @session:{desktop}"
 
 
 def _list(store: work_store.Store, args: dict) -> dict:
@@ -2888,8 +2894,12 @@ def needs_you(session_id: Any, description: Any = None) -> None:
     work_store.Store(home).update(work.ref, status="needs_you", only_if=("starting", "running"))
     what = _cut(description, 160) if isinstance(description, str) and description.strip() else "an approval"
     if work.coordinator:
-        _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” is waiting on the user ({what}). The "
-                                            "request reaches them from that workstream; you can't answer it.",
+        # Its link, so a user on Hermes Desktop, where workstreams aren't
+        # listed, can open it and answer there (Eric 2026-11-03).
+        link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
+        _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” is waiting on the user ({what}). Only they "
+                                            "can answer it, in that workstream's chat (give them its link) or on its "
+                                            "card in Conduit; you can't." + (f" {link}" if link else ""),
                     kind="call" if _call_of(work) else "work")
 
 
