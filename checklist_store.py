@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -195,9 +196,10 @@ class ChecklistStore:
                     done.discard(item)
                 ticked = [text for text in items if text.lower() in done]
             kept = [entry for entry in state["lists"] if not (entry["session"] in sessions and entry["key"] == key)]
+            write = uuid.uuid4().hex
             for session in sessions:
                 kept.append({"session": session, "key": key, "title": title, "items": items, "ticked": ticked,
-                             "updated_at": now, "heard": False})
+                             "updated_at": now, "heard": False, "write": write})
             kept.sort(key=lambda entry: entry["updated_at"])
             state["lists"] = kept[-MAX_LISTS:]
         return self.ticks(sessions)
@@ -208,15 +210,16 @@ class ChecklistStore:
         """The chat's checklists the user changed since Hermes last heard,
         once, for this turn's context."""
         session = _clean(session_id, MAX_SESSION_CHARS)
-        if not session or not self.path.exists():
+        # A lock file with no data yet is a first save still writing.
+        if not session or not (self.path.exists() or self.path.with_name(f".{self.path.name}.lock").exists()):
             return None
         with self._locked() as state:
             changed = [entry for entry in state["lists"] if entry["session"] == session and not entry["heard"]]
             # One write is kept under each of the chat's ids: heard under
             # one, it's heard under them all.
-            written = {(entry["key"], entry["updated_at"]) for entry in changed}
+            written = {_write_of(entry) for entry in changed}
             for entry in state["lists"]:
-                if (entry["key"], entry["updated_at"]) in written:
+                if _write_of(entry) in written:
                     entry["heard"] = True
         if not changed:
             return None
@@ -230,6 +233,14 @@ class ChecklistStore:
             line += f"; still to do: {', '.join(open_items)}.]" if open_items else "; everything is done.]"
             lines.append(line)
         return "\n".join(lines)
+
+
+def _write_of(entry: dict[str, Any]) -> tuple[Any, ...]:
+    """Which save an entry came from: the copies under a chat's other ids
+    share it, and no other chat's do."""
+    if isinstance(entry.get("write"), str):
+        return ("write", entry["write"])
+    return ("saved", entry["session"], entry["key"], entry["updated_at"])
 
 
 def _sync_directory(path: Path) -> None:

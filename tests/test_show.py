@@ -335,6 +335,17 @@ def test_a_group_room_gets_its_board_as_markdown(tool_home, monkeypatch):
     assert _call({"title": "Dinner", "cards": [MAP]}, is_room=lambda s: s == "room-1")["ok"] is True, "a chat draws it"
 
 
+def test_a_group_room_never_gets_a_contact_or_a_drafted_text(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+    for source in ("conduit", "messaging"):
+        monkeypatch.setattr(tool, "_turn_source", lambda: source)
+        answer = _call({"title": "Mei", "cards": [MAP, TEXT]}, session_id="room-1", is_room=lambda s: s == "room-1")
+        assert answer["error"] == "group_room", source
+        assert "Landed safe" not in answer["markdown"] and "139" not in answer["markdown"], source
+        assert answer["markdown"].startswith("**Kin Khao**")
+        assert answer["problems"][-1] == tool.ROOM_CONTACTS_NOTE
+
+
 def test_long_fallback_markdown_is_cut_at_a_line(tool_home, monkeypatch):
     monkeypatch.setattr(tool.card_schema, "fallback_markdown", lambda cards: ("line\n" * 3000))
     text = tool._fallback([CLEAN_MAP])
@@ -510,16 +521,23 @@ def test_an_older_conduit_hears_its_tabs_and_follow_ups_were_left_out(tool_home)
     _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
     answer = _call({"title": "Two", "cards": [STATS_CARD] * 2, "layout": "tabs", "next": ["More"]})
     assert len(answer["cards"]) == 2 and "layout" not in answer and "next" not in answer
-    assert answer["problems"] == ["This version of Conduit draws cards one under another, with no tabs or "
-                                  "follow-ups: layout and next left out, so offer the follow-ups in your reply "
-                                  "if they matter."]
+    assert answer["problems"] == [tool.OLD_BOARD_LAYOUT_NOTE, tool.OLD_BOARD_NEXT_NOTE]
+    tabs_only = _call({"title": "Two", "cards": [STATS_CARD] * 2, "layout": "tabs"})
+    assert tabs_only["problems"] == [tool.OLD_BOARD_LAYOUT_NOTE], "no follow-ups to offer when none were given"
+
+
+def test_tabs_for_a_single_card_are_said_to_be_left_out(tool_home):
+    _exchange(PresentStore(tool_home), features=("show-cards", *BOARD_FEATURES))
+    answer = _call({"title": "One", "cards": [STATS_CARD], "layout": "tabs"})
+    assert answer["ok"] is True and "layout" not in answer
+    assert answer["problems"] == ["layout: it lays out two or more cards, and fewer were shown, left out"]
 
 
 def test_an_older_conduit_hears_of_follow_ups_left_out_without_cards(tool_home):
     _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards", "info-cards"))
     answer = _call({"title": "Plain", "markdown": "Hi", "next": ["More"]})
     assert answer["ok"] is True and "next" not in answer
-    assert any("next left out" in problem for problem in answer["problems"])
+    assert answer["problems"] == [tool.OLD_BOARD_NEXT_NOTE]
 
 
 def test_an_older_conduit_hears_of_a_cut_only_when_cards_were_cut(tool_home):

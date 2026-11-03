@@ -87,6 +87,21 @@ def test_a_change_is_heard_once_under_every_id_of_the_chat(store):
     assert store.note("rt-1") is None, "the same write, heard already"
 
 
+def test_two_chats_saving_at_once_are_each_heard(store):
+    _save(store, ["Swimsuit"], sessions=("a",))
+    _save(store, ["Passport"], sessions=("b",))
+    assert store.note("a") is not None
+    assert "Passport" in store.note("b"), "the same key and time, another chat's write"
+
+
+def test_hermes_waits_for_a_first_save_still_writing(store):
+    lock = store.path.with_name(f".{store.path.name}.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.touch()
+    assert store.note("s1") is None
+    assert not store.path.exists(), "nothing written when nothing changed"
+
+
 def test_a_tick_is_applied_to_the_newest_ticks_any_device_saved(store):
     _save(store, ["Passport"], sessions=("s1",))
     tick = {"sessions": ["s1", "r1"], "key": "packing", "title": "Iceland in June", "items": ITEMS}

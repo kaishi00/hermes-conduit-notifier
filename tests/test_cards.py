@@ -221,6 +221,14 @@ def test_follow_ups_are_plain_messages():
                                        "Two\nlines", "Run `ls`", "  Add a day in Sequoia ", 4, "x" * 300], notes)
     assert kept == ["Make it $1,500", "Two lines", "Add a day in Sequoia", "x" * 200]
     assert 'next[2]: "/new" isn\'t a plain message, left out' in notes
+    assert 'next[1]: "make it $1,500" is there twice, kept once' in notes
+
+
+def test_a_list_photo_that_isnt_https_is_said_to_be_left_out():
+    notes = []
+    card = {"type": "list", "list": [{"title": "X", "photo": {"url": "http://a.test/x.jpg", "source": "S"}}]}
+    assert card_schema.normalize_cards([card], notes) == [{"type": "list", "list": [{"title": "X"}]}]
+    assert notes == ["cards[0].list[0].photo: not https, left out"]
     assert card_schema.normalize_next(None) == [] and card_schema.normalize_next("Hi") == []
     assert card_schema.normalize_next(["a", "b", "c", "d", "e"]) == ["a", "b", "c", "d"]
 

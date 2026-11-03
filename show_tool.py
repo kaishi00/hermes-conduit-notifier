@@ -122,8 +122,11 @@ ROOM_NOTE = ("A group room shows messages, not cards. Put the markdown below in 
              "tidied up.")
 OLD_BOARD_NOTE = ("This version of Conduit draws at most {count} cards, one under another, with no follow-ups, so "
                   "the rest weren't shown: give them in your reply.")
-OLD_BOARD_EXTRAS_NOTE = ("This version of Conduit draws cards one under another, with no tabs or follow-ups: "
-                         "{what} left out, so offer the follow-ups in your reply if they matter.")
+OLD_BOARD_LAYOUT_NOTE = ("layout: this version of Conduit draws cards one under another, with no tabs, left out")
+OLD_BOARD_NEXT_NOTE = ("next: this version of Conduit draws no follow-ups, left out: offer them in your reply if "
+                       "they matter")
+ROOM_CONTACTS_NOTE = ("cards: a contact card holds the user's own details and drafts, so it isn't shared into a "
+                      "room, left out")
 
 
 BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (a plan by day, a comparison, "
@@ -226,17 +229,23 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20]}
     layout = card_schema.normalize_layout(args.get("layout"), problems)
     follow_ups = card_schema.normalize_next(args.get("next"), problems)
+    if cards and session and is_room(session):
+        # A group room draws its messages only, so the board goes in the
+        # reply (Eric, 2026-11-03: text in rooms now, cards there later).
+        # Other people's agents read it, so a contact's numbers and a text
+        # drafted for the user stay out of it.
+        if any(card["type"] == "contact" for card in cards):
+            problems.append(ROOM_CONTACTS_NOTE)
+            cards = [card for card in cards if card["type"] != "contact"]
+        return _as_text("group_room", ROOM_NOTE, cards, problems)
     if cards and _turn_source() not in (None, "conduit"):
         # Desktop, a messaging app or the terminal draws no cards; the
         # board's Markdown reads well in all of them.
         return _as_text("not_conduit", NOT_CONDUIT_NOTE, cards, problems)
-    if cards and session and is_room(session):
-        # A group room draws its messages only, so the board goes in the
-        # reply (Eric, 2026-11-03: text in rooms now, cards there later).
-        return _as_text("group_room", ROOM_NOTE, cards, problems)
     store = _store()
     old_board = not store.has_feature_everywhere(card_schema.BOARD_FEATURE)
-    dropped_extras = [name for name, given in (("layout", layout), ("next", follow_ups)) if old_board and given]
+    dropped_extras = [note for note, given in ((OLD_BOARD_LAYOUT_NOTE, layout), (OLD_BOARD_NEXT_NOTE, follow_ups))
+                      if old_board and given]
     if old_board:
         layout, follow_ups = None, []
     markdown = args.get("markdown")
@@ -260,7 +269,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         problems.append(OLD_BOARD_NOTE.format(count=card_schema.LEGACY_MAX_CARDS))
         cards = cards[:card_schema.LEGACY_MAX_CARDS]
     elif dropped_extras:
-        problems.append(OLD_BOARD_EXTRAS_NOTE.format(what=" and ".join(dropped_extras)))
+        problems.extend(dropped_extras)
     no_texts = _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE)
     if no_texts:
         # An older Conduit would show the person with no Send text, and
@@ -294,6 +303,8 @@ def _board(answer: dict[str, Any], cards: list[dict[str, Any]], layout: str | No
     place whenever it can't draw it."""
     if follow_ups and not cards:
         problems = [*problems, "next: follow-ups go under cards, and none were shown, left out"]
+    if layout and len(cards) < 2:
+        problems = [*problems, "layout: it lays out two or more cards, and fewer were shown, left out"]
     if cards:
         answer["cards"] = cards
         if layout and len(cards) > 1:

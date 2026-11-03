@@ -380,10 +380,11 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
             items.append(item)
         card["checklist"] = items
     elif kind == "list":
-        for item in card["list"]:
+        for index, item in enumerate(card["list"]):
             # The phone loads photos over https only.
             if "photo" in item and not _is_https(item["photo"]["url"]):
                 del item["photo"]
+                _note(notes, f"{path}.list[{index}].photo: not https, left out")
     elif kind == "progress":
         items = [item for item in card["progress"] if item["goal"] > 0]
         if len(items) < len(card["progress"]):
@@ -419,6 +420,7 @@ def normalize_next(value: Any, notes: list[str] | None = None) -> list[str]:
             _note(notes, f"next[{index}]: \"{text}\" isn't a plain message, left out")
             continue
         if text.lower() in (other.lower() for other in kept):
+            _note(notes, f"next[{index}]: \"{text}\" is there twice, kept once")
             continue
         if len(kept) == limit:
             _note(notes, f"next: at most {limit}, the rest were left out")
