@@ -520,6 +520,8 @@ def test_start_makes_a_hidden_titled_session_on_the_bots_own_profile(on, hermes)
     assert row.requested_by["via"] == BOT_CHAT and row.reply_to == {"to": "coordinator", "session": BOT_CHAT}
     assert answer["link"] == "[Open W1](conduit://session/20261031_work_1?profile=default)"
     assert on.outbox_pending() == []
+    # The user sees the start as a card: the coordinator adds to it in a line, never restates it.
+    assert "a card with its title and live status" in answer["note"] and "one short sentence" in answer["note"]
 
 
 def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes):
@@ -3334,6 +3336,7 @@ def test_a_start_stopped_while_hermes_was_starting_it_says_stopped(on, hermes, m
     answer = start()
     assert answer["ok"] and answer["status"] == "stopped"
     assert "hasn't begun its work" in answer["note"] and "Don't wait" not in answer["note"]
+    assert "a card with its title and live status" not in answer["note"]  # nothing began, so no card to add to
     assert stops == [on.get("W1").session_id]  # its brief's turn, if it begins late, is stopped too
     assert on.get("W1").status == "stopped"
 
