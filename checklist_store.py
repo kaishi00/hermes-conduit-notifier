@@ -214,8 +214,8 @@ class ChecklistStore:
         """The chat's checklists the user changed since Hermes last heard,
         once, for this turn's context."""
         session = _clean(session_id, MAX_SESSION_CHARS)
-        # A lock file with no data yet is a first save still writing.
-        if not session or not (self.path.exists() or self.path.with_name(f".{self.path.name}.lock").exists()):
+        # Always under the lock, so a first save still writing is waited for.
+        if not session:
             return None
         with self._locked() as state:
             changed = [entry for entry in state["lists"] if entry["session"] == session and not entry["heard"]]

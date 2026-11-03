@@ -127,6 +127,8 @@ OLD_BOARD_NEXT_NOTE = ("next: this version of Conduit draws no follow-ups, left 
                        "they matter")
 ROOM_CONTACTS_NOTE = ("cards: a contact card holds the user's own details and drafts, so it isn't shared into a "
                       "room: leave it out of your reply too")
+ROOM_PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Give the rest in your reply if it "
+                      "matters, never the contact.")
 TEXT_NEXT_NOTE = "next: these messages show no follow-ups, left out: offer them in your reply if they matter"
 
 
@@ -182,7 +184,9 @@ def _as_text(error: str, note: str, cards: list[dict[str, Any]], problems: list[
 def _with_problems(answer: dict[str, Any], problems: list[str]) -> dict[str, Any]:
     """An answer that didn't show the board, with what normalization dropped."""
     if problems:
-        answer["note"] = f"{answer['note']} {PROBLEMS_NOTE}"
+        # A room's reply never carries the contact it was spared.
+        tail = ROOM_PROBLEMS_NOTE if ROOM_CONTACTS_NOTE in problems else PROBLEMS_NOTE
+        answer["note"] = f"{answer['note']} {tail}"
         answer["problems"] = problems[:20]
     return answer
 
