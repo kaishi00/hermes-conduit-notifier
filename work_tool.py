@@ -205,8 +205,8 @@ _REF_SCHEMA = {"type": "string", "description": "The work's ref, as work_list sh
 SCHEMAS: dict[str, dict] = {
     "work_list": {
         "name": "work_list",
-        "description": ("List the work you coordinate as this bot: your workstreams (W1, W2...) and asks between bots "
-                        "(A1...), with status and their latest result. Use it before starting something, to find "
+        "description": ("List the work you coordinate as this bot, with status and latest results. "
+                        "That's your workstreams (W1, W2...) and asks between bots (A1...). Use it before starting something, to find "
                         "work that's already on it. In a workstream: this bot's other workstreams, to read only."),
         "parameters": {"type": "object", "properties": {
             "filter": {"type": "string", "enum": ["active", "recent", "all"],
@@ -217,8 +217,8 @@ SCHEMAS: dict[str, dict] = {
     },
     "work_start": {
         "name": "work_start",
-        "description": ("Start a workstream: a new chat of this bot's that does a task in the background, with this "
-                        "bot's tools, while you stay free to talk with the user. Give it a short title and full "
+        "description": ("Start a workstream: a background chat of this bot's that does a task for you. "
+                        "It has this bot's tools, and you stay free to talk with the user meanwhile. Give it a short title and full "
                         "instructions. Its result comes back to you as a work update. If open work looks like the "
                         "same task, those are returned first; call again with new=true to start anyway. A "
                         "workstream can't ask other bots: if it needs one, ask yourself with work_ask and for set "
@@ -236,7 +236,7 @@ SCHEMAS: dict[str, dict] = {
     },
     "work_send": {
         "name": "work_send",
-        "description": ("Send words into one of your workstreams: a follow-up, a correction or more to do. how: auto "
+        "description": ("Send a follow-up, a correction or more to do into one of your workstreams. how: auto "
                         "(default: a new turn when it's idle, redirects it when it's working), add (adds to the turn "
                         "it's working on without changing direction) or after (queued until it's done)."),
         "parameters": {"type": "object", "properties": {
@@ -252,8 +252,8 @@ SCHEMAS: dict[str, dict] = {
     },
     "work_read": {
         "name": "work_read",
-        "description": ("Read a workstream: its status, latest result and, with transcript=true, its latest "
-                        "messages. A workstream can read the bot's other workstreams this way, never change them."),
+        "description": ("Read a workstream: its status, its latest result and, if asked, its messages. "
+                        "With transcript=true it returns its latest messages. A workstream can read the bot's other workstreams this way, never change them."),
         "parameters": {"type": "object", "properties": {
             "ref": _REF_SCHEMA,
             "transcript": {"type": "boolean", "description": "Also its latest messages."}},
@@ -261,15 +261,15 @@ SCHEMAS: dict[str, dict] = {
     },
     "work_close": {
         "name": "work_close",
-        "description": ("Mark work as done with: it leaves your work updates and the active list, and moves to "
-                        "the user's Resolved list in Conduit. Nothing is deleted: the user can reopen it, and "
+        "description": ("Mark work as done with: it moves to the user's Resolved list in Conduit. "
+                        "It leaves your work updates and the active list. Nothing is deleted: the user can reopen it, and "
                         "work_send reopens it. Work the user pinned stays open until they resolve it, and a workstream they "
                         "reopened until they resolve it or it runs again."),
         "parameters": {"type": "object", "properties": {"ref": _REF_SCHEMA}, "required": ["ref"]},
     },
     "work_ask": {
         "name": "work_ask",
-        "description": ("Ask another of the user's bots on this Hermes for something: a question or a piece of work. "
+        "description": ("Ask another of the user's bots on this Hermes a question or for some work. "
                         "That bot's coordinator does it its own way and answers; the answer comes back to you as a "
                         "work update, or into the workstream named in for. Don't wait for it. Only you can ask: when "
                         "one of your workstreams needs another bot, ask for it with for."),
@@ -283,8 +283,9 @@ SCHEMAS: dict[str, dict] = {
     },
     "work_reply": {
         "name": "work_reply",
-        "description": ("Answer an ask another bot sent you (its ref, like A2): in your words with text, or with one "
-                        "of your workstreams' reports with from (W7), or both. It goes back to the bot that asked."),
+        "description": ("Answer an ask another bot sent you (its ref, like A2). "
+                        "Answer in your words with text, or with one of your workstreams' reports with from (W7), "
+                        "or both. It goes back to the bot that asked."),
         "parameters": {"type": "object", "properties": {
             "ref": _REF_SCHEMA, "text": {"type": "string", "description": "Your answer."},
             "from": {"type": "string", "description": "A workstream whose report is the answer (W7)."}},
@@ -293,8 +294,9 @@ SCHEMAS: dict[str, dict] = {
 }
 SCHEMAS["work_note"] = {
     "name": "work_note",
-    "description": ("Keep notes on the user's work as this bot: facts and preferences every new workstream should "
-                    "know (their projects, how they like things done). how: add (default) adds a line, replace "
+    "description": ("Keep notes on the user's work that every new workstream of this bot reads. "
+                    "Facts and preferences every new workstream should know (their projects, how they like "
+                    "things done). how: add (default) adds a line, replace "
                     "rewrites them all (up to 3,000 characters), clear empties them. Workstreams can't change them; when one reports "
                     "something lasting, note it here."),
     "parameters": {"type": "object", "properties": {
@@ -303,7 +305,7 @@ SCHEMAS["work_note"] = {
 }
 SCHEMAS["work_progress"] = {
     "name": "work_progress",
-    "description": ("Only in a workstream: your checklist for this task, which the user and your coordinator see. "
+    "description": ("Only in a workstream: your task checklist, which the user and coordinator see. "
                     "Each call with steps replaces the whole list (up to 12 steps of a few words each). Mark a step done, doing or todo. Set ready=true when what "
                     "you made is something the user should look at before it's used (a draft, a diff, a plan)."),
     "parameters": {"type": "object", "properties": {
