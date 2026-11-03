@@ -25,7 +25,7 @@ checks it). The format is fixed, because Conduit reads it:
 - When part of a card can't be shown, Hermes is told exactly what and why,
   so it can fix it and show it again; and every card set carries its text,
   which Conduit shows in a card's place whenever it can't draw it.
-- Outside Conduit (Hermes Desktop, a messaging app), Hermes gets the cards
+- Outside Conduit (Hermes Desktop, a messaging app) and in group rooms, Hermes gets the cards
   as text to put in its reply instead of an error.
 
 ## 0.127.3 (2026-11-03)

@@ -117,6 +117,8 @@ NOT_CONDUIT_NOTE = ("This conversation isn't open in Conduit, so cards can't be 
                     "your reply instead, as it is or tidied up.")
 PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Fix those parts and show the whole board "
                  "again if they matter, or give them in your reply.")
+ROOM_NOTE = ("A group room shows messages, not cards. Put the markdown below in your reply instead, as it is or "
+             "tidied up.")
 OLD_BOARD_NOTE = ("This version of Conduit draws at most {count} cards, one under another, with no follow-ups, so "
                   "the rest weren't shown: give them in your reply.")
 
@@ -140,7 +142,8 @@ def board_rule(turn_source: str | None) -> str | None:
     return BOARD_RULE
 
 
-def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False, skill_path: Any = None) -> None:
+def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
+             is_room: Callable[[Any], bool] = lambda _: False, skill_path: Any = None) -> None:
     """Registers the tool and its recipes, if this Hermes supports plugin
     tools and skills."""
     if skill_path is not None and hasattr(ctx, "register_skill"):
@@ -152,7 +155,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False, ski
         return
 
     def handler(args: Any, session_id: Any = None, **_: Any) -> str:
-        return handle(args, session_id=session_id, is_child=is_child)
+        return handle(args, session_id=session_id, is_child=is_child, is_room=is_room)
 
     tool = {"name": TOOL_NAME, "toolset": TOOLSET, "schema": SCHEMA, "handler": handler, "check_fn": available}
     try:
@@ -181,16 +184,19 @@ def available() -> bool:
         return False
 
 
-def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool] = lambda _: False) -> str:
+def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool] = lambda _: False,
+           is_room: Callable[[Any], bool] = lambda _: False) -> str:
     try:
-        return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child), ensure_ascii=False)
+        return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child, is_room),
+                          ensure_ascii=False)
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_show failed", exc_info=True)
         return json.dumps({"ok": False, "error": "unavailable",
                            "note": "It couldn't be shown. Tell the user the gist instead."})
 
 
-def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool]) -> dict[str, Any]:
+def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool],
+            is_room: Callable[[Any], bool] = lambda _: False) -> dict[str, Any]:
     session = session_id.strip() if isinstance(session_id, str) else ""
     # The user's screen belongs to the conversation they're in, not to a
     # subagent's work.
@@ -209,6 +215,10 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         # board's Markdown reads well in all of them.
         return {"ok": False, "error": "not_conduit", "note": NOT_CONDUIT_NOTE,
                 "markdown": _fallback(cards)}
+    if cards and session and is_room(session):
+        # A group room draws its messages only, so the board goes in the
+        # reply (Eric, 2026-11-03: text in rooms now, cards there later).
+        return {"ok": False, "error": "group_room", "note": ROOM_NOTE, "markdown": _fallback(cards)}
     store = _store()
     old_board = not store.has_feature_everywhere(card_schema.BOARD_FEATURE)
     if old_board and (len(cards) > card_schema.LEGACY_MAX_CARDS or follow_ups):

@@ -326,6 +326,15 @@ def test_cards_are_refused_where_conduit_isnt_drawing_them(tool_home, monkeypatc
     assert _call({"title": "Dinner", "cards": [MAP]})["ok"] is True
 
 
+def test_a_group_room_gets_its_board_as_markdown(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    answer = _call({"title": "Dinner", "cards": [MAP]}, session_id="room-1", is_room=lambda s: s == "room-1")
+    assert answer["ok"] is False and answer["error"] == "group_room"
+    assert answer["markdown"].startswith("**Kin Khao**") and "markdown below" in answer["note"]
+    assert _call({"title": "Dinner", "cards": [MAP]}, is_room=lambda s: s == "room-1")["ok"] is True, "a chat draws it"
+
+
 def test_long_fallback_markdown_is_cut_at_a_line(tool_home, monkeypatch):
     monkeypatch.setattr(tool.card_schema, "fallback_markdown", lambda cards: ("line\n" * 3000))
     text = tool._fallback([CLEAN_MAP])

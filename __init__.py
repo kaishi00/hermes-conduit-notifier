@@ -142,7 +142,7 @@ def register(ctx: Any) -> None:
     present_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
-    show_tool.register(ctx, is_child=_is_child,
+    show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn,
                        skill_path=Path(__file__).resolve().parent / "skills" / show_tool.SKILL_NAME / "SKILL.md")
     # Hermes writes the title and body of the push its turn sends when it
     # ends, for a result the user asked to be told about (#1415).
@@ -362,6 +362,16 @@ def _post_tool_call(**kwargs: Any) -> None:
         logger.log(logging.DEBUG if _ledger_warned else logging.WARNING, "conduit_push: Pulse outcome not recorded",
                    exc_info=True)
         _ledger_warned = True
+
+
+def _is_room_turn(session_id: Any) -> bool:
+    """Whether this session's turns are in a group room, whoever hosts it."""
+    try:
+        return room_rules.room_turn(session_id, get_hermes_home()) is not None
+    except room_rules.RoomStoreError:
+        return True
+    except Exception:  # noqa: BLE001 — logged by room_rules; an unknown session draws as a chat does
+        return False
 
 
 def _member_room_turn(session_id: str) -> bool:
