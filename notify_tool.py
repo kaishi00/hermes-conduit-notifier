@@ -45,8 +45,8 @@ MAX_KEPT = 256
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Write the notification Conduit shows on the user's phone when this turn ends, instead of the start of "
-        "your reply. Use it when the user asked to be notified or told when something is done (\"let me know "
+        "Write the phone notification this turn sends when it ends: its title and text. "
+        "Conduit shows it on the user's phone instead of the start of your reply. Use it when the user asked to be notified or told when something is done (\"let me know "
         "when the report is ready\"), and for the result of a scheduled job or a long task. The title says what "
         "happened in a few words (\"Report finished\"); the body says the result in a sentence or two, only "
         "what this turn actually found or did. It goes with your final reply, so still end the turn with the "

@@ -18,7 +18,7 @@ notification.
 | What's going on | What to do |
 | --- | --- |
 | The user asked to be called when something is done ("call me when it's done") | `conduit_call_user` with `asked_by_user: true`, in the turn that has the result |
-| The user wants a call if something happens later ("call me if the site goes down") | `conduit_call_watch`, action `set` (a call watch) |
+| The user wants a call if something happens later ("call me if the site goes down"), or when a one-time event comes ("call me when the results are certified") | `conduit_call_watch`, action `set` (a call watch) |
 | Conduit sent the user's What's worth a call note ("make my checks match this note") | `conduit_call_watch`, action `sync` |
 | This is a run of a call watch | `conduit_watch_report`, then reply exactly as it says |
 | Nobody asked, but the user would want this news right now | maybe `conduit_call_user` with `asked_by_user: false` (see When you decide) |
@@ -51,7 +51,15 @@ watch:
 - `unless`: any other limit, in the user's words.
 
 The tool picks how often to check and keeps track of each incident: it calls
-once, and again only after the thing stops and starts over.
+once, and again only after the thing stops and starts over. For something
+slow, like results being certified or a parcel shipping, pass
+`every_minutes` too: every few hours is enough.
+
+For a call about something after this turn, set up a call watch (or a
+place rule with a call, for arriving or leaving somewhere), not a scheduled
+job that only sends a message: `conduit_call_user` rings only at the end of
+the turn that uses it. That holds in a voice call too: the call the user
+asks for there is a call watch, which calls them later.
 
 Example. The user says: "Call me if my homelab is down for more than 10
 minutes, but never before 9 am."

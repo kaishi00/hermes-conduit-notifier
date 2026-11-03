@@ -13,13 +13,24 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.127.3 (2026-11-03)
+## 0.127.4 (2026-11-03)
 
 ### Fixes
 - Bot Mode: on Hermes Desktop, which doesn't list workstreams, there was no
   way to open one or answer its approval. The Bot Chat's links to its work
   now open the workstream in Desktop too, and a workstream waiting on you
   comes with its link.
+
+## 0.127.3 (2026-11-03)
+
+### Fixes
+- Hermes could say it can't call you, set an alarm or add a reminder, even
+  with Conduit set up for it: each Conduit tool now opens its description
+  with what it does, short enough for Hermes' tool list to show it whole.
+- Asked to call you when something happens later ("call me when the results
+  are certified"), Hermes could set up a job that only sends a message, or
+  call right away. It's now told to set up a call watch, checked every few
+  hours for something slow.
 
 ## 0.127.2 (2026-11-03)
 

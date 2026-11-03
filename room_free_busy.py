@@ -42,8 +42,8 @@ SHARE_NOTES = {
 }
 
 DESCRIPTION = (
-    "When your owner is busy, for finding a time in this group room (the room is set to Use my data): only the "
-    "busy times from the calendar their phone shares, never what, where or with whom; share them as this room "
+    "When your owner is busy, to find a time in this group room: busy times only. "
+    "The room is set to Use my data: only the busy times from the calendar their phone shares, never what, where or with whom; share them as this room "
     "allows (with Ask me first, ask your owner before you do). "
     "from: a local date (YYYY-MM-DD) or ISO time; to: the end, a local date (inclusive) or ISO time, default the "
     f"from date. At most {MAX_DAYS} days a call."
