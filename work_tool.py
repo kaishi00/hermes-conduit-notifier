@@ -884,7 +884,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         picked = store.workstream_model()
         if picked:
             # The user's pick may be the cause: say where it's changed.
-            note += (f" It was started on the workstream model {picked['model']}, which the user picked in Edit "
+            note += (f" New workstreams are set to run on {picked['model']}, which the user picked in Edit "
                      "Bot > Work; if Hermes can't run that model, they can change it there.")
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": note}
     # The session runs from here on, so a write that fails now never marks it
