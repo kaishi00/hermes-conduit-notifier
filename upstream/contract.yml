@@ -77,7 +77,9 @@ notes:
     A bot's Bot Chat coordinating work sessions of its own (designs/bot-mode-coordinator, branch
     bot-workstreams). work_broker drives the dashboard's session API in process, read from
     sys.modules (so module_paths doesn't list it): tui_gateway.server.dispatch with the broker's
-    own transport for session.create (hidden, idempotency_key, profile) and prompt.submit, its
+    own transport for session.create (hidden, idempotency_key, profile; model, provider and
+    reasoning_effort for Edit Bot > Work's Workstream Model, Hermes' per-session override that
+    a resume keeps) and prompt.submit, its
     _methods with nothing bound for a session another client holds and for the hidden queued
     work-update turn, and _sessions (session_key, profile_home, running, pending_title) to find
     live sessions. upstream/test_bot_work.py runs it on the launch profile and a secondary one.

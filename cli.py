@@ -65,6 +65,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                       help="for on: what the bot's workstreams ask approval for: as its chats do in Hermes (chats, "
                            "the default), the user's own go-ahead before a step that can't be undone (ask), or "
                            "nothing (off)")
+    work.add_argument("--model", default=None, metavar="[PROVIDER:]MODEL",
+                      help="for on: the model new workstreams start on, like anthropic:claude-sonnet-5-5; the "
+                           "first colon ends the provider, so a model with one of its own is ollama:qwen3:8b "
+                           "(\"bot\": the bot's own, the one its Bot Chat uses, the default)")
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
                                                  "dates, ahead, inbox, look, where, private, claims, spots")
@@ -438,7 +442,21 @@ def _work(args: argparse.Namespace) -> int:
         return 1
 
 
+OWN_MODEL = "the bot's own"
+
+
 def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
+    from . import work_store
+
+    picked = (getattr(args, "model", None) or "").strip()
+    # The first colon ends the provider, so a model whose own name has one
+    # (qwen3:8b) is named with its provider (ollama:qwen3:8b).
+    provider, _, model = picked.partition(":") if ":" in picked else ("", "", picked)
+    chosen = {"model": model.strip(), "provider": provider.strip()}
+    if picked and picked.lower() != "bot" and not work_store.model_pick_ok(chosen):
+        print("Bot workstreams: --model takes [provider:]model, like anthropic:claude-sonnet-5-5, "
+              "or bot for the bot's own. Nothing changed.")
+        return 2
     if action == "on":
         store.set_policy(args.policy or (store.policy() if store.policy() != "off" else "strict"))
         if args.max_running is not None:
@@ -447,6 +465,8 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
             store.set_after_restart(args.after_restart)
         if getattr(args, "approvals", None):
             store.set_workstream_approvals(args.approvals)
+        if picked:
+            store.set_workstream_model(None if picked.lower() == "bot" else chosen)
     elif action == "off":
         store.set_policy("off")
     mode = store.policy()
@@ -454,7 +474,8 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
           + (f" (the coordinator {'may also look things up' if mode == 'lookups' else 'only coordinates'}; "
              f"up to {store.max_running()} running at once; after a restart, safe work is "
              f"{'continued' if store.after_restart() == 'continue' else 'left to ask about'}; workstream "
-             f"approvals: {store.workstream_approvals()})"
+             f"approvals: {store.workstream_approvals()}; workstream model: "
+             f"{store.workstream_model().get('model') or OWN_MODEL})"
              if mode != "off" else ""))
     if action == "status":
         for work in store.list(include_closed=False, limit=20):

@@ -867,7 +867,8 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         prompt = _brief(home, _bot_name(home), work, instructions, coordinator, same_repo, tree)
         item = store.outbox_add(work.ref, "start", work.idempotency_key, prompt)
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
-                               created=created, yolo=_yolo(home, store, work.ref))
+                               created=created, yolo=_yolo(home, store, work.ref),
+                               model=store.workstream_model())
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
         if item is not None:
             store.outbox_done(item, "refused")
@@ -879,7 +880,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                 store.set_meta(_WORKTREE + work.ref, "")
         if not isinstance(error, work_broker.BrokerError):
             logger.warning("conduit_push: starting a workstream failed", exc_info=True)
-        return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't start it: {reason}"}
+        note = f"Hermes couldn't start it: {reason}"
+        picked = store.workstream_model()
+        if picked:
+            # The user's pick may be the cause: say where it's changed.
+            note += (f" New workstreams are set to run on {picked['model']}, which the user picked in Edit "
+                     "Bot > Work; if Hermes can't run that model, they can change it there.")
+        return {"ok": False, "ref": work.ref, "error": "hermes", "note": note}
     # The session runs from here on, so a write that fails now never marks it
     # failed: its row already has the id (`created` stored it inside the
     # start, which ends the session when that fails), and its turn's end
@@ -924,6 +931,11 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                                  "repository; it was told to leave their changes alone." +
                                  ("" if tree else " For coding work that edits files, start with worktree=true next "
                                   "time so each has a branch of its own."))
+    # The user sees the start as a card with its live status (Eric 2026-11-03):
+    # a short line still says someone took it, without repeating the card.
+    started_note["note"] += (" The user sees it as a card with its title and live status, so reply in one short "
+                             "sentence that adds to it (what you'll tell them, or a question you need answered); "
+                             "don't repeat its title or say that you started it.")
     return started_note
 
 
@@ -2893,23 +2905,27 @@ def app_settings(home: Path) -> dict:
     (off, strict or lookups), ``max_running`` (with ``max_running_limit``),
     ``after_restart`` (continue or ask), ``workstream_approvals`` (chats,
     ask or off), the bot's own approval mode in Hermes (``chat_approvals``),
-    and ``unavailable``, why workstreams can't run on this Hermes, or ''."""
+    ``workstream_model``, the model new workstreams start on (None: the
+    bot's own), and ``unavailable``, why workstreams can't run on this
+    Hermes, or ''."""
     home = Path(home)
     store = work_store.Store(home)
     return {"ok": True, "policy": policy(home), "max_running": store.max_running(),
             "max_running_limit": work_store.MAX_RUNNING_LIMIT, "after_restart": store.after_restart(),
             "workstream_approvals": workstream_approvals(home), "chat_approvals": approval_mode(home),
+            "workstream_model": store.workstream_model() or None,
             "unavailable": work_broker.unavailable_reason() or ""}
 
 
 def app_set_settings(home: Path, body: Optional[dict]) -> dict:
     """The user's change from Edit Bot > Work: any of ``policy``,
-    ``max_running``, ``after_restart`` and ``workstream_approvals``, each
+    ``max_running``, ``after_restart``, ``workstream_approvals`` and
+    ``workstream_model`` (null for the bot's own), each
     checked before any is kept. Turning workstreams off stops nothing that
     is running. The answer is the settings as they are now."""
     home = Path(home)
     body = body if isinstance(body, dict) else {}
-    known = ("policy", "max_running", "after_restart", "workstream_approvals")
+    known = ("policy", "max_running", "after_restart", "workstream_approvals", "workstream_model")
     if not any(key in body for key in known):
         return {"ok": False, "error": "missing", "note": f"Send one of {', '.join(known)}."}
     choices = {"policy": work_store.POLICIES, "after_restart": work_store.AFTER_RESTART,
@@ -2922,6 +2938,12 @@ def app_set_settings(home: Path, body: Optional[dict]) -> dict:
                                   or not 1 <= running <= work_store.MAX_RUNNING_LIMIT):
         return {"ok": False, "error": "invalid",
                 "note": f"max_running is a whole number from 1 to {work_store.MAX_RUNNING_LIMIT}."}
+    picked = body.get("workstream_model")
+    if "workstream_model" in body and picked is not None and not _model_pick_ok(picked):
+        return {"ok": False, "error": "invalid",
+                "note": ("workstream_model is null (the bot's own) or {\"model\", \"provider\"?, "
+                         "\"reasoning_effort\"?}, each a line of up to "
+                         f"{work_store.WORKSTREAM_MODEL_MAX_CHARS} characters.")}
     store = work_store.Store(home)
     if "policy" in body:
         store.set_policy(body["policy"])
@@ -2933,7 +2955,14 @@ def app_set_settings(home: Path, body: Optional[dict]) -> dict:
     if "workstream_approvals" in body:
         store.set_workstream_approvals(body["workstream_approvals"])
         end_bypasses(home)
+    if "workstream_model" in body:
+        # New workstreams only: a running one keeps the model it started on.
+        store.set_workstream_model(picked)
     return app_settings(home)
+
+
+def _model_pick_ok(picked: Any) -> bool:
+    return work_store.model_pick_ok(picked)
 
 
 def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = None) -> dict:
@@ -3359,9 +3388,22 @@ def digest(session_id: Any) -> Optional[str]:
     store.mark_seen([work.ref for work in rows if work.ref not in unseen])
     reason = work_broker.unavailable_reason()
     mode = policy(home)
-    rules = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), and "
-             "send follow-ups to the one that's on it (work_send with its ref); answer from what you know "
-             "otherwise. " + ("You can also make read-only lookups yourself. " if mode == "lookups" else "")
+    if mode == "lookups":
+        # Said first and plainly: a model reading "anything that needs tools"
+        # first handed the weather to a workstream.
+        routing = ("You coordinate this bot's work. Answer a question that a quick read-only lookup settles "
+                   "yourself, in this turn, without a workstream: the weather, news and other current facts "
+                   "(web_search, web_extract), what was said in past chats (session_search), the bot's skills "
+                   "(skills_list, skill_view), and the user's health, location and inbox (conduit_health, "
+                   "conduit_location, conduit_inbox). Call them through tool_call when they aren't listed. Hand "
+                   "a workstream (work_start) anything else that needs tools: running commands, reading or "
+                   "changing files, or work of several steps; send follow-ups to the one that's on it "
+                   "(work_send with its ref); answer from what you know otherwise. ")
+    else:
+        routing = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), "
+                   "and send follow-ups to the one that's on it (work_send with its ref); answer from what you "
+                   "know otherwise. ")
+    rules = (routing
              + "If the work tools aren't listed, call them through tool_call with their name and arguments, "
              'like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": "Find out '
              'why the login page is slow."}} or tool_call {"name": "work_send", "arguments": {"ref": "W1", '
@@ -3387,9 +3429,12 @@ def _settings_line(home: Path, store: work_store.Store) -> str:
         setting, "they ask for approval as this bot's chats do")
     restart = ("continue" if store.after_restart() == "continue"
                else "wait for the user")
+    picked = store.workstream_model()
+    model = (f"new workstreams run on {picked['model']}" if picked
+             else "workstreams run on this bot's own model")
     return (f"The user's settings for this (Conduit: Edit Bot > Work, which only they change): "
             f"up to {store.max_running()} workstreams at once, "
-            f"{approvals}, and after a restart, safe work will {restart}.")
+            f"{approvals}, {model}, and after a restart, safe work will {restart}.")
 
 
 # Wake turns
