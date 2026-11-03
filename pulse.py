@@ -110,6 +110,8 @@ TICK_S = 30.0
 STALE_TICK_S = 10 * TICK_S
 # One process runs the loop; its lease outlives a few missed ticks.
 LEADER_TTL_S = 4 * TICK_S
+# Loaded only in the dashboard: how a Hermes before v0.22.0 tells it apart (_hosts_chats).
+DASHBOARD_MODULE = "hermes_cli.web_server"
 MAX_TURNS = 256
 PROBE_TEXT = "Pulse delivery check {tag}. Nothing to do: reply with one short line."
 PROBE_NOTE = ("This turn was started by Pulse, the plugin that lets Hermes speak up on its own, to check that "
@@ -169,6 +171,7 @@ def build_stamp() -> str:
 
 _build = build_stamp()
 _said_stale = False
+_said_no_host = False
 
 
 def _owner_gone(owner: Any) -> bool:
@@ -636,11 +639,42 @@ def _hosts_chats() -> bool:
     serve`) publishes a session host to plugins, and its method table is
     loaded; a gateway serving its own listener (the Webapp) runs them on its
     session authority (hermes-conduit#1618). The messaging gateway alone and
-    the CLI have neither."""
+    the CLI have neither. A Hermes from before the plugin manager knew of a
+    session host (before v0.22.0, notifier#513) has no such flag: there the
+    dashboard is the process with its web server loaded."""
     if host.on_authority():
         return True
     manager = getattr(_ctx, "_manager", None)
-    return bool(getattr(manager, "has_tui_message_injector", False)) and host.available()
+    if hasattr(manager, "has_tui_message_injector"):
+        return bool(manager.has_tui_message_injector) and host.available()
+    return _dashboard_here() and host.available()
+
+
+def _dashboard_here() -> bool:
+    return DASHBOARD_MODULE in sys.modules
+
+
+def host_problem() -> str:
+    """Why the dashboard answering a request can't run Pulse: "hermes_too_old"
+    when its Hermes has no session host Pulse can send turns through, else "".
+    A gateway's listener is left out: its chats wait on its session authority."""
+    if _ctx is None or _hosts_chats() or not _dashboard_here() or host.gateway_runs_here():
+        return ""
+    return "hermes_too_old"
+
+
+def _say_no_host() -> None:
+    """Once, in a dashboard whose Hermes can't run Pulse while it's on, so a
+    silent loop has a line in the log (notifier#513)."""
+    global _said_no_host
+    if _said_no_host or not host_problem():
+        return
+    path = Path(get_hermes_home()) / store.DB_NAME
+    if not path.exists() or not open_store(get_hermes_home()).get("enabled"):
+        return
+    logger.warning("conduit_push: Pulse is on, but this Hermes can't run it: its dashboard has no session host "
+                   "that takes a turn into a chat (session.resume and prompt.submit). Update Hermes.")
+    _said_no_host = True
 
 
 def tick(now: Optional[float] = None) -> None:
@@ -649,6 +683,7 @@ def tick(now: Optional[float] = None) -> None:
     before is still followed to its end, so the Pulse chat's hold
     (_held_home_turn) ends with it, and nothing else runs."""
     if _ctx is None or not turns_marked or not _hosts_chats():
+        _say_no_host()
         return
     home = get_hermes_home()
     if not (Path(home) / store.DB_NAME).exists():

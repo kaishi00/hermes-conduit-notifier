@@ -603,7 +603,8 @@ def _pulse(args: argparse.Namespace) -> int:
         ticked, now = pulse_store.get("last_tick_at"), time.time()
         if isinstance(ticked, bool) or not isinstance(ticked, (int, float)) or now - ticked > pulse.STALE_TICK_S:
             print(f"Warning: the dashboard hasn't run Pulse in the last {int(pulse.STALE_TICK_S // 60)} minutes. "
-                  "Check that it's running this build and was restarted after `plugins install`.")
+                  "Check that it's running this build and was restarted after `plugins install`; "
+                  "if it was, its log says when its Hermes can't run Pulse.")
         else:
             print(f"Dashboard last checked: {max(0, int(now - ticked))} s ago")
             lease = pulse_store.get(pulse_delivery.store.LEADER)

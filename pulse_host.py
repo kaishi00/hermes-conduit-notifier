@@ -61,7 +61,7 @@ def _authority_chats() -> Any:
         return None
 
 
-def _gateway_runs_here() -> bool:
+def gateway_runs_here() -> bool:
     return getattr(sys.modules.get("gateway.run_api"), "_ACTIVE_RUNNER", None) is not None
 
 
@@ -69,7 +69,7 @@ def _methods() -> Optional[dict[str, Callable[..., Any]]]:
     # Only a process that already runs the session host has it loaded;
     # importing it anywhere else would start one. A gateway's listener loads
     # it too, but its chats are the authority's.
-    if _gateway_runs_here():
+    if gateway_runs_here():
         # Never the listener's TUI registry, even when the authority can't be
         # reached: its users never see those chats.
         return None

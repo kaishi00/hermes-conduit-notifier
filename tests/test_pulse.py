@@ -677,6 +677,40 @@ def test_nothing_is_sent_outside_the_chat_host(live, db, monkeypatch):
     assert live.sent() == []
 
 
+def test_a_hermes_before_the_host_flag_runs_pulse_in_its_dashboard(live, db, monkeypatch):
+    """notifier#513: a plugin manager with no has_tui_message_injector (Hermes
+    before v0.22.0) runs Pulse where the dashboard's web server is loaded."""
+    db.session()
+    live.store.set("enabled", True)
+    live.ctx._manager = types.SimpleNamespace()
+    monkeypatch.delitem(sys.modules, pulse.DASHBOARD_MODULE, raising=False)
+    pulse.tick()  # the CLI on that Hermes
+    assert live.sent() == []
+    assert pulse.host_problem() == ""
+    monkeypatch.setitem(sys.modules, pulse.DASHBOARD_MODULE, types.ModuleType(pulse.DASHBOARD_MODULE))
+    pulse.tick()
+    assert len(live.sent()) == 1
+    assert live.store.get("last_tick_at")
+
+
+def test_a_dashboard_that_cant_run_pulse_says_so(live, db, monkeypatch, caplog):
+    db.session()
+    live.store.set("enabled", True)
+    live.ctx._manager = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, pulse.DASHBOARD_MODULE, types.ModuleType(pulse.DASHBOARD_MODULE))
+    monkeypatch.delitem(sys.modules, "tui_gateway.server")  # no session host
+    monkeypatch.setattr(pulse, "_said_no_host", False)
+    with caplog.at_level("WARNING"):
+        pulse.tick()
+        pulse.tick()
+    assert live.sent() == []
+    assert sum("can't run it" in record.getMessage() for record in caplog.records) == 1
+    assert control.state(live.store, pulse.get_hermes_home())["host_problem"] == "hermes_too_old"
+    # The messaging gateway's own listener waits on its session authority instead.
+    monkeypatch.setattr(pulse.host, "gateway_runs_here", lambda: True)
+    assert pulse.host_problem() == ""
+
+
 def test_nothing_is_sent_where_pulse_turns_cant_be_recognized(live, db, monkeypatch):
     db.session()
     live.store.set("enabled", True)
