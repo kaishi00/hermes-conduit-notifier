@@ -924,6 +924,11 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                                  "repository; it was told to leave their changes alone." +
                                  ("" if tree else " For coding work that edits files, start with worktree=true next "
                                   "time so each has a branch of its own."))
+    # The user sees the start as a card with its live status (Eric 2026-11-03):
+    # a short line still says someone took it, without repeating the card.
+    started_note["note"] += (" The user sees it as a card with its title and live status, so reply in one short "
+                             "sentence that adds to it (what you'll tell them, or a question you need answered); "
+                             "don't repeat its title or say that you started it.")
     return started_note
 
 
@@ -3359,9 +3364,22 @@ def digest(session_id: Any) -> Optional[str]:
     store.mark_seen([work.ref for work in rows if work.ref not in unseen])
     reason = work_broker.unavailable_reason()
     mode = policy(home)
-    rules = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), and "
-             "send follow-ups to the one that's on it (work_send with its ref); answer from what you know "
-             "otherwise. " + ("You can also make read-only lookups yourself. " if mode == "lookups" else "")
+    if mode == "lookups":
+        # Said first and plainly: a model reading "anything that needs tools"
+        # first handed the weather to a workstream.
+        routing = ("You coordinate this bot's work. Answer a question that a quick read-only lookup settles "
+                   "yourself, in this turn, without a workstream: the weather, news and other current facts "
+                   "(web_search, web_extract), what was said in past chats (session_search), the bot's skills "
+                   "(skills_list, skill_view), and the user's health, location and inbox (conduit_health, "
+                   "conduit_location, conduit_inbox). Call them through tool_call when they aren't listed. Hand "
+                   "a workstream (work_start) anything else that needs tools: running commands, reading or "
+                   "changing files, or work of several steps; send follow-ups to the one that's on it "
+                   "(work_send with its ref); answer from what you know otherwise. ")
+    else:
+        routing = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), "
+                   "and send follow-ups to the one that's on it (work_send with its ref); answer from what you "
+                   "know otherwise. ")
+    rules = (routing
              + "If the work tools aren't listed, call them through tool_call with their name and arguments, "
              'like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": "Find out '
              'why the login page is slow."}} or tool_call {"name": "work_send", "arguments": {"ref": "W1", '

@@ -687,6 +687,18 @@ def test_lookups_allows_read_only_lookups(on, hermes):
     assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"
 
 
+def test_lookups_tells_the_coordinator_to_answer_lookups_itself(on, home, hermes):
+    # Eric's Gridania test: with "Also look things up" on, the weather still went to a workstream.
+    strict = work.digest(BOT_CHAT)
+    assert "Hand anything that needs tools to a workstream" in strict and "weather" not in strict
+    work.app_set_settings(home, {"policy": "lookups"})
+    rules = work.digest(BOT_CHAT)
+    assert "Hand anything that needs tools" not in rules
+    assert rules.index("the weather") < rules.index("work_start")
+    for tool in ("web_search", "web_extract", "session_search", "conduit_location"):
+        assert tool in rules and work.tool_block(BOT_CHAT, tool, {}) is None
+
+
 def test_a_bridged_call_is_checked_by_what_it_calls(on, hermes):
     assert work.tool_block(BOT_CHAT, "tool_call", {"name": "work_start", "arguments": {}}) is None
     assert work.tool_block(BOT_CHAT, "tool_call", {"name": "terminal", "arguments": {}})["action"] == "block"
