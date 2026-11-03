@@ -56,11 +56,10 @@ slow, like results being certified or a parcel shipping, pass
 `every_minutes` too: every few hours is enough.
 
 For a call about something after this turn, set up a call watch (or a
-place rule with a call, for arriving or leaving somewhere). A scheduled job
-you make yourself with `cronjob` doesn't get Conduit's tools, so it can't
-call, and `conduit_call_user` rings only at the end of the turn that uses
-it. That holds in a voice call too: the call the user asks for there is a
-call watch, which calls them later.
+place rule with a call, for arriving or leaving somewhere), not a scheduled
+job that only sends a message: `conduit_call_user` rings only at the end of
+the turn that uses it. That holds in a voice call too: the call the user
+asks for there is a call watch, which calls them later.
 
 Example. The user says: "Call me if my homelab is down for more than 10
 minutes, but never before 9 am."
