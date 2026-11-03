@@ -468,6 +468,13 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
             store.set_after_restart(args.after_restart)
         if getattr(args, "approvals", None):
             store.set_workstream_approvals(args.approvals)
+            # As Edit Bot > Work does: approvals back on reach the running
+            # workstreams now, not only with their next send.
+            try:
+                from . import work_tool
+                work_tool.end_bypasses(store.home)
+            except Exception:  # noqa: BLE001 — each workstream's next send turns it back first
+                pass
         if picked:
             store.set_workstream_model(None if picked.lower() == "bot" else chosen)
     elif action == "off":

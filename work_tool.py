@@ -333,6 +333,8 @@ _redirecting: set[tuple[str, str]] = set()
 _RUNNING_STATES = ("starting", "running", "needs_you")
 # A workstream turn's reply, from post_llm_call until its turn's end.
 _replies: dict[str, str] = {}
+# A call's grace timers (call_ended), cancelled when the plugin unloads.
+_call_grace: set = set()
 # This copy's profile home, as it was when Hermes registered the plugin: each
 # profile loads its own copy, so this names its bot whatever thread asks.
 _pinned_home: Optional[Path] = None
@@ -1587,9 +1589,16 @@ def call_ended(home: Path, chat_id: Any, after: float = 0.0, before: Optional[fl
     if not call and before is not None and began > before:
         return True  # another call on the Bot Chat since: its hold is its own
     if after > 0:
-        later = threading.Timer(after, call_ended, args=(home, chat_id),
-                                kwargs={"before": time.time() if before is None else before, "call": call})
+        since = time.time() if before is None else before
+
+        def again() -> None:
+            with _wake_lock:
+                _call_grace.discard(later)
+            call_ended(home, chat_id, before=since, call=call)
+        later = threading.Timer(after, again)
         later.daemon = True
+        with _wake_lock:
+            _call_grace.add(later)
         later.start()
         return True
     store.set_meta(_CALL_ON + coordinator, "")
@@ -2721,7 +2730,12 @@ def _turn_ended(session_id: Any, response: Any) -> bool:
         return unreadable and _maybe_workstream(session_id, home)
     text = response.strip() if isinstance(response, str) else ""
     with _wake_lock:
+        _replies.pop(session_id, None)
         _replies[session_id] = text
+        # A turn whose end Hermes never reports leaves its reply here: the
+        # oldest go first, as _finished is bounded.
+        while len(_replies) > 512:
+            del _replies[next(iter(_replies))]
         _finished.discard(session_id)  # a reply: this is a new turn's end coming
     return True
 
@@ -3610,6 +3624,8 @@ def stop() -> None:
         _wake_held.clear()
         checks = list(_call_checks.values())
         _call_checks.clear()
+        grace = list(_call_grace)
+        _call_grace.clear()
         _call_held.clear()
         _wake_asks.clear()
         _wake_items.clear()
@@ -3625,6 +3641,8 @@ def stop() -> None:
     for timer in checks:
         if timer is not None:
             timer.cancel()
+    for timer in grace:
+        timer.cancel()
 
 
 def flush_wakes() -> None:
