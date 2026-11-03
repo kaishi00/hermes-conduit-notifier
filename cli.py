@@ -490,7 +490,7 @@ def _pulse(args: argparse.Namespace) -> int:
     if action == "spots":
         return _pulse_spots(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
-    chat, problem = pulse.home_chat(pulse_store, home)
+    chat, problem = pulse.home_chat(pulse_store, home, looks_elsewhere=True)
     if chat is not None:
         print(f"Home chat: {_printable(chat.title)} ({_printable(chat.chat_id)})"
               f"{'' if chat.pinned else ', not pinned'}")

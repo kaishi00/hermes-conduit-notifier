@@ -1868,13 +1868,20 @@ def test_a_pulse_chat_in_another_profile_is_named_and_the_profile_reported(schem
     StateDB(home, schema).session(sid="mine", title="Notes")
     stray = StateDB(root, schema)
     store_ = store.open_store(home)
-    chat, problem = pulse.home_chat(store_, home)
-    assert chat is None and problem == 'Pulse has no chat titled "Pulse" yet; set it up in Settings > Pulse'
+    plain = 'Pulse has no chat titled "Pulse" yet; set it up in Settings > Pulse'
+    assert pulse.home_chat(store_, home, looks_elsewhere=True) == (None, plain)
     stray.session(sid="stray")
-    chat, problem = pulse.home_chat(store_, home)
-    assert chat is None and problem == (
+    assert pulse.home_chat(store_, home, looks_elsewhere=True) == (None, (
         'Pulse runs in profile "rei-ii" and has no chat titled "Pulse" there (profile "default" has one, '
-        "which this Pulse doesn't read); set it up in Settings > Pulse")
+        "which this Pulse doesn't read); set it up in Settings > Pulse"))
+    assert control.state(store_, home)["home_problem"].startswith('Pulse runs in profile "rei-ii"')
+    # The loop's own calls don't read every profile's store.
+    assert pulse.home_chat(store_, home) == (None, plain)
+    work = root / "profiles" / "work"
+    work.mkdir()
+    StateDB(work, schema).session(sid="work-pulse")
+    assert pulse.home_chat(store_, home, looks_elsewhere=True)[1].startswith(
+        'Pulse runs in profile "rei-ii" and has no chat titled "Pulse" there (profiles "default" and "work" have one,')
     # Conduit makes, hides and opens the chat in the profile Pulse names.
     assert control.state(store_, home)["profile"] == "rei-ii"
     assert control.feed(store_, home)["profile"] == "rei-ii"

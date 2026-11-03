@@ -124,7 +124,7 @@ def _window(pulse_store: Any, home: Path, days: int, now: float, *, starting: bo
     window = pulse_memory.backfill_window(pulse_store, days, now)
     if window is None:
         raise Refused("already_read", days=days)
-    chat, problem = pulse.home_chat(pulse_store, Path(home))
+    chat, problem = pulse.home_chat(pulse_store, Path(home), looks_elsewhere=True)
     if chat is None:
         raise Refused("no_home_chat", problem=problem)
     return window, chat
@@ -712,7 +712,7 @@ def set_level(pulse_store: Any, kind: Any, level: Any, now: Optional[float] = No
 def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str, Any]:
     """Everything Settings > Pulse shows, as data. Times are epoch seconds."""
     now = time.time() if now is None else now
-    chat, problem = pulse.home_chat(pulse_store, Path(home))
+    chat, problem = pulse.home_chat(pulse_store, Path(home), looks_elsewhere=True)
     ticked = pulse_store.get("last_tick_at")
     running = _number(ticked) and now - ticked <= pulse.STALE_TICK_S
     lease = pulse_store.get(pulse_delivery.store.LEADER)
