@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.126.2 (2026-11-03)
+
+### Fixes
+- With the plugin in a named profile, Settings > Pulse's Set up Pulse made
+  Pulse's chat in the default profile, where Pulse never looks, so Pulse sent
+  nothing. Pulse now tells Conduit which profile it runs in, so the chat is
+  made there, and when a chat titled Pulse is in another profile, Settings >
+  Pulse says which one.
+
 ## 0.126.1 (2026-11-02)
 
 ### Fixes

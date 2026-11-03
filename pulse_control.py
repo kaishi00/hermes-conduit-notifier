@@ -426,6 +426,9 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
     return {"cards": entries,
             "unseen": pulse_store.unseen_cards(without=without), "levels": pulse_learning.levels(pulse_store),
             "home_chat_id": chat.chat_id if chat else "",
+            # The profile Pulse runs in, whose chats it reads: Conduit makes,
+            # hides and opens Pulse's chat there (issue 1681).
+            "profile": pulse_proposals.profile_name(Path(home)) if home is not None else "default",
             # The screen says when Pulse is quiet (pulse_quiet) and until when.
             "quiet_now": pulse_quiet.why(pulse_store, zone, now),
             "quiet_ends_at": pulse_quiet.ends_at(pulse_store, zone, now),
@@ -729,6 +732,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "home_chat": {"id": chat.chat_id, "title": chat.title, "pinned": bool(chat.pinned)} if chat else None,
         "home_problem": problem,
         "home_title": pulse_store.get("home_title") or "Pulse",
+        # The profile Pulse runs in: Set up Pulse makes the chat there (issue 1681).
+        "profile": pulse_proposals.profile_name(Path(home)),
         "model": pulse.turn_model(pulse_store),
         # What "Default" runs on: the model Pulse's own chat is set to; None, Hermes's main model.
         "default_model": pulse.chat_model(Path(home), chat.chat_id) if chat else None,

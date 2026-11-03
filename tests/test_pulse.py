@@ -1858,6 +1858,29 @@ def test_an_early_report_stands_in_for_the_scheduled_one(live, db):
     assert len(live.sent()) == 1
 
 
+@pytest.mark.parametrize("schema", SCHEMAS)
+def test_a_pulse_chat_in_another_profile_is_named_and_the_profile_reported(schema, tmp_path):
+    # Issue 1681: Pulse runs in a named profile, and its chat was made in the
+    # default one, which Pulse never reads.
+    root = tmp_path / "root"
+    home = root / "profiles" / "rei-ii"
+    home.mkdir(parents=True)
+    StateDB(home, schema).session(sid="mine", title="Notes")
+    stray = StateDB(root, schema)
+    store_ = store.open_store(home)
+    chat, problem = pulse.home_chat(store_, home)
+    assert chat is None and problem == 'Pulse has no chat titled "Pulse" yet; set it up in Settings > Pulse'
+    stray.session(sid="stray")
+    chat, problem = pulse.home_chat(store_, home)
+    assert chat is None and problem == (
+        'Pulse runs in profile "rei-ii" and has no chat titled "Pulse" there (profile "default" has one, '
+        "which this Pulse doesn't read); set it up in Settings > Pulse")
+    # Conduit makes, hides and opens the chat in the profile Pulse names.
+    assert control.state(store_, home)["profile"] == "rei-ii"
+    assert control.feed(store_, home)["profile"] == "rei-ii"
+    assert control.state(store_, root)["profile"] == "default"
+
+
 def test_the_whole_home_chain_is_left_out_of_the_report(db, tmp_path):
     db.session("root", title="Pulse")
     db.session(SID, title="Pulse", parent="root")  # the home chat set by id to a compression tip
