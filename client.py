@@ -340,10 +340,13 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
 
 
 def _send(event: dict[str, Any], state: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+    return _post_outgoing(state, lambda: build_outgoing(event, state), timeout)
+
+
+def _post_outgoing(state: dict[str, Any], build: Callable[[], dict[str, Any]], timeout: float) -> dict[str, Any]:
     url = f"{state['relay_url'].rstrip('/')}/v1/events"
     try:
-        return request_json(url, method="POST", credential=state["credential"],
-                            payload=build_outgoing(event, state), timeout=timeout)
+        return request_json(url, method="POST", credential=state["credential"], payload=build(), timeout=timeout)
     except RelayRejected as error:
         # A sealed push dated ahead of the relay's clock: its refusal told
         # us the relay's time, so the push is sealed again by it, once. The
@@ -351,8 +354,7 @@ def _send(event: dict[str, Any], state: dict[str, Any], timeout: float = 15.0) -
         # on a host whose clock runs fast (#524).
         if error.status != 400 or error.detail != CLOCK_AHEAD or _clock_ahead_by(state) is None:
             raise
-        return request_json(url, method="POST", credential=state["credential"],
-                            payload=build_outgoing(event, state), timeout=timeout)
+        return request_json(url, method="POST", credential=state["credential"], payload=build(), timeout=timeout)
 
 
 def set_redact_content(enabled: bool) -> bool:
@@ -580,18 +582,13 @@ def request_key_rotation(*, without_overlap: bool = False) -> bool:
     return update_state(change)
 
 
-def post_event(payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
-    """POST an already-built outgoing event (diagnostics)."""
+def post_event(build: Callable[[dict[str, Any]], dict[str, Any]], timeout: float = 15.0) -> dict[str, Any]:
+    """POST an outgoing event ``build`` makes from the pairing (diagnostics),
+    built again if the relay's clock asks for it, as every push is."""
     state = load_state()
     if not state:
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
-    return request_json(
-        f"{state['relay_url'].rstrip('/')}/v1/events",
-        method="POST",
-        credential=state["credential"],
-        payload=payload,
-        timeout=timeout,
-    )
+    return _post_outgoing(state, lambda: build(state), timeout)
 
 
 def cancel_decision(request_id: str) -> bool:
@@ -709,7 +706,6 @@ def _request(
                 raise RelayRejected(response.status, "response_too_large")
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as error:
-        _note_relay_clock(url, error.headers)
         try:
             raw = error.read(4096)
         except Exception:
@@ -722,6 +718,9 @@ def _request(
         # body is something in front of it; one cut short or unreadable is
         # still counted as the relay's, so a misread never says "blocked".
         from_relay = raw is None or looks_like_json_object(raw)
+        if from_relay:
+            # Only the relay's own refusal tells its time, not whatever is in front of it.
+            _note_relay_clock(url, error.headers)
         detail = (body.get("error") if isinstance(body, dict) else None) or "request_rejected"
         raise RelayRejected(error.code, detail, from_relay=from_relay) from error
 
@@ -736,6 +735,8 @@ def _request(
 CLOCK_AHEAD = "e2e_clock_ahead"
 # Below this the difference is the Date header's second and the trip.
 CLOCK_CORRECT_AFTER_S = 60.0
+# A Date further off than the phone's day is the header's fault, not drift.
+CLOCK_TRUST_UP_TO_S = 24 * 60 * 60.0
 # A host this far off is worth a line in the log, once per relay.
 CLOCK_WARN_AFTER_S = 5 * 60.0
 _relay_clock_lock = threading.Lock()
@@ -751,12 +752,18 @@ def _relay_origin(url: str) -> str:
 def _note_relay_clock(url: str, headers: Any, *, now: float | None = None) -> None:
     try:
         date = headers.get("Date") if headers is not None else None
-        relay_now = parsedate_to_datetime(date).timestamp() if date else None
+        parsed = parsedate_to_datetime(date) if date else None
     except (TypeError, ValueError, IndexError, OverflowError):
-        relay_now = None
-    if relay_now is None:
+        parsed = None
+    # "-0000" (zone unknown) parses naive, which .timestamp() would read in
+    # this host's zone.
+    if parsed is None or parsed.tzinfo is None:
         return
-    ahead = (time.time() if now is None else now) - relay_now
+    ahead = (time.time() if now is None else now) - parsed.timestamp()
+    if abs(ahead) > CLOCK_TRUST_UP_TO_S:
+        # Not a clock that's drifted: a Date that's wrong, which would only
+        # date every push out of the relay's day.
+        return
     origin = _relay_origin(url)
     with _relay_clock_lock:
         _relay_clock_ahead[origin] = ahead
