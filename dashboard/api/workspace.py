@@ -352,8 +352,12 @@ async def post_workspace(action: str, request: Request, response: Response,
         op = lambda ws: ws.delete(root, path)
     else:
         folder, name = _workspace_text(body, "path"), _workspace_text(body, "name")
+        # An empty file is a file: "" decodes to no bytes and uploads as one (issue 1708).
+        encoded = body.get("data")
+        if not isinstance(encoded, str):
+            raise HTTPException(status_code=400, detail="data is required", headers=no_store)
         try:
-            data = base64.b64decode(_workspace_text(body, "data"), validate=True)
+            data = base64.b64decode(encoded, validate=True)
         except (ValueError, binascii.Error):
             raise HTTPException(status_code=400, detail="data must be base64", headers=no_store)
         op = lambda ws: ws.upload(root, folder, name, data, overwrite)

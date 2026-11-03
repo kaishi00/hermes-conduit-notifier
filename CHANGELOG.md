@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.127.2 (2026-11-03)
+
+### Fixes
+- Workspace files: an empty file (a .gitkeep, say) uploaded from Conduit's
+  Folder tab always failed. It now uploads as an empty file.
+
 ## 0.127.1 (2026-11-03)
 
 ### New and improved
