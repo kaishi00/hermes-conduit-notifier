@@ -313,6 +313,8 @@ def test_ssh_lists_searches_and_changes_files_the_same_way(tree):
     assert remote.duplicate(root, str(tree / "moved.md"))["entry"]["name"] == "moved copy.md"
     remote.upload(root, root, "data.bin", b"\x00\xff")
     assert (tree / "data.bin").read_bytes() == b"\x00\xff"
+    remote.upload(root, root, "empty.bin", b"")
+    assert (tree / "empty.bin").read_bytes() == b""
     remote.delete(root, str(tree / "drafts"))
     assert not (tree / "drafts").exists()
 
@@ -741,6 +743,11 @@ def test_routes_list_search_and_change(tree, client):
     client.post(f"{BASE}/workspace/upload", json={"root": root, "path": root, "name": "u.bin", "data": data})
     assert (tree / "u.bin").read_bytes() == b"bytes"
     client.post(f"{BASE}/workspace/delete", json={"root": root, "path": str(tree / "u.bin")})
+    empty = client.post(f"{BASE}/workspace/upload", json={"root": root, "path": root, "name": ".gitkeep", "data": ""})
+    assert empty.status_code == 200 and empty.json()["entry"]["size"] == 0
+    assert (tree / ".gitkeep").read_bytes() == b""
+    missing = client.post(f"{BASE}/workspace/upload", json={"root": root, "path": root, "name": "m"})
+    assert missing.status_code == 400 and missing.json()["detail"] == "data is required"
     assert not (tree / "u.bin").exists()
 
 
