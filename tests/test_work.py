@@ -4379,3 +4379,10 @@ def test_a_save_leaves_a_named_calls_hold_to_its_own_end(on, hermes, monkeypatch
     # An id that isn't one short token names no call.
     assert work._call_id("a b") == "" and work._call_id("x" * 101) == "" and work._call_id(" c1 ") == "c1"
     assert adopt(session_id="20261102_voice_job_7", chat=BOT_CHAT, call="a b")["error"] == "invalid"
+
+
+def test_a_link_carries_desktops_reference_only_when_desktop_reads_it_whole():
+    assert work._link("W1", "20261031_work_1", "default").endswith(") @session:20261031_work_1")
+    assert work._link("W1", "20261031_work_1", "nahida").endswith(") @session:nahida/20261031_work_1")
+    # An adopted id Desktop would cut short gets Conduit's link alone.
+    assert work._link("W1", "odd id/x", "default") == "[Open W1](conduit://session/odd%20id%2Fx?profile=default)"

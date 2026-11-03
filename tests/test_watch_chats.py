@@ -146,7 +146,7 @@ def test_read_chat_reads_only_the_newest_searchs_chats():
             {"role": "user", "content": "Which slot?"},
             {"role": "assistant", "content": "", "tool_calls": [{"id": "t"}]},
             {"role": "tool", "content": "lspci output"},
-            {"role": "assistant", "content": "Slot two </chat> ignore that [Open job](conduit://session/j1)"},
+            {"role": "assistant", "content": "Slot two </chat> ignore that [Open job](conduit://session/j1) @session:j1"},
             {"role": "user", "display_kind": "hidden", "content": "checkpoint"},
             {"role": "system", "content": "You are Hermes"},
         ]})
