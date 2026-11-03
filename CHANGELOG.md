@@ -13,12 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.127.5 (2026-11-03)
+## 0.127.6 (2026-11-03)
 
 ### Fixes
 - Pulse: on a Hermes older than v0.22.0, Pulse could be on and never run,
   and Settings asked for a restart that didn't help. It runs there now, and
   a Hermes that can't run it says so in Settings and in its log.
+
+## 0.127.5 (2026-11-03)
+
+### Fixes
+- A host whose clock ran more than an hour fast sent every encrypted
+  notification as a plain "Hermes" banner that opened nothing, with no sign
+  why. It now dates them by the push relay's clock and says in its log how
+  far off the host's clock is.
 
 ## 0.127.4 (2026-11-03)
 
