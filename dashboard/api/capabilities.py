@@ -157,6 +157,9 @@ ROUTE_CAPABILITIES = (
     # POST /self/update runs the whole update on the host and notifies.
     "self-update",
     "cron-notifications",
+    # "act" on /cron/notifications: a job delivered to a Bot Chat just shows
+    # its report there unless it lets the bot act on it (cron_bot_chat).
+    "cron-bot-chat-reports",
     "reply-sources",
     "chat-on-screen",
     # POST /predict, GET /predict: Conduit's Predictive features, answered

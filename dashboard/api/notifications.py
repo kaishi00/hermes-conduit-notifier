@@ -22,7 +22,9 @@ router = core.router
 # muted job ids live in the profile's conduit-cron.json, shared with the
 # plugin's turn-end hooks (agent process), which skip the push for that job's
 # runs, through cron_store.py (loaded by path: this module can't import the
-# plugin package). A run that answers [SILENT] never notifies either way.
+# plugin package). A run that answers [SILENT] never notifies either way. The
+# same file keeps the jobs delivered to a Bot Chat that let the bot act on
+# their report (cron_bot_chat); the rest just show it.
 
 CRON_LIMIT = 60
 CRON_WINDOW_S = 60.0
@@ -53,18 +55,51 @@ def _cron_home() -> Any:
     return get_hermes_home()
 
 
+_shows_reports: Optional[bool] = None
+
+
+def _cron_shows_reports() -> bool:
+    """Whether this Hermes can write a cron report into a Bot Chat as a
+    note, as the plugin's cron_bot_chat.supported() decides it (this module
+    can't import the plugin package). Without it every job keeps Hermes'
+    turn, and Conduit offers no choice."""
+    global _shows_reports
+    if _shows_reports is None:
+        try:
+            import importlib
+
+            cron = importlib.import_module("gateway.session_cron")
+            state = importlib.import_module("hermes_state")
+            _shows_reports = (callable(getattr(cron, "deliver_to_local_chat", None))
+                              and callable(getattr(cron, "owner_for_home", None))
+                              and callable(getattr(getattr(state, "SessionDB", None), "append_completion_note", None)))
+        except Exception:  # noqa: BLE001 - an older Hermes, or none here (tests)
+            _shows_reports = False
+    return _shows_reports
+
+
 def cron_notifications() -> Dict[str, Any]:
-    return {"muted": _cron_store().CronStore(_cron_home()).muted()}
+    store = _cron_store().CronStore(_cron_home())
+    # "act": the jobs delivered to a Bot Chat whose report starts the bot's
+    # turn; every other one just shows its report (cron_bot_chat), when this
+    # Hermes can ("shows_reports").
+    return {"muted": store.muted(), "act": store.acting(), "shows_reports": _cron_shows_reports()}
 
 
 def update_cron_notifications(body: Any) -> Dict[str, Any]:
-    if not isinstance(body, dict):
-        raise core.TokenError(400, "Expected a JSON object with job_id and notify")
+    """One job's choice: ``notify`` (its runs push) or ``act`` (its Bot
+    Chat report starts the bot's turn), one per request."""
+    if not isinstance(body, dict) or ("notify" in body) == ("act" in body):
+        raise core.TokenError(400, "Expected a JSON object with job_id and one of notify or act")
+    store = _cron_store().CronStore(_cron_home())
     try:
-        muted = _cron_store().CronStore(_cron_home()).set_notify(body.get("job_id"), body.get("notify"))
+        if "notify" in body:
+            store.set_notify(body.get("job_id"), body.get("notify"))
+        else:
+            store.set_act(body.get("job_id"), body.get("act"))
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
-    return {"muted": muted}
+    return {"muted": store.muted(), "act": store.acting(), "shows_reports": _cron_shows_reports()}
 
 
 async def _cron_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],

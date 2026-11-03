@@ -60,19 +60,35 @@ def client(tmp_path, monkeypatch):
 
 
 def test_routes_read_and_change_a_jobs_notifications(client):
-    assert client.get(f"{BASE}/cron/notifications").json() == {"ok": True, "muted": []}
+    assert client.get(f"{BASE}/cron/notifications").json() == {"ok": True, "muted": [], "act": [], "shows_reports": False}
     response = client.put(f"{BASE}/cron/notifications", json={"job_id": "a1b2c3d4e5f6", "notify": False})
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == {"ok": True, "muted": ["a1b2c3d4e5f6"]}
+    assert response.json() == {"ok": True, "muted": ["a1b2c3d4e5f6"], "act": [], "shows_reports": False}
     assert client.get(f"{BASE}/cron/notifications").json()["muted"] == ["a1b2c3d4e5f6"]
     assert client.put(f"{BASE}/cron/notifications", json={"job_id": "a1b2c3d4e5f6", "notify": True}).json() \
-        == {"ok": True, "muted": []}
+        == {"ok": True, "muted": [], "act": [], "shows_reports": False}
+
+
+def test_a_job_lets_its_bot_act_on_its_report_only_when_picked(client, tmp_path):
+    assert CronStore(tmp_path).lets_act("a1b2c3d4e5f6") is False
+    assert client.put(f"{BASE}/cron/notifications", json={"job_id": "a1b2c3d4e5f6", "act": True}).json() \
+        == {"ok": True, "muted": [], "act": ["a1b2c3d4e5f6"], "shows_reports": False}
+    assert CronStore(tmp_path).lets_act("a1b2c3d4e5f6") is True
+    # Its notifications are a choice of their own.
+    client.put(f"{BASE}/cron/notifications", json={"job_id": "a1b2c3d4e5f6", "notify": False})
+    assert client.get(f"{BASE}/cron/notifications").json() \
+        == {"ok": True, "muted": ["a1b2c3d4e5f6"], "act": ["a1b2c3d4e5f6"], "shows_reports": False}
+    assert client.put(f"{BASE}/cron/notifications", json={"job_id": "a1b2c3d4e5f6", "act": False}).json()["act"] == []
 
 
 def test_a_bad_body_is_a_400(client):
     assert client.put(f"{BASE}/cron/notifications", json={"job_id": "x", "notify": 1}).status_code == 400
     assert client.put(f"{BASE}/cron/notifications", json=["x"]).status_code == 400
+    assert client.put(f"{BASE}/cron/notifications", json={"job_id": "x", "act": "yes"}).status_code == 400
+    # One choice per request.
+    assert client.put(f"{BASE}/cron/notifications", json={"job_id": "x", "act": True, "notify": True}).status_code == 400
+    assert client.put(f"{BASE}/cron/notifications", json={"job_id": "x"}).status_code == 400
 
 
 def test_an_unreadable_file_is_not_overwritten(tmp_path, monkeypatch):

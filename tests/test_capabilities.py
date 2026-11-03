@@ -121,6 +121,7 @@ def test_every_capability_names_a_served_route_family():
         "self-restart": "/self/restart",
         "self-update": "/self/update",
         "cron-notifications": "/cron/notifications",
+        "cron-bot-chat-reports": "/cron/notifications",
         "reply-sources": "/notifications/reply-sources",
         "chat-on-screen": "/notifications/on-screen",
         "predict": "/predict",

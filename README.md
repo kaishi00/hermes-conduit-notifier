@@ -123,9 +123,13 @@ A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predict
 A cron run notifies like any other turn, with two exceptions:
 
 - A run whose reply is Hermes' cron silence marker doesn't notify, by the same rule Hermes uses to skip delivering it: `[SILENT]` (or `SILENT` / `NO_REPLY`) as the whole reply, on its own first or last line, or opening the reply (`[SILENT] No changes since yesterday`). A marker mid-sentence is real content and still notifies.
-- You can turn a job's notifications off in Conduit's Cron tab. Its runs then send no reply or failure notification (and no automatic alert call; a call you asked for on the job still rings). The muted job ids live in the profile's `conduit-cron.json`; `GET /api/plugins/conduit_push/cron/notifications` lists them (`{"ok": true, "muted": [...]}`) and `PUT` with `{"job_id": "...", "notify": false}` changes one. Capability `cron-notifications`.
+- You can turn a job's notifications off in Conduit's Cron tab. Its runs then send no reply or failure notification (and no automatic alert call; a call you asked for on the job still rings). The muted job ids live in the profile's `conduit-cron.json`; `GET /api/plugins/conduit_push/cron/notifications` lists them (`{"ok": true, "muted": [...], "act": [...], "shows_reports": true}`) and `PUT` with `{"job_id": "...", "notify": false}` changes one. Capability `cron-notifications`.
 
 The plugin tells a cron run by its task id (`cron:<job id>:…`) or its classic session id (`cron_<job id>_<date>_<time>`).
+
+### Cron jobs delivered to a Bot Chat
+
+Hermes delivers a job set to `deliver: bot-chat` (or `bot-chat:<profile>`) as a turn: the bot reads the report, acts on what needs action and summarizes it, a model call every run. With the plugin, such a job **just shows its report** in that bot's Bot Chat instead: it's written into the chat as a note, the way Hermes writes a cron result into a local chat, with no turn and no model call, and the bot sees it as context on its next turn. Pick **Let the bot act on it** for a job in Conduit's job editor to keep Hermes' turn for it. The choice is kept in the job's profile's `conduit-cron.json` beside the muted jobs: `GET /api/plugins/conduit_push/cron/notifications` lists the jobs that let the bot act under `act`, and `PUT` with `{"job_id": "...", "act": true}` changes one. Capability `cron-bot-chat-reports`; the route's `shows_reports` says whether this Hermes can write the note (Hermes v0.22.5 can't, its canary from late October can), and without it every job keeps Hermes' turn and Conduit offers no choice. A report shows only in a Bot Chat that exists.
 
 Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-032)).
 

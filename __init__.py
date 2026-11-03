@@ -14,7 +14,7 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
+from . import (call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity,
                location_tool, maps_tool, notify_tool, phone_tool, present_tool, profile_copies, pulse, reply_sources,
                review_notices,
@@ -87,6 +87,9 @@ def register(ctx: Any) -> None:
     # An open chat's self-improvement updates follow the setting as it is
     # now, not as it was when the chat opened (review_notices).
     review_notices.install()
+    # A cron job delivered to a Bot Chat just shows its report there, no
+    # turn, unless the user lets the bot act on it (cron_bot_chat).
+    cron_bot_chat.install()
     # A fork of a chat (the self-improvement review, /btw, Conduit's
     # predictions) shares the chat's session id: its turn is never the
     # chat's (forks).
@@ -543,6 +546,7 @@ def _unload() -> None:
     room_cutoff.uninstall()
     room_wakeups.uninstall()
     room_cleanup.uninstall()
+    cron_bot_chat.uninstall()
     room_rules.forget()
     review_notices.uninstall()
     forks.uninstall()
@@ -987,7 +991,15 @@ def _room_chat_note(session_id: str) -> str | None:
 
 def _transform_tool_result(**kwargs: Any) -> str | None:
     """session_search's result without the sessions of rooms with other
-    people's agents (room_rules); None leaves any other result as it is."""
+    people's agents (room_rules), and a cron job's with what Conduit does
+    with its Bot Chat reports (cron_bot_chat); None leaves any other result
+    as it is."""
+    if kwargs.get("tool_name") == cron_bot_chat.CRON_TOOL:
+        try:
+            return cron_bot_chat.annotate(kwargs.get("tool_name"), kwargs.get("result"))
+        except Exception:  # noqa: BLE001 — a hook must never break the turn
+            logger.debug("conduit_push: cron result note failed", exc_info=True)
+            return None
     if kwargs.get("tool_name") != room_rules.SEARCH_TOOL:
         return None
     result = kwargs.get("result")
