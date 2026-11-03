@@ -737,3 +737,13 @@ def test_a_slot_is_hashed_kept_through_redaction_and_only_on_a_turns_end():
     assert push_event("turn.failed", identifier="failure:1", slot="cron:default:daily")["slot"]
     assert "slot" not in push_event("approval.needed", identifier="approval:1", slot="cron:default:daily")
     assert "slot" not in push_event("response.ready", identifier="response:2", session_id="s")
+
+
+def test_no_push_shows_a_work_links_desktop_reference():
+    # The work tools put Hermes Desktop's session reference right after a
+    # work link (work_tool._link): Desktop's chip, never a push's words.
+    from events import plain_text
+    reply = plain_text("W1 is waiting on you. [Open W1](conduit://session/s1?profile=nahida) @session:nahida/s1")
+    assert push_event("response.ready", identifier="r", body=reply)["body"] == "W1 is waiting on you. Open W1"
+    # Another chat's reference, not after a work link, stays as written.
+    assert plain_text("See @session:old1 too.") == "See @session:old1 too."

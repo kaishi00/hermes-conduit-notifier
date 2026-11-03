@@ -28,6 +28,14 @@ checks it). The format is fixed, because Conduit reads it:
 - Outside Conduit (Hermes Desktop, a messaging app) and in group rooms, Hermes gets the cards
   as text to put in its reply instead of an error.
 
+## 0.127.4 (2026-11-03)
+
+### Fixes
+- Bot Mode: on Hermes Desktop, which doesn't list workstreams, there was no
+  way to open one or answer its approval. The Bot Chat's links to its work
+  now open the workstream in Desktop too, and a workstream waiting on you
+  comes with its link.
+
 ## 0.127.3 (2026-11-03)
 
 ### Fixes
