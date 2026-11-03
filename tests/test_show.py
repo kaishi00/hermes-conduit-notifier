@@ -343,7 +343,11 @@ def test_a_group_room_never_gets_a_contact_or_a_drafted_text(tool_home, monkeypa
         assert answer["error"] == "group_room", source
         assert "Landed safe" not in answer["markdown"] and "139" not in answer["markdown"], source
         assert answer["markdown"].startswith("**Kin Khao**")
-        assert answer["problems"][-1] == tool.ROOM_CONTACTS_NOTE
+        assert answer["problems"][0] == tool.ROOM_CONTACTS_NOTE, "first, so the cap never cuts it"
+        assert "leave it out of your reply" in answer["problems"][0]
+    with_next = _call({"title": "Dinner", "cards": [MAP], "next": ["More"]}, session_id="room-1",
+                      is_room=lambda s: s == "room-1")
+    assert with_next["problems"][0] == tool.TEXT_NEXT_NOTE
 
 
 def test_long_fallback_markdown_is_cut_at_a_line(tool_home, monkeypatch):

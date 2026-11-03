@@ -306,9 +306,9 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
         _note(notes, f"{path}.{field}: a {kind} card needs it")
         return None
     if kind in PLACE_TYPES:
-        return _place_rules(card, raw)
+        return _place_rules(card, raw, path, notes)
     if kind == "chart":
-        chart = _chart_rules(card["chart"])
+        chart = _chart_rules(card["chart"], f"{path}.chart", notes)
         if chart is None:
             _note(notes, f"{path}.chart: no series has one value per label (a pie needs one, never negative)")
             return None
@@ -316,11 +316,18 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
     elif kind == "weather":
         weather = card["weather"]
         if "days" in weather:
-            weather["days"] = [day for day in weather["days"] if day["low"] <= day["high"]]
+            days = [day for day in weather["days"] if day["low"] <= day["high"]]
+            if len(days) < len(weather["days"]):
+                _note(notes, f"{path}.weather.days: a day's low is above its high, those were left out")
+            weather["days"] = days
         for key in ("hours", "days"):
             if key in weather and not weather[key]:
                 del weather[key]
-        if "source" not in card or not any(key in weather for key in ("now", "hours", "days")):
+        if "source" not in card:
+            _note(notes, f"{path}.source: a weather card needs it")
+            return None
+        if not any(key in weather for key in ("now", "hours", "days")):
+            _note(notes, f"{path}.weather: needs now, hours or days")
             return None
     elif kind == "comparison":
         seen = False
@@ -331,9 +338,13 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
                 seen = True
     elif kind == "media":
         if "source" not in card:
+            _note(notes, f"{path}.source: a media card needs it")
             return None
         # The phone loads media over https only.
-        card["media"] = [item for item in card["media"] if _is_https(item["url"])]
+        media = [item for item in card["media"] if _is_https(item["url"])]
+        if len(media) < len(card["media"]):
+            _note(notes, f"{path}.media: an item's url isn't https, those were left out")
+        card["media"] = media
         if not card["media"]:
             return None
         for item in card["media"]:
@@ -343,16 +354,21 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
                 item.pop("duration", None)
     elif kind == "contact":
         for person in card["people"]:
+            # Named by name: people the schema left out are gone by now.
+            who = f'{path}.people "{person["name"]}"'
             if "phone" in person and not _phone_ok(person["phone"]):
                 del person["phone"]
+                _note(notes, f"{who}.phone: not a phone number, left out")
             if "email" in person and not _EMAIL.match(person["email"]):
                 del person["email"]
+                _note(notes, f"{who}.email: not an email address, left out")
             # A text goes to their number, so there's none without it.
-            if "phone" not in person:
-                person.pop("message", None)
+            if "phone" not in person and person.pop("message", None) is not None:
+                _note(notes, f"{who}.message: a text needs their phone number, left out")
             # The phone loads photos over https only.
             if "photo" in person and not _is_https(person["photo"]["url"]):
                 del person["photo"]
+                _note(notes, f"{who}.photo: not https, left out")
     elif kind == "table":
         table = card["table"]
         width = len(table["columns"])
@@ -380,11 +396,12 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
             items.append(item)
         card["checklist"] = items
     elif kind == "list":
-        for index, item in enumerate(card["list"]):
-            # The phone loads photos over https only.
+        for item in card["list"]:
+            # The phone loads photos over https only. Named by title: items
+            # the schema left out are gone by now.
             if "photo" in item and not _is_https(item["photo"]["url"]):
                 del item["photo"]
-                _note(notes, f"{path}.list[{index}].photo: not https, left out")
+                _note(notes, f'{path}.list "{item["title"]}".photo: not https, left out')
     elif kind == "progress":
         items = [item for item in card["progress"] if item["goal"] > 0]
         if len(items) < len(card["progress"]):
@@ -443,14 +460,18 @@ def _phone_ok(phone: str) -> bool:
     return bool(_PHONE.match(phone)) and 3 <= sum(char.isdigit() for char in phone) <= 20
 
 
-def _place_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+def _place_rules(card: dict[str, Any], raw: dict[str, Any], path: str = "cards[0]",
+                 notes: list[str] | None = None) -> dict[str, Any]:
     places = card["places"]
     if card["type"] == "place":
+        if len(places) > 1:
+            _note(notes, f"{path}.places: a place card shows one, the rest were left out")
         card["places"] = places[:1]
     # The phone loads photos over https only.
     for place in card["places"]:
         if "photo" in place and not _is_https(place["photo"]["url"]):
             del place["photo"]
+            _note(notes, f'{path}.places "{place["name"]}".photo: not https, left out')
     route = card.pop("route", None)
     # Only a map carries a route (_TYPE_FIELDS), so this is for maps alone.
     if route is not None:
@@ -459,10 +480,13 @@ def _place_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
         to, start = route["to"], route.get("from")
         if survived and to < len(places) and (start is None or (start < len(places) and start != to)):
             card["route"] = route
+        else:
+            _note(notes, f"{path}.route: its places aren't all there, left out")
     return card
 
 
-def _chart_rules(chart: dict[str, Any]) -> dict[str, Any] | None:
+def _chart_rules(chart: dict[str, Any], path: str = "cards[0].chart",
+                 notes: list[str] | None = None) -> dict[str, Any] | None:
     count = len(chart["labels"])
     series = [line for line in chart["series"] if len(line["values"]) == count]
     if chart["kind"] == "pie":
@@ -471,6 +495,9 @@ def _chart_rules(chart: dict[str, Any]) -> dict[str, Any] | None:
             series = []
     if not series:
         return None
+    if len(series) < len(chart["series"]):
+        dropped = len(chart["series"]) - len(series)
+        _note(notes, f"{path}.series: {dropped} without one value per label (a pie shows one) left out")
     chart["series"] = series
     return chart
 

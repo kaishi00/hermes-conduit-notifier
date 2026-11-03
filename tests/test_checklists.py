@@ -87,6 +87,13 @@ def test_a_change_is_heard_once_under_every_id_of_the_chat(store):
     assert store.note("rt-1") is None, "the same write, heard already"
 
 
+def test_a_repeated_save_isnt_heard_twice(store):
+    _save(store, ["Swimsuit"])
+    assert store.note("s1") is not None
+    _save(store, ["Swimsuit"])
+    assert store.note("s1") is None, "nothing changed since Hermes heard it"
+
+
 def test_two_chats_saving_at_once_are_each_heard(store):
     _save(store, ["Swimsuit"], sessions=("a",))
     _save(store, ["Passport"], sessions=("b",))

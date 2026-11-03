@@ -181,13 +181,13 @@ class ChecklistStore:
         title = _clean(body.get("title"), MAX_KEY_CHARS)
         with self._locked() as state:
             now = self.clock()
+            newest = max((entry for entry in state["lists"] if entry["session"] in sessions and entry["key"] == key),
+                         key=lambda entry: entry["updated_at"], default=None)
             if change is None:
                 ticked = [known[text.lower()] for text in _texts(body.get("ticked")) if text.lower() in known]
             else:
                 # One tick, applied to the newest state any of the chat's
                 # devices saved, so a tick from elsewhere is never undone.
-                newest = max((entry for entry in state["lists"] if entry["session"] in sessions and entry["key"] == key),
-                             key=lambda entry: entry["updated_at"], default=None)
                 done = {text.lower() for text in (newest["ticked"] if newest else [])}
                 item = _clean(change["item"], MAX_ITEM_CHARS).lower()
                 if change["ticked"]:
@@ -195,11 +195,15 @@ class ChecklistStore:
                 else:
                     done.discard(item)
                 ticked = [text for text in items if text.lower() in done]
+            # A retried or repeated save is news only if Hermes hadn't heard
+            # it yet.
+            heard = bool(newest and newest["heard"] and (newest["items"], newest["ticked"], newest["title"])
+                         == (items, ticked, title))
             kept = [entry for entry in state["lists"] if not (entry["session"] in sessions and entry["key"] == key)]
             write = uuid.uuid4().hex
             for session in sessions:
                 kept.append({"session": session, "key": key, "title": title, "items": items, "ticked": ticked,
-                             "updated_at": now, "heard": False, "write": write})
+                             "updated_at": now, "heard": heard, "write": write})
             kept.sort(key=lambda entry: entry["updated_at"])
             state["lists"] = kept[-MAX_LISTS:]
         return self.ticks(sessions)

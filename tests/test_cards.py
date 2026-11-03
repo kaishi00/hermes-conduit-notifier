@@ -226,9 +226,21 @@ def test_follow_ups_are_plain_messages():
 
 def test_a_list_photo_that_isnt_https_is_said_to_be_left_out():
     notes = []
-    card = {"type": "list", "list": [{"title": "X", "photo": {"url": "http://a.test/x.jpg", "source": "S"}}]}
+    card = {"type": "list", "list": [{"detail": "no title"},
+                                     {"title": "X", "photo": {"url": "http://a.test/x.jpg", "source": "S"}}]}
     assert card_schema.normalize_cards([card], notes) == [{"type": "list", "list": [{"title": "X"}]}]
-    assert notes == ["cards[0].list[0].photo: not https, left out"]
+    assert notes[-1] == 'cards[0].list "X".photo: not https, left out', "named by title, not a moved place"
+
+
+def test_older_kinds_say_what_their_rules_left_out():
+    notes = []
+    weather = {"type": "weather", "source": {"name": "Met"},
+               "weather": {"unit": "C", "days": [{"day": "Mon", "low": 5, "high": 9}, {"day": "Tue", "low": 20, "high": 10}]}}
+    contact = {"type": "contact", "people": [{"name": "Mei", "email": "not-an-email", "message": "Hi"}]}
+    card_schema.normalize_cards([weather, contact], notes)
+    assert "cards[0].weather.days: a day's low is above its high, those were left out" in notes
+    assert 'cards[1].people "Mei".email: not an email address, left out' in notes
+    assert 'cards[1].people "Mei".message: a text needs their phone number, left out' in notes
     assert card_schema.normalize_next(None) == [] and card_schema.normalize_next("Hi") == []
     assert card_schema.normalize_next(["a", "b", "c", "d", "e"]) == ["a", "b", "c", "d"]
 

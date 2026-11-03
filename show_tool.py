@@ -126,7 +126,8 @@ OLD_BOARD_LAYOUT_NOTE = ("layout: this version of Conduit draws cards one under 
 OLD_BOARD_NEXT_NOTE = ("next: this version of Conduit draws no follow-ups, left out: offer them in your reply if "
                        "they matter")
 ROOM_CONTACTS_NOTE = ("cards: a contact card holds the user's own details and drafts, so it isn't shared into a "
-                      "room, left out")
+                      "room: leave it out of your reply too")
+TEXT_NEXT_NOTE = "next: these messages show no follow-ups, left out: offer them in your reply if they matter"
 
 
 BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (a plan by day, a comparison, "
@@ -234,13 +235,17 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         # reply (Eric, 2026-11-03: text in rooms now, cards there later).
         # Other people's agents read it, so a contact's numbers and a text
         # drafted for the user stay out of it.
+        if follow_ups:
+            problems.insert(0, TEXT_NEXT_NOTE)
         if any(card["type"] == "contact" for card in cards):
-            problems.append(ROOM_CONTACTS_NOTE)
+            problems.insert(0, ROOM_CONTACTS_NOTE)
             cards = [card for card in cards if card["type"] != "contact"]
         return _as_text("group_room", ROOM_NOTE, cards, problems)
     if cards and _turn_source() not in (None, "conduit"):
         # Desktop, a messaging app or the terminal draws no cards; the
         # board's Markdown reads well in all of them.
+        if follow_ups:
+            problems.insert(0, TEXT_NEXT_NOTE)
         return _as_text("not_conduit", NOT_CONDUIT_NOTE, cards, problems)
     store = _store()
     old_board = not store.has_feature_everywhere(card_schema.BOARD_FEATURE)
@@ -266,10 +271,11 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if old_board and len(cards) > card_schema.LEGACY_MAX_CARDS:
         # A Conduit from before boards keeps the first four it can draw;
         # Hermes hears to say the rest.
-        problems.append(OLD_BOARD_NOTE.format(count=card_schema.LEGACY_MAX_CARDS))
+        # First, so the cap on problems never cuts what Hermes must say.
+        problems.insert(0, OLD_BOARD_NOTE.format(count=card_schema.LEGACY_MAX_CARDS))
         cards = cards[:card_schema.LEGACY_MAX_CARDS]
     elif dropped_extras:
-        problems.extend(dropped_extras)
+        problems[:0] = dropped_extras
     no_texts = _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE)
     if no_texts:
         # An older Conduit would show the person with no Send text, and
@@ -301,10 +307,10 @@ def _board(answer: dict[str, Any], cards: list[dict[str, Any]], layout: str | No
     """The answer the chat's history keeps: the cards, how they're laid out,
     the follow-ups, and the cards' Markdown, which Conduit shows in a card's
     place whenever it can't draw it."""
-    if follow_ups and not cards:
-        problems = [*problems, "next: follow-ups go under cards, and none were shown, left out"]
     if layout and len(cards) < 2:
-        problems = [*problems, "layout: it lays out two or more cards, and fewer were shown, left out"]
+        problems = ["layout: it lays out two or more cards, and fewer were shown, left out", *problems]
+    if follow_ups and not cards:
+        problems = ["next: follow-ups go under cards, and none were shown, left out", *problems]
     if cards:
         answer["cards"] = cards
         if layout and len(cards) > 1:
