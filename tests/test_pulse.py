@@ -706,6 +706,9 @@ def test_a_dashboard_that_cant_run_pulse_says_so(live, db, monkeypatch, caplog):
     assert live.sent() == []
     assert sum("can't run it" in record.getMessage() for record in caplog.records) == 1
     assert control.state(live.store, pulse.get_hermes_home())["host_problem"] == "hermes_too_old"
+    # The dashboard's routes run their own copy of the module, never registered.
+    monkeypatch.setattr(pulse, "_ctx", None)
+    assert pulse.host_problem() == "hermes_too_old"
     # The messaging gateway's own listener waits on its session authority instead.
     monkeypatch.setattr(pulse.host, "gateway_runs_here", lambda: True)
     assert pulse.host_problem() == ""

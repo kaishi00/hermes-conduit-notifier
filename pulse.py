@@ -657,8 +657,10 @@ def _dashboard_here() -> bool:
 def host_problem() -> str:
     """Why the dashboard answering a request can't run Pulse: "hermes_too_old"
     when its Hermes has no session host Pulse can send turns through, else "".
-    A gateway's listener is left out: its chats wait on its session authority."""
-    if _ctx is None or _hosts_chats() or not _dashboard_here() or host.gateway_runs_here():
+    A gateway's listener is left out: its chats wait on its session authority.
+    From the process alone, never _ctx: the dashboard's routes load their own
+    copy of this module (core._plugin_package_module), which never registers."""
+    if not _dashboard_here() or host.gateway_runs_here() or host.available():
         return ""
     return "hermes_too_old"
 
