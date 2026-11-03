@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.127.2 (2026-11-03)
+## 0.127.3 (2026-11-03)
 
 ### Fixes
 - Hermes could say it can't call you, set an alarm or add a reminder, even
@@ -23,6 +23,12 @@ checks it). The format is fixed, because Conduit reads it:
   are certified"), Hermes could set up a job that only sends a message, or
   call right away. It's now told to set up a call watch, checked every few
   hours for something slow.
+
+## 0.127.2 (2026-11-03)
+
+### Fixes
+- Workspace files: an empty file (a .gitkeep, say) uploaded from Conduit's
+  Folder tab always failed. It now uploads as an empty file.
 
 ## 0.127.1 (2026-11-03)
 
