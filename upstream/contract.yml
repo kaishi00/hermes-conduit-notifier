@@ -5,7 +5,8 @@
 
 # Upstream paths watched besides the modules the plugin imports (module_paths
 # below): the dashboard and plugin host that serve our routes, profiles and
-# auth, the state schema, and the docs that describe the plugin API. A
+# auth, the state schema, Tool Search (it shows our tools to the model), and
+# the docs that describe the plugin API. A
 # trailing / is a directory; * matches within one path segment.
 watch_paths:
   - hermes_cli/web_server*.py
@@ -14,6 +15,7 @@ watch_paths:
   - tools/plugin_guard*.py
   - tools/plugin_guard/
   - tools/skills_guard.py
+  - tools/tool_search*.py
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
   - hermes_cli/config*.py

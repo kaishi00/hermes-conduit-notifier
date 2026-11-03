@@ -27,8 +27,8 @@ MAX_LIMIT = 100
 DEFAULT_LIMIT = 20
 
 DESCRIPTION = (
-    "What the user's iPhone Shortcuts automations logged for you through Conduit's Log to Hermes action: "
-    "notifications from apps they picked, messages, emails, Wallet payments, NFC tags, sounds the phone heard "
+    "Read what the user's iPhone automations logged: notifications, messages, emails. "
+    "Their Shortcuts automations log it for you through Conduit's Log to Hermes action: notifications from apps they picked, messages, emails, Wallet payments, NFC tags, sounds the phone heard "
     "(a smoke alarm, a doorbell) and other moments they chose. Only what they set up arrives; sign-in codes "
     "never do. Read-only. Use it to answer them (\"what did my bank send today?\", \"did the courier text?\", "
     "\"what did I spend this week?\"), and for jobs or habits they set up around it, such as a digest of what "

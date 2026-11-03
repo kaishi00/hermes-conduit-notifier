@@ -46,8 +46,8 @@ _CHECK_LATER = "Tell the room you'll check with your owner, and don't share it u
 UNAVAILABLE = "Your owner can't be asked about this right now. Don't share it: say you can't share that here."
 
 DESCRIPTION = (
-    "Ask your owner on their phone before you share something personal about them in this group room (the room is "
-    "set to Ask me first): their plans, free time, where they are, what they think, anything about them. question: "
+    "Ask your owner's OK on their phone before sharing something personal of theirs. "
+    "In this group room (the room is set to Ask me first) that's their plans, free time, where they are, what they think, anything about them. question: "
     "what's being asked and by whom, on one line (\"Laifu asks whether you're free on the 22nd\"). share: exactly "
     "what you'd say if they agree. It waits a little for the answer: \"confirmed\" means share exactly that, "
     "\"edit\" means say only what your owner wrote (edit_text), \"declined\" means don't share it, and \"waiting\" "

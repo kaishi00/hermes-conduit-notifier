@@ -99,15 +99,21 @@ _WATCH_FIELDS: dict[str, Any] = {
     },
     "every_minutes": {
         "type": "integer",
-        "description": "How often to check, 5 or more. Leave it out: it follows from for_minutes.",
+        "description": ("How often to check, 5 or more. Leave it out for something that can happen any minute "
+                        "(it follows from for_minutes). For something slow, check every few hours (\"results "
+                        "certified\": 240)."),
     },
 }
 
 SETUP_SCHEMA: dict[str, Any] = {
     "name": SETUP_TOOL,
     "description": (
-        "Call watches: scheduled checks that phone the user through Conduit when something happens (\"call me "
-        "if the homelab is down for more than 10 minutes\"). This tool writes and keeps the scheduled jobs; you "
+        "Phone the user later through Conduit, when something happens: call watches. "
+        "A call watch is a scheduled check that calls the user when what it watches happens (\"call me "
+        "if the homelab is down for more than 10 minutes\"), or a one-time event comes (\"call me when the "
+        "results are certified\"). Use it whenever the user wants a call about something after this turn, "
+        "rather than a job that only sends a message (for arriving at or leaving a place, use a place rule "
+        "with a call). This tool writes and keeps the scheduled jobs; you "
         "only describe each watch. action set: add one watch, or change it (the same `what` is the same "
         "watch, never a second one). action sync: when the user sends their What's worth a call note, pass "
         "every watch the note describes, each with the note's limits that apply to it; it changes the ones "

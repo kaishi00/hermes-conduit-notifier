@@ -74,7 +74,8 @@ _PLACE_ARG = ("Where: \"me\" (the user's current position), one of their saved p
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Apple Maps, looked up on the user's iPhone by Conduit: find places (\"pharmacy open near me\", \"EV "
+        "Apple Maps on the user's iPhone: find places, directions and travel times. "
+        "Conduit looks it up there: find places (\"pharmacy open near me\", \"EV "
         "chargers near the office\"), look a place or address up, see what's at a spot, directions with real "
         "travel time and traffic by car, on foot, by transit or bike, when to leave to arrive by a time, and "
         "which of several places is quickest. A building block: use it whenever getting somewhere or finding "
