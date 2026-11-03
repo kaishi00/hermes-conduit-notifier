@@ -122,6 +122,8 @@ ROOM_NOTE = ("A group room shows messages, not cards. Put the markdown below in 
              "tidied up.")
 OLD_BOARD_NOTE = ("This version of Conduit draws at most {count} cards, one under another, with no follow-ups, so "
                   "the rest weren't shown: give them in your reply.")
+OLD_BOARD_EXTRAS_NOTE = ("This version of Conduit draws cards one under another, with no tabs or follow-ups: "
+                         "{what} left out, so offer the follow-ups in your reply if they matter.")
 
 
 BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (a plan by day, a comparison, "
@@ -170,9 +172,13 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
 
 def _as_text(error: str, note: str, cards: list[dict[str, Any]], problems: list[str]) -> dict[str, Any]:
     """The board as Markdown for a reply, where no cards can be drawn."""
-    answer: dict[str, Any] = {"ok": False, "error": error, "note": note, "markdown": _fallback(cards)}
+    return _with_problems({"ok": False, "error": error, "note": note, "markdown": _fallback(cards)}, problems)
+
+
+def _with_problems(answer: dict[str, Any], problems: list[str]) -> dict[str, Any]:
+    """An answer that didn't show the board, with what normalization dropped."""
     if problems:
-        answer["note"] = f"{note} {PROBLEMS_NOTE}"
+        answer["note"] = f"{answer['note']} {PROBLEMS_NOTE}"
         answer["problems"] = problems[:20]
     return answer
 
@@ -230,7 +236,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         return _as_text("group_room", ROOM_NOTE, cards, problems)
     store = _store()
     old_board = not store.has_feature_everywhere(card_schema.BOARD_FEATURE)
-    dropped_follow_ups = old_board and bool(follow_ups)
+    dropped_extras = [name for name, given in (("layout", layout), ("next", follow_ups)) if old_board and given]
     if old_board:
         layout, follow_ups = None, []
     markdown = args.get("markdown")
@@ -246,12 +252,15 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         left_out = list(dict.fromkeys(card["type"] for card in cards if card["type"] in hidden))
         cards = [card for card in cards if card["type"] not in hidden]
         if not cards and not given_markdown:
-            return {"ok": False, "error": "unsupported_cards", "note": UNSUPPORTED_CARDS_NOTE}
-    if old_board and (len(cards) > card_schema.LEGACY_MAX_CARDS or dropped_follow_ups):
+            return _with_problems({"ok": False, "error": "unsupported_cards", "note": UNSUPPORTED_CARDS_NOTE},
+                                  problems)
+    if old_board and len(cards) > card_schema.LEGACY_MAX_CARDS:
         # A Conduit from before boards keeps the first four it can draw;
         # Hermes hears to say the rest.
         problems.append(OLD_BOARD_NOTE.format(count=card_schema.LEGACY_MAX_CARDS))
         cards = cards[:card_schema.LEGACY_MAX_CARDS]
+    elif dropped_extras and cards:
+        problems.append(OLD_BOARD_EXTRAS_NOTE.format(what=" and ".join(dropped_extras)))
     no_texts = _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE)
     if no_texts:
         # An older Conduit would show the person with no Send text, and
@@ -272,7 +281,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         note = str(error)
         if error.code in ("no_device", "rate_limited"):
             note += " Tell the user the gist instead."
-        return {"ok": False, "error": error.code, "note": _with_left_out(note, left_out, no_texts)}
+        return _with_problems({"ok": False, "error": error.code, "note": _with_left_out(note, left_out, no_texts)},
+                              problems)
     return _board({"ok": True, "id": card["id"]}, cards, layout, follow_ups, problems,
                   _with_left_out(SHOWN_NOTE, left_out, no_texts))
 

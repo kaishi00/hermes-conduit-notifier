@@ -458,6 +458,7 @@ def test_a_text_left_off_is_left_out_of_the_markdown_and_named_when_nothing_show
         "an answer that shows nothing still says the text was left off"
 
 
+STATS_CARD = {"type": "stats", "stats": [{"label": "N", "value": "1"}]}
 BOARD_FEATURES = ("chat-cards", "info-cards", "media-cards", "live-cards", "board-cards")
 TABLE_CARD = {"type": "table", "title": "Caps", "table": {"columns": ["Company", "Cap"], "rows": [["Apple", 3.1]]}}
 CALLOUT = {"type": "callout", "title": "Tip", "callout": {"text": "Book early", "tone": "tip"}}
@@ -503,6 +504,15 @@ def test_follow_ups_without_cards_are_said_to_be_left_out(tool_home):
     answer = _call({"title": "Plain", "markdown": "Hi", "next": ["More"]})
     assert answer["ok"] is True and "next" not in answer
     assert answer["problems"] == ["next: follow-ups go under cards, and none were shown, left out"]
+
+
+def test_an_older_conduit_hears_its_tabs_and_follow_ups_were_left_out(tool_home):
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    answer = _call({"title": "Two", "cards": [STATS_CARD] * 2, "layout": "tabs", "next": ["More"]})
+    assert len(answer["cards"]) == 2 and "layout" not in answer and "next" not in answer
+    assert answer["problems"] == ["This version of Conduit draws cards one under another, with no tabs or "
+                                  "follow-ups: layout and next left out, so offer the follow-ups in your reply "
+                                  "if they matter."]
 
 
 def test_an_older_conduit_hears_of_a_cut_only_when_cards_were_cut(tool_home):
