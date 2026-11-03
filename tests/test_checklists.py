@@ -87,6 +87,17 @@ def test_a_change_is_heard_once_under_every_id_of_the_chat(store):
     assert store.note("rt-1") is None, "the same write, heard already"
 
 
+def test_a_tick_is_applied_to_the_newest_ticks_any_device_saved(store):
+    _save(store, ["Passport"], sessions=("s1",))
+    tick = {"sessions": ["s1", "r1"], "key": "packing", "title": "Iceland in June", "items": ITEMS}
+    store.clock.now += 1
+    assert store.save({**tick, "change": {"item": "swimsuit", "ticked": True}}) == {"packing": ["Swimsuit", "Passport"]}
+    store.clock.now += 1
+    assert store.save({**tick, "change": {"item": "Passport", "ticked": False}}) == {"packing": ["Swimsuit"]}
+    with pytest.raises(checklist_store.ChecklistError):
+        store.save({**tick, "change": {"item": "Passport"}})
+
+
 def test_bad_writes_are_refused(store):
     for body in ([], {"sessions": [], "key": "k", "items": [], "ticked": []},
                  {"sessions": ["s1"], "key": " ", "items": [], "ticked": []},

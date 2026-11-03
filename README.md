@@ -2484,10 +2484,11 @@ the schema's `board` section.
 - **Checklist ticks** are kept in the profile's `conduit-checklists.json`
   (200 checklists, forgotten after 90 days untouched): Conduit reads a
   chat's with `GET /boards/checklists?session=<id>` (every id the chat is
-  known by) and sends a checklist's whole state on each tick with
-  `POST /boards/checklists` (`sessions`, `key`: its live name, else its
-  title, else `checklist`, `title`, `items`, `ticked`). Hermes hears a
-  changed checklist once, at the chat's next turn.
+  known by) and sends each tick with `POST /boards/checklists` (`sessions`,
+  `key`: its live name, else its title, else `checklist`, `title`, `items`,
+  and `change`: the item and whether it's ticked), which the host applies to
+  the newest ticks any device saved; a body with `ticked` instead sets them
+  all. Hermes hears a changed checklist once, at the chat's next turn.
 - **Recipes.** The `conduit_push:drawing-boards` skill holds the plans for a
   trip, a comparison, a dashboard from the user's data and a tracker. On a
   turn from a Conduit that draws boards, Hermes gets a one-line rule on when

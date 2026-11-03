@@ -2,9 +2,11 @@
 kept on the host so every one of their Conduits shows the same ticks, and
 Hermes hears what changed.
 
-Conduit sends a checklist's whole state whenever a tick changes: the chat's
+Conduit sends a tick as it changes, with the checklist's state: the chat's
 ids (a chat is known by more than one), the checklist's key (its live name,
-else its title, else "checklist"), its title, its items and the ones ticked.
+else its title, else "checklist"), its title, its items, and the item that
+changed (``change``), which the host applies to the newest ticks any device
+saved. A body without ``change`` sets the ticks it lists.
 Ticks are kept by item text, compared without regard to case, so a checklist
 shown again with the same live name keeps the ticks of the items it still
 has. Hermes hears a changed checklist once, at the chat's next turn
@@ -168,10 +170,27 @@ class ChecklistStore:
             raise ChecklistError("key names the checklist")
         items = _texts(body.get("items"))
         known = {item.lower(): item for item in items}
-        ticked = [known[text.lower()] for text in _texts(body.get("ticked")) if text.lower() in known]
+        change = body.get("change")
+        if change is not None and not (isinstance(change, dict) and isinstance(change.get("ticked"), bool)
+                                       and _clean(change.get("item"), MAX_ITEM_CHARS)):
+            raise ChecklistError("change is an item and whether it's ticked")
         title = _clean(body.get("title"), MAX_KEY_CHARS)
         with self._locked() as state:
             now = self.clock()
+            if change is None:
+                ticked = [known[text.lower()] for text in _texts(body.get("ticked")) if text.lower() in known]
+            else:
+                # One tick, applied to the newest state any of the chat's
+                # devices saved, so a tick from elsewhere is never undone.
+                newest = max((entry for entry in state["lists"] if entry["session"] in sessions and entry["key"] == key),
+                             key=lambda entry: entry["updated_at"], default=None)
+                done = {text.lower() for text in (newest["ticked"] if newest else [])}
+                item = _clean(change["item"], MAX_ITEM_CHARS).lower()
+                if change["ticked"]:
+                    done.add(item)
+                else:
+                    done.discard(item)
+                ticked = [text for text in items if text.lower() in done]
             kept = [entry for entry in state["lists"] if not (entry["session"] in sessions and entry["key"] == key)]
             for session in sessions:
                 kept.append({"session": session, "key": key, "title": title, "items": items, "ticked": ticked,
