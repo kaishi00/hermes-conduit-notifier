@@ -4386,3 +4386,4 @@ def test_a_link_carries_desktops_reference_only_when_desktop_reads_it_whole():
     assert work._link("W1", "20261031_work_1", "nahida").endswith(") @session:nahida/20261031_work_1")
     # An adopted id Desktop would cut short gets Conduit's link alone.
     assert work._link("W1", "odd id/x", "default") == "[Open W1](conduit://session/odd%20id%2Fx?profile=default)"
+    assert work._link("W1", "odd/id", "default") == "[Open W1](conduit://session/odd%2Fid?profile=default)"

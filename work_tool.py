@@ -792,12 +792,15 @@ def _link(ref: str, session_id: str, profile: Any) -> str:
     named = isinstance(profile, str) and profile
     query = f"?profile={quote(profile, safe='')}" if named else ""
     link = f"[Open {ref}](conduit://session/{quote(session_id, safe='')}{query})"
-    desktop = f"{profile}/{session_id}" if named and profile != "default" else session_id
+    secondary = named and profile != "default"
     # Only a reference Desktop reads whole: Hermes' ids and profile names.
-    return f"{link} @session:{desktop}" if _DESKTOP_REF.fullmatch(desktop) else link
+    if not _DESKTOP_ID.fullmatch(session_id) or (secondary and not _DESKTOP_PROFILE.fullmatch(profile)):
+        return link
+    return f"{link} @session:{profile}/{session_id}" if secondary else f"{link} @session:{session_id}"
 
 
-_DESKTOP_REF = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63}/)?[A-Za-z0-9_](?:[A-Za-z0-9_.:-]{0,126}[A-Za-z0-9_])?")
+_DESKTOP_ID = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_.:-]{0,126}[A-Za-z0-9_])?")
+_DESKTOP_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
 def _list(store: work_store.Store, args: dict) -> dict:
