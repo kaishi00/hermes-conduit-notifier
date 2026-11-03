@@ -81,6 +81,12 @@ def test_hermes_hears_a_change_once(store):
     assert "Nothing is ticked" in store.note("s1")
 
 
+def test_a_change_is_heard_once_under_every_id_of_the_chat(store):
+    _save(store, ["Swimsuit"], sessions=("st-1", "rt-1"))
+    assert store.note("st-1") is not None
+    assert store.note("rt-1") is None, "the same write, heard already"
+
+
 def test_bad_writes_are_refused(store):
     for body in ([], {"sessions": [], "key": "k", "items": [], "ticked": []},
                  {"sessions": ["s1"], "key": " ", "items": [], "ticked": []},

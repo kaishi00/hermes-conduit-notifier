@@ -22,8 +22,18 @@ import tempfile
 import threading
 import time
 import unicodedata
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
 
 FILE_NAME = "conduit-checklists.json"
 MAX_LISTS = 200
@@ -101,6 +111,24 @@ class ChecklistStore:
         lists = [entry for entry in state["lists"] if _well_formed(entry) and now - entry["updated_at"] < KEEP_S]
         return {"lists": lists}
 
+    @contextmanager
+    def _locked(self) -> Iterator[dict[str, Any]]:
+        """Load, let the caller change, then save, under a lock file: the
+        dashboard saves ticks while the agent marks them heard, in another
+        process."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_name(f".{self.path.name}.lock")
+        with _lock, open(lock_path, "a+b") as handle, _exclusive(handle):
+            try:
+                os.chmod(lock_path, 0o600)
+            except OSError:
+                pass
+            state = self._load()
+            before = json.dumps(state, sort_keys=True)
+            yield state
+            if json.dumps(state, sort_keys=True) != before:
+                self._save(state)
+
     def _save(self, state: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".conduit-checklists-")
@@ -142,8 +170,7 @@ class ChecklistStore:
         known = {item.lower(): item for item in items}
         ticked = [known[text.lower()] for text in _texts(body.get("ticked")) if text.lower() in known]
         title = _clean(body.get("title"), MAX_KEY_CHARS)
-        with _lock:
-            state = self._load()
+        with self._locked() as state:
             now = self.clock()
             kept = [entry for entry in state["lists"] if not (entry["session"] in sessions and entry["key"] == key)]
             for session in sessions:
@@ -151,7 +178,6 @@ class ChecklistStore:
                              "updated_at": now, "heard": False})
             kept.sort(key=lambda entry: entry["updated_at"])
             state["lists"] = kept[-MAX_LISTS:]
-            self._save(state)
         return self.ticks(sessions)
 
     # --- what Hermes hears ---------------------------------------------------
@@ -162,15 +188,16 @@ class ChecklistStore:
         session = _clean(session_id, MAX_SESSION_CHARS)
         if not session or not self.path.exists():
             return None
-        with _lock:
-            state = self._load()
+        with self._locked() as state:
             changed = [entry for entry in state["lists"] if entry["session"] == session and not entry["heard"]]
-            if not changed:
-                return None
+            # One write is kept under each of the chat's ids: heard under
+            # one, it's heard under them all.
+            written = {(entry["key"], entry["updated_at"]) for entry in changed}
             for entry in state["lists"]:
-                if entry["key"] in {item["key"] for item in changed} and entry["session"] == session:
+                if (entry["key"], entry["updated_at"]) in written:
                     entry["heard"] = True
-            self._save(state)
+        if not changed:
+            return None
         lines = []
         for entry in changed:
             name = entry["title"] or entry["key"]
@@ -181,6 +208,34 @@ class ChecklistStore:
             line += f"; still to do: {', '.join(open_items)}.]" if open_items else "; everything is done.]"
             lines.append(line)
         return "\n".join(lines)
+
+
+@contextmanager
+def _exclusive(handle: Any) -> Iterator[None]:
+    # The same locking as present_store: flock where there is one, a
+    # first-byte lock on Windows.
+    if fcntl is not None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        handle.seek(0)
+        for attempt in range(6):
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                if attempt == 5:
+                    raise
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        yield
 
 
 def _well_formed(entry: Any) -> bool:

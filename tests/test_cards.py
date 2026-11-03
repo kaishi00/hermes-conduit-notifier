@@ -203,7 +203,7 @@ def test_notes_say_what_was_dropped_and_why():
         {"type": "chart", "chart": {"kind": "doughnut", "labels": ["a"], "series": [{"values": [1]}]}},
         {"type": "stats", "stats": [{"label": "Steps", "value": "1"}], "places": []}], notes)
     assert [card["type"] for card in cards] == ["table", "stats"]
-    assert "cards[0].table.rows[1]: 1 cells for 2 columns, left out" in notes
+    assert 'cards[0].table.rows: the row starting "3" has 1 cells for 2 columns, left out' in notes
     assert "cards[1].progress: a goal must be above 0, those without were left out" in notes
     assert "cards[2].chart.kind: not one of line, bar, area, pie" in notes and "cards[2]: dropped" in notes
     assert "cards[3].places: not used on a stats card, left out" not in notes, "an empty list never survives"

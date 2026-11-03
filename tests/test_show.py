@@ -480,7 +480,7 @@ def test_a_board_says_exactly_what_it_dropped(tool_home):
     _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
     answer = _call({"title": "Caps", "cards": [{"type": "table", "table": {"columns": ["A", "B"],
                                                                            "rows": [["1", "2"], ["3"]]}}]})
-    assert answer["problems"] == ["cards[0].table.rows[1]: 1 cells for 2 columns, left out"]
+    assert answer["problems"] == ['cards[0].table.rows: the row starting "3" has 1 cells for 2 columns, left out']
     refused = _call({"title": "Caps", "cards": [{"type": "table", "table": {"columns": ["A"], "rows": []}}]})
     assert refused["error"] == "invalid_cards"
     assert "cards[0].table.rows: needs at least 1 valid items" in refused["problems"]
@@ -496,6 +496,37 @@ def test_an_older_conduit_gets_four_cards_and_no_follow_ups(tool_home):
     assert "layout" not in answer and "next" not in answer
     assert "can't draw callout cards" in answer["note"]
     assert any("at most 4 cards" in problem for problem in answer["problems"]), "Hermes says the rest"
+
+
+def test_follow_ups_without_cards_are_said_to_be_left_out(tool_home):
+    _exchange(PresentStore(tool_home), features=("show-cards", *BOARD_FEATURES))
+    answer = _call({"title": "Plain", "markdown": "Hi", "next": ["More"]})
+    assert answer["ok"] is True and "next" not in answer
+    assert answer["problems"] == ["next: follow-ups go under cards, and none were shown, left out"]
+
+
+def test_an_older_conduit_hears_of_a_cut_only_when_cards_were_cut(tool_home):
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    stats = [{"type": "stats", "title": str(index), "stats": [{"label": "N", "value": str(index)}]}
+             for index in range(2)]
+    answer = _call({"title": "Mixed", "cards": stats + [CALLOUT] * 3})
+    assert [card["type"] for card in answer["cards"]] == ["stats", "stats"]
+    assert not any("at most 4 cards" in problem for problem in answer.get("problems", [])), \
+        "the callouts weren't cut for the count, they can't be drawn"
+
+
+def test_what_is_left_out_is_said_wherever_the_board_goes(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    table = {"type": "table", "table": {"columns": ["A", "B"], "rows": [["1", "2"], ["3"]]}}
+    answer = _call({"title": "Caps", "cards": [table], "layout": "grid", "next": "More"})
+    assert "layout: not one of stack, tabs" in answer["problems"]
+    assert "next: not a list of messages, left out" in answer["problems"]
+    monkeypatch.setattr(tool, "_turn_source", lambda: "desktop")
+    away = _call({"title": "Caps", "cards": [table]})
+    assert away["error"] == "not_conduit" and len(away["problems"]) == 1 and "problems says" in away["note"]
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    room = _call({"title": "Caps", "cards": [table]}, is_room=lambda _: True)
+    assert room["error"] == "group_room" and room["problems"] == away["problems"]
 
 
 def test_a_call_screen_shows_a_board_as_its_phone_can(store):

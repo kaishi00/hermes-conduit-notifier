@@ -361,7 +361,10 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
             if len(row) == width:
                 rows.append(row)
             else:
-                _note(notes, f"{path}.table.rows[{index}]: {len(row)} cells for {width} columns, left out")
+                # Rows the schema left out are gone by now, so the row is
+                # named by its first cell rather than a place that moved.
+                _note(notes, f"{path}.table.rows: the row starting \"{row[0] if row else ''}\" has {len(row)} cells "
+                             f"for {width} columns, left out")
         if not rows:
             return None
         table["rows"] = rows
@@ -403,6 +406,8 @@ def normalize_next(value: Any, notes: list[str] | None = None) -> list[str]:
     rules): each item checked as the schema's text, the ones that aren't a
     plain message and repeats dropped, then the first maxItems kept."""
     if not isinstance(value, list):
+        if value is not None:
+            _note(notes, "next: not a list of messages, left out")
         return []
     limit = NEXT_SCHEMA["maxItems"]
     kept: list[str] = []
@@ -422,9 +427,9 @@ def normalize_next(value: Any, notes: list[str] | None = None) -> list[str]:
     return kept
 
 
-def normalize_layout(value: Any) -> str | None:
+def normalize_layout(value: Any, notes: list[str] | None = None) -> str | None:
     """tabs, or None for the default stack."""
-    layout = _normalize(LAYOUT_SCHEMA, value) if value is not None else _INVALID
+    layout = _normalize(LAYOUT_SCHEMA, value, "layout", notes) if value is not None else _INVALID
     return "tabs" if layout == "tabs" else None
 
 

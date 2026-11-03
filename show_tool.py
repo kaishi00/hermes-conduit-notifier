@@ -101,7 +101,8 @@ SCHEMA: dict[str, Any] = {
 
 INVALID_CARDS_NOTE = ("None of the cards could be shown: each needs a type and that type's field (places with "
                       "names for map, place and places, people for contact; stats, chart, weather, options, steps, "
-                      "media or status for the others), "
+                      "media, status, table (columns and rows), timeline, checklist, list, progress or callout for the "
+                      "others), "
                       "and a forecast and media need their source.")
 UNSUPPORTED_CARDS_NOTE = ("This version of Conduit can't draw these cards. On a call, show it as Markdown instead; "
                           "in a typed chat, write it in your reply.")
@@ -167,6 +168,15 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
         logger.warning("conduit_push: could not register %s", TOOL_NAME, exc_info=True)
 
 
+def _as_text(error: str, note: str, cards: list[dict[str, Any]], problems: list[str]) -> dict[str, Any]:
+    """The board as Markdown for a reply, where no cards can be drawn."""
+    answer: dict[str, Any] = {"ok": False, "error": error, "note": note, "markdown": _fallback(cards)}
+    if problems:
+        answer["note"] = f"{note} {PROBLEMS_NOTE}"
+        answer["problems"] = problems[:20]
+    return answer
+
+
 def _store() -> PresentStore:
     return PresentStore(get_hermes_home())
 
@@ -208,23 +218,19 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     cards = card_schema.normalize_cards(given, problems)
     if given not in (None, []) and not cards:
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20]}
-    layout = card_schema.normalize_layout(args.get("layout"))
+    layout = card_schema.normalize_layout(args.get("layout"), problems)
     follow_ups = card_schema.normalize_next(args.get("next"), problems)
     if cards and _turn_source() not in (None, "conduit"):
         # Desktop, a messaging app or the terminal draws no cards; the
         # board's Markdown reads well in all of them.
-        return {"ok": False, "error": "not_conduit", "note": NOT_CONDUIT_NOTE,
-                "markdown": _fallback(cards)}
+        return _as_text("not_conduit", NOT_CONDUIT_NOTE, cards, problems)
     if cards and session and is_room(session):
         # A group room draws its messages only, so the board goes in the
         # reply (Eric, 2026-11-03: text in rooms now, cards there later).
-        return {"ok": False, "error": "group_room", "note": ROOM_NOTE, "markdown": _fallback(cards)}
+        return _as_text("group_room", ROOM_NOTE, cards, problems)
     store = _store()
     old_board = not store.has_feature_everywhere(card_schema.BOARD_FEATURE)
-    if old_board and (len(cards) > card_schema.LEGACY_MAX_CARDS or follow_ups):
-        # A Conduit from before boards keeps the first four it can draw;
-        # Hermes hears to say the rest.
-        problems.append(OLD_BOARD_NOTE.format(count=card_schema.LEGACY_MAX_CARDS))
+    dropped_follow_ups = old_board and bool(follow_ups)
     if old_board:
         layout, follow_ups = None, []
     markdown = args.get("markdown")
@@ -241,7 +247,10 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         cards = [card for card in cards if card["type"] not in hidden]
         if not cards and not given_markdown:
             return {"ok": False, "error": "unsupported_cards", "note": UNSUPPORTED_CARDS_NOTE}
-    if old_board:
+    if old_board and (len(cards) > card_schema.LEGACY_MAX_CARDS or dropped_follow_ups):
+        # A Conduit from before boards keeps the first four it can draw;
+        # Hermes hears to say the rest.
+        problems.append(OLD_BOARD_NOTE.format(count=card_schema.LEGACY_MAX_CARDS))
         cards = cards[:card_schema.LEGACY_MAX_CARDS]
     no_texts = _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE)
     if no_texts:
@@ -273,6 +282,8 @@ def _board(answer: dict[str, Any], cards: list[dict[str, Any]], layout: str | No
     """The answer the chat's history keeps: the cards, how they're laid out,
     the follow-ups, and the cards' Markdown, which Conduit shows in a card's
     place whenever it can't draw it."""
+    if follow_ups and not cards:
+        problems = [*problems, "next: follow-ups go under cards, and none were shown, left out"]
     if cards:
         answer["cards"] = cards
         if layout and len(cards) > 1:
