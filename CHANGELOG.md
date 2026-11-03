@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.127.5 (2026-11-03)
+
+### Fixes
+- A host whose clock ran more than an hour fast sent every encrypted
+  notification as a plain "Hermes" banner that opened nothing, with no sign
+  why. It now dates them by the push relay's clock and says in its log how
+  far off the host's clock is.
+
 ## 0.127.4 (2026-11-03)
 
 ### Fixes

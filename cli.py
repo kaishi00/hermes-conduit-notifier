@@ -313,9 +313,13 @@ def dispatch(args: argparse.Namespace) -> int:
             if "e2e" not in outgoing:
                 print("End-to-end encryption is off for this profile; nothing to corrupt.")
                 return 1
-            outgoing["e2e"]["ct"] = _flipped(outgoing["e2e"]["ct"])
+            def corrupted(paired: dict) -> dict:
+                broken = build_outgoing(event, paired)
+                broken["e2e"]["ct"] = _flipped(broken["e2e"]["ct"])
+                return broken
+
             try:
-                post_event(outgoing)
+                post_event(corrupted)
             except _RELAY_ERRORS as error:
                 if isinstance(error, RelayRejected) and error.status in (401, 403):
                     record_relay_refusal(state, error)

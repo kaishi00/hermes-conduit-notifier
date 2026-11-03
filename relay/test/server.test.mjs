@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { SESSION_KEY_MAX_BYTES, callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, shouldDeliver, validateEvent, validateDecision } from '../src/server.mjs';
+import { E2E_MAX_AGE_S, E2E_MAX_FUTURE_S, SESSION_KEY_MAX_BYTES, callPushFor, notificationFor, phoneBackgroundPushFor, settlePushFor, shouldDeliver, validateEnvelope, validateEvent, validateDecision } from '../src/server.mjs';
 import { normalizePreferences } from '../src/store.mjs';
 
 const preferences = { show_previews: true, completion_sound: false };
@@ -636,7 +636,6 @@ test('validateEvent rejects malformed envelopes instead of falling back to plain
     { msg: 'input:other0000000000' },
     { iat: 1.5 },
     { iat: Math.floor(Date.now() / 1000) - 26 * 60 * 60 },
-    { iat: Math.floor(Date.now() / 1000) + 3 * 60 * 60 },
     { tok: 'zz' },
     { z: 2 },
     { req: 'x' },
@@ -652,6 +651,22 @@ test('validateEvent rejects malformed envelopes instead of falling back to plain
     () => validateEvent(encryptedEvent({ clarify: { request_id: 'conduit-push-000000000000', qids: [] } })),
     /invalid_e2e/,
   );
+});
+
+test('validateEnvelope takes an envelope up to the phone\'s hour ahead and names a later one', () => {
+  // Conduit's NotificationE2E.maxClockSkew: the phone shows anything further
+  // ahead as the generic banner, so the relay never forwards one (#524).
+  assert.equal(E2E_MAX_FUTURE_S, 60 * 60);
+  const now = 1_800_000_000;
+  const at = (iat) => () => validateEnvelope({ ...envelope, iat }, envelope.msg, now);
+  assert.equal(at(now + E2E_MAX_FUTURE_S)().iat, now + E2E_MAX_FUTURE_S);
+  assert.throws(at(now + E2E_MAX_FUTURE_S + 1), /e2e_clock_ahead/);
+  assert.throws(at(now + 3 * 60 * 60), /e2e_clock_ahead/);
+  // The age keeps its extra hour over the phone's day.
+  assert.equal(at(now - E2E_MAX_AGE_S)().iat, now - E2E_MAX_AGE_S);
+  assert.throws(at(now - E2E_MAX_AGE_S - 1), /invalid_e2e/);
+  // A malformed envelope stays invalid_e2e whatever its date.
+  assert.throws(() => validateEnvelope({ ...envelope, iat: now + 3 * 60 * 60, kid: 'ABC' }, envelope.msg, now), /invalid_e2e/);
 });
 
 test('notificationFor sends the generic alert, mutable-content and the untouched envelope', () => {

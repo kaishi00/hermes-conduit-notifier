@@ -1686,9 +1686,13 @@ function validCapabilities(value) {
 // Defense in depth against replaying a captured envelope after the event-id
 // ledger forgot it: the phone rejects anything older than 24 hours (or more
 // than an hour ahead) itself; the relay refuses the same, with an extra hour
-// of slack for clocks that disagree.
-const E2E_MAX_AGE_S = 25 * 60 * 60;
-const E2E_MAX_FUTURE_S = 2 * 60 * 60;
+// of slack on the age. Ahead it takes exactly the phone's hour: an envelope
+// further ahead is one the phone would only show as the generic banner, with
+// nothing to open, so it's refused as e2e_clock_ahead and the plugin seals it
+// again by the relay's clock, which this answer's Date header gives it (#524).
+// Conduit's NotificationE2E.maxClockSkew is the same hour.
+export const E2E_MAX_AGE_S = 25 * 60 * 60;
+export const E2E_MAX_FUTURE_S = 60 * 60;
 
 export function validateEnvelope(value, eventId, nowSeconds = Math.floor(Date.now() / 1000)) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw httpError(400, 'invalid_e2e');
@@ -1696,13 +1700,14 @@ export function validateEnvelope(value, eventId, nowSeconds = Math.floor(Date.no
   const valid = v === 1
     && typeof kid === 'string' && /^[0-9a-f]{32}$/.test(kid)
     && msg === eventId
-    && Number.isSafeInteger(iat) && iat >= nowSeconds - E2E_MAX_AGE_S && iat <= nowSeconds + E2E_MAX_FUTURE_S
+    && Number.isSafeInteger(iat) && iat >= nowSeconds - E2E_MAX_AGE_S
     && typeof tok === 'string' && /^[0-9a-f]{16}$/.test(tok)
     && (z === 0 || z === 1)
     && typeof req === 'string' && /^([A-Za-z0-9_-]{4,128})?$/.test(req)
     && typeof n === 'string' && /^[A-Za-z0-9_-]{16}$/.test(n)
     && typeof ct === 'string' && /^[A-Za-z0-9_-]{22,}$/.test(ct) && ct.length <= E2E_MAX_CT_CHARS;
   if (!valid) throw httpError(400, 'invalid_e2e');
+  if (iat > nowSeconds + E2E_MAX_FUTURE_S) throw httpError(400, 'e2e_clock_ahead');
   return { v, kid, msg, iat, tok, z, req, n, ct };
 }
 
