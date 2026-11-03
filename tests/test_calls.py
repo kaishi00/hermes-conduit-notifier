@@ -761,7 +761,9 @@ def test_register_adds_the_tool_and_its_skill():
     rooms = ("conduit_ask_owner", "conduit_free_busy")
     assert all(other["toolset"] == ("conduit_rooms" if other["name"] in rooms else "conduit")
                and other["schema"]["name"] == other["name"] for other in tools)
-    [(name, path), (health_name, health_path), (location_name, location_path), (calendar_name, calendar_path)] = skills
+    [(name, path), (boards_name, boards_path), (health_name, health_path), (location_name, location_path),
+     (calendar_name, calendar_path)] = skills
+    assert boards_name == "drawing-boards" and boards_path.read_text().startswith("---\nname: drawing-boards\n")
     assert location_name == "using-location" and location_path.is_file()
     assert name == "calling-the-user" and path.is_file()
     assert health_name == "reading-health-data" and health_path.read_text().startswith("---\nname: reading-health-data\n")
@@ -1005,6 +1007,17 @@ def test_the_next_turn_of_a_declined_calls_chat_hears_it_once(home, clock):
         'matters, tell them.]'
     )}
     assert plugin._pre_llm_call(session_id="rt-1", conversation_history=[]) is None
+
+
+def test_the_next_turn_hears_a_changed_checklist_once(home, monkeypatch):
+    from conduit_push import checklist_store
+
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
+    checklist_store.ChecklistStore(home).save({"sessions": ["st-1", "rt-1"], "key": "packing", "title": "Packing",
+                                               "items": ["Hat", "Socks"], "ticked": ["Hat"]})
+    assert plugin._pre_llm_call(session_id="st-1", conversation_history=[]) == {"context": (
+        '[Conduit: the user changed the checklist "Packing" in this chat. Done: Hat; still to do: Socks.]')}
+    assert plugin._pre_llm_call(session_id="st-1", conversation_history=[]) is None
 
 
 @pytest.mark.parametrize("entry, ago, says", [

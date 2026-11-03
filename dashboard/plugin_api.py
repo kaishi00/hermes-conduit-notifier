@@ -56,6 +56,7 @@ they run:
     workstreams           Bot workstreams: the Work panel, and Reply, Stop,
                           Continue and Check first on a workstream, and
                           the bot's work settings (Edit Bot > Work)
+    boards                Boards: the ticks on conduit_show's checklist cards
     capabilities          Capabilities: the features this plugin serves, as
                           Conduit reads them
     self_update           Self restart and self update

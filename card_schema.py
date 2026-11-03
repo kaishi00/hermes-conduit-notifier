@@ -1,6 +1,9 @@
 """Conduit's rich cards: maps, places, stats, charts, forecasts, comparisons,
-steps, media, contacts and statuses Conduit draws natively, checked against
-the one schema both sides read (``cards/card-schema.json``).
+steps, media, contacts and statuses, and the board kinds (tables, timelines,
+checklists, lists, progress and callouts) Conduit draws natively, checked
+against the one schema both sides read (``cards/card-schema.json``). A set of
+cards from one conduit_show call is a board: it can be laid out as tabs and
+carry follow-ups (``normalize_layout``, ``normalize_next``).
 
 Hermes fills in a card's facts (a place's name, where it is, a rating it
 found and where from; numbers, a forecast, the steps of a recipe); Conduit
@@ -16,6 +19,8 @@ card of that name in the conversation, so a status can be kept up to date.
 Normalizing follows the schema and is the same in Conduit's Swift
 (``RichCardSchema``); ``cards/card-vectors.json`` holds the examples both
 test suites run, so the two can't drift:
+- a table's cells and column names are made text first, so each keeps its
+  place (``_prepared``);
 - unknown keys are dropped;
 - text has control characters turned into spaces, is trimmed, and is cut to
   ``maxLength`` code points (a URL that's too long, or holds a space, quote,
@@ -33,7 +38,13 @@ test suites run, so the two can't drift:
   option at most; media needs a source, and an image has no duration or
   artwork; a contact keeps only a phone and an email that look like one,
   and a person's message only with their phone;
+  a table keeps the rows with one cell per column; a checklist keeps one
+  item per text; a list item's photo needs an https url; a progress goal is
+  above 0;
   a live name is kept on the first card of a set that has it.
+
+With a ``notes`` list, normalizing also says what it dropped or cut and why,
+so conduit_show can hand the model exact errors to fix.
 
 The tool (agent process) and the dashboard (dashboard process, voice call
 turns) both use this module: the dashboard loads it by path, so it imports
@@ -74,16 +85,24 @@ def tool_parameter(description: str) -> dict[str, Any]:
     return {"type": "array", "maxItems": MAX_CARDS, "description": description, "items": CARD_SCHEMA}
 
 
-def normalize_cards(value: Any) -> list[dict[str, Any]]:
-    """The valid cards in ``value``, normalized; invalid ones are dropped."""
+def normalize_cards(value: Any, notes: list[str] | None = None) -> list[dict[str, Any]]:
+    """The valid cards in ``value``, normalized; invalid ones are dropped.
+
+    With ``notes``, each thing dropped or cut is added to it as a line the
+    model can act on, like ``cards[1].table.rows[3]: 4 cells for 3 columns,
+    dropped``. Normalizing is the same with or without it."""
     if not isinstance(value, list):
+        if notes is not None and value is not None:
+            notes.append("cards: not a list, nothing shown")
         return []
     cards = []
     live = set()
-    for raw in value:
+    for index, raw in enumerate(value):
         if len(cards) == MAX_CARDS:
+            if notes is not None:
+                notes.append(f"cards: only {MAX_CARDS} can be shown at once, the rest were left out")
             break
-        card = normalize_card(raw)
+        card = normalize_card(raw, notes, f"cards[{index}]")
         if card is None:
             continue
         if "live" in card:
@@ -95,82 +114,147 @@ def normalize_cards(value: Any) -> list[dict[str, Any]]:
     return cards
 
 
-def normalize_card(raw: Any) -> dict[str, Any] | None:
-    card = _normalize(CARD_SCHEMA, raw)
+def normalize_card(raw: Any, notes: list[str] | None = None, path: str = "card") -> dict[str, Any] | None:
+    raw = _prepared(raw)
+    card = _normalize(CARD_SCHEMA, raw, path, notes)
     if card is _INVALID:
+        _note(notes, f"{path}: dropped")
         return None
-    return _apply_rules(card, raw)
+    result = _apply_rules(card, raw, notes, path)
+    if result is None:
+        _note(notes, f"{path}: dropped")
+    return result
 
 
-def _normalize(schema: dict[str, Any], value: Any) -> Any:
+def _note(notes: list[str] | None, text: str) -> None:
+    if notes is not None:
+        notes.append(text)
+
+
+def _prepared(raw: Any) -> Any:
+    """A table's cells and column names as text, so a number, a blank or a
+    null keeps its place in the row: a string stays as it is (an empty one
+    is \u2013), a number becomes its digits, anything else is \u2013."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("type"), str) or raw["type"].lower() != "table":
+        return raw
+    table = raw.get("table")
+    if not isinstance(table, dict):
+        return raw
+    table = dict(table)
+    if isinstance(table.get("columns"), list):
+        table["columns"] = [_cell(cell) for cell in table["columns"]]
+    if isinstance(table.get("rows"), list):
+        table["rows"] = [[_cell(cell) for cell in row] if isinstance(row, list) else row for row in table["rows"]]
+    return {**raw, "table": table}
+
+
+_BLANK = "\u2013"
+
+
+def _cell(value: Any) -> str:
+    if isinstance(value, str):
+        return value if clean_text(value) else _BLANK
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return _BLANK
+    if isinstance(value, float) and not math.isfinite(value):
+        return _BLANK
+    if abs(value) >= 1e15:
+        return _BLANK
+    if isinstance(value, int) or value.is_integer():
+        return str(int(value))
+    return repr(value)
+
+
+def _normalize(schema: dict[str, Any], value: Any, path: str = "", notes: list[str] | None = None) -> Any:
     kind = schema.get("type")
     if kind == "object":
         if not isinstance(value, dict):
+            _note(notes, f"{path}: not an object")
             return _INVALID
         required = set(schema.get("required", []))
         result: dict[str, Any] = {}
         for key, inner in schema.get("properties", {}).items():
             if key not in value or value[key] is None:
                 if key in required:
+                    _note(notes, f"{path}.{key}: missing")
                     return _INVALID
                 continue
-            clean = _normalize(inner, value[key])
+            clean = _normalize(inner, value[key], f"{path}.{key}", notes)
             if clean is _INVALID:
                 if key in required:
                     return _INVALID
+                _note(notes, f"{path}.{key}: left out")
                 continue
             result[key] = clean
         return result
     if kind == "array":
         if not isinstance(value, list):
+            _note(notes, f"{path}: not a list")
             return _INVALID
         limit = schema.get("maxItems")
         items = []
-        for raw in value:
+        for index, raw in enumerate(value):
             if limit is not None and len(items) == limit:
+                _note(notes, f"{path}: at most {limit} items, the rest were left out")
                 break
-            item = _normalize(schema["items"], raw)
+            item = _normalize(schema["items"], raw, f"{path}[{index}]", notes)
             if item is not _INVALID:
                 items.append(item)
+            else:
+                _note(notes, f"{path}[{index}]: left out")
         if len(items) < schema.get("minItems", 0):
+            _note(notes, f"{path}: needs at least {schema['minItems']} valid items")
             return _INVALID
         return items
     if kind == "string":
         if not isinstance(value, str):
+            _note(notes, f"{path}: not text")
             return _INVALID
         text = clean_text(value)
         if not text:
+            _note(notes, f"{path}: empty")
             return _INVALID
         limit = schema.get("maxLength")
         if schema.get("format") == "uri":
             if not _URI.match(text) or (limit is not None and len(text) > limit):
+                _note(notes, f"{path}: not a link (http or https, no spaces, quotes or brackets)")
                 return _INVALID
             return text
-        if limit is not None:
+        if limit is not None and len(text) > limit:
+            _note(notes, f"{path}: cut to {limit} characters")
             text = text[:limit].rstrip()
         if "enum" in schema:
             for option in schema["enum"]:
                 if option.lower() == text.lower():
                     return option
+            _note(notes, f"{path}: not one of {', '.join(schema['enum'])}")
             return _INVALID
         return text
     if kind in ("number", "integer"):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
+            _note(notes, f"{path}: not a number")
             return _INVALID
         if isinstance(value, float) and not math.isfinite(value):
+            _note(notes, f"{path}: not a number")
             return _INVALID
         if kind == "integer":
             if isinstance(value, float):
                 if not value.is_integer():
+                    _note(notes, f"{path}: not a whole number")
                     return _INVALID
                 value = int(value)
         if "minimum" in schema and value < schema["minimum"]:
+            _note(notes, f"{path}: below {schema['minimum']:g}")
             return _INVALID
         if "maximum" in schema and value > schema["maximum"]:
+            _note(notes, f"{path}: above {schema['maximum']:g}")
             return _INVALID
         return value
     if kind == "boolean":
-        return value if isinstance(value, bool) else _INVALID
+        if isinstance(value, bool):
+            return value
+        _note(notes, f"{path}: not true or false")
+        return _INVALID
     return _INVALID
 
 
@@ -182,36 +266,51 @@ def clean_text(text: str) -> str:
 # Each type's own field; a card keeps it and the shared fields, and nothing else.
 _TYPE_FIELDS = {"map": ("places", "route"), "place": ("places",), "places": ("places",), "stats": ("stats",),
                 "chart": ("chart",), "weather": ("weather",), "comparison": ("options",), "steps": ("steps", "needs"),
-                "media": ("media",), "contact": ("people",), "status": ("status",)}
+                "media": ("media",), "contact": ("people",), "status": ("status",), "table": ("table",),
+                "timeline": ("timeline",), "checklist": ("checklist",), "list": ("list", "ranked"),
+                "progress": ("progress",), "callout": ("callout",)}
 PLACE_TYPES = ("map", "place", "places")
 # The information cards (plugin 0.46+), media and contacts, and statuses
 # (0.47+): a Conduit draws each group only when its exchange names it.
 INFO_TYPES = ("stats", "chart", "weather", "comparison", "steps")
 MEDIA_TYPES = ("media", "contact")
 LIVE_TYPES = ("status",)
-FEATURE_TYPES = {"info-cards": INFO_TYPES, "media-cards": MEDIA_TYPES, "live-cards": LIVE_TYPES}
+# Boards (plugin 0.128+): these kinds, more than LEGACY_MAX_CARDS cards in a
+# set, a layout and follow-ups.
+BOARD_TYPES = ("table", "timeline", "checklist", "list", "progress", "callout")
+BOARD_FEATURE = "board-cards"
+FEATURE_TYPES = {"info-cards": INFO_TYPES, "media-cards": MEDIA_TYPES, "live-cards": LIVE_TYPES,
+                 BOARD_FEATURE: BOARD_TYPES}
+# How many cards a Conduit without boards draws from a set.
+LEGACY_MAX_CARDS = 4
 # A phone number's characters, and an address with nothing that could end a
 # link or a header early, or add a header or recipient to its mailto: link.
 _PHONE = re.compile(r"^[0-9+\-(). ]+$")
 _EMAIL = re.compile(r"^[^@\s<>()\[\]\"'`,;:\\?#%&=]+@[^@\s<>()\[\]\"'`,;:\\?#%&=]+\.[^@\s<>()\[\]\"'`,;:\\?#%&=.]+$")
 
 
-def _apply_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any] | None:
+def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | None = None,
+                 path: str = "card") -> dict[str, Any] | None:
     kind = card["type"]
     if kind not in _TYPE_FIELDS:
         return None
     keep = {"type", "title", "live", *_TYPE_FIELDS[kind]}
     if kind not in PLACE_TYPES:
         keep.add("source")
+    for key in card:
+        if key not in keep:
+            _note(notes, f"{path}.{key}: not used on a {kind} card, left out")
     card = {key: value for key, value in card.items() if key in keep}
     field = _TYPE_FIELDS[kind][0]
     if field not in card:
+        _note(notes, f"{path}.{field}: a {kind} card needs it")
         return None
     if kind in PLACE_TYPES:
         return _place_rules(card, raw)
     if kind == "chart":
         chart = _chart_rules(card["chart"])
         if chart is None:
+            _note(notes, f"{path}.chart: no series has one value per label (a pie needs one, never negative)")
             return None
         card["chart"] = chart
     elif kind == "weather":
@@ -254,7 +353,79 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any] | 
             # The phone loads photos over https only.
             if "photo" in person and not _is_https(person["photo"]["url"]):
                 del person["photo"]
+    elif kind == "table":
+        table = card["table"]
+        width = len(table["columns"])
+        rows = []
+        for index, row in enumerate(table["rows"]):
+            if len(row) == width:
+                rows.append(row)
+            else:
+                _note(notes, f"{path}.table.rows[{index}]: {len(row)} cells for {width} columns, left out")
+        if not rows:
+            return None
+        table["rows"] = rows
+    elif kind == "checklist":
+        seen: set[str] = set()
+        items = []
+        for item in card["checklist"]:
+            key = item["text"].lower()
+            if key in seen:
+                _note(notes, f"{path}.checklist: \"{item['text']}\" is there twice, kept once")
+                continue
+            seen.add(key)
+            items.append(item)
+        card["checklist"] = items
+    elif kind == "list":
+        for item in card["list"]:
+            # The phone loads photos over https only.
+            if "photo" in item and not _is_https(item["photo"]["url"]):
+                del item["photo"]
+    elif kind == "progress":
+        items = [item for item in card["progress"] if item["goal"] > 0]
+        if len(items) < len(card["progress"]):
+            _note(notes, f"{path}.progress: a goal must be above 0, those without were left out")
+        if not items:
+            return None
+        card["progress"] = items
     return card
+
+
+# Follow-ups a tap sends as the user's message: never a command, a file
+# reference or a shell line, so a tap can only ever ask.
+_NEXT_MENTION = re.compile(r"@[\w/.~]")
+NEXT_SCHEMA: dict[str, Any] = DEFINITION["board"]["next"]
+LAYOUT_SCHEMA: dict[str, Any] = DEFINITION["board"]["layout"]
+
+
+def normalize_next(value: Any, notes: list[str] | None = None) -> list[str]:
+    """The follow-ups worth offering under a set of cards (the board's
+    rules): each item checked as the schema's text, the ones that aren't a
+    plain message and repeats dropped, then the first maxItems kept."""
+    if not isinstance(value, list):
+        return []
+    limit = NEXT_SCHEMA["maxItems"]
+    kept: list[str] = []
+    for index, raw in enumerate(value):
+        text = _normalize(NEXT_SCHEMA["items"], raw, f"next[{index}]", notes)
+        if text is _INVALID:
+            continue
+        if text[:1] in ("/", "!") or _NEXT_MENTION.search(text) or "`" in text:
+            _note(notes, f"next[{index}]: \"{text}\" isn't a plain message, left out")
+            continue
+        if text.lower() in (other.lower() for other in kept):
+            continue
+        if len(kept) == limit:
+            _note(notes, f"next: at most {limit}, the rest were left out")
+            break
+        kept.append(text)
+    return kept
+
+
+def normalize_layout(value: Any) -> str | None:
+    """tabs, or None for the default stack."""
+    layout = _normalize(LAYOUT_SCHEMA, value) if value is not None else _INVALID
+    return "tabs" if layout == "tabs" else None
 
 
 def _is_https(url: str) -> bool:
@@ -545,9 +716,89 @@ def _status_markdown(card: dict[str, Any]) -> list[str]:
     return ["  \n".join(lines)]
 
 
+def _table_markdown(card: dict[str, Any]) -> list[str]:
+    table = card["table"]
+    rows = ["| " + " | ".join(_escape(name) for name in table["columns"]) + " |",
+            "|" + "---|" * len(table["columns"])]
+    rows.extend("| " + " | ".join(_escape(cell) for cell in row) + " |" for row in table["rows"])
+    return ["\n".join(rows)]
+
+
+def _timeline_markdown(card: dict[str, Any]) -> list[str]:
+    parts = []
+    for day in card["timeline"]:
+        head = f"**{_escape(day['label'])}**"
+        if day.get("title"):
+            head += f" · {_escape(day['title'])}"
+        rows = [head]
+        for stop in day["stops"]:
+            row = "- "
+            if stop.get("time"):
+                row += f"{_escape(stop['time'])}: "
+            row += _escape(stop["text"])
+            if stop.get("place"):
+                row += f" ([{_escape(stop['place'])}](https://maps.apple.com/?q={quote(stop['place'], safe=',')}))"
+            if stop.get("note"):
+                row += f". _{_escape(stop['note'])}_"
+            rows.append(row)
+        parts.append("\n".join(rows))
+    return parts
+
+
+def _checklist_markdown(card: dict[str, Any]) -> list[str]:
+    parts: list[str] = []
+    rows: list[str] = []
+    group = None
+    for item in card["checklist"]:
+        if item.get("group") != group:
+            if rows:
+                parts.append("\n".join(rows))
+            group = item.get("group")
+            rows = [f"**{_escape(group)}**"] if group else []
+        rows.append(f"- [ ] {_escape(item['text'])}")
+    if rows:
+        parts.append("\n".join(rows))
+    return parts
+
+
+def _list_markdown(card: dict[str, Any]) -> list[str]:
+    rows = []
+    for number, item in enumerate(card["list"], start=1):
+        name = _escape(item["title"])
+        if item.get("url"):
+            name = f"[{name}]({item['url']})"
+        row = f"{number}. **{name}**" if card.get("ranked") else f"- **{name}**"
+        if item.get("value"):
+            row += f" · {_escape(item['value'])}"
+        if item.get("detail"):
+            row += f": {_escape(item['detail'])}"
+        rows.append(row)
+    return ["\n".join(rows)]
+
+
+def _progress_markdown(card: dict[str, Any]) -> list[str]:
+    rows = []
+    for item in card["progress"]:
+        unit = f" {_escape(item['unit'])}" if item.get("unit") else ""
+        share = round(min(item["value"] / item["goal"], 1) * 100)
+        rows.append(f"- **{_escape(item['label'])}:** {_number(item['value'])} of {_number(item['goal'])}{unit} "
+                    f"({share}%)")
+    return ["\n".join(rows)]
+
+
+_TONES = {"tip": "Tip", "note": "Note", "warning": "Warning"}
+
+
+def _callout_markdown(card: dict[str, Any]) -> list[str]:
+    callout = card["callout"]
+    return [f"> **{_TONES[callout.get('tone', 'note')]}:** {_escape(callout['text'])}"]
+
+
 _INFO_MARKDOWN = {"stats": _stats_markdown, "chart": _chart_markdown, "weather": _weather_markdown,
                   "comparison": _comparison_markdown, "steps": _steps_markdown, "media": _media_markdown,
-                  "contact": _contact_markdown, "status": _status_markdown}
+                  "contact": _contact_markdown, "status": _status_markdown, "table": _table_markdown,
+                  "timeline": _timeline_markdown, "checklist": _checklist_markdown, "list": _list_markdown,
+                  "progress": _progress_markdown, "callout": _callout_markdown}
 
 
 def _sourced_name(source: dict[str, Any]) -> str:
