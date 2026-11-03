@@ -1396,7 +1396,7 @@ calls end without these steps until one finishes, and past 20 calls waiting a
 call ends without them too (the log says so each time). A call that isn't saved
 (saving turned off in Conduit, or no speech from you) ends nothing.
 
-## Bot workstreams (experimental, `bot-workstreams` branch)
+## Bot workstreams
 
 A bot's Bot Chat can coordinate work sessions of its own: you ask Furina for
 something, she starts a workstream (a hidden chat on her own profile) and stays

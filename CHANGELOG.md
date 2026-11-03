@@ -20,6 +20,11 @@ checks it). The format is fixed, because Conduit reads it:
   workstreams (each a chat of its own, with an optional worktree for coding
   work), follows them, and reports back in the Bot Chat. Conduit shows them
   in the bot's Work panel and on Bots Home.
+- This is on for every bot after the update. A Bot Chat then only
+  coordinates: its terminal, file and web tools run in a workstream instead
+  of in the Bot Chat itself. Edit Bot > Work lets a bot look things up
+  itself as well, or turns workstreams off so its Bot Chat runs its own
+  tools as before.
 - Bots can ask each other for help and answer, and a workstream picks up
   again after Hermes restarts.
 - Edit Bot > Work: whether a bot starts workstreams, asks before it does, or
