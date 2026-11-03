@@ -98,6 +98,19 @@ notes:
     worktree: tools.subagent_worktree's resolve_repo_root, local_backend_active,
     create_subagent_worktree and finalize_subagent_worktree (prune=False to look, prune=True only
     for an empty one). Without them work_start refuses worktree=true and starts nothing.
+  cron reports in a Bot Chat: >-
+    A cron job delivered to a Bot Chat just shows its report there unless it lets the bot act
+    (cron_bot_chat; feature map "Cron jobs delivered to a bot", branch bot-workstreams). The plugin
+    replaces cron.scheduler_delivery._deliver_to_bot_chat in the process that runs the jobs (the
+    delivery loop calls it by module name); a job that acts calls Hermes' own. A report finds the
+    Bot Chat with tools.bot_live_delivery._bot_chat_tip and goes in through
+    gateway.session_cron.deliver_to_local_chat (owner_for_home first), as Hermes writes a cron
+    result into a local chat: a note, no turn. Where the owner refuses (a desktop-made Bot Chat its
+    door hasn't adopted) or runs in another process, hermes_state's SessionDB.append_completion_note
+    writes it, once per run. gateway.session_cron is newer than v0.22.5, so it's reached by name
+    and checked first, and without it every job keeps Hermes' turn (the route's shows_reports is
+    false). upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
+    report on the user's next turn.
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
@@ -150,6 +163,8 @@ imports:
     optional: ["BasePlatformAdapter"]
   gateway.response_filters:
     optional: ["is_autonomous_silence_response"]
+  gateway.warning_notifications:
+    required: ["warning_notifications_enabled"]
   hermes_cli:
     optional: ["active_sessions", "lifecycle"]
   hermes_cli._launchers:
@@ -177,7 +192,8 @@ imports:
     required: ["invoke_hook"]
     optional: ["clear_thread_tool_whitelist", "set_thread_tool_whitelist"]
   hermes_cli.profiles:
-    optional: ["get_active_profile_name", "get_profile_dir", "list_profile_names"]
+    required: ["get_profile_dir"]
+    optional: ["get_active_profile_name", "list_profile_names"]
   hermes_cli.tools_config:
     optional: ["_get_platform_tools", "_get_plugin_toolset_keys"]
   hermes_cli.web_routers:
@@ -212,6 +228,8 @@ imports:
     optional: ["_get_approval_timeout"]
   tools.approval_context:
     optional: ["_get_approval_timeout"]
+  tools.bot_live_delivery:
+    required: ["_bot_chat_tip"]
   tools.clarify_gateway:
     optional: ["get_clarify_timeout"]
   tools.clarify_tool:
@@ -253,6 +271,7 @@ module_paths:
   - gateway/config
   - gateway/platforms/base
   - gateway/response_filters
+  - gateway/warning_notifications
   - hermes_cli
   - hermes_cli/_launchers
   - hermes_cli/active_sessions
@@ -282,6 +301,7 @@ module_paths:
   - tools
   - tools/approval
   - tools/approval_context
+  - tools/bot_live_delivery
   - tools/clarify_gateway
   - tools/clarify_tool
   - tools/cronjob_tools
