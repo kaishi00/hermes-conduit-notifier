@@ -1147,6 +1147,24 @@ def test_a_refusal_for_a_clock_ahead_is_sealed_again_by_the_relays_clock(relay_c
     assert inner["body"] == "Deploy to prod?"
 
 
+def test_a_clock_refusal_is_sealed_again_after_the_hosts_clock_was_set_right(relay_clock, monkeypatch):
+    # Sealed while an hour and a half fast; by the refusal the clock is right.
+    sent = []
+
+    def relay(url, **kwargs):
+        sent.append(kwargs["payload"])
+        if len(sent) == 1:
+            client._note_relay_clock(url, {"Date": _http_date(time.time())})
+            raise client.RelayRejected(400, "e2e_clock_ahead")
+        return {}
+
+    monkeypatch.setattr(client, "request_json", relay)
+    monkeypatch.setattr(client, "load_state", lambda: _state())
+    client.send_now(_clarify_event())
+    assert len(sent) == 2
+    assert abs(sent[1]["e2e"]["iat"] - time.time()) <= 5
+
+
 def test_a_clock_refusal_without_a_date_is_not_retried(relay_clock, monkeypatch):
     sent = []
 

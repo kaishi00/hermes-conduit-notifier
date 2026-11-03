@@ -352,7 +352,7 @@ def _post_outgoing(state: dict[str, Any], build: Callable[[], dict[str, Any]], t
         # us the relay's time, so the push is sealed again by it, once. The
         # first sealed push of each process (a cron job's worker) gets here
         # on a host whose clock runs fast (#524).
-        if error.status != 400 or error.detail != CLOCK_AHEAD or _clock_ahead_by(state) is None:
+        if error.status != 400 or error.detail != CLOCK_AHEAD or not _relay_clock_known(state):
             raise
         return request_json(url, method="POST", credential=state["credential"], payload=build(), timeout=timeout)
 
@@ -737,7 +737,8 @@ CLOCK_AHEAD = "e2e_clock_ahead"
 CLOCK_CORRECT_AFTER_S = 60.0
 # A Date further off than the phone's day is the header's fault, not drift.
 CLOCK_TRUST_UP_TO_S = 24 * 60 * 60.0
-# A host this far off is worth a line in the log, once per relay.
+# A host this far off is worth a line in the log, once per relay in each
+# process (a cron job's worker logs it again: the clock is still wrong).
 CLOCK_WARN_AFTER_S = 5 * 60.0
 _relay_clock_lock = threading.Lock()
 _relay_clock_ahead: dict[str, float] = {}
@@ -780,6 +781,14 @@ def _note_relay_clock(url: str, headers: Any, *, now: float | None = None) -> No
             logger.warning("This host's clock is about %d minutes behind the Conduit relay's; set this host's "
                            "time (turn on NTP). Encrypted notifications more than a day behind can't be opened "
                            "on the phone.", minutes)
+
+
+def _relay_clock_known(state: dict[str, Any]) -> bool:
+    """Whether the pairing's relay has told its time. A refusal for a clock
+    ahead is sealed again then, even when this host's clock was set right
+    meanwhile: sealed again by it, the push goes through."""
+    with _relay_clock_lock:
+        return _relay_origin(state.get("relay_url") or "") in _relay_clock_ahead
 
 
 def _clock_ahead_by(state: dict[str, Any]) -> float | None:
