@@ -23,6 +23,8 @@ they run:
                           Hermes
     voice_calls           Voice transcripts and call end: a live call's turns
                           saved into its chat
+    read_aloud            Read aloud, streamed: a spoken reply as a chunked body,
+                          so its first sentence plays while the rest synthesises
     chats                 Chat takeover, where in Conduit a message was sent,
                           and predictions
     history               Chat history pages without the rows Conduit already

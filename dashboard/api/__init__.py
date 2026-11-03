@@ -25,6 +25,7 @@ MODULES = (
     "local_live_read_back",
     "local_live_agent",
     "voice_calls",
+    "read_aloud",
     "chats",
     "history",
     "pairing",

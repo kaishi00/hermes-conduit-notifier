@@ -31,6 +31,9 @@ ROUTE_CAPABILITIES = (
     "voice-tags",
     "voice-summary",
     "voice-chat-calls",
+    # POST /read-aloud/stream: a spoken reply as a chunked body, so the first
+    # sentence plays while the rest is still being synthesized.
+    "read-aloud-stream",
     "session-takeover",
     "e2e-notifications",
     # POST /e2e/rotate: keys rotate inline through a key exchange.
