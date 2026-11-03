@@ -1379,6 +1379,11 @@ def test_the_cli_status_says_on_by_default_without_a_registry(home, monkeypatch,
     assert store_mod.Store(home).workstream_model() == {"model": "claude-sonnet-5-5", "provider": "anthropic"}
     cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="bot"))
     assert store_mod.Store(home).workstream_model() == {}
+    # An empty model is refused, and changes nothing.
+    cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="anthropic:claude-sonnet-5-5"))
+    assert cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="anthropic:")) == 2
+    assert store_mod.Store(home).workstream_model()["model"] == "claude-sonnet-5-5"
+    cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="bot"))
     assert store_mod.Store(home).workstream_approvals() == "ask"
     assert "workstream approvals: ask" in capsys.readouterr().out
 

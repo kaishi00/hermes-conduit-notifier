@@ -445,6 +445,17 @@ OWN_MODEL = "the bot's own"
 
 
 def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
+    from . import work_store
+
+    picked = (getattr(args, "model", None) or "").strip()
+    # The first colon ends the provider, so a model whose own name has one
+    # (qwen3:8b) is named with its provider (ollama:qwen3:8b).
+    provider, _, model = picked.partition(":") if ":" in picked else ("", "", picked)
+    if picked and picked.lower() != "bot" and (not model.strip()
+                                               or len(picked) > work_store.WORKSTREAM_MODEL_MAX_CHARS):
+        print("Bot workstreams: --model takes [provider:]model, like anthropic:claude-sonnet-5-5, "
+              "or bot for the bot's own. Nothing changed.")
+        return 2
     if action == "on":
         store.set_policy(args.policy or (store.policy() if store.policy() != "off" else "strict"))
         if args.max_running is not None:
@@ -453,10 +464,7 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
             store.set_after_restart(args.after_restart)
         if getattr(args, "approvals", None):
             store.set_workstream_approvals(args.approvals)
-        picked = (getattr(args, "model", None) or "").strip()
         if picked:
-            # The first colon ends the provider: a model's own name may have one (qwen3:8b).
-            provider, _, model = picked.partition(":") if ":" in picked else ("", "", picked)
             store.set_workstream_model(None if picked.lower() == "bot" else
                                        {"model": model.strip(), "provider": provider.strip()})
     elif action == "off":
