@@ -117,6 +117,14 @@ const PHONE_BACKGROUND_TTL_S = 24 * 60 * 60;
 // Lock Screen's summary ranks by. A level this relay doesn't know is
 // ignored, so the push goes as it always has.
 const PUSH_LEVELS = new Map([['passive', 0.2], ['active', 0.5], ['time-sensitive', 0.9]]);
+// The pushes that say how a turn or a task ended (#1579). A chat keeps one
+// of them on the phone: a failed turn's notice, a finished task and a reply
+// replace each other, while an approval, a question or a call keeps its own
+// until it's answered. A `slot` (the plugin's hashed scheduled job or
+// conduit_notify key) stands in for the chat, so each run of a job
+// replaces the last.
+const COMPLETION_TYPES = new Set(['response.ready', 'turn.failed', 'background_task.finished']);
+const SLOT_PATTERN = /^[0-9a-f]{16}$/;
 // An invite to a room from someone you've linked (Linked Rooms): its Link,
 // the room's id as the inviting Hermes made it, and, with previews on, the
 // room's name and who it's from. The ids mirror the plugin's room_links and
@@ -1107,6 +1115,8 @@ function notificationFor(event, preferences, gateway = undefined) {
     gatewayId ? createHash('sha256').update(`${gatewayId}:${seed}`).digest('hex').slice(0, 16) : undefined;
   if (event.e2e) return encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, scopeToken });
   const generic = genericCopy(event.type);
+  // What threads and replaces this push on the phone: its slot, else its chat.
+  const threadSeed = event.slot ? `slot:${event.slot}` : event.sessionId;
   // Chat names (#1415) joins the chat's title to the generic one, as
   // Conduit's NotificationCopy.chatNames does, over the generic body: none
   // of Hermes' words, and never the plugin's own title, which may quote a
@@ -1127,7 +1137,9 @@ function notificationFor(event, preferences, gateway = undefined) {
   // truthy test, so its behavior for any stored shape is unchanged.
   // turn.failed is deliberately excluded: it reports, it doesn't wait on the user.
   const attention = waitsOnUser(event.type);
-  const sound = (completion && preferences.completion_sound) || (attention && preferences.attention_sound !== false);
+  // A passive push (a quiet conduit_notify update) never makes a sound.
+  const sound = event.level !== 'passive'
+    && ((completion && preferences.completion_sound) || (attention && preferences.attention_sound !== false));
   // `decision` carries structured approval card content so Conduit can render
   // an answerable card from the push payload alone — the one-shot gateway
   // stream event is missed while the app is backgrounded. It has its own
@@ -1173,10 +1185,11 @@ function notificationFor(event, preferences, gateway = undefined) {
     ...levelAps(event),
     // Thread grouping is gateway-scoped: two dashboards both using session
     // "default" must never share a Notification Center thread. Gateway-less
-    // callers (direct/test use) keep the legacy raw-session shape.
+    // callers (direct/test use) keep the legacy raw-session shape. A slot
+    // threads in place of the chat.
     'thread-id': gatewayId
-      ? (event.sessionId ? scopeToken(event.sessionId) : scopeToken('hermes'))
-      : (event.sessionId ?? 'hermes'),
+      ? (threadSeed ? scopeToken(threadSeed) : scopeToken('hermes'))
+      : (threadSeed ?? 'hermes'),
   };
   let payload = { aps, body: { conduit: bodyConduit }, conduit: routing };
   // APNs caps the notification payload at 4 KB and rejects anything larger.
@@ -1197,13 +1210,13 @@ function notificationFor(event, preferences, gateway = undefined) {
   // produce the same APNs collapse id. Gateway-LESS callers (direct/test
   // use of the pure builder) keep the exact pre-scoping shapes.
   const collapseId = gatewayId
-    ? (event.sessionId
-        ? `${event.type}:${scopeToken(event.sessionId)}`
+    ? (threadSeed
+        ? `${collapseKind(event.type)}:${scopeToken(threadSeed)}`
         : `${event.type}:${scopeToken(event.eventId)}`)
-    : (event.sessionId ? `${event.type}:${event.sessionId}` : event.eventId);
+    : (threadSeed ? `${collapseKind(event.type)}:${threadSeed}` : event.eventId);
   const threadId = gatewayId
-    ? (event.sessionId ? scopeToken(event.sessionId) : scopeToken('hermes'))
-    : (event.sessionId ?? 'hermes');
+    ? (threadSeed ? scopeToken(threadSeed) : scopeToken('hermes'))
+    : (threadSeed ?? 'hermes');
   return {
     collapseId,
     payload,
@@ -1441,7 +1454,8 @@ function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, 
   const generic = genericCopy(event.type);
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
   const attention = waitsOnUser(event.type);
-  const sound = (completion && preferences.completion_sound) || (attention && preferences.attention_sound !== false);
+  const sound = event.level !== 'passive'
+    && ((completion && preferences.completion_sound) || (attention && preferences.attention_sound !== false));
   const threadId = scopeToken(event.e2e.tok) ?? event.e2e.tok;
   const routing = {
     type: event.type,
@@ -1466,7 +1480,12 @@ function encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, 
     const { 'mutable-content': _unused, ...plainAps } = aps;
     payload = { aps: plainAps, body: { conduit: routing }, conduit: routing };
   }
-  return { collapseId: `${event.type}:${threadId}`, payload, threadId };
+  return { collapseId: `${collapseKind(event.type)}:${threadId}`, payload, threadId };
+}
+
+// The kind part of a push's collapse id: the pushes that end a turn share one.
+function collapseKind(type) {
+  return COMPLETION_TYPES.has(type) ? 'done' : type;
 }
 
 // The alert's level and its Lock Screen relevance (PUSH_LEVELS), for an
@@ -1591,6 +1610,9 @@ function validateEvent(body) {
     room: body.type === 'room.invite' ? validateRoom(body.room) : undefined,
     ...(mode ? { mode } : {}),
     ...(level ? { level } : {}),
+    // A sealed event folds its slot into the envelope's thread token instead.
+    ...(COMPLETION_TYPES.has(body.type) && typeof body.slot === 'string' && SLOT_PATTERN.test(body.slot)
+      ? { slot: body.slot } : {}),
   };
 }
 

@@ -480,7 +480,40 @@ test('scoped collapse ids stay within the APNs 64-byte limit', () => {
     gatewayA,
   );
   assert.ok(Buffer.byteLength(collapseId) <= 64, `collapse id must fit APNs cap, got ${Buffer.byteLength(collapseId)} bytes`);
-  assert.match(collapseId, /^background_task\.finished:[0-9a-f]{16}$/);
+  assert.match(collapseId, /^done:[0-9a-f]{16}$/);
+});
+
+test('a reply, a failed turn and a finished task share one slot per chat; an approval keeps its own (#1579)', () => {
+  const kinds = ['response.ready', 'turn.failed', 'background_task.finished'].map((type, n) => notificationFor(
+    { eventId: `x:${n}0000000`, type, sessionId: 'chat-1', profile: 'default' }, preferences, gatewayA));
+  assert.equal(new Set(kinds.map((push) => push.collapseId)).size, 1);
+  const approval = notificationFor({ eventId: 'approval:1', type: 'approval.needed', sessionId: 'chat-1' }, preferences, gatewayA);
+  assert.notEqual(approval.collapseId, kinds[0].collapseId);
+  assert.equal(approval.payload.aps['thread-id'], kinds[0].payload.aps['thread-id']);
+});
+
+test('a slot threads and replaces in place of the chat: each run of a job replaces the last (#1579)', () => {
+  const slot = '0123456789abcdef';
+  const runs = ['cron_daily_20261030_120000', 'cron_daily_20261031_120000'].map((sessionId, n) => notificationFor(
+    validateEvent({ type: 'response.ready', event_id: `response:run${n}0000`, session_id: sessionId, slot }), preferences, gatewayA));
+  assert.equal(runs[0].collapseId, runs[1].collapseId);
+  assert.equal(runs[0].payload.aps['thread-id'], runs[1].payload.aps['thread-id']);
+  assert.equal(runs[1].payload.conduit.session_id, 'cron_daily_20261031_120000', 'a tap opens the newest run');
+  const chat = notificationFor(validateEvent({ type: 'response.ready', event_id: 'response:chat0000', session_id: 'cron_daily_20261031_120000' }), preferences, gatewayA);
+  assert.notEqual(chat.collapseId, runs[0].collapseId);
+  assert.notEqual(notificationFor(validateEvent({ type: 'response.ready', event_id: 'response:other000', session_id: 's', slot }), preferences, gatewayB).collapseId,
+    runs[0].collapseId, 'another gateway never shares the slot');
+  assert.equal('slot' in validateEvent({ type: 'approval.needed', event_id: 'approval:slot0000', session_id: 's', slot }), false);
+  assert.equal('slot' in validateEvent({ type: 'response.ready', event_id: 'response:bad00000', session_id: 's', slot: 'report' }), false);
+});
+
+test('a passive reply makes no sound, whatever the preferences (#1579)', () => {
+  const loud = { ...preferences, completion_sound: true };
+  const quiet = notificationFor(validateEvent({ type: 'response.ready', event_id: 'response:quiet000', session_id: 's', level: 'passive' }), loud, gatewayA);
+  assert.equal(quiet.payload.aps['interruption-level'], 'passive');
+  assert.equal('sound' in quiet.payload.aps, false);
+  const ringing = notificationFor(validateEvent({ type: 'response.ready', event_id: 'response:loud0000', session_id: 's' }), loud, gatewayA);
+  assert.equal(ringing.payload.aps.sound, 'default');
 });
 
 test('a plugin-supplied gateway_id in the event body is dropped and can never rebind routing', () => {
@@ -510,7 +543,7 @@ test('no-session collapse ids are gateway-scoped: identical event ids differ per
   assert.notEqual(a.collapseId, b.collapseId);
   // Bounded and token-shaped.
   assert.ok(Buffer.byteLength(a.collapseId) <= 64);
-  assert.match(a.collapseId, /^background_task\.finished:[0-9a-f]{16}$/);
+  assert.match(a.collapseId, /^background_task\.finished:[0-9a-f]{16}$/, 'no session: by event id, its own type');
   // Thread differs too.
   assert.notEqual(a.payload.aps['thread-id'], b.payload.aps['thread-id']);
 });
@@ -520,7 +553,7 @@ test('gateway-less direct callers keep the legacy collapse/thread shapes', () =>
     { eventId: 'response:legacy01', type: 'response.ready', sessionId: 'sess-legacy', profile: 'default' },
     preferences,
   );
-  assert.equal(withSession.collapseId, 'response.ready:sess-legacy');
+  assert.equal(withSession.collapseId, 'done:sess-legacy');
   assert.equal(withSession.payload.aps['thread-id'], 'sess-legacy');
   assert.equal(withSession.threadId, 'sess-legacy');
 

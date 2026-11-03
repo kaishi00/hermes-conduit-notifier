@@ -268,3 +268,73 @@ def test_a_subagent_turn_leaves_the_report_alone(gateway, client):
 def test_no_gateway_in_this_process_means_no_line(monkeypatch):
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     assert surfaces.note(True, "hi", CONDUIT) is None
+
+
+# --- On the gateway's own listener (hermes-conduit#1618) -----------------------
+
+def test_on_the_listener_a_report_is_kept_for_the_authoritys_turn(gateway, client, monkeypatch):
+    authority = types.SimpleNamespace(sessions={"auth-1": types.SimpleNamespace(source="src")})
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace(session_authority=authority)
+    authorities = types.ModuleType("gateway.session_authorities")
+    authorities.all_authorities = lambda runner: [authority]
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    monkeypatch.setitem(sys.modules, "gateway.session_authorities", authorities)
+    monkeypatch.delitem(sys.__dict__, surfaces._AUTHORITY_STORE, raising=False)
+
+    response = client.post(f"{BASE}/turn-surface", json=_report("watch", "Call Mum", "spoken", session_id="auth-1"))
+    assert response.json() == {"ok": True, "recorded": True}
+    # Not on the TUI gateway's record: the authority runs this chat.
+    assert surfaces.KEY not in gateway.session
+    line = surfaces.note(True, "Call Mum", session_id="auth-1")
+    assert line and "Apple Watch" in line
+    # Taken once.
+    assert surfaces.note(True, "Call Mum", session_id="auth-1") is None
+    # A chat the authority doesn't have open keeps nothing.
+    assert client.post(f"{BASE}/turn-surface", json=_report("watch", session_id="auth-2")).json() == {
+        "ok": True, "recorded": False}
+
+
+def test_a_failed_send_discards_its_report(gateway, client):
+    client.post(f"{BASE}/turn-surface", json=_report("carplay", "yes", "spoken"))
+    body = {"session_id": "rt-1", "text_sha256": surfaces.text_sha256("yes")}
+    assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": True}
+    # The turn of those words then takes no line.
+    assert gateway.turn(CONDUIT, "yes") == ""
+    assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": False}
+    assert client.post(f"{BASE}/turn-surface/discard", json={"session_id": "rt-1"}).status_code == 400
+
+
+def test_on_the_listener_a_failed_send_discards_its_report(gateway, client, monkeypatch):
+    authority = types.SimpleNamespace(sessions={"auth-1": types.SimpleNamespace(source="src")})
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace(session_authority=authority)
+    authorities = types.ModuleType("gateway.session_authorities")
+    authorities.all_authorities = lambda runner: [authority]
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    monkeypatch.setitem(sys.modules, "gateway.session_authorities", authorities)
+    monkeypatch.delitem(sys.__dict__, surfaces._AUTHORITY_STORE, raising=False)
+
+    client.post(f"{BASE}/turn-surface", json=_report("iphone", "yes", "typed", session_id="auth-1"))
+    body = {"session_id": "auth-1", "text_sha256": surfaces.text_sha256("yes")}
+    assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": True}
+    assert surfaces.note(False, "yes", session_id="auth-1") is None
+
+
+def test_a_watch_turns_listener_requests_keep_their_own_budget():
+    # The gateway's own listener answers in the call: each Watch request
+    # hands it the time it was given, not the listener's own wait.
+    class Listener:
+        takes_timeout = True
+
+        def __init__(self):
+            self.waits = []
+
+        def dispatch(self, frame, transport, timeout=None):
+            self.waits.append(timeout)
+            return {"jsonrpc": "2.0", "id": frame["id"], "result": {"ok": True}}
+
+    listener = Listener()
+    chat = api.watch_local_live._WatchCallChat(listener, None)
+    assert chat.rpc("session.steer", {"session_id": "s1"}, timeout=7) == {"ok": True}
+    assert listener.waits == [7]

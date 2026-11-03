@@ -431,3 +431,42 @@ def _job_profile_home_guess(name: str) -> Path:
 # --- The plugin's name --------------------------------------------------------
 
 PLUGIN_NAME = "conduit_push"
+
+
+
+# --- The gateway's session authority (hermes-conduit#1618) --------------------
+#
+# On the gateway's own listener (the Webapp) chats run on its session
+# authority, not in the dashboard's TUI gateway: gateway_chats.py finds them
+# and drives the plugin's own chats there. The dashboard's code reads it
+# through these.
+
+def _gateway_chats() -> Any:
+    return _plugin_package_module("gateway_chats")
+
+
+def _gateway_runner() -> Any:
+    """The gateway serving this process's listener, or None (``hermes dashboard``):
+    gateway_chats.runner(), read here so a dashboard never loads that module."""
+    return getattr(sys.modules.get("gateway.run_api"), "_ACTIVE_RUNNER", None)
+
+
+def _authority_session(session_id: Any) -> Optional[tuple]:
+    return _gateway_chats().authority_session(session_id) if _gateway_runner() is not None else None
+
+
+def _authority_agent(session_id: Any) -> Optional[tuple]:
+    return _gateway_chats().authority_agent(session_id) if _gateway_runner() is not None else None
+
+
+def _authority_scope(authority: Any) -> Any:
+    return _gateway_chats().authority_scope(authority)
+
+
+def _authority_session_api() -> Any:
+    return _gateway_chats().session_api() if _gateway_runner() is not None else None
+
+
+def _release_authority_link(transport: Any) -> None:
+    if getattr(transport, "_conduit_authority_link", None) is not None:
+        _gateway_chats().release(transport)

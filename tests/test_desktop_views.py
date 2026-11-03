@@ -243,6 +243,17 @@ def test_reports_why_it_is_not_observing(monkeypatch, tmp_path):
     assert hook.reason == "gateway-unsupported" and not hook.observing
 
 
+def test_on_the_gateways_listener_it_says_the_authority_runs_the_chats(monkeypatch, tmp_path):
+    # hermes-conduit#1618: the listener's chats open on the session authority.
+    FakeGateway(tmp_path).install(monkeypatch)
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    hook = _hook()
+    assert not hook.try_install()
+    assert hook.reason == "gateway-authority" and not hook.observing
+
+
 def test_flush_merges_newest_wins_with_the_file_and_keeps_it_private(tmp_path):
     path = tmp_path / api.desktop_views.DESKTOP_VIEWS_FILE
     path.write_text(json.dumps({"version": 1, "views": {

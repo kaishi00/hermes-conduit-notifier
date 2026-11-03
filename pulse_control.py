@@ -124,7 +124,7 @@ def _window(pulse_store: Any, home: Path, days: int, now: float, *, starting: bo
     window = pulse_memory.backfill_window(pulse_store, days, now)
     if window is None:
         raise Refused("already_read", days=days)
-    chat, problem = pulse.home_chat(pulse_store, Path(home))
+    chat, problem = pulse.home_chat(pulse_store, Path(home), looks_elsewhere=True)
     if chat is None:
         raise Refused("no_home_chat", problem=problem)
     return window, chat
@@ -415,6 +415,7 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
     entries = []
     for card in cards:
         entry = pulse_learning.card_entry(card, marks.get(card["id"]))
+        entry["news"] = pulse_learning.shown_news(pulse_store, card)  # a week-old ask names what it's about
         task = workers.get((card.get("profile") or "", card.get("chat_id") or ""))
         if task is not None:
             entry["kanban_task"] = task
@@ -425,6 +426,9 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
     return {"cards": entries,
             "unseen": pulse_store.unseen_cards(without=without), "levels": pulse_learning.levels(pulse_store),
             "home_chat_id": chat.chat_id if chat else "",
+            # The profile Pulse runs in, whose chats it reads: Conduit makes,
+            # hides and opens Pulse's chat there (issue 1681).
+            "profile": pulse_proposals.profile_name(Path(home)) if home is not None else "default",
             # The screen says when Pulse is quiet (pulse_quiet) and until when.
             "quiet_now": pulse_quiet.why(pulse_store, zone, now),
             "quiet_ends_at": pulse_quiet.ends_at(pulse_store, zone, now),
@@ -708,7 +712,7 @@ def set_level(pulse_store: Any, kind: Any, level: Any, now: Optional[float] = No
 def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str, Any]:
     """Everything Settings > Pulse shows, as data. Times are epoch seconds."""
     now = time.time() if now is None else now
-    chat, problem = pulse.home_chat(pulse_store, Path(home))
+    chat, problem = pulse.home_chat(pulse_store, Path(home), looks_elsewhere=True)
     ticked = pulse_store.get("last_tick_at")
     running = _number(ticked) and now - ticked <= pulse.STALE_TICK_S
     lease = pulse_store.get(pulse_delivery.store.LEADER)
@@ -728,6 +732,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "home_chat": {"id": chat.chat_id, "title": chat.title, "pinned": bool(chat.pinned)} if chat else None,
         "home_problem": problem,
         "home_title": pulse_store.get("home_title") or "Pulse",
+        # The profile Pulse runs in: Set up Pulse makes the chat there (issue 1681).
+        "profile": pulse_proposals.profile_name(Path(home)),
         "model": pulse.turn_model(pulse_store),
         # What "Default" runs on: the model Pulse's own chat is set to; None, Hermes's main model.
         "default_model": pulse.chat_model(Path(home), chat.chat_id) if chat else None,

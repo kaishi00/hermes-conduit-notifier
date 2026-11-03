@@ -98,6 +98,34 @@ def _clip(text: Any, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+# A follow-up still open a week on (a watch, a month) with nothing showing it
+# happened: the follow-up row keeps this line as its mark (pulse_followup).
+STALE_NEWS = "It has been over a week and nothing shows it happened."
+
+
+def stale_news(text: Any, kind: str = "") -> str:
+    """The week-old "still want it?" as its card says it: what was said
+    first, so the card stands on its own (Eric, 2026-11-01: "none of them
+    really tell me what it is"). ``text``: the item's; a watch waits a
+    month."""
+    what = _clip(text, 300).rstrip(" .")
+    if not what:
+        return STALE_NEWS
+    span = "month" if kind == "watch" else "week"
+    stop = "" if what[-1] in "?!…" else "."
+    return f"{what}{stop} That was over a {span} ago, and nothing shows it happened. Still want it?"
+
+
+def shown_news(pulse_store: store.PulseStore, card: dict) -> str:
+    """A card's news as the screen and the brief say it: a week-old ask
+    made before it named what it's about says it from its title and its
+    item's kind."""
+    if card.get("kind") != "followup" or card.get("news") != STALE_NEWS:
+        return card.get("news") or ""
+    item = pulse_store.item(card["item_id"]) if card.get("item_id") is not None else None
+    return stale_news(card.get("title"), (item or {}).get("kind") or "")
+
+
 # What's in force --------------------------------------------------------------
 
 def level(pulse_store: store.PulseStore, kind: str) -> str:

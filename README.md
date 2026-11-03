@@ -36,6 +36,14 @@ hermes -p coder gateway restart
 hermes -p coder conduit-push pair YYYYY-YYYYY
 ```
 
+`plugins enable` finds only a plugin in the profile's own `plugins/` folder.
+A profile made without `--clone` has none until the dashboard links it, which
+it does only for a profile that turned the plugin on, so for such a profile
+add `conduit_push` to `plugins.enabled` in its `config.yaml` instead (and take it
+out of `plugins.disabled` if it is there), then
+restart as above. Until then Hermes answers that profile's plugin requests
+with "Plugin not found", and Conduit says so on the screen that asked.
+
 A profile's chats load plugins from that profile's own `plugins/` folder
 only, so with plugin 0.122.2+ the dashboard links every profile that turns
 the plugin on to the main install (`~/.hermes/plugins/conduit_push`) when it
@@ -135,7 +143,7 @@ Beside notifications, the plugin keeps a Live Activity up to date while a turn y
 
 Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile id capitalized, and Hermes for the main bot), so you can tell which bot replied. Conduit shows a name you gave the main bot on the phone instead. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. How much shows is Conduit's Settings > Notifications > Show in notifications: Generic shows neither the title nor the text, Chat names shows the session's title and the profile without Hermes' words, and Full previews shows both, with the profile as the subtitle. `redact on` or end-to-end encryption keeps the title from reaching the relay.
 
-Hermes can write a reply's notification itself with the `conduit_notify` tool (plugin 0.112+), when you asked to be told something is done or a scheduled job reports: a title of a few words and a sentence or two, sent instead of the reply's opening when the turn ends. It sends no push of its own, so the turn still sends one, under the same settings, and a reply that sends none (`[SILENT]`, a muted job) sends none with it. The title rides as `headline`, sealed with the rest, and Conduit shows it only with Full previews; Chat names and Generic never show it.
+Hermes can write a reply's notification itself with the `conduit_notify` tool (plugin 0.112+), when you asked to be told something is done or a scheduled job reports: a title of a few words and a sentence or two, sent instead of the reply's opening when the turn ends. It sends no push of its own, so the turn still sends one, under the same settings, and a reply that sends none (`[SILENT]`, a muted job) sends none with it. The title rides as `headline`, sealed with the rest, and Conduit shows it only with Full previews; Chat names and Generic never show it. To update a notification instead of adding another ("Report in progress", later "Report ready"), Hermes gives both the same `key` (plugin 0.123+): the profile's chats and scheduled jobs share it, and `quiet` sends the update without a sound or banner (relay 0.26+). Each scheduled job also keeps one notification of its own, so a new run replaces the last one.
 
 The iOS app controls which categories are enabled, how much a notification shows, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
 
@@ -1820,6 +1828,17 @@ a file path; a file the user asks for still goes (0.115.1+).
   result), and a turn that merges several queued messages, or one Hermes
   rewrote, gets no line. The plugin's own Watch jobs and call chats name
   the Watch themselves.
+- On the gateway's own listener (`hermes webapp`, 0.126.0+) there is no such
+  record and a turn can't be tied to the socket that sent it, so the plugin
+  keeps the report itself, by session id, and the chat's next turn with that
+  text takes it, for 15 minutes.
+- `POST /api/plugins/conduit_push/turn-surface/discard` with
+  `{"session_id": "<runtime session id>", "text_sha256": "<hex>"}` answers
+  `{"ok": true, "discarded": true}` (or `false` when none was kept): Conduit
+  sends it after a send Hermes refused or that never left the phone, so the
+  same words sent from another app in that chat don't take its line. A send
+  whose answer was only lost keeps its report, since Hermes may have taken
+  it. Capability `turn-surface-discard` (0.126.0+).
 - `prompt.submit` refuses keys Hermes doesn't know, so the value can't ride
   there. With the gateway out of this process (`plugins.isolation: host`, a
   compute host) the route answers `"recorded": false`, and a turn on a chat
@@ -1855,7 +1874,10 @@ it as a `[btw …]` note), the route answers only the device that asked.
 - `"model": "fast"` answers on `auxiliary.conduit_predict` (`provider`,
   `model`) from the chat's profile config, from a digest of the chat instead
   of the warm cache; without it the chat's own model answers. Usage is
-  billed to the chat, like `/btw`.
+  billed to the chat, like `/btw`. From plugin 0.124 the plugin registers
+  `conduit_predict` as a helper model ("Conduit predictions"), so Hermes'
+  `/api/model/auxiliary` lists it and `/api/model/set` sets it, from Conduit
+  (Models & providers > Helper models) or Hermes' Models page.
 - The chat must be live in this dashboard (404 otherwise). On a Hermes without
   the fork's parts the route falls back to its plain side question.
 
@@ -3186,6 +3208,19 @@ How Pulse knows what a card is about:
   is its own. Before, a birthday on the calendar could come up on several
   days as it got closer, and again from the report when the look ahead
   held it for a shop.
+- **A card with nothing to key on** (0.123.1+; the model found it in a
+  chat, or it came before keys) counts by its words. While it's open and
+  no older than 30 days, a new one of the same kind is left out when it
+  names no one the card doesn't name, starts with the same name (so a
+  relative sharing a surname isn't the same person), and is on the same
+  day: the same day of the month when both give one, years and clock
+  times aside (and the same month when both name one), else a weekday
+  or month plus a plain word in common. One
+  that names no one needs two plain words in common with the card. The
+  look ahead's own dates and deadlines keep their lead times, and the
+  morning brief matches its remembered items, reminders and entries
+  this way too. Before, a birthday the model had found came up again
+  while Tuesday's card for it was still open.
 - **In one run**, two cards about the same reminder or entry make one.
 
 ## Apple Watch lookups and jobs (plugin 0.6+, jobs 0.7+, Gemini tokens 0.8+, Qwen tokens 0.75+)
@@ -3654,6 +3689,7 @@ the setup saves it exactly. One command sets a profile up:
 hermes conduit-push rooms setup                               # says what it changes, asks, saves, restarts the gateway
 hermes -p mona conduit-push rooms setup --ceiling web,vision  # only these toolsets
 hermes conduit-push rooms setup --ceiling "" --no-restart --yes   # no tools; you restart the gateway
+hermes conduit-push rooms setup --mcp github,notes               # also these MCP servers (plugin 0.125+)
 ```
 
 It changes only what needs it:
@@ -3696,6 +3732,29 @@ It changes only what needs it:
   before it saves; new rooms use the new ceiling. With no toolsets at all,
   Hermes' log says once that the API server has no valid toolsets: that's
   the empty ceiling.
+- **MCP servers** (plugin 0.125+): none, unless you name some of the
+  profile's enabled MCP servers with `--mcp` (or in Conduit's setup). Then the
+  ceiling lists them in place of `no_mcp`, which Hermes reads as an
+  allowlist, so a server added later still stays out. Their tools still run
+  only in rooms whose Custom choice names them (`rooms set --tools custom
+  --tool mcp__github__search_issues`, Hermes' `mcp__<server>__<tool>`
+  names); no other choice allows them. Each server is yours to choose, on your
+  own host, and its own approvals still apply. `--mcp ""` takes them all out and
+  puts `no_mcp` back. Without `--mcp`, the servers saved before stay, even
+  when `--ceiling` changes the toolsets, and `--mcp` may name a saved server
+  you've turned off since, which keeps it chosen and off. A chosen server you take out of
+  Hermes is dropped from the ceiling on the next setup, and with none left,
+  `no_mcp` is back: Hermes would give a list naming no server it has every
+  enabled one. Until then the setup isn't ready, and rooms already started
+  stop hearing the agent, as for any ceiling change. A chosen server you turn
+  off stays chosen and stays off. When a ceiling names servers, or you name
+  some, and Hermes can't list the profile's MCP servers just then, the setup
+  stops (`mcp_unreadable`) and leaves the ceiling as it is. Servers count
+  toward the ceiling's 64 names with the toolsets kept beside them. A server named like any Hermes toolset (`web`,
+  or `memory`, which rooms leave out) can't be
+  chosen, since the ceiling couldn't tell the two apart, and once servers
+  are named, a saved toolset this Hermes no longer has is dropped for the
+  same reason.
 - **Approvals**: off becomes manual, since rooms refuse a profile that runs
   tools without asking.
 - **The gateway** restarts when the API server isn't running, to start it:
@@ -3722,7 +3781,8 @@ capability:
 
 - `GET /rooms/setup`: `{"ready", "needs", "changes", "blockers", "profile",
   "api_server": {"enabled", "key_set", "profile_key_set", "address",
-  "running", "error"}, "ceiling", "choices", "approvals", "policy"}`.
+  "running", "error"}, "ceiling", "choices", "mcp_servers", "mcp_choices",
+  "approvals", "policy"}`.
   `needs` lists what a POST would do, in its order (`api_server`, `ceiling`,
   `plugin_tools`, `approvals`, `restart`), `changes` what it would change
   (`api_server_key`, `profile_key`, `api_server_port`, `api_server_enabled`,
@@ -3732,11 +3792,14 @@ capability:
   uses the API server's), `address` is where the API server runs, or will
   once set up, and `error` why it isn't running while the gateway is, such
   as its port being taken. `choices` are the toolsets the ceiling can name
-  (`{"id", "label", "description"}`), and `policy` is the profile's room
+  (`{"id", "label", "description"}`), `mcp_servers` the MCP servers it names
+  and `mcp_choices` the profile's enabled ones it can (`{"id"}`, plugin
+  0.125+; an older plugin has neither), and `policy` is the profile's room
   policy as Hermes reads it now (`enabled_toolsets`, `approval_mode`,
   `policy_digest` and the rest), or null.
-- `POST /rooms/setup` with `{"ceiling": [...], "interrupt": false}`, both
-  optional: the same, after the writes, with `changed` (what it changed, by
+- `POST /rooms/setup` with `{"ceiling": [...], "mcp_servers": [...],
+  "interrupt": false}`, all optional (without `mcp_servers`, the saved ones
+  stay): the same, after the writes, with `changed` (what it changed, by
   the same names as `changes`) and, when it needs one, `restart`:
   `{"started", "busy", "error"}`. The restart is Hermes' own after a
   settings save, `busy` while chats run on the gateway, unless `interrupt`
@@ -3748,8 +3811,8 @@ capability:
   environment, Hermes' plugin host flag among it. `restart.error` then says
   to restart it on the host or update Conduit.
 
-A refusal carries `detail` and a `code`: `bad_ceiling` and `bad_request`
-(400), a blocker's code (409), `bad_config` (409, a `config.yaml` setting the
+A refusal carries `detail` and a `code`: `bad_ceiling`, `bad_mcp_servers`
+(an MCP server the profile hasn't turned on) and `bad_request` (400), a blocker's code (409), `bad_config` (409, a `config.yaml` setting the
 setup saves under isn't a section) and `unsupported` (501, a Hermes without
 what the setup calls). The routes answer 30 reads a minute and 6 setups in 10
 minutes.
@@ -4353,11 +4416,11 @@ The static site source lives in [`docs/`](docs/).
 
 ## Development
 
-The runtime uses only the Python standard library plus Hermes APIs. CI ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs the plugin, relay and mailbox tests on every PR and every push to main. To run them locally:
+The runtime uses only the Python standard library plus Hermes APIs. CI ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) runs the plugin, relay and mailbox tests on every PR and every push to main (the Pulse persona suite only when Pulse changes, and daily). To run them locally:
 
 ```bash
 pip install -r tests/requirements.txt
-python -m pytest --rootdir=tests tests
+python -m pytest --rootdir=tests tests -n auto --dist worksteal
 (cd relay && npm test)
 (cd mailbox && npm test)
 ```

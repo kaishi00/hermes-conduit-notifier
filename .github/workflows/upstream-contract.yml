@@ -13,7 +13,8 @@ name: Upstream contract
 #   the newest release. A failure opens or updates an `upstream-break` issue,
 #   one per test and failure signature (upstream/report.py), so a known
 #   failure doesn't open a new issue for every canary.
-# - By hand: any Hermes tag or commit.
+# - By hand: any Hermes tag or commit. Only a release tag may skip the Webapp leg; a canary
+#   or a commit without the listener fails it.
 
 on:
   pull_request:
@@ -106,6 +107,12 @@ jobs:
           fi
 
       - name: Run the contract tests
+        env:
+          # The leg that needs the Webapp fails on a canary without it rather than skipping.
+          # Until a release has the Webapp, PRs (which run the latest release) skip it, so
+          # test_gateway_listener.py and the listener's watched modules gate only on the daily
+          # canary run: check that run after merging a change to them.
+          HERMES_REF: ${{ matrix.ref }}
         run: |
           hermes="$RUNNER_TEMP/hermes"
           HERMES_BIN="$hermes/.venv/bin/hermes" "$hermes/.venv/bin/python" -m pytest \

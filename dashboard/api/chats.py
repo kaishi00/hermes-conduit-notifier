@@ -177,7 +177,7 @@ def _sweep_idle_claims(token: object) -> None:
             claims = core._plugin_package_module("conduit_claims")
             time.sleep(claims.SWEEP_S)
             if sys.__dict__.get(_CLAIMS_SWEEPER) is token:
-                claims.sweep(watch_jobs._hermes_session_api(), _claims_home)
+                claims.sweep(watch_jobs._tui_session_api(), _claims_home)
         except Exception:  # noqa: BLE001 — keep sweeping
             logger.debug("Conduit: idle claim sweep failed", exc_info=True)
             time.sleep(60.0)
@@ -255,7 +255,11 @@ def record_turn_surface(body: Any) -> bool:
     here. Raises ValueError for a body that isn't one."""
     module = _turn_surface()
     report = module.parse(body)
-    server = watch_jobs._hermes_session_api()
+    if core._authority_session(report.session_id) is not None:
+        # The gateway's listener: the authority runs the chat (turn_surface.py).
+        module.record_for_authority(report)
+        return True
+    server = watch_jobs._tui_session_api()
     session = server._sessions.get(report.session_id) if server is not None else None
     if not isinstance(session, dict):
         return False
@@ -275,6 +279,34 @@ async def post_turn_surface(request: Request, response: Response) -> Dict[str, A
     except Exception as exc:
         raise core._unexpected("turn-surface", exc, feature="Turn surface")
     return {"ok": True, "recorded": recorded}
+
+
+def discard_turn_surface(body: Any) -> bool:
+    """Forgets the report of a send Conduit says failed; False when none was
+    kept. Raises ValueError for a body that isn't one."""
+    module = _turn_surface()
+    session_id, digest = module.parse_discard(body)
+    if core._gateway_runner() is not None:
+        # The gateway's listener: its reports are the plugin's own, kept
+        # whether or not the chat is still live there.
+        return module.discard_digest_for_authority(session_id, digest)
+    server = watch_jobs._tui_session_api()
+    session = server._sessions.get(session_id) if server is not None else None
+    return module.discard(session, digest) if isinstance(session, dict) else False
+
+
+@router.post("/turn-surface/discard")
+async def post_turn_surface_discard(request: Request, response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    body = await core._read_json_body(request, TURN_SURFACE_MAX_BODY_BYTES)
+    try:
+        discarded = discard_turn_surface(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc), headers=no_store)
+    except Exception as exc:
+        raise core._unexpected("turn-surface", exc, feature="Turn surface")
+    return {"ok": True, "discarded": discarded}
 
 
 # --- Predictions (predict.py) -------------------------------------------------
@@ -393,7 +425,25 @@ def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:
         request = module.parse(body)
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
-    server = watch_jobs._hermes_session_api()
+    try:
+        authority = core._authority_agent(request.session_id)
+    except RuntimeError as exc:
+        # The lookup itself failed (a Hermes that changed how it keeps
+        # agents), not a chat whose agent was let go. Matched by name: the
+        # dashboard loads its own copy of gateway_chats, so the class
+        # isn't the plugin's; the name is the contract between the copies.
+        if type(exc).__name__ != "AgentLookupError":
+            raise
+        raise core.TokenError(502, str(exc))
+    if authority is None and core._authority_session(request.session_id) is not None:
+        # Open on the gateway's listener, but the gateway let its agent go (idle
+        # for its cache's hour): no turn to predict after, as a closed chat.
+        raise core.TokenError(404, "That chat's agent isn't loaded on the host")
+    if authority is not None:
+        # The gateway's listener: the chat's agent is the gateway's, and its
+        # profile is the authority's (hermes-conduit#1618).
+        return module, request, {"authority": authority[0]}, authority[1]
+    server = watch_jobs._tui_session_api()
     session = server._sessions.get(request.session_id) if server is not None else None
     agent = session.get("agent") if isinstance(session, dict) else None
     if agent is None:
@@ -403,7 +453,8 @@ def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:
 
 def _answer_prediction(module: Any, request: Any, session: dict, agent: Any) -> Dict[str, Any]:
     history = list(getattr(agent, "_session_messages", None) or session.get("history") or [])
-    with _predict_profile_scope(session):
+    scope = core._authority_scope(session["authority"]) if "authority" in session else _predict_profile_scope(session)
+    with scope:
         task_cfg = _predict_fast_model() if request.model == "fast" else {}
         text = _predict_fork_answer(agent, history, module.question(request), task_cfg)
     today = time.strftime("%Y-%m-%d")

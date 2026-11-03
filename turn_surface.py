@@ -19,12 +19,26 @@ plugin's own Watch transports name their surface themselves.
 Matching the text keeps the line on the message it describes: a message
 that steered or redirected a turn already running never becomes a turn of
 its own, so its report labels nothing (not a goal's next step, not a
-background result), and two queued messages each keep their own. A turn
+background result), and two queued messages with different words each
+keep their own (two with the same words share one report). A turn
 whose text Hermes changed, or that merges several messages, gets no line.
 It counts only when the turn came from Conduit's socket, and a report older
 than ``FRESH_S`` counts as none. Under plugin isolation or a turn on a
 compute host the record isn't in this process, and the turn gets no line,
 as before.
+
+On the gateway's own listener (the Webapp, hermes-conduit#1618) the session
+authority runs the chat: there is no record of Hermes' to keep it on, and a
+turn runs from the admitted message, not on the socket that sent it, so it
+can't tell Conduit's from another client's. The report is kept here instead,
+by the chat's session id (``record_for_authority``, one map for the process),
+and the turn whose session and text match it takes it: only Conduit reports,
+for the exact text it is about to send in that chat. A send of the
+plugin's own (Watch jobs, a Watch call's chat) that the authority refused
+drops its report, and Conduit drops the report of a send of its own that
+failed (``POST /turn-surface/discard``, on either server). One that seemed
+to go but never reached Hermes still waits: the same words sent from
+another client in that chat within ``AUTHORITY_FRESH_S`` would take its line.
 
 Standalone (no imports from the plugin package): the dashboard loads it from
 its file, the plugin imports it.
@@ -35,6 +49,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sys
+import threading
 import time
 from typing import Any, Callable, Optional, Tuple
 
@@ -42,6 +57,9 @@ from typing import Any, Callable, Optional, Tuple
 KEY = "conduit_turn_surface"
 # A message queued behind a long turn may wait this long before it runs.
 FRESH_S = 900.0
+# On the gateway's listener too: a message queued behind a long turn runs
+# late. A send the authority refused drops its report (gateway_chats.py).
+AUTHORITY_FRESH_S = FRESH_S
 # Reports kept per chat; the oldest goes first.
 MAX_KEPT = 8
 MAX_SESSION_ID_CHARS = 200
@@ -128,8 +146,8 @@ def record(session: dict, report: Report, clock: Callable[[], float] = time.mono
     session[KEY] = kept
 
 
-def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic
-         ) -> Optional[Tuple[str, Optional[str]]]:
+def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic,
+         fresh_s: float = FRESH_S) -> Optional[Tuple[str, Optional[str]]]:
     """Removes the report for ``message`` kept on ``session`` and returns its
     surface and entry while fresh."""
     if not isinstance(session, dict):
@@ -139,17 +157,17 @@ def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic
     if not isinstance(kept, dict) or text is None:
         return None
     value = kept.pop(text_sha256(text), None)
-    if value is None or not _fresh(value, clock()):
+    if value is None or not _fresh(value, clock(), fresh_s):
         return None
     surface, entry, _at = value
     return surface, entry if entry in INPUTS else None
 
 
-def _fresh(value: Any, now: float) -> bool:
+def _fresh(value: Any, now: float, fresh_s: float = FRESH_S) -> bool:
     if not (isinstance(value, tuple) and len(value) == 3 and value[0] in SURFACES):
         return False
     at = value[2]
-    return isinstance(at, float) and 0 <= now - at <= FRESH_S
+    return isinstance(at, float) and 0 <= now - at <= fresh_s
 
 
 def _message_text(message: Any) -> Optional[str]:
@@ -171,6 +189,93 @@ def line(surface: str, entry: Optional[str] = None) -> str:
     return f"[Conduit: this message came from {where}.{''.join(' ' + text for text in hints)}]"
 
 
+# The reports for chats the gateway's session authority runs, by session id:
+# kept on ``sys`` so the dashboard's copy of this module (loaded from its
+# file) and the plugin's share them.
+_AUTHORITY_STORE = "_conduit_turn_surface_authority"
+# Chats with reports kept at once; the one reported to longest ago goes first.
+MAX_AUTHORITY_CHATS = 256
+
+
+def _authority_store() -> Tuple[Any, dict]:
+    store = sys.__dict__.get(_AUTHORITY_STORE)
+    if store is None:
+        store = sys.__dict__.setdefault(_AUTHORITY_STORE, (threading.Lock(), {}))
+    return store
+
+
+def record_for_authority(report: Report, clock: Callable[[], float] = time.monotonic) -> None:
+    """Keeps ``report`` for its chat's next turn of that text, for a chat the
+    gateway's session authority runs."""
+    lock, chats = _authority_store()
+    with lock:
+        session = chats.pop(report.session_id, None) or {}
+        record(session, report, clock)
+        chats[report.session_id] = session
+        while len(chats) > MAX_AUTHORITY_CHATS:
+            chats.pop(next(iter(chats)))
+
+
+def discard_for_authority(session_id: str, text: str) -> bool:
+    """Forgets the report kept for ``text``'s turn in ``session_id``, a turn
+    the gateway's session authority refused."""
+    return discard_digest_for_authority(session_id, text_sha256(text))
+
+
+def discard_digest_for_authority(session_id: str, digest: str) -> bool:
+    """Forgets the report kept for the turn of the text hashing to
+    ``digest`` in ``session_id``; True when there was one."""
+    lock, chats = _authority_store()
+    with lock:
+        session = chats.get(session_id)
+        if not isinstance(session, dict) or not discard(session, digest):
+            return False
+        if not session.get(KEY):
+            chats.pop(session_id, None)
+        return True
+
+
+def discard(session: dict, digest: str) -> bool:
+    """Forgets the report on ``session`` (Hermes' record) for the text hashing
+    to ``digest``; True when there was one. Conduit's send that failed: no
+    turn of that text is coming, so the report would wait for another."""
+    kept = session.get(KEY)
+    if not isinstance(kept, dict) or digest not in kept:
+        return False
+    kept = dict(kept)
+    kept.pop(digest)
+    # One assignment, as ``record`` writes it.
+    session[KEY] = kept
+    return True
+
+
+def parse_discard(body: Any) -> Tuple[str, str]:
+    """A discard route's body: ``(session id, text digest)``. Raises
+    ValueError, with what's wrong, for anything else."""
+    if not isinstance(body, dict):
+        raise ValueError("body must be an object")
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > MAX_SESSION_ID_CHARS:
+        raise ValueError("session_id must be a chat's runtime session id")
+    digest = body.get("text_sha256")
+    if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+        raise ValueError("text_sha256 must be the lowercase hex SHA-256 of the message's text")
+    return session_id.strip(), digest
+
+
+def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float]
+                        ) -> Optional[Tuple[str, Optional[str]]]:
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    lock, chats = _authority_store()
+    with lock:
+        session = chats.get(session_id)
+        kept = take(session, message, clock, AUTHORITY_FRESH_S) if session is not None else None
+        if session is not None and not session.get(KEY):
+            chats.pop(session_id, None)
+    return kept
+
+
 def current_session() -> Any:
     """Hermes' record of the chat whose turn runs on this thread, if Hermes'
     app gateway runs in this process. Never imports it: a copy this plugin
@@ -183,12 +288,15 @@ def current_session() -> Any:
 
 
 def note(from_conduit: bool, message: Any, transport: Any = None,
-         clock: Callable[[], float] = time.monotonic) -> Optional[str]:
+         clock: Callable[[], float] = time.monotonic, session_id: Any = None) -> Optional[str]:
     """The line for this turn, or None. Never raises: a hook calls this."""
     try:
-        if not from_conduit:
+        # A chat the gateway's authority runs: its report is the evidence.
+        kept = _take_for_authority(session_id, message, clock)
+        if kept is None and not from_conduit:
             return None
-        kept = take(current_session(), message, clock)
+        if kept is None:
+            kept = take(current_session(), message, clock)
         if kept is None:
             # The plugin's Watch jobs and call chats name their own surface.
             surface = getattr(transport, "conduit_surface", None)

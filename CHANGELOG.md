@@ -13,6 +13,129 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.127.0 (2026-11-03)
+
+### New and improved
+- Bot Mode: a bot's Bot Chat can coordinate work of its own. It starts
+  workstreams (each a chat of its own, with an optional worktree for coding
+  work), follows them, and reports back in the Bot Chat. Conduit shows them
+  in the bot's Work panel and on Bots Home.
+- Bots can ask each other for help and answer, and a workstream picks up
+  again after Hermes restarts.
+- Edit Bot > Work: whether a bot starts workstreams, asks before it does, or
+  never does, and the model its workstreams use.
+- A voice call's "call me when it's done" jobs show in the bot's Work panel,
+  and a Bot Chat call tells you what its coordinator reported.
+- Scheduled jobs delivered to a Bot Chat just show their report by default.
+  Turn on "Let the bot act on it" for a job to have the bot follow up on
+  each run.
+
+## 0.126.2 (2026-11-03)
+
+### Fixes
+- With the plugin in a named profile, Settings > Pulse's Set up Pulse made
+  Pulse's chat in the default profile, where Pulse never looks, so Pulse sent
+  nothing. Pulse now tells Conduit which profile it runs in, so the chat is
+  made there, and when a chat titled Pulse is in another profile, Settings >
+  Pulse says which one.
+
+## 0.126.1 (2026-11-02)
+
+### Fixes
+- Predictions could show one suggested reply fewer than you chose: a
+  suggestion between 201 and 280 characters took a place, then Conduit left
+  it out as too long for a chip. Those are now left out on the host, so a
+  shorter one takes the place.
+
+## 0.126.0 (2026-11-02)
+
+### Fixes
+- On a host where Conduit connects to Hermes' Webapp (`hermes webapp`)
+  instead of `hermes dashboard`, Predictions said the chat isn't open,
+  Watch jobs and a Watch call's Hermes chat ran where the phone couldn't
+  see them, Pulse sent nothing, and messages from CarPlay or the Watch lost
+  the note saying where they came from. Those work there now. Predictions
+  answer there only while Hermes still holds the chat, up to an hour after
+  its last reply; a chat opened after Hermes restarts gets none until it
+  replies again.
+- A message Hermes refused, or that Conduit never sent (Conduit takes its
+  note back when the send fails), no longer leaves its
+  "sent from CarPlay" (or iPhone, Watch...) note waiting, where the same words
+  sent from another app in that chat could pick it up. One whose answer was
+  lost on the way keeps it, since Hermes may have taken it, and on Hermes'
+  Webapp a note left behind still lapses after 15 minutes.
+
+## 0.125.0 (2026-11-02)
+
+### New and improved
+- Linked Rooms: you can let your agent use MCP servers you choose in rooms
+  with people you've linked. They stay off unless you pick them in the room
+  setup, a server added later stays out, and their tools work only in rooms
+  where Custom names them.
+
+## 0.124.0 (2026-11-01)
+
+### New and improved
+- Predictive's fast model is now one of Hermes' helper models, named
+  "Conduit predictions", so you can pick it in Conduit under Models &
+  providers > Helper models, or on Hermes' own Models page.
+
+## 0.123.3 (2026-11-01)
+
+### Fixes
+- Pulse's "still want it?" card for something open over a week now says
+  what it's about. It used to say only "It has been over a week and
+  nothing shows it happened". Cards already on the Pulse screen or waiting
+  for the morning brief say it too.
+
+## 0.123.2 (2026-11-01)
+
+### Fixes
+- Messages from other bots no longer keep failing with "held by another
+  session writer". A Bot Chat from before Hermes' gateway took over chats
+  only moved to the gateway when a bot's message arrived while nothing
+  had the chat open, so with it open in Conduit or Desktop every message
+  was refused. On Linux and macOS hosts, the plugin now moves such a Bot
+  Chat itself the next time it's free, usually right after a restart, and
+  messages get through from then on, open or not.
+
+## 0.123.1 (2026-11-01)
+
+### Fixes
+- Pulse no longer brings up something again while its card is still open
+  when that card had nothing to tie it to (no remembered item, reminder or
+  calendar entry): it now matches by what the card says, the same names and
+  the same day, so a birthday you already have a card for doesn't come back
+  in a report or the morning brief before its day.
+
+## 0.123.0 (2026-10-31)
+
+### New and improved
+- Fewer notifications pile up. Each scheduled job keeps one notification:
+  a new run replaces the last one instead of adding another.
+- Hermes can update a notification it sent earlier instead of adding a
+  new one ("Report in progress", later "Report ready"), from any chat or
+  scheduled job of the same profile, and can make the update quiet: no
+  sound or banner. Quiet updates need relay 0.26, and so does replacing
+  an unencrypted notification.
+- A quiet notification makes no sound now, Pulse's included (one sent
+  while your phone says you're busy, or a quiet report). They used to
+  chime when the completion sound was on.
+- A muted scheduled job's background task no longer notifies when the
+  run's chat is one Hermes' gateway made (a `local-` chat that names the
+  job only through its task).
+
+## 0.122.3 (2026-10-31)
+
+### Fixes
+- Pulse no longer makes a card out of a command that failed harmlessly.
+  A command that said its failure doesn't matter, a lookup like ls or cat
+  with its errors silenced or a yes/no check like grep or test, is left out
+  of what Pulse reads when its output shows nothing wrong, and so is a call that went
+  through when it ran again.
+  A failure that says what went wrong, like a traceback, still shows, now
+  with the line that says it.
+
 ## 0.122.2 (2026-10-31)
 
 ### Fixes

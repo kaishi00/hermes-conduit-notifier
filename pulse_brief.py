@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import pulse_candidates as candidates
+from . import pulse_learning as learning
 from . import pulse_places as places
 from . import pulse_report as report
 from . import pulse_store as store
@@ -95,7 +96,9 @@ def context(home: Path, pulse_store: store.PulseStore, cards: list[dict], *, hom
     today's events, and what was held for it. In that order, so a long
     brief cut at the end (text_for) loses the held news first: it shows as
     its own cards anyway."""
-    held = HELD_TITLE + "\n" + "\n".join(line(card) for card in cards) if cards else ""
+    # A week-old ask held from before it named what it's about says it here too.
+    held = (HELD_TITLE + "\n" + "\n".join(line({**card, "news": learning.shown_news(pulse_store, card)})
+                                           for card in cards) if cards else "")
     listed, later, related = "", "", ""
     # What a card still says stays out (candidates.on_cards); on its day one more may come.
     left_out: list[int] = []

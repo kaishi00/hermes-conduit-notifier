@@ -275,7 +275,11 @@ def seal_event(
     kind = str(event.get("type") or "")
     msg = keyed_event_id(keys, str(event.get("event_id") or ""))
     iat = int(now if now is not None else time.time())
-    tok = thread_token(keys, str(event.get("session_id") or msg))
+    # The phone threads and replaces pushes by this token: the chat's, or a
+    # slot's (events.slot_token: a scheduled job, a conduit_notify key).
+    slot = event.get("slot")
+    tok = thread_token(keys, f"slot:{slot}" if isinstance(slot, str) and slot
+                       else str(event.get("session_id") or msg))
     inner = {field: event[field] for field in INNER_FIELDS if event.get(field) not in (None, "")}
 
     outgoing: dict[str, Any] = {"event_id": msg, "type": kind}

@@ -695,7 +695,141 @@ def test_only_the_newest_written_notifications_are_kept(paired, monkeypatch):
     for session in ("a", "b", "c"):
         notify_tool.keep(session, "Done", session)
     assert notify_tool.take("a") is None
-    assert notify_tool.take("c") == ("Done", "c")
+    assert notify_tool.take("c") == notify_tool.Headline("Done", "c")
+
+
+@pytest.fixture
+def runs(monkeypatch):
+    """No turn's slot left over from another test."""
+    monkeypatch.setattr(plugin, "_turn_slots", {})
+    monkeypatch.setattr(plugin, "_job_runs", {})
+    monkeypatch.setattr(plugin, "_job_run_chats", {})
+    monkeypatch.setattr(plugin, "_key_writers", {})
+
+
+def test_a_keyed_notification_replaces_the_profiles_earlier_one_from_any_chat(pushed, paired, runs):
+    # #1579: "Report in progress" from a chat, "Report ready" from a
+    # scheduled job, both keyed "report": one slot on the phone.
+    answer = notify_tool.handle({"title": "Report in progress", "body": "Half done.", "key": " Report "}, session_id="s")
+    assert '"key": "report"' in answer
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Working on it.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    notify_tool.handle({"title": "Report ready", "body": "All 150 analysed.", "key": "report", "quiet": True},
+                       session_id="cron_daily_20261031_120000")
+    plugin._post_llm_call(session_id="cron_daily_20261031_120000", turn_id="t2", assistant_response="Done.")
+    plugin._on_session_end(session_id="cron_daily_20261031_120000", turn_id="t2", completed=True, failed=False,
+                           interrupted=False)
+    first, second = pushed
+    assert first["slot"] == second["slot"] == events.slot_token("key:default:report")
+    assert "level" not in first, "a keyed notification still rings unless it's quiet"
+    assert second["level"] == "passive"
+
+
+def test_each_scheduled_job_keeps_one_notification(pushed, runs):
+    # Every run of a job is its own chat; its runs share the job's slot.
+    for n, run in enumerate(("cron_daily_20261031_120000", "cron_daily_20261101_120000")):
+        plugin._post_llm_call(session_id=run, turn_id=run, task_id=f"cron:daily:{n}", assistant_response="News.")
+        plugin._on_session_end(session_id=run, turn_id=run, task_id=f"cron:daily:{n}", completed=True, failed=False,
+                               interrupted=False)
+    plugin._on_session_end(session_id="local-1", task_id="cron:daily:3", turn_id="t3", failed=True)
+    plugin._post_llm_call(session_id="chat", turn_id="t4", assistant_response="Hi.")
+    plugin._on_session_end(session_id="chat", turn_id="t4", completed=True, failed=False, interrupted=False)
+    assert _types(pushed) == ["response.ready", "response.ready", "turn.failed", "response.ready"]
+    job = events.slot_token("cron:default:daily")
+    assert [event.get("slot") for event in pushed] == [job, job, job, None], "a chat keeps its own"
+
+
+def test_a_key_is_kept_short_and_plain(paired):
+    assert notify_tool.slot_key("  Weekly  Report!! ") == "weekly-report"
+    assert notify_tool.slot_key("a" * 80) == "a" * notify_tool.MAX_KEY_CHARS
+    assert notify_tool.slot_key("a" * 39 + " b") == "a" * 39, "no dash left at the cut"
+    assert notify_tool.slot_key(None) == notify_tool.slot_key("!!!") == ""
+    assert notify_tool.slot_key("___") == notify_tool.slot_key("...") == notify_tool.slot_key("_._") == ""
+    for junk in ("📊", "___", "..."):
+        assert "invalid_key" in notify_tool.handle({"title": "a", "body": "b", "key": junk}, session_id="s")
+    assert notify_tool.take("s") is None
+
+
+def test_a_failed_turn_replaces_the_keyed_notification_it_wrote(pushed, paired):
+    notify_tool.handle({"title": "Report in progress", "body": "Half done.", "key": "report"}, session_id="s")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=False, failed=True, interrupted=False)
+    [failed] = pushed
+    assert failed["type"] == "turn.failed"
+    assert failed["slot"] == events.slot_token("key:default:report")
+
+
+def test_a_gateway_owned_runs_background_task_joins_its_jobs_slot(pushed, runs):
+    # The run's chat (local-…) names the job only through the turn's task id.
+    plugin._pre_llm_call(session_id="local-run", turn_id="t")
+    plugin._post_llm_call(session_id="local-run", turn_id="t", task_id="cron:daily:7", assistant_response="Started.")
+    plugin._on_session_end(session_id="local-run", turn_id="t", task_id="cron:daily:7", completed=True,
+                           failed=False, interrupted=False)
+    _subagent(parent="local-run")
+    reply, task = pushed
+    assert task["type"] == "background_task.finished"
+    assert reply["slot"] == task["slot"] == events.slot_token("cron:default:daily")
+
+
+def test_a_muted_gateway_owned_runs_background_task_stays_quiet(pushed, runs, monkeypatch):
+    monkeypatch.setattr(plugin.cron_runs, "muted", lambda job: job == "daily")
+    plugin._pre_llm_call(session_id="local-run", turn_id="t")
+    plugin._post_llm_call(session_id="local-run", turn_id="t", task_id="cron:daily:7", assistant_response="Started.")
+    plugin._on_session_end(session_id="local-run", turn_id="t", task_id="cron:daily:7", completed=True,
+                           failed=False, interrupted=False)
+    _subagent(parent="local-run")
+    assert pushed == []
+
+
+def test_an_older_runs_late_background_task_keeps_its_own_chats_slot(pushed, runs):
+    for n, run in enumerate(("local-r1", "local-r2")):
+        plugin._pre_llm_call(session_id=run, turn_id="t")
+        plugin._post_llm_call(session_id=run, turn_id="t", task_id=f"cron:daily:{n}", assistant_response="Report.")
+        plugin._on_session_end(session_id=run, turn_id="t", task_id=f"cron:daily:{n}", completed=True,
+                               failed=False, interrupted=False)
+    _subagent(parent="local-r1")
+    job = events.slot_token("cron:default:daily")
+    assert [event.get("slot") for event in pushed] == [job, job, None], "the newest run's report stays"
+
+
+@pytest.mark.parametrize("ending", [{"failed": True}, {"interrupted": True}, {"completed": True}])
+def test_a_muted_gateway_owned_run_that_ends_without_text_keeps_its_task_quiet(pushed, runs, monkeypatch, ending):
+    monkeypatch.setattr(plugin.cron_runs, "muted", lambda job: job == "daily")
+    plugin._pre_llm_call(session_id="local-run", turn_id="t")
+    plugin._on_session_end(session_id="local-run", turn_id="t", task_id="cron:daily:7",
+                           **{"completed": False, "failed": False, "interrupted": False, **ending})
+    _subagent(parent="local-run")
+    assert [event["type"] for event in pushed if event["type"] != "turn.failed"] == []
+
+
+def test_an_older_keyed_runs_late_task_leaves_the_newer_runs_key(pushed, paired, runs):
+    for n, run in enumerate(("local-k1", "local-k2")):
+        plugin._pre_llm_call(session_id=run, turn_id="t")
+        notify_tool.handle({"title": "Backup done", "body": "All good.", "key": "backup"}, session_id=run)
+        plugin._post_llm_call(session_id=run, turn_id="t", task_id=f"cron:backup:{n}", assistant_response="Done.")
+        plugin._on_session_end(session_id=run, turn_id="t", task_id=f"cron:backup:{n}", completed=True,
+                               failed=False, interrupted=False)
+    _subagent(parent="local-k1")
+    key = events.slot_token("key:default:backup")
+    assert [event.get("slot") for event in pushed] == [key, key, None]
+
+
+def test_an_overlapping_older_run_ending_late_stays_older(pushed, runs):
+    plugin._post_llm_call(session_id="local-a", turn_id="t1", task_id="cron:daily:1", assistant_response="Working.")
+    plugin._post_llm_call(session_id="local-b", turn_id="t1", task_id="cron:daily:2", assistant_response="Report.")
+    plugin._post_llm_call(session_id="local-a", turn_id="t2", task_id="cron:daily:1", assistant_response="Late.")
+    assert plugin._job_runs["daily"] == "local-b"
+
+
+def test_a_chats_late_task_leaves_the_key_another_chat_wrote_since(pushed, paired, runs):
+    for chat in ("chat-a", "chat-b"):
+        plugin._pre_llm_call(session_id=chat, turn_id="t")
+        notify_tool.handle({"title": "Report", "body": "Update.", "key": "report"}, session_id=chat)
+        plugin._post_llm_call(session_id=chat, turn_id="t", assistant_response="Done.")
+        plugin._on_session_end(session_id=chat, turn_id="t", completed=True, failed=False, interrupted=False)
+    _subagent(parent="chat-a")
+    _subagent(parent="chat-b", child="c2")
+    key = events.slot_token("key:default:report")
+    assert [event.get("slot") for event in pushed] == [key, key, None, key]
 
 
 def test_conduit_notify_registers_on_a_hermes_without_display_fields():
@@ -723,3 +857,51 @@ def test_only_an_answered_turn_checks_for_a_voice_job_to_archive(pushed, tmp_pat
         raise RuntimeError("store gone")
     monkeypatch.setattr(plugin.voice_archive, "archive_answered_job", broken)
     plugin._on_session_end(session_id="job", turn_id="t4", completed=True, failed=False, interrupted=False)
+
+
+def test_a_follow_up_in_an_older_run_keeps_its_own_chats_slot(pushed, runs):
+    # Only a run's own turn carries the job's task id; the user's follow-up
+    # in an older run's chat doesn't, so the newest run's report stays.
+    for n, run in enumerate(("cron_weekly_20261030_120000", "cron_weekly_20261031_120000")):
+        plugin._post_llm_call(session_id=run, turn_id=f"r{n}", task_id=f"cron:weekly:{n}", assistant_response="News.")
+        plugin._on_session_end(session_id=run, turn_id=f"r{n}", task_id=f"cron:weekly:{n}", completed=True,
+                               failed=False, interrupted=False)
+    plugin._post_llm_call(session_id="cron_weekly_20261030_120000", turn_id="f", assistant_response="Answer.")
+    plugin._on_session_end(session_id="cron_weekly_20261030_120000", turn_id="f", completed=True, failed=False,
+                           interrupted=False)
+    job = events.slot_token("cron:default:weekly")
+    assert [event.get("slot") for event in pushed] == [job, job, None]
+
+
+def test_a_silent_gateway_owned_run_still_hands_its_job_to_a_later_background_task(pushed, runs):
+    plugin._pre_llm_call(session_id="local-quiet", turn_id="t")
+    plugin._post_llm_call(session_id="local-quiet", turn_id="t", task_id="cron:nightly:1", assistant_response="[SILENT]")
+    plugin._on_session_end(session_id="local-quiet", turn_id="t", task_id="cron:nightly:1", completed=True,
+                           failed=False, interrupted=False)
+    _subagent(parent="local-quiet")
+    [task] = pushed
+    assert task["slot"] == events.slot_token("cron:default:nightly")
+    plugin._post_llm_call(session_id="local-quiet", turn_id="t2", assistant_response="A follow-up.")
+    plugin._on_session_end(session_id="local-quiet", turn_id="t2", completed=True, failed=False, interrupted=False)
+    assert "slot" not in pushed[-1], "the user's own follow-up keeps the chat's slot"
+
+
+def test_a_keyed_runs_background_task_replaces_the_keys_notification(pushed, paired, runs):
+    notify_tool.handle({"title": "Backup running", "body": "Started.", "key": "backup"}, session_id="local-keyed")
+    plugin._pre_llm_call(session_id="local-keyed", turn_id="t")
+    plugin._post_llm_call(session_id="local-keyed", turn_id="t", task_id="cron:nightly:2", assistant_response="Started.")
+    plugin._on_session_end(session_id="local-keyed", turn_id="t", task_id="cron:nightly:2", completed=True,
+                           failed=False, interrupted=False)
+    _subagent(parent="local-keyed")
+    reply, task = pushed
+    assert reply["slot"] == task["slot"] == events.slot_token("key:default:backup")
+
+
+def test_a_background_task_from_another_turn_keeps_the_chats_slot(pushed, paired, runs):
+    notify_tool.handle({"title": "Report in progress", "body": "Started.", "key": "report"}, session_id="p")
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._post_llm_call(session_id="p", turn_id="t", assistant_response="Started.")
+    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
+    _subagent(parent="p", parent_turn="other")
+    reply, task = pushed
+    assert reply["slot"] == events.slot_token("key:default:report") and "slot" not in task

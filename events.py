@@ -111,6 +111,7 @@ def push_event(
     room: dict[str, Any] | None = None,
     level: str | None = None,
     private: bool = False,
+    slot: str = "",
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "event_id": identifier,
@@ -207,7 +208,22 @@ def push_event(
     # plaintext path drops it (client._sealed).
     if kind == "response.ready" and private is True:
         event["private"] = True
+    # `slot` (#1579): which notification on the phone this one replaces,
+    # when that isn't the chat's (a scheduled job's runs, a conduit_notify
+    # key). Hashed, so the relay sees which pushes share one and nothing of
+    # the key; sealing folds it into the envelope's thread token instead.
+    if isinstance(slot, str) and slot and kind in SLOT_KINDS:
+        event["slot"] = slot_token(slot)
     return event
+
+
+# The pushes that report how a turn or a task ended; the phone keeps one of
+# them per chat, or per slot (relay COMPLETION_TYPES).
+SLOT_KINDS = ("response.ready", "turn.failed", "background_task.finished")
+
+
+def slot_token(seed: str) -> str:
+    return hashlib.sha256(b"conduit-slot\n" + seed.encode("utf-8")).hexdigest()[:16]
 
 
 PHONE_CHANGE_MODES = ("alert", "background")
@@ -368,7 +384,8 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
 
 # The gateway's approval vocabulary (the relay whitelists the same set).
 _APPROVAL_CHOICES = ("once", "session", "always", "deny")
-_REDACTED_EVENT_KEYS = ("event_id", "type", "plugin_version", "plugin_capabilities", "session_id", "profile", "gateway")
+_REDACTED_EVENT_KEYS = ("event_id", "type", "plugin_version", "plugin_capabilities", "session_id", "profile", "gateway",
+                        "slot")
 
 
 def approval_decision(*, session_key: str, description: str) -> dict[str, Any]:

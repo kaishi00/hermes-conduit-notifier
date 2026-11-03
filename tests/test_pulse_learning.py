@@ -2323,3 +2323,35 @@ def test_a_store_from_before_briefs_and_not_now_gets_their_columns(tmp_path):
     [card] = old.cards()
     assert card["topic"] == "" and card["brief"] == "" and card["dismissed_at"] is None
     assert old.dismiss_card(card["id"], True, 5.0) is True
+
+
+def test_the_week_old_ask_says_what_it_is_about(live):
+    # Eric, 2026-11-01: "It has been over a week and nothing showed that it happened" named nothing.
+    item_id = tell(live, news=followup.STALE_NEWS)
+    delivered(live)
+    [card] = live.store.cards()
+    assert card["news"] == ("Hermes will tell the user when the deploy finishes. That was over a week ago, "
+                            "and nothing shows it happened. Still want it?")
+    assert live.store.followups()[0]["decision"] == followup.ASKED and live.store.item(item_id)["status"] == "open"
+    # A card made before this says it too, from what it's about.
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE cards SET news=? WHERE id=?", (followup.STALE_NEWS, card["id"]))
+    [entry] = control.feed(live.store)["cards"]
+    assert entry["news"].startswith("Hermes will tell the user when the deploy finishes. That was over a week ago")
+    assert followup.stale_news("") == followup.STALE_NEWS
+    assert followup.stale_news("Is the 2nd item still slow?").startswith("Is the 2nd item still slow? That was")
+
+
+def test_an_old_watch_ask_says_a_month_on_the_screen_and_in_the_brief(live):
+    from test_pulse_followup import watch
+    item_id = watch(live)
+    [card_id] = live.store.add_cards([{"kind": "followup", "item_id": item_id, "level": "brief",
+                                       "title": "Tell the user when the bank confirms the transfer to Marc.",
+                                       "news": followup.STALE_NEWS, "why": "x", "created_at": time.time()}])
+    said = ("Tell the user when the bank confirms the transfer to Marc. That was over a month ago, "
+            "and nothing shows it happened. Still want it?")
+    [entry] = control.feed(live.store)["cards"]
+    assert entry["news"] == said
+    [card] = [card for card in live.store.cards() if card["id"] == card_id]
+    context = pulse.brief.context(live.home, live.store, [card], home_chat_id="home", now=time.time(), zone=None)
+    assert said in context and followup.STALE_NEWS not in context
