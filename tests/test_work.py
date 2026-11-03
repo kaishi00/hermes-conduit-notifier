@@ -248,7 +248,7 @@ def test_the_outbox_keeps_what_hermes_never_took(home):
 # Who may call the tools -----------------------------------------------------------
 
 def test_on_by_default_for_every_bot(home, hermes):
-    assert work.available() and work.policy(home) == "strict"
+    assert work.available() and work.policy(home) == "lookups"  # Eric 2026-11-03
     assert not store_mod.exists(home)  # reading it writes nothing
     assert start()["ok"] and store_mod.Store(home).get("W1").status == "running"
 
@@ -2788,7 +2788,7 @@ def test_a_multi_line_command_keeps_its_lines_on_the_card(on, hermes):
 
 def test_the_work_panel_is_empty_for_a_bot_without_workstreams(home, hermes):
     listed = work.app_list(home)
-    assert listed["policy"] == "strict" and listed["work"] == [] and not (home / "conduit").exists()
+    assert listed["policy"] == "lookups" and listed["work"] == [] and not (home / "conduit").exists()
 
 
 # Edit Bot > Work (M3) ------------------------------------------------------------
@@ -2799,7 +2799,7 @@ def _hermes_approvals(home, mode):
 
 def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
     settings = work.app_settings(home)
-    assert settings == {"ok": True, "policy": "strict", "max_running": 2, "max_running_limit": 6,
+    assert settings == {"ok": True, "policy": "lookups", "max_running": 2, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
                         "workstream_model": None, "unavailable": ""}
     assert not store_mod.exists(home)
@@ -2824,7 +2824,7 @@ def test_a_settings_change_is_kept_and_takes_effect(home, hermes):
 def test_a_bad_settings_change_changes_nothing(home, hermes, body):
     answer = work.app_set_settings(home, body)
     assert answer["ok"] is False and answer["error"] in ("missing", "invalid")
-    assert work.policy(home) == "strict" and not store_mod.exists(home)
+    assert work.policy(home) == "lookups" and not store_mod.exists(home)
 
 
 def _brief(hermes):

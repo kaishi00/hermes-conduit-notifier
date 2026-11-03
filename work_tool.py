@@ -422,8 +422,8 @@ def _store(home: Optional[Path] = None) -> Optional[work_store.Store]:
 
 
 def policy(home: Optional[Path] = None) -> str:
-    """This bot's setting: on (strict) unless the user turned it off or
-    picked lookups (M3: on for every bot where workstreams can run). A registry that exists but can't
+    """This bot's setting: on (lookups) unless the user turned it off or
+    picked strict (M3: on for every bot where workstreams can run). A registry that exists but can't
     be read is "strict": the coordinator's limits hold until it can be read
     again."""
     home = home or _home()

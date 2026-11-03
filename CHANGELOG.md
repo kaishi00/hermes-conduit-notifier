@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.127.1 (2026-11-03)
+
+### New and improved
+- Bot Mode: a Bot Chat now also looks things up itself by default, so a
+  quick question gets a quick answer instead of starting a workstream. A bot
+  you set to only coordinate in Edit Bot > Work keeps that.
+
 ## 0.127.0 (2026-11-03)
 
 ### New and improved

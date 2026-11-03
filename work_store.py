@@ -37,8 +37,10 @@ SCHEMA_VERSION = 1
 # today's Bot Chat; "strict" keeps only the work tools, clarify and memory;
 # "lookups" adds read-only lookups.
 POLICIES = ("off", "strict", "lookups")
-# On for every bot until the user turns it off (C.4, M3): strict, as M0 picked.
-DEFAULT_POLICY = "strict"
+# On for every bot until the user turns it off (C.4, M3). Lookups (Eric
+# 2026-11-03): a quick lookup answered in the Bot Chat beats a workstream
+# started for it; strict stays a choice in Edit Bot > Work.
+DEFAULT_POLICY = "lookups"
 DEFAULT_MAX_RUNNING = 2
 # What a restart does with a workstream it stopped that had nothing
 # uncertain in flight (C.7): continue it once, or only tell the coordinator.
