@@ -164,3 +164,45 @@ def test_the_cron_tool_says_what_conduit_does_with_a_bot_chat_jobs_reports(herme
     assert cron_bot_chat.annotate("cronjob_manage", local) is None
     assert cron_bot_chat.annotate("cronjob_manage", json.dumps({"success": False, "error": "x"})) is None
     assert cron_bot_chat.annotate("session_search", created) is None
+
+
+def test_a_report_hermes_cant_redact_is_withheld(hermes, monkeypatch):
+    assert cron_bot_chat.install()
+
+    def broken(text, what):
+        raise RuntimeError("redactor changed")
+
+    monkeypatch.setattr(hermes.delivery, "_redact_cron_payload", broken)
+    hermes.delivery.deliver(dict(JOB), "key sk-secret", "")
+    monkeypatch.delattr(hermes.delivery, "_redact_cron_payload")
+    hermes.delivery.deliver(dict(JOB), "key sk-secret", "")
+    texts = [note[2] for note in hermes.notes]
+    assert len(texts) == 2 and not any("sk-secret" in text for text in texts)
+    assert all(text.endswith(cron_bot_chat.WITHHELD) for text in texts)
+
+
+def test_a_database_that_wont_open_is_waited_for_too(hermes, monkeypatch):
+    hermes.owned = False
+    db = sys.modules["hermes_state"].SessionDB
+    opens = []
+
+    class Locked(db):
+        def __init__(self, db_path, read_only=False):
+            opens.append(db_path)
+            if len(opens) == 1:
+                raise RuntimeError("database is locked")
+            super().__init__(db_path, read_only)
+
+    monkeypatch.setattr(sys.modules["hermes_state"], "SessionDB", Locked)
+    monkeypatch.setattr(cron_bot_chat.time, "sleep", lambda seconds: None)
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain.", "") is None
+    assert len(opens) == 2 and len(hermes.written) == 1
+
+
+def test_a_failure_notice_passed_positionally_is_still_one(hermes):
+    assert cron_bot_chat.install()
+    hermes.warnings = False
+    job = dict(JOB)
+    assert hermes.delivery._deliver_to_bot_chat(job, "It failed.", "", True) is None
+    assert job["_notification_all_targets_suppressed"] and hermes.notes == []

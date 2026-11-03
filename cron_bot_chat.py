@@ -46,6 +46,9 @@ HEADER = '[Cron job "{name}" report: shown in the chat, no reply asked for]'
 NOTE_WAIT_S = 60.0
 NOTE_RETRY_S = 5.0
 
+# The report in place of one Hermes couldn't redact.
+WITHHELD = "(The report was withheld: it couldn't be checked for secrets. It's in the job's own run history.)"
+
 _lock = threading.Lock()
 _installed: Optional[tuple[Any, Callable[..., Any], Callable[..., Any]]] = None
 
@@ -54,12 +57,17 @@ def note_text(job: Any, content: Any) -> str:
     job = job if isinstance(job, dict) else {}
     name = str(job.get("name") or job.get("id") or "?")
     text = content if isinstance(content, str) else str(content or "")
+    # Redacted as Hermes' own delivery redacts it, or not written at all:
+    # the bot reads the note on its next turn, and a report can hold a key.
     redact = getattr(_delivery_module(), "_redact_cron_payload", None)
-    if callable(redact):
-        try:
-            name, text = redact(name, "job name"), redact(text, "bot-chat payload")
-        except Exception:  # noqa: BLE001 - Hermes' own delivery redacts the same way; a change there costs no report
-            logger.debug("conduit_push: cron report redaction failed", exc_info=True)
+    try:
+        if not callable(redact):
+            raise LookupError("no _redact_cron_payload")
+        name, text = redact(name, "job name"), redact(text, "bot-chat payload")
+    except Exception:  # noqa: BLE001 - withheld rather than shown unredacted
+        logger.warning("conduit_push: cron report not redactable, withheld from the Bot Chat", exc_info=True)
+        name = str(job.get("id") or "?")
+        text = WITHHELD
     name = " ".join(name.replace('"', "'").split()) or "?"
     return HEADER.format(name=name) + "\n\n" + text
 
@@ -136,15 +144,17 @@ def _note_from_elsewhere(home: Path, chat: str, text: str, key: str, for_failure
     sleep, clock = sleep or time.sleep, clock or time.monotonic
     deadline = clock() + NOTE_WAIT_S
     while True:
-        db = SessionDB(db_path=home / "state.db")
+        db = None
         try:
+            db = SessionDB(db_path=home / "state.db")
             db.append_completion_note(chat, key, text, "internal_notification", metadata)
             return None
-        except Exception as exc:  # noqa: BLE001 - a running turn refuses it; anything else too, once the wait is up
+        except Exception as exc:  # noqa: BLE001 - a running turn refuses it, a locked database too; anything else once the wait is up
             if clock() + NOTE_RETRY_S > deadline:
                 return f"bot-chat report not written: {exc!r}"
         finally:
-            db.close()
+            if db is not None:
+                db.close()
         sleep(NOTE_RETRY_S)
 
 
@@ -225,7 +235,9 @@ def _replacement(original: Callable[..., Any]) -> Callable[..., Any]:
     def _deliver_to_bot_chat(job: dict, content: str, profile: str, *args: Any, **kwargs: Any) -> Any:
         if lets_act(job):
             return original(job, content, profile, *args, **kwargs)
-        return show(job, content, profile, for_failure=bool(kwargs.get("for_failure", False)))
+        # Hermes passes it by keyword; positionally, it's the next one.
+        for_failure = kwargs.get("for_failure", args[0] if args else False)
+        return show(job, content, profile, for_failure=bool(for_failure))
 
     functools.update_wrapper(_deliver_to_bot_chat, original)
     setattr(_deliver_to_bot_chat, _GUARD_FLAG, True)
