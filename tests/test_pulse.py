@@ -912,7 +912,8 @@ def test_pulse_command(live, db, capsys, monkeypatch):
     assert run("status") == 0
     out = capsys.readouterr().out
     assert f"Home chat: Pulse ({SID})" in out
-    assert "hasn't run Pulse" in out  # no tick yet
+    assert "hasn't run Pulse" in out
+    assert "its log says when its Hermes can't run Pulse" in out  # no tick yet
     pulse.tick()
     assert run("status") == 0 and "Dashboard last checked" in capsys.readouterr().out
     assert run("home", "other-chat") == 0 and live.store.get("home_session_key") == "other-chat"

@@ -671,8 +671,11 @@ def _say_no_host() -> None:
     global _said_no_host
     if _said_no_host or not host_problem():
         return
-    path = Path(get_hermes_home()) / store.DB_NAME
-    if not path.exists() or not open_store(get_hermes_home()).get("enabled"):
+    try:
+        if not (Path(get_hermes_home()) / store.DB_NAME).exists() or not open_store(get_hermes_home()).get("enabled"):
+            return
+    except Exception:  # noqa: BLE001 — an unreadable store is no reason to fail every tick
+        logger.debug("conduit_push: Pulse couldn't read whether it's on", exc_info=True)
         return
     logger.warning("conduit_push: Pulse is on, but this Hermes can't run it: its dashboard has no session host "
                    "that takes a turn into a chat (session.resume and prompt.submit). Update Hermes.")
