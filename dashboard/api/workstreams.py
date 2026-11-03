@@ -110,7 +110,9 @@ async def get_workstreams_settings(request: Request, response: Response, profile
     """The bot's work settings for Edit Bot > Work: ``policy`` (off, strict
     or lookups), ``max_running`` and ``max_running_limit``,
     ``after_restart`` (continue or ask), ``workstream_approvals`` (chats,
-    ask or off), ``chat_approvals`` (the bot's approval mode in Hermes) and
+    ask or off), ``chat_approvals`` (the bot's approval mode in Hermes),
+    ``workstream_model`` (the model new workstreams start on, {"model",
+    "provider"?, "reasoning_effort"?}, or null for the bot's own) and
     ``unavailable`` (why workstreams can't run on this Hermes, or '')."""
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
@@ -120,7 +122,8 @@ async def get_workstreams_settings(request: Request, response: Response, profile
 @router.post("/workstreams/settings")
 async def post_workstreams_settings(request: Request, response: Response, profile: Optional[str] = None) -> Any:
     """The user's change from Edit Bot > Work: any of ``policy``,
-    ``max_running``, ``after_restart`` and ``workstream_approvals``. The
+    ``max_running``, ``after_restart``, ``workstream_approvals`` and
+    ``workstream_model`` (null for the bot's own; new workstreams only). The
     answer is the settings as they are now; a value out of range is a 400
     (``invalid``) and changes nothing."""
     response.headers["Cache-Control"] = "no-store"

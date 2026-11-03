@@ -522,6 +522,29 @@ def test_start_makes_a_hidden_titled_session_on_the_bots_own_profile(on, hermes)
     assert on.outbox_pending() == []
 
 
+def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes):
+    # Eric 2026-11-03: a coordinator and its workstreams on different models.
+    assert start()["ok"]
+    (_, params, _), = hermes.named("session.create")
+    assert "model" not in params and "provider" not in params  # the bot's own, as its Bot Chat
+    assert "this bot's own model" in work.digest(BOT_CHAT)
+    picked = {"model": "claude-sonnet-5-5", "provider": "anthropic", "reasoning_effort": "high"}
+    assert work.app_set_settings(home, {"workstream_model": picked})["workstream_model"] == picked
+    assert start("Another")["ok"]
+    params = hermes.named("session.create")[-1][1]
+    assert (params["model"], params["provider"], params["reasoning_effort"]) == ("claude-sonnet-5-5", "anthropic",
+                                                                                 "high")
+    assert "new workstreams run on claude-sonnet-5-5" in work.digest(BOT_CHAT)
+    assert work.app_set_settings(home, {"workstream_model": {"model": "gpt-5.5"}})["workstream_model"] == {
+        "model": "gpt-5.5"}
+    assert work.app_set_settings(home, {"workstream_model": None})["workstream_model"] is None
+    for bad in ({"provider": "x"}, {"model": ""}, {"model": "a\nb"}, {"model": "x" * 201}, {"model": "m", "fast": True},
+                "gpt-5.5", {"model": 5}):
+        refused = work.app_set_settings(home, {"workstream_model": bad})
+        assert refused["ok"] is False and refused["error"] == "invalid"
+    assert work.app_settings(home)["workstream_model"] is None
+
+
 def test_a_secondary_bot_starts_on_its_own_profile(tmp_path, monkeypatch, hermes):
     home = tmp_path / "root" / "profiles" / "nahida"
     home.mkdir(parents=True)
@@ -1350,6 +1373,10 @@ def test_the_cli_status_says_on_by_default_without_a_registry(home, monkeypatch,
     assert cli._work(types.SimpleNamespace(work_action="off", policy=None, max_running=None)) == 0
     assert store_mod.Store(home).policy() == "off"  # off is kept, so it stays off
     cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, approvals="ask"))
+    cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="anthropic:claude-sonnet-5-5"))
+    assert store_mod.Store(home).workstream_model() == {"model": "claude-sonnet-5-5", "provider": "anthropic"}
+    cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, model="bot"))
+    assert store_mod.Store(home).workstream_model() == {}
     assert store_mod.Store(home).workstream_approvals() == "ask"
     assert "workstream approvals: ask" in capsys.readouterr().out
 
@@ -2757,7 +2784,7 @@ def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
     settings = work.app_settings(home)
     assert settings == {"ok": True, "policy": "strict", "max_running": 2, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
-                        "unavailable": ""}
+                        "workstream_model": None, "unavailable": ""}
     assert not store_mod.exists(home)
     _hermes_approvals(home, "smart")
     assert work.app_settings(home)["chat_approvals"] == "smart"

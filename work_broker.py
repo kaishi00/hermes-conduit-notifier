@@ -255,11 +255,15 @@ class Broker:
                 if isinstance(record, dict) and not record.get("_finalized")}
 
     def start(self, *, title: str, prompt: str, idempotency_key: str, cwd: str = "",
-              created: Optional[Callable[[str], None]] = None, yolo: Optional[bool] = None) -> Started:
+              created: Optional[Callable[[str], None]] = None, yolo: Optional[bool] = None,
+              model: Optional[dict] = None) -> Started:
         """A new hidden session on this bot's profile, with ``prompt`` as its
         first turn. ``created`` hears its stored id before the prompt goes in (or
         right after, when Hermes names it only then). ``yolo``: the session's
         own approval bypass, set before its first turn (None leaves it).
+        ``model``: the session's own model (``model``, ``provider``,
+        ``reasoning_effort``, as Hermes' per-session override keeps them, so
+        a resume keeps it too); None or {} for the profile's.
         Anything that fails once the session exists ends it again (its turn
         interrupted, the session closed), so no session runs outside the
         registry."""
@@ -267,6 +271,9 @@ class Broker:
                                   "idempotency_key": idempotency_key, **self._profile_params()}
         if cwd:
             params["cwd"] = cwd
+        if model and model.get("model"):
+            params.update({key: value for key, value in model.items()
+                           if key in ("model", "provider", "reasoning_effort") and value})
         made = self._dispatch("session.create", params)
         runtime_id = made.get("session_id")
         if not isinstance(runtime_id, str) or not runtime_id:
