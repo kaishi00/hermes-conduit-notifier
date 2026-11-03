@@ -262,8 +262,11 @@ class Store:
                         (key, value, value))
 
     def policy(self) -> str:
-        value = self.get_meta("policy", DEFAULT_POLICY)
-        return value if value in POLICIES else DEFAULT_POLICY
+        value = self.get_meta("policy", None)
+        if value is None:
+            return DEFAULT_POLICY
+        # A value this version doesn't know holds the Bot Chat to strict.
+        return value if value in POLICIES else "strict"
 
     def set_policy(self, policy: str) -> None:
         if policy not in POLICIES:

@@ -19,6 +19,9 @@ checks it). The format is fixed, because Conduit reads it:
 - Bot Mode: a Bot Chat now also looks things up itself by default, so a
   quick question gets a quick answer instead of starting a workstream. A bot
   you set to only coordinate in Edit Bot > Work keeps that.
+- Bot Mode: a Bot Chat that looks things up hands setting or removing a
+  place rule to a workstream, as it does anything else that changes
+  something.
 
 ## 0.127.0 (2026-11-03)
 
