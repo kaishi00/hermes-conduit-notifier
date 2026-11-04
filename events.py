@@ -782,6 +782,9 @@ def _desktop_directive(match: re.Match) -> str:
     if name == "preview":
         path = (attributes.get("file") or "").strip()
         return f'MEDIA:"{path}"' if path and '"' not in path else match.group(0)
+    if name == "conduit-board":
+        # conduit_show's board in a Desktop chat (show_tool), one of ours.
+        return "🗂 Board"
     plugin = "hermes-rich-ui" if name == "richui" else name
     return f"🗂 {plugin} card"
 

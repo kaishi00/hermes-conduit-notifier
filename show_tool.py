@@ -135,6 +135,9 @@ ROOM_SHOWN_NOTE = ("Shown as cards under your next message in the room, for the 
 ROOM_NOTHING_NOTE = "A group room shows messages, and nothing on this board can go to one."
 ROOM_PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Give the rest in your reply if it "
                       "matters, never the contact.")
+DESKTOP_SHOWN_NOTE = ("Hermes Desktop draws these cards where your reply holds this line, on a line of its own: "
+                      "{line} Write it once, where the board goes, and give the gist in a sentence or two; don't "
+                      "repeat the cards.")
 TEXT_LAYOUT_NOTE = "layout: these messages show no tabs, left out"
 TEXT_NEXT_NOTE = "next: these messages show no follow-ups, left out: offer them in your reply if they matter"
 
@@ -145,9 +148,18 @@ BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read
               "page.]")
 
 
-def board_rule(turn_source: str | None) -> str | None:
-    """The drawing rule for a turn sent from a Conduit that draws boards;
-    nothing elsewhere, where boards would only be Markdown."""
+DESKTOP_BOARD_RULE = BOARD_RULE.replace("[Conduit draws boards", "[Hermes Desktop draws boards")
+
+
+def board_rule(turn_source: str | None, desktop_half: Callable[[], bool] = lambda: False) -> str | None:
+    """The drawing rule for a turn sent from a Conduit that draws boards, or
+    from Hermes Desktop with the plugin's Desktop half loaded; nothing
+    elsewhere, where boards would only be Markdown."""
+    if turn_source == "desktop" and available():
+        try:
+            return DESKTOP_BOARD_RULE if desktop_half() else None
+        except Exception:  # noqa: BLE001
+            return None
     if turn_source != "conduit" or not available():
         return None
     try:
@@ -160,7 +172,8 @@ def board_rule(turn_source: str | None) -> str | None:
 
 def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
              is_room: Callable[[Any], bool] = lambda _: False,
-             room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False, skill_path: Any = None) -> None:
+             room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
+             desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None, skill_path: Any = None) -> None:
     """Registers the tool and its recipes, if this Hermes supports plugin
     tools and skills."""
     if skill_path is not None and hasattr(ctx, "register_skill"):
@@ -172,7 +185,8 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
         return
 
     def handler(args: Any, session_id: Any = None, **_: Any) -> str:
-        return handle(args, session_id=session_id, is_child=is_child, is_room=is_room, room_board=room_board)
+        return handle(args, session_id=session_id, is_child=is_child, is_room=is_room, room_board=room_board,
+                      desktop_board=desktop_board)
 
     tool = {"name": TOOL_NAME, "toolset": TOOLSET, "schema": SCHEMA, "handler": handler, "check_fn": available}
     try:
@@ -218,10 +232,11 @@ def available() -> bool:
 
 def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool] = lambda _: False,
            is_room: Callable[[Any], bool] = lambda _: False,
-           room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False) -> str:
+           room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
+           desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None) -> str:
     try:
-        return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child, is_room, room_board),
-                          ensure_ascii=False)
+        return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child, is_room, room_board,
+                                  desktop_board), ensure_ascii=False)
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_show failed", exc_info=True)
         return json.dumps({"ok": False, "error": "unavailable",
@@ -230,7 +245,8 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
 
 def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool],
             is_room: Callable[[Any], bool] = lambda _: False,
-            room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False) -> dict[str, Any]:
+            room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
+            desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None) -> dict[str, Any]:
     session = session_id.strip() if isinstance(session_id, str) else ""
     # The user's screen belongs to the conversation they're in, not to a
     # subagent's work.
@@ -268,9 +284,25 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         if layout:
             problems.insert(0, TEXT_LAYOUT_NOTE)
         return _as_text("group_room", ROOM_NOTE, cards, problems)
-    if cards and _turn_source() not in (None, "conduit"):
-        # Desktop, a messaging app or the terminal draws no cards; the
-        # board's Markdown reads well in all of them.
+    source = _turn_source() if cards else None
+    if source == "desktop":
+        # Hermes Desktop draws a board through the plugin's Desktop half,
+        # where the reply holds the board's line (Eric, 2026-11-04); without
+        # the half the board goes in the reply as Markdown.
+        board = {"cards": cards, "card_markdown": [_fallback([card]) for card in cards],
+                 "markdown": _fallback(cards)}
+        if layout and len(cards) > 1:
+            board["layout"] = layout
+        if follow_ups:
+            board["next"] = follow_ups
+        board_id = desktop_board(board)
+        if board_id:
+            line = f'::conduit-board{{id="{board_id}"}}'
+            return _board({"ok": True, "directive": line}, cards, layout, follow_ups, problems,
+                          DESKTOP_SHOWN_NOTE.format(line=line))
+    if cards and source not in (None, "conduit"):
+        # Desktop without its half, a messaging app or the terminal draws no
+        # cards; the board's Markdown reads well in all of them.
         if follow_ups:
             problems.insert(0, TEXT_NEXT_NOTE)
         if layout:

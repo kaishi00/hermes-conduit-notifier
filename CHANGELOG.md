@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.130.0 (2026-11-04)
+
+### New and improved
+- Hermes Desktop can draw the boards Hermes shows, as cards in the reply,
+  once you turn on "Conduit boards" in Desktop's Capabilities › Plugins.
+  Without it, Desktop keeps getting the board as text.
+
 ## 0.129.1 (2026-11-04)
 
 ### Fixes

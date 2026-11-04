@@ -659,6 +659,8 @@ def test_no_push_shows_a_desktop_directive():
     reply = plain_text('Rents below.\n::richui{id="ru-c91286278685"}\n::preview{file="/tmp/x/chart.html"}')
     assert push_event("response.ready", identifier="r", body=reply)["body"] == \
         "Rents below. 🗂 hermes-rich-ui card 📎 chart.html"
+    board = plain_text('Your plan:\n::conduit-board{id="cb-0123456789ab"}')
+    assert push_event("response.ready", identifier="b", body=board)["body"] == "Your plan: 🗂 Board"
     approval = push_event("approval.needed", identifier="a", body="Show ::widget{name='x'} now?")
     assert approval["body"] == "Show 🗂 widget card now?"
     # Prose, code and CSS stay as written.

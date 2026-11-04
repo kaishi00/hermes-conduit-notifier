@@ -57,7 +57,8 @@ they run:
                           Continue and Check first on a workstream, and
                           the bot's work settings (Edit Bot > Work)
     boards                Boards: the ticks on conduit_show's checklist cards,
-                          and the boards agents showed in group rooms
+                          the boards agents showed in group rooms, and the
+                          boards Hermes Desktop draws
     capabilities          Capabilities: the features this plugin serves, as
                           Conduit reads them
     self_update           Self restart and self update
