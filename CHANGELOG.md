@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.130.1 (2026-11-04)
+
+### Fixes
+- A resolved workstream's link didn't open in Hermes Desktop ("Session
+  owner could not be resolved"). Resolving it now shows its chat in
+  Desktop's Sessions list, and work resolved before is shown once.
+
 ## 0.130.0 (2026-11-04)
 
 ### Fixes

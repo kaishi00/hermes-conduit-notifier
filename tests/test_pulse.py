@@ -1943,6 +1943,28 @@ def test_the_whole_home_chain_is_left_out_of_the_report(db, tmp_path):
     assert "from orphan" not in [row["content"] for row in rows]
 
 
+def test_a_bots_workstreams_are_not_chats_the_person_had(db, tmp_path):
+    # Hermes shows a resolved workstream so Desktop's link opens it (notifier
+    # #540); its brief and replies are the bot's, so Pulse still reads past it.
+    work_store = _load("conduit_push.work_store", ROOT / "work_store.py")
+    work_store.Store(tmp_path).add("workstream", title="Disk", status="done", session_id="ws")
+    db.session()
+    db.session("w", title="Work", pinned=0)
+    db.session("ws", title="Disk", pinned=0)
+    db.session("ws-tip", title="Disk", pinned=0, parent="ws")
+    db.session("ws-tip2", title="Disk", pinned=0, parent="ws-tip")  # continued twice
+    now = time.time()
+    for sid in ("w", "ws", "ws-tip", "ws-tip2"):
+        db.message("user", f"from {sid}", sid=sid, at=now - 60)
+    assert [row["content"] for row in hermes.recent_messages(tmp_path, exclude_chat=SID, since=0)] == ["from w"]
+    work_store.Store(tmp_path).add("workstream", title="Pulse", status="done", session_id="ws-pulse")
+    db.session("ws-pulse", title="Pulse", pinned=1)  # a resolved workstream that took the home chat's name
+    assert [chat.chat_id for chat in hermes.find_home_chat(tmp_path, "Pulse")] == [SID]
+    assert [row["chat_id"] for row in hermes.chat_activity(tmp_path, exclude_chat=SID, since=0)] == ["w"]
+    assert [row["chat_id"] for row in hermes.later_messages(tmp_path, after=0, exclude=[SID], max_chars=50,
+                                                             limit=10)] == ["w"]
+
+
 def test_recent_messages_are_bounded(db, tmp_path):
     db.session()
     db.session("w", title="Work", pinned=0)

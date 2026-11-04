@@ -64,6 +64,16 @@ def _artifacts_index() -> Any:
         return _artifacts_module
 
 
+def _workstreams(home: Any) -> List[str]:
+    """The profile's bots' workstreams, left out of its Artifacts list as
+    hidden chats are: Hermes shows a resolved one (notifier #540)."""
+    try:
+        return core._plugin_package_module("work_store").Store(home).session_ids()
+    except Exception:  # an unreadable registry leaves nothing out
+        logger.debug("Conduit artifacts couldn't read the bots' workstreams", exc_info=True)
+        return []
+
+
 def list_artifacts(before: Optional[int] = None, session_ids: Optional[List[str]] = None,
                    kind: Optional[str] = None, q: str = "", limit: Optional[int] = None,
                    missing: Optional[str] = None) -> Dict[str, Any]:
@@ -88,7 +98,8 @@ def list_artifacts(before: Optional[int] = None, session_ids: Optional[List[str]
             return {"items": [], "next_before": None}
         return index.list_artifacts(conn, before=before, session_ids=ids, group=kind or None,
                                     query=q or "", limit=index.DEFAULT_LIMIT if limit is None else limit,
-                                    include_missing=missing != "hide")
+                                    include_missing=missing != "hide",
+                                    workstreams=[] if ids else _workstreams(get_hermes_home()))
     finally:
         conn.close()
 

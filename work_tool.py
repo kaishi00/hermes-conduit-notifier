@@ -614,6 +614,7 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
             return {"ok": False, "ref": work.ref, "error": "reopened",
                     "note": f"The user reopened {work.ref}, so it stays open until they resolve it or it runs again."}
         store.update(work.ref, closed_at=time.time(), resolved_by="bot")
+        _show_in_desktop(store, work)
         closed = {"ok": True, "ref": work.ref, "title": work.title,
                   "note": f"Closed {work.ref}: {work.title}. It's in the user's Resolved list now."}
         left = _tidy_worktree(store, work.ref)
@@ -1885,7 +1886,8 @@ def _sweep_once(home: Path, store: work_store.Store, broker: Optional[work_broke
     if stopped:
         logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
     for step, run in (("recovering", lambda: _recover(home, store, broker, stopped)),
-                      ("replaying the outbox", lambda: _replay(home, store, broker))):
+                      ("replaying the outbox", lambda: _replay(home, store, broker)),
+                      ("showing resolved work in Desktop", lambda: _show_resolved_once(store))):
         try:
             run()
         except Exception:  # noqa: BLE001 — the digest still shows the work as it is
@@ -1951,6 +1953,63 @@ def _worktree_back(store: work_store.Store, ref: str) -> None:
     tree = _worktree_of(store, ref)
     if tree and not work_trees.restore(tree):
         logger.warning("conduit_push: a workstream's worktree is gone and couldn't be made again")
+
+
+def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> Optional[int]:
+    """On resolve: the workstream's session stops being hidden. Hermes
+    Desktop opens a work link's ``@session:`` chip by id alone, and finds
+    which backend holds a session from its list or from the live session, so
+    a finished hidden one couldn't be opened (Eric 2026-11-04: "Session owner
+    could not be resolved"). Conduit's lists, its Artifacts list and Pulse's
+    reads leave it out as a workstream (by ``Store.session_ids``). Never
+    raises: how many sessions weren't unhidden, each tried on its own, or
+    None when none could be tried (an older Hermes, or no state.db)."""
+    # A call's job's chat was never hidden: it stays in the chat lists.
+    ids = [work.session_id for work in works
+           if work.kind == "workstream" and work.session_id and not _from_call(work)]
+    if not ids:
+        return 0
+    unhidden = 0
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=store.home / "state.db")
+        try:
+            setter = getattr(db, "set_session_hidden", None)
+            if not callable(setter):
+                return None
+            for session_id in ids:
+                try:
+                    setter(session_id, False)
+                    unhidden += 1
+                except Exception:  # noqa: BLE001 - one session never stops the rest
+                    logger.debug("conduit_push: couldn't unhide session %s", session_id, exc_info=True)
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - resolving must never fail for this
+        logger.debug("conduit_push: couldn't unhide resolved workstreams' sessions", exc_info=True)
+        return None
+    return len(ids) - unhidden
+
+
+# Meta key: work resolved before 0.130.1 has been shown in Desktop once ("1"),
+# or how many passes left some out.
+_SHOWN_RESOLVED = "desktop:resolved_shown"
+# Passes a session Hermes keeps refusing gets before it's left hidden, so
+# every start doesn't write the whole resolved history again.
+_SHOW_RESOLVED_TRIES = 3
+
+
+def _show_resolved_once(store: work_store.Store) -> None:
+    """Work resolved before resolving unhid it, shown in Desktop once."""
+    mark = store.get_meta(_SHOWN_RESOLVED) or ""
+    if mark == "1":
+        return
+    failed = _show_in_desktop(store, *[work for work in store.list(include_closed=True, limit=-1) if work.closed_at])
+    if failed is None:
+        return  # couldn't try (an older Hermes): the next sweep does
+    tries = (int(mark[4:]) if mark.startswith("try:") and mark[4:].isdigit() else 0) + 1
+    store.set_meta(_SHOWN_RESOLVED, "1" if not failed or tries >= _SHOW_RESOLVED_TRIES else f"try:{tries}")
 
 
 def _tidy_worktree(store: work_store.Store, ref: str) -> dict:
@@ -3279,6 +3338,7 @@ def _app_manage_act(store: work_store.Store, ref: str, action: str) -> dict:
                 if action == "resolve" else f"{work.ref} changed meanwhile. Try again."}
     if action == "resolve" and done.kind == "workstream":
         _tidy_worktree(store, done.ref)  # removed only when it holds nothing
+        _show_in_desktop(store, done)
     return {"ok": True, "ref": work.ref, "status": done.status, "work": _app_row(store, done)}
 
 

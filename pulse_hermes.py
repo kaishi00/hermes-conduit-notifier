@@ -72,11 +72,13 @@ def find_home_chat(home: Path, title: str) -> list[HomeChat]:
     Mode finds "Bot Chat"), pinned and most recently active first. Only
     chats a person started count: a compression or branch child shares its
     parent's title, and reopening the parent follows it there. More than one
-    means the user has to pick (``pulse home``)."""
+    means the user has to pick (``pulse home``). A bot's workstream never
+    counts, though a resolved one is shown in Hermes (notifier #540)."""
     rows = _run(home, (
-        "SELECT id, title, pinned FROM sessions WHERE title = ? AND archived = 0 AND hidden = 0 "
-        "AND parent_session_id IS NULL ORDER BY pinned DESC, COALESCE(last_activity_at, started_at) DESC"
-    ), (title,))
+        "SELECT id, title, pinned FROM sessions s WHERE title = ? AND archived = 0 AND hidden = 0 "
+        "AND parent_session_id IS NULL AND " + _NOT_WORK + " "
+        "ORDER BY pinned DESC, COALESCE(last_activity_at, started_at) DESC"
+    ), (title, _workstreams(home)))
     return [HomeChat(row["id"], row["title"], bool(row["pinned"])) for row in rows]
 
 
@@ -148,9 +150,26 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
     return TurnRows(session_id, reply, failed, closed, prompt, reply_id)
 
 
+# A bot's workstreams, a json list for ``_NOT_WORK``: Hermes hides an open
+# one, but a resolved one is shown so Desktop's link opens it (notifier
+# #540), and its brief and replies are the bot's, not chats the person had.
+def _workstreams(home: Path) -> str:
+    try:
+        from . import work_store  # this module is also read on its own
+
+        return json.dumps(work_store.Store(Path(home)).session_ids())
+    except Exception:  # an unreadable registry leaves nothing out
+        return "[]"
+
+
+# Not a workstream's chat, nor any chat that continues it. Takes the json list.
+_NOT_WORK = ("s.id NOT IN (WITH RECURSIVE work(id) AS (SELECT value FROM json_each(?) "
+             "UNION SELECT c.id FROM sessions c JOIN work ON c.parent_session_id = work.id) SELECT id FROM work)")
+
 # The chats a person had: every session but ``excluded`` (the home chat's
-# whole compression chain), cron runs and hidden chats; only their visible
-# user and assistant rows. Takes the home chat's id twice.
+# whole compression chain), cron runs, hidden chats and a bot's workstreams;
+# only their visible user and assistant rows. Takes the home chat's id
+# twice, then the workstreams.
 _EXCLUDED = (
     "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_session_id FROM sessions WHERE id = ? "
     "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
@@ -158,21 +177,22 @@ _EXCLUDED = (
     "UNION SELECT s.id FROM sessions s JOIN excluded e ON s.parent_session_id = e.id) ")
 _PERSON_ROWS = (
     "m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
-    "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded)")
+    "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
+    "AND " + _NOT_WORK)
 
 
 def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: int = 2000,
                     limit: int = 3000) -> list[sqlite3.Row]:
     """User and assistant rows since ``since`` in the chats a person had:
     not any part of ``exclude_chat``'s compression chain, not cron runs, hidden
-    chats or hidden rows. The newest ``limit``, each cut to ``max_chars``,
+    chats, a bot's workstreams or hidden rows. The newest ``limit``, each cut to ``max_chars``,
     oldest first, with the chat's id and title."""
     return _run(home, (
         _EXCLUDED + "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(m.content, 1, ?) AS content, "
         "m.timestamp, m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
         "WHERE m.timestamp >= ? AND " + _PERSON_ROWS + " "
         "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?) ORDER BY timestamp, id"
-    ), (exclude_chat, exclude_chat, max_chars, since, limit))
+    ), (exclude_chat, exclude_chat, max_chars, since, _workstreams(home), limit))
 
 
 def chat_activity(home: Path, *, exclude_chat: str, since: float,
@@ -186,7 +206,8 @@ def chat_activity(home: Path, *, exclude_chat: str, since: float,
         "MAX(m.timestamp) AS last_at, SUM(MIN(LENGTH(m.content), ?)) AS chars FROM messages m "
         "JOIN sessions s ON s.id = m.session_id WHERE m.timestamp > ? AND m.timestamp <= ? AND "
         + _PERSON_ROWS + " GROUP BY s.id ORDER BY last_at"
-    ), (exclude_chat, exclude_chat, max_chars, since, float("inf") if until is None else until))
+    ), (exclude_chat, exclude_chat, max_chars, since, float("inf") if until is None else until,
+        _workstreams(home)))
 
 
 def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_chars: int,
@@ -230,7 +251,7 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
 
 
 # Every session but the ones in the json list (each id's whole compression
-# chain, up and down), and no hidden chats or hidden rows. Cron runs count:
+# chain, up and down), and no hidden chats, workstreams or hidden rows. Cron runs count:
 # a job's output is often where the work got done.
 _LATER = (
     "WITH RECURSIVE seed(id) AS (SELECT value FROM json_each(?)), "
@@ -241,7 +262,7 @@ _LATER = (
     "SELECT s.id AS chat_id, s.title, s.source, m.role, substr(m.content, 1, ?) AS content, m.timestamp, m.id "
     "FROM messages m JOIN sessions s ON s.id = m.session_id "
     "WHERE m.timestamp > ? AND m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
-    "AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
+    "AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) AND " + _NOT_WORK + " "
     "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?")
 
 
@@ -252,7 +273,7 @@ def later_messages(home: Path, *, after: float, exclude: Iterable[str], max_char
     newest first, each cut to ``max_chars``, with the chat's id, title and
     source."""
     ids = json.dumps([chat for chat in exclude if chat])
-    return _run(home, _LATER, (ids, max_chars, after, limit))
+    return _run(home, _LATER, (ids, max_chars, after, _workstreams(home), limit))
 
 
 def chain_ids(home: Path, chat_id: str) -> set[str]:
