@@ -108,6 +108,8 @@ def normalize_cards(value: Any, notes: list[str] | None = None) -> list[dict[str
         if "live" in card:
             if card["live"] in live:
                 del card["live"]
+                if notes is not None:
+                    notes.append(f"cards[{index}].live: another card has that name, left out")
             else:
                 live.add(card["live"])
         cards.append(card)
@@ -350,9 +352,10 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
             return None
         for item in card["media"]:
             if item["kind"] == "image" or not _is_https(item.get("artwork", "https://")):
-                item.pop("artwork", None)
-            if item["kind"] == "image":
-                item.pop("duration", None)
+                if item.pop("artwork", None) is not None:
+                    _note(notes, f"{path}.media: artwork goes with video or audio over https, left out")
+            if item["kind"] == "image" and item.pop("duration", None) is not None:
+                _note(notes, f"{path}.media: an image has no duration, left out")
     elif kind == "contact":
         for person in card["people"]:
             # Named by name: people the schema left out are gone by now.

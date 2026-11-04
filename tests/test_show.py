@@ -349,6 +349,8 @@ def test_a_group_room_never_gets_a_contact_or_a_drafted_text(tool_home, monkeypa
     with_next = _call({"title": "Dinner", "cards": [MAP], "next": ["More"]}, session_id="room-1",
                       is_room=lambda s: s == "room-1")
     assert with_next["problems"][0] == tool.TEXT_NEXT_NOTE
+    only = _call({"title": "Mei", "cards": [TEXT]}, session_id="room-1", is_room=lambda s: s == "room-1")
+    assert "markdown" not in only and only["note"].startswith(tool.ROOM_NOTHING_NOTE)
     tabs = _call({"title": "Dinner", "cards": [MAP, MAP], "layout": "tabs"}, session_id="room-1",
                  is_room=lambda s: s == "room-1")
     assert tabs["problems"][0] == tool.TEXT_LAYOUT_NOTE

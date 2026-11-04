@@ -127,6 +127,7 @@ OLD_BOARD_NEXT_NOTE = ("next: this version of Conduit draws no follow-ups, left 
                        "they matter")
 ROOM_CONTACTS_NOTE = ("cards: a contact card holds the user's own details and drafts, so it isn't shared into a "
                       "room: leave it out of your reply too")
+ROOM_NOTHING_NOTE = "A group room shows messages, and nothing on this board can go to one."
 ROOM_PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Give the rest in your reply if it "
                       "matters, never the contact.")
 TEXT_LAYOUT_NOTE = "layout: these messages show no tabs, left out"
@@ -247,6 +248,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         if any(card["type"] == "contact" for card in cards):
             problems.insert(0, ROOM_CONTACTS_NOTE)
             cards = [card for card in cards if card["type"] != "contact"]
+            if not cards:
+                return _with_problems({"ok": False, "error": "group_room", "note": ROOM_NOTHING_NOTE}, problems)
         return _as_text("group_room", ROOM_NOTE, cards, problems)
     if cards and _turn_source() not in (None, "conduit"):
         # Desktop, a messaging app or the terminal draws no cards; the
