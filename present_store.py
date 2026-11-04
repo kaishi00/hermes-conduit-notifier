@@ -119,6 +119,10 @@ SHOW_DEVICE_RECENT_S = 6 * 3600
 # long to say it draws them.
 CHAT_CARDS_FEATURE = "chat-cards"
 CARD_DEVICE_RECENT_S = 30 * 24 * 3600
+# A feature every Conduit must say (board-cards, room-boards…) counts only the
+# Conduits used this recently, so an old install left on a drawer iPad doesn't
+# hold back boards on the phone in use (Eric, 2026-11-04: three days).
+FEATURE_DEVICE_RECENT_S = 3 * 24 * 3600
 # How often an unchanged phone's last-seen time is refreshed.
 SEEN_REFRESH_S = 60
 DEFAULT_TTL_MINUTES = 30
@@ -235,12 +239,12 @@ class PresentStore:
 
     def has_feature_everywhere(self, feature: str) -> bool:
         """Whether every Conduit that draws cards (on a call or in chats) and
-        exchanged with this profile recently says it can do ``feature``;
-        False when there's none."""
+        exchanged with this profile in the last FEATURE_DEVICE_RECENT_S says
+        it can do ``feature``; False when there's none."""
         now = self.clock()
         drawing = [device["features"] for device in self._load()["devices"].values()
                    if {SHOW_FEATURE, CHAT_CARDS_FEATURE} & set(device["features"])
-                   and now - device["seen_at"] < CARD_DEVICE_RECENT_S]
+                   and now - device["seen_at"] < FEATURE_DEVICE_RECENT_S]
         return bool(drawing) and all(feature in features for features in drawing)
 
     def confirm(self, title: Any, preview: Any, action_label: Any = None, *, spoken_yes: Any = None,

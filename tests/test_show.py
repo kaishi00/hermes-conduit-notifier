@@ -600,6 +600,54 @@ def test_what_is_left_out_is_said_wherever_the_board_goes(tool_home, monkeypatch
     assert room["error"] == "group_room" and room["problems"] == away["problems"]
 
 
+def test_a_desktop_chat_with_the_half_gets_the_boards_line(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    monkeypatch.setattr(tool, "_turn_source", lambda: "desktop")
+    monkeypatch.setattr(tool, "_desktop_app", lambda: True)
+    kept = []
+    answer = _call({"title": "Caps", "cards": [TABLE_CARD, CALLOUT], "layout": "tabs", "next": ["More"]},
+                   desktop_board=lambda board: kept.append(board) or "cb-0123456789ab")
+    line = '::conduit-board{id="cb-0123456789ab"}'
+    assert answer["ok"] is True and answer["directive"] == line and line in answer["note"]
+    assert answer["layout"] == "tabs" and answer["next"] == ["More"], "Desktop's half draws tabs and follow-ups"
+    [board] = kept
+    assert board["cards"] == answer["cards"] and board["markdown"] == answer["markdown"]
+    assert board["card_markdown"] == [tool.card_schema.fallback_markdown([card]) for card in answer["cards"]]
+    assert board["layout"] == "tabs" and board["next"] == ["More"]
+    without = _call({"title": "Caps", "cards": [TABLE_CARD]}, desktop_board=lambda board: None)
+    assert without["error"] == "not_conduit" and without["markdown"], "no half: the board goes as Markdown"
+    monkeypatch.setattr(tool, "_desktop_app", lambda: False)
+    web = _call({"title": "Caps", "cards": [TABLE_CARD]}, desktop_board=lambda board: "cb-0123456789ab")
+    assert web["error"] == "not_conduit" and web["markdown"], "the web dashboard draws no line: Markdown"
+    monkeypatch.setattr(tool, "_desktop_app", lambda: True)
+    monkeypatch.setattr(tool, "_turn_source", lambda: "messaging")
+    assert _call({"title": "Caps", "cards": [TABLE_CARD]}, desktop_board=lambda board: "cb-0123456789ab")["error"] \
+        == "not_conduit", "only Desktop draws the line"
+
+
+def test_desktop_hears_the_board_rule_only_with_its_half(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    monkeypatch.setattr(tool, "_desktop_app", lambda: True)
+    assert tool.board_rule("desktop", desktop_half=lambda: True) == tool.DESKTOP_BOARD_RULE
+    assert tool.DESKTOP_BOARD_RULE.startswith("[Hermes Desktop draws boards")
+    assert tool.board_rule("desktop", desktop_half=lambda: False) is None
+    assert tool.board_rule("desktop") is None
+    monkeypatch.setattr(tool, "_desktop_app", lambda: False)
+    assert tool.board_rule("desktop", desktop_half=lambda: True) is None, "the web dashboard hears no rule"
+
+
+def test_only_hermes_desktops_own_socket_counts_as_the_desktop_app():
+    class WSTransport:
+        def __init__(self, agent):
+            self._ws = type("WS", (), {"headers": {"User-Agent": agent}})()
+    electron = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/138.0 Electron/37.2.0 Safari/537.36"
+    chrome = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/138.0 Safari/537.36"
+    assert tool.reply_sources.is_desktop_app(WSTransport(electron)) is True
+    assert tool.reply_sources.is_desktop_app(WSTransport(chrome)) is False
+    assert tool.reply_sources.is_desktop_app(None) is False
+    assert tool.reply_sources.turn_source(None, WSTransport(chrome)) == "desktop", "both still Desktop for pushes"
+
+
 def test_a_call_screen_shows_a_board_as_its_phone_can(store):
     store.exchange({"installation_id": PHONE, "device": "iPhone", "app_version": "2.3", "results": [],
                     "features": ["show-cards", "info-cards", "board-cards"]})
