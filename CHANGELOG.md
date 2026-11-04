@@ -18,7 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 - A bot that passed on a workstream's link in its own words left out the
   part Hermes Desktop opens, so the workstream couldn't be opened there.
-  Bots now give the link as written.
+  Bots now give the link as written, outside any code block.
 
 ## 0.128.0 (2026-11-04)
 

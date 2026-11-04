@@ -4392,7 +4392,7 @@ def test_a_link_carries_desktops_reference_only_when_desktop_reads_it_whole():
 def test_every_text_that_hands_the_model_a_link_says_to_keep_the_desktop_reference():
     # A coordinator that wrote "Open W4 — title [blocked]" in its own words
     # dropped @session:, and Desktop couldn't open W4 (Eric 2026-11-04).
-    assert "@session" in work.LINK_RULE and "exactly as written" in work.LINK_RULE
+    assert "@session" in work.LINK_RULE and "never in a code block" in work.LINK_RULE
     assert work.LINK_RULE in work.WAKE and work.LINK_RULE in work.WORK_TAIL
     assert work.LINK_RULE in work.SCHEMAS["work_list"]["description"]
     work.WAKE.format(lines="- W1")
