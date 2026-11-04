@@ -4,7 +4,7 @@
  *
  * The plugin keeps each board on the host (room_boards.DesktopBoards) and this
  * half reads it from GET /boards/desktop. While it's loaded it says so
- * (POST /boards/desktop/seen, every half hour), so the agent is asked for the
+ * (POST /boards/desktop/seen, every ten minutes, and that it's gone when it's turned off), so the agent is asked for the
  * line only where it will be drawn; without the half, Desktop gets the board
  * as Markdown in the reply.
  *
@@ -18,7 +18,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'conduit_push'
 const BOARD_ID = /^cb-[0-9a-f]{12}$/
-const SEEN_EVERY_MS = 30 * 60 * 1000
+const SEEN_EVERY_MS = 10 * 60 * 1000
 // Kinds drawn here; every other card shows its own Markdown.
 const NATIVE = new Set([
   'stats', 'chart', 'comparison', 'steps', 'status', 'table', 'timeline', 'checklist', 'list', 'progress', 'callout'
@@ -92,7 +92,7 @@ function Board({ id, sessionId, streaming }) {
     return jsx('div', { className: cn('my-2 text-sm', muted), children: 'Loading the board…' })
   }
 
-  return jsx(BoardView, { board: state.board, sessionId, streaming })
+  return jsx(BoardView, { board: state.board, sessionId, streaming }, id)
 }
 
 function BoardView({ board, sessionId, streaming }) {
@@ -105,7 +105,7 @@ function BoardView({ board, sessionId, streaming }) {
     return typeof board.markdown === 'string' ? jsx(MessageTextContent, { text: board.markdown }) : null
   }
 
-  const shown = tabs ? [tab] : cards.map((_, index) => index)
+  const shown = tabs ? [Math.min(tab, cards.length - 1)] : cards.map((_, index) => index)
 
   return jsxs('div', {
     className: 'my-2 flex max-w-2xl flex-col gap-2',
@@ -758,7 +758,11 @@ export default {
     const seen = () => ctx.rest('/boards/desktop/seen', { method: 'POST', body: {} }).catch(() => {})
     seen()
     ctx.setInterval(seen, SEEN_EVERY_MS)
-    ctx.onDispose(() => boards.clear())
+    ctx.onDispose(() => {
+      boards.clear()
+      // Turned off: the agent stops writing a line nothing would draw.
+      ctx.rest('/boards/desktop/seen', { method: 'POST', body: { gone: true } }).catch(() => {})
+    })
 
     ctx.register({
       id: 'board',

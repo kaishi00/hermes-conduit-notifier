@@ -160,9 +160,10 @@ def read_desktop_board(board_id: Optional[str]) -> Dict[str, Any]:
     return {"board": board}
 
 
-def note_desktop_half() -> Dict[str, Any]:
+def note_desktop_half(body: Any = None) -> Dict[str, Any]:
+    gone = isinstance(body, dict) and body.get("gone") is True
     try:
-        _desktop_boards().saw_half()
+        _desktop_boards().saw_half(gone=gone)
     except OSError:
         raise core.TokenError(503, "The plugin couldn't note Desktop's half right now")
     return {"ok": True}
@@ -190,8 +191,10 @@ async def post_desktop_half_seen(request: Request, response: Response,
                                  profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, 1024)
     try:
-        return await core._run_scoped(profile, core._limited(_desktop_boards_limiter, profile, note_desktop_half))
+        return await core._run_scoped(profile, core._limited(_desktop_boards_limiter, profile,
+                                                             lambda: note_desktop_half(body)))
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
     except HTTPException as exc:

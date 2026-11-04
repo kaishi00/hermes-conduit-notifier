@@ -79,6 +79,8 @@ def test_the_routes_read_a_board_and_note_the_half(tmp_path, monkeypatch):
     assert kept.half_live() is False
     assert http.post(f"{BASE}/boards/desktop/seen", json={}).json() == {"ok": True}
     assert kept.half_live() is True
+    assert http.post(f"{BASE}/boards/desktop/seen", json={"gone": True}).json() == {"ok": True}
+    assert kept.half_live() is False, "turned off: no line until it's back"
     assert "desktop-boards" in api.capabilities.ROUTE_CAPABILITIES
 
 
@@ -119,6 +121,7 @@ def test_the_desktop_half_claims_the_line_the_tool_writes():
     source = (ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
     assert "id: ID," in source and "const ID = 'conduit_push'" in source, "the half's id is the package's folder"
     assert "name: 'conduit-board'" in source
+    assert "body: { gone: true }" in source and "Math.min(tab, cards.length - 1)" in source
     assert "const BOARD_ID = /^cb-[0-9a-f]{12}$/" in source
     assert room_boards.DESKTOP_BOARD_ID.pattern == "cb-[0-9a-f]{12}"
     imports = re.findall(r"^import .* from '([^']+)'", source, flags=re.MULTILINE)

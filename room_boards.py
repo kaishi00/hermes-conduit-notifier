@@ -52,7 +52,7 @@ MAX_ID_CHARS = 200
 # Desktop boards: what the file keeps, and how long the half counts as
 # loaded after it last said so (it says so every half hour while loaded).
 MAX_DESKTOP_BOARDS = 500
-HALF_LIVE_S = 2 * 3600
+HALF_LIVE_S = 30 * 60
 DESKTOP_BOARD_ID = re.compile(r"cb-[0-9a-f]{12}")
 
 _lock = threading.Lock()
@@ -199,10 +199,10 @@ class DesktopBoards(_BoardFile):
             raise ValueError("id names a board: cb- and 12 hex digits")
         return next((entry["board"] for entry in self._boards(self._state()) if entry["id"] == board_id), None)
 
-    def saw_half(self) -> None:
-        """The Desktop half is loaded, just now."""
+    def saw_half(self, gone: bool = False) -> None:
+        """The Desktop half is loaded, just now, or was just turned off."""
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._save({"seen": self.clock()}, self.half_path)
+        self._save({"seen": None if gone else self.clock()}, self.half_path)
 
     def half_live(self) -> bool:
         """Whether a Desktop half said it was loaded lately."""

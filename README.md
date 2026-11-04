@@ -2518,8 +2518,10 @@ Desktop copies it from the plugin's folder and lists it in Capabilities ›
 Plugins as "Conduit boards", off until you turn it on there.
 
 - **The half says it's there.** While it's loaded it posts
-  `POST /boards/desktop/seen` (at load and every half hour); the plugin
-  counts it as loaded for two hours after the last one, in the root home's
+  `POST /boards/desktop/seen` (at load and every ten minutes, and
+  `{"gone": true}` when it's turned off); the plugin counts it as loaded for
+  half an hour after the last one, so a Desktop that quit stops counting
+  within that, in the root home's
   `conduit-desktop/half.json`, for every profile (the boards are in
   `boards.json` beside it).
 - **The line.** In a chat sent from Hermes Desktop itself (not the web
