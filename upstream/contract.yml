@@ -15,6 +15,7 @@ watch_paths:
   - tools/plugin_guard*.py
   - tools/plugin_guard/
   - tools/skills_guard.py
+  - hermes_cli/plugin_validate_desktop*.py
   - tools/tool_search*.py
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
@@ -144,6 +145,10 @@ notes:
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
     update can't confirm, so hosts stay on the old version (hermes-conduit#1500).
+  desktop half lint: >-
+    The boards Hermes Desktop draws (feature map: "Cards Hermes shows"). Hermes lints a package's
+    Desktop half (desktop/plugin.js) with hermes_cli.plugin_validate_desktop; a construct it flags
+    keeps the half from loading. upstream/test_desktop_half.py runs that lint over the shipped copy.
   chats on the gateway's listener: >-
     Conduit's chat socket, when its address is the gateway's own listener (the Webapp) instead of
     hermes dashboard (feature map: "Two Hermes servers"). gateway.ready's session_authority tells
