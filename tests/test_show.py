@@ -335,6 +335,32 @@ def test_a_group_room_gets_its_board_as_markdown(tool_home, monkeypatch):
     assert _call({"title": "Dinner", "cards": [MAP]}, is_room=lambda s: s == "room-1")["ok"] is True, "a chat draws it"
 
 
+def test_a_room_this_host_runs_keeps_its_board_for_conduit(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=(*BOARD_FEATURES, tool.ROOM_BOARDS_FEATURE))
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    kept = []
+    answer = _call({"title": "Caps", "cards": [TABLE_CARD, CALLOUT, TEXT], "layout": "tabs", "next": ["More"]},
+                   session_id="room-1", is_room=lambda s: s == "room-1",
+                   room_board=lambda session, board: kept.append((session, board)) or True)
+    assert answer["ok"] is True and answer["note"].startswith(tool.ROOM_SHOWN_NOTE)
+    assert [card["type"] for card in answer["cards"]] == ["table", "callout"], "no contact in a room"
+    assert answer["layout"] == "tabs" and "next" not in answer, "no follow-ups in a room"
+    assert kept == [("room-1", {"cards": answer["cards"], "markdown": answer["markdown"], "layout": "tabs"})]
+    assert tool.TEXT_NEXT_NOTE in answer["problems"] and tool.ROOM_CONTACTS_NOTE in answer["problems"]
+    elsewhere = _call({"title": "Caps", "cards": [TABLE_CARD]}, session_id="room-1",
+                      is_room=lambda s: s == "room-1", room_board=lambda *_: False)
+    assert elsewhere["error"] == "group_room" and elsewhere["markdown"], "a room run elsewhere gets text"
+
+
+def test_an_older_conduit_gets_a_rooms_board_as_text(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    kept = []
+    answer = _call({"title": "Caps", "cards": [TABLE_CARD]}, session_id="room-1", is_room=lambda s: s == "room-1",
+                   room_board=lambda session, board: kept.append(board) or True)
+    assert answer["error"] == "group_room" and not kept
+
+
 def test_a_group_room_never_gets_a_contact_or_a_drafted_text(tool_home, monkeypatch):
     _exchange(PresentStore(tool_home), features=("chat-cards",))
     for source in ("conduit", "messaging"):

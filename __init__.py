@@ -142,7 +142,7 @@ def register(ctx: Any) -> None:
     present_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
-    show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn,
+    show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn, room_board=_save_room_board,
                        skill_path=Path(__file__).resolve().parent / "skills" / show_tool.SKILL_NAME / "SKILL.md")
     # Hermes writes the title and body of the push its turn sends when it
     # ends, for a result the user asked to be told about (#1415).
@@ -362,6 +362,24 @@ def _post_tool_call(**kwargs: Any) -> None:
         logger.log(logging.DEBUG if _ledger_warned else logging.WARNING, "conduit_push: Pulse outcome not recorded",
                    exc_info=True)
         _ledger_warned = True
+
+
+def _save_room_board(session_id: Any, board: dict) -> bool:
+    """Keeps a board an agent showed in a room this host runs, for Conduit to
+    draw under its message (room_boards); False where it can't: a room run
+    elsewhere, or one whose id isn't known."""
+    try:
+        home = get_hermes_home()
+        turn = room_rules.room_turn(session_id, home)
+        if turn is None or turn.side != "home" or not turn.room_id:
+            return False
+        from . import room_boards, room_identity, room_setup
+        room_boards.RoomBoards(room_identity.root_home(home)).add(turn.room_id, room_setup.profile_name(Path(home)),
+                                                                   board)
+        return True
+    except Exception:  # noqa: BLE001 — the board goes in the reply as text instead
+        room_rules.warn_often("room board", "conduit_push: couldn't keep a room's board; it goes in the reply as text")
+        return False
 
 
 def _is_room_turn(session_id: Any) -> bool:

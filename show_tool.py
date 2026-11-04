@@ -50,6 +50,8 @@ SKILL_NAME = "drawing-boards"
 # A Conduit that offers Send text for a contact card's message says this in
 # its exchange (plugin 0.67+).
 TEXT_DRAFTS_FEATURE = "text-drafts"
+# Conduit draws a room's boards under its agents' messages (room_boards).
+ROOM_BOARDS_FEATURE = "room-boards"
 TOOLSET = "conduit"
 
 SCHEMA: dict[str, Any] = {
@@ -127,6 +129,9 @@ OLD_BOARD_NEXT_NOTE = ("next: this version of Conduit draws no follow-ups, left 
                        "they matter")
 ROOM_CONTACTS_NOTE = ("cards: a contact card holds the user's own details and drafts, so it isn't shared into a "
                       "room: leave it out of your reply too")
+ROOM_SHOWN_NOTE = ("Shown as cards under your next message in the room, for the people reading it in Conduit. "
+                   "The room's other agents read only your message, so give them what they need from it in a "
+                   "sentence or two; don't repeat the cards.")
 ROOM_NOTHING_NOTE = "A group room shows messages, and nothing on this board can go to one."
 ROOM_PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Give the rest in your reply if it "
                       "matters, never the contact.")
@@ -154,7 +159,8 @@ def board_rule(turn_source: str | None) -> str | None:
 
 
 def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
-             is_room: Callable[[Any], bool] = lambda _: False, skill_path: Any = None) -> None:
+             is_room: Callable[[Any], bool] = lambda _: False,
+             room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False, skill_path: Any = None) -> None:
     """Registers the tool and its recipes, if this Hermes supports plugin
     tools and skills."""
     if skill_path is not None and hasattr(ctx, "register_skill"):
@@ -166,7 +172,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
         return
 
     def handler(args: Any, session_id: Any = None, **_: Any) -> str:
-        return handle(args, session_id=session_id, is_child=is_child, is_room=is_room)
+        return handle(args, session_id=session_id, is_child=is_child, is_room=is_room, room_board=room_board)
 
     tool = {"name": TOOL_NAME, "toolset": TOOLSET, "schema": SCHEMA, "handler": handler, "check_fn": available}
     try:
@@ -184,7 +190,7 @@ def _as_text(error: str, note: str, cards: list[dict[str, Any]], problems: list[
 
 
 def _with_problems(answer: dict[str, Any], problems: list[str]) -> dict[str, Any]:
-    """An answer that didn't show the board, with what normalization dropped."""
+    """An answer with what normalization dropped, and what to do about it."""
     if problems:
         # A room's reply never carries the contact it was spared.
         tail = ROOM_PROBLEMS_NOTE if ROOM_CONTACTS_NOTE in problems else PROBLEMS_NOTE
@@ -211,9 +217,10 @@ def available() -> bool:
 
 
 def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool] = lambda _: False,
-           is_room: Callable[[Any], bool] = lambda _: False) -> str:
+           is_room: Callable[[Any], bool] = lambda _: False,
+           room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False) -> str:
     try:
-        return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child, is_room),
+        return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child, is_room, room_board),
                           ensure_ascii=False)
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_show failed", exc_info=True)
@@ -222,7 +229,8 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
 
 
 def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool],
-            is_room: Callable[[Any], bool] = lambda _: False) -> dict[str, Any]:
+            is_room: Callable[[Any], bool] = lambda _: False,
+            room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False) -> dict[str, Any]:
     session = session_id.strip() if isinstance(session_id, str) else ""
     # The user's screen belongs to the conversation they're in, not to a
     # subagent's work.
@@ -237,19 +245,28 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     layout = card_schema.normalize_layout(args.get("layout"), problems)
     follow_ups = card_schema.normalize_next(args.get("next"), problems)
     if cards and session and is_room(session):
-        # A group room draws its messages only, so the board goes in the
-        # reply (Eric, 2026-11-03: text in rooms now, cards there later).
-        # Other people's agents read it, so a contact's numbers and a text
-        # drafted for the user stay out of it.
+        # A room this host runs keeps the board for Conduit to draw under
+        # the agent's message; elsewhere, or for an older Conduit, it goes in
+        # the reply as text (Eric, 2026-11-03). Other people's agents may
+        # read a room, so a contact's numbers and a text drafted for the user
+        # stay out of it, and a tap there would speak for the user to the
+        # whole room, so it has no follow-ups.
         if follow_ups:
             problems.insert(0, TEXT_NEXT_NOTE)
-        if layout:
-            problems.insert(0, TEXT_LAYOUT_NOTE)
         if any(card["type"] == "contact" for card in cards):
             problems.insert(0, ROOM_CONTACTS_NOTE)
             cards = [card for card in cards if card["type"] != "contact"]
             if not cards:
                 return _with_problems({"ok": False, "error": "group_room", "note": ROOM_NOTHING_NOTE}, problems)
+        board = {"cards": cards, "markdown": _fallback(cards)}
+        if layout and len(cards) > 1:
+            board["layout"] = layout
+        if _store().has_feature_everywhere(ROOM_BOARDS_FEATURE) and room_board(session, board):
+            if layout and len(cards) < 2:
+                problems.insert(0, "layout: it lays out two or more cards, and fewer were shown, left out")
+            return _with_problems({"ok": True, **board, "note": ROOM_SHOWN_NOTE}, problems)
+        if layout:
+            problems.insert(0, TEXT_LAYOUT_NOTE)
         return _as_text("group_room", ROOM_NOTE, cards, problems)
     if cards and _turn_source() not in (None, "conduit"):
         # Desktop, a messaging app or the terminal draws no cards; the

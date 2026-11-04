@@ -241,6 +241,9 @@ ROUTE_CAPABILITIES = (
     # for every Conduit, and heard by Hermes at the chat's next turn (Cards
     # Hermes shows).
     "board-checklists",
+    # GET /boards/rooms: the boards agents showed in a room this host runs,
+    # which Conduit draws under their messages (Cards Hermes shows).
+    "room-boards",
 )
 
 

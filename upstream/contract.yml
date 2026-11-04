@@ -365,6 +365,7 @@ routes:
   - GET /artifacts
   - GET /boards/checklists
   - POST /boards/checklists
+  - GET /boards/rooms
   - GET /calls
   - PUT /calls
   - POST /calls/outcomes
