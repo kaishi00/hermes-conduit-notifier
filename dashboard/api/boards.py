@@ -1,4 +1,5 @@
-"""Boards: the ticks on conduit_show's checklist cards, kept on the host."""
+"""Boards: the ticks on conduit_show's checklist cards, and the boards agents
+showed in group rooms, kept on the host."""
 
 from __future__ import annotations
 

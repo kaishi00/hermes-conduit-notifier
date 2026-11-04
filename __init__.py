@@ -378,7 +378,7 @@ def _save_room_board(session_id: Any, board: dict) -> bool:
                                                                    board)
         return True
     except Exception:  # noqa: BLE001 — the board goes in the reply as text instead
-        logger.warning("conduit_push: couldn't keep a room's board; it goes in the reply as text", exc_info=True)
+        room_rules.warn_often("room board", "conduit_push: couldn't keep a room's board; it goes in the reply as text")
         return False
 
 
