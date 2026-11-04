@@ -208,11 +208,12 @@ def test_a_bots_workstreams_are_left_out_hidden_or_not(tmp_path, monkeypatch):
     # and the workstream's own chat still lists its artifacts.
     _no_gateway(monkeypatch)
     conn = _db(tmp_path / "a", [("s1", "assistant", "MEDIA:/root/a.png"), ("ws", "assistant", "MEDIA:/root/b.png"),
-                                ("ws-tip", "assistant", "MEDIA:/root/c.png")],
-               sessions=[("s1", "Shown", 0), ("ws", "Disk", 0), ("ws-tip", "Disk", 0, "ws")])
+                                ("ws-tip", "assistant", "MEDIA:/root/c.png"), ("ws-tip2", "assistant", "MEDIA:/root/d.png")],
+               sessions=[("s1", "Shown", 0), ("ws", "Disk", 0), ("ws-tip", "Disk", 0, "ws"),
+                         ("ws-tip2", "Disk", 0, "ws-tip")])
     assert [i["name"] for i in _list(conn, workstreams=["ws"])["items"]] == ["a.png"]
-    assert [i["name"] for i in _list(conn, session_id="ws", workstreams=["ws"])["items"]] == ["c.png", "b.png"]
-    assert len(_list(conn)["items"]) == 3
+    assert [i["name"] for i in _list(conn, session_id="ws", workstreams=["ws"])["items"]] == ["d.png", "c.png", "b.png"]
+    assert len(_list(conn)["items"]) == 4
 
 
 def test_a_bots_hidden_bot_chat_is_listed(tmp_path, monkeypatch):

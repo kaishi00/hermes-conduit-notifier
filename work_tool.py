@@ -1964,7 +1964,9 @@ def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> Option
     reads leave it out as a workstream (by ``Store.session_ids``). Never
     raises: how many sessions weren't unhidden, each tried on its own, or
     None when none could be tried (an older Hermes, or no state.db)."""
-    ids = [work.session_id for work in works if work.kind == "workstream" and work.session_id]
+    # A call's job's chat was never hidden: it stays in the chat lists.
+    ids = [work.session_id for work in works
+           if work.kind == "workstream" and work.session_id and not _from_call(work)]
     if not ids:
         return 0
     unhidden = 0

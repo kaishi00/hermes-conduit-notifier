@@ -1952,8 +1952,9 @@ def test_a_bots_workstreams_are_not_chats_the_person_had(db, tmp_path):
     db.session("w", title="Work", pinned=0)
     db.session("ws", title="Disk", pinned=0)
     db.session("ws-tip", title="Disk", pinned=0, parent="ws")
+    db.session("ws-tip2", title="Disk", pinned=0, parent="ws-tip")  # continued twice
     now = time.time()
-    for sid in ("w", "ws", "ws-tip"):
+    for sid in ("w", "ws", "ws-tip", "ws-tip2"):
         db.message("user", f"from {sid}", sid=sid, at=now - 60)
     assert [row["content"] for row in hermes.recent_messages(tmp_path, exclude_chat=SID, since=0)] == ["from w"]
     assert [row["chat_id"] for row in hermes.chat_activity(tmp_path, exclude_chat=SID, since=0)] == ["w"]

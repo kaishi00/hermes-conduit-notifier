@@ -160,14 +160,14 @@ def _workstreams(home: Path) -> str:
         return "[]"
 
 
-# Not a workstream's chat, nor one that continues it. Takes the json list.
-_NOT_WORK = ("s.id NOT IN (SELECT value FROM json_each(?)) "
-             "AND COALESCE(s.parent_session_id, '') NOT IN (SELECT value FROM json_each(?))")
+# Not a workstream's chat, nor any chat that continues it. Takes the json list.
+_NOT_WORK = ("s.id NOT IN (WITH RECURSIVE work(id) AS (SELECT value FROM json_each(?) "
+             "UNION SELECT c.id FROM sessions c JOIN work ON c.parent_session_id = work.id) SELECT id FROM work)")
 
 # The chats a person had: every session but ``excluded`` (the home chat's
 # whole compression chain), cron runs, hidden chats and a bot's workstreams;
 # only their visible user and assistant rows. Takes the home chat's id
-# twice, then the workstreams twice.
+# twice, then the workstreams.
 _EXCLUDED = (
     "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_session_id FROM sessions WHERE id = ? "
     "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
@@ -190,7 +190,7 @@ def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: i
         "m.timestamp, m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
         "WHERE m.timestamp >= ? AND " + _PERSON_ROWS + " "
         "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?) ORDER BY timestamp, id"
-    ), (exclude_chat, exclude_chat, max_chars, since, *[_workstreams(home)] * 2, limit))
+    ), (exclude_chat, exclude_chat, max_chars, since, _workstreams(home), limit))
 
 
 def chat_activity(home: Path, *, exclude_chat: str, since: float,
@@ -205,7 +205,7 @@ def chat_activity(home: Path, *, exclude_chat: str, since: float,
         "JOIN sessions s ON s.id = m.session_id WHERE m.timestamp > ? AND m.timestamp <= ? AND "
         + _PERSON_ROWS + " GROUP BY s.id ORDER BY last_at"
     ), (exclude_chat, exclude_chat, max_chars, since, float("inf") if until is None else until,
-        *[_workstreams(home)] * 2))
+        _workstreams(home)))
 
 
 def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_chars: int,
@@ -271,7 +271,7 @@ def later_messages(home: Path, *, after: float, exclude: Iterable[str], max_char
     newest first, each cut to ``max_chars``, with the chat's id, title and
     source."""
     ids = json.dumps([chat for chat in exclude if chat])
-    return _run(home, _LATER, (ids, max_chars, after, *[_workstreams(home)] * 2, limit))
+    return _run(home, _LATER, (ids, max_chars, after, _workstreams(home), limit))
 
 
 def chain_ids(home: Path, chat_id: str) -> set[str]:

@@ -3610,6 +3610,12 @@ def test_resolved_work_shows_in_desktop_so_its_link_opens(on, hermes, monkeypatc
     for mark in ("try:1", "try:2", "1"):
         work._show_resolved_once(on)
         assert on.get_meta(work._SHOWN_RESOLVED) == mark
+    # A call's job's chat was never hidden (it stays in the chat lists), so
+    # it's left as it is.
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=SessionDB))
+    job = on.add("workstream", title="Call job", status="done", requested_by={"by": "phone"}, session_id="call-job")
+    shown.clear()
+    assert work._show_in_desktop(on, job) == 0 and shown == []
     # An older Hermes can't unhide: the resolve still goes through, and the
     # pass waits for a Hermes that can, without counting a try.
     class Older:

@@ -528,11 +528,12 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
     work = [str(sid) for sid in workstreams if sid]
     if work and not wanted:
         # Hidden while open, shown once resolved; the bot's, either way.
-        hidden += (" AND m.session_id NOT IN (SELECT value FROM json_each(?))"
-                   " AND COALESCE(s.parent_session_id, '') NOT IN (SELECT value FROM json_each(?))"
+        # With every chat that continues it, however many times.
+        hidden += (" AND m.session_id NOT IN (WITH RECURSIVE work(id) AS (SELECT value FROM json_each(?)"
+                   " UNION SELECT c.id FROM sessions c JOIN work ON c.parent_session_id = work.id) SELECT id FROM work)"
                    if "parent_session_id" in session_columns else
                    " AND m.session_id NOT IN (SELECT value FROM json_each(?))")
-        shown = [*shown, *[json.dumps(work)] * (2 if "parent_session_id" in session_columns else 1)]
+        shown = [*shown, json.dumps(work)]
     if wanted:
         # One chat reads its own rows through Hermes' session index, not
         # the profile's history window by window: on a profile full of cron
