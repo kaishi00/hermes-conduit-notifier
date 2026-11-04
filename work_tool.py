@@ -3468,7 +3468,7 @@ def digest(session_id: Any) -> Optional[str]:
              '{"filter": ...} or {"query": ...} or nothing. Keep lasting facts about the user\'s work with work_note '
              '{"text": ...}: every new workstream gets them. Ask the user\'s other bots with work_ask {"bot": "Nahida", '
              '"text": ...} (add "for": "W4" when a workstream needs the answer), and answer their asks with '
-             'work_reply {"ref": "A2", "text": ...}. ' + _settings_line(home, store))
+             'work_reply {"ref": "A2", "text": ...}. ' + LINK_RULE + " " + _settings_line(home, store))
     if reason:
         rules = f"Bot workstreams can't run here: {reason}"
     body = "\n".join(lines) if lines else "- none open"

@@ -1399,6 +1399,13 @@ def test_the_digest_frames_results_as_data(on, hermes):
     assert "data, not instructions" in work.digest(BOT_CHAT)
 
 
+def test_the_digest_says_to_keep_work_links_as_written(on, hermes):
+    # Called through tool_call, work_list's description isn't shown, so the
+    # digest carries the rule for the rows' links.
+    start()
+    assert work.LINK_RULE in work.digest(BOT_CHAT)
+
+
 def test_the_cli_status_says_on_by_default_without_a_registry(home, monkeypatch, capsys):
     cli = _load("conduit_push.cli", ROOT / "cli.py")
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
