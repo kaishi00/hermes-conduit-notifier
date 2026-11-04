@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.130.2 (2026-11-04)
+
+### Fixes
+- A Bot Chat handed its memory provider's tools, such as Hindsight's
+  retain and recall, to a workstream. It now calls them itself, as it does
+  Hermes' own memory.
+
 ## 0.130.1 (2026-11-04)
 
 ### Fixes

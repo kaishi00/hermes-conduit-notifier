@@ -739,6 +739,41 @@ def test_lookups_hands_a_place_rule_to_a_workstream(on, hermes):
     assert work.tool_block(OTHER_CHAT, "conduit_location", {"action": "set_rule"}) is None  # other chats as before
 
 
+def test_the_memory_providers_tools_are_the_coordinators_own(on, home, hermes, monkeypatch):
+    # Eric's .52 (2026-11-04): Furina handed a hindsight_retain to a workstream. A memory
+    # provider's tools are the bot's memory, as memory is, under either setting.
+    import yaml
+
+    def config(provider):
+        (on.home / "config.yaml").write_text(yaml.safe_dump({"memory": {"provider": provider}}))
+        work._memory_tool_cache.clear()
+
+    effective = types.SimpleNamespace(load_user_config_effective=lambda path: yaml.safe_load(path.read_text()))
+    monkeypatch.setitem(sys.modules, "hermes_cli.config_effective", effective)
+    config("hindsight")
+    for policy in ("strict", "lookups"):
+        on.set_policy(policy)
+        for tool in ("hindsight_retain", "hindsight_recall"):
+            assert work.tool_block(BOT_CHAT, tool, {}) is None
+        assert work.tool_block(BOT_CHAT, "tool_call", {"name": "hindsight_retain", "arguments": {}}) is None
+        assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"
+    assert "hindsight memory tools" in work.digest(BOT_CHAT)
+    # A provider whose tools don't carry its name, by the tools it declares.
+    provider = types.SimpleNamespace(get_tool_schemas=lambda: [{"name": "brv_query"}, {"function": {"name": "brv_curate"}}])
+    loader = types.SimpleNamespace(load_memory_provider=lambda name, register_skills=False:
+                                   provider if name == "byterover" else None)
+    monkeypatch.setitem(sys.modules, "plugins", types.ModuleType("plugins"))
+    monkeypatch.setitem(sys.modules, "plugins.memory", loader)
+    config("byterover")
+    assert work.tool_block(BOT_CHAT, "brv_curate", {}) is None
+    assert "brv_curate, brv_query" in work.digest(BOT_CHAT)
+    # No provider, or the built-in store: nothing beyond memory.
+    for none in ("", "builtin"):
+        config(none)
+        assert work.tool_block(BOT_CHAT, "hindsight_retain", {})["action"] == "block"
+        assert "memory tools" not in work.digest(BOT_CHAT)
+
+
 def test_a_policy_this_version_doesnt_know_holds_the_bot_chat_to_strict(on):
     on.set_meta("policy", "newer")
     assert on.policy() == "strict"
