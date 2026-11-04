@@ -540,42 +540,20 @@ def _clean_voice(voice: Any) -> Optional[str]:
 # calls for users with a long memory ("briefing is too long",
 # kaishi00/hermes-conduit#1077); Conduit 2.2.0 build 219 doesn't trim it.
 GPT_LIVE_MAX_BRIEFING_CHARS = 64 * 1024
-# Last, so a chatty persona doesn't talk the model into an opening greeting.
+# Last, so a chatty persona doesn't talk the model into an opening greeting
+# (a call that should open with one gets Conduit's own turn instead).
 GPT_LIVE_WAIT_FOR_USER = (
     "Opening policy: do not speak first. When the call starts, stay silent until the user "
     "speaks, then answer what they said. This applies whatever the persona above says."
 )
 GPT_LIVE_MAX_GREETING_CHARS = 200
-# A call Hermes placed: the user answered and is waiting to hear why it rang
-# (kaishi00/hermes-conduit#544). Conduit's briefing says what to open with.
-GPT_LIVE_CALL_OPENING = (
-    "Opening policy: speak first. You placed this call and the user just answered, so as soon "
-    "as it starts, tell them why you called, as the part about this call above says, without "
-    "waiting for them to speak. Then wait for them. This applies whatever the persona above says."
-)
-# The same call without Conduit's briefing (a Watch call whose briefing couldn't be
-# read): nothing says why it rang, so the model mustn't guess a reason.
-GPT_LIVE_CALL_OPENING_UNBRIEFED = (
-    "Opening policy: speak first. You placed this call and the user just answered, so as soon "
-    "as it starts, say in one short sentence that it's you calling, without guessing why. Then "
-    "wait for them. This applies whatever the persona above says."
-)
-
-
-def _greet_first(greeting: str) -> str:
-    """The opening policy for a user who asked to be greeted when a call connects."""
-    say = f' Say: "{greeting}"' if greeting else ""
-    return ("Opening policy: speak first. As soon as the call starts, greet the user in one short "
-            f"sentence so they know you're there and listening.{say} Then wait for them. "
-            "This applies whatever the persona above says.")
 
 
 def _clean_greeting(greeting: Any) -> Optional[str]:
     """None keeps the call silent until the user speaks; text (or "" for a default
-    greeting) makes the model greet first. Kept to one printable line without
-    double quotes so it reads as the line to say. It is the user's own setting
-    for their own call, not untrusted input: nothing here stops it from reading
-    as an instruction."""
+    greeting) says Conduit will open the call with its own greeting turn. Still
+    checked as before (one printable line, no double quotes), so an older
+    Conduit's request is held to the same rules."""
     if greeting is None:
         return None
     if not isinstance(greeting, str):
@@ -590,8 +568,8 @@ def _clean_greeting(greeting: Any) -> Optional[str]:
 
 
 def _clean_call_opening(call_opening: Any) -> bool:
-    """True when Conduit opens a call Hermes placed: the model speaks first with
-    the briefing's opening instead of a greeting or staying silent."""
+    """True when Conduit opens a call Hermes placed with its own turn saying why
+    it rang, instead of a greeting or staying silent."""
     if call_opening is None:
         return False
     if not isinstance(call_opening, bool):
@@ -629,8 +607,8 @@ def _built_voice(config: Any) -> Optional[str]:
 
 
 def _built_has_instructions(config: Any, text: Optional[str]) -> bool:
-    """True only when Hermes' config really carries the text (the briefing or the
-    opening policy), so Conduit never drops it unsent."""
+    """True only when Hermes' config really carries the text (the briefing), so
+    Conduit never drops it unsent."""
     if not text:
         return False
     instructions = _built_session(config).get("instructions")
@@ -667,17 +645,19 @@ def create_gpt_live_session(
         # sent as context appends after the call starts, it answers each chunk out loud.
         extra = str(live.get("instructions") or "").strip()
         live["instructions"] = f"{extra}\n\n{briefing}" if extra else briefing
-    if call_opening:
-        opening = GPT_LIVE_CALL_OPENING if briefing else GPT_LIVE_CALL_OPENING_UNBRIEFED
-    else:
-        opening = GPT_LIVE_WAIT_FOR_USER if greeting is None else _greet_first(greeting)
-    # Conduit sends its own opening turn when the model won't speak first.
-    speaks_first = call_opening or greeting is not None
-    extra = str(live.get("instructions") or "").strip()
-    live["instructions"] = f"{extra}\n\n{opening}" if extra else opening
+    # A call that opens with the model talking (a greeting, or a call Hermes
+    # placed) opens with a speakable turn Conduit sends: gpt-live-1-codex doesn't
+    # speak first from its instructions, however they're worded. It stays silent
+    # until the session idles out, and response.create is refused in client
+    # delegation (checked 2026-11-04, notifier #541). So the instructions never
+    # ask it to, and greeting_applied is always False, which every Conduit
+    # answers with that turn. The only opening policy left is the silent one.
+    if not call_opening and greeting is None:
+        extra = str(live.get("instructions") or "").strip()
+        live["instructions"] = f"{extra}\n\n{GPT_LIVE_WAIT_FOR_USER}" if extra else GPT_LIVE_WAIT_FOR_USER
     if billing == "api":
         return _api_gpt_live_session(sdp, history, live, limiter_key, post or _post_sdp,
-                                     briefing_applied=bool(briefing), greeting_applied=speaks_first)
+                                     briefing_applied=bool(briefing), greeting_applied=False)
     # Echoed back so Conduit can tell a host that applied the chosen voice from one that ignored it.
     applied_voice = _gpt_live_model_voice(live)[1]
     upstream = _upstream_voice_live()
@@ -702,10 +682,10 @@ def create_gpt_live_session(
         return {"auth": "subscription", "session": {"id": session["id"]},
                 "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes",
                 "voice": applied_voice, "briefing_applied": _built_has_instructions(config, briefing),
-                "greeting_applied": speaks_first and _built_has_instructions(config, opening)}
+                "greeting_applied": False}
     config = gpt_live_session_config(history, live)
     return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice,
-            "briefing_applied": bool(briefing), "greeting_applied": speaks_first}
+            "briefing_applied": bool(briefing), "greeting_applied": False}
 
 
 @router.get("/gpt-live/status")

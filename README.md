@@ -826,7 +826,7 @@ API key. First sign in on the Hermes host with `hermes auth` and choose OpenAI C
 | POST | `/api/plugins/conduit_push/gpt-live/session` | `{ok, auth, session: {id}, transport: {type, sdp}, source, voice, briefing_applied, greeting_applied}` (plus `model` on the API path) |
 
 The session route takes `{"sdp": "<WebRTC offer>", "history": [...], "voice": "cove", "briefing": "..."}` (history
-optional, last 40 items kept; voice optional and, when given, used instead of `subscription_voice`; briefing optional, up to 65,536 characters (32,768 before 0.52.1), and added to the session instructions so the model has Conduit's rules before it speaks; greeting optional: absent, the model stays silent until the user speaks; `""` or text, it greets the user first, saying the text when given, up to 200 characters; call_opening optional (0.17.1+): `true` for a call Hermes placed, so the model speaks first with the opening Conduit's briefing gives (without a briefing it only says it's calling, never guessing why) and any greeting is ignored; `greeting_applied` is then true too, as it means the model was told to speak first) and returns the SDP answer plus the `voice` it used. The plugin posts the
+optional, last 40 items kept; voice optional and, when given, used instead of `subscription_voice`; briefing optional, up to 65,536 characters (32,768 before 0.52.1), and added to the session instructions so the model has Conduit's rules before it speaks; greeting optional: absent, the model is told to stay silent until the user speaks; `""` or text (up to 200 characters), Conduit opens the call with its own greeting turn; call_opening optional (0.17.1+): `true` for a call Hermes placed, which Conduit opens with its own turn saying why it rang. `greeting_applied` is always false since 0.130.4: the model no longer speaks first from its instructions (it stays silent until the session idles out), so Conduit's speakable turn is every call's opening) and returns the SDP answer plus the `voice` it used. The plugin posts the
 offer to the Codex voice service with the host's Codex OAuth token and ChatGPT
 account id; neither is ever returned to Conduit or logged (a failure in Hermes' own exchange logs only its exception type). Status only checks that a
 sign-in exists; the account's voice entitlement is checked when a call starts.
@@ -911,7 +911,7 @@ services behind `base_url` (Azure Foundry, say) are untested and may expect a
 different auth header.
 
 OpenAI's answer doesn't echo the session, so on the API path
-`briefing_applied`, `greeting_applied` and `voice` say what the plugin sent,
+`briefing_applied` and `voice` say what the plugin sent,
 not what OpenAI confirmed. A 401 from OpenAI is reported as a rejected key and
 a 429 is passed on as a 429; neither carries OpenAI's response body. The status route reports the API path under its own key, leaving
 the top-level fields the subscription's:
