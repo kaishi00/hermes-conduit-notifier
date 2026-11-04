@@ -2402,9 +2402,15 @@ in the exchange (0.45.1+), so a phone that draws the cards leaves it out.
   the tool, and the card shows in the chat only. A turn that isn't from
   Conduit (Desktop, or a messaging app through Hermes' gateway) is refused
   with `not_conduit`, and from 0.128 the answer's `markdown` is the cards'
-  text for Hermes to put in its reply. A group room's turn gets the same
-  answer with `group_room`, since rooms show messages only; other people's agents read
-  it, so contact cards (numbers, a drafted text) are left out of it. A classic `hermes` terminal turn can't be told apart
+  text for Hermes to put in its reply. In a group room this host runs, with
+  every Conduit saying `room-boards` (0.129+), the board is kept for Conduit
+  to draw under the agent's next message in the room (`GET
+  /boards/rooms?room_id=<id>`, a room's boards with the profile that showed
+  each and when), and the answer says the room's other agents read only the
+  message. Any other room's turn gets the board as text, with
+  `group_room`. Either way a room gets no follow-ups (a tap would speak for
+  the user to the whole room), and other people's agents may read it, so
+  contact cards (numbers, a drafted text) are left out. A classic `hermes` terminal turn can't be told apart
   yet (Hermes doesn't bind its platform for tools), so it isn't refused.
 - **Live calls.** A saved call's assistant turn can carry `cards`
   (`POST /voice/sessions`): kept with a chat's call and returned by

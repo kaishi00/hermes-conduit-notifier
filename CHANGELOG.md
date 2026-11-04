@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.129.0 (2026-11-04)
+
+### New and improved
+- Boards in group rooms: cards an agent shows in a room on your Hermes
+  appear under its message there, instead of as text.
+
 ## 0.128.0 (2026-11-04)
 
 ### New and improved

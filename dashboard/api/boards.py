@@ -96,3 +96,38 @@ async def post_board_checklists(request: Request, response: Response,
         raise
     except Exception as exc:
         raise core._unexpected("board-checklists", exc, feature="Checklist ticks")
+
+
+# --- Boards in group rooms -------------------------------------------------------
+#
+# A board an agent showed in a room this host runs (room_boards, kept in the
+# root home for every profile's agents): Conduit reads a room's boards and
+# draws each under the next message its agent posts there.
+
+_room_boards_limiter = core._MintLimiter(240, 60.0, message="Too many room board reads; try again shortly")
+
+
+def read_room_boards(room_id: Optional[str]) -> Dict[str, Any]:
+    module = core._plugin_package_module("room_boards")
+    root = core._plugin_package_module("room_identity").root_home(core._calls_home())
+    try:
+        return {"boards": module.RoomBoards(root).room(room_id)}
+    except ValueError as exc:
+        raise core.TokenError(400, str(exc))
+
+
+@router.get("/boards/rooms")
+async def get_room_boards(request: Request, response: Response, profile: Optional[str] = None,
+                          room_id: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    try:
+        return await core._run_scoped(profile, core._limited(_room_boards_limiter, profile,
+                                                             lambda: read_room_boards(room_id)))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+    except Exception as exc:
+        raise core._unexpected("room-boards", exc, feature="Boards in rooms")
