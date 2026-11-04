@@ -3584,6 +3584,24 @@ def test_resolved_work_shows_in_desktop_so_its_link_opens(on, hermes, monkeypatc
     monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=Broken))
     assert work.app_act(on.home, "W1", "reopen")["ok"]
     assert work.app_act(on.home, "W1", "resolve")["ok"]
+    # The one-time pass: a session that fails doesn't stop the others, and
+    # the pass isn't marked done, so the next sweep tries again.
+    failing = {on.get("W1").session_id}
+
+    class Partly(SessionDB):
+        def set_session_hidden(self, session_id, hidden):
+            if session_id in failing:
+                raise RuntimeError("locked")
+            super().set_session_hidden(session_id, hidden)
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=Partly))
+    on.set_meta(work._SHOWN_RESOLVED, "")
+    shown.clear()
+    work._show_resolved_once(on)
+    assert [sid for _, sid, _ in shown] == [on.get("W2").session_id] and not on.get_meta(work._SHOWN_RESOLVED)
+    failing.clear()
+    work._show_resolved_once(on)
+    assert on.get_meta(work._SHOWN_RESOLVED) == "1"
 
 
 def test_work_still_at_it_isnt_resolved(on, hermes):
