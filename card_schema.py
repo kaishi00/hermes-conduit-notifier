@@ -335,6 +335,7 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
             if option.get("recommended"):
                 if seen:
                     del option["recommended"]
+                    _note(notes, f'{path}.options "{option["name"]}".recommended: one option at most, left out')
                 seen = True
     elif kind == "media":
         if "source" not in card:

@@ -241,6 +241,10 @@ def test_older_kinds_say_what_their_rules_left_out():
     assert "cards[0].weather.days: a day's low is above its high, those were left out" in notes
     assert 'cards[1].people "Mei".email: not an email address, left out' in notes
     assert 'cards[1].people "Mei".message: a text needs their phone number, left out' in notes
+    both = {"type": "comparison", "options": [{"name": "A", "recommended": True}, {"name": "B", "recommended": True}]}
+    notes = []
+    card_schema.normalize_cards([both], notes)
+    assert 'cards[0].options "B".recommended: one option at most, left out' in notes
     assert card_schema.normalize_next(None) == [] and card_schema.normalize_next("Hi") == []
     assert card_schema.normalize_next(["a", "b", "c", "d", "e"]) == ["a", "b", "c", "d"]
 

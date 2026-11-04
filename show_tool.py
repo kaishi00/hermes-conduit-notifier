@@ -129,6 +129,7 @@ ROOM_CONTACTS_NOTE = ("cards: a contact card holds the user's own details and dr
                       "room: leave it out of your reply too")
 ROOM_PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Give the rest in your reply if it "
                       "matters, never the contact.")
+TEXT_LAYOUT_NOTE = "layout: these messages show no tabs, left out"
 TEXT_NEXT_NOTE = "next: these messages show no follow-ups, left out: offer them in your reply if they matter"
 
 
@@ -241,6 +242,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         # drafted for the user stay out of it.
         if follow_ups:
             problems.insert(0, TEXT_NEXT_NOTE)
+        if layout:
+            problems.insert(0, TEXT_LAYOUT_NOTE)
         if any(card["type"] == "contact" for card in cards):
             problems.insert(0, ROOM_CONTACTS_NOTE)
             cards = [card for card in cards if card["type"] != "contact"]
@@ -250,6 +253,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         # board's Markdown reads well in all of them.
         if follow_ups:
             problems.insert(0, TEXT_NEXT_NOTE)
+        if layout:
+            problems.insert(0, TEXT_LAYOUT_NOTE)
         return _as_text("not_conduit", NOT_CONDUIT_NOTE, cards, problems)
     store = _store()
     old_board = not store.has_feature_everywhere(card_schema.BOARD_FEATURE)
