@@ -3541,6 +3541,51 @@ def test_the_user_pins_resolves_and_reopens_work_without_a_turn(on, hermes):
     assert "W1" in note and "the user reopened it" in note
 
 
+def test_resolved_work_shows_in_desktop_so_its_link_opens(on, hermes, monkeypatch):
+    # Desktop opens a work link by id alone and can't find a finished hidden
+    # session's backend (Eric 2026-11-04), so resolving unhides it, by the
+    # user or by the bot; a store that can't do it never fails the resolve.
+    shown = []
+
+    class SessionDB:
+        def __init__(self, db_path):
+            self.path = db_path
+
+        def set_session_hidden(self, session_id, hidden):
+            shown.append((self.path, session_id, hidden))
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=SessionDB))
+    start()
+    start(title="Other", instructions="Something else.", new=True)
+    on.update("W1", status="done")
+    on.update("W2", status="done")
+    assert work.app_act(on.home, "W1", "resolve")["ok"]
+    assert shown == [(on.home / "state.db", on.get("W1").session_id, False)]
+    assert call("work_close", {"ref": "W2"})["ok"]
+    assert shown[-1] == (on.home / "state.db", on.get("W2").session_id, False)
+    # Work resolved before this plugin, shown once (the sweep already ran
+    # its pass, when nothing was resolved yet).
+    assert on.get_meta(work._SHOWN_RESOLVED) == "1"
+    on.set_meta(work._SHOWN_RESOLVED, "")
+    shown.clear()
+    work._show_resolved_once(on)
+    assert sorted(sid for _, sid, _ in shown) == sorted([on.get("W1").session_id, on.get("W2").session_id])
+    shown.clear()
+    work._show_resolved_once(on)
+    assert shown == []
+
+    class Broken(SessionDB):
+        def set_session_hidden(self, session_id, hidden):
+            raise RuntimeError("locked")
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=Broken))
+    assert work.app_act(on.home, "W1", "reopen")["ok"]
+    assert work.app_act(on.home, "W1", "resolve")["ok"]
+
+
 def test_work_still_at_it_isnt_resolved(on, hermes):
     start()
     row, = work.app_list(on.home)["work"]

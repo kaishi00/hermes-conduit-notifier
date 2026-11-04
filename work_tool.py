@@ -614,6 +614,7 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
             return {"ok": False, "ref": work.ref, "error": "reopened",
                     "note": f"The user reopened {work.ref}, so it stays open until they resolve it or it runs again."}
         store.update(work.ref, closed_at=time.time(), resolved_by="bot")
+        _show_in_desktop(store, work)
         closed = {"ok": True, "ref": work.ref, "title": work.title,
                   "note": f"Closed {work.ref}: {work.title}. It's in the user's Resolved list now."}
         left = _tidy_worktree(store, work.ref)
@@ -1885,7 +1886,8 @@ def _sweep_once(home: Path, store: work_store.Store, broker: Optional[work_broke
     if stopped:
         logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
     for step, run in (("recovering", lambda: _recover(home, store, broker, stopped)),
-                      ("replaying the outbox", lambda: _replay(home, store, broker))):
+                      ("replaying the outbox", lambda: _replay(home, store, broker)),
+                      ("showing resolved work in Desktop", lambda: _show_resolved_once(store))):
         try:
             run()
         except Exception:  # noqa: BLE001 — the digest still shows the work as it is
@@ -1951,6 +1953,43 @@ def _worktree_back(store: work_store.Store, ref: str) -> None:
     tree = _worktree_of(store, ref)
     if tree and not work_trees.restore(tree):
         logger.warning("conduit_push: a workstream's worktree is gone and couldn't be made again")
+
+
+def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> None:
+    """On resolve: the workstream's session stops being hidden. Hermes
+    Desktop opens a work link's ``@session:`` chip by id alone, and finds
+    which backend holds a session from its list or from the live session, so
+    a finished hidden one couldn't be opened (Eric 2026-11-04: "Session owner
+    could not be resolved"). Conduit keeps it out of its own lists as a
+    workstream. Never raises."""
+    ids = [work.session_id for work in works if work.kind == "workstream" and work.session_id]
+    if not ids:
+        return
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=store.home / "state.db")
+        try:
+            setter = getattr(db, "set_session_hidden", None)
+            if callable(setter):
+                for session_id in ids:
+                    setter(session_id, False)
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - resolving must never fail for this
+        logger.debug("conduit_push: couldn't unhide resolved workstreams' sessions", exc_info=True)
+
+
+# Meta key: work resolved before 0.129.2 has been shown in Desktop once.
+_SHOWN_RESOLVED = "desktop:resolved_shown"
+
+
+def _show_resolved_once(store: work_store.Store) -> None:
+    """Work resolved before resolving unhid it, shown in Desktop once."""
+    if store.get_meta(_SHOWN_RESOLVED):
+        return
+    _show_in_desktop(store, *[work for work in store.list(include_closed=True, limit=-1) if work.closed_at])
+    store.set_meta(_SHOWN_RESOLVED, "1")
 
 
 def _tidy_worktree(store: work_store.Store, ref: str) -> dict:
@@ -3279,6 +3318,7 @@ def _app_manage_act(store: work_store.Store, ref: str, action: str) -> dict:
                 if action == "resolve" else f"{work.ref} changed meanwhile. Try again."}
     if action == "resolve" and done.kind == "workstream":
         _tidy_worktree(store, done.ref)  # removed only when it holds nothing
+        _show_in_desktop(store, done)
     return {"ok": True, "ref": work.ref, "status": done.status, "work": _app_row(store, done)}
 
 
