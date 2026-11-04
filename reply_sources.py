@@ -193,6 +193,17 @@ def turn_source(platform: Any, transport: Any = None) -> str | None:
     return "messaging" if _is_messaging(name) else None
 
 
+def is_desktop_app(transport: Any) -> bool:
+    """Whether the turn's socket is Hermes Desktop's own (an Electron
+    browser engine), not the web dashboard in a browser, which turn_source
+    also counts as "desktop"."""
+    if not _is_app_socket(transport):
+        return False
+    headers = _headers(transport) or {}
+    agent = str(headers.get("user-agent") or "")
+    return agent.startswith("Mozilla/") and "Electron/" in agent
+
+
 def _is_app_socket(transport: Any) -> bool:
     """Hermes' WSTransport: an instance of the gateway's class when it is
     loaded, or a class of that name (a socket opened before a reload)."""

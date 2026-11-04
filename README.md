@@ -2402,7 +2402,8 @@ in the exchange (0.45.1+), so a phone that draws the cards leaves it out.
   the tool, and the card shows in the chat only. A turn that isn't from
   Conduit (Desktop, or a messaging app through Hermes' gateway) is refused
   with `not_conduit`, and from 0.128 the answer's `markdown` is the cards'
-  text for Hermes to put in its reply. In a group room this host runs, with
+  text for Hermes to put in its reply. Hermes Desktop with the plugin's
+  Desktop half turned on (0.130+, below) draws the board instead. In a group room this host runs, with
   every Conduit saying `room-boards` (0.129+), the board is kept for Conduit
   to draw under the agent's next message in the room (`GET
   /boards/rooms?room_id=<id>`, a room's boards with the profile that showed
@@ -2432,7 +2433,7 @@ keep only that field.
 - **Only where they're drawn.** A Conduit says `info-cards` in its
   exchange's `features` when it draws them. Unless every Conduit that
   draws cards (`show-cards` or `chat-cards`) and exchanged with the profile
-  in the last 30 days says it, the tool leaves them out (`unsupported_cards`
+  in the last 3 days says it (30 days before plugin 0.130), the tool leaves them out (`unsupported_cards`
   when nothing else is left): the chat keeps the cards, and an older build
   opening it would show them as nothing. Each phone's exchange
   also leaves out the cards it can't draw and shows the Markdown instead.
@@ -2507,6 +2508,39 @@ the schema's `board` section.
   the new kinds out, keeps the first four cards, drops `layout` and `next`,
   and tells Hermes to give the rest in its reply; a call screen's phone
   without it gets four cards and the Markdown.
+
+### Boards in Hermes Desktop (plugin 0.130+)
+
+Hermes Desktop lets a plugin draw only where the model writes a
+`::name{…}` line in its reply, not in a tool's result, so the plugin ships a
+Desktop half, `desktop/plugin.js`, that claims `::conduit-board{id="…"}`.
+Desktop copies it from the plugin's folder and lists it in Capabilities ›
+Plugins as "Conduit boards", off until you turn it on there.
+
+- **The half says it's there.** While it's loaded it posts
+  `POST /boards/desktop/seen` (at load and every ten minutes, and
+  `{"gone": true}` when it's turned off); the plugin counts it as loaded for
+  half an hour after the last one, so a Desktop that quit stops counting
+  within that, in the root home's
+  `conduit-desktop/half.json`, for every profile (the boards are in
+  `boards.json` beside it).
+- **The line.** In a chat sent from Hermes Desktop itself (not the web
+  dashboard in a browser, which draws no line) with the half loaded,
+  `conduit_show` keeps
+  the board (500 at most, forgotten after 30 days) and answers with
+  `directive`, the line for Hermes to write where the board goes, and the
+  cards as usual, so Conduit draws them when it opens the chat (and hides the
+  line). Hermes also hears the one-line drawing rule on a Desktop turn then.
+  Without the half, the board goes in the reply as Markdown, as before.
+  `conduit_show` is offered only while a Conduit paired with this host has
+  been in touch lately, so boards in Desktop need the Conduit app too.
+- **Drawing.** The half reads the board with `GET /boards/desktop?id=<id>`
+  and draws stats, charts, comparisons, steps, status, tables (sortable),
+  timelines, checklists, lists, progress and callouts as cards, tabs when the
+  board has them, and its follow-ups as buttons that send to that chat;
+  maps, places, weather, media and contacts show as their own Markdown.
+  Checklist ticks go through `/boards/checklists`, the same ticks Conduit
+  shows. A board that's gone says so.
 
 ## Health data from Conduit (plugin 0.23+)
 

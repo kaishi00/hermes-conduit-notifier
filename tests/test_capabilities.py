@@ -157,6 +157,7 @@ def test_every_capability_names_a_served_route_family():
         "work-call-ended": "/workstreams/call-ended",
         "board-checklists": "/boards/checklists",
         "room-boards": "/boards/rooms",
+        "desktop-boards": "/boards/desktop",
     }
     assert set(prefixes) == set(api.capabilities.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

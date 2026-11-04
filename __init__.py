@@ -143,6 +143,7 @@ def register(ctx: Any) -> None:
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
     show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn, room_board=_save_room_board,
+                       desktop_board=_save_desktop_board,
                        skill_path=Path(__file__).resolve().parent / "skills" / show_tool.SKILL_NAME / "SKILL.md")
     # Hermes writes the title and body of the push its turn sends when it
     # ends, for a result the user asked to be told about (#1415).
@@ -380,6 +381,25 @@ def _save_room_board(session_id: Any, board: dict) -> bool:
     except Exception:  # noqa: BLE001 — the board goes in the reply as text instead
         room_rules.warn_often("room board", "conduit_push: couldn't keep a room's board; it goes in the reply as text")
         return False
+
+
+def _save_desktop_board(board: dict) -> str | None:
+    """Keeps a board shown in a Hermes Desktop chat for the plugin's Desktop
+    half to draw (room_boards.DesktopBoards); its id, or None where no half
+    said it was loaded lately."""
+    try:
+        from . import room_boards, room_identity
+        store = room_boards.DesktopBoards(room_identity.root_home(get_hermes_home()))
+        return store.add(board) if store.half_live() else None
+    except Exception:  # noqa: BLE001 — the board goes in the reply as text instead
+        room_rules.warn_often("desktop board", "conduit_push: couldn't keep a Desktop board; it goes in the reply as "
+                              "text")
+        return None
+
+
+def _desktop_half_live() -> bool:
+    from . import room_boards, room_identity
+    return room_boards.DesktopBoards(room_identity.root_home(get_hermes_home())).half_live()
 
 
 def _is_room_turn(session_id: Any) -> bool:
@@ -1103,7 +1123,8 @@ def _checklist_note(session_id: str) -> str | None:
 
 def _board_rule(platform: Any) -> str | None:
     try:
-        return show_tool.board_rule(reply_sources.turn_source(platform, reply_sources.current_transport()))
+        return show_tool.board_rule(reply_sources.turn_source(platform, reply_sources.current_transport()),
+                                    desktop_half=_desktop_half_live)
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.debug("conduit_push: board rule failed", exc_info=True)
         return None

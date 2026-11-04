@@ -1990,7 +1990,7 @@ def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> Option
     return len(ids) - unhidden
 
 
-# Meta key: work resolved before 0.129.2 has been shown in Desktop once ("1"),
+# Meta key: work resolved before 0.130.1 has been shown in Desktop once ("1"),
 # or how many passes left some out.
 _SHOWN_RESOLVED = "desktop:resolved_shown"
 # Passes a session Hermes keeps refusing gets before it's left hidden, so

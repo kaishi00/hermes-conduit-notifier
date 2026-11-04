@@ -1,5 +1,5 @@
-"""Boards: the ticks on conduit_show's checklist cards, and the boards agents
-showed in group rooms, kept on the host."""
+"""Boards: the ticks on conduit_show's checklist cards, the boards agents
+showed in group rooms, and the boards Hermes Desktop draws, kept on the host."""
 
 from __future__ import annotations
 
@@ -132,3 +132,73 @@ async def get_room_boards(request: Request, response: Response, profile: Optiona
         raise
     except Exception as exc:
         raise core._unexpected("room-boards", exc, feature="Boards in rooms")
+
+
+# --- Boards in Hermes Desktop ----------------------------------------------------
+#
+# A board shown in a Desktop chat (room_boards.DesktopBoards, in the root home,
+# since Desktop's half is one for every profile): the half draws it where the
+# agent's reply writes ::conduit-board{id="cb-…"}, and says it's loaded, so the
+# agent is asked for that line only where it will be drawn.
+
+_desktop_boards_limiter = core._MintLimiter(240, 60.0, message="Too many board reads; try again shortly")
+
+
+def _desktop_boards() -> Any:
+    module = core._plugin_package_module("room_boards")
+    root = core._plugin_package_module("room_identity").root_home(core._calls_home())
+    return module.DesktopBoards(root)
+
+
+def read_desktop_board(board_id: Optional[str]) -> Dict[str, Any]:
+    try:
+        board = _desktop_boards().get(board_id)
+    except ValueError as exc:
+        raise core.TokenError(400, str(exc))
+    if board is None:
+        raise core.TokenError(404, "That board is gone")
+    return {"board": board}
+
+
+def note_desktop_half(body: Any = None) -> Dict[str, Any]:
+    gone = isinstance(body, dict) and body.get("gone") is True
+    try:
+        _desktop_boards().saw_half(gone=gone)
+    except OSError:
+        raise core.TokenError(503, "The plugin couldn't note Desktop's half right now")
+    return {"ok": True}
+
+
+@router.get("/boards/desktop")
+async def get_desktop_board(request: Request, response: Response, profile: Optional[str] = None,
+                            id: Optional[str] = None) -> Dict[str, Any]:  # noqa: A002 — the query's name
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    try:
+        return await core._run_scoped(profile, core._limited(_desktop_boards_limiter, profile,
+                                                             lambda: read_desktop_board(id)))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+    except Exception as exc:
+        raise core._unexpected("desktop-boards", exc, feature="Boards in Hermes Desktop")
+
+
+@router.post("/boards/desktop/seen")
+async def post_desktop_half_seen(request: Request, response: Response,
+                                 profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, 1024)
+    try:
+        return await core._run_scoped(profile, core._limited(_desktop_boards_limiter, profile,
+                                                             lambda: note_desktop_half(body)))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+    except Exception as exc:
+        raise core._unexpected("desktop-boards", exc, feature="Boards in Hermes Desktop")
