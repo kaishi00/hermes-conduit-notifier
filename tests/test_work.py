@@ -1399,11 +1399,12 @@ def test_the_digest_frames_results_as_data(on, hermes):
     assert "data, not instructions" in work.digest(BOT_CHAT)
 
 
-def test_the_digest_says_to_keep_work_links_as_written(on, hermes):
+def test_the_digest_and_work_starts_note_say_to_keep_work_links_as_written(on, hermes):
     # Called through tool_call, work_list's description isn't shown, so the
     # digest carries the rule for the rows' links.
-    start()
+    started = start()
     assert work.LINK_RULE in work.digest(BOT_CHAT)
+    assert started["link"] and work.LINK_RULE in started["note"]
 
 
 def test_the_cli_status_says_on_by_default_without_a_registry(home, monkeypatch, capsys):

@@ -945,7 +945,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         store.update(work.ref, status="stopped")
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped", "link": link,
                 "note": f"{work.ref} was stopped while it was being started, so it hasn't begun its work. "
-                        "work_send continues it."}
+                        "work_send continues it. " + LINK_RULE}
     started_note = {"ok": True, "ref": work.ref, "title": work.title, "status": status, "link": link,
                     "note": f"Started {work.ref}: {work.title}. It works in the background; its result comes back "
                             "to you as a work update. Don't wait for it. " + LINK_RULE}
