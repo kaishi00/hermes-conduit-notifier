@@ -58,8 +58,8 @@ router = core.router
 # "voice"?, "briefing"?, "greeting"?, "call_opening"?, "history"?, "resume_session_id"?}
 # and {"type": "end"}. Host to Watch: "started" (engine, model, voice,
 # input_rate, output_rate; for GPT-Live also briefing_applied and
-# greeting_applied: true whenever the model was told to speak first, for a
-# greeting or call_opening; for Local Live session_id, the call's chat, and
+# greeting_applied: always false now, so the Watch opens a greeting or a call
+# from Hermes with its own turn (notifier #541); for Local Live session_id, the call's chat, and
 # resumed), "ended" (reason) and
 # "error" (code, message). The Watch waits for "started" before it sends
 # audio or events. It owns the conversation, as the phone does: it speaks each

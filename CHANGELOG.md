@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.130.4 (2026-11-04)
+
+### Fixes
+- A GPT-Live call that should open with a greeting, or a call from Hermes,
+  stayed silent for a few seconds before the model spoke: OpenAI's model no
+  longer speaks first when told to. Conduit now opens these calls itself, so
+  the greeting comes within a second, on the iPhone and on the Apple Watch.
+
 ## 0.130.3 (2026-11-04)
 
 ### Fixes

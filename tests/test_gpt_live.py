@@ -155,47 +155,28 @@ def test_session_briefing_joins_the_instructions_instead_of_context_appends(clie
     assert openai.calls[0][2]["session"]["instructions"].endswith("Speak French.\n\n[Conduit rules]\n\n" + api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
 
 
-def test_session_greets_first_only_when_conduit_asks(client, hermes, openai):
+def test_session_never_asks_the_model_to_speak_first(client, hermes, openai):
+    """gpt-live-1-codex stays silent when told to speak first (notifier #541):
+    a greeting or a call from Hermes leaves the opening to Conduit's own turn."""
     hermes.config = {"voice": {"gpt_live": {"instructions": "Speak French."}}}
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert body["greeting_applied"] is False
     assert openai.calls[0][2]["session"]["instructions"].endswith(api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
 
-    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": ""}).json()
-    assert body["greeting_applied"] is True
-    instructions = openai.calls[1][2]["session"]["instructions"]
-    assert api.gpt_live.GPT_LIVE_WAIT_FOR_USER not in instructions
-    assert instructions.endswith(api.gpt_live._greet_first("")) and "Say:" not in instructions
+    for request in ({"greeting": ""}, {"greeting": ' Hey Neal,\n I\'m "here". '},
+                    {"briefing": "About this call", "call_opening": True}, {"call_opening": True},
+                    {"briefing": "About this call", "greeting": "Hi", "call_opening": True}):
+        openai.calls.clear()
+        body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, **request}).json()
+        assert body["greeting_applied"] is False, f"Conduit opens {request} with its own turn"
+        instructions = openai.calls[0][2]["session"]["instructions"]
+        assert "Opening policy" not in instructions, "no policy that keeps the model from answering Conduit's turn"
+        assert instructions.endswith(request.get("briefing") or "Speak French.")
 
-    client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": ' Hey Neal,\n I\'m "here". '})
-    instructions = openai.calls[2][2]["session"]["instructions"]
-    assert instructions.endswith(api.gpt_live._greet_first("Hey Neal, I'm 'here'."))
-    assert 'Say: "Hey Neal, I\'m \'here\'."' in instructions, "the user's text stays on one line, inside the quotes"
-
-
-def test_session_opens_a_call_hermes_placed_by_speaking_first(client, hermes, openai):
-    body = client.post(f"{BASE}/gpt-live/session",
-                       json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
-    assert body["greeting_applied"] is True, "Conduit must not send its own opening turn as well"
-    instructions = openai.calls[0][2]["session"]["instructions"]
-    assert instructions.endswith("About this call\n\n" + api.gpt_live.GPT_LIVE_CALL_OPENING)
-    assert api.gpt_live.GPT_LIVE_WAIT_FOR_USER not in instructions
-
-    # It wins over a greeting, and false keeps the usual policy.
-    assert client.post(f"{BASE}/gpt-live/session",
-                       json={"sdp": OFFER, "briefing": "About this call", "greeting": "Hi", "call_opening": True}).status_code == 200
-    assert openai.calls[1][2]["session"]["instructions"].endswith(api.gpt_live.GPT_LIVE_CALL_OPENING)
+    openai.calls.clear()
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": False}).json()
     assert body["greeting_applied"] is False
-    assert openai.calls[2][2]["session"]["instructions"].endswith(api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
-
-
-def test_call_opening_without_a_briefing_never_guesses_why(client, hermes, openai):
-    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": True}).json()
-    assert body["greeting_applied"] is True
-    instructions = openai.calls[0][2]["session"]["instructions"]
-    assert instructions.endswith(api.gpt_live.GPT_LIVE_CALL_OPENING_UNBRIEFED)
-    assert api.gpt_live.GPT_LIVE_CALL_OPENING not in instructions
+    assert openai.calls[0][2]["session"]["instructions"].endswith(api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
 
 
 @pytest.mark.parametrize("call_opening", [1, "true", []])
@@ -361,21 +342,18 @@ def test_hermes_path_reports_the_briefing_only_when_its_config_carries_it(client
     assert body["voice"] == "marin"
 
 
-def test_hermes_path_reports_the_greeting_only_when_its_config_carries_it(client, openai, monkeypatch):
-    _upstream(monkeypatch, [])
-    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": ""}).json()
-    assert body["greeting_applied"] is False, "Hermes dropped it, so Conduit must still ask for it"
+def test_hermes_path_leaves_the_opening_to_conduit(client, openai, monkeypatch):
     calls = []
-    _upstream(monkeypatch, calls, built=lambda live: {"session": {"instructions": live["instructions"]}})
+    _upstream(monkeypatch, calls, built=lambda live: {"session": {"instructions": live.get("instructions", "")}})
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": "Hi"}).json()
-    assert body["greeting_applied"] is True
-    assert calls[0][2]["instructions"].endswith(api.gpt_live._greet_first("Hi"))
+    assert body["greeting_applied"] is False
+    assert "instructions" not in calls[0][2], "no opening policy that would keep the model from answering Conduit's turn"
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert body["greeting_applied"] is False
     calls.clear()
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
-    assert body["greeting_applied"] is True
-    assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith(api.gpt_live.GPT_LIVE_CALL_OPENING)
+    assert body["greeting_applied"] is False
+    assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith("About this call")
 
 
 @pytest.mark.parametrize("audio", ["loud", {"output": "x"}, {"output": {"voice": "bad voice!"}}])
