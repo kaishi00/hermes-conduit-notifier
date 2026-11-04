@@ -4,19 +4,29 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: List Go models and ask crouton-alpha-free
+      - name: Install opencode
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/anomalyco/opencode/v1.18.34/install -o /tmp/i.sh
+          GITHUB_ACTIONS=false bash /tmp/i.sh --version 1.18.34 --no-modify-path
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+      - name: Built-in opencode provider, no key
+        continue-on-error: true
+        working-directory: /tmp
+        run: timeout 180 opencode run -m opencode/crouton-alpha-free "Reply with the word ok." --print-logs 2>&1 | grep -v -i "authorization" | tail -40
+      - name: Built-in opencode provider, Go key
+        continue-on-error: true
+        working-directory: /tmp
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+        run: timeout 180 opencode run -m opencode/crouton-alpha-free "Reply with the word ok." --print-logs 2>&1 | grep -v -i "authorization" | tail -40
+      - name: Go endpoint free models (curl)
         env:
           KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
-          echo "key set: $([ -n "$KEY" ] && echo yes || echo no)"
-          for base in https://opencode.ai/zen/go/v1 https://opencode.ai/zen/v1; do
-            echo "== $base/models"
-            curl -sS -m 30 "$base/models" -H "Authorization: Bearer $KEY" -H "x-opencode-session: probe-$GITHUB_RUN_ID" | jq -r '.data[]?.id' 2>/dev/null | sort | tr '\n' ' ' || true
-            echo
-            echo "== $base/chat/completions crouton-alpha-free"
-            curl -sS -m 90 "$base/chat/completions" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -H "x-opencode-session: probe-$GITHUB_RUN_ID" \
-              -d '{"model":"crouton-alpha-free","messages":[{"role":"user","content":"Reply with the word ok."}],"max_tokens":200}' | head -c 1500
-            echo
+          for m in beam-free iceman-contributor-free; do
+            echo "== go $m"
+            curl -sS -m 90 https://opencode.ai/zen/go/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -H "x-opencode-session: probe-$GITHUB_RUN_ID" \
+              -d "{\"model\":\"$m\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with the word ok.\"}],\"max_tokens\":300}" | head -c 800; echo
           done
