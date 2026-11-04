@@ -687,7 +687,8 @@ def test_an_approval_marks_it_needs_you(on, hermes):
     # workstreams, can open it there and answer (Eric 2026-11-03).
     line, = [line for lines, _ in work._wakes.values() for line in lines if "is waiting on the user" in line]
     assert "(rm -rf build)" in line and "you can't" in line
-    assert line.endswith("[Open W1](conduit://session/20261031_work_1?profile=default) @session:20261031_work_1")
+    assert line.endswith("[Open W1](conduit://session/20261031_work_1?profile=default) @session:20261031_work_1 "
+                         + work.LINK_RULE)
 
 
 def test_the_digest_lists_open_work_once_as_new(on, hermes):
@@ -4395,4 +4396,6 @@ def test_every_text_that_hands_the_model_a_link_says_to_keep_the_desktop_referen
     assert "@session" in work.LINK_RULE and "never in a code block" in work.LINK_RULE
     assert work.LINK_RULE in work.WAKE and work.LINK_RULE in work.WORK_TAIL
     assert work.LINK_RULE in work.SCHEMAS["work_list"]["description"]
+    assert work.LINK_RULE in work.SCHEMAS["work_read"]["description"]
+    # The waiting-on-you line carries it too (test_an_approval_marks_it_needs_you).
     work.WAKE.format(lines="- W1")

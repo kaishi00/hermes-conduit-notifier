@@ -259,7 +259,8 @@ SCHEMAS: dict[str, dict] = {
     "work_read": {
         "name": "work_read",
         "description": ("Read a workstream: its status, its latest result and, if asked, its messages. "
-                        "With transcript=true it returns its latest messages. A workstream can read the bot's other workstreams this way, never change them."),
+                        "With transcript=true it returns its latest messages. A workstream can read the bot's other workstreams this way, never change them. "
+                        + LINK_RULE),
         "parameters": {"type": "object", "properties": {
             "ref": _REF_SCHEMA,
             "transcript": {"type": "boolean", "description": "Also its latest messages."}},
@@ -947,7 +948,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                         "work_send continues it."}
     started_note = {"ok": True, "ref": work.ref, "title": work.title, "status": status, "link": link,
                     "note": f"Started {work.ref}: {work.title}. It works in the background; its result comes back "
-                            "to you as a work update. Don't wait for it."}
+                            "to you as a work update. Don't wait for it. " + LINK_RULE}
     if tree:
         started_note["worktree"] = {"path": tree["path"], "branch": tree.get("branch")}
         started_note["note"] += f" It works in its own worktree, on the branch {tree.get('branch')}."
@@ -2914,9 +2915,8 @@ def needs_you(session_id: Any, description: Any = None) -> None:
         # listed, can open it and answer there (Eric 2026-11-03).
         link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
         _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” is waiting on the user ({what}). Only they "
-                                            "can answer it, in that workstream's chat (give them its link as it is "
-                                            "written, not in a code block) or on its "
-                                            "card in Conduit; you can't." + (f" {link}" if link else ""),
+                                            "can answer it, in that workstream's chat (give them its link) or on its "
+                                            "card in Conduit; you can't." + (f" {link} {LINK_RULE}" if link else ""),
                     kind="call" if _call_of(work) else "work")
 
 
