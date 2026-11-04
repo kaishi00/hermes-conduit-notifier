@@ -1000,6 +1000,78 @@ def test_the_users_stop_reaches_the_server_once_whether_or_not_a_sentence_is_in_
     assert upstream.sent[-1] == {"type": "response.cancel"}
 
 
+def test_a_server_initiated_filler_opens_the_reply_and_the_sentences_join_it(client, hermes, server):
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed",
+                       "transcript": "Weather tonight"})
+        turn, _ = _next(ws, "conduit.turn")
+        # The server starts a filler of its own before the reply lands: the
+        # call hears it, and it opens the reply's response.
+        upstream.push({"type": "response.created", "response": {"id": "filler1", "status": "in_progress"}})
+        upstream.push({"type": "response.output_audio_transcript.delta", "response_id": "filler1",
+                       "delta": "One sec."})
+        upstream.push({"type": "response.output_audio.delta", "response_id": "filler1", "delta": PCM})
+        upstream.push({"type": "response.output_audio_transcript.done", "response_id": "filler1",
+                       "transcript": "One sec."})
+        created, seen = _next(ws, "response.output_audio_transcript.done")
+        assert created["type"] == "response.output_audio_transcript.done"
+        assert seen[0]["type"] == "response.created" and seen[0]["response"]["id"] == "filler1"
+        assert [frame["type"] for frame in seen] == [
+            "response.created", "response.output_audio_transcript.delta",
+            "response.output_audio.delta", "response.output_audio_transcript.done"]
+        # The reply waits for the filler's end: the seam, not a cut-over.
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"],
+                                 "text": "Clear skies, sixty degrees."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": turn["turn_id"]}))
+        # Two pump ticks and a beat: with the guard gone, the sentence would
+        # be on its way to the server inside this window.
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            assert upstream.creates() == []
+            time.sleep(0.05)
+        upstream.push({"type": "response.done", "response": {"id": "filler1", "status": "completed"}})
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert upstream.spoken() == ["Clear skies, sixty degrees."]
+    # The filler's own end stays with the plugin (the reply's response stays
+    # open); the sentence joins it, its transcript spaced from the filler's,
+    # and the one response the call saw closes under the filler's id.
+    assert [frame["type"] for frame in seen].count("response.created") == 0
+    assert "".join(frame["delta"] for frame in seen
+                   if frame["type"] == "response.output_audio_transcript.delta") == " Clear skies, sixty degrees."
+    assert done["response"]["id"] == "filler1" and done["response"]["status"] == "completed"
+
+
+def test_talking_over_a_filler_cancels_it_and_ends_the_reply(client, hermes, server):
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed",
+                       "transcript": "Tell me a story"})
+        turn, _ = _next(ws, "conduit.turn")
+        upstream.push({"type": "response.created", "response": {"id": "filler1", "status": "in_progress"}})
+        upstream.push({"type": "response.output_audio.delta", "response_id": "filler1", "delta": PCM})
+        _next(ws, "response.created")
+        # The user talks over the filler: it stops, and its turn goes.
+        upstream.push({"type": "input_audio_buffer.speech_started", "item_id": "item2"})
+        cancel, _ = _next(ws, "conduit.turn.cancel")
+        assert cancel["turn_id"] == turn["turn_id"]
+        done, seen = _next(ws, "response.done")
+        assert done["response"]["id"] == "filler1" and done["response"]["status"] == "cancelled"
+        assert seen == [done]
+        # The filler's late audio stays with the plugin.
+        upstream.push({"type": "response.output_audio.delta", "response_id": "filler1", "delta": PCM})
+        upstream.push({"type": "response.done", "response": {"id": "filler1", "status": "cancelled"}})
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Stop"})
+        turn, seen = _next(ws, "conduit.turn")
+        assert [frame["type"] for frame in seen] == [
+            "conversation.item.input_audio_transcription.completed", "conduit.turn"]
+        _finish(ws)
+    assert {"type": "response.cancel"} in upstream.sent
+
+
 def test_a_typed_turn_is_run_by_the_plugin_not_read_back(client, hermes, server):
     server.upstream = upstream = ReadBackUpstream()
     item = {"type": "conversation.item.create",
