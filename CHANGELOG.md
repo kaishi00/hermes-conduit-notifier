@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.128.1 (2026-11-04)
+
+### Fixes
+- A bot that passed on a workstream's link in its own words left out the
+  part Hermes Desktop opens, so the workstream couldn't be opened there.
+  Bots now give the link as written.
+
 ## 0.128.0 (2026-11-04)
 
 ### New and improved
