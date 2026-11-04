@@ -202,6 +202,19 @@ def test_hidden_chats_are_left_out_and_older_stores_still_read(tmp_path, monkeyp
     assert [i["name"] for i in _list(old)["items"]] == ["a.png"]
 
 
+def test_a_bots_workstreams_are_left_out_hidden_or_not(tmp_path, monkeypatch):
+    # Hermes shows a resolved workstream so Desktop's link opens it (notifier
+    # #540); the profile's list still leaves it and what continues it out,
+    # and the workstream's own chat still lists its artifacts.
+    _no_gateway(monkeypatch)
+    conn = _db(tmp_path / "a", [("s1", "assistant", "MEDIA:/root/a.png"), ("ws", "assistant", "MEDIA:/root/b.png"),
+                                ("ws-tip", "assistant", "MEDIA:/root/c.png")],
+               sessions=[("s1", "Shown", 0), ("ws", "Disk", 0), ("ws-tip", "Disk", 0, "ws")])
+    assert [i["name"] for i in _list(conn, workstreams=["ws"])["items"]] == ["a.png"]
+    assert [i["name"] for i in _list(conn, session_id="ws", workstreams=["ws"])["items"]] == ["c.png", "b.png"]
+    assert len(_list(conn)["items"]) == 3
+
+
 def test_a_bots_hidden_bot_chat_is_listed(tmp_path, monkeypatch):
     # Bot Mode keeps a bot's Bot Chat as a hidden session titled "Bot Chat";
     # other hidden chats (a group room member's turns) stay out of the

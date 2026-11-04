@@ -3598,10 +3598,33 @@ def test_resolved_work_shows_in_desktop_so_its_link_opens(on, hermes, monkeypatc
     on.set_meta(work._SHOWN_RESOLVED, "")
     shown.clear()
     work._show_resolved_once(on)
-    assert [sid for _, sid, _ in shown] == [on.get("W2").session_id] and not on.get_meta(work._SHOWN_RESOLVED)
+    assert [sid for _, sid, _ in shown] == [on.get("W2").session_id]
+    assert on.get_meta(work._SHOWN_RESOLVED) == "try:1"
     failing.clear()
     work._show_resolved_once(on)
     assert on.get_meta(work._SHOWN_RESOLVED) == "1"
+    # One Hermes keeps refusing is left hidden after a few passes, so every
+    # start doesn't write the whole resolved history again.
+    failing.add(on.get("W1").session_id)
+    on.set_meta(work._SHOWN_RESOLVED, "")
+    for mark in ("try:1", "try:2", "1"):
+        work._show_resolved_once(on)
+        assert on.get_meta(work._SHOWN_RESOLVED) == mark
+    # An older Hermes can't unhide: the resolve still goes through, and the
+    # pass waits for a Hermes that can, without counting a try.
+    class Older:
+        def __init__(self, db_path):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=Older))
+    assert work.app_act(on.home, "W1", "reopen")["ok"]
+    assert work.app_act(on.home, "W1", "resolve")["ok"]
+    on.set_meta(work._SHOWN_RESOLVED, "")
+    work._show_resolved_once(on)
+    assert not on.get_meta(work._SHOWN_RESOLVED)
 
 
 def test_work_still_at_it_isnt_resolved(on, hermes):

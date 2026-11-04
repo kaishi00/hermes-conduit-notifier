@@ -13,8 +13,9 @@ open again:
 - ``attached``: a file the user sent, as its ``@file:`` reference;
 - ``link``: a web link in one of Hermes' replies.
 
-Hidden chats (a group room member's turns, say) are left out of the
-profile's list, but a bot's Bot Chat, a hidden session titled "Bot Chat", is
+Hidden chats (a group room member's turns, say) and a bot's workstreams
+(``workstreams``, the caller's list: Hermes shows a resolved one so
+Desktop's link opens it) are left out of the profile's list, but a bot's Bot Chat, a hidden session titled "Bot Chat", is
 listed, and a chat asked for by id is read whether hidden or not.
 
 The list is read from the profile's ``state.db`` (read only), newest message
@@ -456,6 +457,7 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
                    group: Optional[str] = None,
                    query: str = "", limit: int = DEFAULT_LIMIT,
                    include_missing: bool = True,
+                   workstreams: Iterable[str] = (),
                    stat: Callable[[str], Optional[int]] = _file_size,
                    window_rows: int = WINDOW_ROWS, max_scan_rows: int = MAX_SCAN_ROWS) -> dict:
     """One page of artifacts, newest first, and where the next page starts
@@ -464,7 +466,8 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
     ``max_scan_rows`` of them, and ignores ``window_rows``. Without
     ``include_missing``, a file no longer on disk is left out, so a history
     of deleted files doesn't leave Conduit's pages mostly empty; links have
-    no file and always stay."""
+    no file and always stay. The profile's list leaves out ``workstreams``
+    and the chats that continue them."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     max_scan_rows = max(1, int(max_scan_rows))
     kinds = GROUPS.get(group) if group else None
@@ -522,6 +525,14 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
         shown = list(dict.fromkeys([*(str(sid) for sid in wanted if sid), *bot_chat_lineage(conn, session_columns)]))
         listed = f" OR m.session_id IN ({','.join('?' * len(shown))})" if shown else ""
         hidden = f" AND (COALESCE(s.hidden, 0) = 0{listed})"
+    work = [str(sid) for sid in workstreams if sid]
+    if work and not wanted:
+        # Hidden while open, shown once resolved; the bot's, either way.
+        hidden += (" AND m.session_id NOT IN (SELECT value FROM json_each(?))"
+                   " AND COALESCE(s.parent_session_id, '') NOT IN (SELECT value FROM json_each(?))"
+                   if "parent_session_id" in session_columns else
+                   " AND m.session_id NOT IN (SELECT value FROM json_each(?))")
+        shown = [*shown, *[json.dumps(work)] * (2 if "parent_session_id" in session_columns else 1)]
     if wanted:
         # One chat reads its own rows through Hermes' session index, not
         # the profile's history window by window: on a profile full of cron

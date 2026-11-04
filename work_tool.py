@@ -1955,17 +1955,18 @@ def _worktree_back(store: work_store.Store, ref: str) -> None:
         logger.warning("conduit_push: a workstream's worktree is gone and couldn't be made again")
 
 
-def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> bool:
+def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> Optional[int]:
     """On resolve: the workstream's session stops being hidden. Hermes
     Desktop opens a work link's ``@session:`` chip by id alone, and finds
     which backend holds a session from its list or from the live session, so
     a finished hidden one couldn't be opened (Eric 2026-11-04: "Session owner
-    could not be resolved"). Conduit keeps it out of its own lists as a
-    workstream. Never raises: True when every session was unhidden (or
-    there was none), False when one or more weren't, each tried on its own."""
+    could not be resolved"). Conduit's lists, its Artifacts list and Pulse's
+    reads leave it out as a workstream (by ``Store.session_ids``). Never
+    raises: how many sessions weren't unhidden, each tried on its own, or
+    None when none could be tried (an older Hermes, or no state.db)."""
     ids = [work.session_id for work in works if work.kind == "workstream" and work.session_id]
     if not ids:
-        return True
+        return 0
     unhidden = 0
     try:
         from hermes_state import SessionDB
@@ -1974,7 +1975,7 @@ def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> bool:
         try:
             setter = getattr(db, "set_session_hidden", None)
             if not callable(setter):
-                return False
+                return None
             for session_id in ids:
                 try:
                     setter(session_id, False)
@@ -1985,20 +1986,28 @@ def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> bool:
             db.close()
     except Exception:  # noqa: BLE001 - resolving must never fail for this
         logger.debug("conduit_push: couldn't unhide resolved workstreams' sessions", exc_info=True)
-    return unhidden == len(ids)
+        return None
+    return len(ids) - unhidden
 
 
-# Meta key: work resolved before 0.129.2 has been shown in Desktop once.
+# Meta key: work resolved before 0.129.2 has been shown in Desktop once ("1"),
+# or how many passes left some out.
 _SHOWN_RESOLVED = "desktop:resolved_shown"
+# Passes a session Hermes keeps refusing gets before it's left hidden, so
+# every start doesn't write the whole resolved history again.
+_SHOW_RESOLVED_TRIES = 3
 
 
 def _show_resolved_once(store: work_store.Store) -> None:
     """Work resolved before resolving unhid it, shown in Desktop once."""
-    if store.get_meta(_SHOWN_RESOLVED):
+    mark = store.get_meta(_SHOWN_RESOLVED) or ""
+    if mark == "1":
         return
-    # Marked done only once every one went through: the next sweep tries again.
-    if _show_in_desktop(store, *[work for work in store.list(include_closed=True, limit=-1) if work.closed_at]):
-        store.set_meta(_SHOWN_RESOLVED, "1")
+    failed = _show_in_desktop(store, *[work for work in store.list(include_closed=True, limit=-1) if work.closed_at])
+    if failed is None:
+        return  # couldn't try (an older Hermes): the next sweep does
+    tries = (int(mark[4:]) if mark.startswith("try:") and mark[4:].isdigit() else 0) + 1
+    store.set_meta(_SHOWN_RESOLVED, "1" if not failed or tries >= _SHOW_RESOLVED_TRIES else f"try:{tries}")
 
 
 def _tidy_worktree(store: work_store.Store, ref: str) -> dict:
