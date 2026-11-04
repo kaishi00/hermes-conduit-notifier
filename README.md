@@ -1511,8 +1511,8 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   link (`work_read` gives the coordinator up to 2,000 characters of it).
   A workstream keeps a checklist with `work_progress` (its only work
   tool), which the Bot Chat's digest shows, Conduit's Work panel lists, and
-  Conduit shows as the Tasks line in the workstream's own chat, and marks a result you should look
-  at first (a draft, a diff) as ready. `work_progress` stays offered while
+  Conduit shows as the Tasks line in the workstream's own chat. The
+  workstream also marks a result you should look at first (a draft, a diff) as ready. `work_progress` stays offered while
   the bot has a registry, so turning workstreams off doesn't take it from one
   that's running; anywhere but a workstream it answers that it's only for one.
   A workstream doesn't save to the bot's `memory`: what's worth keeping goes
