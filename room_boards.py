@@ -113,7 +113,8 @@ class _BoardFile:
             yield state
             self._save(state)
 
-    def _save(self, state: dict[str, Any]) -> None:
+    def _save(self, state: dict[str, Any], path: Any = None) -> None:
+        path = self.path if path is None else path
         handle, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".conduit-boards-")
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as file:
@@ -121,7 +122,7 @@ class _BoardFile:
                 file.flush()
                 os.fsync(file.fileno())
             os.chmod(temporary, 0o600)
-            os.replace(temporary, self.path)
+            os.replace(temporary, path)
         except BaseException:
             try:
                 os.unlink(temporary)
@@ -172,6 +173,9 @@ class DesktopBoards(_BoardFile):
                  new_id: Callable[[], str] = lambda: "cb-" + secrets.token_hex(6)) -> None:
         super().__init__(root, clock)
         self.new_id = new_id
+        # A file of its own, so the half's half-hourly "loaded" doesn't
+        # rewrite every board.
+        self.half_path = self.path.with_name("half.json")
 
     @staticmethod
     def _well_formed(entry: Any) -> bool:
@@ -197,12 +201,16 @@ class DesktopBoards(_BoardFile):
 
     def saw_half(self) -> None:
         """The Desktop half is loaded, just now."""
-        with self._locked() as state:
-            state["half_seen"] = self.clock()
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._save({"seen": self.clock()}, self.half_path)
 
     def half_live(self) -> bool:
         """Whether a Desktop half said it was loaded lately."""
-        seen = self._state().get("half_seen")
+        try:
+            state = json.loads(self.half_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        seen = state.get("seen") if isinstance(state, dict) else None
         if not isinstance(seen, (int, float)) or isinstance(seen, bool):
             return False
         return 0 <= self.clock() - seen < HALF_LIVE_S

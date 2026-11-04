@@ -157,7 +157,7 @@ def board_rule(turn_source: str | None, desktop_half: Callable[[], bool] = lambd
     elsewhere, where boards would only be Markdown."""
     if turn_source == "desktop" and available():
         try:
-            return DESKTOP_BOARD_RULE if desktop_half() else None
+            return DESKTOP_BOARD_RULE if _desktop_app() and desktop_half() else None
         except Exception:  # noqa: BLE001
             return None
     if turn_source != "conduit" or not available():
@@ -285,8 +285,9 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
             problems.insert(0, TEXT_LAYOUT_NOTE)
         return _as_text("group_room", ROOM_NOTE, cards, problems)
     source = _turn_source() if cards else None
-    if source == "desktop":
-        # Hermes Desktop draws a board through the plugin's Desktop half,
+    if source == "desktop" and _desktop_app():
+        # Hermes Desktop (not the web dashboard, which turn_source counts as
+        # "desktop" too) draws a board through the plugin's Desktop half,
         # where the reply holds the board's line (Eric, 2026-11-04); without
         # the half the board goes in the reply as Markdown.
         board = {"cards": cards, "card_markdown": [_fallback([card]) for card in cards],
@@ -405,6 +406,14 @@ def _without_messages(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _fallback(cards: list[dict[str, Any]]) -> str:
     """The cards' Markdown, cut at a line to fit a card."""
     return clip_markdown(card_schema.fallback_markdown(cards))
+
+
+def _desktop_app() -> bool:
+    """Whether this turn came from Hermes Desktop itself, where the half draws."""
+    try:
+        return reply_sources.is_desktop_app(reply_sources.current_transport())
+    except Exception:  # noqa: BLE001 — unknown: the board goes as Markdown
+        return False
 
 
 def _turn_source() -> str | None:

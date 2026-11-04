@@ -53,7 +53,10 @@ def test_the_half_counts_as_loaded_for_a_while_after_it_says_so(tmp_path):
     assert store.half_live() is True
     store.clock.now += room_boards.HALF_LIVE_S
     assert store.half_live() is False, "a half that stopped saying so, turned off or gone"
-    store.path.write_text(json.dumps({"boards": [], "half_seen": True}))
+    store.half_path.write_text(json.dumps({"seen": True}))
+    assert store.half_live() is False
+    assert not store.path.exists(), "saying it's loaded leaves the boards alone"
+    store.half_path.write_text("not json")
     assert store.half_live() is False
 
 

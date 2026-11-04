@@ -2520,13 +2520,18 @@ Plugins as "Conduit boards", off until you turn it on there.
 - **The half says it's there.** While it's loaded it posts
   `POST /boards/desktop/seen` (at load and every half hour); the plugin
   counts it as loaded for two hours after the last one, in the root home's
-  `conduit-desktop/boards.json`, for every profile.
-- **The line.** In a Desktop chat with the half loaded, `conduit_show` keeps
+  `conduit-desktop/half.json`, for every profile (the boards are in
+  `boards.json` beside it).
+- **The line.** In a chat sent from Hermes Desktop itself (not the web
+  dashboard in a browser, which draws no line) with the half loaded,
+  `conduit_show` keeps
   the board (500 at most, forgotten after 30 days) and answers with
   `directive`, the line for Hermes to write where the board goes, and the
   cards as usual, so Conduit draws them when it opens the chat (and hides the
   line). Hermes also hears the one-line drawing rule on a Desktop turn then.
   Without the half, the board goes in the reply as Markdown, as before.
+  `conduit_show` is offered only while a Conduit paired with this host has
+  been in touch lately, so boards in Desktop need the Conduit app too.
 - **Drawing.** The half reads the board with `GET /boards/desktop?id=<id>`
   and draws stats, charts, comparisons, steps, status, tables (sortable),
   timelines, checklists, lists, progress and callouts as cards, tabs when the
