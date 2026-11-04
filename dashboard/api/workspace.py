@@ -69,7 +69,8 @@ def _workstreams(home: Any) -> List[str]:
     hidden chats are: Hermes shows a resolved one (notifier #540)."""
     try:
         return core._plugin_package_module("work_store").Store(home).session_ids()
-    except Exception:
+    except Exception:  # an unreadable registry leaves nothing out
+        logger.debug("Conduit artifacts couldn't read the bots' workstreams", exc_info=True)
         return []
 
 
