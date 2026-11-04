@@ -15,6 +15,13 @@ checks it). The format is fixed, because Conduit reads it:
 
 ## 0.130.0 (2026-11-04)
 
+### Fixes
+- An old copy of Conduit you no longer open, on another iPhone or iPad,
+  kept Hermes from drawing boards and cut tables, timelines and tabs from
+  them. Now only the Conduits you've used in the last three days count.
+- With Tool Search on, Hermes often answered in text, the weather for one,
+  without looking for the board tool. It's now told where to find it.
+
 ### New and improved
 - Hermes Desktop can draw the boards Hermes shows, as cards in the reply,
   once you turn on "Conduit boards" in Desktop's Capabilities › Plugins.

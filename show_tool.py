@@ -142,10 +142,10 @@ TEXT_LAYOUT_NOTE = "layout: these messages show no tabs, left out"
 TEXT_NEXT_NOTE = "next: these messages show no follow-ups, left out: offer them in your reply if they matter"
 
 
-BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (a plan by day, a comparison, "
-              "numbers or a trend, a ranking, a list to tick off), show it with conduit_show as cards, with next "
-              "for the obvious follow-ups, and keep your reply to the gist. Never draw data as an HTML ::preview "
-              "page.]")
+BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (the weather or a forecast, a "
+              "plan by day, a comparison, numbers or a trend, a ranking, a list to tick off), show it with "
+              "conduit_show as cards (through tool_search and tool_call when it's deferred), with next for the "
+              "obvious follow-ups, and keep your reply to the gist. Never draw data as an HTML ::preview page.]")
 
 
 DESKTOP_BOARD_RULE = BOARD_RULE.replace("[Conduit draws boards", "[Hermes Desktop draws boards")
