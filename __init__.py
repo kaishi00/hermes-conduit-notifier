@@ -142,7 +142,8 @@ def register(ctx: Any) -> None:
     present_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
-    show_tool.register(ctx, is_child=_is_child)
+    show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn,
+                       skill_path=Path(__file__).resolve().parent / "skills" / show_tool.SKILL_NAME / "SKILL.md")
     # Hermes writes the title and body of the push its turn sends when it
     # ends, for a result the user asked to be told about (#1415).
     notify_tool.register(ctx, is_child=_is_child)
@@ -361,6 +362,16 @@ def _post_tool_call(**kwargs: Any) -> None:
         logger.log(logging.DEBUG if _ledger_warned else logging.WARNING, "conduit_push: Pulse outcome not recorded",
                    exc_info=True)
         _ledger_warned = True
+
+
+def _is_room_turn(session_id: Any) -> bool:
+    """Whether this session's turns are in a group room, whoever hosts it."""
+    try:
+        return room_rules.room_turn(session_id, get_hermes_home()) is not None
+    except room_rules.RoomStoreError:
+        return True
+    except Exception:  # noqa: BLE001 — logged by room_rules; an unknown session draws as a chat does
+        return False
 
 
 def _member_room_turn(session_id: str) -> bool:
@@ -1053,9 +1064,31 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else _link_answers_note(session_id),
         # A coordinator Bot Chat's open work (work_tool).
         None if child else _work_digest(session_id),
+        # Checklist cards the user ticked in Conduit since (checklist_store), once.
+        None if child else _checklist_note(session_id),
+        # When to draw a board instead of writing it out (show_tool).
+        None if child else _board_rule(kwargs.get("platform")),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _checklist_note(session_id: str) -> str | None:
+    try:
+        from . import checklist_store
+
+        return checklist_store.ChecklistStore(get_hermes_home()).note(session_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: checklist note failed", exc_info=True)
+        return None
+
+
+def _board_rule(platform: Any) -> str | None:
+    try:
+        return show_tool.board_rule(reply_sources.turn_source(platform, reply_sources.current_transport()))
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: board rule failed", exc_info=True)
+        return None
 
 
 def _work_digest(session_id: str) -> str | None:

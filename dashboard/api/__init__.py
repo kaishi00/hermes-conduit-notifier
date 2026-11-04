@@ -44,6 +44,7 @@ MODULES = (
     "rooms",
     "workspace",
     "workstreams",
+    "boards",
     "capabilities",
     "self_update",
 )

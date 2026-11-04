@@ -13,6 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.128.0 (2026-11-04)
+
+### New and improved
+- Boards: Hermes can show tables you can sort, day-by-day plans,
+  checklists, ranked lists, progress toward goals and tips or warnings as
+  cards in the chat, up to 12 at once, as tabs when there are many, with
+  follow-up buttons that ask the next question in a tap.
+- Checklist ticks are kept on your Hermes, so every one of your devices shows
+  the same ones, and Hermes hears what you ticked at your next message.
+- When part of a card can't be shown, Hermes is told exactly what and why,
+  so it can fix it and show it again; and every card set carries its text,
+  which Conduit shows in a card's place whenever it can't draw it.
+- Outside Conduit (Hermes Desktop, a messaging app) and in group rooms, Hermes gets the cards
+  as text to put in its reply instead of an error.
+
 ## 0.127.6 (2026-11-03)
 
 ### Fixes

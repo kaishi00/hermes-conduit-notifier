@@ -100,7 +100,8 @@ def test_fallback_markdown_shows_information_cards_and_their_sources():
 def test_every_type_has_its_field_and_markdown():
     fields = {"map": "places", "place": "places", "places": "places", "stats": "stats", "chart": "chart",
               "weather": "weather", "comparison": "options", "steps": "steps", "media": "media",
-              "contact": "people", "status": "status"}
+              "contact": "people", "status": "status", "table": "table", "timeline": "timeline",
+              "checklist": "checklist", "list": "list", "progress": "progress", "callout": "callout"}
     assert set(card_schema.CARD_SCHEMA["properties"]["type"]["enum"]) == set(fields)
     for kind, field in fields.items():
         assert card_schema._TYPE_FIELDS[kind][0] == field
@@ -165,3 +166,89 @@ def test_the_tool_parameter_wraps_the_card():
     parameter = card_schema.tool_parameter("Cards.")
     assert parameter == {"type": "array", "maxItems": card_schema.MAX_CARDS, "description": "Cards.",
                          "items": card_schema.CARD_SCHEMA}
+
+
+def test_fallback_markdown_shows_the_board_kinds():
+    cards = card_schema.normalize_cards([
+        {"type": "table", "title": "Top", "table": {"columns": ["Company", "Cap"],
+                                                    "rows": [["Apple", "$3T"], ["Nvidia", 2.9]]}},
+        {"type": "timeline", "timeline": [{"label": "Day 1", "title": "Valley", "stops": [
+            {"time": "09:00", "text": "Mist Trail", "place": "Vernal Fall, Yosemite", "note": "Go early"}]}]},
+        {"type": "checklist", "checklist": [{"text": "Socks", "group": "Clothes"}, {"text": "Passport"}]},
+        {"type": "list", "ranked": True, "list": [{"title": "Apple", "value": "$3T", "url": "https://a.test"}]},
+        {"type": "progress", "progress": [{"label": "Savings", "value": 500, "goal": 2000, "unit": "USD"}]},
+        {"type": "callout", "callout": {"text": "Book *early*", "tone": "warning"}}])
+    text = card_schema.fallback_markdown(cards)
+    assert "| Company | Cap |\n|---|---|\n| Apple | $3T |\n| Nvidia | 2.9 |" in text
+    assert "**Day 1** · Valley\n- 09:00: Mist Trail ([Vernal Fall, Yosemite]" \
+           "(https://maps.apple.com/?q=Vernal%20Fall,%20Yosemite)). _Go early_" in text
+    assert "**Clothes**\n- [ ] Socks\n\n- [ ] Passport" in text
+    assert "1. **[Apple](https://a.test)** · $3T" in text
+    assert "- **Savings:** 500 of 2,000 USD (25%)" in text
+    assert "> **Warning:** Book \\*early\\*" in text
+
+
+def test_table_cells_keep_their_places():
+    [card] = card_schema.normalize_cards([{"type": "table", "table": {
+        "columns": ["A", "", 3], "rows": [[1, 2.5, None], ["x", " ", True], [1], [1e16, -0.25, "y"]]}}])
+    assert card["table"] == {"columns": ["A", "\u2013", "3"],
+                             "rows": [["1", "2.5", "\u2013"], ["x", "\u2013", "\u2013"], ["\u2013", "-0.25", "y"]]}
+
+
+def test_notes_say_what_was_dropped_and_why():
+    notes = []
+    cards = card_schema.normalize_cards([
+        {"type": "table", "table": {"columns": ["A", "B"], "rows": [["1", "2"], ["3"]]}},
+        {"type": "progress", "progress": [{"label": "X", "value": 1, "goal": 0}]},
+        {"type": "chart", "chart": {"kind": "doughnut", "labels": ["a"], "series": [{"values": [1]}]}},
+        {"type": "stats", "stats": [{"label": "Steps", "value": "1"}], "places": []}], notes)
+    assert [card["type"] for card in cards] == ["table", "stats"]
+    assert 'cards[0].table.rows: the row starting "3" has 1 cells for 2 columns, left out' in notes
+    assert "cards[1].progress: a goal must be above 0, those without were left out" in notes
+    assert "cards[2].chart.kind: not one of line, bar, area, pie" in notes and "cards[2]: dropped" in notes
+    assert "cards[3].places: not used on a stats card, left out" not in notes, "an empty list never survives"
+    assert card_schema.normalize_cards([{"type": "stats", "stats": []}]) == []
+
+
+def test_notes_never_change_what_is_kept():
+    for case in VECTORS["cases"]:
+        assert card_schema.normalize_cards(case["input"], []) == case["output"], case["name"]
+
+
+def test_follow_ups_are_plain_messages():
+    notes = []
+    kept = card_schema.normalize_next(["Make it $1,500", "make it $1,500", "/new", "!ls", "Read @notes.md",
+                                       "Two\nlines", "Run `ls`", "  Add a day in Sequoia ", 4, "x" * 300], notes)
+    assert kept == ["Make it $1,500", "Two lines", "Add a day in Sequoia", "x" * 200]
+    assert 'next[2]: "/new" isn\'t a plain message, left out' in notes
+    assert 'next[1]: "make it $1,500" is there twice, kept once' in notes
+
+
+def test_a_list_photo_that_isnt_https_is_said_to_be_left_out():
+    notes = []
+    card = {"type": "list", "list": [{"detail": "no title"},
+                                     {"title": "X", "photo": {"url": "http://a.test/x.jpg", "source": "S"}}]}
+    assert card_schema.normalize_cards([card], notes) == [{"type": "list", "list": [{"title": "X"}]}]
+    assert notes[-1] == 'cards[0].list "X".photo: not https, left out', "named by title, not a moved place"
+
+
+def test_older_kinds_say_what_their_rules_left_out():
+    notes = []
+    weather = {"type": "weather", "source": {"name": "Met"},
+               "weather": {"unit": "C", "days": [{"day": "Mon", "low": 5, "high": 9}, {"day": "Tue", "low": 20, "high": 10}]}}
+    contact = {"type": "contact", "people": [{"name": "Mei", "email": "not-an-email", "message": "Hi"}]}
+    card_schema.normalize_cards([weather, contact], notes)
+    assert "cards[0].weather.days: a day's low is above its high, those were left out" in notes
+    assert 'cards[1].people "Mei".email: not an email address, left out' in notes
+    assert 'cards[1].people "Mei".message: a text needs their phone number, left out' in notes
+    both = {"type": "comparison", "options": [{"name": "A", "recommended": True}, {"name": "B", "recommended": True}]}
+    notes = []
+    card_schema.normalize_cards([both], notes)
+    assert 'cards[0].options "B".recommended: one option at most, left out' in notes
+    assert card_schema.normalize_next(None) == [] and card_schema.normalize_next("Hi") == []
+    assert card_schema.normalize_next(["a", "b", "c", "d", "e"]) == ["a", "b", "c", "d"]
+
+
+def test_layout_is_tabs_or_the_default():
+    assert card_schema.normalize_layout("TABS") == "tabs"
+    assert card_schema.normalize_layout("stack") is None and card_schema.normalize_layout("grid") is None

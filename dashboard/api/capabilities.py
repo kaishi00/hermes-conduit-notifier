@@ -237,6 +237,10 @@ ROUTE_CAPABILITIES = (
     # POST /workstreams/call-ended: a call kept with the Bot Chat ended in
     # any voice mode, so the updates its workstreams held go out.
     "work-call-ended",
+    # GET/POST /boards/checklists: a checklist card's ticks, kept on the host
+    # for every Conduit, and heard by Hermes at the chat's next turn (Cards
+    # Hermes shows).
+    "board-checklists",
 )
 
 

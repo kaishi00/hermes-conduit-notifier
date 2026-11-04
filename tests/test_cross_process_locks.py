@@ -41,6 +41,7 @@ def _load(name, path):
 health = _load("conduit_push.health_store", ROOT / "health_store.py")
 location = _load("conduit_push.location_store", ROOT / "location_store.py")
 phone = _load("conduit_push.phone_store", ROOT / "phone_store.py")
+checklists = _load("conduit_push.checklist_store", ROOT / "checklist_store.py")
 _api_spec = importlib.util.spec_from_file_location("conduit_plugin_api_locks", ROOT / "dashboard" / "plugin_api.py")
 api = importlib.util.module_from_spec(_api_spec)
 _api_spec.loader.exec_module(api)
@@ -185,3 +186,11 @@ def test_a_room_picture_read_never_fails_on_a_lock_file_it_cannot_open(tmp_path)
     (root / api.rooms.ROOM_IMAGE_LOCK_FILE).mkdir(parents=True)  # can't be opened for writing
     assert api.rooms.read_room_image(str(root), "room_1") is None
     assert api.rooms.clear_room_image(str(root), "room_1") is False
+
+
+def test_checklist_ticks_and_hermes_hearing_them_wait_for_another_process(tmp_path):
+    store = checklists.ChecklistStore(tmp_path)
+    body = {"sessions": ["s1"], "key": "packing", "title": "Packing", "items": ["Hat"], "ticked": ["Hat"]}
+    lock = store.path.with_name(f".{store.path.name}.lock")
+    assert _waits_for(lock, lambda: store.save(body)) == {"packing": ["Hat"]}
+    assert _waits_for(lock, lambda: store.note("s1")).startswith('[Conduit: the user changed the checklist "Packing"')

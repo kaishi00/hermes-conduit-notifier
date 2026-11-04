@@ -431,11 +431,12 @@ class PresentStore:
             return {**_shown(prompt), "preview": prompt["preview"]}
 
     def show(self, title: Any, markdown: Any, *, session_id: Any = None, cards: Any = None,
-             markdown_is_fallback: bool = False) -> dict[str, Any]:
+             markdown_is_fallback: bool = False, layout: str | None = None) -> dict[str, Any]:
         """Keeps a card for the screen of the user's voice call. ``cards``
         are rich cards, already normalized; ``markdown`` is what shows where
         they can't be drawn (``markdown_is_fallback``: only there, it's the
-        cards' own text). Raises PresentError when it won't."""
+        cards' own text). ``layout`` "tabs" shows the cards one at a time.
+        Raises PresentError when it won't."""
         clean_title = _line(title, MAX_CARD_TITLE_CHARS + 1)
         if not clean_title:
             raise PresentError("no_title", "Give a short title, a few words.")
@@ -463,6 +464,8 @@ class PresentStore:
                 card["cards"] = rich
                 if markdown_is_fallback:
                     card["fallback"] = True
+                if layout == "tabs" and len(rich) > 1:
+                    card["layout"] = "tabs"
             # A card with a live name replaces the conversation's earlier
             # card of that name; the cards shown beside it stay.
             live = {item["live"] for item in rich if "live" in item}
@@ -905,6 +908,10 @@ def _for_device(card: dict[str, Any], features: list[str]) -> dict[str, Any]:
         return card
     hidden = {kind for feature, kinds in schema.FEATURE_TYPES.items() if feature not in features for kind in kinds}
     kept = [rich for rich in card["cards"] if rich.get("type") not in hidden]
+    if schema.BOARD_FEATURE not in features:
+        # A phone from before boards draws a stack of four at most.
+        card.pop("layout", None)
+        kept = kept[:schema.LEGACY_MAX_CARDS]
     if len(kept) == len(card["cards"]):
         return card
     if kept:
@@ -968,6 +975,8 @@ def _card(raw: Any, now: float) -> dict[str, Any] | None:
         card["cards"] = rich
         if raw.get("fallback") is True:
             card["fallback"] = True
+        if raw.get("layout") == "tabs" and len(rich) > 1:
+            card["layout"] = "tabs"
     return card
 
 
