@@ -8,8 +8,10 @@ unknown: does chatgpt.com accept an offer from a Python WebRTC stack
 (aiortc) rather than a browser or Conduit's libwebrtc?
 
 It starts the call exactly as Conduit's does (the plugin's own
-create_gpt_live_session, same Codex sign-in, same URL), asks the model to
-greet first, optionally plays a WAV as the microphone, saves what the model
+create_gpt_live_session, same Codex sign-in, same URL), opens it with
+Conduit's greeting turn when the host leaves the opening to it (it always
+does since 0.130.4: the model doesn't speak first from its instructions),
+optionally plays a WAV as the microphone, saves what the model
 says to a WAV, and prints timings. Nothing is sent to Conduit or the relay.
 
 Run it with the Python Hermes itself runs on, the one that can
@@ -53,6 +55,9 @@ ROOT = Path(__file__).resolve().parents[1]
 RATE = 48_000
 FRAME_SAMPLES = 960  # 20 ms, what aiortc's Opus encoder takes
 GREETING = "Hi, this is a GPT-Live bridge test."
+# Conduit's greeting turn (Shared/WatchVoice/LiveVoiceGreeting.swift in hermes-conduit).
+OPENING_TURN = (f'[The call just connected. Greet the user in one short sentence so they know you\'re there '
+                f'and listening. Say: "{GREETING}" Then wait for them.]')
 # Peak above which a received frame counts as speech rather than comfort noise.
 SPEECH_PEAK = 1_000
 # Room for the model to answer once the --wav question has played.
@@ -154,6 +159,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
     channel = pc.createDataChannel("oai-events")
     readers: List[asyncio.Task] = []
     greeted = asyncio.Event()
+    started = asyncio.Event()
 
     @channel.on("open")
     def _open():
@@ -177,6 +183,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
         run.events.append(kind)
         if kind in ("session.started", "session.updated"):
             run.mark("session started")
+            started.set()
         elif kind in ("input_transcript.added", "output_transcript.added"):
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
             run.mark("first " + kind.split("_")[0] + " transcript")
@@ -236,6 +243,15 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
         result["source"] = answer.get("source")
         await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["transport"]["sdp"], type="answer"))
         deadline = time.monotonic() + seconds
+        if not answer.get("greeting_applied"):
+            # As Conduit does: the call's opening is a speakable turn of its own.
+            try:
+                await asyncio.wait_for(started.wait(), timeout=10.0)
+                channel.send(json.dumps({"type": "session.context.append", "channel": "speakable",
+                                         "content": [{"type": "input_text", "text": OPENING_TURN}]}))
+                run.mark("opening turn sent")
+            except asyncio.TimeoutError:
+                print("  no session.started within 10s; opening turn not sent")
         if speech:
             # The greeting gets a bounded wait; the question then always gets its
             # own playback time plus room for the answer.

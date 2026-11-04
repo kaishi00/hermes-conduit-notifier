@@ -417,6 +417,12 @@ async def call(api, grant: dict, engine: str, speech: Dict[int, bytes], seconds:
         run.mark("started")
         result["started"] = info
         input_rate = int(info.get("input_rate") or 16_000)
+        if engine == "gpt_live" and not info.get("greeting_applied"):
+            # As the Watch does: the call's opening is a speakable turn of its own
+            # (the model doesn't speak first from its instructions, notifier #541).
+            await send(2, json.dumps({"type": "session.context.append", "channel": "speakable", "content": [
+                {"type": "input_text", "text": f'[The call just connected. Greet the user in one short sentence. '
+                                               f'Say: "{GREETING}" Then wait for them.]'}]}).encode())
         if engine == "grok":
             # The Watch owns Grok's session, as the phone does.
             await send(2, json.dumps({"type": "session.update", "session": {

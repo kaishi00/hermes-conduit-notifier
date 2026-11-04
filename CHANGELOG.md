@@ -17,9 +17,10 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 - A GPT-Live call that should open with a greeting, or a call from Hermes,
-  stayed silent for a few seconds before the model spoke: OpenAI's model no
-  longer speaks first when told to. Conduit now opens these calls itself, so
-  the greeting comes within a second, on the iPhone and on the Apple Watch.
+  started in silence: OpenAI's model no longer speaks first when told to, so
+  only Conduit's second ask a few seconds later got it talking, and on the
+  Apple Watch nothing did. Conduit now opens these calls itself, so the
+  greeting comes within a second.
 
 ## 0.130.3 (2026-11-04)
 
