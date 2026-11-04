@@ -672,7 +672,12 @@ def create_gpt_live_session(
     else:
         opening = GPT_LIVE_WAIT_FOR_USER if greeting is None else _greet_first(greeting)
     # Conduit sends its own opening turn when the model won't speak first.
-    speaks_first = call_opening or greeting is not None
+    # gpt-live-1-codex no longer self-starts a turn at session start (verified
+    # 2026-11-04: instructed to speak first, the model stays silent ~20s until
+    # the server closes the idle session, and response.create is refused in
+    # client delegation). A speakable context append DOES make it speak, so
+    # report greeting_applied=False and let Conduit open with its own turn.
+    speaks_first = False
     extra = str(live.get("instructions") or "").strip()
     live["instructions"] = f"{extra}\n\n{opening}" if extra else opening
     if billing == "api":

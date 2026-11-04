@@ -162,7 +162,7 @@ def test_session_greets_first_only_when_conduit_asks(client, hermes, openai):
     assert openai.calls[0][2]["session"]["instructions"].endswith(api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
 
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": ""}).json()
-    assert body["greeting_applied"] is True
+    assert body["greeting_applied"] is False, "the model can't self-start a turn; Conduit opens itself"
     instructions = openai.calls[1][2]["session"]["instructions"]
     assert api.gpt_live.GPT_LIVE_WAIT_FOR_USER not in instructions
     assert instructions.endswith(api.gpt_live._greet_first("")) and "Say:" not in instructions
@@ -176,7 +176,7 @@ def test_session_greets_first_only_when_conduit_asks(client, hermes, openai):
 def test_session_opens_a_call_hermes_placed_by_speaking_first(client, hermes, openai):
     body = client.post(f"{BASE}/gpt-live/session",
                        json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
-    assert body["greeting_applied"] is True, "Conduit must not send its own opening turn as well"
+    assert body["greeting_applied"] is False, "the model can't self-start: Conduit's own opening turn is the opening"
     instructions = openai.calls[0][2]["session"]["instructions"]
     assert instructions.endswith("About this call\n\n" + api.gpt_live.GPT_LIVE_CALL_OPENING)
     assert api.gpt_live.GPT_LIVE_WAIT_FOR_USER not in instructions
@@ -192,7 +192,7 @@ def test_session_opens_a_call_hermes_placed_by_speaking_first(client, hermes, op
 
 def test_call_opening_without_a_briefing_never_guesses_why(client, hermes, openai):
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": True}).json()
-    assert body["greeting_applied"] is True
+    assert body["greeting_applied"] is False
     instructions = openai.calls[0][2]["session"]["instructions"]
     assert instructions.endswith(api.gpt_live.GPT_LIVE_CALL_OPENING_UNBRIEFED)
     assert api.gpt_live.GPT_LIVE_CALL_OPENING not in instructions
@@ -368,13 +368,13 @@ def test_hermes_path_reports_the_greeting_only_when_its_config_carries_it(client
     calls = []
     _upstream(monkeypatch, calls, built=lambda live: {"session": {"instructions": live["instructions"]}})
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "greeting": "Hi"}).json()
-    assert body["greeting_applied"] is True
+    assert body["greeting_applied"] is False
     assert calls[0][2]["instructions"].endswith(api.gpt_live._greet_first("Hi"))
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert body["greeting_applied"] is False
     calls.clear()
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
-    assert body["greeting_applied"] is True
+    assert body["greeting_applied"] is False
     assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith(api.gpt_live.GPT_LIVE_CALL_OPENING)
 
 
