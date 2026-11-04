@@ -2503,7 +2503,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             held = (work is not None and not _from_call(work)) or unreadable
             return {"action": "block", "message": BRIDGE_BLOCK} if held else None
         return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
-    allowed = LOOKUPS if mode == "lookups" else STRICT
+    # The memory provider's own tools (hindsight_retain, ...) are the bot's
+    # memory, as ``memory`` is, under either setting (Eric 2026-11-04).
+    allowed = (LOOKUPS if mode == "lookups" else STRICT) | _memory_tools(home, names)
     if name == "tool_call":
         # A bridged call that names nothing readable, or bridges again, is
         # held: Hermes runs what's inside without asking this hook again.
@@ -2551,6 +2553,72 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             return {"action": "block", "message": MESSAGE_AGENT_BLOCK}
         return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
     return None
+
+
+# Each home's memory provider and its tools, by config.yaml's mtime.
+_memory_tool_cache: dict[str, tuple[float, str, frozenset]] = {}
+_memory_tool_lock = threading.Lock()
+
+
+def _memory_tools(home: Path, names: list[str]) -> frozenset:
+    """Which of ``names`` are the profile's memory provider's own tools
+    (``memory.provider``: hindsight's hindsight_retain and hindsight_recall,
+    say), which Hermes routes to the provider rather than its tool registry.
+    By the tools the provider declares, or failing that by its name as their
+    prefix. Never raises: nothing when it can't tell."""
+    if not names:
+        return frozenset()
+    provider, declared = _memory_provider(home)
+    if not provider:
+        return frozenset()
+    prefix = provider.lower() + "_"
+    return frozenset(name for name in names if name in declared or name.lower().startswith(prefix))
+
+
+def _memory_provider(home: Path) -> tuple[str, frozenset]:
+    """The profile's memory provider ("" for none or the built-in store)
+    and the tools it declares, read again when config.yaml changes."""
+    config = Path(home) / "config.yaml"
+    try:
+        stamp = config.stat().st_mtime
+    except OSError:
+        return "", frozenset()
+    key = str(home)
+    with _memory_tool_lock:
+        cached = _memory_tool_cache.get(key)
+    if cached is None or cached[0] != stamp:
+        provider, declared = "", frozenset()
+        try:
+            from hermes_cli.config_effective import load_user_config_effective
+
+            memory = load_user_config_effective(config).get("memory")
+            provider = str(memory.get("provider") or "").strip() if isinstance(memory, dict) else ""
+        except Exception:  # noqa: BLE001 - unread config: no provider tools
+            logger.debug("conduit_push: couldn't read the memory provider", exc_info=True)
+        if provider:
+            try:
+                from agent.memory_provider import is_core_memory_provider
+
+                if is_core_memory_provider(provider):
+                    provider = ""
+            except Exception:  # noqa: BLE001 - an older Hermes: its spellings of the built-in store
+                if provider.lower() in ("default", "builtin", "built-in", "none"):
+                    provider = ""
+        if provider:
+            try:
+                from plugins.memory import load_memory_provider
+
+                loaded = load_memory_provider(provider, register_skills=False)
+                schemas = loaded.get_tool_schemas() if loaded is not None else []
+                declared = frozenset(
+                    str((schema.get("function") or schema).get("name") or "")
+                    for schema in schemas or [] if isinstance(schema, dict)) - {""}
+            except Exception:  # noqa: BLE001 - the prefix still tells them
+                logger.debug("conduit_push: couldn't read memory provider %s's tools", provider, exc_info=True)
+        cached = (stamp, provider, declared)
+        with _memory_tool_lock:
+            _memory_tool_cache[key] = cached
+    return cached[1], cached[2]
 
 
 def _allowed(called: str, called_args: Any, allowed: frozenset) -> bool:
@@ -3520,6 +3588,11 @@ def digest(session_id: Any) -> Optional[str]:
         routing = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), "
                    "and send follow-ups to the one that's on it (work_send with its ref); answer from what you "
                    "know otherwise. ")
+    provider, declared = _memory_provider(home)
+    if provider:
+        tools = ", ".join(sorted(declared)[:4]) or f"{provider}_..."
+        routing += (f"Your memory is yours to keep: call memory and the {provider} memory tools ({tools}) "
+                    "yourself, never through a workstream. ")
     rules = (routing
              + "If the work tools aren't listed, call them through tool_call with their name and arguments, "
              'like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": "Find out '
