@@ -244,6 +244,9 @@ ROUTE_CAPABILITIES = (
     # GET /boards/rooms: the boards agents showed in a room this host runs,
     # which Conduit draws under their messages (Cards Hermes shows).
     "room-boards",
+    # GET /boards/desktop and POST /boards/desktop/seen: the boards the
+    # plugin's Desktop half draws in Hermes Desktop chats (Cards Hermes shows).
+    "desktop-boards",
 )
 
 

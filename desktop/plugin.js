@@ -30,9 +30,12 @@ const frame = 'rounded-lg border border-(--ui-border) bg-(--ui-surface) p-3'
 let rest = null
 let os = null
 const boards = new Map()
+const KEPT_READS = 200
 
 function readBoard(id) {
   if (!boards.has(id)) {
+    // The oldest read goes first, so a long session keeps a few hundred.
+    if (boards.size >= KEPT_READS) boards.delete(boards.keys().next().value)
     const read = rest(`/boards/desktop?id=${id}`).then(
       answer => answer.board,
       error => {

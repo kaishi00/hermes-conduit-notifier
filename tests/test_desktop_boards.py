@@ -76,6 +76,7 @@ def test_the_routes_read_a_board_and_note_the_half(tmp_path, monkeypatch):
     assert kept.half_live() is False
     assert http.post(f"{BASE}/boards/desktop/seen", json={}).json() == {"ok": True}
     assert kept.half_live() is True
+    assert "desktop-boards" in api.capabilities.ROUTE_CAPABILITIES
 
 
 def _plugin():
