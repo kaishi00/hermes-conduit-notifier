@@ -729,6 +729,8 @@ def state(pulse_store: Any, home: Path, now: Optional[float] = None) -> dict[str
         "enabled": bool(pulse_store.get("enabled")),
         "running": bool(running),
         "stale_build": bool(running and pulse.lease_on_older_build(lease)),
+        # Why this dashboard can't run it, as Settings says it (notifier#513).
+        "host_problem": "" if running else pulse.host_problem(),
         "home_chat": {"id": chat.chat_id, "title": chat.title, "pinned": bool(chat.pinned)} if chat else None,
         "home_problem": problem,
         "home_title": pulse_store.get("home_title") or "Pulse",

@@ -313,9 +313,13 @@ def dispatch(args: argparse.Namespace) -> int:
             if "e2e" not in outgoing:
                 print("End-to-end encryption is off for this profile; nothing to corrupt.")
                 return 1
-            outgoing["e2e"]["ct"] = _flipped(outgoing["e2e"]["ct"])
+            def corrupted(paired: dict) -> dict:
+                broken = build_outgoing(event, paired)
+                broken["e2e"]["ct"] = _flipped(broken["e2e"]["ct"])
+                return broken
+
             try:
-                post_event(outgoing)
+                post_event(corrupted)
             except _RELAY_ERRORS as error:
                 if isinstance(error, RelayRejected) and error.status in (401, 403):
                     record_relay_refusal(state, error)
@@ -603,7 +607,8 @@ def _pulse(args: argparse.Namespace) -> int:
         ticked, now = pulse_store.get("last_tick_at"), time.time()
         if isinstance(ticked, bool) or not isinstance(ticked, (int, float)) or now - ticked > pulse.STALE_TICK_S:
             print(f"Warning: the dashboard hasn't run Pulse in the last {int(pulse.STALE_TICK_S // 60)} minutes. "
-                  "Check that it's running this build and was restarted after `plugins install`.")
+                  "Check that it's running this build and was restarted after `plugins install`; "
+                  "if it was, its log says when its Hermes can't run Pulse.")
         else:
             print(f"Dashboard last checked: {max(0, int(now - ticked))} s ago")
             lease = pulse_store.get(pulse_delivery.store.LEADER)
