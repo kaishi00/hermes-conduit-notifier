@@ -1957,6 +1957,9 @@ def test_a_bots_workstreams_are_not_chats_the_person_had(db, tmp_path):
     for sid in ("w", "ws", "ws-tip", "ws-tip2"):
         db.message("user", f"from {sid}", sid=sid, at=now - 60)
     assert [row["content"] for row in hermes.recent_messages(tmp_path, exclude_chat=SID, since=0)] == ["from w"]
+    work_store.Store(tmp_path).add("workstream", title="Pulse", status="done", session_id="ws-pulse")
+    db.session("ws-pulse", title="Pulse", pinned=1)  # a resolved workstream that took the home chat's name
+    assert [chat.chat_id for chat in hermes.find_home_chat(tmp_path, "Pulse")] == [SID]
     assert [row["chat_id"] for row in hermes.chat_activity(tmp_path, exclude_chat=SID, since=0)] == ["w"]
     assert [row["chat_id"] for row in hermes.later_messages(tmp_path, after=0, exclude=[SID], max_chars=50,
                                                              limit=10)] == ["w"]

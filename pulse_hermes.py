@@ -72,11 +72,13 @@ def find_home_chat(home: Path, title: str) -> list[HomeChat]:
     Mode finds "Bot Chat"), pinned and most recently active first. Only
     chats a person started count: a compression or branch child shares its
     parent's title, and reopening the parent follows it there. More than one
-    means the user has to pick (``pulse home``)."""
+    means the user has to pick (``pulse home``). A bot's workstream never
+    counts, though a resolved one is shown in Hermes (notifier #540)."""
     rows = _run(home, (
-        "SELECT id, title, pinned FROM sessions WHERE title = ? AND archived = 0 AND hidden = 0 "
-        "AND parent_session_id IS NULL ORDER BY pinned DESC, COALESCE(last_activity_at, started_at) DESC"
-    ), (title,))
+        "SELECT id, title, pinned FROM sessions s WHERE title = ? AND archived = 0 AND hidden = 0 "
+        "AND parent_session_id IS NULL AND " + _NOT_WORK + " "
+        "ORDER BY pinned DESC, COALESCE(last_activity_at, started_at) DESC"
+    ), (title, _workstreams(home)))
     return [HomeChat(row["id"], row["title"], bool(row["pinned"])) for row in rows]
 
 
