@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.130.3 (2026-11-04)
+
+### Fixes
+- Pulse read a message you sent with a picture as if you had also written
+  your recalled memories and Conduit's notes for that turn, which Hermes
+  stores after the picture. It now reads only what you wrote.
+
 ## 0.130.2 (2026-11-04)
 
 ### Fixes

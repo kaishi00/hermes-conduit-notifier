@@ -2319,6 +2319,29 @@ def test_chat_reads_match_hermes(db, tmp_path):
     assert [(r["role"], r["content"]) for r in rows] == [("assistant", "h")]
 
 
+_RECALLED = ("<memory-context>\n[System note: The following is recalled memory context, NOT new user input. "
+             "Treat as authoritative reference data — this is the agent's persistent memory and should inform "
+             "all responses.]\n\nThe user speaks English.\n</memory-context>")
+
+
+def test_a_picture_turns_stored_context_is_not_the_users_words(db, tmp_path):
+    # Hermes stores a picture turn's recalled memory and plugin notes after
+    # its [screenshot] line (Hermes #71998); Pulse reads only what was typed.
+    db.session()
+    db.session("work", title="Work", pinned=0)
+    db.message("user", "Is this mould?\n[screenshot]\n" + _RECALLED + "\n\nConduit note for this turn.",
+               sid="work", at=DAY + 20)
+    db.message("assistant", "It looks like it. [screenshot] stays in a reply.", sid="work", at=DAY + 30)
+    db.message("user", "Hi\n\n" + _RECALLED, sid="work", at=DAY + 40)
+    rows = hermes.chat_messages(tmp_path, chat_id="work", after_id=0, since=0, max_chars=2000, limit=10)
+    assert [r["content"] for r in rows] == ["Is this mould?\n[screenshot]",
+                                           "It looks like it. [screenshot] stays in a reply.", "Hi"]
+    # Cut off before the fence closes, it goes to the end.
+    assert hermes.typed("Look [screenshot] <memory-context> [System note: cut") == "Look [screenshot]"
+    assert hermes.typed("hello\n[screenshot]") == "hello\n[screenshot]"
+    assert hermes.typed(None) is None
+
+
 @pytest.fixture
 def remembering(live, db, monkeypatch):
     live.store.set("memory_since", DAY)

@@ -15,7 +15,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 STATE_DB = "state.db"
 # Hermes writes this display kind on the assistant row of a turn that failed
@@ -53,8 +53,44 @@ def _connect(home: Path) -> sqlite3.Connection:
         conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
     except sqlite3.Error as error:
         raise HermesUnreadable(str(error)) from error
-    conn.row_factory = sqlite3.Row
+    conn.row_factory = _row
     return conn
+
+
+# Hermes gives the model a turn's recalled memory (fenced in
+# <memory-context>) and plugins' pre_llm_call notes, ours included, with the
+# user's message. On a text turn they ride in api_content and content stays
+# what was typed. On a turn with a picture they go in as one more text part
+# after the pictures, and the stored row keeps it (Hermes #71998): flattened,
+# the text after the pictures' [screenshot] lines. Conduit's bubble drops it
+# the same way (MessageNormalizer.removingTurnContext), and so does Pulse.
+_MEMORY_CONTEXT = re.compile(r"<\s*memory-context\s*>[\s\S]*?(?:<\s*/\s*memory-context\s*>|\Z)", re.IGNORECASE)
+# One line per picture the prompt held (agent/session_persistence.py _image_marker).
+_PICTURE_LINE = re.compile(r"[ \t]*\[screenshot(?: detail=(?:low|high|auto))?\][ \t]*")
+
+
+def typed(content: Any) -> Any:
+    """A stored prompt as the user typed it, without the turn's context;
+    anything but text as it is."""
+    if not isinstance(content, str) or ("[screenshot" not in content and "memory-context" not in content.lower()):
+        return content
+    lines = content.split("\n")
+    last = max((index for index, line in enumerate(lines) if _PICTURE_LINE.fullmatch(line)), default=None)
+    text = "\n".join(lines[:last + 1]) if last is not None else content
+    text = _MEMORY_CONTEXT.sub("", text)
+    return content if text == content else text.strip()
+
+
+def _row(cursor: sqlite3.Cursor, values: tuple) -> sqlite3.Row:
+    """A row, a user row's ``content`` as the user typed it (``typed``)."""
+    row = sqlite3.Row(cursor, values)
+    keys = row.keys()
+    if "content" in keys and "role" in keys and row["role"] == "user":
+        index = keys.index("content")
+        content = typed(values[index])
+        if content is not values[index]:
+            row = sqlite3.Row(cursor, values[:index] + (content,) + values[index + 1:])
+    return row
 
 
 def _run(home: Path, sql: str, params: tuple) -> list[sqlite3.Row]:
@@ -238,7 +274,7 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
     """What the user wrote after the user row carrying ``tag``, up to the
     next hidden (Pulse) row."""
     rows = _run(home, (
-        "SELECT content, display_kind FROM messages WHERE session_id = ? AND role = 'user' AND id > ("
+        "SELECT role, content, display_kind FROM messages WHERE session_id = ? AND role = 'user' AND id > ("
         "SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user' AND instr(content, ?) > 0) "
         "ORDER BY id"
     ), (session_id, session_id, tag))
