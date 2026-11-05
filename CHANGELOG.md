@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.131.0 (2026-11-05)
+
+### New and improved
+- Conduit can show every chat waiting on your approval or answer, in every
+  profile: a count on the profile strip, a banner when another chat starts
+  waiting, and a Needs you list that opens each one at its card.
+
 ## 0.130.5 (2026-11-05)
 
 ### Fixes

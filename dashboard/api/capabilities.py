@@ -227,6 +227,10 @@ ROUTE_CAPABILITIES = (
     # on a workstream (Reply, Stop, Continue, Check first), ?conduit_profile=
     # included (Bot workstreams).
     "bot-workstreams",
+    # GET /waiting: every chat with an approval or a question waiting on the
+    # user, for the Needs you list, the profile strip's counts and the
+    # in-app banner (Hermes is waiting on you, issue 1705).
+    "waiting-list",
     # GET/POST /workstreams/settings: the bot's work settings, which Edit Bot
     # > Work shows and changes (on or off, lookups, running at once, after a
     # restart, the workstreams' approvals).

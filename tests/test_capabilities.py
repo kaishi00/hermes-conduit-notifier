@@ -152,6 +152,7 @@ def test_every_capability_names_a_served_route_family():
         "room-free-busy": "/rooms/choices",
         "link-asks": "/links/rules",
         "bot-workstreams": "/workstreams",
+        "waiting-list": "/waiting",
         "bot-work-settings": "/workstreams/settings",
         "work-adopt": "/workstreams/adopt",
         "work-call-ended": "/workstreams/call-ended",
