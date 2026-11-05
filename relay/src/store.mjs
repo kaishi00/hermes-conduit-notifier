@@ -82,6 +82,12 @@ export class RelayStore {
     this.decisionSaveDelayMs = Math.min(decisionSaveDelayMs, saveDelayMs);
     this.saveTimer = undefined;
     this.saveDueAt = 0;
+    // The soonest delay any unsaved change asked for, so a failed write
+    // retries on the decisions' delay when decisions are among them.
+    this.pendingDelayMs = undefined;
+    // When writes started failing; null while the file is current. /healthz
+    // reports it so an operator can see changes held only in memory.
+    this.unsavedSince = null;
     this.dirty = false;
     this.events = new EventLedger({ perInstallation: this.limits.maxEventIdsPerInstallation, total: this.limits.maxGlobalEventIds });
     this.data = { version: 1, installations: {}, pairings: {}, pendingDecisions: {} };
@@ -201,11 +207,14 @@ export class RelayStore {
     } catch (error) {
       // A partial file would hold space a full disk needs back.
       try { unlinkSync(temporary); } catch { /* Preserve the original failure. */ }
-      // Keep the change pending and try again after the save delay.
-      this.saveSoon();
+      // Keep the change pending and try again after its save delay.
+      this.unsavedSince ??= new Date().toISOString();
+      this.saveSoon(this.pendingDelayMs ?? this.saveDelayMs);
       throw error;
     }
     this.dirty = false;
+    this.pendingDelayMs = undefined;
+    this.unsavedSince = null;
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
   }
@@ -215,6 +224,7 @@ export class RelayStore {
   // pending write forward; any full save in the meantime writes both.
   saveSoon(delayMs = this.saveDelayMs) {
     this.dirty = true;
+    this.pendingDelayMs = Math.min(this.pendingDelayMs ?? delayMs, delayMs);
     const dueAt = Date.now() + delayMs;
     if (this.saveTimer) {
       if (this.saveDueAt <= dueAt) return;
@@ -226,7 +236,7 @@ export class RelayStore {
       try {
         this.flush();
       } catch (error) {
-        console.error(JSON.stringify({ level: 'error', message: 'deferred relay save failed', error: error instanceof Error ? error.message : String(error) }));
+        console.error(JSON.stringify({ level: 'error', message: 'deferred relay save failed, changes held in memory', unsaved_since: this.unsavedSince, error: error instanceof Error ? error.message : String(error) }));
       }
     }, delayMs);
     this.saveTimer.unref?.();

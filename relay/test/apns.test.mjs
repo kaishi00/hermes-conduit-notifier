@@ -282,3 +282,60 @@ test('a burst larger than Node\'s listener limit shares the session without a wa
     server.close();
   }
 });
+
+test('when a shared session breaks, only the push APNs had not answered is sent again', async () => {
+  // Two pushes share a kept session: APNs has answered the first one's
+  // headers (its body still coming) and not the second when the session
+  // fails, which reaches both sends with one error.
+  let firstSession = null;
+  const seen = [];
+  const { server, origin } = await startH2Server((stream, headers) => {
+    seen.push(headers[':path']);
+    if (firstSession && stream.session !== firstSession) {
+      stream.respond({ ':status': 200, 'content-type': 'application/json' });
+      stream.end('{}');
+      return;
+    }
+    firstSession ??= stream.session;
+    if (headers[':path'].endsWith('a'.repeat(64))) stream.respond({ ':status': 200, 'content-type': 'application/json' });
+  });
+  try {
+    const apns = client(origin);
+    // Open the session first so both pushes go on a kept one.
+    const session = apns.currentSession();
+    const sends = Promise.allSettled([
+      apns.send('a'.repeat(64), notification),
+      apns.send('b'.repeat(64), notification),
+    ]);
+    while (seen.length < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    session.emit('error', new Error('connection reset'));
+    session.destroy();
+    const [answered, unanswered] = await sends;
+    assert.equal(answered.status, 'rejected');
+    assert.equal(answered.reason.apnsAnswered, true);
+    assert.deepEqual(unanswered.value, { ok: true, status: 200, reason: null }, 'never answered: sent again on a fresh session');
+    assert.equal(seen.filter((path) => path.endsWith('a'.repeat(64))).length, 1, 'answered: never sent again');
+    assert.equal(seen.filter((path) => path.endsWith('b'.repeat(64))).length, 2);
+  } finally {
+    server.close();
+  }
+});
+
+test('a push left unanswered past the send timeout retires the session and the next connects again', async () => {
+  let held = true;
+  const { server, origin } = await startH2Server((stream) => {
+    if (held) { held = false; return; }
+    stream.respond({ ':status': 200, 'content-type': 'application/json' });
+    stream.end('{}');
+  });
+  try {
+    const apns = client(origin, { sendTimeoutMs: 50 });
+    await assert.rejects(apns.send('a'.repeat(64), notification), /timed out/);
+    assert.equal(apns.session, null);
+    assert.equal((await apns.send('b'.repeat(64), notification)).ok, true);
+    assert.equal(apns.connects, 2);
+  } finally {
+    server.close();
+  }
+});

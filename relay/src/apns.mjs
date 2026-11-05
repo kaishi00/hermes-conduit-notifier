@@ -24,7 +24,7 @@ const PING_TIMEOUT_MS = 10_000;
 const IDLE_CLOSE_MS = 15 * 60_000;
 
 export class ApnsClient {
-  constructor({ keyPath, keyId, teamId, topic, origin, pingIntervalMs = PING_INTERVAL_MS, pingTimeoutMs = PING_TIMEOUT_MS, idleCloseMs = IDLE_CLOSE_MS }) {
+  constructor({ keyPath, keyId, teamId, topic, origin, sendTimeoutMs = SEND_TIMEOUT_MS, pingIntervalMs = PING_INTERVAL_MS, pingTimeoutMs = PING_TIMEOUT_MS, idleCloseMs = IDLE_CLOSE_MS }) {
     this.keyId = keyId;
     this.teamId = teamId;
     this.topic = topic;
@@ -32,6 +32,7 @@ export class ApnsClient {
     this.privateKey = createPrivateKey(readFileSync(keyPath));
     this.cachedToken = null;
     this.tokenCreatedAt = 0;
+    this.sendTimeoutMs = sendTimeoutMs;
     this.pingIntervalMs = pingIntervalMs;
     this.pingTimeoutMs = pingTimeoutMs;
     this.idleCloseMs = idleCloseMs;
@@ -68,10 +69,12 @@ export class ApnsClient {
     session.inflight = 0;
     session.lastSendAt = Date.now();
     this.session = session;
+    let ping;
     const retire = () => {
       clearInterval(ping);
       if (this.session === session) this.session = null;
     };
+    session.retire = retire;
     // Required: without an 'error' listener a connection-level failure
     // (refused, TLS, socket reset) reaches Node as an unhandled 'error'
     // event and terminates the whole relay. It also settles every send in
@@ -87,7 +90,7 @@ export class ApnsClient {
       retire();
       try { session.close(); } catch { /* already closing */ }
     });
-    const ping = setInterval(() => {
+    ping = setInterval(() => {
       if (session.closed || session.destroyed) return;
       // The pings themselves keep the socket busy, so idleness is counted
       // from the last send, not from socket activity.
@@ -142,13 +145,18 @@ export class ApnsClient {
         session.inflight -= 1;
         if (session.inflight === 0 && !session.destroyed) session.unref();
       };
-      const fail = (error) => {
+      const fail = (cause) => {
         if (settled) return;
         settled = true;
-        // APNs answered before this broke (the session may fail before the
-        // stream does): it may have delivered the push, so send() does not
-        // send it again.
-        if (status !== 0 && error && typeof error === 'object') error.apnsAnswered = true;
+        // Each send rejects with its own error: a session failure reaches
+        // every send on it with one shared error object, and whether APNs
+        // answered is this send's alone. Answered before this broke (the
+        // session may fail before the stream does), APNs may have delivered
+        // the push, so send() does not send it again.
+        const error = new Error(cause instanceof Error ? cause.message : String(cause), { cause });
+        if (cause?.code) error.code = cause.code;
+        error.apnsAnswered = status !== 0;
+        error.apnsTimedOut = Boolean(cause?.apnsTimedOut);
         finish();
         // Cancel only this stream: the session is shared with other sends,
         // and its own listeners retire it if it is the thing that broke.
@@ -168,12 +176,12 @@ export class ApnsClient {
       const stall = setTimeout(() => {
         // A session that leaves a push unanswered this long is not one to
         // keep: the next send connects again.
-        if (this.session === session) this.session = null;
+        session.retire();
         try { session.close(); } catch { /* already closing */ }
         const error = new Error('apns send timed out');
         error.apnsTimedOut = true;
         fail(error);
-      }, SEND_TIMEOUT_MS);
+      }, this.sendTimeoutMs);
       session.pending.add(fail);
       try {
         request = session.request({

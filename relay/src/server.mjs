@@ -370,7 +370,10 @@ if (isEntryPoint()) {
 async function route(request, response) {
   const url = new URL(request.url ?? '/', config.publicUrl);
   const client = clientAddress(request);
-  if (request.method === 'GET' && url.pathname === '/healthz') return sendJson(response, 200, { ok: true });
+  if (request.method === 'GET' && url.pathname === '/healthz') {
+    // Still ok when writes fail: a restart would lose what only memory holds.
+    return sendJson(response, 200, store.unsavedSince ? { ok: true, unsaved_since: store.unsavedSince } : { ok: true });
+  }
 
   // Registration proof (#142, #146): push a one-time nonce to the device
   // token; the phone sends it back with the registration or token change.

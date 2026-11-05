@@ -1066,3 +1066,28 @@ test('polling one decision does not sweep the whole store', () => {
   assert.deepEqual(relay.pendingDecisionStatus('inst-poll', 'gw-1', 'conduit-push-poll'), { status: 'unknown' });
   assert.equal(relay.data.pendingDecisions[RelayStore.decisionKey('inst-poll', 'gw-1', 'conduit-push-poll')], undefined);
 });
+
+test('a failed decision write retries on the decision delay and is reported until it lands', async () => {
+  const path = join(dir, `decision-retry-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, {}, { saveDelayMs: 60_000, decisionSaveDelayMs: 20 });
+  relay.flush();
+  const blocker = join(dir, `not-a-directory-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(blocker, '');
+  relay.path = join(blocker, 'relay.json');
+  const errors = [];
+  const consoleError = console.error;
+  console.error = (line) => errors.push(line);
+  try {
+    relay.savePendingDecision({ id: 'conduit-push-retry', installationId: 'inst-retry', gatewayId: 'gw-1', question: 'q' });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(errors.filter((line) => line.includes('deferred relay save failed')).length >= 2, 'retried on the 20 ms decision delay, not the minute');
+    assert.ok(relay.unsavedSince, 'the failure is reported');
+    relay.path = path;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  } finally {
+    console.error = consoleError;
+  }
+  assert.equal(relay.dirty, false);
+  assert.equal(relay.unsavedSince, null);
+  assert.ok(JSON.parse(readFileSync(path, 'utf8')).pendingDecisions[RelayStore.decisionKey('inst-retry', 'gw-1', 'conduit-push-retry')]);
+});
