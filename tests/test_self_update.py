@@ -349,12 +349,16 @@ def test_a_dashboard_restarted_before_the_gateway_says_so_where_it_cant_restart_
     path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,
                                 "version": api.capabilities.LOADED_VERSION}))
 
-    def unsupported():
-        raise api.core.TokenError(501, "no")
+    for error in (api.core.TokenError(501, "no"), ImportError("broken inside Hermes")):
+        path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,
+                                    "version": api.capabilities.LOADED_VERSION}))
 
-    monkeypatch.setattr(api.self_update, "_hermes_update_steps", unsupported)
-    job = api.self_update.finish_self_update_after_restart(path, lambda job: None, delay=0)
-    assert job["step"] == "failed" and "hermes gateway restart" in job["detail"]
+        def unsupported():
+            raise error
+
+        monkeypatch.setattr(api.self_update, "_hermes_update_steps", unsupported)
+        job = api.self_update.finish_self_update_after_restart(path, lambda job: None, delay=0)
+        assert job["step"] == "failed" and "hermes gateway restart" in job["detail"]
 
 
 def test_a_failure_before_the_gateway_restart_isnt_read_as_taken_down(tmp_path):

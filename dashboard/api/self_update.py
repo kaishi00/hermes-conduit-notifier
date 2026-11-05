@@ -707,7 +707,8 @@ def _resume_gateway_restart(path: Path, job: Dict[str, Any],
     global _self_update_thread, _self_update_job
     try:
         pull, restart_gateway = _hermes_update_steps()
-    except core.TokenError:
+    except Exception:  # noqa: BLE001 — at import nobody hears a raise: the job says it at once
+        logger.warning("Conduit plugin: couldn't carry on the update's gateway restart", exc_info=True)
         _self_update_failed(job, "The dashboard restarted before the gateway did. Restart the gateway "
                                  "on this host (hermes gateway restart) to finish the update")
         with contextlib.suppress(OSError):
