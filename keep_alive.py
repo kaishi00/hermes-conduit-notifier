@@ -13,9 +13,11 @@ request.
 - A pooled connection the relay (or what's in front of it) closed while it
   sat idle fails on the next send. That request is sent again once on a new
   connection when it failed while being written, or when asking twice
-  changes nothing (a GET or DELETE; urllib3's rule): a POST the relay may
-  have taken before dropping the connection, a pairing claim say, is never
-  replayed.
+  changes nothing (GET, HEAD, PUT, DELETE, OPTIONS; urllib3's rule): a POST
+  the relay answered-or-not after taking it whole, a pairing claim say, is
+  not replayed. One that failed mid-write is, as urllib3 does: a claim the
+  relay did take answers 404 the second time (the code is gone), and
+  events are deduplicated.
 - Through an HTTP(S) proxy, urllib's own handler runs (a tunnel each time).
 - A forked process starts with an empty pool, and a connection that was in
   flight across the fork is closed rather than pooled: it never shares a
