@@ -534,7 +534,18 @@ def test_an_absolute_path_is_only_checked(tmp_path):
     assert index.resolve_name(conn, ["s1"], str(tmp_path / "b.md"), exists=check)["path"] is None
 
 
+def _hermes_file_routes(monkeypatch):
+    """Hermes' own file routing, as a local install has it."""
+    import types
+    files = types.ModuleType("hermes_cli.web_routers.files")
+    files._fs_backend = lambda profile: None
+    files._fs_profile_home = lambda profile: None
+    files._is_sensitive_path = lambda path: False
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", files)
+
+
 def test_the_resolve_route_reads_the_profile_store(tmp_path, monkeypatch):
+    _hermes_file_routes(monkeypatch)
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "report.xlsx").write_text("x")
     _db(tmp_path, [("s1", "tool", json.dumps({"file_path": str(tmp_path / "out" / "report.xlsx")}), None,
@@ -571,6 +582,7 @@ def test_a_windows_path_in_a_tool_call_resolves(tmp_path):
 
 
 def test_the_resolve_route_never_answers_with_a_secret_file(tmp_path, monkeypatch):
+    _hermes_file_routes(monkeypatch)
     (tmp_path / ".ssh").mkdir()
     (tmp_path / ".ssh" / "id_rsa").write_text("x")
     (tmp_path / "out").mkdir()
@@ -599,3 +611,14 @@ def test_the_chats_own_folder_wins_over_a_continuations(tmp_path):
     db = index.open_db(home)
     assert index.resolve_name(db, ["main"], "README.md", exists=lambda p: True) == {
         "path": "C:/proj/README.md", "via": "folder"}
+
+
+def test_without_hermes_routing_the_resolve_route_refuses(tmp_path, monkeypatch):
+    _db(tmp_path, []).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", None)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    assert client.get(f"{BASE}/workspace/resolve", params={"path": "a.md", "session_id": "s1"}).status_code == 501

@@ -177,8 +177,8 @@ def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[
         conn = index.open_db(get_hermes_home())
     except FileNotFoundError:
         return {"path": None}
-    exists = _host_file_check(profile)
     try:
+        exists = _host_file_check(profile)
         return index.resolve_name(conn, ids, name, exists=exists)
     finally:
         conn.close()
@@ -197,7 +197,9 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
         remote = _fs_backend(profile) is not None
         home = None if remote else _fs_profile_home(profile)
     except Exception:
-        _is_sensitive_path, remote, home = None, False, None
+        # Without Hermes' own routing an SSH profile's paths would be checked
+        # on this host and its secret-file check lost: refuse, as the Folder does.
+        raise core.TokenError(501, "This Hermes can't route workspace files; update Hermes")
     try:
         from hermes_cli.web_server_files import _agent_fs_path
     except Exception:

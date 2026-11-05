@@ -661,10 +661,12 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
 
     if "cwd" in session_columns:
         # The chat's own folder first, then those of the sessions it
-        # continues or that continue it, in lineage order.
-        folders = {str(row[0]): str(row[1] or "") for row in conn.execute(
-            f"SELECT id, cwd FROM sessions WHERE id IN ({marks})", chat)}
-        order = [sid for sid in wanted if sid in folders] + [sid for sid in chat if sid not in wanted]
+        # continues or that continue it, the most recently active first.
+        rows = conn.execute(
+            f"SELECT s.id, s.cwd FROM sessions s WHERE s.id IN ({marks}) ORDER BY "
+            f"(SELECT MAX(m.id) FROM messages m WHERE m.session_id = s.id) DESC, s.id", chat).fetchall()
+        folders = {str(row[0]): str(row[1] or "") for row in rows}
+        order = [sid for sid in wanted if sid in folders] + [str(row[0]) for row in rows if str(row[0]) not in wanted]
         for cwd in dict.fromkeys(folders.get(sid, "") for sid in order):
             cwd = cwd.strip()
             if re.match(r"^[A-Za-z]:[\\/]", cwd):
