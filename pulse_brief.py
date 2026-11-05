@@ -66,7 +66,8 @@ _NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on i
          "reply: give it a few words at most. What's under \"Related to today's events\" is what Pulse remembers that "
          "shares a name or a word with one of today's events: where it helps with that event, say it with the event "
          "in a few words (\"lunch with Dan at 1: he started the new job on Monday\"), and leave out the rest. "
-         "When nothing is outstanding, say so in the one sentence and stop. "
+         "When nothing is outstanding, say so in the one sentence and stop. Never say something hasn't happened "
+         "or started because nothing here shows it: this message doesn't hold everything the chats said. "
          "Only pass on what the message says")
 # While Pulse looks things up first, pulse_tools.look_note follows LOOK_NOTE.
 NOTE, LOOK_NOTE = _NOTE + ". Don't use any tools.", _NOTE + " and what you look up about it."

@@ -3224,6 +3224,12 @@ keeps it.
   keeps one only when it names the done item or the ended event it follows,
   and at most 2 a report. The calendar is read as the phone already shares
   it, on this host: nothing new leaves the phone.
+- With each thing a chat showed done comes the newest few lines that chat
+  said after it (plugin 0.130.5): memory has read that chat, so the report's
+  chats leave it out, and a next step that saw only the done step once said
+  the work after it hadn't started when it had finished hours before. Pulse
+  never says something hasn't happened or started just because nothing it
+  reads shows it, in a report, a next step or the morning brief.
 - Next steps have a level of their own, held for the morning brief until
   you turn them up in What Pulse learned, `hermes conduit-push pulse learned
   next push|screen|brief|off` or `PUT /pulse/levels` with `"kind": "next"`
