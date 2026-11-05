@@ -3894,7 +3894,7 @@ def _screen_freed(home: Path) -> bool:
     if work is None or not work.session_id:
         # Not readable just now: back on the list; the next look drops it
         # if it no longer waits.
-        screen_lock.wait(home, str(item.get("session_id") or ""), who)
+        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"))
         _watch_screen(home)
         return False
     store = work_store.Store(home)
@@ -3904,7 +3904,7 @@ def _screen_freed(home: Path) -> bool:
         # Still waiting (at the running limit, say): kept on the list for
         # the next release or the watch's next look.
         logger.debug("conduit_push: couldn't tell %s the screen is free: %s", work.ref, result.get("note"))
-        screen_lock.wait(home, work.session_id, who)
+        screen_lock.wait(home, work.session_id, who, since=item.get("at"))
         _watch_screen(home)
     return False
 

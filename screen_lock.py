@@ -176,6 +176,14 @@ def _pid_alive(pid: Any) -> bool:
         return False
     if pid == os.getpid():
         return True
+    if os.name == "nt":
+        # No signal 0 there: os.kill(pid, 0) would end the holder's process.
+        try:
+            from .pulse_evidence import _windows_pid_running
+
+            return _windows_pid_running(pid)
+        except Exception:  # noqa: BLE001 — can't ask: counted as running
+            return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -247,14 +255,16 @@ def release(home: Path, session_id: str, now: Optional[float] = None) -> bool:
 
 
 def wait(home: Path, session_id: str, who: dict, where: Optional[str] = None,
-         now: Optional[float] = None) -> None:
-    """A session refused the screen asks to be told when it's free."""
+         now: Optional[float] = None, since: Optional[float] = None) -> None:
+    """A session refused the screen asks to be told when it's free. ``since``
+    puts back one taken off the list in its place, with its own expiry."""
     where = where or scope()
     now = time.time() if now is None else now
     with _locked(_path(home, where)) as state:
         waiting = [item for item in state.get("waiting") or [] if isinstance(item, dict)
                    and item.get("session_id") != session_id and now - float(item.get("at") or 0) < WAIT_KEEP_S]
-        waiting.append({**who, "session_id": session_id, "home": str(home), "at": now})
+        waiting.append({**who, "session_id": session_id, "home": str(home), "at": now if since is None else since})
+        waiting.sort(key=lambda item: float(item.get("at") or 0))
         # Past the cap the newest ask goes: the longest wait is woken first.
         state["waiting"] = waiting[:MAX_WAITING]
 

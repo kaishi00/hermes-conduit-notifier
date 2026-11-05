@@ -338,3 +338,25 @@ def test_a_chat_continues_another_only_through_compactions(tmp_path):
     assert work._compacted_into(tmp_path, "b", "c")
     assert not work._compacted_into(tmp_path, "x", "y")
     assert not work._compacted_into(tmp_path, "c", "a")
+
+
+def test_windows_never_probes_a_holder_with_os_kill(monkeypatch):
+    pulse_evidence = sys.modules["conduit_push.pulse_evidence"]
+
+    def killed(*_):
+        raise AssertionError("os.kill(pid, 0) ends the process on Windows")
+
+    monkeypatch.setattr(lock.os, "name", "nt")
+    monkeypatch.setattr(lock.os, "kill", killed)
+    monkeypatch.setattr(pulse_evidence, "_windows_pid_running", lambda pid: pid == 4242)
+    assert lock._pid_alive(4242)
+    assert not lock._pid_alive(4343)
+
+
+def test_a_waiter_put_back_keeps_its_place(home):
+    now = time.time()
+    lock.wait(home, "first", {"ref": "W1"}, now=now)
+    lock.wait(home, "second", {"ref": "W2"}, now=now + 1)
+    taken = lock.take_next_waiting(home, lambda item: True, now=now + 2)
+    lock.wait(home, taken["session_id"], {"ref": "W1"}, now=now + 3, since=taken["at"])
+    assert lock.take_next_waiting(home, lambda item: True, now=now + 4)["session_id"] == "first"
