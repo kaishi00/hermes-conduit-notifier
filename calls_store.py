@@ -527,6 +527,9 @@ class CallStore:
             return False
         with self._locked() as state:
             entry["followed"] = bool(state["settings"]["enabled"] and state["settings"]["alerts"])
+            if not entry["followed"]:
+                # Only listed: no call ever reads its command, so none is kept.
+                entry.update(command="", command_sha="", cut=False)
             kept = [item for item in state["waiting"]
                     if not (item["kind"] == kind and set(item["session_ids"]) & set(ids))]
             state["waiting"] = _capped_waiting([*kept, entry])

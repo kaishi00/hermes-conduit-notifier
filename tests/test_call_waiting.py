@@ -97,6 +97,8 @@ def test_the_needs_you_list_keeps_every_wait_even_with_alert_calls_off(tmp_path)
     assert approval["summary"] == "Run the migration?" and approval["title"] == "Release prep"
     assert approval["session_ids"] == ["s1", "rt-1"] and approval["at"] == 1000.0
     assert "command" not in approval, "the list never shows a command"
+    stored = json.loads((tmp_path / "conduit-calls.json").read_text())["waiting"]
+    assert all(not item["command"] and not item["command_sha"] for item in stored), "nor keeps one"
     # Without alert calls, a call can neither read nor answer them.
     assert calls.waiting_for("s1") is None
     assert calls.answer_waiting("s1", choice="once")["status"] == "not_waiting"
