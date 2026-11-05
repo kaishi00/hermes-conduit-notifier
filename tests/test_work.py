@@ -166,6 +166,18 @@ def hermes(home, monkeypatch):
     return fake
 
 
+def batched():
+    """The lines waiting in the Bot Chats' work update batches. A test that
+    reads them pins WAKE_BATCH_S, so the timer can't send them first on a
+    slow runner; this cancels the timers, so none fires into a later test."""
+    lines = []
+    for batch, timer in list(work._wakes.values()):
+        if timer is not None:
+            timer.cancel()
+        lines.extend(batch)
+    return lines
+
+
 @pytest.fixture
 def on(home, hermes):
     store_mod.Store(home).set_policy("strict")
@@ -679,13 +691,14 @@ def test_a_workstream_turn_sends_no_push_of_its_own(on, hermes, monkeypatch):
     assert sent == [None]
 
 
-def test_an_approval_marks_it_needs_you(on, hermes):
+def test_an_approval_marks_it_needs_you(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # read the batch before its timer sends it
     start()
     work.needs_you("20261031_work_1", "rm -rf build")
     assert on.get("W1").status == "needs_you"
     # Its links go with it, so a user on Hermes Desktop, which doesn't list
     # workstreams, can open it there and answer (Eric 2026-11-03).
-    line, = [line for lines, _ in work._wakes.values() for line in lines if "is waiting on the user" in line]
+    line, = [line for line in batched() if "is waiting on the user" in line]
     assert "(rm -rf build)" in line and "you can't" in line
     assert line.endswith("[Open W1](conduit://session/20261031_work_1?profile=default) @session:20261031_work_1 "
                          + work.LINK_RULE)
@@ -1139,6 +1152,7 @@ def test_allowed_tools_skip_the_title_read(on, hermes, monkeypatch):
 
 
 def test_a_stop_that_lands_before_the_settle_wins_and_still_reports(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # read the batch before its timer sends it
     start()
     real = work._lookup
 
@@ -1152,7 +1166,7 @@ def test_a_stop_that_lands_before_the_settle_wins_and_still_reports(on, hermes, 
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     row = on.get("W1")
     assert row.status == "stopped" and row.last_result.startswith("Finished.")
-    line, = [line for lines, _ in work._wakes.values() for line in lines if "was stopped as it finished" in line]
+    line, = [line for line in batched() if "was stopped as it finished" in line]
     assert "conduit://session/20261031_work_1" in line and len(line) < 600
 
 
@@ -1596,6 +1610,7 @@ def test_lookalikes_share_more_than_one_word(first, second, alike):
 
 
 def test_a_turn_end_reported_twice_tells_the_coordinator_once(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # read the batch before its timer sends it
     start()
     real = work._lookup
     seen = real("20261031_work_1")
@@ -1604,7 +1619,7 @@ def test_a_turn_end_reported_twice_tells_the_coordinator_once(on, hermes, monkey
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     work.turn_ended("20261031_work_1", "Done.")
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
-    lines = [line for lines, _ in work._wakes.values() for line in lines]
+    lines = [line for line in batched()]
     assert len(lines) == 1 and on.get("W1").status == "done"
 
 
@@ -1662,14 +1677,15 @@ def test_a_held_work_update_goes_out_queued_after_the_longest_wait(on, hermes, m
     assert len(hermes.named("prompt.submit")) == 1
 
 
-def test_a_stopped_turns_end_reported_twice_keeps_its_report(on, hermes):
+def test_a_stopped_turns_end_reported_twice_keeps_its_report(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # read the batch before its timer sends it
     start()
     on.update("W1", status="stopped")
     work.turn_ended("20261031_work_1", "Got it all.")
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     assert on.get("W1").last_result == "Got it all."
-    assert len([line for lines, _ in work._wakes.values() for line in lines]) == 1
+    assert len([line for line in batched()]) == 1
 
 
 def test_the_next_turns_end_is_its_own(on, hermes):
