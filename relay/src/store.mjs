@@ -41,9 +41,23 @@ const defaultPreferences = Object.freeze({
 // written at most this often instead of on every event. Each write is still
 // the whole file, so on a busy relay this is one full rewrite per interval.
 const DEFAULT_SAVE_DELAY_MS = 5_000;
+// Pending decisions (parked, answered, released, undeliverable) are written
+// within this window rather than on every change (#561): each change used
+// to rewrite the whole file on the event loop while the gateway's polls and
+// other installations' pushes waited. The memory copy is what every route
+// reads, so nobody waits on the write; a burst of changes is one write, and
+// shutdown flushes. A crash inside the window loses at most the last second
+// of decisions, which both ends already survive: an unknown decision sends
+// the plugin back to Hermes' own clarify prompt, and a device answer that
+// was lost reads as an open card the user answers again.
+const DEFAULT_DECISION_SAVE_DELAY_MS = 1_000;
+// Clarify prompts live at most ~1h server-side (agent.clarify_timeout
+// default 3600s); 2h covers drift and unlimited-config edge cases while
+// still bounding the store.
+const DECISION_RETENTION_MS = 2 * 60 * 60_000;
 
 export class RelayStore {
-  constructor(path, limits = {}, { saveDelayMs = DEFAULT_SAVE_DELAY_MS } = {}) {
+  constructor(path, limits = {}, { saveDelayMs = DEFAULT_SAVE_DELAY_MS, decisionSaveDelayMs = DEFAULT_DECISION_SAVE_DELAY_MS } = {}) {
     this.path = path;
     limits ??= {};
     this.limits = {
@@ -65,7 +79,15 @@ export class RelayStore {
       if (!Number.isSafeInteger(limit) || limit <= 0) throw new TypeError('Decision limits must be positive integers.');
     }
     this.saveDelayMs = saveDelayMs;
+    this.decisionSaveDelayMs = Math.min(decisionSaveDelayMs, saveDelayMs);
     this.saveTimer = undefined;
+    this.saveDueAt = 0;
+    // The soonest delay any unsaved change asked for, so a failed write
+    // retries on the decisions' delay when decisions are among them.
+    this.pendingDelayMs = undefined;
+    // When writes started failing; null while the file is current. /healthz
+    // reports it so an operator can see changes held only in memory.
+    this.unsavedSince = null;
     this.dirty = false;
     this.events = new EventLedger({ perInstallation: this.limits.maxEventIdsPerInstallation, total: this.limits.maxGlobalEventIds });
     this.data = { version: 1, installations: {}, pairings: {}, pendingDecisions: {} };
@@ -185,28 +207,38 @@ export class RelayStore {
     } catch (error) {
       // A partial file would hold space a full disk needs back.
       try { unlinkSync(temporary); } catch { /* Preserve the original failure. */ }
-      // Keep the change pending and try again after the save delay.
-      this.saveSoon();
+      // Keep the change pending and try again after its save delay.
+      this.unsavedSince ??= new Date().toISOString();
+      this.saveSoon(this.pendingDelayMs ?? this.saveDelayMs);
       throw error;
     }
     this.dirty = false;
+    this.pendingDelayMs = undefined;
+    this.unsavedSince = null;
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
   }
 
-  // Deferred save for metadata a crash may lose without harm. Any full save
-  // in the meantime writes it too.
-  saveSoon() {
+  // Deferred save for changes a crash may lose without harm: metadata after
+  // saveDelayMs, decisions after decisionSaveDelayMs. A sooner one brings a
+  // pending write forward; any full save in the meantime writes both.
+  saveSoon(delayMs = this.saveDelayMs) {
     this.dirty = true;
-    if (this.saveTimer) return;
+    this.pendingDelayMs = Math.min(this.pendingDelayMs ?? delayMs, delayMs);
+    const dueAt = Date.now() + delayMs;
+    if (this.saveTimer) {
+      if (this.saveDueAt <= dueAt) return;
+      clearTimeout(this.saveTimer);
+    }
+    this.saveDueAt = dueAt;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
       try {
         this.flush();
       } catch (error) {
-        console.error(JSON.stringify({ level: 'error', message: 'deferred relay save failed', error: error instanceof Error ? error.message : String(error) }));
+        console.error(JSON.stringify({ level: 'error', message: 'deferred relay save failed, changes held in memory', unsaved_since: this.unsavedSince, error: error instanceof Error ? error.message : String(error) }));
       }
-    }, this.saveDelayMs);
+    }, delayMs);
     this.saveTimer.unref?.();
   }
 
@@ -656,7 +688,7 @@ export class RelayStore {
       deliverable: Boolean(deliverable),
       createdAt: Date.now(),
     };
-    this.save();
+    this.saveDecisionsSoon();
     return true;
   }
 
@@ -680,7 +712,7 @@ export class RelayStore {
   wouldRespondPendingDecision(installationId, gatewayId, id, questionId = '', answer = undefined) {
     const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
     const createdAt = Number(decision?.createdAt);
-    if (!decision || !Number.isFinite(createdAt) || createdAt < Date.now() - 2 * 60 * 60_000) return false;
+    if (!decision || !Number.isFinite(createdAt) || createdAt < Date.now() - DECISION_RETENTION_MS) return false;
     if (decision.cancelledAt || decision.answer !== undefined) return false;
     // A blank leaves one named question of a batch blank, never a whole
     // decision (respondPendingDecision).
@@ -694,8 +726,7 @@ export class RelayStore {
   }
 
   respondPendingDecision(installationId, gatewayId, id, answer, questionId = '') {
-    this.prune();
-    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    const decision = this.liveDecision(installationId, gatewayId, id);
     if (!decision) return { outcome: 'unknown' };
     // Distinct device-facing outcomes: a CANCELLED decision (the original
     // gateway path won) releases the whole pushed card (410
@@ -727,7 +758,7 @@ export class RelayStore {
       decision.answeredAt = Date.now();
       const remaining = batchQuestions.map((question) => question.qid)
         .filter((qid) => !Object.hasOwn(answers, qid));
-      this.save();
+      this.saveDecisionsSoon();
       return { outcome: 'answered', remaining };
     }
     // A blank answer leaves one question of a batch blank; a decision with
@@ -735,13 +766,12 @@ export class RelayStore {
     if (answer === '') return { outcome: 'invalid_answer' };
     decision.answer = boundedAnswer(answer);
     decision.answeredAt = Date.now();
-    this.save();
+    this.saveDecisionsSoon();
     return { outcome: 'answered' };
   }
 
   pendingDecisionStatus(installationId, gatewayId, id) {
-    this.prune();
-    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    const decision = this.liveDecision(installationId, gatewayId, id);
     if (!decision) {
       return { status: 'unknown' };
     }
@@ -779,8 +809,7 @@ export class RelayStore {
   // rather than parked as results nobody will read. Cancelling an
   // already-completed decision reports it instead of double-marking.
   cancelPendingDecision(installationId, gatewayId, id) {
-    this.prune();
-    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    const decision = this.liveDecision(installationId, gatewayId, id);
     if (!decision) {
       return 'unknown';
     }
@@ -789,7 +818,7 @@ export class RelayStore {
     }
     if (decision.cancelledAt) return 'cancelled';
     decision.cancelledAt = Date.now();
-    this.save();
+    this.saveDecisionsSoon();
     return 'cancelled';
   }
 
@@ -800,8 +829,7 @@ export class RelayStore {
   // Released and fully completed decisions (scalar or batch) are never
   // mutated — their outcomes are already settled.
   markPendingDecisionUndeliverable(installationId, gatewayId, id) {
-    this.prune();
-    const decision = this.data.pendingDecisions[RelayStore.decisionKey(installationId, gatewayId, id)];
+    const decision = this.liveDecision(installationId, gatewayId, id);
     if (!decision) {
       return 'unknown';
     }
@@ -813,8 +841,28 @@ export class RelayStore {
     }
     if (decision.cancelledAt) return 'skipped';
     decision.deliverable = false;
-    this.save();
+    this.saveDecisionsSoon();
     return 'marked';
+  }
+
+  saveDecisionsSoon() {
+    this.saveSoon(this.decisionSaveDelayMs);
+  }
+
+  // One decision by its scoped key, dropped if it has aged out. The routes
+  // that touch one decision (a device answer, the gateway's poll, a release)
+  // check just that one instead of sweeping every pairing and decision on
+  // each request (#561); the full sweep runs where whole-store counts
+  // matter (parking, pairing, legacy lookup) and on load.
+  liveDecision(installationId, gatewayId, id) {
+    const key = RelayStore.decisionKey(installationId, gatewayId, id);
+    const decision = this.data.pendingDecisions[key];
+    if (decision === undefined) return undefined;
+    if (!decisionIsFresh(decision, Date.now())) {
+      delete this.data.pendingDecisions[key];
+      return undefined;
+    }
+    return decision;
   }
 
   prune() {
@@ -823,12 +871,8 @@ export class RelayStore {
       const expiresAt = pairing && typeof pairing === 'object' ? Date.parse(pairing.expiresAt) : NaN;
       if (!Number.isFinite(expiresAt) || expiresAt <= now) delete this.data.pairings[key];
     }
-    // Clarify prompts live at most ~1h server-side (agent.clarify_timeout
-    // default 3600s); 2h covers drift and unlimited-config edge cases while
-    // still bounding the store.
     for (const [key, decision] of Object.entries(this.data.pendingDecisions ?? {})) {
-      const createdAt = decision && typeof decision === 'object' ? Number(decision.createdAt) : NaN;
-      if (!Number.isFinite(createdAt) || createdAt < now - 2 * 60 * 60_000) delete this.data.pendingDecisions[key];
+      if (!decisionIsFresh(decision, now)) delete this.data.pendingDecisions[key];
     }
   }
 }
@@ -845,6 +889,11 @@ function capacityError(code) {
   const error = new Error(code);
   error.status = 429;
   return error;
+}
+
+function decisionIsFresh(decision, now) {
+  const createdAt = decision && typeof decision === 'object' ? Number(decision.createdAt) : NaN;
+  return Number.isFinite(createdAt) && createdAt >= now - DECISION_RETENTION_MS;
 }
 
 function decisionIsActive(decision) {

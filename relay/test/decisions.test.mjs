@@ -357,8 +357,11 @@ test('no-op installation updates and repeated cancellation do not save or rewrit
   relay.savePendingDecision({ id: 'conduit-push-cancel', installationId: created.installation.id, gatewayId: 'gw-1', question: 'q' });
   const installation = relay.data.installations[created.installation.id];
   const updatedAt = installation.updatedAt;
+  relay.flush();
   let writes = 0;
   relay.save = () => { writes += 1; };
+  let decisionWrites = 0;
+  relay.saveDecisionsSoon = () => { decisionWrites += 1; };
 
   assert.deepEqual(relay.updateInstallation(installation.id, { deviceToken: installation.deviceToken, preferences: installation.preferences }), {
     id: installation.id, active: true, gateways: [], preferences: installation.preferences, voip: false, watch_voip: false, location: false, updated_at: updatedAt,
@@ -367,7 +370,8 @@ test('no-op installation updates and repeated cancellation do not save or rewrit
   const cancelledAt = relay.data.pendingDecisions[RelayStore.decisionKey(installation.id, 'gw-1', 'conduit-push-cancel')].cancelledAt;
   assert.equal(relay.cancelPendingDecision(installation.id, 'gw-1', 'conduit-push-cancel'), 'cancelled');
   assert.equal(relay.data.pendingDecisions[RelayStore.decisionKey(installation.id, 'gw-1', 'conduit-push-cancel')].cancelledAt, cancelledAt);
-  assert.equal(writes, 1, 'only the first cancellation persists');
+  assert.equal(writes, 0, 'the no-op update does not save');
+  assert.equal(decisionWrites, 1, 'only the first cancellation persists');
 });
 
 test('pending decision lifecycle: save → pending → answered → already', () => {
@@ -579,6 +583,7 @@ test('pending decisions survive a reload and expire past the TTL', () => {
   const path = join(dir, `store-${Math.random().toString(36).slice(2)}.json`);
   const first = new RelayStore(path);
   first.savePendingDecision({ id: 'conduit-push-old', installationId: 'inst-1', gatewayId: 'gw-1', question: 'q' });
+  first.flush();
 
   const reloaded = new RelayStore(path);
   assert.equal(reloaded.pendingDecisionStatus('inst-1', 'gw-1', 'conduit-push-old').status, 'pending');
@@ -641,6 +646,7 @@ test('per-installation retained cap rejects without dropping locks or blocking a
   relay.savePendingDecision({ id: 'conduit-push-cancel-lock', installationId: 'inst-retain', gatewayId: 'gw-1', question: 'q' });
   relay.cancelPendingDecision('inst-retain', 'gw-1', 'conduit-push-cancel-lock');
   assert.throws(() => relay.savePendingDecision({ id: 'conduit-push-retained-over', installationId: 'inst-retain', gatewayId: 'gw-1', question: 'q' }), { code: 'decision_capacity_exceeded', status: 429 });
+  relay.flush();
   const reloaded = new RelayStore(path, limits);
   assert.deepEqual(reloaded.pendingDecisionStatus('inst-retain', 'gw-1', 'conduit-push-answer-lock'), { status: 'answered', answer: 'preserved' });
   assert.equal(reloaded.respondPendingDecision('inst-retain', 'gw-1', 'conduit-push-cancel-lock', 'late').outcome, 'released');
@@ -680,6 +686,7 @@ test('persisted malformed batch rows do not break capacity, polling, answering, 
     id: 'conduit-push-empty-batch', installationId: 'inst-corrupt', gatewayId: 'gw-1',
     question: 'Scalar fallback?', questions: [{ qid: 'q-valid-2', question: 'Second?', choices: ['Yes'] }],
   });
+  seed.flush();
   const persisted = JSON.parse(readFileSync(path, 'utf8'));
   persisted.pendingDecisions[RelayStore.decisionKey('inst-corrupt', 'gw-1', 'conduit-push-corrupt-batch')].questions = [
     null, { qid: 'q-valid', question: 'Valid question?', choices: ['Yes'] },
@@ -1011,4 +1018,76 @@ test('a save never writes through a symlink planted at the temporary name', { sk
   assert.throws(() => relay.save());
   assert.equal(readFileSync(victim, 'utf8'), 'untouched\n');
   clearTimeout(relay.saveTimer);
+});
+
+test('decision changes are written once, shortly after, instead of on each change (#561)', async () => {
+  const path = join(dir, `store-decision-defer-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, {}, { saveDelayMs: 60_000, decisionSaveDelayMs: 20 });
+  relay.flush();
+  let writes = 0;
+  const save = relay.save.bind(relay);
+  relay.save = () => { writes += 1; save(); };
+  relay.savePendingDecision({ id: 'conduit-push-defer', installationId: 'inst-defer', gatewayId: 'gw-1', question: 'q',
+    questions: [{ qid: 'a', question: 'A?', choices: ['Yes'] }, { qid: 'b', question: 'B?', choices: ['Yes'] }] });
+  relay.respondPendingDecision('inst-defer', 'gw-1', 'conduit-push-defer', 'Yes', 'a');
+  relay.respondPendingDecision('inst-defer', 'gw-1', 'conduit-push-defer', 'Yes', 'b');
+  assert.equal(writes, 0, 'no write on the request path');
+  assert.equal(relay.pendingDecisionStatus('inst-defer', 'gw-1', 'conduit-push-defer').status, 'answered', 'reads see the change at once');
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(writes, 1, 'three changes, one write');
+  const persisted = JSON.parse(readFileSync(path, 'utf8')).pendingDecisions[RelayStore.decisionKey('inst-defer', 'gw-1', 'conduit-push-defer')];
+  assert.deepEqual({ ...persisted.answers }, { a: 'Yes', b: 'Yes' });
+});
+
+test('a decision change brings a pending metadata save forward', async () => {
+  const path = join(dir, `store-decision-sooner-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, {}, { saveDelayMs: 60_000, decisionSaveDelayMs: 20 });
+  const created = relay.createInstallation({ bundleId: 'app', deviceToken: 'd'.repeat(64), environment: 'production' });
+  const claim = relay.claimPairing(relay.createPairing(created.installation.id).code, 'gateway');
+  relay.recordGatewayPlugin(created.installation.id, claim.gatewayId, { version: '9.9.9' });
+  relay.savePendingDecision({ id: 'conduit-push-sooner', installationId: created.installation.id, gatewayId: claim.gatewayId, question: 'q' });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const persisted = JSON.parse(readFileSync(path, 'utf8'));
+  assert.ok(persisted.pendingDecisions[RelayStore.decisionKey(created.installation.id, claim.gatewayId, 'conduit-push-sooner')]);
+  assert.equal(persisted.installations[created.installation.id].gateways[claim.gatewayId].pluginVersion, '9.9.9');
+});
+
+test('polling one decision does not sweep the whole store', () => {
+  const relay = store();
+  relay.savePendingDecision({ id: 'conduit-push-poll', installationId: 'inst-poll', gatewayId: 'gw-1', question: 'q' });
+  let sweeps = 0;
+  relay.prune = () => { sweeps += 1; };
+  for (let i = 0; i < 5; i += 1) assert.equal(relay.pendingDecisionStatus('inst-poll', 'gw-1', 'conduit-push-poll').status, 'pending');
+  assert.equal(relay.respondPendingDecision('inst-poll', 'gw-1', 'conduit-push-poll', 'Yes').outcome, 'answered');
+  assert.equal(relay.cancelPendingDecision('inst-poll', 'gw-1', 'conduit-push-poll'), 'answered');
+  assert.equal(sweeps, 0);
+  // An aged-out record still reads as gone, and is dropped.
+  relay.data.pendingDecisions[RelayStore.decisionKey('inst-poll', 'gw-1', 'conduit-push-poll')].createdAt = Date.now() - 3 * 60 * 60_000;
+  assert.deepEqual(relay.pendingDecisionStatus('inst-poll', 'gw-1', 'conduit-push-poll'), { status: 'unknown' });
+  assert.equal(relay.data.pendingDecisions[RelayStore.decisionKey('inst-poll', 'gw-1', 'conduit-push-poll')], undefined);
+});
+
+test('a failed decision write retries on the decision delay and is reported until it lands', async () => {
+  const path = join(dir, `decision-retry-${Math.random().toString(36).slice(2)}.json`);
+  const relay = new RelayStore(path, {}, { saveDelayMs: 60_000, decisionSaveDelayMs: 20 });
+  relay.flush();
+  const blocker = join(dir, `not-a-directory-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(blocker, '');
+  relay.path = join(blocker, 'relay.json');
+  const errors = [];
+  const consoleError = console.error;
+  console.error = (line) => errors.push(line);
+  try {
+    relay.savePendingDecision({ id: 'conduit-push-retry', installationId: 'inst-retry', gatewayId: 'gw-1', question: 'q' });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(errors.filter((line) => line.includes('deferred relay save failed')).length >= 2, 'retried on the 20 ms decision delay, not the minute');
+    assert.ok(relay.unsavedSince, 'the failure is reported');
+    relay.path = path;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  } finally {
+    console.error = consoleError;
+  }
+  assert.equal(relay.dirty, false);
+  assert.equal(relay.unsavedSince, null);
+  assert.ok(JSON.parse(readFileSync(path, 'utf8')).pendingDecisions[RelayStore.decisionKey('inst-retry', 'gw-1', 'conduit-push-retry')]);
 });
