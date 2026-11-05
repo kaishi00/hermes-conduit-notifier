@@ -669,6 +669,9 @@ def test_a_quoted_path_with_spaces_or_brackets_is_read_whole(tmp_path):
                                       None, "terminal")])
     assert index.resolve_name(moved, ["s1"], "new.md")["path"] == "/srv/new.md"
     assert index.resolve_name(moved, ["s1"], "old.md")["path"] == "/srv/old.md"
+    renamed = _db(tmp_path / "home4", [("s1", "tool", json.dumps({"detail": "/srv/old.md renamed to backup/old.md"}),
+                                        None, "terminal")])
+    assert index.resolve_name(renamed, ["s1"], "old.md")["path"] == "/srv/old.md"
     assert index.resolve_name(conn, ["s1"], "Report (final).pdf", exists=check)["path"] == (
         "/Users/me/Reports (2026)/Report (final).pdf")
     assert index.resolve_name(conn, ["s1"], "notes v2.md", exists=check)["path"] == "/Users/me/My Project/notes v2.md"

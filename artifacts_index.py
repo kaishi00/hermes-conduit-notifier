@@ -588,7 +588,9 @@ RESOLVE_MAX_ROWS = 20_000
 MAX_RESOLVE_NAME_CHARS = 512
 # Paths a row offers, and how many a request checks on disk at most.
 MAX_RESOLVE_CANDIDATES = 400
-_ABS_PATH_RE = re.compile(r"""(?:~/|/)[^\s'"`<>()\[\]{},;|\\]+"""
+# A path starts at a / or ~/ of its own, never inside a relative one
+# (backup/old.md isn't /old.md).
+_ABS_PATH_RE = re.compile(r"""(?:(?<![A-Za-z0-9_.~-])~/|(?<![A-Za-z0-9_.~-])/)[^\s'"`<>()\[\]{},;|\\]+"""
                           r"""|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/][^\s'"`<>()\[\]{},;|]+""")
 
 
@@ -642,6 +644,13 @@ def _name_end(raw: str, suffix: str, strip: str) -> Optional[str]:
     return raw[:end] if all(char in strip for char in tail) else None
 
 
+def _bare_candidate(raw: str, suffix: str) -> Optional[str]:
+    """A bare-pattern match as a path ending in ``suffix``, or None.
+    Trailing punctuation is the sentence's, unless the name ends in it."""
+    return (_path_candidate(raw, suffix, strip=_TRAILING + "'\"")
+            or _path_candidate(_name_end(raw, suffix, _TRAILING + "'\"\\") or "", suffix, strip=""))
+
+
 def _path_tokens(text: str, suffix: str) -> Iterable[str]:
     """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
     whole trailing folders: ``/a/b/AppState.swift`` for
@@ -655,6 +664,11 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
         run = match.group(2)
         if not _PATH_BREAK_RE.search(run) or _ANOTHER_PATH_RE.search(run):
             continue  # the bare-path pattern reads it, piece by piece
+        head = _ABS_PATH_RE.match(run)
+        if head and _bare_candidate(head.group(0), suffix):
+            # It opens with the whole path ("/srv/old.md renamed to
+            # backup/old.md"): what follows is prose, read as such.
+            continue
         # A nested JSON string's quote comes escaped: \" ends the path.
         strip = " \t\\" + _SENTENCE_END
         path = (_path_candidate(run, suffix, strip=" \t\\")
@@ -668,10 +682,7 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
         start = match.start()
         if any(lo <= start < hi for lo, hi in quoted):
             continue  # a piece of a quoted path, read whole above
-        raw = match.group(0)
-        # Trailing punctuation is the sentence's, unless the name ends in it.
-        path = (_path_candidate(raw, suffix, strip=_TRAILING + "'\"")
-                or _path_candidate(_name_end(raw, suffix, _TRAILING + "'\"\\") or "", suffix, strip=""))
+        path = _bare_candidate(match.group(0), suffix)
         if path:
             found.append((start, path))
     for _, path in sorted(found, key=lambda item: item[0]):
