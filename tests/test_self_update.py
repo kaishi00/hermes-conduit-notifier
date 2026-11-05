@@ -385,6 +385,23 @@ def test_a_resume_that_cant_write_its_start_ends_the_job_at_once(monkeypatch, tm
     assert "gateway_stage" not in on_disk
 
 
+def test_a_failed_write_before_the_restart_isnt_read_as_taken_down(monkeypatch, tmp_path):
+    # Review on #554: the write that drops gateway_pending failing left a failed job the next
+    # dashboard read as taken down by a restart that was never sent, and called done.
+    write, failed = api.self_update._write_self_update, []
+
+    def drop_fails_once(target, job):
+        if job["step"] == "restarting_gateway" and "gateway_pending" not in job and not failed:
+            failed.append(1)
+            raise OSError("disk full")
+        write(target, job)
+
+    monkeypatch.setattr(api.self_update, "_write_self_update", drop_fails_once)
+    job, _, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=lambda draining: pytest.fail("restart sent"))
+    assert failed and job["step"] == "failed" and job["gateway_pending"]
+    assert not api.self_update._taken_down_by_gateway_restart(job)
+
+
 def test_a_failure_before_the_gateway_restart_isnt_read_as_taken_down(tmp_path):
     path = tmp_path / api.self_update.SELF_UPDATE_FILE
     path.write_text(json.dumps({"id": "j1", "step": "failed", "failed_step": "restarting_gateway", "boot_id": "old",

@@ -252,7 +252,8 @@ SELF_UPDATE_GATEWAY_LIMIT_S = 180.0
 # is 30 minutes by default).
 SELF_UPDATE_DRAIN_LIMIT_S = 7200.0
 # How long the update waits for the gateway's running work before it restarts
-# anyway (a wedged turn counts too), as long as Hermes' own default cap.
+# anyway (a wedged turn is left out, as the gateway leaves it out), as long as
+# Hermes' own default cap.
 SELF_UPDATE_GATEWAY_WAIT_S = 1800.0
 SELF_UPDATE_CHATS_RECHECK_S = 2.0
 # A turn marker left behind can't hold the update forever.
@@ -464,7 +465,12 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
         # Restarting now, no longer waiting.
         for key in ("gateway_pending", "gateway_stage", "running_chats"):
             job.pop(key, None)
-        _write_self_update(path, job)
+        try:
+            _write_self_update(path, job)
+        except BaseException:
+            # The restart wasn't sent: a failure here must not read as taken down with it.
+            job["gateway_pending"] = True
+            raise
 
         def draining() -> None:
             if job.get("gateway_stage") != "draining":
