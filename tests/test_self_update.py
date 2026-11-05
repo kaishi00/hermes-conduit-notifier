@@ -321,6 +321,17 @@ def test_a_dashboard_restarted_before_the_gateway_restarts_it(monkeypatch, tmp_p
     assert [n["step"] for n in notified] == ["done"]
 
 
+def test_a_plugin_host_leaves_a_pending_gateway_restart_to_the_dashboard(monkeypatch, tmp_path):
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    pending = {"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,
+               "version": api.capabilities.LOADED_VERSION}
+    path.write_text(json.dumps(pending))
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
+    monkeypatch.setattr(api.self_update, "_hermes_update_steps", lambda: pytest.fail("a plugin host restarted Hermes"))
+    assert api.self_update.finish_self_update_after_restart(path, lambda job: None, delay=0) is None
+    assert json.loads(path.read_text()) == pending
+
+
 def test_a_resumed_job_whose_pull_fails_reads_as_a_pull_failure(monkeypatch, tmp_path):
     path = tmp_path / api.self_update.SELF_UPDATE_FILE
     path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,

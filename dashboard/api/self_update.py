@@ -680,6 +680,10 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
     # Pulled (it has a version) and this process loaded it: done, whatever
     # restarted the dashboard (an update's own re-exec or a /self/restart).
     if job.get("gateway_pending"):
+        if _self_restart_refusal() is not None:
+            # A plugin host (or another process that mustn't restart Hermes) leaves it to the
+            # dashboard: a gateway restarted from here would come back with this process's env.
+            return None
         # It went down before it restarted the gateway, which still runs the old plugin.
         return _resume_gateway_restart(path, job, notify or _notify_self_update)
     if job.get("version") is not None and capabilities.LOADED_VERSION == job["version"]:
