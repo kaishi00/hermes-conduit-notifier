@@ -38,7 +38,7 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import card_schema, client, reply_sources
+from . import card_schema, client, reply_sources, turn_surface
 from .present_store import (CHAT_CARDS_FEATURE, MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, PresentError,
                             PresentStore, clip_markdown)
 
@@ -81,8 +81,8 @@ SCHEMA: dict[str, Any] = {
         "write Markdown: tables for data, numbered lists for steps, ![description](url) for images (direct image "
         "URLs you actually found) and [title](url) for links. Then say in a sentence that it's on their screen and "
         "give the gist; don't read it out, and don't repeat it in your reply. In a typed chat, use it only for "
-        "cards and write the rest in your reply. If the answer lists problems, fix those cards and show the "
-        f"whole board again. For a trip plan, a comparison, a dashboard or a tracker, load "
+        "cards and write the rest in your reply: Markdown alone shows nothing there. If the answer lists "
+        f"problems, fix those cards and show the whole board again. For a trip plan, a comparison, a dashboard or a tracker, load "
         f"skill_view(\"conduit_push:{SKILL_NAME}\") first."
     ),
     "parameters": {
@@ -116,6 +116,10 @@ SHOWN_NOTE = ("On the user's screen. Say in a sentence that it's there and give 
               "repeat it in your reply.")
 IN_CHAT_NOTE = ("The cards are shown in the chat; Markdown isn't, so put anything else in your reply. Give the "
                 "gist in a sentence or two; don't repeat the cards' details.")
+TYPED_CHAT_NOTE = ("This message was typed in the chat, which shows cards but not Markdown, so nothing was shown: "
+                   "write it in your reply instead.")
+CHAT_NO_CARDS_NOTE = ("This version of Conduit draws no cards in a chat. Put the markdown below in your reply "
+                      "instead, as it is or tidied up.")
 NOT_CONDUIT_NOTE = ("This conversation isn't open in Conduit, so cards can't be drawn. Put the markdown below in "
                     "your reply instead, as it is or tidied up.")
 PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Fix those parts and show the whole board "
@@ -346,6 +350,18 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     fallback = bool(cards) and not given_markdown
     if fallback:
         markdown = _fallback(cards)
+    if turn_surface.turn_entry(session) == "typed":
+        # A typed message's chat is open, not a call's screen: the card would
+        # wait unclaimed for a screen that isn't there, and Hermes would tell
+        # the user to look at it (hermes-conduit#1808). The chat draws the
+        # cards from this answer; Markdown goes in the reply.
+        if cards and store.has_feature(CHAT_CARDS_FEATURE):
+            return _board({"ok": True}, cards, layout, follow_ups, problems,
+                          _with_left_out(IN_CHAT_NOTE, left_out, no_texts))
+        if cards:
+            return _as_text("typed_chat", CHAT_NO_CARDS_NOTE, cards, problems)
+        return _with_problems({"ok": False, "error": "typed_chat",
+                               "note": _with_left_out(TYPED_CHAT_NOTE, left_out, no_texts)}, problems)
     try:
         card = store.show(args.get("title"), markdown, session_id=session, cards=cards,
                           markdown_is_fallback=fallback, layout=layout)

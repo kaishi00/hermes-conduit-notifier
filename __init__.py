@@ -1062,6 +1062,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     was sent from, the voice persona hint, and which of the user's data
     Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
+    turn_surface.start_turn(session_id)
     child = _is_child(session_id)
     if forks.inside():
         # Pulse holds a fork of its home chat as it holds the chat's turns:

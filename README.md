@@ -2382,6 +2382,12 @@ The tool shows only while a Conduit that says `show-cards` in its exchange's
 that phone gets the cards; subagents can't use it. Limits:
 60 cards an hour, the newest 20 kept.
 
+A turn whose message Conduit reported as typed (see "Where in Conduit a
+message was sent") keeps nothing for a call's screen (0.131.3+): its chat is open, not a
+call. Cards go to the chat, from the tool's answer; Markdown alone answers
+`"error": "typed_chat"`, so Hermes writes it in its reply rather than telling
+the user to look at a screen that shows nothing.
+
 ### Map and place cards (plugin 0.45+)
 
 `conduit_show` also takes `cards`: up to 12 maps, places and other cards Conduit draws (four before boards, below)
