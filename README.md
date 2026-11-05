@@ -3225,7 +3225,7 @@ keeps it.
   and at most 2 a report. The calendar is read as the phone already shares
   it, on this host: nothing new leaves the phone.
 - With each thing a chat showed done comes the newest few lines that chat
-  said after it (plugin 0.130.5): memory has read that chat, so the report's
+  said after it (plugin 0.130.6): memory has read that chat, so the report's
   chats leave it out, and a next step that saw only the done step once said
   the work after it hadn't started when it had finished hours before. Pulse
   never says something hasn't happened or started just because nothing it
