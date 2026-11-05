@@ -580,12 +580,11 @@ def after_done_section(home: Path, items: Sequence[dict], zone: tzinfo,
                                          max_chars=PER_MESSAGE, limit=AFTER_DONE_SCAN)
         except hermes.HermesUnreadable:
             continue
-        rows = [row for row in rows if said_at is None or row["timestamp"] > said_at][-AFTER_DONE_ROWS:]
+        rows = [row for row in rows if (said_at is None or row["timestamp"] > said_at)
+                and _clip(row["content"], PER_MESSAGE)][-AFTER_DONE_ROWS:]  # a tool-only reply says nothing
         lines, size = [], 0
         for row in reversed(rows):  # the newest that fit
             text = _clip(row["content"], PER_MESSAGE)
-            if not text:
-                continue
             line = f"[{_local(row['timestamp'], zone)}] {'User' if row['role'] == 'user' else 'Hermes'}: {text}"
             if size + len(line) > AFTER_DONE_PER_ITEM:
                 break
