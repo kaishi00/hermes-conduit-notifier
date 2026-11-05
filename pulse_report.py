@@ -102,8 +102,9 @@ DONE_BUDGET = 1_500
 # the chats below, and a next step that saw only the done item filled the
 # silence after it ("the copy itself hasn't started", for a copy that had
 # finished in that chat hours before).
-AFTER_DONE_TITLE = ("## Later in the chat each was done in (its newest lines after the one that showed it done; "
-                    "memory has read them, so they aren't under the chats below)")
+AFTER_DONE_TITLE = ("## Later in the chat each was done in (its newest lines after the one that showed it done, or "
+                    "for one done another way, after the line it came from; memory reads these chats, so they're "
+                    "mostly not under the chats below)")
 AFTER_DONE_ROWS = 4
 AFTER_DONE_PER_ITEM = 700
 AFTER_DONE_BUDGET = 1_800
@@ -552,22 +553,26 @@ def done_section(items: Sequence[dict], zone: tzinfo) -> tuple[str, dict[int, di
 
 
 def after_done_section(home: Path, items: Sequence[dict], zone: tzinfo) -> str:
-    """For each of ``items`` (``done_section``'s) a chat showed done, the
-    newest lines its chat (and the sessions it continued into) said after
-    the line that did, at most AFTER_DONE_ROWS within AFTER_DONE_PER_ITEM;
-    "" when none has any. So a next step can see the work that came after
-    a done step, which memory read and the report's chats leave out."""
+    """For each of ``items`` (``done_section``'s), the newest lines the
+    chat that showed it done (and the sessions it continued into) said after
+    the line that did; for one done another way (Done on its card, Do it,
+    Pulse's checks), its own chat's after the line it came from. At most
+    AFTER_DONE_ROWS within AFTER_DONE_PER_ITEM each; "" when none has any.
+    So a next step can see the work that came after a done step, which
+    memory read and the report's chats leave out."""
     homes: dict[str, Path] = {"": Path(home)}
     if any(item["profile"] for item in items):
         homes.update(dict(profile_homes(home)))
     out, used = [], 0
     for item in items:
         closed = _CHAT_CLOSED_AT.match(item["closed_by"] if isinstance(item["closed_by"], str) else "")
+        chat_id, after_id = (closed.group(1), int(closed.group(2))) if closed else (item["chat_id"],
+                                                                                    item["message_id"])
         where = homes.get(item["profile"])
-        if closed is None or where is None:
-            continue
+        if not chat_id or where is None:
+            continue  # from the Shortcuts inbox: no chat
         try:
-            rows = hermes.chain_messages(where, chat_id=closed.group(1), after_id=int(closed.group(2)),
+            rows = hermes.chain_messages(where, chat_id=chat_id, after_id=after_id,
                                          max_chars=PER_MESSAGE, limit=AFTER_DONE_ROWS)
         except hermes.HermesUnreadable:
             continue

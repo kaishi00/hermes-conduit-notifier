@@ -240,7 +240,13 @@ def test_what_its_chat_said_after_a_done_item_comes_with_it(live):
         live.db.message("assistant", f"note {n}", sid=CHAT, at=now - 7 * 3600 + n)
     newest = report.after_done_section(live.home, [item], UTC)
     assert newest.count("\n[") == report.AFTER_DONE_ROWS and newest.endswith("Hermes: note 9")
-    assert report.after_done_section(live.home, [{**item, "closed_by": learning.DONE_BY}], UTC) == ""
+    # Done another way (Done on its card, Do it, Pulse's checks): its own chat, after the line it came from.
+    marked = report.after_done_section(live.home, [{**item, "closed_by": learning.DONE_BY}], UTC)
+    assert marked == newest
+    assert report.after_done_section(live.home, [{**item, "closed_by": learning.ACT_DONE_BY,
+                                                  "message_id": live.db.message("user", "last", sid=CHAT)}], UTC) == ""
+    assert report.after_done_section(live.home, [{**item, "closed_by": "inbox dev1/e4: paid", "chat_id": ""}],
+                                     UTC) == ""
     assert report.after_done_section(live.home, [], UTC) == ""
     # The candidate list reads it beside what got done, and hears never to infer from silence.
     live.store.set("memory", True)
@@ -251,6 +257,9 @@ def test_what_its_chat_said_after_a_done_item_comes_with_it(live):
     assert "never that nothing shows it happening" in candidates.INSTRUCTIONS
     assert "never that something hasn't happened, started or been done" in candidates.INSTRUCTIONS
     assert "never say something hasn't happened, started or been done" in report.REPORT_TEXT
+    brief = _load("conduit_push.pulse_brief", ROOT / "pulse_brief.py")
+    for note in (brief.NOTE, brief.LOOK_NOTE):
+        assert "Never say something hasn't happened or started because nothing here shows it" in note
 
 
 # What ended -----------------------------------------------------------------------------------
