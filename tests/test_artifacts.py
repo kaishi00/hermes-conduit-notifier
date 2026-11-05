@@ -661,6 +661,9 @@ def test_a_quoted_path_with_spaces_or_brackets_is_read_whole(tmp_path):
     # Never a piece of it (/Project/AppState.swift).
     assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=check) == {
         "path": "/Users/me/My Project/AppState.swift", "via": "chat"}
+    # A quote that only starts with a path still names it.
+    said = _db(tmp_path / "home2", [("s1", "assistant", '"/srv/app/plan.md has been updated"')])
+    assert index.resolve_name(said, ["s1"], "plan.md", exists=check)["path"] == "/srv/app/plan.md"
     assert index.resolve_name(conn, ["s1"], "Report (final).pdf", exists=check)["path"] == (
         "/Users/me/Reports (2026)/Report (final).pdf")
     assert index.resolve_name(conn, ["s1"], "notes v2.md", exists=check)["path"] == "/Users/me/My Project/notes v2.md"
@@ -669,11 +672,13 @@ def test_a_quoted_path_with_spaces_or_brackets_is_read_whole(tmp_path):
 def test_a_name_ending_in_punctuation_still_matches(tmp_path):
     conn = _db(tmp_path / "home", [
         ("s1", "tool", "wrote /notes/report_ and /notes/why?", None, "terminal"),
+        ("s1", "tool", "then /logs/build_.", None, "terminal"),
         ("s1", "assistant", "See /srv/app/plan.md."),
     ])
     check = lambda p: True  # noqa: E731
     assert index.resolve_name(conn, ["s1"], "report_", exists=check)["path"] == "/notes/report_"
     assert index.resolve_name(conn, ["s1"], "why?", exists=check)["path"] == "/notes/why?"
+    assert index.resolve_name(conn, ["s1"], "build_", exists=check)["path"] == "/logs/build_"
     # A sentence's full stop is still not the name's.
     assert index.resolve_name(conn, ["s1"], "plan.md", exists=check)["path"] == "/srv/app/plan.md"
 

@@ -602,6 +602,8 @@ def _clean_name(name: str) -> str:
 # A path between quotes or backticks, where it may hold spaces or brackets
 # (`/Users/me/My Project/Report (final).pdf`, a tool call's JSON string).
 _QUOTED_PATH_RE = re.compile(r"""(["'`])((?:~/|/|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/])[^"'`\n]{1,%d})\1""" % MAX_PATH_CHARS)
+# A sentence's own end after a path, which a name ending in `_` or `*` keeps.
+_SENTENCE_END = ".,;:!?"
 # What the bare-path pattern stops at, so a quoted path holding one is read whole.
 _PATH_BREAK_RE = re.compile(r"""[\s<>()\[\]{},;|]""")
 
@@ -636,10 +638,13 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
     for match in _QUOTED_PATH_RE.finditer(text):
         if not _PATH_BREAK_RE.search(match.group(2)):
             continue  # the bare-path pattern reads it the same
-        quoted.append(match.span(2))
         # A nested JSON string's quote comes escaped: \" ends the path.
-        path = _path_candidate(match.group(2), suffix, strip=" \t\\")
+        path = (_path_candidate(match.group(2), suffix, strip=" \t\\")
+                or _path_candidate(match.group(2), suffix, strip=" \t\\" + _SENTENCE_END))
         if path:
+            # Its pieces aren't candidates; a quote that only starts with
+            # a path ("/srv/plan.md is done") leaves them to the bare reading.
+            quoted.append(match.span(2))
             found.append((match.start(2), path))
     for match in _ABS_PATH_RE.finditer(text):
         start = match.start()
@@ -648,6 +653,7 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
         raw = match.group(0)
         # Trailing punctuation is the sentence's, unless the name ends in it.
         path = (_path_candidate(raw, suffix, strip=_TRAILING + "'\"")
+                or _path_candidate(raw, suffix, strip=_SENTENCE_END + "'\"")
                 or _path_candidate(raw, suffix, strip="'\""))
         if path:
             found.append((start, path))
