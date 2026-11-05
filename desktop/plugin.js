@@ -783,7 +783,8 @@ function Diff({ diff }) {
   const files = Array.isArray(diff.files) ? diff.files : []
   const whole = files.some(file => Array.isArray(file.hunks))
   const [state, setState] = useState({ diff: null, error: null })
-  const [wanted, setWanted] = useState(false)
+  // Each time a file is opened; a failed read is tried again.
+  const [wanted, setWanted] = useState(0)
 
   useEffect(() => {
     if (whole || !wanted || !DIFF_ID.test(diff.id ?? '')) return
@@ -818,7 +819,10 @@ function Diff({ diff }) {
           {
             file,
             open: shown.length === 1 && !file.binary,
-            onOpen: () => setWanted(true),
+            onOpen: () => {
+              setState(now => (now.error ? { diff: null, error: null } : now))
+              setWanted(count => count + 1)
+            },
             loading: !whole && !state.diff && !state.error && DIFF_ID.test(diff.id ?? ''),
             failed: !whole && state.error ? gone(state.error) ? 'This diff is no longer kept on the host.' : 'The diff couldn’t be loaded.' : null
           },

@@ -291,10 +291,20 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
             cards = [card for card in cards if card["type"] != "contact"]
             if not cards:
                 return _with_problems({"ok": False, "error": "group_room", "note": ROOM_NOTHING_NOTE}, problems)
+        store = _store()
+        if any(card["type"] in card_schema.DIFF_TYPES for card in cards) and \
+                store.has_feature_everywhere(ROOM_BOARDS_FEATURE) and \
+                not store.has_feature_everywhere(card_schema.DIFF_FEATURE):
+            # A Conduit that draws a room's boards but not diffs would show
+            # nothing for one; as text, its Markdown goes in the reply.
+            problems.insert(0, LEFT_OUT_NOTE.format(kinds="diff"))
+            cards = [card for card in cards if card["type"] not in card_schema.DIFF_TYPES]
+            if not cards:
+                return {"ok": False, "error": "unsupported_cards", "note": problems.pop(0), "problems": problems[:20]}
         board = {"cards": cards, "markdown": _fallback(cards)}
         if layout and len(cards) > 1:
             board["layout"] = layout
-        if _store().has_feature_everywhere(ROOM_BOARDS_FEATURE) and room_board(session, board):
+        if store.has_feature_everywhere(ROOM_BOARDS_FEATURE) and room_board(session, board):
             if layout and len(cards) < 2:
                 problems.insert(0, "layout: it lays out two or more cards, and fewer were shown, left out")
             return _with_problems({"ok": True, **board, "note": ROOM_SHOWN_NOTE}, problems)

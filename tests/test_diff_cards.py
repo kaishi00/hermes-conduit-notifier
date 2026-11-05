@@ -210,6 +210,21 @@ def test_a_conduit_without_diffs_hears_nothing_was_shown(tool_home):
     assert answer["ok"] is False and answer["error"] == "unsupported_cards"
 
 
+def test_a_room_drawn_by_a_conduit_without_diffs_leaves_the_diff_out(tool_home, monkeypatch):
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    room = {"session_id": "room-1", "is_room": lambda s: s == "room-1", "room_board": lambda *_: True}
+    callout = {"type": "callout", "callout": {"text": "Merged"}}
+    _exchange(PresentStore(tool_home), features=(*BOARD_FEATURES, tool.ROOM_BOARDS_FEATURE))
+    answer = _call({"title": "Fix", "cards": [{"type": "diff", "diff": {"patch": GIT_SHOW}}, callout]}, **room)
+    assert [card["type"] for card in answer["cards"]] == ["callout"]
+    assert answer["problems"][0] == tool.LEFT_OUT_NOTE.format(kinds="diff")
+    alone = _call({"title": "Fix", "cards": [{"type": "diff", "diff": {"patch": GIT_SHOW}}]}, **room)
+    assert alone["ok"] is False and alone["error"] == "unsupported_cards"
+    _exchange(PresentStore(tool_home), features=(*DIFF_FEATURES, tool.ROOM_BOARDS_FEATURE))
+    shown = _call({"title": "Fix", "cards": [{"type": "diff", "diff": {"patch": GIT_SHOW}}]}, **room)
+    assert shown["ok"] is True and shown["cards"][0]["type"] == "diff"
+
+
 def test_the_tool_offers_the_diffs_input():
     diff = tool.SCHEMA["parameters"]["properties"]["cards"]["items"]["properties"]["diff"]
     assert set(diff["properties"]) == {"patch", "patch_file", "before", "after", "name"}
