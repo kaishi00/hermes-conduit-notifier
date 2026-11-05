@@ -375,3 +375,24 @@ def test_a_just_written_file_is_never_trusted_unchanged(store, monkeypatch):
     assert store.answers_ready("conduit-push-r") is False
     assert store.answers_ready("conduit-push-r") is False
     assert len(loads) == 2
+
+
+def test_a_read_that_failed_is_not_remembered_as_not_yet(store, monkeypatch):
+    store.note_waiting("s1", "question", request_id="conduit-push-f", questions=BATCH)
+    monkeypatch.setattr(store_module, "SETTLED_NS", 0)
+    real_read = pathlib.Path.read_text
+    failing = [True]
+
+    def read_text(self, *args, **kwargs):
+        if failing and self == store.path:
+            failing.clear()
+            raise OSError(24, "Too many open files")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", read_text)
+    assert store.answers_ready("conduit-push-f") is False
+    loads = []
+    real_load = CallStore._load
+    monkeypatch.setattr(CallStore, "_load", lambda self, **kw: loads.append(kw) or real_load(self, **kw))
+    assert store.answers_ready("conduit-push-f") is False
+    assert loads, "the failed read wasn't remembered: the file is read again"

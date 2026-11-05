@@ -701,8 +701,16 @@ class CallStore:
             with _not_ready_lock:
                 if _not_ready.get(key) == signature:
                     return False
-        ready = any(_complete(item, request_id) for item in self._load()["waiting"])
-        if not ready and signature is not None:
+        try:
+            # Read as a write does: a read that failed (too many open files,
+            # a brief I/O error) says nothing about the file, so it isn't
+            # remembered, and the next ask reads again.
+            state = self._load(for_write=True)
+            read = True
+        except OSError:
+            state, read = self._load(), False
+        ready = any(_complete(item, request_id) for item in state["waiting"])
+        if not ready and read and signature is not None:
             # Each parked question asks from its own thread.
             with _not_ready_lock:
                 if len(_not_ready) >= NOT_READY_KEPT:
