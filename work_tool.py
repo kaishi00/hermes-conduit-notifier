@@ -3791,7 +3791,7 @@ def screen_block(session_id: Any, tool_name: Any, args: Any) -> Optional[dict[st
         who = screen_who(home, owner)
         where = screen_lock.scope()
         holder = screen_lock.claim(home, owner, who, where)
-        if holder is not None and _same_chat(holder, who):
+        if holder is not None and _same_chat(holder, who, home, owner):
             # The same chat under the id a compaction gave it: still its turn.
             screen_lock.release(home, str(holder.get("session_id")))
             holder = screen_lock.claim(home, owner, who, where)
@@ -3809,13 +3809,48 @@ def screen_block(session_id: Any, tool_name: Any, args: Any) -> Optional[dict[st
         return None
 
 
-def _same_chat(holder: dict, who: dict) -> bool:
+def _compacted_into(home: Path, old: str, session_id: str) -> bool:
+    """Whether ``session_id`` continues ``old`` through compactions, read
+    from the bot's own state.db (False when that can't be read)."""
+    import sqlite3
+
+    path = home / "state.db"
+    if not old or not path.exists():
+        return False
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return False
+    try:
+        current = session_id
+        for _ in range(_LINEAGE_HOPS):
+            row = db.execute("SELECT parent_session_id FROM sessions WHERE id = ?", (current,)).fetchone()
+            parent = row[0] if row else None
+            if not parent:
+                return False
+            ended = db.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
+            if not ended or ended[0] != "compression":
+                return False
+            if parent == old:
+                return True
+            current = parent
+        return False
+    except sqlite3.Error:
+        return False
+    finally:
+        db.close()
+
+
+def _same_chat(holder: dict, who: dict, home: Optional[Path] = None, session_id: str = "") -> bool:
     """Whether a hold is this chat's under an older session id: the same
-    workstream (by ref) or the bot's Bot Chat, of the same bot."""
+    workstream (by ref), the bot's Bot Chat, or another chat this session
+    continues through a compaction, of the same bot."""
     if holder.get("profile") != who.get("profile") or holder.get("kind") != who.get("kind"):
         return False
     if who.get("kind") == "workstream":
         return bool(who.get("ref")) and holder.get("ref") == who.get("ref")
+    if who.get("kind") == "chat":
+        return home is not None and _compacted_into(home, str(holder.get("session_id") or ""), session_id)
     return who.get("kind") == "bot_chat"
 
 
@@ -3833,7 +3868,7 @@ def screen_turn_ended(session_id: Any) -> None:
         # (A delegated child's end never lets its parent's turn go.)
         holder = screen_lock.snapshot(home).get("controlling")
         if holder and holder.get("session_id") != session_id \
-                and _same_chat(holder, screen_who(home, session_id)):
+                and _same_chat(holder, screen_who(home, session_id), home, session_id):
             released = screen_lock.release(home, str(holder["session_id"]))
     if released:
         _screen_freed(home)
@@ -3902,10 +3937,11 @@ def _watch_screen(home: Path) -> None:
                 except Exception:  # noqa: BLE001
                     logger.debug("conduit_push: screen watch failed", exc_info=True)
         finally:
-            with _wake_lock:
-                _screen_watchers.discard(key)
-            # Ran its time with someone still waiting (not unloaded): watched again.
+            # After an unload a newer watch may own the key: left alone then.
             if generation == _screen_generation[0]:
+                with _wake_lock:
+                    _screen_watchers.discard(key)
+                # Ran its time with someone still waiting: watched again.
                 try:
                     if screen_lock.snapshot(home).get("waiting"):
                         _watch_screen(home)
@@ -3919,7 +3955,8 @@ def _screen_line(home: Path) -> str:
     """The coordinator's line on the bot's screen, when someone has it or waits."""
     snap = _screen_snapshot(home)
     holder = snap.get("controlling")
-    waiting = [item for item in snap.get("waiting") or [] if item]
+    # Work that was resolved or failed while it waited isn't named.
+    waiting = [item for item in snap.get("waiting") or [] if item and _still_waits({**item, "home": str(home)})]
     if not holder and not waiting:
         return ""
     parts = []

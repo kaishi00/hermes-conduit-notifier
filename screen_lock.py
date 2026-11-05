@@ -274,11 +274,13 @@ def take_next_waiting(home: Path, still_waits: Callable[[dict], bool], now: Opti
             found = None
             kept = []
             for item in waiting:
-                if found is None and item.get("home") == str(home):
-                    if still_waits(item):
-                        found = item
+                if item.get("home") == str(home):
                     # Work that no longer waits (resolved, failed) leaves the list.
-                    continue
+                    if not still_waits(item):
+                        continue
+                    if found is None:
+                        found = item
+                        continue
                 kept.append(item)
             state["waiting"] = kept
             if found is not None:

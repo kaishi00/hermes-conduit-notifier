@@ -304,3 +304,37 @@ def test_past_the_cap_the_longest_wait_is_kept(home):
         lock.wait(home, f"s{index}", {"ref": f"W{index}"}, now=now + index)
     taken = lock.take_next_waiting(home, lambda item: True, now=now + 50)
     assert taken["session_id"] == "s0"
+
+
+def test_a_resolved_waiter_isnt_named_as_waiting(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER)
+    assert click(BOT_CHAT) is None
+    click(WORKER)
+    assert "W1 waits for it" in work.digest(BOT_CHAT)
+    monkeypatch.setattr(work, "_still_waits", lambda item: False)
+    assert "W1 waits for it" not in work.digest(BOT_CHAT)
+
+
+def test_a_compacted_plain_chat_keeps_its_own_screen(on, hermes, tmp_path, monkeypatch):
+    monkeypatch.setattr(work, "_compacted_into", lambda home, old, new: (old, new) == (OTHER_CHAT, "other-2"))
+    assert click(OTHER_CHAT) is None
+    assert click("other-2") is None
+    assert lock.snapshot(on.home)["controlling"]["session_id"] == "other-2"
+
+
+def test_a_chat_continues_another_only_through_compactions(tmp_path):
+    import sqlite3
+
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.execute("CREATE TABLE sessions (id TEXT, parent_session_id TEXT, end_reason TEXT)")
+    db.executemany("INSERT INTO sessions VALUES (?, ?, ?)", [
+        ("a", None, "compression"), ("b", "a", "compression"), ("c", "b", None),
+        ("x", None, "branch"), ("y", "x", None),
+    ])
+    db.commit()
+    db.close()
+    assert work._compacted_into(tmp_path, "a", "c")
+    assert work._compacted_into(tmp_path, "b", "c")
+    assert not work._compacted_into(tmp_path, "x", "y")
+    assert not work._compacted_into(tmp_path, "c", "a")
