@@ -256,6 +256,20 @@ def test_a_compacted_chat_keeps_its_own_screen(on, hermes):
     assert lock.snapshot(on.home)["controlling"]["session_id"] == WORKER
     # Another chat is still refused.
     assert click(BOT_CHAT)["action"] == "block"
+    # Its turn's end lets go of a hold still under the older id.
+    lock.release(on.home, WORKER)
+    assert lock.claim(on.home, "before-compaction", work.screen_who(on.home, WORKER)) is None
+    work.screen_turn_ended(WORKER)
+    assert lock.snapshot(on.home)["controlling"] is None
+
+
+def test_a_restart_watches_those_still_waiting(on, hermes, monkeypatch):
+    start()
+    lock.wait(on.home, WORKER, work.screen_who(on.home, WORKER))
+    started = []
+    monkeypatch.setattr(work, "_watch_screen", lambda home: started.append(home))
+    work._replay(on.home, store_mod.Store(on.home))
+    assert started == [on.home]
 
 
 def test_no_screen_ask_where_the_host_has_no_screen(on, hermes, monkeypatch):

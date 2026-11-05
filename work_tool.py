@@ -2334,6 +2334,13 @@ def _replay(home: Path, store: work_store.Store, broker: Optional[work_broker.Br
             _replay_one(home, store, broker, row, oldest)
         except Exception:  # noqa: BLE001 — the other rows still go
             logger.warning("conduit_push: replaying outbox row %s failed", row.get("id"), exc_info=True)
+    # Workstreams that waited for the screen before the restart are watched
+    # again: a hold that died with the old process is free at once.
+    try:
+        if screen_lock.snapshot(home).get("waiting"):
+            _watch_screen(home)
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: couldn't read who waits for the screen", exc_info=True)
 
 
 def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broker.Broker], row: dict,
@@ -3819,7 +3826,15 @@ def screen_turn_ended(session_id: Any) -> None:
     home = _home()
     if home is None:
         return
-    if screen_lock.release(home, session_id):
+    released = screen_lock.release(home, session_id)
+    if not released and screen_lock.owner_of(session_id) == session_id:
+        # Held under the id it had before a compaction: still this chat's.
+        # (A delegated child's end never lets its parent's turn go.)
+        holder = screen_lock.snapshot(home).get("controlling")
+        if holder and holder.get("session_id") != session_id \
+                and _same_chat(holder, screen_who(home, session_id)):
+            released = screen_lock.release(home, str(holder["session_id"]))
+    if released:
         _screen_freed(home)
 
 
@@ -3884,6 +3899,13 @@ def _watch_screen(home: Path) -> None:
         finally:
             with _wake_lock:
                 _screen_watchers.discard(key)
+            # Ran its time with someone still waiting (not unloaded): watched again.
+            if generation == _screen_generation[0]:
+                try:
+                    if screen_lock.snapshot(home).get("waiting"):
+                        _watch_screen(home)
+                except Exception:  # noqa: BLE001
+                    logger.debug("conduit_push: screen watch restart failed", exc_info=True)
 
     threading.Thread(target=run, name="conduit-screen-watch", daemon=True).start()
 
