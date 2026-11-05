@@ -1565,7 +1565,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, resolved_count, workstream_sessions, work}` |
+| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, counts, resolved_count, workstream_sessions, screen, work}` |
 | GET | `/api/plugins/conduit_push/workstreams?resolved=1&before=<closed_at>` | `{ok, ..., work, more}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/send` with `{text, how?}` | `{ok, outcome, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
@@ -1588,7 +1588,11 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   that one, never another queued behind it. The command comes whole, as
   written; one that is empty or longer than 2,000 characters is cut, with
   `approvable` false, and only denied there (`approve` is refused with
-  `deny_only`). Its chat still answers it too.
+  `deny_only`). Its chat still answers it too. A workstream also has
+  `screen` (`controlling` while it drives the bot's screen now, `waiting`
+  while it waits for it, else ""), `screen_used_at` (when it last used it,
+  which says nothing about now) and `screen_ask` (what it waits on you to do
+  on the screen, or "").
 - Work leaves the list when it's resolved: by you (`resolve`, refused with
   `still_running` while it's at work: stop it first) or by the bot
   (`work_close`). Nothing resolves itself. `resolved=1` lists resolved work,
@@ -1599,7 +1603,11 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 - `workstream_sessions` names every workstream's chat, resolved ones too, so
   Conduit keeps them out of its chat lists (not a call's jobs, which stay
   under Voice Jobs). `counts` has `working`, `needs_you` (approvals, questions and work a
-  restart left for you), `ready` and `waiting` (asks to other bots).
+  restart left for you, and screen asks), `ready` and `waiting` (asks to other bots).
+- `screen` says who holds the bot's screen now (`controlling`, null when
+  nobody), who used it last (`last`) and who waits for it (`waiting`), each
+  with `session_id`, `kind` (`workstream`, `bot_chat` or `chat`), `ref`,
+  `title` and `label`.
 - `check` (Check first) is offered when a restart cut off a step that can
   change things (`uncertain`): the workstream is asked to find out whether
   that step took effect and change nothing. `continue` after such a cut-off

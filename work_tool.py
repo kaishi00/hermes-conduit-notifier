@@ -332,8 +332,9 @@ SCHEMAS["work_progress"] = {
                                                      "as you last set it this turn.")},
         "screen": {"type": "string", "description": ("What the user needs to do on the bot's screen before you can "
                                                      "go on (\"Sign in to GitHub\"), when a step needs them there "
-                                                     "(a sign-in, 2FA, a CAPTCHA, a payment). End your turn after "
-                                                     "it; they tell you to continue. Empty clears it.")}},
+                                                     "(a sign-in, 2FA, a CAPTCHA, a payment), on a Linux host with "
+                                                     "a bot screen. End your turn after it; they tell you to "
+                                                     "continue. Empty clears it.")}},
         "required": []},
 }
 EMOJI = {"work_list": "🗂️", "work_start": "🚀", "work_send": "✉️", "work_stop": "⏹️", "work_read": "📖",
@@ -737,6 +738,10 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     if asked is not None and not isinstance(asked, str):
         return {"ok": False, "ref": work.ref, "error": "screen",
                 "note": "screen takes a few words of what the user needs to do there. Nothing was changed."}
+    if asked and not screen_possible():
+        return {"ok": False, "ref": work.ref, "error": "screen",
+                "note": "This bot has no screen on its host, so ask the user in your reply instead. Nothing was "
+                        "changed."}
     progress = {"steps": steps, "ready": flag if flag is not None else bool((work.progress or {}).get("ready"))}
     kept = work.progress or {}
     if asked is not None:
@@ -2347,6 +2352,16 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
     if kind == "continue":
         store.outbox_done(row["id"], "dropped")  # recovery owns it: it decides again from the journal
         return
+    if kind == "screen":
+        # The screen's free message a restart cut off: waiting again, so the
+        # watch sends it once the screen is free (a dead process holds nothing).
+        store.outbox_done(row["id"], "dropped")
+        work = store.get(row["ref"])
+        if work is not None and not work.closed_at and work.session_id \
+                and not _in_transcript(home, work.session_id, row["text"]):
+            screen_lock.wait(home, work.session_id, screen_who(home, work.session_id))
+            _watch_screen(home)
+        return
     if kind in ("send", "answer", "user_send") and row["target"]:
         work = store.get(row["ref"])
         sessions = {row["target"], *([work.session_id] if work and work.session_id else [])}
@@ -3699,6 +3714,8 @@ SCREEN_FREE = ("The bot's screen is free now (you were waiting for it). Carry on
                "only one chat drives it at a time, so finish them in this turn if you can.")
 SCREEN_POLL_S = 5.0
 _screen_watchers: set[str] = set()
+# Bumped by stop(): a watch from before it ends rather than sending on.
+_screen_generation = [0]
 
 
 def _screen_snapshot(home: Path) -> dict:
@@ -3766,6 +3783,10 @@ def screen_block(session_id: Any, tool_name: Any, args: Any) -> Optional[dict[st
         who = screen_who(home, owner)
         where = screen_lock.scope()
         holder = screen_lock.claim(home, owner, who, where)
+        if holder is not None and _same_chat(holder, who):
+            # The same chat under the id a compaction gave it: still its turn.
+            screen_lock.release(home, str(holder.get("session_id")))
+            holder = screen_lock.claim(home, owner, who, where)
         if holder is None:
             return None
         # A workstream is told when the screen is free: its turn may end
@@ -3778,6 +3799,16 @@ def screen_block(session_id: Any, tool_name: Any, args: Any) -> Optional[dict[st
     except Exception:  # noqa: BLE001 — coordination, not a fence
         logger.warning("conduit_push: couldn't check who has the screen; letting the call through", exc_info=True)
         return None
+
+
+def _same_chat(holder: dict, who: dict) -> bool:
+    """Whether a hold is this chat's under an older session id: the same
+    workstream (by ref) or the bot's Bot Chat, of the same bot."""
+    if holder.get("profile") != who.get("profile") or holder.get("kind") != who.get("kind"):
+        return False
+    if who.get("kind") == "workstream":
+        return bool(who.get("ref")) and holder.get("ref") == who.get("ref")
+    return who.get("kind") == "bot_chat"
 
 
 def screen_turn_ended(session_id: Any) -> None:
@@ -3814,7 +3845,12 @@ def _screen_freed(home: Path) -> bool:
     # Behind its turn when it's running (never redirecting it), else its next turn.
     result = _deliver(store, work_broker.Broker(home), work, SCREEN_FREE, "after", kind="screen")
     if not result.get("ok"):
-        logger.info("conduit_push: couldn't tell %s the screen is free: %s", work.ref, result.get("note"))
+        # Still waiting (at the running limit, say): kept on the list for
+        # the next release or the watch's next look.
+        logger.debug("conduit_push: couldn't tell %s the screen is free: %s", work.ref, result.get("note"))
+        who = {key: item[key] for key in ("profile", "kind", "ref", "title", "label") if key in item}
+        screen_lock.wait(home, work.session_id, who)
+        _watch_screen(home)
     return False
 
 
@@ -3827,16 +3863,21 @@ def _watch_screen(home: Path) -> None:
             return
         _screen_watchers.add(key)
 
+    generation = _screen_generation[0]
+
     def run() -> None:
         try:
             deadline = time.time() + screen_lock.WAIT_KEEP_S
-            while time.time() < deadline:
+            while time.time() < deadline and generation == _screen_generation[0]:
                 time.sleep(SCREEN_POLL_S)
                 try:
-                    snap = screen_lock.snapshot(home)
-                    if not snap.get("waiting"):
-                        return
-                    if snap.get("controlling") is None:
+                    # Decided under the lock a refusal takes to start a
+                    # watch, so a waiter added as this one ends isn't missed.
+                    with _wake_lock:
+                        if not screen_lock.snapshot(home).get("waiting"):
+                            _screen_watchers.discard(key)
+                            return
+                    if screen_lock.snapshot(home).get("controlling") is None:
                         _screen_freed(home)
                 except Exception:  # noqa: BLE001
                     logger.debug("conduit_push: screen watch failed", exc_info=True)
@@ -4049,6 +4090,8 @@ def stop() -> None:
         _turn_began.clear()
         _replies.clear()
         _redirecting.clear()
+        _screen_watchers.clear()
+        _screen_generation[0] += 1
     for _, timer in pending:
         if timer is not None:
             timer.cancel()

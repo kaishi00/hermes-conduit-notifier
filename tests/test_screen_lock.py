@@ -18,6 +18,7 @@ lock = sys.modules["conduit_push.screen_lock"]
 def bot_screen(monkeypatch):
     monkeypatch.setattr(lock, "scope", lambda: lock.BOT)
     monkeypatch.setattr(work, "SCREEN_POLL_S", 0.01)
+    monkeypatch.setattr(work, "screen_possible", lambda: True)
     lock._parents.clear()
     work._screen_watchers.clear()
     yield
@@ -233,3 +234,41 @@ def test_an_unreadable_hold_file_lets_the_call_through(on, hermes, monkeypatch):
 
     monkeypatch.setattr(lock, "claim", broken)
     assert click(WORKER) is None
+
+
+def test_a_waiter_whose_message_couldnt_go_stays_waiting(on, hermes, monkeypatch):
+    start()
+    work.turn_started(WORKER)
+    assert click(BOT_CHAT) is None
+    assert click(WORKER)["action"] == "block"
+    work.turn_ended(WORKER, "Waiting for the screen.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    monkeypatch.setattr(work, "_deliver", lambda *_a, **_k: {"ok": False, "note": "at the limit"})
+    work.screen_turn_ended(BOT_CHAT)
+    assert [item["ref"] for item in lock.snapshot(on.home)["waiting"]] == ["W1"]
+
+
+def test_a_compacted_chat_keeps_its_own_screen(on, hermes):
+    start()
+    # W1's hold under the id it had before a compaction.
+    assert lock.claim(on.home, "before-compaction", work.screen_who(on.home, WORKER)) is None
+    assert click(WORKER) is None
+    assert lock.snapshot(on.home)["controlling"]["session_id"] == WORKER
+    # Another chat is still refused.
+    assert click(BOT_CHAT)["action"] == "block"
+
+
+def test_no_screen_ask_where_the_host_has_no_screen(on, hermes, monkeypatch):
+    start()
+    monkeypatch.setattr(work, "screen_possible", lambda: False)
+    answer = call("work_progress", {"screen": "Sign in"}, session_id=WORKER)
+    assert answer["error"] == "screen" and "no screen" in answer["note"]
+    assert "screen" not in (on.get("W1").progress or {})
+
+
+def test_unloading_ends_the_screen_watch(on, hermes):
+    start()
+    before = work._screen_generation[0]
+    work._screen_watchers.add(str(on.home))
+    work.stop()
+    assert work._screen_generation[0] == before + 1 and not work._screen_watchers
