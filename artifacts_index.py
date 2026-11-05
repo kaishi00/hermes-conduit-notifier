@@ -599,26 +599,60 @@ def _clean_name(name: str) -> str:
     return text.rstrip("/")
 
 
+# A path between quotes or backticks, where it may hold spaces or brackets
+# (`/Users/me/My Project/Report (final).pdf`, a tool call's JSON string).
+_QUOTED_PATH_RE = re.compile(r"""(["'`])((?:~/|/|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/])[^"'`\n]{1,%d})\1""" % MAX_PATH_CHARS)
+# What the bare-path pattern stops at, so a quoted path holding one is read whole.
+_PATH_BREAK_RE = re.compile(r"""[\s<>()\[\]{},;|]""")
+
+
+def _path_candidate(path: str, suffix: str, *, strip: str) -> Optional[str]:
+    """``path`` as a file path ending in ``suffix``, or None."""
+    path = path.rstrip(strip)
+    if not path.startswith(("/", "~")):
+        # The escape before a JSON string's closing quote isn't the path's.
+        path = path.rstrip(strip + "\\")
+        # A Windows path, compared and opened with forward slashes.
+        path = re.sub(r"/+", "/", path.replace("\\", "/"))
+    # grep's `path:12:` and a compiler's `path:12:5:`.
+    path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
+    # A URL's //host/... (and a UNC share) is never a file here.
+    if path.startswith("//"):
+        return None
+    if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
+        return path
+    return None
+
+
 def _path_tokens(text: str, suffix: str) -> Iterable[str]:
     """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
     whole trailing folders: ``/a/b/AppState.swift`` for
-    ``AppState.swift``, never ``/a/MyAppState.swift``)."""
+    ``AppState.swift``, never ``/a/MyAppState.swift``), in the order they
+    appear. A quoted path is read whole, spaces and brackets included."""
     if suffix.rsplit("/", 1)[-1] not in text:
         return
+    found: list = []
+    quoted: list = []
+    for match in _QUOTED_PATH_RE.finditer(text):
+        if not _PATH_BREAK_RE.search(match.group(2)):
+            continue  # the bare-path pattern reads it the same
+        quoted.append(match.span(2))
+        # A nested JSON string's quote comes escaped: \" ends the path.
+        path = _path_candidate(match.group(2), suffix, strip=" \t\\")
+        if path:
+            found.append((match.start(2), path))
     for match in _ABS_PATH_RE.finditer(text):
-        path = match.group(0).rstrip(_TRAILING + "'\"")
-        if not path.startswith(("/", "~")):
-            # The escape before a JSON string's closing quote isn't the path's.
-            path = path.rstrip(_TRAILING + "'\"\\")
-            # A Windows path, compared and opened with forward slashes.
-            path = re.sub(r"/+", "/", path.replace("\\", "/"))
-        # grep's `path:12:` and a compiler's `path:12:5:`.
-        path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
-        # A URL's //host/... (and a UNC share) is never a file here.
-        if path.startswith("//"):
-            continue
-        if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
-            yield path
+        start = match.start()
+        if any(lo <= start < hi for lo, hi in quoted):
+            continue  # a piece of a quoted path, read whole above
+        raw = match.group(0)
+        # Trailing punctuation is the sentence's, unless the name ends in it.
+        path = (_path_candidate(raw, suffix, strip=_TRAILING + "'\"")
+                or _path_candidate(raw, suffix, strip="'\""))
+        if path:
+            found.append((start, path))
+    for _, path in sorted(found, key=lambda item: item[0]):
+        yield path
 
 
 def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str, *,

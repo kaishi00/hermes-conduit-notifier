@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.132.1 (2026-11-05)
+
+### Fixes
+- A tapped file name now opens the file when its folder has spaces or
+  brackets in its name, like `My Project` or `Report (final).pdf`, and when
+  the name ends in punctuation. Before, Conduit said it wasn't on the server.
+
 ## 0.132.0 (2026-11-05)
 
 ### New and improved

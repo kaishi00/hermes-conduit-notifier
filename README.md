@@ -2032,7 +2032,8 @@ through Hermes' `/api/fs/*` routes.
   names by its name or a path inside a project (`AppState.swift`,
   `docs/plan.md`) is. Pass each id the chat goes by. It tries the chat's
   working folder, then the newest full path ending in that name that the
-  chat's own tool calls, tool output and replies carry, and answers with
+  chat's own tool calls, tool output and replies carry (a quoted path is
+  read whole, spaces and brackets included), and answers with
   `path` (and `via`: `folder`, `chat`, or `absolute` for a full path
   checked as it is), or `path: null` when none is a file on this host the
   Folder would open (secret files and, on a hosted install, files outside
