@@ -588,7 +588,8 @@ RESOLVE_MAX_ROWS = 20_000
 MAX_RESOLVE_NAME_CHARS = 512
 # Paths a row offers, and how many a request checks on disk at most.
 MAX_RESOLVE_CANDIDATES = 400
-_ABS_PATH_RE = re.compile(r"""(?:~/|/)[^\s'"`<>()\[\]{},;|\\]+""")
+_ABS_PATH_RE = re.compile(r"""(?:~/|/)[^\s'"`<>()\[\]{},;|\\]+"""
+                          r"""|[A-Za-z]:[\\/][^\s'"`<>()\[\]{},;|]+""")
 
 
 def _clean_name(name: str) -> str:
@@ -602,10 +603,15 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
     """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
     whole trailing folders: ``/a/b/AppState.swift`` for
     ``AppState.swift``, never ``/a/MyAppState.swift``)."""
-    if suffix not in text:
+    if suffix.rsplit("/", 1)[-1] not in text:
         return
     for match in _ABS_PATH_RE.finditer(text):
         path = match.group(0).rstrip(_TRAILING + "'\"")
+        if not path.startswith(("/", "~")):
+            # The escape before a JSON string's closing quote isn't the path's.
+            path = path.rstrip(_TRAILING + "'\"\\")
+            # A Windows path, compared and opened with forward slashes.
+            path = re.sub(r"/+", "/", path.replace("\\", "/"))
         # grep's `path:12:` and a compiler's `path:12:5:`.
         path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
         if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
@@ -618,21 +624,32 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
     """Where the file a chat's reply names as ``name`` (a bare name or a
     relative path) is: joined to the chat's working folder, else the newest
     absolute path ending in it that the chat's own messages (tool calls,
-    tool results, replies) carry. ``exists`` checks a candidate on the host;
-    without it (a profile whose files are on another machine) the newest
-    candidate is taken. ``{"path": None}`` when nothing names it."""
+    tool results, replies) carry. Hidden sessions in the lineage (a room
+    the chat was branched from) are left out, as the Artifacts list leaves
+    them out, except the ids asked for and the Bot Chat's. ``exists`` checks
+    a candidate on the host (and refuses one it won't show); without it (a
+    profile whose files are on another machine) the folder's join, else the
+    newest candidate, is taken unchecked. ``{"path": None}`` when nothing
+    names it."""
     suffix = _clean_name(name)
     if not suffix or len(suffix) > MAX_RESOLVE_NAME_CHARS or "\n" in suffix:
         return {"path": None}
     if _is_local_path(suffix):
-        found = exists is None or exists(os.path.expanduser(suffix))
-        return {"path": suffix if found else None, "via": "absolute"}
+        if exists is None or exists(os.path.expanduser(suffix)):
+            return {"path": suffix, "via": "absolute"}
+        return {"path": None}
     if any(part == ".." for part in suffix.split("/")):
         return {"path": None}
-    chat = lineage(conn, [sid for sid in session_ids if sid])
+    wanted = [sid for sid in session_ids if sid]
+    chat = lineage(conn, wanted)
+    session_columns = _columns(conn, "sessions")
+    if chat and "hidden" in session_columns:
+        shown = {*wanted, *bot_chat_lineage(conn, session_columns)}
+        hidden = {str(row[0]) for row in conn.execute(
+            f"SELECT id FROM sessions WHERE COALESCE(hidden, 0) != 0 AND id IN ({','.join('?' * len(chat))})", chat)}
+        chat = [sid for sid in chat if sid in shown or sid not in hidden]
     if not chat:
         return {"path": None}
-    session_columns = _columns(conn, "sessions")
     marks = ",".join("?" * len(chat))
     checked: set = set()
 
@@ -652,11 +669,12 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
 
     message_columns = _columns(conn, "messages")
     tool_calls = "tool_calls" if "tool_calls" in message_columns else "NULL"
-    # The name's last part narrows the rows sqlite hands back.
+    # The name's last part narrows the rows sqlite hands back (after a / or,
+    # on Windows, a \\).
     leaf = suffix.rsplit("/", 1)[-1].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     sql = (f"SELECT content, {tool_calls} AS tool_calls FROM messages WHERE session_id IN ({marks}) "
            f"AND (content LIKE ? ESCAPE '\\' OR {tool_calls} LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT ?")
-    pattern = f"%/{leaf}%"
+    pattern = f"%{leaf}%"
     for row in conn.execute(sql, [*chat, pattern, pattern, max(1, int(max_rows))]):
         for column in ("content", "tool_calls"):
             text = row[column]
@@ -664,7 +682,7 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
                 continue
             # A JSON-encoded tool call escapes nothing in a POSIX path, but
             # a result can hold one as an escaped string.
-            text = text[:MAX_SCAN_CHARS].replace("\\/", "/")
+            text = text[:MAX_SCAN_CHARS].replace("\\/", "/").replace("\\\\", "\\")
             # Newest mention in the row first, as rows are.
             for path in reversed(list(_path_tokens(text, suffix))):
                 if found(path):

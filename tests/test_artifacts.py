@@ -548,3 +548,38 @@ def test_the_resolve_route_reads_the_profile_store(tmp_path, monkeypatch):
     assert body == {"ok": True, "path": str(tmp_path / "out" / "report.xlsx"), "via": "chat"}
     missing = client.get(f"{BASE}/workspace/resolve", params={"path": "nope.xlsx", "session_id": "s1"}).json()
     assert missing == {"ok": True, "path": None}
+
+
+def test_a_hidden_room_the_chat_came_from_is_not_read(tmp_path):
+    conn = _db(tmp_path / "home", [("room", "assistant", "/srv/room/plan.md"),
+                                   ("chat", "assistant", "See `plan.md`.")],
+               sessions=[("room", "Room", 1), ("chat", "Chat", 0, "room")])
+    assert index.resolve_name(conn, ["chat"], "plan.md", exists=lambda p: True) == {"path": None}
+    # Asked for by its own id, the hidden session is read.
+    assert index.resolve_name(conn, ["room"], "plan.md", exists=lambda p: True)["path"] == "/srv/room/plan.md"
+
+
+def test_a_windows_path_in_a_tool_call_resolves(tmp_path):
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call("C:\\proj\\Conduit\\AppState.swift")),
+        ("s1", "tool", "C:\\proj\\Conduit\\AppStateTests.swift:12: ok", None, "terminal"),
+    ])
+    assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=lambda p: True) == {
+        "path": "C:/proj/Conduit/AppState.swift", "via": "chat"}
+    assert index.resolve_name(conn, ["s1"], "Conduit\\AppState.swift", exists=lambda p: True)["path"] == (
+        "C:/proj/Conduit/AppState.swift")
+
+
+def test_the_resolve_route_never_answers_with_a_secret_file(tmp_path, monkeypatch):
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_rsa").write_text("x")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / ".env").write_text("x")
+    _db(tmp_path, [("s1", "tool", f"cat {tmp_path / 'out' / '.env'}", None, "terminal")]).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    for params in ({"path": str(tmp_path / ".ssh" / "id_rsa")}, {"path": ".env", "session_id": "s1"}):
+        assert client.get(f"{BASE}/workspace/resolve", params=params).json() == {"ok": True, "path": None}

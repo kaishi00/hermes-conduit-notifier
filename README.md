@@ -2033,8 +2033,12 @@ through Hermes' `/api/fs/*` routes.
   `docs/plan.md`) is. Pass each id the chat goes by. It tries the chat's
   working folder, then the newest full path ending in that name that the
   chat's own tool calls, tool output and replies carry, and answers with
-  `path` (and `via`: `folder` or `chat`), or `path: null` when none is a
-  file on this host. On an SSH profile the newest path is taken unchecked.
+  `path` (and `via`: `folder`, `chat`, or `absolute` for a full path
+  checked as it is), or `path: null` when none is a file on this host the
+  Folder would open (secret files and, on a hosted install, files outside
+  its folder never are). Hidden sessions the chat came from aren't read. On
+  an SSH profile the folder's join, else the newest path, is taken
+  unchecked.
   Conduit asks when such a name is tapped, and opens the Folder there
   (capability `workspace-resolve`, plugin 0.132+).
 

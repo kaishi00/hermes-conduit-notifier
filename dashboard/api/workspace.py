@@ -41,6 +41,10 @@ ARTIFACTS_MAX_ID_LENGTH = 200
 ARTIFACTS_TIMEOUT_S = 25.0
 _artifacts_limiter = core._MintLimiter(ARTIFACTS_LIMIT, ARTIFACTS_WINDOW_S,
                                   message="Too many artifact requests; try again shortly")
+# File lookups (GET /workspace/resolve) share the readers, with a bucket
+# of their own.
+_resolve_limiter = core._MintLimiter(ARTIFACTS_LIMIT, ARTIFACTS_WINDOW_S,
+                                     message="Too many file lookups; try again shortly")
 _artifacts_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-artifacts")
 # A timed-out read keeps its worker until it ends, so a request finding both
 # busy is turned away rather than queued behind them.
@@ -180,25 +184,48 @@ def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[
         conn.close()
 
 
-def _host_file_check(profile: Optional[str]) -> Optional[Callable[[str], bool]]:
-    """Whether a path the chat named is a file here, through Hermes' own
-    mapping of a Docker profile's paths; None for a profile whose files
-    are on its SSH machine, where the newest path is taken unchecked."""
+def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
+    """Whether a path the chat named is one the Folder would open: not a
+    secret file, inside a hosted install's folder, and (on this host, through
+    Hermes' own mapping of a Docker profile's paths) a file. A profile whose
+    files are on its SSH machine checks only the first, and the folder's
+    join, else the newest path, is taken."""
     try:
-        from hermes_cli.web_routers.files import _fs_backend, _fs_profile_home
-        if _fs_backend(profile) is not None:
-            return None
-        home = _fs_profile_home(profile)
+        sensitive_default = _workspace_files().default_sensitive
     except Exception:
-        home = None
+        sensitive_default = None
+    try:
+        from hermes_cli.web_routers.files import _fs_backend, _fs_profile_home, _is_sensitive_path
+        remote = _fs_backend(profile) is not None
+        home = None if remote else _fs_profile_home(profile)
+    except Exception:
+        _is_sensitive_path, remote, home = None, False, None
     try:
         from hermes_cli.web_server_files import _agent_fs_path
     except Exception:
         _agent_fs_path = None
+    boundary = None
+    if not remote:
+        try:
+            from hermes_cli.web_server_files import _managed_files_policy
+            locked = _managed_files_policy(None, create_root=False).locked_root
+            boundary = os.path.realpath(str(locked)) if locked is not None else None
+        except Exception:
+            boundary = None
 
     def exists(path: str) -> bool:
         try:
+            if sensitive_default is not None and sensitive_default(path):
+                return False
+            if _is_sensitive_path is not None and _is_sensitive_path(Path(path)):
+                return False
+            if remote:
+                return True
             target = str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
+            if boundary is not None:
+                real = os.path.realpath(target)
+                if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
+                    return False
             return os.path.isfile(target)
         except Exception:
             return False
@@ -226,7 +253,7 @@ async def get_workspace_resolve(response: Response, path: str, session_id: Optio
             _artifacts_slots.release()
 
     try:
-        await core._scoped_acquire(_artifacts_limiter, profile)
+        await core._scoped_acquire(_resolve_limiter, profile)
         if not _artifacts_slots.acquire(blocking=False):
             raise HTTPException(status_code=503, detail="Hermes is still reading chats; try again shortly",
                                 headers=no_store)
