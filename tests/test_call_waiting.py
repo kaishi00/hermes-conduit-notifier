@@ -39,10 +39,22 @@ def store(tmp_path):
     return calls
 
 
-def test_nothing_is_kept_with_alert_calls_off(tmp_path):
+def test_no_wait_is_a_calls_with_alert_calls_off(tmp_path):
     calls = CallStore(tmp_path)
     assert calls.note_waiting("s1", "question", request_id="conduit-push-a", questions=BATCH) is False
     assert calls.waiting_for("s1") is None
+
+
+def test_an_approval_follower_ends_once_alert_calls_are_off(tmp_path):
+    calls = CallStore(tmp_path)
+    calls.update_settings({"enabled": True, "alerts": True})
+    assert calls.note_waiting("s1", "approval", description="Run it?", command="make") is True
+    assert calls.has_waiting("s1", "approval")
+    calls.update_settings({"alerts": False})
+    calls.forget_waiting("s1", "approval")
+    assert calls.note_waiting("s1", "approval", description="Run it again?", command="make") is False
+    assert not calls.has_waiting("s1", "approval"), "an unfollowed wait keeps no follower going"
+    assert len(calls.waiting_list()) == 1, "it is still listed"
 
 
 def test_the_needs_you_list_keeps_every_wait_even_with_alert_calls_off(tmp_path):

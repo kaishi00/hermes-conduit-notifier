@@ -780,7 +780,9 @@ class CallStore:
     def has_waiting(self, session_id: Any, kind: str) -> bool:
         if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
             return False
-        return any(item["kind"] == kind and session_id.strip() in item["session_ids"]
+        # Followed waits only: an approval's follower, started with alert
+        # calls on, ends once they're off even as unfollowed ones arrive.
+        return any(item["followed"] and item["kind"] == kind and session_id.strip() in item["session_ids"]
                    for item in self._load()["waiting"])
 
     # --- Presence -----------------------------------------------------------
