@@ -581,7 +581,7 @@ INLINE_DIFF_FILES = 20
 ANSWER_DIFF_FILES = 100
 DIFF_ID = re.compile(r"cd-[0-9a-f]{16}")
 _HUNK_HEAD = re.compile(r"^@@+ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@+ ?(.*)$")
-_DIFF_INPUTS = ("patch", "patch_file", "before", "after", "name")
+_DIFF_INPUTS = ("patch", "patch_file", "before", "after")
 
 
 def _prepared_diff(raw: dict[str, Any], notes: list[str] | None, path: str) -> dict[str, Any]:
@@ -838,12 +838,26 @@ def _strip_side(path: str, side: str) -> str:
     return path[len(side):] if path.startswith(side) else path
 
 
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13}
+
+
 def _unquoted(text: str) -> str:
-    """A path git quoted (spaces kept, \\" and \\\\ read)."""
+    """A path git quoted: C escapes read, octal ones as the UTF-8 bytes of
+    a name like caf\\303\\251.txt (core.quotePath)."""
     text = text.strip()
-    if len(text) >= 2 and text[0] == text[-1] == '"':
-        text = re.sub(r'\\(.)', r"\1", text[1:-1])
-    return text
+    if len(text) < 2 or text[0] != text[-1] or text[0] != '"':
+        return text
+    out = bytearray()
+    for octal, named, plain in re.findall(r'\\([0-7]{1,3})|\\(.)|([^\\]+)', text[1:-1], re.S):
+        if octal:
+            out.append(int(octal, 8) & 0xFF)
+        elif named in _C_ESCAPES:
+            out.append(_C_ESCAPES[named])
+        elif named:
+            out.extend(named.encode())
+        else:
+            out.extend(plain.encode())
+    return out.decode("utf-8", errors="replace")
 
 
 def _kept(files: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str]]:
@@ -1240,6 +1254,9 @@ def _callout_markdown(card: dict[str, Any]) -> list[str]:
 # How many files and lines a diff's Markdown shows, so a reply stays a reply.
 MARKDOWN_DIFF_FILES = 20
 MARKDOWN_DIFF_LINES = 40
+# What the diff's Markdown holds at most, so a card's Markdown limit never
+# cuts it inside its fence.
+MARKDOWN_DIFF_CHARS = 6000
 _DIFF_STATUS = {"added": " (new)", "deleted": " (deleted)", "renamed": "", "modified": ""}
 
 
@@ -1267,27 +1284,44 @@ def _diff_markdown(card: dict[str, Any]) -> list[str]:
     parts.append("\n".join(rows))
     body: list[str] = []
     left = MARKDOWN_DIFF_LINES
+    room = MARKDOWN_DIFF_CHARS - sum(len(part) + 2 for part in parts) - 40
     total = diff_lines(diff)
+    shown_lines = 0
     for file in files:
         if left <= 0 or not file.get("hunks"):
             continue
         old = file.get("old_path", file["path"])
-        body.append("--- /dev/null" if file["status"] == "added" else f"--- a/{old}")
-        body.append("+++ /dev/null" if file["status"] == "deleted" else f"+++ b/{file['path']}")
+        heads = ["--- /dev/null" if file["status"] == "added" else f"--- a/{old}",
+                 "+++ /dev/null" if file["status"] == "deleted" else f"+++ b/{file['path']}"]
         for hunk in file["hunks"]:
             if left <= 0:
                 break
-            shown = hunk["lines"][:left]
+            shown = []
+            used = sum(len(line) + 1 for line in heads) + len(hunk.get("context") or "") + 40
+            full = False
+            for line in hunk["lines"][:left]:
+                if used + len(line) + 1 > room:
+                    full = True
+                    break
+                shown.append(line)
+                used += len(line) + 1
+            if not shown:
+                left = 0
+                break
             olds = sum(1 for line in shown if line[0] != "+")
             news = sum(1 for line in shown if line[0] != "-")
             head = f"@@ -{hunk['old_start']},{olds} +{hunk['new_start']},{news} @@"
+            body.extend(heads)
+            heads = []
             body.append(f"{head} {hunk['context']}" if hunk.get("context") else head)
             body.extend(shown)
-            left -= len(shown)
+            room -= used
+            left = 0 if full else left - len(shown)
+            shown_lines += len(shown)
     if body:
         fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", "\n".join(body))), default=0))
         parts.append(f"{fence}diff\n" + "\n".join(body) + f"\n{fence}")
-        hidden = total - (MARKDOWN_DIFF_LINES - left)
+        hidden = total - shown_lines
         if hidden > 0:
             parts.append(f"_\u2026 {hidden:,} more line{'s' if hidden != 1 else ''}_")
     return parts
