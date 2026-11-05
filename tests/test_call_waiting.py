@@ -368,8 +368,10 @@ def test_a_just_written_file_is_never_trusted_unchanged(store, monkeypatch):
     loads = []
     real_load = CallStore._load
     monkeypatch.setattr(CallStore, "_load", lambda self, **kw: loads.append(kw) or real_load(self, **kw))
-    # Written within the last two seconds: a second write in the same
-    # timestamp tick could look the same to a stat.
+    # Written within the settle window (made wide, so a slow worker can't
+    # step past it): a second write in the same timestamp tick could look
+    # the same to a stat.
+    monkeypatch.setattr(store_module, "SETTLED_NS", 3_600_000_000_000)
     assert store.answers_ready("conduit-push-r") is False
     assert store.answers_ready("conduit-push-r") is False
     assert len(loads) == 2

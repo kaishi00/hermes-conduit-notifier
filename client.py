@@ -713,6 +713,9 @@ def _request(
             raw = error.read(4096)
         except Exception:
             raw = None
+        finally:
+            # Hands a kept connection back once read whole, else closes it.
+            error.close()
         try:
             body = json.loads(raw) if raw else None
         except Exception:

@@ -12,6 +12,7 @@ import ssl
 import sys
 import tempfile
 import threading
+import time
 import types
 import urllib.error
 import urllib.request
@@ -155,6 +156,23 @@ def test_a_connection_closed_while_idle_is_replaced_and_the_request_sent_once(re
     # The relay closed it after answering; the pooled copy is dead.
     assert _get(opener, f"{base}/two")["n"] == 2
     assert [path for _m, path, _b, _c in server.requests] == ["/one", "/two"]
+    assert server.connections == 2
+
+
+def test_a_post_on_a_connection_the_relay_closed_while_idle_goes_out_on_a_new_one(relay, monkeypatch):
+    server, handler, opener, base = relay
+    monkeypatch.setattr(client, "_opener", opener)
+    server.close_after = True
+    assert _get(opener, f"{base}/one")["n"] == 1
+    # The close has arrived: the dead connection is dropped before the
+    # POST is written, so it isn't refused for fear of a replay.
+    deadline = time.monotonic() + 2
+    while handler._idle and time.monotonic() < deadline:
+        if keep_alive._closed_by_peer(handler._idle[next(iter(handler._idle))][0][0]):
+            break
+        time.sleep(0.01)
+    answer = client.request_json(f"{base}/v1/pairings/claim", method="POST", payload={"code": "x"})
+    assert answer["ok"] is True
     assert server.connections == 2
 
 

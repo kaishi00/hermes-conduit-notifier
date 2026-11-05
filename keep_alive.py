@@ -11,7 +11,8 @@ request.
 - A connection goes back to the pool only once its answer was read to the
   end and the relay didn't ask to close it; one read part way is closed.
 - A pooled connection the relay (or what's in front of it) closed while it
-  sat idle fails on the next send. That request is sent again once on a new
+  sat idle is dropped before it's used, when its close already arrived.
+  One whose close is still on the way fails on the next send. That request is sent again once on a new
   connection when it failed while being written, or when asking twice
   changes nothing (GET, HEAD, PUT, DELETE, OPTIONS; urllib3's rule): a POST
   the relay answered-or-not after taking it whole, a pairing claim say, is
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import http.client
 import os
+import select
 import socket
 import ssl
 import threading
@@ -46,6 +48,21 @@ _IDEMPOTENT = frozenset({"GET", "HEAD", "DELETE", "PUT", "OPTIONS"})
 # A pooled connection that fails like this was closed while it sat idle.
 _STALE = (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
           ssl.SSLEOFError, ssl.SSLZeroReturnError)
+
+
+def _closed_by_peer(connection: http.client.HTTPSConnection) -> bool:
+    """An idle connection with anything to read was closed by the relay (or
+    sent what nobody asked for): either way it can't carry a request."""
+    sock = connection.sock
+    if sock is None:
+        return True
+    try:
+        if isinstance(sock, ssl.SSLSocket) and sock.pending():
+            return True
+        readable, _, _ = select.select([sock], [], [], 0)
+        return bool(readable)
+    except (OSError, ValueError):
+        return True
 
 
 class _PooledResponse(http.client.HTTPResponse):
@@ -147,7 +164,7 @@ class KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
             idle = self._idle.get(origin, [])
             while idle:
                 connection, since = idle.pop()
-                if now - since <= IDLE_SECONDS and connection.sock is not None:
+                if now - since <= IDLE_SECONDS and not _closed_by_peer(connection):
                     found = connection
                     break
                 stale.append(connection)
