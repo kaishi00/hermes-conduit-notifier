@@ -3324,7 +3324,7 @@ def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
     row["call"] = _call_of(work) if not row["from_call"] else ""
     # The screen: "controlling" only while it holds it now, "waiting" while
     # it waits for it; when it used it last, apart (Eric 2026-11-05).
-    row["screen"], row["screen_used_at"] = _row_screen(work, screen or {})
+    row["screen"], row["screen_used_at"] = _row_screen(work, screen or {}, work_broker.profile_of(store.home))
     row["screen_ask"] = _row_screen_ask(work)
     row["approval"] = None
     if on and broker is not None and work.status == "needs_you" and work.session_id and not work.closed_at:
@@ -3737,7 +3737,7 @@ def _screen_snapshot(home: Path) -> dict:
         return {"controlling": None, "last": None, "waiting": []}
 
 
-def _row_screen(work: work_store.Work, screen: dict) -> tuple[str, float]:
+def _row_screen(work: work_store.Work, screen: dict, profile: str = "") -> tuple[str, float]:
     if not work.session_id:
         return "", 0.0
     controlling = screen.get("controlling") or {}
@@ -3745,8 +3745,9 @@ def _row_screen(work: work_store.Work, screen: dict) -> tuple[str, float]:
     used = float(last.get("at") or 0) if last.get("session_id") == work.session_id else 0.0
     if controlling.get("session_id") == work.session_id:
         return "controlling", used
-    if not work.closed_at and work.status not in ("stopped", "failed") and any((item or {}).get("session_id") == work.session_id
-                                  for item in screen.get("waiting") or []):
+    if not work.closed_at and work.status not in ("stopped", "failed", "interrupted") and any(
+            (item or {}).get("session_id") == work.session_id or _same_waiter(item or {}, work, profile)
+            for item in screen.get("waiting") or []):
         return "waiting", used
     return "", used
 
@@ -3878,9 +3879,32 @@ def screen_turn_ended(session_id: Any) -> None:
         _screen_freed(home)
 
 
+def _same_waiter(item: dict, work: work_store.Work, profile: str) -> bool:
+    """A waiting entry names this workstream by its ref, in its own bot (a
+    host's list is every bot's)."""
+    return bool(item.get("ref")) and item.get("ref") == work.ref and item.get("kind") == "workstream" \
+        and item.get("profile") == profile
+
+
+def _waiting_work(item: dict, home: Path) -> tuple[Optional[work_store.Work], bool]:
+    """The work a waiting entry stands for, and whether the registry couldn't
+    be read. Found by its ref when a compaction has since moved its session."""
+    _, work, unreadable = _lookup(str(item.get("session_id") or ""), home)
+    ref = item.get("ref")
+    if work is None and not unreadable and ref and item.get("kind") == "workstream" \
+            and item.get("profile") == work_broker.profile_of(home) and work_store.exists(home):
+        try:
+            work = work_store.Store(home).get(ref)
+        except Exception:  # noqa: BLE001
+            return None, True
+        if work is not None and work.kind != "workstream":
+            work = None
+    return work, unreadable
+
+
 def _still_waits(item: dict) -> bool:
     home = Path(str(item.get("home") or ""))
-    _, work, unreadable = _lookup(str(item.get("session_id") or ""), home)
+    work, unreadable = _waiting_work(item, home)
     if unreadable:
         return True  # Not known just now: it keeps its place, and the next look tries again.
     # Running work hears when its turn ends; closed or stopped work doesn't wait.
@@ -3889,13 +3913,14 @@ def _still_waits(item: dict) -> bool:
 
 
 def _screen_freed(home: Path) -> bool:
-    """Sends the next waiting workstream on. True when one was sent, or none waits."""
+    """Sends the next waiting workstream on. True when nobody is left to
+    send on (none waits, or the broker is off), False otherwise."""
     if work_broker.unavailable_reason():
         return True
     item = screen_lock.take_next_waiting(home, _still_waits)
     if item is None:
         return not screen_lock.snapshot(home).get("waiting")
-    _, work, _ = _lookup(str(item.get("session_id") or ""), home)
+    work, _ = _waiting_work(item, home)
     who = {key: item[key] for key in ("profile", "kind", "ref", "title", "label") if key in item}
     if work is None or not work.session_id:
         # Not readable just now: back on the list; the next look drops it

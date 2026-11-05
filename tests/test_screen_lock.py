@@ -416,3 +416,23 @@ def test_a_watch_asleep_through_an_unload_sends_nothing(on, hermes, monkeypatch)
     work.stop()
     time.sleep(0.1)
     assert freed == []
+
+
+def test_a_waiter_whose_session_moved_is_still_told(on, hermes):
+    start()
+    assert click(BOT_CHAT) is None
+    assert click(WORKER)["action"] == "block"
+    work.turn_ended(WORKER, "Waiting for the screen.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    store = store_mod.Store(on.home)
+    ref = store.by_session(WORKER).ref
+    store.update(ref, session_id="worker-compacted")  # a compaction moved its session meanwhile
+    assert work.app_list(on.home)["work"][0]["screen"] == "waiting"
+    hermes.calls.clear()
+    work.screen_turn_ended(BOT_CHAT)
+    deadline = time.time() + 5
+    while not [c for c in list(hermes.calls) if c[0] == "prompt.submit"] and time.time() < deadline:
+        time.sleep(0.01)
+    sent = [params for name, params, _ in list(hermes.calls) if name == "prompt.submit"
+            and params.get("text") == work.SCREEN_FREE]
+    assert len(sent) == 1
