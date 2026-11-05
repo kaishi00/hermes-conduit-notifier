@@ -596,9 +596,10 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
         # model was shown: the shortlist (candidates) can miss a repeat said in
         # another chat in other words around it (notifier #550: "midterm
         # elections dashboard" shared one word with "election dashboard").
+        said, summary = _norm(evidence), _norm(text)
         same_as = next((item["id"] for item in (repeats or remembered) if
                         item["kind"] == kind and not _reminded(item) and (
-                            _norm(item["evidence"]) == _norm(evidence) or _norm(item["text"]) == _norm(text))), None)
+                            _norm(item["evidence"]) == said or _norm(item["text"]) == summary)), None)
     return {"kind": kind, "text": text, "evidence": evidence, "explicit": int(raw.get("explicit") is True),
             "due": due, "due_at": due_at, "message_id": row["id"], "mentioned_at": row["timestamp"],
             "same_as": same_as, "replaces": replaces, "late": late, "every_year": every_year, "occasion": occasion,
@@ -760,11 +761,11 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 chat.chat_id, max(chunk[0]["timestamp"] - IDLE_S, read_to), last["timestamp"], MAX_OUTCOMES)
                 if o["at"] > read_to]
             calls += 1
-            # Every profile's: what the model weighs is the shortlist from the
-            # newest MAX_OPEN, and the plain-repeat check reads all of them, so
-            # an old item still meets its word-for-word repeat.
+            # Every profile's, all of them: the model weighs the shortlist
+            # (candidates), and the plain-repeat check reads the rest too, so
+            # neither another profile's newer items nor age hides an item.
             standing = pulse_store.remembered_items(limit=None, reminded_since=now - REMINDED_KEEP_S)
-            remembered = candidates(standing[:MAX_OPEN], chunk, chat.chat_id, chat.profile)
+            remembered = candidates(standing, chunk, chat.chat_id, chat.profile)
             found: list[dict] = []
             try:
                 # Only older chats (a backfill) set a commitment learned late

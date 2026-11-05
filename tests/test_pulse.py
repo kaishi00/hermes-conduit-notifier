@@ -2786,21 +2786,39 @@ def test_one_plan_said_as_an_intention_and_an_interest_in_one_reply_is_kept_once
     assert [item["kind"] for item in items] == ["intention", "commitment"]
 
 
-def test_an_old_item_past_the_shortlists_window_still_meets_its_repeat(remembering, db, monkeypatch):
-    monkeypatch.setattr(memory, "MAX_OPEN", 1)
+def test_other_profiles_newer_items_never_hide_this_chats_own(remembering, db, monkeypatch):
+    monkeypatch.setattr(memory, "MAX_OPEN", 10)  # the report's window, not memory's
+    store_ = remembering.store
+    [mine] = store_.advance("", "work", message_id=1, at=DAY, items=[{
+        "kind": "intention", "text": "The user wants to learn the cello.", "evidence": "I want to learn the cello",
+        "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}])
+    store_.advance("nahida", "b1", message_id=1, at=DAY + 5, items=[
+        {"kind": "fact", "text": f"Fact {n}.", "evidence": f"fact number {n}", "explicit": 1, "due": "",
+         "due_at": None, "message_id": 1, "mentioned_at": DAY + 5 + n} for n in range(memory.MAX_CANDIDATES + 5)])
+    db.message("user", "Thinking of signing up for lessons", sid="work", at=DAY + 600)
+    db.message("assistant", "Nice.", sid="work", at=DAY + 610)
+    model = FakeModel({"items": []})
+    _remember(remembering, model, DAY + 610 + memory.IDLE_S)
+    assert f"#{mine} intention: The user wants to learn the cello." in model.shown[0]
+
+
+def test_an_old_item_still_meets_its_word_for_word_repeat(remembering, db, monkeypatch):
+    monkeypatch.setattr(memory, "MAX_OPEN", 10)  # the report's window, not memory's
     store_ = remembering.store
     old = {"kind": "commitment", "text": "The user will renew the passport.", "evidence": "I'll renew the passport",
            "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}
     [kept] = store_.advance("", "other", message_id=1, at=DAY, items=[old])
-    store_.advance("", "more", message_id=1, at=DAY + 5, items=[
-        {**old, "text": "The user will call Ana.", "evidence": "I'll call Ana", "mentioned_at": DAY + 5}])
-    db.message("user", "Oh and I still need to renew it, the passport", sid="work", at=DAY + 60)
-    db.message("assistant", "Noted.", sid="work", at=DAY + 70)
+    store_.advance("nahida", "b1", message_id=1, at=DAY + 5, items=[
+        {**old, "text": f"The user will do task {n}.", "evidence": f"I'll do task {n}", "mentioned_at": DAY + 5 + n}
+        for n in range(memory.MAX_CANDIDATES + 5)])
+    db.message("user", "Oh and I need to sort out that document", sid="work", at=DAY + 600)
+    db.message("assistant", "Noted.", sid="work", at=DAY + 610)
     model = FakeModel({"items": [{"kind": "commitment", "text": "The user will renew the passport.",
-                                  "evidence": "I still need to renew it, the passport", "line": 1}]})
-    _remember(remembering, model, DAY + 70 + memory.IDLE_S)
-    assert f"#{kept} " not in model.shown[0]  # past the shortlist's window
-    assert len(store_.open_items("commitment")) == 2 and store_.item(kept)["mentioned_at"] == DAY + 60
+                                  "evidence": "I need to sort out that document", "line": 1}]})
+    _remember(remembering, model, DAY + 610 + memory.IDLE_S)
+    assert f"#{kept} " not in model.shown[0]  # not on the shortlist
+    assert store_.item(kept)["mentioned_at"] == DAY + 600
+    assert len(store_.open_items("commitment")) == memory.MAX_CANDIDATES + 6
 
 
 def test_this_chats_newest_are_its_own_profiles():
