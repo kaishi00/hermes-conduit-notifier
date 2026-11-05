@@ -321,6 +321,18 @@ def test_a_dashboard_restarted_before_the_gateway_restarts_it(monkeypatch, tmp_p
     assert [n["step"] for n in notified] == ["done"]
 
 
+def test_a_resumed_job_whose_pull_fails_reads_as_a_pull_failure(monkeypatch, tmp_path):
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,
+                                "version": api.capabilities.LOADED_VERSION}))
+    monkeypatch.setattr(api.self_update, "_hermes_update_steps",
+                        lambda: (lambda: {"ok": False, "error": "offline"}, lambda draining: 0))
+    api.self_update.finish_self_update_after_restart(path, lambda job: None, delay=0)
+    api.self_update._self_update_thread.join(5)
+    job = json.loads(path.read_text())
+    assert job["step"] == "failed" and job["failed_step"] == "downloading"
+
+
 def test_a_dashboard_restarted_before_the_gateway_says_so_where_it_cant_restart_it(monkeypatch, tmp_path):
     path = tmp_path / api.self_update.SELF_UPDATE_FILE
     path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,

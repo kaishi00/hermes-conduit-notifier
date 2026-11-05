@@ -712,7 +712,8 @@ def _resume_gateway_restart(path: Path, job: Dict[str, Any],
         timer.daemon = True
         timer.start()
         return job
-    job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid())
+    # From the pull again (a no-op once pulled), so a failure there reads as the pull's.
+    job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid(), step="downloading")
 
     def schedule(delay: float, fn: Callable[[], None]) -> None:
         timer = threading.Timer(delay, fn)
