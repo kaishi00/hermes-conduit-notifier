@@ -237,6 +237,8 @@ def test_an_unreadable_hold_file_lets_the_call_through(on, hermes, monkeypatch):
 
 
 def test_a_waiter_whose_message_couldnt_go_stays_waiting(on, hermes, monkeypatch):
+    # No watch thread: it would take the waiter off and put it back meanwhile.
+    monkeypatch.setattr(work, "_watch_screen", lambda home: None)
     start()
     work.turn_started(WORKER)
     assert click(BOT_CHAT) is None
