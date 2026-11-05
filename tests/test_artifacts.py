@@ -799,3 +799,14 @@ def test_an_ssh_profile_never_opens_a_piece_of_a_quoted_bracket_path(tmp_path, m
 def test_a_quoted_run_with_a_path_in_brackets_still_names_it(tmp_path):
     conn = _db(tmp_path / "home", [("s1", "tool", '"/a/b.md (/c/d.md)"', None, "terminal")])
     assert index.resolve_name(conn, ["s1"], "d.md", exists=lambda p: True)["path"] == "/c/d.md"
+
+
+def test_a_quoted_path_whose_folder_ends_in_a_separator_is_tried_whole(tmp_path):
+    real = {"/data/a;/b/old.md", "/b/old.md", "/x/old.md"}
+    conn = _db(tmp_path / "home", [
+        ("s1", "tool", '"/data/a;/b/old.md"', None, "terminal"),
+        ("s2", "tool", '"/x/old.md, /y/old.md"', None, "terminal"),
+    ])
+    assert index.resolve_name(conn, ["s1"], "old.md", exists=real.__contains__)["path"] == "/data/a;/b/old.md"
+    # Two paths: the whole run isn't a file, so its pieces still answer.
+    assert index.resolve_name(conn, ["s2"], "old.md", exists=real.__contains__)["path"] == "/x/old.md"

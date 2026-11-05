@@ -20,6 +20,8 @@ checks it). The format is fixed, because Conduit reads it:
   apostrophe in it, like `John's Projects`. On an SSH profile, a tap on a file
   in a folder with brackets in its name no longer opens a wrong file of the
   same name.
+- A tapped file name opens the right file when a folder in its path ends in
+  a comma, semicolon or bar, rather than a file of the same name elsewhere.
 
 ## 0.132.2 (2026-11-05)
 

@@ -667,15 +667,23 @@ def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterab
     whole_runs: list = []
     for match in _QUOTED_PATH_RE.finditer(text):
         run = match.group(2)
-        if not _PATH_BREAK_RE.search(run.replace("'", " ")) or _ANOTHER_PATH_RE.search(run):
-            continue  # the bare-path pattern reads it, piece by piece
+        if not _PATH_BREAK_RE.search(run.replace("'", " ")):
+            continue  # the bare-path pattern reads it whole
+        # A nested JSON string's quote comes escaped: \" ends the path.
+        strip = " \t\\" + _SENTENCE_END
+        if _ANOTHER_PATH_RE.search(run):
+            # Most likely several paths, read piece by piece. A folder can
+            # end in a separator, though (/data/a;/b/old.md), so a host that
+            # checks tries the whole run too, before its pieces.
+            path = _path_candidate(run, suffix, strip=" \t\\") if quoted_whole else None
+            if path:
+                found.append((match.end(2), path))
+            continue
         head = _ABS_PATH_RE.match(run)
         if head and _bare_candidate(head.group(0), suffix):
             # It opens with the whole path ("/srv/old.md renamed to
             # backup/old.md"): what follows is prose, read as such.
             continue
-        # A nested JSON string's quote comes escaped: \" ends the path.
-        strip = " \t\\" + _SENTENCE_END
         path = (_path_candidate(run, suffix, strip=" \t\\")
                 or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
         if not path:
