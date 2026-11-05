@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.132.2 (2026-11-05)
+
+### Fixes
+- One reading the host can't keep, like a sleep or workout that ends
+  before it starts or runs past a week, no longer stops a whole health
+  sync, and with it every good reading in it. The host leaves that one out,
+  counts it and keeps the rest. Calendar events, reminders and arrivals at
+  a saved place work the same way.
+
 ## 0.132.1 (2026-11-05)
 
 ### Fixes
