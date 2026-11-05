@@ -65,7 +65,9 @@ SCHEMA: dict[str, Any] = {
         "of two to four options, steps the user can tick off (with timers), photos, videos or audio to play, people "
         "to call, message or email, the status of something in progress (a delivery, a flight, a match, a job), "
         "a table to sort, a day-by-day plan (timeline), a checklist whose ticks are kept, a ranked list, progress "
-        "toward goals, or a tip or warning (callout). Up to 12 cards make a board: put a short title on each, use "
+        "toward goals, a tip or warning (callout), or a diff of changes to code, a config or any text (give a patch, "
+        "a patch_file for a long one, or before and after; put the pull request or commit in source). Up to 12 "
+        "cards make a board: put a short title on each, use "
         "layout tabs for one card at a time, and give next: the follow-ups the user would likely send, which a tap "
         "sends. "
         "When the user asks you to text someone, show a contact card for them with their phone and the message "
@@ -103,8 +105,8 @@ SCHEMA: dict[str, Any] = {
 
 INVALID_CARDS_NOTE = ("None of the cards could be shown: each needs a type and that type's field (places with "
                       "names for map, place and places, people for contact; stats, chart, weather, options, steps, "
-                      "media, status, table (columns and rows), timeline, checklist, list, progress or callout for the "
-                      "others), "
+                      "media, status, table (columns and rows), timeline, checklist, list, progress, callout or diff "
+                      "(a patch, a patch_file, or before and after) for the others), "
                       "and a forecast and media need their source.")
 UNSUPPORTED_CARDS_NOTE = ("This version of Conduit can't draw these cards. On a call, show it as Markdown instead; "
                           "in a typed chat, write it in your reply.")
@@ -144,11 +146,14 @@ DESKTOP_SHOWN_NOTE = ("Hermes Desktop draws these cards where your reply holds t
                       "{line} Write it once, where the board goes, and give the gist in a sentence or two; don't "
                       "repeat the cards.")
 TEXT_LAYOUT_NOTE = "layout: these messages show no tabs, left out"
+DIFF_NOT_KEPT_NOTE = ("cards: a diff was too long to send whole and couldn't be kept on the host, so its card lists "
+                      "the files without their lines: give the changes that matter in your reply")
 TEXT_NEXT_NOTE = "next: these messages show no follow-ups, left out: offer them in your reply if they matter"
 
 
 BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (the weather or a forecast, a "
-              "plan by day, a comparison, numbers or a trend, a ranking, a list to tick off), show it with "
+              "plan by day, a comparison, numbers or a trend, a ranking, a list to tick off, changes to code or a "
+              "config as a diff), show it with "
               "conduit_show as cards (through tool_search and tool_call when it's deferred), with next for the "
               "obvious follow-ups, and keep your reply to the gist. Never draw data as an HTML ::preview page.]")
 
@@ -178,7 +183,8 @@ def board_rule(turn_source: str | None, desktop_half: Callable[[], bool] = lambd
 def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
              is_room: Callable[[Any], bool] = lambda _: False,
              room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
-             desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None, skill_path: Any = None) -> None:
+             desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
+             keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None, skill_path: Any = None) -> None:
     """Registers the tool and its recipes, if this Hermes supports plugin
     tools and skills."""
     if skill_path is not None and hasattr(ctx, "register_skill"):
@@ -191,7 +197,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
 
     def handler(args: Any, session_id: Any = None, **_: Any) -> str:
         return handle(args, session_id=session_id, is_child=is_child, is_room=is_room, room_board=room_board,
-                      desktop_board=desktop_board)
+                      desktop_board=desktop_board, keep_diff=keep_diff)
 
     tool = {"name": TOOL_NAME, "toolset": TOOLSET, "schema": SCHEMA, "handler": handler, "check_fn": available}
     try:
@@ -238,10 +244,11 @@ def available() -> bool:
 def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool] = lambda _: False,
            is_room: Callable[[Any], bool] = lambda _: False,
            room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
-           desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None) -> str:
+           desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
+           keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None) -> str:
     try:
         return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child, is_room, room_board,
-                                  desktop_board), ensure_ascii=False)
+                                  desktop_board, keep_diff), ensure_ascii=False)
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_show failed", exc_info=True)
         return json.dumps({"ok": False, "error": "unavailable",
@@ -251,7 +258,8 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
 def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool],
             is_room: Callable[[Any], bool] = lambda _: False,
             room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
-            desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None) -> dict[str, Any]:
+            desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
+            keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None) -> dict[str, Any]:
     session = session_id.strip() if isinstance(session_id, str) else ""
     # The user's screen belongs to the conversation they're in, not to a
     # subagent's work.
@@ -263,6 +271,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     cards = card_schema.normalize_cards(given, problems)
     if given not in (None, []) and not cards:
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20]}
+    cards = _diffs_answered(cards, keep_diff, problems)
     layout = card_schema.normalize_layout(args.get("layout"), problems)
     follow_ups = card_schema.normalize_next(args.get("next"), problems)
     if not cards and session and is_room(session):
@@ -282,10 +291,20 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
             cards = [card for card in cards if card["type"] != "contact"]
             if not cards:
                 return _with_problems({"ok": False, "error": "group_room", "note": ROOM_NOTHING_NOTE}, problems)
+        store = _store()
+        if any(card["type"] in card_schema.DIFF_TYPES for card in cards) and \
+                store.has_feature_everywhere(ROOM_BOARDS_FEATURE) and \
+                not store.has_feature_everywhere(card_schema.DIFF_FEATURE):
+            # A Conduit that draws a room's boards but not diffs would show
+            # nothing for one; as text, its Markdown goes in the reply.
+            problems.insert(0, LEFT_OUT_NOTE.format(kinds="diff"))
+            cards = [card for card in cards if card["type"] not in card_schema.DIFF_TYPES]
+            if not cards:
+                return {"ok": False, "error": "unsupported_cards", "note": problems.pop(0), "problems": problems[:20]}
         board = {"cards": cards, "markdown": _fallback(cards)}
         if layout and len(cards) > 1:
             board["layout"] = layout
-        if _store().has_feature_everywhere(ROOM_BOARDS_FEATURE) and room_board(session, board):
+        if store.has_feature_everywhere(ROOM_BOARDS_FEATURE) and room_board(session, board):
             if layout and len(cards) < 2:
                 problems.insert(0, "layout: it lays out two or more cards, and fewer were shown, left out")
             return _with_problems({"ok": True, **board, "note": ROOM_SHOWN_NOTE}, problems)
@@ -405,6 +424,26 @@ def _board(answer: dict[str, Any], cards: list[dict[str, Any]], layout: str | No
         note = f"{note} {PROBLEMS_NOTE}"
     answer["note"] = note
     return answer
+
+
+def _diffs_answered(cards: list[dict[str, Any]], keep_diff: Callable[[dict[str, Any]], str | None],
+                    problems: list[str]) -> list[dict[str, Any]]:
+    """The cards as the answer carries them: a diff too long to carry whole
+    is kept on the host, and its card lists the files and names the id
+    Conduit reads the rest by, so the chat's history (and the model's
+    context) never holds a long diff."""
+    answered = []
+    for card in cards:
+        if card["type"] == "diff" and not card_schema.carries_whole(card["diff"]):
+            try:
+                diff_id = keep_diff(card["diff"])
+            except Exception:  # noqa: BLE001 — the card lists the files alone
+                diff_id = None
+            if not diff_id:
+                problems.append(DIFF_NOT_KEPT_NOTE)
+            card = {**card, "diff": card_schema.answer_diff(card["diff"], diff_id)}
+        answered.append(card)
+    return answered
 
 
 def _with_left_out(note: str, left_out: list[str], no_texts: bool = False) -> str:

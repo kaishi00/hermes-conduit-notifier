@@ -6,7 +6,8 @@
  * half reads it from GET /boards/desktop. While it's loaded it says so
  * (POST /boards/desktop/seen, every ten minutes, and that it's gone when it's turned off), so the agent is asked for the
  * line only where it will be drawn; without the half, Desktop gets the board
- * as Markdown in the reply.
+ * as Markdown in the reply. A diff card too long to carry its lines names the
+ * whole diff the host keeps (GET /boards/diffs), read when a file is opened.
  *
  * Plain ESM, loaded uncompiled: jsx() calls, not JSX. Only @hermes/plugin-sdk
  * and react resolve.
@@ -21,8 +22,10 @@ const BOARD_ID = /^cb-[0-9a-f]{12}$/
 const SEEN_EVERY_MS = 10 * 60 * 1000
 // Kinds drawn here; every other card shows its own Markdown.
 const NATIVE = new Set([
-  'stats', 'chart', 'comparison', 'steps', 'status', 'table', 'timeline', 'checklist', 'list', 'progress', 'callout'
+  'stats', 'chart', 'comparison', 'steps', 'status', 'table', 'timeline', 'checklist', 'list', 'progress', 'callout',
+  'diff'
 ])
+const DIFF_ID = /^cd-[0-9a-f]{16}$/
 
 const muted = 'text-(--ui-text-tertiary)'
 const frame = 'rounded-lg border border-(--ui-border) bg-(--ui-surface) p-3'
@@ -187,13 +190,15 @@ function CardBody({ card, sessionId }) {
       return jsx(Progress, { items: card.progress })
     case 'callout':
       return jsx(Callout, { callout: card.callout })
+    case 'diff':
+      return jsx(Diff, { diff: card.diff })
     default:
       return null
   }
 }
 
 function kindName(type) {
-  return { comparison: 'Compare', timeline: 'Plan', checklist: 'Checklist' }[type] ?? (type || 'Card')
+  return { comparison: 'Compare', timeline: 'Plan', checklist: 'Checklist', diff: 'Changes' }[type] ?? (type || 'Card')
 }
 
 function Source({ source }) {
@@ -747,6 +752,175 @@ function Callout({ callout }) {
   })
 }
 
+// A diff: its files, each folding open to its hunks with line numbers. A diff
+// too long for the card lists its files, and the whole one is read from the
+// host (GET /boards/diffs) when the first file is opened.
+
+const diffs = new Map()
+
+function readDiff(id) {
+  if (!diffs.has(id)) {
+    if (diffs.size >= KEPT_READS) diffs.delete(diffs.keys().next().value)
+    const read = rest(`/boards/diffs?id=${id}`).then(
+      answer => answer.diff,
+      error => {
+        diffs.delete(id)
+        throw error
+      }
+    )
+    diffs.set(id, read)
+  }
+  return diffs.get(id)
+}
+
+const statusNames = { added: 'new', deleted: 'deleted', renamed: 'renamed' }
+
+function plural(count, one) {
+  return `${count.toLocaleString()} ${one}${count === 1 ? '' : 's'}`
+}
+
+function Diff({ diff }) {
+  const files = Array.isArray(diff.files) ? diff.files : []
+  const whole = files.some(file => Array.isArray(file.hunks))
+  const [state, setState] = useState({ diff: null, error: null })
+  // Each time a file is opened; a failed read is tried again.
+  const [wanted, setWanted] = useState(0)
+
+  useEffect(() => {
+    if (whole || !wanted || !DIFF_ID.test(diff.id ?? '')) return
+    let live = true
+    readDiff(diff.id).then(
+      read => live && setState({ diff: read, error: null }),
+      error => live && setState({ diff: null, error })
+    )
+    return () => {
+      live = false
+    }
+  }, [whole, wanted, diff.id])
+
+  const shown = whole ? files : (state.diff?.files ?? files)
+  const count = files.length + (diff.more_files ?? 0)
+  return jsxs('div', {
+    className: 'flex flex-col gap-1 text-sm',
+    children: [
+      jsxs('div', {
+        className: muted,
+        children: [
+          plural(count, 'file'),
+          ' · ',
+          jsx('span', { className: tones.good, children: `+${(diff.added ?? 0).toLocaleString()}` }),
+          ' ',
+          jsx('span', { className: tones.bad, children: `\u2212${(diff.removed ?? 0).toLocaleString()}` })
+        ]
+      }),
+      ...shown.map((file, index) =>
+        jsx(
+          DiffFile,
+          {
+            file,
+            open: shown.length === 1 && !file.binary,
+            onOpen: () => {
+              setState(now => (now.error ? { diff: null, error: null } : now))
+              setWanted(count => count + 1)
+            },
+            loading: !whole && !state.diff && !state.error && DIFF_ID.test(diff.id ?? ''),
+            failed: !whole && state.error ? gone(state.error) ? 'This diff is no longer kept on the host.' : 'The diff couldn’t be loaded.' : null
+          },
+          `${index}-${file.path}`
+        )
+      ),
+      diff.more_files ? jsx('div', { className: muted, children: `and ${plural(diff.more_files, 'more file')}` }) : null
+    ]
+  })
+}
+
+function DiffFile({ file, open, onOpen, loading, failed }) {
+  const name = file.status === 'renamed' && file.old_path ? `${file.old_path} \u2192 ${file.path}` : file.path
+  const note = statusNames[file.status]
+  const hunks = Array.isArray(file.hunks) ? file.hunks : null
+  return jsxs('details', {
+    className: 'rounded-md border border-(--ui-border)',
+    open,
+    onToggle: event => event.currentTarget.open && onOpen(),
+    children: [
+      jsxs('summary', {
+        className: 'flex cursor-pointer items-baseline gap-2 px-2 py-1',
+        children: [
+          jsx('span', { className: 'min-w-0 flex-1 truncate font-mono text-xs', title: name, children: name }),
+          note ? jsx('span', { className: cn('text-xs', muted), children: note }) : null,
+          file.binary
+            ? jsx('span', { className: cn('text-xs', muted), children: 'binary' })
+            : jsxs('span', {
+                className: 'text-xs tabular-nums',
+                children: [
+                  jsx('span', { className: tones.good, children: `+${file.added}` }),
+                  ' ',
+                  jsx('span', { className: tones.bad, children: `\u2212${file.removed}` })
+                ]
+              })
+        ]
+      }),
+      file.binary
+        ? jsx('div', { className: cn('px-2 pb-2 text-xs', muted), children: 'A binary file: no lines to show.' })
+        : hunks
+          ? jsxs('div', {
+              className: 'overflow-x-auto border-t border-(--ui-border)',
+              children: [
+                ...hunks.map((hunk, index) => jsx(DiffHunk, { hunk }, index)),
+                file.cut ? jsx('div', { className: cn('px-2 py-1 text-xs', muted), children: 'The rest of this file’s changes aren’t shown.' }) : null
+              ]
+            })
+          : jsx('div', {
+              className: cn('px-2 pb-2 text-xs', muted),
+              children: failed ?? (loading ? 'Loading the diff…'
+                : file.added || file.removed ? 'Its lines weren’t kept on Hermes.' : 'No lines changed.')
+            })
+    ]
+  })
+}
+
+function DiffHunk({ hunk }) {
+  let old = hunk.old_start
+  let now = hunk.new_start
+  const rows = hunk.lines.map(line => {
+    const kind = line[0]
+    const row = { kind, text: line.slice(1), old: kind === '+' ? '' : old, now: kind === '-' ? '' : now }
+    if (kind !== '+') old += 1
+    if (kind !== '-') now += 1
+    return row
+  })
+  const tint = { '+': 'bg-emerald-500/10', '-': 'bg-red-500/10' }
+  return jsxs('div', {
+    className: 'font-mono text-xs',
+    children: [
+      jsx('div', {
+        className: cn('bg-(--ui-surface-active) px-2 py-0.5', muted),
+        children: `@@ -${hunk.old_start} +${hunk.new_start} @@${hunk.context ? ` ${hunk.context}` : ''}`
+      }),
+      jsx('table', {
+        className: 'w-full border-collapse',
+        children: jsx('tbody', {
+          children: rows.map((row, index) =>
+            jsxs(
+              'tr',
+              {
+                className: tint[row.kind] ?? '',
+                children: [
+                  jsx('td', { className: cn('select-none px-1 text-right tabular-nums', muted), children: row.old }),
+                  jsx('td', { className: cn('select-none px-1 text-right tabular-nums', muted), children: row.now }),
+                  jsx('td', { className: cn('select-none px-1', row.kind === ' ' ? muted : ''), children: row.kind }),
+                  jsx('td', { className: 'whitespace-pre pr-2', children: row.text })
+                ]
+              },
+              index
+            )
+          )
+        })
+      })
+    ]
+  })
+}
+
 // --- the plugin ----------------------------------------------------------------
 
 export default {
@@ -760,6 +934,7 @@ export default {
     ctx.setInterval(seen, SEEN_EVERY_MS)
     ctx.onDispose(() => {
       boards.clear()
+      diffs.clear()
       // Turned off: the agent stops writing a line nothing would draw.
       ctx.rest('/boards/desktop/seen', { method: 'POST', body: { gone: true } }).catch(() => {})
     })
