@@ -141,6 +141,12 @@ notes:
     and checked first, and without it every job keeps Hermes' turn (the route's shows_reports is
     false). upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
     report on the user's next turn.
+  plugin update around a running turn: >-
+    The host-run update (feature map: "Conduit plugin update") asks
+    gateway_lifecycle_guards.live_work (over _candidate_homes) what the gateway is running and
+    waits for it before the restart, and reads gateway.status' gateway_state.json for a restart
+    that is draining. Without them it restarts at once and gives up after 180 s, so an update
+    during a turn reports a failure while the gateway refuses new work (notifier #546).
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
@@ -214,6 +220,8 @@ imports:
     optional: ["is_autonomous_silence_response"]
   gateway.session_controls:
     required: ["AuthorityConnection"]
+  gateway.status:
+    optional: ["read_runtime_status", "runtime_status_is_stale"]
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
@@ -237,6 +245,8 @@ imports:
     optional: ["registry", "token_auth"]
   hermes_cli.dashboard_auth.base:
     required: ["DashboardAuthProvider", "TokenPrincipal"]
+  hermes_cli.gateway_lifecycle_guards:
+    optional: ["_candidate_homes", "live_work"]
   hermes_cli.gateway_runtime_start:
     optional: ["start_detached_replacement"]
   hermes_cli.plugins:
@@ -323,6 +333,7 @@ module_paths:
   - gateway/platforms/base
   - gateway/response_filters
   - gateway/session_controls
+  - gateway/status
   - gateway/warning_notifications
   - hermes_cli
   - hermes_cli/_launchers
@@ -334,6 +345,7 @@ module_paths:
   - hermes_cli/config_effective
   - hermes_cli/dashboard_auth
   - hermes_cli/dashboard_auth/base
+  - hermes_cli/gateway_lifecycle_guards
   - hermes_cli/gateway_runtime_start
   - hermes_cli/plugins
   - hermes_cli/profiles

@@ -247,6 +247,14 @@ async def post_self_restart(response: Response) -> Dict[str, Any]:
 
 SELF_UPDATE_FILE = "conduit-self-update.json"
 SELF_UPDATE_GATEWAY_LIMIT_S = 180.0
+# A gateway still letting running work finish after the limit is waited on in
+# steps of the limit, up to this (its own cap, agent.restart_after_turn_timeout,
+# is 30 minutes by default).
+SELF_UPDATE_DRAIN_LIMIT_S = 7200.0
+# How long the update waits for the gateway's running work before it restarts
+# anyway (a wedged turn is left out, as the gateway leaves it out), as long as
+# Hermes' own default cap.
+SELF_UPDATE_GATEWAY_WAIT_S = 1800.0
 SELF_UPDATE_CHATS_RECHECK_S = 2.0
 # A turn marker left behind can't hold the update forever.
 SELF_UPDATE_CHATS_LIMIT_S = 7200.0
@@ -292,7 +300,77 @@ def _write_self_update(path: Path, job: Dict[str, Any]) -> None:
         raise
 
 
-def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[[], int]]:
+# --- The gateway's running work (issue 546) ------------------------------------
+#
+# A restart sent while the gateway runs a turn makes it refuse new work at once
+# and wait for that turn (up to agent.restart_after_turn_timeout, 30 minutes by
+# default) before it stops; --interrupt only skips the CLI's question. Conduit
+# can't reach a gateway that refuses new work, so the update waits for the work
+# first, while the gateway still serves, and a restart that still meets some
+# (a turn started meanwhile) is waited on rather than reported as failed.
+
+
+def _gateway_homes() -> List[Path]:
+    """The homes whose gateway `hermes gateway restart` from here takes down, as Hermes' own
+    guard picks them (a host multiplexer's included), or the root on a Hermes that can't say;
+    none when even the root can't be found (the callers then read "no gateway")."""
+    try:
+        from hermes_cli.gateway_lifecycle_guards import _candidate_homes
+        homes = [Path(home) for home in _candidate_homes()]
+    except Exception:  # noqa: BLE001 — the root's gateway is the one to ask then
+        logger.debug("Conduit plugin: couldn't list the gateway's homes", exc_info=True)
+        homes = []
+    if homes:
+        return homes
+    try:
+        return _hermes_homes()[:1]
+    except Exception:  # noqa: BLE001
+        logger.debug("Conduit plugin: couldn't find the Hermes home", exc_info=True)
+        return []
+
+
+def _gateway_work() -> int:
+    """The work units the gateway's restart would wait on (wedged turns and restart-safe cron
+    runs left out, as the gateway leaves them out); 0 when no gateway answers or this Hermes
+    can't say."""
+    try:
+        from hermes_cli.gateway_lifecycle_guards import live_work
+    except Exception:  # noqa: BLE001 — a broken import reads as one that's missing
+        return 0
+    for home in _gateway_homes():
+        try:
+            work = live_work(home)
+        except Exception:  # noqa: BLE001 — not knowing is no reason to hold the update
+            logger.debug("Conduit plugin: couldn't read the gateway's running work", exc_info=True)
+            return 0
+        if not isinstance(work, dict):
+            continue
+        units = [unit for unit in work.get("active_work") or [] if isinstance(unit, dict)]
+        if units:
+            return sum(1 for unit in units if not unit.get("wedged") and not unit.get("restart_safe"))
+        count = work.get("active_agents")
+        return count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
+    return 0
+
+
+def _gateway_draining() -> bool:
+    """Whether the gateway is letting running work finish before its restart stops it."""
+    try:
+        from gateway.status import read_runtime_status, runtime_status_is_stale
+    except Exception:  # noqa: BLE001 — a broken import reads as one that's missing
+        return False
+    for home in _gateway_homes():
+        try:
+            record = read_runtime_status(home / "gateway_state.json")
+            if record and not runtime_status_is_stale(record):
+                return record.get("gateway_state") == "draining"
+        except Exception:  # noqa: BLE001 — unknown reads as not draining: the old limit applies
+            logger.debug("Conduit plugin: couldn't read the gateway's state", exc_info=True)
+            return False
+    return False
+
+
+def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]:
     """Hermes' own plugin pull and gateway restart, or 501 when this Hermes lacks them."""
     try:
         plugins_cmd = importlib.import_module("hermes_cli.plugins_cmd")
@@ -318,15 +396,25 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[[], i
     def pull() -> Dict[str, Any]:
         return dashboard_update_user_plugin(core.PLUGIN_NAME)
 
-    def restart_gateway() -> int:
+    def restart_gateway(draining: Callable[[], None] = lambda: None) -> int:
         proc, _reused = _spawn_gateway_restart(None, **restart_kwargs)
-        try:
-            return proc.wait(timeout=SELF_UPDATE_GATEWAY_LIMIT_S)
-        except subprocess.TimeoutExpired:
-            # Failed is failed: a restart finishing later mustn't contradict the job.
-            with contextlib.suppress(OSError):
-                proc.kill()
-            raise
+        waited = 0.0
+        while True:
+            try:
+                return proc.wait(timeout=SELF_UPDATE_GATEWAY_LIMIT_S)
+            except subprocess.TimeoutExpired:
+                waited += SELF_UPDATE_GATEWAY_LIMIT_S
+                # Hermes' restart waits out the drain, then forces it: still going, not failed.
+                if waited < SELF_UPDATE_DRAIN_LIMIT_S and _gateway_draining():
+                    draining()
+                    continue
+                # Failed is failed: a restart finishing later mustn't contradict the job.
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                # Reaped, so it doesn't linger as a zombie of this dashboard.
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+                raise
 
     return pull, restart_gateway
 
@@ -334,16 +422,20 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[[], i
 def _self_update_failed(job: Dict[str, Any], detail: str, code: Optional[str] = None) -> None:
     # failed_step says how far it got: Conduit runs the steps itself only
     # when the pull itself failed.
+    # The gateway's stage belonged to the step that ended.
+    for key in ("gateway_stage", "running_chats"):
+        job.pop(key, None)
     job.update(failed_step=job.get("step"), step="failed", detail=detail, finished_at=time.time())
     if code:
         job["code"] = code
 
 
 def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[str, Any]],
-                     restart_gateway: Callable[[], int], schedule: Callable[[float, Callable[[], None]], Any],
+                     restart_gateway: Callable[..., int], schedule: Callable[[float, Callable[[], None]], Any],
                      homes: Callable[[], List[Path]], notify: Callable[[Dict[str, Any]], None],
                      sleep: Callable[[float], None] = time.sleep,
-                     point_profiles: Callable[[], Any] = lambda: _point_profiles()) -> None:
+                     point_profiles: Callable[[], Any] = lambda: _point_profiles(),
+                     gateway_work: Callable[[], int] = lambda: _gateway_work()) -> None:
     global _self_restart_scheduled
     claimed_restart = False
     try:
@@ -361,11 +453,43 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
         # Before the restart, so the profiles it restarts load the new version with it. A profile
         # running its own gateway loads it when that gateway restarts.
         point_profiles()
+        # Until the restart is sent: a dashboard restarted before then (during the wait below)
+        # loads the new plugin, but the gateway still runs the old one.
+        job["gateway_pending"] = True
         _write_self_update(path, job)
+        # The gateway's running work first, while it still serves (issue 546). Past the limit
+        # the restart goes ahead: the gateway then waits for the work itself, up to its own cap.
+        waited = 0.0
+        while waited < SELF_UPDATE_GATEWAY_WAIT_S and (running := gateway_work()):
+            if job.get("gateway_stage") != "waiting" or job.get("running_chats") != running:
+                job.update(gateway_stage="waiting", running_chats=running)
+                _write_self_update(path, job)
+            sleep(SELF_UPDATE_CHATS_RECHECK_S)
+            waited += SELF_UPDATE_CHATS_RECHECK_S
+        # Restarting now, no longer waiting.
+        for key in ("gateway_pending", "gateway_stage", "running_chats"):
+            job.pop(key, None)
         try:
-            exit_code = restart_gateway()
+            _write_self_update(path, job)
+        except BaseException:
+            # The restart wasn't sent: a failure here must not read as taken down with it.
+            job["gateway_pending"] = True
+            raise
+
+        def draining() -> None:
+            if job.get("gateway_stage") != "draining":
+                job.update(gateway_stage="draining")
+                job.pop("running_chats", None)
+                # A status read misses the stage at worst; the restart goes on.
+                with contextlib.suppress(OSError):
+                    _write_self_update(path, job)
+
+        try:
+            exit_code = restart_gateway(draining)
         except subprocess.TimeoutExpired:
             exit_code = None
+        for key in ("gateway_stage", "running_chats"):
+            job.pop(key, None)
         if exit_code != 0:
             _self_update_failed(job, "The plugin is updated, but the gateway didn't restart. "
                                      "Run hermes gateway status on the host.")
@@ -415,7 +539,7 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
 
 def start_self_update(profile: Optional[str], schedule: Callable[[float, Callable[[], None]], Any], *,
                       path: Optional[Path] = None,
-                      steps: Optional[Tuple[Callable[[], Dict[str, Any]], Callable[[], int]]] = None,
+                      steps: Optional[Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]] = None,
                       homes: Optional[Callable[[], List[Path]]] = None,
                       notify: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Starts the update on the host, or returns the one still under way."""
@@ -544,7 +668,7 @@ def _taken_down_by_gateway_restart(job: Dict[str, Any], now: Optional[float] = N
     The new plugin is what this process loaded: that update finished.
     """
     return (job.get("step") == "failed" and job.get("failed_step") == "restarting_gateway"
-            and not job.get("code")
+            and not job.get("code") and not job.get("gateway_pending")
             and (now or time.time()) - _job_time(job.get("finished_at")) <= SELF_UPDATE_TAKEN_DOWN_S)
 
 
@@ -565,8 +689,15 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
         return None
     # Pulled (it has a version) and this process loaded it: done, whatever
     # restarted the dashboard (an update's own re-exec or a /self/restart).
+    if job.get("gateway_pending"):
+        if _self_restart_refusal() is not None:
+            # A plugin host (or another process that mustn't restart Hermes) leaves it to the
+            # dashboard: a gateway restarted from here would come back with this process's env.
+            return None
+        # It went down before it restarted the gateway, which still runs the old plugin.
+        return _resume_gateway_restart(path, job, notify or _notify_self_update)
     if job.get("version") is not None and capabilities.LOADED_VERSION == job["version"]:
-        for key in ("failed_step", "detail", "code"):
+        for key in ("failed_step", "detail", "code", "gateway_stage", "running_chats"):
             job.pop(key, None)
         job.update(step="done", loaded_version=capabilities.LOADED_VERSION, finished_at=time.time())
     else:
@@ -575,6 +706,49 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
     timer = threading.Timer(delay, notify or _notify_self_update, args=(dict(job),))
     timer.daemon = True
     timer.start()
+    return job
+
+
+def _resume_gateway_restart(path: Path, job: Dict[str, Any],
+                            notify: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    """Carries on a job whose dashboard restarted before the gateway did (during the wait for
+    its running work): this process waits and restarts it. It already runs the new plugin, so
+    the job ends there."""
+    global _self_update_thread, _self_update_job
+
+    def give_up() -> Dict[str, Any]:
+        # At import nobody hears a raise: the job says it at once, and the asking profile hears it.
+        logger.warning("Conduit plugin: couldn't carry on the update's gateway restart", exc_info=True)
+        _self_update_failed(job, "The dashboard restarted before the gateway did. Restart the gateway "
+                                 "on this host (hermes gateway restart) to finish the update")
+        with contextlib.suppress(OSError):
+            _write_self_update(path, job)
+        timer = threading.Timer(0, notify, args=(dict(job),))
+        timer.daemon = True
+        timer.start()
+        return job
+
+    try:
+        pull, restart_gateway = _hermes_update_steps()
+    except Exception:  # noqa: BLE001
+        return give_up()
+    # From the pull again (a no-op once pulled), so a failure there reads as the pull's.
+    job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid(), step="downloading")
+
+    def schedule(delay: float, fn: Callable[[], None]) -> None:
+        timer = threading.Timer(delay, fn)
+        timer.daemon = True
+        timer.start()
+
+    with _self_update_lock:
+        try:
+            _write_self_update(path, job)
+            thread = threading.Thread(target=_run_self_update, name="conduit-self-update", daemon=True,
+                                      args=(job, path, pull, restart_gateway, schedule, _hermes_homes, notify))
+            thread.start()
+        except Exception:  # noqa: BLE001 — a resume that can't begin ends the job, not an hour later
+            return give_up()
+        _self_update_job, _self_update_thread = job, thread
     return job
 
 
