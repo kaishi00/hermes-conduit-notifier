@@ -622,3 +622,22 @@ def test_without_hermes_routing_the_resolve_route_refuses(tmp_path, monkeypatch)
     app.include_router(api.router, prefix=BASE)
     client = TestClient(app)
     assert client.get(f"{BASE}/workspace/resolve", params={"path": "a.md", "session_id": "s1"}).status_code == 501
+
+
+def test_a_chat_without_a_folder_skips_the_join(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT, cwd TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('s1', 't', NULL, NULL)")
+    conn.execute("INSERT INTO sessions VALUES ('s2', 't', NULL, '/')")
+    conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('s1', 'tool', '/srv/app/README.md')")
+    conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('s2', 'tool', '/srv/app/README.md')")
+    conn.commit()
+    conn.close()
+    db = index.open_db(home)
+    # Unchecked (an SSH profile): the chat's own path, never /README.md.
+    for sid in ("s1", "s2"):
+        assert index.resolve_name(db, [sid], "README.md") == {"path": "/srv/app/README.md", "via": "chat"}

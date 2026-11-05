@@ -203,6 +203,10 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
     try:
         from hermes_cli.web_server_files import _agent_fs_path
     except Exception:
+        global _workspace_unmapped_logged
+        if not _workspace_unmapped_logged:
+            _workspace_unmapped_logged = True
+            logger.warning("Conduit workspace files: Hermes has no _agent_fs_path; Docker paths aren't mapped")
         _agent_fs_path = None
     boundary = None
     if not remote:

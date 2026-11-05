@@ -672,7 +672,8 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
             if re.match(r"^[A-Za-z]:[\\/]", cwd):
                 cwd = re.sub(r"/+", "/", cwd.replace("\\", "/"))
             cwd = cwd.rstrip("/")
-            if _is_local_path(cwd + "/"):
+            # No folder recorded (or the disk's top) isn't a folder to join.
+            if cwd and cwd != "~" and _is_local_path(cwd + "/"):
                 candidate = f"{cwd}/{suffix}"
                 if found(candidate):
                     return {"path": candidate, "via": "folder"}
