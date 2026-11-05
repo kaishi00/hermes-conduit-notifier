@@ -361,6 +361,30 @@ def test_a_dashboard_restarted_before_the_gateway_says_so_where_it_cant_restart_
         assert job["step"] == "failed" and "hermes gateway restart" in job["detail"]
 
 
+def test_a_resume_that_cant_write_its_start_ends_the_job_at_once(monkeypatch, tmp_path):
+    # Review on #554: the resume's first write failing used to vanish at import, leaving the job
+    # "waiting" for the stale hour. It ends at once with the manual-restart instruction.
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,
+                                "gateway_stage": "waiting", "version": api.capabilities.LOADED_VERSION}))
+    monkeypatch.setattr(api.self_update, "_hermes_update_steps",
+                        lambda: (lambda: pytest.fail("the job ran"), lambda draining: 0))
+    write, writes = api.self_update._write_self_update, []
+
+    def first_write_fails(target, job):
+        writes.append(job["step"])
+        if len(writes) == 1:
+            raise OSError("read-only")
+        write(target, job)
+
+    monkeypatch.setattr(api.self_update, "_write_self_update", first_write_fails)
+    notified = []
+    job = api.self_update.finish_self_update_after_restart(path, notified.append, delay=0)
+    on_disk = json.loads(path.read_text())
+    assert job["step"] == on_disk["step"] == "failed" and "hermes gateway restart" in on_disk["detail"]
+    assert "gateway_stage" not in on_disk
+
+
 def test_a_failure_before_the_gateway_restart_isnt_read_as_taken_down(tmp_path):
     path = tmp_path / api.self_update.SELF_UPDATE_FILE
     path.write_text(json.dumps({"id": "j1", "step": "failed", "failed_step": "restarting_gateway", "boot_id": "old",

@@ -705,9 +705,9 @@ def _resume_gateway_restart(path: Path, job: Dict[str, Any],
     its running work): this process waits and restarts it. It already runs the new plugin, so
     the job ends there."""
     global _self_update_thread, _self_update_job
-    try:
-        pull, restart_gateway = _hermes_update_steps()
-    except Exception:  # noqa: BLE001 — at import nobody hears a raise: the job says it at once
+
+    def give_up() -> Dict[str, Any]:
+        # At import nobody hears a raise: the job says it at once, and the asking profile hears it.
         logger.warning("Conduit plugin: couldn't carry on the update's gateway restart", exc_info=True)
         _self_update_failed(job, "The dashboard restarted before the gateway did. Restart the gateway "
                                  "on this host (hermes gateway restart) to finish the update")
@@ -717,6 +717,11 @@ def _resume_gateway_restart(path: Path, job: Dict[str, Any],
         timer.daemon = True
         timer.start()
         return job
+
+    try:
+        pull, restart_gateway = _hermes_update_steps()
+    except Exception:  # noqa: BLE001
+        return give_up()
     # From the pull again (a no-op once pulled), so a failure there reads as the pull's.
     job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid(), step="downloading")
 
@@ -726,11 +731,14 @@ def _resume_gateway_restart(path: Path, job: Dict[str, Any],
         timer.start()
 
     with _self_update_lock:
-        _write_self_update(path, job)
-        thread = threading.Thread(target=_run_self_update, name="conduit-self-update", daemon=True,
-                                  args=(job, path, pull, restart_gateway, schedule, _hermes_homes, notify))
+        try:
+            _write_self_update(path, job)
+            thread = threading.Thread(target=_run_self_update, name="conduit-self-update", daemon=True,
+                                      args=(job, path, pull, restart_gateway, schedule, _hermes_homes, notify))
+            thread.start()
+        except Exception:  # noqa: BLE001 — a resume that can't begin ends the job, not an hour later
+            return give_up()
         _self_update_job, _self_update_thread = job, thread
-        thread.start()
     return job
 
 
