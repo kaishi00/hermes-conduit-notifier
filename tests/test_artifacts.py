@@ -760,3 +760,18 @@ def test_a_docker_profiles_paths_are_checked_where_the_host_keeps_them(tmp_path,
     assert body["path"] == "/workspace/out.csv"
     gone = client.get(f"{BASE}/workspace/resolve", params={"path": "gone.csv", "session_id": "s1"}).json()
     assert gone["path"] is None
+
+
+def test_an_ssh_profile_never_takes_quoted_prose_for_a_path(tmp_path, monkeypatch):
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", json.dumps({"message": "/srv/app moved to backup/old.md"}), None, "terminal"),
+        ("s1", "tool", '"/srv/My Project/notes.md"', None, "terminal")])
+    # The profile's files are on its SSH machine: nothing here checks them.
+    monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: object())
+
+    def resolve(name):
+        return client.get(f"{BASE}/workspace/resolve", params={"path": name, "session_id": "s1"}).json()["path"]
+
+    assert resolve("old.md") is None
+    # Unchecked, a quoted path with a space is left out too.
+    assert resolve("notes.md") is None

@@ -748,6 +748,9 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
                 if found(candidate):
                     return {"path": candidate, "via": "folder"}
 
+    # Only a host that checks each candidate can tell a quoted path from
+    # quoted prose that ends in one.
+    host_checks = exists is not None and getattr(exists, "checks_host", True)
     message_columns = _columns(conn, "messages")
     tool_calls = "tool_calls" if "tool_calls" in message_columns else "NULL"
     # The name's last part narrows the rows sqlite hands back (after a / or,
@@ -765,7 +768,7 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
             # a result can hold one as an escaped string.
             text = text[:MAX_SCAN_CHARS].replace("\\/", "/").replace("\\\\", "\\")
             # Newest mention in the row first, as rows are.
-            for path in reversed(list(_path_tokens(text, suffix, quoted_whole=exists is not None))):
+            for path in reversed(list(_path_tokens(text, suffix, quoted_whole=host_checks))):
                 if found(path):
                     return {"path": path, "via": "chat"}
         if len(checked) >= MAX_RESOLVE_CANDIDATES:
