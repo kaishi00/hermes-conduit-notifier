@@ -1301,14 +1301,17 @@ class PulseStore:
             gone += len(found)
         return gone
 
-    def remembered_items(self, *, profile: str, limit: int, reminded_since: float) -> list[dict]:
-        """What memory reads a chat beside: the profile's open items, and its
+    def remembered_items(self, *, limit: int, reminded_since: float) -> list[dict]:
+        """What memory reads a chat beside: the open items, and the
         commitments reminded since ``reminded_since``, which a chat can still
-        show done; most recently mentioned first."""
+        show done; most recently mentioned first. Every profile's: memory is
+        the user's, whichever profile's chat said it, and the report reads
+        it whole, so a thing said in two profiles' chats is one item
+        (notifier #550)."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM items WHERE superseded_at IS NULL AND profile=? AND (status='open' "
+            rows = conn.execute("SELECT * FROM items WHERE superseded_at IS NULL AND (status='open' "
                                 "OR (status='reminded' AND closed_at >= ?)) ORDER BY mentioned_at DESC, id DESC LIMIT ?",
-                                (profile, reminded_since, limit)).fetchall()
+                                (reminded_since, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def expire_items(self, *, due_before: float, now: float) -> int:
@@ -1331,8 +1334,7 @@ class PulseStore:
         """The open item standing for ``item_id`` now: itself, or what
         replaced it; None once it's closed."""
         with self._connect() as conn:
-            row = conn.execute("SELECT profile FROM items WHERE id=?", (item_id,)).fetchone()
-            return _current(conn, item_id, row["profile"]) if row else None
+            return _current(conn, item_id)
 
     def item(self, item_id: int) -> Optional[dict]:
         with self._connect() as conn:
@@ -2520,8 +2522,10 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
           closed: Sequence[dict[str, Any]], closer: Callable[[dict[str, Any]], str]) -> list[int]:
     """What ``advance`` and ``keep_inbox`` write, inside their transaction:
     the new items, the ones they repeat or replace, and the ones they close
-    (``closer`` says what closed each); the new items' ids."""
-    live = "status='open' AND superseded_at IS NULL AND profile=?"
+    (``closer`` says what closed each); the new items' ids. A new item is
+    ``profile``'s; the ones it repeats, replaces or closes may be any
+    profile's (remembered_items)."""
+    live = "status='open' AND superseded_at IS NULL"
     now, ids = time.time(), []
     for item in items:
         item = {"every_year": "", "occasion": "", "from_inbox": "", "sender": "", "place_words": "", "place_on": "",
@@ -2529,7 +2533,7 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
         if item.get("same_as"):
             # A repeat of an item replaced since it was shown repeats its successor;
             # one of an item closed since is already on record.
-            target = _current(conn, item["same_as"], profile)
+            target = _current(conn, item["same_as"])
             if target is None or conn.execute(
                     # A date said again, or a later one, moves the item's date. A
                     # yearly one (a fact's) is kept as said this time, and takes the
@@ -2552,7 +2556,7 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
                      item["every_year"], item["due_at"], item["due_at"], item["due_at"],
                      item["every_year"], item["every_year"], item["every_year"], item["occasion"],
                      item["place_words"], item["place_on"], item["place_words"], item["place_words"],
-                     target, profile)).rowcount:
+                     target)).rowcount:
                 continue
         row = {**item, "profile": profile, "chat_id": chat_id, "recorded_at": now, "valid_from": item["mentioned_at"]}
         new_id = conn.execute(
@@ -2563,33 +2567,32 @@ def _keep(conn: sqlite3.Connection, profile: str, chat_id: str, items: Sequence[
             conn.execute("UPDATE items SET status='expired', closed_by=?, closed_at=? WHERE id=?",
                          (LATE_BY, now, new_id))
         # Already replaced (by an earlier chunk): replace its successor.
-        target = _current(conn, item["replaces"], profile) if item.get("replaces") else None
+        target = _current(conn, item["replaces"]) if item.get("replaces") else None
         if target is not None and target != new_id:
             conn.execute(f"UPDATE items SET superseded_at=?, superseded_by=?, valid_to=? WHERE id=? AND {live}",
-                         (now, new_id, item["mentioned_at"], target, profile))
+                         (now, new_id, item["mentioned_at"], target))
     for entry in closed:  # an item replaced since closes through its successor
-        target = _current(conn, entry["id"], profile, reminded=True)
+        target = _current(conn, entry["id"], reminded=True)
         if target is None:
             continue
         said = closer(entry)
         prior = _prior(conn, target)
         if conn.execute("UPDATE items SET status=?, closed_by=?, closed_at=? WHERE id=? "
-                        "AND status IN ('open', 'reminded') AND superseded_at IS NULL AND profile=?",
-                        (entry["status"], said, now, target, profile)).rowcount:
+                        "AND status IN ('open', 'reminded') AND superseded_at IS NULL",
+                        (entry["status"], said, now, target)).rowcount:
             # Undo puts the item back while this close still holds it,
             # from a card about an item it replaced too.
             _mark_cards_done(conn, target, prior={**prior, "closer": said, "item": target}, now=now)
     return ids
 
 
-def _current(conn: sqlite3.Connection, item_id: int, profile: str, *, reminded: bool = False) -> Optional[int]:
+def _current(conn: sqlite3.Connection, item_id: int, *, reminded: bool = False) -> Optional[int]:
     """The item still standing for ``item_id``: itself, or what replaced
-    it; None once it's closed (or isn't this profile's). With ``reminded``,
+    it; None once it's closed. With ``reminded``,
     a commitment whose reminder went out still stands: a chat can close it."""
     standing = ("open", "reminded") if reminded else ("open",)
     for _ in range(MAX_CHAIN):
-        row = conn.execute("SELECT status, superseded_by FROM items WHERE id=? AND profile=?",
-                           (item_id, profile)).fetchone()
+        row = conn.execute("SELECT status, superseded_by FROM items WHERE id=?", (item_id,)).fetchone()
         if row is None or row["status"] not in standing:
             return None
         if row["superseded_by"] is None:

@@ -122,6 +122,12 @@ PLACE_LIMIT = 60
 # Who may say each kind; a fact can come from either.
 SPEAKERS = {"commitment": "user", "intention": "user", "interest": "user", "watch": "user",
             "promise": "assistant"}
+# The kinds an item may repeat or replace: its own, and for a plan the user
+# wants or is only weighing, the other one, so one idea isn't kept as both
+# (notifier #550: "set up a Home Assistant voice assistant" and "considering
+# a Voice Preview Edition" made two items and two cards). Nothing else
+# crosses: a commitment taken as a repeat of a fact would lose its reminder.
+KIN = {"intention": ("intention", "interest"), "interest": ("interest", "intention")}
 # A chunk that fails this many times is skipped, so one bad chunk can't
 # stop a chat from ever being read again.
 MAX_FAILURES = 3
@@ -153,8 +159,10 @@ Each item has:
 - "due_words": the exact words that gave the date ("due" or "every_year"), or null.
 - "place": only for a commitment or a promise said for a place rather than a time ("next time I'm at Costco", "when I get home", "when I leave work"): the place's words as said on its line ("Costco", "home", "work"). Otherwise null. Never guess a place.
 - "place_on": with "place", "leave" when it's for leaving the place, else "arrive". Otherwise null.
-- "same_as": the number of a remembered thing of the same kind this says again, or null. Say it again rather than repeating it as a new item. Never one marked "reminded": Pulse already reminded the user of it, and said again it's a new item.
-- "replaces": the number of a remembered thing of the same kind this changes (a new date, a changed plan, a fact that is no longer true), or null. Never one marked "reminded".
+- "same_as": the number of a remembered thing of the same kind this says again, or null; an intention and an interest about the same plan count as the same kind. Say it again rather than repeating it as a new item. Never one marked "reminded": Pulse already reminded the user of it, and said again it's a new item.
+- "replaces": the number of a remembered thing of the same kind this changes (a new date, a changed plan, a fact that is no longer true, an interest the user has now decided on), or null. Never one marked "reminded".
+
+Note each thing once, as the kind that fits it best: one plan is an intention or an interest, never both. What the user asks Hermes to do is not the user's commitment, unless they ask to be reminded: when Hermes says it will do it, that is Hermes's promise alone.
 
 "closed" lists remembered commitments, promises, intentions, watches and deadlines, including ones marked "reminded", that this conversation shows were done or called off (a deadline: paid, cancelled or otherwise taken care of): {"number": n, "status": "done" or "cancelled", "evidence": the exact words that show it, "line": that line's number}.
 
@@ -548,7 +556,8 @@ def _number(value: Any, allowed: set[int]) -> Optional[int]:
 
 
 def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dict] = (),
-          handoffs: Collection[int] = (), now: Optional[float] = None) -> Optional[dict[str, Any]]:
+          handoffs: Collection[int] = (), now: Optional[float] = None,
+          repeats: Sequence[dict] = ()) -> Optional[dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
     kind = str(raw.get("kind") or "").strip().lower()
@@ -574,14 +583,19 @@ def _item(raw: Any, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dic
     late = kind == "commitment" and due_at is not None and now is not None \
         and now - (due_at if "T" in due else due_at + 86400.0) > LATE_S
     # Said again, a commitment Pulse already reminded of is a new item.
-    standing = [item for item in remembered if item["kind"] == kind and not _reminded(item)]
-    allowed = {item["id"] for item in standing}
+    kin = KIN.get(kind, (kind,))
+    allowed = {item["id"] for item in remembered if item["kind"] in kin and not _reminded(item)}
     replaces = _number(raw.get("replaces"), allowed)  # a change wins over a repeat when both are named
     same_as = None if replaces else _number(raw.get("same_as"), allowed)
     if same_as is None and replaces is None:
         # The model missed a plain repeat: the same words, or the same sentence.
-        same_as = next((item["id"] for item in standing if
-                        _norm(item["evidence"]) == _norm(evidence) or _norm(item["text"]) == _norm(text)), None)
+        # Among everything standing (``repeats``) when given, not just what the
+        # model was shown: the shortlist (candidates) can miss a repeat said in
+        # another chat in other words around it (notifier #550: "midterm
+        # elections dashboard" shared one word with "election dashboard").
+        same_as = next((item["id"] for item in (repeats or remembered) if
+                        item["kind"] == kind and not _reminded(item) and (
+                            _norm(item["evidence"]) == _norm(evidence) or _norm(item["text"]) == _norm(text))), None)
     return {"kind": kind, "text": text, "evidence": evidence, "explicit": int(raw.get("explicit") is True),
             "due": due, "due_at": due_at, "message_id": row["id"], "mentioned_at": row["timestamp"],
             "same_as": same_as, "replaces": replaces, "late": late, "every_year": every_year, "occasion": occasion,
@@ -626,12 +640,16 @@ def _claim(raw: Any, chunk: Sequence[Any]) -> Optional[dict[str, Any]]:
 
 def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dict] = (),
             remembered: Sequence[dict] = (), handoffs: Collection[int] = (),
-            now: Optional[float] = None, claims: Optional[list[dict]] = None) -> tuple[list[dict], list[dict], int]:
+            now: Optional[float] = None, claims: Optional[list[dict]] = None,
+            repeats: Sequence[dict] = ()) -> tuple[list[dict], list[dict], int]:
     """The chunk's items, the remembered items it closes, and the tokens the
     call used; what Hermes said it had just done goes into ``claims`` when
     given (_claim). Rows in ``handoffs`` (handoff_rows) can close an item
     but never add one; a commitment read ``now`` (run passes it for a
-    backfill's reads), over LATE_S after its time, is marked ``late``."""
+    backfill's reads), over LATE_S after its time, is marked ``late``. A
+    plain repeat (the same words or sentence) the model didn't name is
+    looked for in ``repeats`` (everything standing) when given, else in
+    ``remembered`` (_item)."""
     remembered_text = render_remembered(remembered, zone) or "(nothing yet)"
     chat_text = render(chunk, zone, outcomes, handoffs)
     mark = secrets.token_hex(6)
@@ -651,7 +669,7 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
     if not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list):
         raise BadReply("BadReply: not a JSON object with an items list", tokens)
     try:
-        items, closed, found = _parse(parsed, chunk, zone, remembered, handoffs, now)
+        items, closed, found = _parse(parsed, chunk, zone, remembered, handoffs, now, repeats)
     except Exception as error:  # noqa: BLE001 — a reply this code didn't foresee fails its chunk, not the run
         raise BadReply(f"BadReply: {type(error).__name__}", tokens) from error
     if claims is not None:
@@ -660,12 +678,13 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
 
 
 def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo, remembered: Sequence[dict],
-           handoffs: Collection[int] = (), now: Optional[float] = None) -> tuple[list[dict], list[dict], list[dict]]:
+           handoffs: Collection[int] = (), now: Optional[float] = None,
+           repeats: Sequence[dict] = ()) -> tuple[list[dict], list[dict], list[dict]]:
     if len(parsed["items"]) > MAX_ITEMS:
         logger.info("conduit_push: Pulse memory kept the first %d of %d items from a chunk", MAX_ITEMS,
                     len(parsed["items"]))
     items, seen = [], set()
-    for item in (_item(raw, chunk, zone, remembered, handoffs, now) for raw in parsed["items"][:MAX_ITEMS]):
+    for item in (_item(raw, chunk, zone, remembered, handoffs, now, repeats) for raw in parsed["items"][:MAX_ITEMS]):
         if item and (item["kind"], _norm(item["evidence"])) not in seen:  # once per chunk
             seen.add((item["kind"], _norm(item["evidence"])))
             items.append(item)
@@ -736,16 +755,18 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 chat.chat_id, max(chunk[0]["timestamp"] - IDLE_S, read_to), last["timestamp"], MAX_OUTCOMES)
                 if o["at"] > read_to]
             calls += 1
-            remembered = candidates(pulse_store.remembered_items(profile=chat.profile, limit=MAX_OPEN,
-                                                                 reminded_since=now - REMINDED_KEEP_S),
-                                    chunk, chat.chat_id)
+            # Every profile's: what the model weighs is the shortlist, and the
+            # plain-repeat check reads all of it.
+            standing = pulse_store.remembered_items(limit=MAX_OPEN, reminded_since=now - REMINDED_KEEP_S)
+            remembered = candidates(standing, chunk, chat.chat_id)
             found: list[dict] = []
             try:
                 # Only older chats (a backfill) set a commitment learned late
                 # aside: a live read that fell behind keeps it, for the
                 # follow-up checks to weigh.
                 items, closed, tokens = extract(llm, chunk, zone, outcomes, remembered, handed_on,
-                                                now=now if chat.until is not None else None, claims=found)
+                                                now=now if chat.until is not None else None, claims=found,
+                                                repeats=standing)
             except ChunkFailed as error:  # waits for a retry
                 done["tokens"] += error.tokens
                 if not still_leader() or (chat.until is not None and not current()):

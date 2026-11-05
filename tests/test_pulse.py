@@ -2481,10 +2481,10 @@ def test_a_reminded_commitment_is_closable_for_two_weeks_and_said_again_is_new(r
         "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}])
     _reminded(store_, kept, DAY + 86400)
     shown = lambda now: [item["id"] for item in store_.remembered_items(
-        profile="", limit=10, reminded_since=now - memory.REMINDED_KEEP_S)]
+        limit=10, reminded_since=now - memory.REMINDED_KEEP_S)]
     assert shown(DAY + 86400 + memory.REMINDED_KEEP_S) == [kept]
     assert shown(DAY + 86400 + memory.REMINDED_KEEP_S + 1) == []
-    remembered = store_.remembered_items(profile="", limit=10, reminded_since=DAY)
+    remembered = store_.remembered_items(limit=10, reminded_since=DAY)
     chunk = [_row(1, "user", "I'll renew my passport this week", DAY + 3 * 86400)]
     items, _, _ = memory.extract(FakeModel({"items": [
         {"kind": "commitment", "text": "x", "evidence": "I'll renew my passport this week", "line": 1,
@@ -2709,6 +2709,86 @@ def test_other_profiles_are_remembered_with_their_name(remembering, db, tmp_path
     assert (item["profile"], item["chat_id"]) == ("nahida", "b1")
     assert len(model.shown) == 1 and report.their_home_chat(bot_home) == "bp"
     assert memory.describe(item, UTC).startswith("#1 [nahida] The user's mum's birthday is 3 March.\n")
+
+
+def test_a_thing_said_in_two_profiles_chats_is_one_item(remembering, db, tmp_path, request):
+    # Notifier #550: memory compared a chat with its own profile's items only,
+    # so the same thing said in a bot's chat and the main chat was kept twice.
+    bot_home = tmp_path / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, request.node.callspec.params["db"])
+    bot.session("b1", title="Bot Chat", pinned=0)
+    bot.message("user", "We're hosting Christmas dinner this year", sid="b1", at=DAY + 60)
+    bot.message("assistant", "Lovely.", sid="b1", at=DAY + 70)
+    sources = [("", tmp_path, SID), ("nahida", bot_home, "")]
+    fact = {"kind": "fact", "text": "The user is hosting Christmas dinner this year.", "line": 1, "explicit": True}
+    _remember(remembering, FakeModel({"items": [{**fact, "evidence": "We're hosting Christmas dinner this year"}]}),
+              DAY + 70 + memory.IDLE_S, sources)
+    [first] = remembering.store.open_items("fact")
+    assert first["profile"] == "nahida"
+    db.message("user", "Reminder to self: we host Christmas dinner, so plan the menu", sid="work", at=DAY + 4000)
+    db.message("assistant", "Noted.", sid="work", at=DAY + 4010)
+    # The model is shown the bot's item beside the main chat, and names it.
+    model = FakeModel({"items": [{**fact, "evidence": "we host Christmas dinner", "same_as": first["id"]}],
+                       "closed": []})
+    _remember(remembering, model, DAY + 4010 + memory.IDLE_S, sources)
+    assert f"#{first['id']} fact: The user is hosting Christmas dinner" in model.shown[0]
+    [item] = remembering.store.open_items("fact")
+    assert (item["id"], item["profile"], item["mentioned_at"]) == (first["id"], "nahida", DAY + 4000)
+
+
+def test_a_chat_closes_and_replaces_another_profiles_item(remembering):
+    store_ = remembering.store
+    [promise, plan] = store_.advance("nahida", "b1", message_id=1, at=DAY, items=[
+        {"kind": "promise", "text": "Hermes will send the report.", "evidence": "I'll send the report",
+         "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY},
+        {"kind": "interest", "text": "The user is considering a Voice Preview Edition.",
+         "evidence": "thinking about a Voice Preview Edition", "explicit": 1, "due": "", "due_at": None,
+         "message_id": 1, "mentioned_at": DAY}])
+    [new] = store_.advance("", "work", message_id=5, at=DAY + 60, items=[
+        {"kind": "intention", "text": "The user will buy a Voice Preview Edition.", "evidence": "I'll get the Voice PE",
+         "explicit": 1, "due": "", "due_at": None, "message_id": 5, "mentioned_at": DAY + 60, "replaces": plan}],
+        closed=[{"id": promise, "status": "done", "evidence": "Report's in my inbox", "message_id": 5}])
+    assert store_.item(promise)["status"] == "done"
+    assert store_.item(plan)["superseded_by"] == new and store_.item(new)["profile"] == ""
+
+
+def test_a_word_for_word_repeat_the_shortlist_missed_is_still_a_repeat():
+    # Notifier #550: "midterm elections dashboard" shared too few words with
+    # the stored "election dashboard" commitment to be shown to the model.
+    kept = {**_open(14, "commitment", "The user will check the election dashboard at 18:30 on 2026-11-03.",
+                    "I'll check the election dashboard at 6:30", chat="other"), "status": "open"}
+    reminded = {**_open(15, "commitment", "The user will water the plants.", "water the plants",
+                      chat="other"), "status": "reminded", "closed_at": DAY}
+    chunk = [_row(1, "user", "Midterms tonight! I'll look at it at 6:30", DAY + 60)]
+    said = {"items": [{"kind": "commitment", "text": "The user will check the election dashboard at 18:30 on "
+                       "2026-11-03.", "evidence": "I'll look at it at 6:30", "line": 1},
+                      {"kind": "commitment", "text": "The user will water the plants.",
+                       "evidence": "Midterms tonight", "line": 1},
+                      {"kind": "interest", "text": "The user will check the election dashboard at 18:30 on "
+                       "2026-11-03.", "evidence": "Midterms tonight!", "line": 1}]}
+    shortlist = memory.candidates([kept, reminded], chunk, "work")
+    assert shortlist == []
+    items, _, _ = memory.extract(FakeModel(said), chunk, UTC, remembered=shortlist, repeats=[kept, reminded])
+    # Another kind, or a commitment Pulse already reminded of, is not a repeat.
+    assert [item["same_as"] for item in items] == [14, None, None]
+    items, _, _ = memory.extract(FakeModel(said), chunk, UTC, remembered=shortlist)
+    assert [item["same_as"] for item in items] == [None, None, None]
+
+
+def test_an_intention_and_an_interest_about_one_plan_are_one_item():
+    # Notifier #550: one idea kept as both an intention and an interest made two cards.
+    remembered = [_open(3, "intention", "The user wants to set up a Home Assistant voice assistant.",
+                        "I want a voice assistant for Home Assistant"),
+                  _open(4, "fact", "The user's sister is Ana.", "my sister is Ana")]
+    chunk = [_row(1, "user", "I'm considering a Voice Preview Edition, and I'll call Ana", DAY + 60)]
+    items, _, _ = memory.extract(FakeModel({"items": [
+        {"kind": "interest", "text": "x", "evidence": "considering a Voice Preview Edition", "line": 1, "same_as": 3},
+        {"kind": "commitment", "text": "x", "evidence": "I'll call Ana", "line": 1, "same_as": 4}]}),
+        chunk, UTC, remembered=remembered)
+    # A commitment taken as a fact's repeat would lose its reminder: only the plan's two kinds cross.
+    assert [(item["kind"], item["same_as"]) for item in items] == [("interest", 3), ("commitment", None)]
+    assert "one plan is an intention or an interest, never both" in memory.INSTRUCTIONS
 
 
 def test_model_calls_run_in_this_profiles_secret_scope(remembering, monkeypatch):
