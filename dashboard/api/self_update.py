@@ -448,6 +448,9 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
         # Before the restart, so the profiles it restarts load the new version with it. A profile
         # running its own gateway loads it when that gateway restarts.
         point_profiles()
+        # Until the restart is sent: a dashboard restarted before then (during the wait below)
+        # loads the new plugin, but the gateway still runs the old one.
+        job["gateway_pending"] = True
         _write_self_update(path, job)
         # The gateway's running work first, while it still serves (issue 546). Past the limit
         # the restart goes ahead: the gateway then waits for the work itself, up to its own cap.
@@ -458,10 +461,10 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
                 _write_self_update(path, job)
             sleep(SELF_UPDATE_CHATS_RECHECK_S)
             waited += SELF_UPDATE_CHATS_RECHECK_S
-        if job.pop("gateway_stage", None) is not None:
-            # Restarting now, no longer waiting.
-            job.pop("running_chats", None)
-            _write_self_update(path, job)
+        # Restarting now, no longer waiting.
+        for key in ("gateway_pending", "gateway_stage", "running_chats"):
+            job.pop(key, None)
+        _write_self_update(path, job)
 
         def draining() -> None:
             if job.get("gateway_stage") != "draining":
@@ -655,7 +658,7 @@ def _taken_down_by_gateway_restart(job: Dict[str, Any], now: Optional[float] = N
     The new plugin is what this process loaded: that update finished.
     """
     return (job.get("step") == "failed" and job.get("failed_step") == "restarting_gateway"
-            and not job.get("code")
+            and not job.get("code") and not job.get("gateway_pending")
             and (now or time.time()) - _job_time(job.get("finished_at")) <= SELF_UPDATE_TAKEN_DOWN_S)
 
 
@@ -676,6 +679,9 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
         return None
     # Pulled (it has a version) and this process loaded it: done, whatever
     # restarted the dashboard (an update's own re-exec or a /self/restart).
+    if job.get("gateway_pending"):
+        # It went down before it restarted the gateway, which still runs the old plugin.
+        return _resume_gateway_restart(path, job, notify or _notify_self_update)
     if job.get("version") is not None and capabilities.LOADED_VERSION == job["version"]:
         for key in ("failed_step", "detail", "code", "gateway_stage", "running_chats"):
             job.pop(key, None)
@@ -686,6 +692,39 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
     timer = threading.Timer(delay, notify or _notify_self_update, args=(dict(job),))
     timer.daemon = True
     timer.start()
+    return job
+
+
+def _resume_gateway_restart(path: Path, job: Dict[str, Any],
+                            notify: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    """Carries on a job whose dashboard restarted before the gateway did (during the wait for
+    its running work): this process waits and restarts it. It already runs the new plugin, so
+    the job ends there."""
+    global _self_update_thread, _self_update_job
+    try:
+        pull, restart_gateway = _hermes_update_steps()
+    except core.TokenError:
+        _self_update_failed(job, "The dashboard restarted before the gateway did. Restart the gateway "
+                                 "on this host (hermes gateway restart) to finish the update")
+        with contextlib.suppress(OSError):
+            _write_self_update(path, job)
+        timer = threading.Timer(0, notify, args=(dict(job),))
+        timer.daemon = True
+        timer.start()
+        return job
+    job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid())
+
+    def schedule(delay: float, fn: Callable[[], None]) -> None:
+        timer = threading.Timer(delay, fn)
+        timer.daemon = True
+        timer.start()
+
+    with _self_update_lock:
+        _write_self_update(path, job)
+        thread = threading.Thread(target=_run_self_update, name="conduit-self-update", daemon=True,
+                                  args=(job, path, pull, restart_gateway, schedule, _hermes_homes, notify))
+        _self_update_job, _self_update_thread = job, thread
+        thread.start()
     return job
 
 

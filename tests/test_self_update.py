@@ -301,6 +301,47 @@ def test_another_restart_after_the_pull_still_finishes_the_job(tmp_path):
     assert job["step"] == "done"
 
 
+def test_a_dashboard_restarted_before_the_gateway_restarts_it(monkeypatch, tmp_path):
+    # Review on #554: during the wait for the gateway's work, a dashboard restart loads the new
+    # plugin while the gateway still runs the old one. The new dashboard restarts the gateway.
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,
+                                "gateway_stage": "waiting", "running_chats": 1, "version": api.capabilities.LOADED_VERSION}))
+    restarts, notified = [], []
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: api.capabilities.LOADED_VERSION)
+    monkeypatch.setattr(api.self_update, "_hermes_update_steps",
+                        lambda: (lambda: {"ok": True}, lambda draining: restarts.append(1) or 0))
+    monkeypatch.setattr(api.self_update, "_gateway_work", lambda: 0)
+    monkeypatch.setattr(api.self_update, "_point_profiles", lambda: [])
+    api.self_update.finish_self_update_after_restart(path, notified.append, delay=0)
+    api.self_update._self_update_thread.join(5)
+    job = json.loads(path.read_text())
+    assert restarts == [1] and job["step"] == "done" and job["boot_id"] == api.capabilities.BOOT_ID
+    assert "gateway_pending" not in job and "gateway_stage" not in job
+    assert [n["step"] for n in notified] == ["done"]
+
+
+def test_a_dashboard_restarted_before_the_gateway_says_so_where_it_cant_restart_it(monkeypatch, tmp_path):
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,
+                                "version": api.capabilities.LOADED_VERSION}))
+
+    def unsupported():
+        raise api.core.TokenError(501, "no")
+
+    monkeypatch.setattr(api.self_update, "_hermes_update_steps", unsupported)
+    job = api.self_update.finish_self_update_after_restart(path, lambda job: None, delay=0)
+    assert job["step"] == "failed" and "hermes gateway restart" in job["detail"]
+
+
+def test_a_failure_before_the_gateway_restart_isnt_read_as_taken_down(tmp_path):
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    path.write_text(json.dumps({"id": "j1", "step": "failed", "failed_step": "restarting_gateway", "boot_id": "old",
+                                "gateway_pending": True, "version": api.capabilities.LOADED_VERSION,
+                                "finished_at": api.self_update.time.time() - 5}))
+    assert api.self_update.finish_self_update_after_restart(path, lambda job: None, delay=0) is None
+
+
 def test_a_gateway_restart_that_took_the_dashboard_down_finishes_the_job(tmp_path):
     # A service manager restarted the dashboard with the gateway: the restart
     # command died with it and the job read as failed (Eric, 2026-10-24).

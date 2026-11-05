@@ -4499,7 +4499,8 @@ while it runs:
   `gateway_stage: waiting` and `running_chats`, for up to 30 minutes, then
   restarts anyway. A restart that still meets work (a turn started
   meanwhile) shows `gateway_stage: draining` and is waited on until Hermes
-  finishes it, rather than failing after three minutes.
+  finishes it, rather than failing after three minutes. A dashboard
+  restarted during the wait restarts the gateway itself and ends the job.
 - The job is kept in `conduit-self-update.json` in the Hermes root. The
   restarted dashboard marks it done and sends the profile that asked a
   notification saying which version is running, or why the update didn't
