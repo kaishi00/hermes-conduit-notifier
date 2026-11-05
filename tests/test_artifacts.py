@@ -794,3 +794,8 @@ def test_an_ssh_profile_never_opens_a_piece_of_a_quoted_bracket_path(tmp_path, m
     monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: object())
     body = client.get(f"{BASE}/workspace/resolve", params={"path": "AppState.swift", "session_id": "s1"}).json()
     assert body["path"] is None, "never /AppState.swift"
+
+
+def test_a_quoted_run_with_a_path_in_brackets_still_names_it(tmp_path):
+    conn = _db(tmp_path / "home", [("s1", "tool", '"/a/b.md (/c/d.md)"', None, "terminal")])
+    assert index.resolve_name(conn, ["s1"], "d.md", exists=lambda p: True)["path"] == "/c/d.md"

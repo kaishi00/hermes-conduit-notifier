@@ -674,16 +674,16 @@ def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterab
             # It opens with the whole path ("/srv/old.md renamed to
             # backup/old.md"): what follows is prose, read as such.
             continue
-        # One path: a piece of it (/AppState.swift after `Reports (2026)`)
-        # isn't a file the chat named.
-        whole_runs.append(match.span(2))
-        if not quoted_whole:
-            continue
         # A nested JSON string's quote comes escaped: \" ends the path.
         strip = " \t\\" + _SENTENCE_END
         path = (_path_candidate(run, suffix, strip=" \t\\")
                 or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
-        if path:
+        if not path:
+            continue  # not a path ending in the name: its pieces may be ("/a/b.md (/c/d.md)")
+        # One path: a piece of it (/AppState.swift after `Reports (2026)`)
+        # isn't a file the chat named.
+        whole_runs.append(match.span(2))
+        if quoted_whole:
             found.append((match.start(2), path))
     for match in _ABS_PATH_RE.finditer(text):
         if any(lo <= match.start() < hi for lo, hi in whole_runs):
