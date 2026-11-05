@@ -130,9 +130,17 @@ def test_a_refused_workstream_waits_and_hears_when_the_screen_is_free(on, hermes
     work.turn_finished(WORKER, failed=False, interrupted=False)
     hermes.calls.clear()
     work.screen_turn_ended(BOT_CHAT)
-    sent = [params for name, params, _ in hermes.calls if name == "prompt.submit"
-            and params.get("text") == work.SCREEN_FREE]
-    assert len(sent) == 1
+
+    def sent():
+        return [params for name, params, _ in list(hermes.calls) if name == "prompt.submit"
+                and params.get("text") == work.SCREEN_FREE]
+
+    # The watch may take the freed screen first and send from its thread.
+    deadline = time.time() + 5
+    while not sent() and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.05)
+    assert len(sent()) == 1
     assert lock.snapshot(on.home)["waiting"] == []
 
 
@@ -360,3 +368,19 @@ def test_a_waiter_put_back_keeps_its_place(home):
     taken = lock.take_next_waiting(home, lambda item: True, now=now + 2)
     lock.wait(home, taken["session_id"], {"ref": "W1"}, now=now + 3, since=taken["at"])
     assert lock.take_next_waiting(home, lambda item: True, now=now + 4)["session_id"] == "first"
+
+
+def test_a_waiter_the_registry_couldnt_read_stays_waiting(home, monkeypatch):
+    monkeypatch.setattr(work, "_lookup", lambda session_id, home=None: (home, None, True))
+    assert work._still_waits({"session_id": "any", "home": str(home)})
+
+
+def test_a_host_desktop_has_no_bot_screen_to_ask_for(monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(work.sys, "platform", "linux")
+    monkeypatch.setattr(lock, "scope", lambda: lock.HOST)
+    assert not work.screen_possible()
+    monkeypatch.setattr(lock, "scope", lambda: lock.BOT)
+    assert work.screen_possible()
+    monkeypatch.setattr(work.sys, "platform", "darwin")
+    assert not work.screen_possible()

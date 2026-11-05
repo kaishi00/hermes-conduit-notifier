@@ -797,8 +797,12 @@ def _screen_ask(progress: Optional[dict], began: Optional[float]) -> str:
 
 
 def screen_possible() -> bool:
-    """Whether this host can give a bot a Bot Screen (Hermes: Linux only)."""
-    return sys.platform.startswith("linux")
+    """Whether this bot has a Bot Screen to send the user to: Hermes runs one
+    on Linux only, and a Linux host whose real desktop ``computer_use`` acts
+    on has none (Conduit shows no screen there)."""
+    if not sys.platform.startswith("linux"):
+        return False
+    return screen_lock.scope() == screen_lock.BOT
 
 
 def _no_such(ref: Any) -> dict:
@@ -3876,7 +3880,9 @@ def screen_turn_ended(session_id: Any) -> None:
 
 def _still_waits(item: dict) -> bool:
     home = Path(str(item.get("home") or ""))
-    _, work, _ = _lookup(str(item.get("session_id") or ""), home)
+    _, work, unreadable = _lookup(str(item.get("session_id") or ""), home)
+    if unreadable:
+        return True  # Not known just now: it keeps its place, and the next look tries again.
     # Running work hears when its turn ends; closed or stopped work doesn't wait.
     return (work is not None and work.kind == "workstream" and not work.closed_at
             and work.status in ("done", "ready", "running", "starting"))
