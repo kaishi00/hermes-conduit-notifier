@@ -589,7 +589,7 @@ MAX_RESOLVE_NAME_CHARS = 512
 # Paths a row offers, and how many a request checks on disk at most.
 MAX_RESOLVE_CANDIDATES = 400
 _ABS_PATH_RE = re.compile(r"""(?:~/|/)[^\s'"`<>()\[\]{},;|\\]+"""
-                          r"""|[A-Za-z]:[\\/][^\s'"`<>()\[\]{},;|]+""")
+                          r"""|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/][^\s'"`<>()\[\]{},;|]+""")
 
 
 def _clean_name(name: str) -> str:
