@@ -106,7 +106,7 @@ AFTER_DONE_TITLE = ("## Later in the chat each was done in (its newest lines aft
                     "for one done another way, after the line it came from; memory reads these chats, so they're "
                     "mostly not under the chats below)")
 AFTER_DONE_ROWS = 4
-AFTER_DONE_SCAN = 40  # read to find them past copies compression carried over
+AFTER_DONE_SCAN = 40  # rows with text read, to find them past copies compression carried over
 AFTER_DONE_PER_ITEM = 700
 AFTER_DONE_BUDGET = 1_800
 ENDED_BUDGET = 2_000
@@ -571,17 +571,29 @@ def after_done_section(home: Path, items: Sequence[dict], zone: tzinfo,
         closed = _CHAT_CLOSED_AT.match(item["closed_by"] if isinstance(item["closed_by"], str) else "")
         chat_id, after_id = (closed.group(1), int(closed.group(2))) if closed else (item["chat_id"],
                                                                                     item["message_id"])
-        where = homes.get(item["profile"])
-        if not chat_id or where is None:
+        if not chat_id:
             continue  # from the Shortcuts inbox: no chat
-        try:
-            said_at = hermes.row_time(where, chat_id=chat_id, row_id=after_id)  # compaction leaves it inactive
-            rows = hermes.chain_messages(where, chat_id=chat_id, after_id=after_id,
-                                         max_chars=PER_MESSAGE, limit=AFTER_DONE_SCAN)
-        except hermes.HermesUnreadable:
+        # Memory can close an item from another profile's chat: the closing
+        # chat is in whichever home the report reads holds that row.
+        wheres = [homes[item["profile"]]] if item["profile"] in homes else []
+        if closed:
+            wheres += [path for path in homes.values() if path not in wheres]
+        found = None
+        for where in wheres:
+            try:
+                said_at = hermes.row_time(where, chat_id=chat_id, row_id=after_id)  # compaction leaves it inactive
+                if said_at is not None:
+                    found = where, said_at, hermes.chain_messages(where, chat_id=chat_id, after_id=after_id,
+                                                                  max_chars=PER_MESSAGE, limit=AFTER_DONE_SCAN,
+                                                                  said=True)
+                    break
+            except hermes.HermesUnreadable:
+                continue
+        if found is None:
             continue
-        rows = [row for row in rows if (said_at is None or row["timestamp"] > said_at)
-                and _clip(row["content"], PER_MESSAGE)][-AFTER_DONE_ROWS:]  # a tool-only reply says nothing
+        where, said_at, rows = found
+        rows = [row for row in rows if row["timestamp"] > said_at
+                and _clip(row["content"], PER_MESSAGE)][-AFTER_DONE_ROWS:]
         lines, size = [], 0
         for row in reversed(rows):  # the newest that fit
             text = _clip(row["content"], PER_MESSAGE)

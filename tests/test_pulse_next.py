@@ -275,14 +275,18 @@ def test_the_lines_after_a_done_item_skip_what_compression_copied_and_profiles_t
     live.db.message("user", "I'll clear out the old folders", sid="tip", at=now - 11 * 3600)
     live.db.message("user", "the old folders are all empty now", sid="tip", at=now - 10 * 3600)
     live.db.message("assistant", "Backfill complete.", sid="tip", at=now - 8 * 3600)
-    for n in range(report.AFTER_DONE_ROWS + 1):  # tool-only replies after it say nothing
+    for n in range(report.AFTER_DONE_SCAN + 1):  # tool-only replies after it say nothing
         live.db.message("assistant", "" if n % 2 else "  ", sid="tip", at=now - 7 * 3600 + n)
     assert report.after_done_section(live.home, [item], UTC) == (
         f"{report.AFTER_DONE_TITLE}\n#{folders}:\n[{report._local(now - 8 * 3600, UTC)}] Hermes: Backfill complete.")
-    # Another profile's item only when the report reads that profile.
+    # Only from the homes the report reads. Memory keeps one item across profiles, so one of nahida's
+    # can be closed from a chat here: it's found where that chat is, when the report reads that home.
     theirs = {**item, "profile": "nahida"}
-    assert report.after_done_section(live.home, [theirs], UTC) == ""
-    assert "Backfill complete." in report.after_done_section(live.home, [theirs], UTC, [("nahida", live.home)])
+    other = live.home / "profiles" / "nahida"
+    other.mkdir(parents=True)
+    assert "Backfill complete." in report.after_done_section(live.home, [theirs], UTC)
+    assert report.after_done_section(other, [theirs], UTC) == ""
+    assert "Backfill complete." in report.after_done_section(other, [theirs], UTC, [("default", live.home)])
 
 
 # What ended -----------------------------------------------------------------------------------

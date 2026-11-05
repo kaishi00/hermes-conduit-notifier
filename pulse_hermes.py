@@ -387,16 +387,22 @@ def worker_tasks(home: Path, ids: Iterable[str]) -> dict[str, str]:
     return found
 
 
-def chain_messages(home: Path, *, chat_id: str, after_id: int, max_chars: int, limit: int) -> list[sqlite3.Row]:
+# A row with text: not a reply that only called tools.
+SAID = "AND trim(coalesce(content, '')) != '' "
+
+
+def chain_messages(home: Path, *, chat_id: str, after_id: int, max_chars: int, limit: int,
+                   said: bool = False) -> list[sqlite3.Row]:
     """``chat_messages`` with ``newest``, through the chat and the sessions
     it continued into (compression, branches): the last ``limit`` visible
-    user and assistant rows after row ``after_id``, oldest first."""
+    user and assistant rows after row ``after_id``, oldest first. With
+    ``said``, only rows with text (not a reply that only called tools)."""
     rows = _run(home, (
         "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
         "ON s.parent_session_id = c.id) "
         "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
         "WHERE session_id IN (SELECT id FROM chain) AND id > ? AND role IN ('user', 'assistant') "
-        "AND active = 1 AND display_kind IS NULL ORDER BY id DESC LIMIT ?"
+        "AND active = 1 AND display_kind IS NULL " + (SAID if said else "") + "ORDER BY id DESC LIMIT ?"
     ), (chat_id, max_chars, after_id, limit))
     return rows[::-1]
 
