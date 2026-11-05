@@ -57,6 +57,31 @@ def test_an_approval_follower_ends_once_alert_calls_are_off(tmp_path):
     assert len(calls.waiting_list()) == 1, "it is still listed"
 
 
+def test_a_full_list_drops_a_listed_wait_before_one_a_call_may_answer(tmp_path):
+    from calls_store import MAX_WAITING
+    calls = CallStore(tmp_path)
+    calls.update_settings({"enabled": True, "alerts": True})
+    calls.note_waiting("followed", "approval", description="Run it?", command="make")
+    calls.update_settings({"alerts": False})
+    for index in range(MAX_WAITING):
+        calls.note_waiting(f"s{index}", "approval", description="Run it?", command="make")
+    listed = calls.waiting_list()
+    assert len(listed) == MAX_WAITING
+    assert listed[-1]["session_ids"] == ["followed"], "the followed wait stays"
+    assert calls.waiting_for("followed") is not None
+
+
+def test_a_call_reads_a_followed_wait_for_two_hours_the_list_longer(tmp_path):
+    clock = {"now": 1000.0}
+    calls = CallStore(tmp_path, clock=lambda: clock["now"])
+    calls.update_settings({"enabled": True, "alerts": True})
+    calls.note_waiting("s1", "approval", description="Run it?", command="make")
+    clock["now"] += 2 * 3600
+    assert calls.waiting_for("s1") is None and not calls.has_waiting("s1", "approval")
+    assert calls.answer_waiting("s1", choice="once")["status"] == "not_waiting"
+    assert len(calls.waiting_list()) == 1, "still listed while Hermes may wait"
+
+
 def test_the_needs_you_list_keeps_every_wait_even_with_alert_calls_off(tmp_path):
     clock = {"now": 1000.0}
     calls = CallStore(tmp_path, clock=lambda: clock["now"])

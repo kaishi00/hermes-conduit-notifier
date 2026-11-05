@@ -2115,7 +2115,8 @@ and the dashboard routes under one file lock, so they survive restarts:
   `too_late` when no pending request was the one read out (answered on
   its card, or timed out), `failed` when nothing picked it up in time (it's
   taken back, so it can't land later), `unconfirmed` while still being
-  passed on. Gone once answered anywhere, and after 2 hours.
+  passed on. Gone once answered anywhere; a call reads one for 2 hours, and
+  the Needs you list for as long as Hermes still waits (up to a day).
 - A watch names up to 4 session ids (the job's runtime and stored ids) and a
   title of up to 120 characters. It fires once, on the first turn end of any
   of them: `done` (the turn finished), `failed`, or `stopped` (interrupted).

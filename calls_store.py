@@ -153,6 +153,9 @@ MAX_TOLD = 64
 # still waiting stays listed; the list itself drops one Hermes gave up on
 # sooner (``waiting_list``'s ``max_age``).
 WAITING_TTL_S = 24 * 3600
+# A call reads and answers a followed wait for as long as it always could, so
+# an approval's follower still ends once its wait is that old.
+FOLLOWED_TTL_S = 2 * 3600
 # Every chat waiting at once, in one profile.
 MAX_WAITING = 32
 # The list's line for a wait: an approval's description, a question's text.
@@ -526,7 +529,7 @@ class CallStore:
             entry["followed"] = bool(state["settings"]["enabled"] and state["settings"]["alerts"])
             kept = [item for item in state["waiting"]
                     if not (item["kind"] == kind and set(item["session_ids"]) & set(ids))]
-            state["waiting"] = [*kept, entry][-MAX_WAITING:]
+            state["waiting"] = _capped_waiting([*kept, entry])
             return entry["followed"]
 
     def forget_waiting(self, session_id: Any, kind: str | None = None) -> int:
@@ -554,7 +557,8 @@ class CallStore:
         if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
             return None
         session_id = session_id.strip()
-        found = [item for item in self._load()["waiting"] if item["followed"] and session_id in item["session_ids"]]
+        now = self.clock()
+        found = [item for item in self._load()["waiting"] if _calls_wait(item, now) and session_id in item["session_ids"]]
         return _public_waiting(max(found, key=lambda item: item["at"])) if found else None
 
     def waiting_list(self, *, max_age: dict[str, float] | None = None,
@@ -597,7 +601,8 @@ class CallStore:
             raise ValueError("session_id must be a session id")
         session_id = session_id.strip()
         with self._locked() as state:
-            found = [item for item in state["waiting"] if item["followed"] and session_id in item["session_ids"]]
+            now = self.clock()
+            found = [item for item in state["waiting"] if _calls_wait(item, now) and session_id in item["session_ids"]]
             if not found:
                 return {"status": "not_waiting", "message": "Hermes isn't waiting on the user in that chat any more."}
             item = max(found, key=lambda entry: entry["at"])
@@ -782,7 +787,8 @@ class CallStore:
             return False
         # Followed waits only: an approval's follower, started with alert
         # calls on, ends once they're off even as unfollowed ones arrive.
-        return any(item["followed"] and item["kind"] == kind and session_id.strip() in item["session_ids"]
+        now = self.clock()
+        return any(_calls_wait(item, now) and item["kind"] == kind and session_id.strip() in item["session_ids"]
                    for item in self._load()["waiting"])
 
     # --- Presence -----------------------------------------------------------
@@ -1160,8 +1166,25 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
             delivered.append({"id": entry["id"], "state": entry["state"], "at": float(entry["at"])})
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
             "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until,
-            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": waiting[-MAX_WAITING:],
+            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": _capped_waiting(waiting),
             "delivered": delivered[-MAX_DELIVERED:]}
+
+
+def _calls_wait(item: dict[str, Any], now: float) -> bool:
+    """Whether a call may read or answer this wait: kept with alert calls on,
+    and no older than a call could ever answer one."""
+    return bool(item["followed"]) and now - item["at"] < FOLLOWED_TTL_S
+
+
+def _capped_waiting(waiting: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """At most MAX_WAITING, oldest out first, but a wait only listed goes
+    before one a call may be answering."""
+    over = len(waiting) - MAX_WAITING
+    if over <= 0:
+        return waiting
+    listed_only = [id(item) for item in waiting if not item["followed"]][:over]
+    kept = [item for item in waiting if id(item) not in set(listed_only)]
+    return kept[-MAX_WAITING:]
 
 
 def _waiting_text(value: Any, limit: int) -> str:
