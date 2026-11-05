@@ -1517,6 +1517,20 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   that's running; anywhere but a workstream it answers that it's only for one.
   A workstream doesn't save to the bot's `memory`: what's worth keeping goes
   in its report, and the coordinator decides what to remember.
+- The bot's screen (Hermes' Bot Screen, on a Linux host): one of the bot's
+  chats drives it with `computer_use` at a time, whichever it is (the Bot
+  Chat, a workstream, any other chat; a delegated child counts as the chat
+  that delegated it). The first to use it keeps it until its turn ends, or
+  until it hasn't touched it for 10 minutes; any other chat's `computer_use`
+  is refused, naming who has the screen. The browser tools aren't held. A
+  workstream refused the screen gets a message in its chat once it's free,
+  the one that waited longest first. On a host with a real desktop and no Bot
+  Screen, every bot drives that one desktop, so the hold covers them all.
+  The Work panel shows which workstream drives the screen now, apart from
+  which one used it last. A workstream that needs you on the screen (a
+  sign-in, 2FA, a CAPTCHA, a payment) says so with `work_progress`'s
+  `screen` and ends its turn: its card in Conduit shows what to do, with the
+  screen one tap away.
 - A workstream's turn sends no push of its own: the Bot Chat's reply about it
   is the one push. Its approvals and questions still come from the workstream.
 - Up to 2 run at once per bot (`--max-running`). The registry is

@@ -20,7 +20,7 @@ from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, c
                review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
-               room_wakeups, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
+               room_wakeups, screen_lock, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .present_store import PresentStore
@@ -261,7 +261,8 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     child = _is_child(kwargs.get("session_id"))
     fork = forks.inside()
     if child and not fork:
-        return None
+        # A delegated child drives the bot's screen as its parent does.
+        return _screen_block(kwargs)
     # A Pulse turn may only look things up (pulse_tools). Fails closed:
     # Hermes blocks the call when this hook raises, so the check is outside
     # _quietly. A fork of the chat is held by it like any turn of the chat.
@@ -272,6 +273,11 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     # A coordinator Bot Chat, and a fork of it, runs only what its bot's
     # policy allows (work_tool). Fails closed once the bot has a registry.
     block = _work_tool_block(kwargs)
+    if block is not None:
+        return block
+    # One of the bot's chats drives its screen at a time (screen_lock), taken
+    # only by a call its other rules let run. Fails open.
+    block = _screen_block(kwargs)
     if block is not None:
         return block
     if child:
@@ -336,6 +342,10 @@ def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 
 
 _ledger_warned = False
+
+
+def _screen_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
+    return work_tool.screen_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"))
 
 
 def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
@@ -757,6 +767,8 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     if _is_child(session_id):
         return
+    # Its turn is over: the screen is free for the bot's other chats.
+    _quietly(work_tool.screen_turn_ended, session_id)
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
     # A workstream's turn is settled with its reply, or as failed, and its
@@ -961,6 +973,8 @@ def _quietly(function: Any, *args: Any) -> None:
 
 def _subagent_start(**kwargs: Any) -> None:
     child = _text(kwargs.get("child_session_id"))
+    # A child's computer_use is its parent's turn on the screen.
+    _quietly(screen_lock.child_started, child, _text(kwargs.get("parent_session_id")))
     if child:
         with _children_lock:
             _child_sessions.add(child)
@@ -968,6 +982,7 @@ def _subagent_start(**kwargs: Any) -> None:
 
 def _subagent_stop(**kwargs: Any) -> None:
     child = _text(kwargs.get("child_session_id"))
+    _quietly(screen_lock.child_stopped, child)
     if child:
         # Hermes reports the id the child ends under, which a compaction may
         # have moved from the one subagent_start reported.

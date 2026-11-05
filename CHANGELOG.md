@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.133.0 (2026-11-05)
+
+### New and improved
+- One of a bot's chats drives its screen at a time: while a workstream, the
+  Bot Chat or another chat is clicking on it, the others wait their turn
+  instead of fighting over the mouse, and a workstream that waited hears
+  when the screen is free. Conduit shows who has the screen now.
+- A workstream that needs you on the bot's screen (a sign-in, a 2FA code, a
+  CAPTCHA) says so on its card in Conduit, with the screen one tap away.
+
 ## 0.132.0 (2026-11-05)
 
 ### New and improved

@@ -128,6 +128,10 @@ notes:
     worktree: tools.subagent_worktree's resolve_repo_root, local_backend_active,
     create_subagent_worktree and finalize_subagent_worktree (prune=False to look, prune=True only
     for an empty one). Without them work_start refuses worktree=true and starts nothing.
+  bot screen hold: >-
+    screen_lock.py reads tools.bot_desktop.placement.resolve() and runtime.published_env() to tell a
+    bot's own Bot Screen from the host's real desktop (feature map: "Bot Screen"). Both optional: without
+    them the hold falls back to the host's DISPLAY, so a rename only widens or narrows who shares a hold.
   cron reports in a Bot Chat: >-
     A cron job delivered to a Bot Chat just shows its report there unless it lets the bot act
     (cron_bot_chat; feature map "Cron jobs delivered to a bot", branch bot-workstreams). The plugin
@@ -289,6 +293,8 @@ imports:
     optional: ["_get_approval_timeout"]
   tools.approval_context:
     optional: ["_get_approval_timeout"]
+  tools.bot_desktop:
+    optional: ["placement", "runtime"]
   tools.bot_live_delivery:
     required: ["_bot_chat_tip"]
   tools.clarify_gateway:
@@ -365,6 +371,7 @@ module_paths:
   - tools
   - tools/approval
   - tools/approval_context
+  - tools/bot_desktop
   - tools/bot_live_delivery
   - tools/clarify_gateway
   - tools/clarify_tool
