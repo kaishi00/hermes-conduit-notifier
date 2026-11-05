@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 import os
 import re
@@ -48,6 +49,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from . import sealing
+
+logger = logging.getLogger(__name__)
 
 try:
     import fcntl
@@ -807,12 +810,25 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         value for value in batch["detailed"] if isinstance(value, str) and value in CATEGORIES]
 
     # Validate everything before writing anything, so a bad item can't leave
-    # half a batch behind.
+    # half a batch behind. A reading the store can't keep (years of Apple
+    # Health hold a few that end before they start, or run for weeks) is
+    # left out and counted, never the batch with it (notifier issue 555).
     parsed_windows = [_parse_window(window, index) for index, window in enumerate(windows)]
-    parsed_events = [_parse_event(event, index) for index, event in enumerate(events)]
-    for index, event_id in enumerate(deleted):
-        if not isinstance(event_id, str) or not _EVENT_ID.match(event_id):
-            raise HealthError("malformed", f"deleted[{index}] is malformed")
+    parsed_events, unusable = [], []
+    for index, event in enumerate(events):
+        try:
+            parsed_events.append(_parse_event(event, index))
+        except HealthError as error:
+            unusable.append(str(error))
+    # A deletion id the store could never have kept matches nothing: left
+    # out and counted the same way.
+    usable_ids = [event_id for event_id in deleted if isinstance(event_id, str) and _EVENT_ID.match(event_id)]
+    unusable += [f"deleted[{index}] is malformed" for index, event_id in enumerate(deleted)
+                 if not (isinstance(event_id, str) and _EVENT_ID.match(event_id))]
+    deleted = usable_ids
+    if unusable:
+        logger.warning("conduit health: left out %d items the store can't keep (first: %s)",
+                       len(unusable), unusable[0])
 
     replaced = skipped = 0
     for window in parsed_windows:
@@ -867,7 +883,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
                (now, tz, None if categories is None else json.dumps(categories),
                 None if detailed is None else json.dumps(detailed), device_id))
     return {"windows": replaced, "stale_windows": skipped, "events": added, "duplicates": duplicates,
-            "deleted": len(deleted), "removed": removed}
+            "skipped_events": len(unusable), "deleted": len(deleted), "removed": removed}
 
 
 def _parse_window(window: Any, index: int) -> dict[str, Any]:

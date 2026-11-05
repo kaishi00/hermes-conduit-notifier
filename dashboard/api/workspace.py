@@ -234,6 +234,9 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
         except Exception:
             return False
 
+    # An SSH profile's answer isn't a check of the file, so quoted prose
+    # ending in a name can't be told from a quoted path there.
+    exists.checks_host = not remote
     return exists
 
 

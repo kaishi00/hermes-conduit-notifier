@@ -649,3 +649,129 @@ def test_a_url_ending_in_the_name_is_not_a_file(tmp_path):
     conn = _db(tmp_path / "home", [("s1", "assistant", "Mirror: https://mirror.example/AppState.swift")])
     assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=lambda p: True) == {"path": None}
     assert index.resolve_name(conn, ["s1"], "//mirror.example/AppState.swift", exists=lambda p: True) == {"path": None}
+
+
+def test_a_quoted_path_with_spaces_or_brackets_is_read_whole(tmp_path):
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call("/Users/me/My Project/AppState.swift")),
+        ("s1", "tool", 'saved "/Users/me/Reports (2026)/Report (final).pdf"', None, "terminal"),
+        ("s1", "assistant", "Wrote `/Users/me/My Project/notes v2.md`."),
+    ])
+    check = lambda p: True  # noqa: E731
+    # Never a piece of it (/Project/AppState.swift).
+    assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=check) == {
+        "path": "/Users/me/My Project/AppState.swift", "via": "chat"}
+    # A quote that only starts with a path still names it.
+    said = _db(tmp_path / "home2", [("s1", "assistant", '"/srv/app/plan.md has been updated"')])
+    assert index.resolve_name(said, ["s1"], "plan.md", exists=check)["path"] == "/srv/app/plan.md"
+    # A quote holding two paths is two paths, even unchecked (an SSH profile).
+    moved = _db(tmp_path / "home3", [("s1", "tool", json.dumps({"message": "/srv/old.md moved to /srv/new.md"}),
+                                      None, "terminal")])
+    assert index.resolve_name(moved, ["s1"], "new.md")["path"] == "/srv/new.md"
+    assert index.resolve_name(moved, ["s1"], "old.md")["path"] == "/srv/old.md"
+    joined = _db(tmp_path / "home5", [("s1", "tool", json.dumps({"detail": "/srv/other.md,/b/plan.md"}), None,
+                                       "terminal")])
+    assert index.resolve_name(joined, ["s1"], "plan.md")["path"] == "/b/plan.md"
+    # Unchecked (an SSH profile), quoted prose is never taken for a path.
+    prose = _db(tmp_path / "home6", [("s1", "tool", json.dumps({"detail": "/srv/app moved to backup/old.md"}),
+                                      None, "terminal")])
+    assert index.resolve_name(prose, ["s1"], "old.md") == {"path": None}
+    # Checked, a quoted run the host doesn't have falls back to its pieces,
+    # and a piece of a folder's name (/Project/AppState.swift) isn't one.
+    spaced = _db(tmp_path / "home7", [("s1", "tool", '"/srv/app moved to /w/AppState.swift"', None, "terminal"),
+                                      ("s1", "tool", '"/Users/me/My Project/AppState.swift"', None, "terminal")])
+    assert index.resolve_name(spaced, ["s1"], "AppState.swift",
+                              exists=lambda p: p == "/w/AppState.swift")["path"] == "/w/AppState.swift"
+    renamed = _db(tmp_path / "home4", [("s1", "tool", json.dumps({"detail": "/srv/old.md renamed to backup/old.md"}),
+                                        None, "terminal")])
+    assert index.resolve_name(renamed, ["s1"], "old.md")["path"] == "/srv/old.md"
+    assert index.resolve_name(conn, ["s1"], "Report (final).pdf", exists=check)["path"] == (
+        "/Users/me/Reports (2026)/Report (final).pdf")
+    assert index.resolve_name(conn, ["s1"], "notes v2.md", exists=check)["path"] == "/Users/me/My Project/notes v2.md"
+
+
+def test_a_name_ending_in_punctuation_still_matches(tmp_path):
+    conn = _db(tmp_path / "home", [
+        ("s1", "tool", "wrote /notes/report_ and /notes/why?", None, "terminal"),
+        ("s1", "tool", "then /logs/build_. And /q/wow!.", None, "terminal"),
+        ("s1", "assistant", "See /srv/app/plan.md."),
+    ])
+    check = lambda p: True  # noqa: E731
+    assert index.resolve_name(conn, ["s1"], "report_", exists=check)["path"] == "/notes/report_"
+    assert index.resolve_name(conn, ["s1"], "why?", exists=check)["path"] == "/notes/why?"
+    assert index.resolve_name(conn, ["s1"], "build_", exists=check)["path"] == "/logs/build_"
+    assert index.resolve_name(conn, ["s1"], "wow!", exists=check)["path"] == "/q/wow!"
+    # A sentence's full stop is still not the name's.
+    assert index.resolve_name(conn, ["s1"], "plan.md", exists=check)["path"] == "/srv/app/plan.md"
+
+
+def _resolve_client(tmp_path, monkeypatch, rows):
+    _hermes_file_routes(monkeypatch)
+    _db(tmp_path / "home", rows).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    return TestClient(app)
+
+
+def test_a_hosted_install_never_answers_outside_its_locked_root(tmp_path, monkeypatch):
+    import types
+    root = tmp_path / "root"
+    (root / "out").mkdir(parents=True)
+    (root / "out" / "a.md").write_text("x")
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "b.md").write_text("x")
+    (root / "link.md").symlink_to(tmp_path / "outside" / "b.md")
+    server_files = types.ModuleType("hermes_cli.web_server_files")
+    server_files._managed_files_policy = lambda *a, **k: types.SimpleNamespace(locked_root=root)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_files", server_files)
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", f"{root / 'out' / 'a.md'} {tmp_path / 'outside' / 'b.md'} {root / 'link.md'}", None,
+         "terminal")])
+
+    def resolve(name):
+        return client.get(f"{BASE}/workspace/resolve", params={"path": name, "session_id": "s1"}).json()["path"]
+
+    assert resolve("a.md") == str(root / "out" / "a.md")
+    assert resolve("b.md") is None
+    assert resolve(str(tmp_path / "outside" / "b.md")) is None
+    # A link inside the root to a file outside it is outside.
+    assert resolve("link.md") is None
+
+
+def test_a_docker_profiles_paths_are_checked_where_the_host_keeps_them(tmp_path, monkeypatch):
+    import types
+    host = tmp_path / "sandbox"
+    (host / "workspace").mkdir(parents=True)
+    (host / "workspace" / "out.csv").write_text("x")
+    server_files = types.ModuleType("hermes_cli.web_server_files")
+
+    def agent_fs_path(path, profile_home=None):
+        text = str(path)
+        return pathlib.Path(str(host) + text) if text.startswith("/workspace/") else pathlib.Path(text)
+
+    server_files._agent_fs_path = agent_fs_path
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_files", server_files)
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", "wrote /workspace/out.csv and /workspace/gone.csv", None, "terminal")])
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "out.csv", "session_id": "s1"}).json()
+    # Answered in the agent's own path, which the Folder maps again.
+    assert body["path"] == "/workspace/out.csv"
+    gone = client.get(f"{BASE}/workspace/resolve", params={"path": "gone.csv", "session_id": "s1"}).json()
+    assert gone["path"] is None
+
+
+def test_an_ssh_profile_never_takes_quoted_prose_for_a_path(tmp_path, monkeypatch):
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", json.dumps({"message": "/srv/app moved to backup/old.md"}), None, "terminal"),
+        ("s1", "tool", '"/srv/My Project/notes.md"', None, "terminal")])
+    # The profile's files are on its SSH machine: nothing here checks them.
+    monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: object())
+
+    def resolve(name):
+        return client.get(f"{BASE}/workspace/resolve", params={"path": name, "session_id": "s1"}).json()["path"]
+
+    assert resolve("old.md") is None
+    # Unchecked, a quoted path with a space is left out too.
+    assert resolve("notes.md") is None
