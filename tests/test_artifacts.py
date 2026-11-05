@@ -805,8 +805,10 @@ def test_a_quoted_path_whose_folder_ends_in_a_separator_is_tried_whole(tmp_path)
     real = {"/data/a;/b/old.md", "/b/old.md", "/x/old.md"}
     conn = _db(tmp_path / "home", [
         ("s1", "tool", '"/data/a;/b/old.md"', None, "terminal"),
+        ("s3", "assistant", 'Moved it to "/data/a;/b/old.md."'),
         ("s2", "tool", '"/x/old.md, /y/old.md"', None, "terminal"),
     ])
     assert index.resolve_name(conn, ["s1"], "old.md", exists=real.__contains__)["path"] == "/data/a;/b/old.md"
+    assert index.resolve_name(conn, ["s3"], "old.md", exists=real.__contains__)["path"] == "/data/a;/b/old.md"
     # Two paths: the whole run isn't a file, so its pieces still answer.
     assert index.resolve_name(conn, ["s2"], "old.md", exists=real.__contains__)["path"] == "/x/old.md"

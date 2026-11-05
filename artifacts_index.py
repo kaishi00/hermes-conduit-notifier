@@ -675,7 +675,9 @@ def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterab
             # Most likely several paths, read piece by piece. A folder can
             # end in a separator, though (/data/a;/b/old.md), so a host that
             # checks tries the whole run too, before its pieces.
-            path = _path_candidate(run, suffix, strip=" \t\\") if quoted_whole else None
+            path = quoted_whole and (
+                _path_candidate(run, suffix, strip=" \t\\")
+                or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
             if path:
                 found.append((match.end(2), path))
             continue

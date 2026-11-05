@@ -22,7 +22,7 @@ checks it). The format is fixed, because Conduit reads it:
   same name.
 - A tapped file name opens the right file when a folder in its path ends in
   a comma, semicolon, bar or space, rather than a file of the same name
-  elsewhere.
+  elsewhere (not on an SSH profile, whose files aren't checked).
 
 ## 0.133.1 (2026-11-05)
 
