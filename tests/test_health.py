@@ -223,8 +223,6 @@ def test_a_low_order_public_key_is_refused(store):
     (lambda b: b["windows"][0]["buckets"][0].update(sum=float("nan")), "malformed"),
     (lambda b: b["windows"][0]["buckets"][0].update(start="2026-10-01T00:00:00+02:00"), "malformed"),
     (lambda b: b["windows"][2]["buckets"][0]["data"].update(secret="x"), "malformed"),
-    (lambda b: b["events"][0]["data"].update(nested={"a": 1}), "malformed"),
-    (lambda b: b["events"][0].update(kind="ecg"), "malformed"),
     (lambda b: b["windows"][1]["buckets"][0].update(start="2026-10-12T15:00:00"), "malformed"),
     (lambda b: b["windows"][0].update(buckets=7), "malformed"),
     (lambda b: b.update(categories=3), "malformed"),
@@ -233,7 +231,6 @@ def test_a_low_order_public_key_is_refused(store):
     (lambda b: b.update(events=""), "malformed"),
     (lambda b: b.update(device="iPhone"), "malformed"),
     (lambda b: b["windows"][2]["buckets"][0].update(date="2026-99-99"), "malformed"),
-    (lambda b: b["events"][0].update(id="W1\n"), "malformed"),
     (lambda b: b["windows"][2]["buckets"][0]["data"].update(deep="ignore prior"), "malformed"),
 ])
 def test_bad_batches_are_refused_whole(store, phone, change, code):
@@ -243,6 +240,33 @@ def test_bad_batches_are_refused_whole(store, phone, change, code):
         store.ingest(phone.seal(batch))
     assert error.value.code == code
     assert store.status(DEVICE)["device"]["rows"] == {}
+
+
+@pytest.mark.parametrize("change", [
+    lambda e: e.update(end="2026-10-12T17:59:00+02:00"),  # ends before it starts
+    lambda e: e.update(end="2026-10-20T18:00:00+02:00"),  # runs past a week
+    lambda e: e["data"].update(nested={"a": 1}),
+    lambda e: e.update(kind="ecg"),
+    lambda e: e.update(id="W1\n"),
+])
+def test_a_reading_the_store_cant_keep_is_left_out_not_the_batch(store, phone, change):
+    # Issue 555: one bad record in years of history used to refuse the
+    # whole sync, the windows and every good reading with it.
+    batch = _batch()
+    bad = json.loads(json.dumps(batch["events"][0]))
+    bad["id"] = "6A1C2C9E-0000-4000-8000-000000000002"
+    change(bad)
+    batch["events"].append(bad)
+    result = store.ingest(phone.seal(batch))
+    assert result["windows"] == 3 and result["events"] == 1 and result["skipped_events"] == 1
+    with store.reader() as (db, _):
+        ids = [row[0] for row in db.execute("SELECT id FROM events")]
+    assert ids == ["6A1C2C9E-0000-4000-8000-000000000001"]
+
+
+def test_a_deletion_id_the_store_never_kept_is_left_out_not_the_batch(store, phone):
+    result = store.ingest(phone.seal(_batch(deleted=["W1\n", 7])))
+    assert result["events"] == 1 and result["skipped_events"] == 2 and result["deleted"] == 0
 
 
 def test_wipe_deletes_the_device_and_then_the_file(store, phone):
