@@ -688,8 +688,10 @@ def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo, remembered: Sequenc
                     len(parsed["items"]))
     items, seen = [], set()
     for item in (_item(raw, chunk, zone, remembered, handoffs, now, repeats) for raw in parsed["items"][:MAX_ITEMS]):
-        if item and (item["kind"], _norm(item["evidence"])) not in seen:  # once per chunk
-            seen.add((item["kind"], _norm(item["evidence"])))
+        # Once per chunk; the same words as an intention and an interest are one plan (KIN).
+        key = item and (min(KIN.get(item["kind"], (item["kind"],))), _norm(item["evidence"]))
+        if item and key not in seen:
+            seen.add(key)
             items.append(item)
     closed_raw = parsed.get("closed") if isinstance(parsed.get("closed"), list) else []
     closed = [entry for entry in (_closed(raw, chunk, remembered) for raw in closed_raw[:MAX_ITEMS]) if entry]
@@ -758,10 +760,11 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
                 chat.chat_id, max(chunk[0]["timestamp"] - IDLE_S, read_to), last["timestamp"], MAX_OUTCOMES)
                 if o["at"] > read_to]
             calls += 1
-            # Every profile's: what the model weighs is the shortlist, and the
-            # plain-repeat check reads all of it.
-            standing = pulse_store.remembered_items(limit=MAX_OPEN, reminded_since=now - REMINDED_KEEP_S)
-            remembered = candidates(standing, chunk, chat.chat_id, chat.profile)
+            # Every profile's: what the model weighs is the shortlist from the
+            # newest MAX_OPEN, and the plain-repeat check reads all of them, so
+            # an old item still meets its word-for-word repeat.
+            standing = pulse_store.remembered_items(limit=None, reminded_since=now - REMINDED_KEEP_S)
+            remembered = candidates(standing[:MAX_OPEN], chunk, chat.chat_id, chat.profile)
             found: list[dict] = []
             try:
                 # Only older chats (a backfill) set a commitment learned late

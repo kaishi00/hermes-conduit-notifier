@@ -2776,6 +2776,33 @@ def test_a_word_for_word_repeat_the_shortlist_missed_is_still_a_repeat():
     assert [item["same_as"] for item in items] == [None, None, None]
 
 
+def test_one_plan_said_as_an_intention_and_an_interest_in_one_reply_is_kept_once():
+    chunk = [_row(1, "user", "I might set up a voice assistant for Home Assistant", DAY + 60)]
+    items, _, _ = memory.extract(FakeModel({"items": [
+        {"kind": "intention", "text": "x", "evidence": "set up a voice assistant for Home Assistant", "line": 1},
+        {"kind": "interest", "text": "y", "evidence": "set up a voice assistant for Home Assistant", "line": 1},
+        {"kind": "commitment", "text": "z", "evidence": "set up a voice assistant for Home Assistant", "line": 1}]}),
+        chunk, UTC)
+    assert [item["kind"] for item in items] == ["intention", "commitment"]
+
+
+def test_an_old_item_past_the_shortlists_window_still_meets_its_repeat(remembering, db, monkeypatch):
+    monkeypatch.setattr(memory, "MAX_OPEN", 1)
+    store_ = remembering.store
+    old = {"kind": "commitment", "text": "The user will renew the passport.", "evidence": "I'll renew the passport",
+           "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}
+    [kept] = store_.advance("", "other", message_id=1, at=DAY, items=[old])
+    store_.advance("", "more", message_id=1, at=DAY + 5, items=[
+        {**old, "text": "The user will call Ana.", "evidence": "I'll call Ana", "mentioned_at": DAY + 5}])
+    db.message("user", "Oh and I still need to renew it, the passport", sid="work", at=DAY + 60)
+    db.message("assistant", "Noted.", sid="work", at=DAY + 70)
+    model = FakeModel({"items": [{"kind": "commitment", "text": "The user will renew the passport.",
+                                  "evidence": "I still need to renew it, the passport", "line": 1}]})
+    _remember(remembering, model, DAY + 70 + memory.IDLE_S)
+    assert f"#{kept} " not in model.shown[0]  # past the shortlist's window
+    assert len(store_.open_items("commitment")) == 2 and store_.item(kept)["mentioned_at"] == DAY + 60
+
+
 def test_this_chats_newest_are_its_own_profiles():
     # Another profile's chat may share this chat's id: its items aren't this chat's.
     mine = [{**_open(n, "fact", f"Fact {n}.", f"fact {n}", chat="c1"), "profile": ""} for n in range(1, 4)]

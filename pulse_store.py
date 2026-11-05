@@ -1301,17 +1301,17 @@ class PulseStore:
             gone += len(found)
         return gone
 
-    def remembered_items(self, *, limit: int, reminded_since: float) -> list[dict]:
+    def remembered_items(self, *, limit: Optional[int], reminded_since: float) -> list[dict]:
         """What memory reads a chat beside: the open items, and the
         commitments reminded since ``reminded_since``, which a chat can still
         show done; most recently mentioned first. Every profile's: memory is
         the user's, whichever profile's chat said it, and the report reads
         it whole, so a thing said in two profiles' chats is one item
-        (notifier #550)."""
+        (notifier #550). ``limit`` None reads them all."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM items WHERE superseded_at IS NULL AND (status='open' "
                                 "OR (status='reminded' AND closed_at >= ?)) ORDER BY mentioned_at DESC, id DESC LIMIT ?",
-                                (reminded_since, limit)).fetchall()
+                                (reminded_since, -1 if limit is None else limit)).fetchall()
         return [dict(row) for row in rows]
 
     def expire_items(self, *, due_before: float, now: float) -> int:
