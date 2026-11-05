@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.133.0 (2026-11-05)
+## 0.134.0 (2026-11-05)
 
 ### New and improved
 - One of a bot's chats drives its screen at a time: while a workstream, the
@@ -22,6 +22,14 @@ checks it). The format is fixed, because Conduit reads it:
   when the screen is free. Conduit shows who has the screen now.
 - A workstream that needs you on the bot's screen (a sign-in, a 2FA code, a
   CAPTCHA) says so on its card in Conduit, with the screen one tap away.
+
+## 0.133.0 (2026-11-05)
+
+### New and improved
+- Hermes can show changes as a diff card: a review, a commit, a config it
+  edited or two versions of a text, with each file's added and removed
+  lines, line numbers and colors. Long diffs stay on your host and open a
+  file at a time, so they don't slow the chat down.
 
 ## 0.132.2 (2026-11-05)
 
