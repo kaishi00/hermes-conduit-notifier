@@ -4492,6 +4492,14 @@ while it runs:
   and `code` for `consent_required`, `scan_blocked` or `restart_needed`).
   Chats still running after two hours fail the job with `restart_needed`:
   the new plugin is on disk and loads on the next dashboard restart.
+- A gateway restart sent during a turn makes the gateway refuse new work
+  until the turn ends (up to `agent.restart_after_turn_timeout`, 30 minutes
+  by default), so Conduit couldn't reach it. The update first waits for the
+  gateway's running work while it still serves: `restarting_gateway` with
+  `gateway_stage: waiting` and `running_chats`, for up to 30 minutes, then
+  restarts anyway. A restart that still meets work (a turn started
+  meanwhile) shows `gateway_stage: draining` and is waited on until Hermes
+  finishes it, rather than failing after three minutes.
 - The job is kept in `conduit-self-update.json` in the Hermes root. The
   restarted dashboard marks it done and sends the profile that asked a
   notification saying which version is running, or why the update didn't

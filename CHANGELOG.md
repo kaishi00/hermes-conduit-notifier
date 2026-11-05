@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.130.5 (2026-11-05)
+
+### Fixes
+- Updating the plugin from Conduit while a chat was running left Hermes
+  unreachable for up to 30 minutes, and the update said the gateway didn't
+  restart. The update now waits for running chats to finish while the
+  gateway keeps serving, then restarts it. A restart that still has to wait
+  shows as waiting rather than failing.
+
 ## 0.130.4 (2026-11-04)
 
 ### Fixes
