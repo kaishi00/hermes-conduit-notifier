@@ -262,6 +262,25 @@ def test_what_its_chat_said_after_a_done_item_comes_with_it(live):
         assert "Never say something hasn't happened or started because nothing here shows it" in note
 
 
+def test_the_lines_after_a_done_item_skip_what_compression_copied_and_profiles_the_report_skips(live):
+    now = time.time()
+    folders = commitment(live, "The user will clear out the old folders.", words="I'll clear out the old folders",
+                         said_at=now - 11 * 3600)
+    done_in_chat(live, folders, "the old folders are all empty now", at=now - 10 * 3600)
+    [item] = report.done_items(live.store, now - 12 * 3600)
+    # The chat is compressed: its tail is copied into the session it continues in, new ids and old times.
+    live.db.session("tip", parent=CHAT, started=now - 9 * 3600)
+    live.db.message("user", "I'll clear out the old folders", sid="tip", at=now - 11 * 3600)
+    live.db.message("user", "the old folders are all empty now", sid="tip", at=now - 10 * 3600)
+    live.db.message("assistant", "Backfill complete.", sid="tip", at=now - 8 * 3600)
+    assert report.after_done_section(live.home, [item], UTC) == (
+        f"{report.AFTER_DONE_TITLE}\n#{folders}:\n[{report._local(now - 8 * 3600, UTC)}] Hermes: Backfill complete.")
+    # Another profile's item only when the report reads that profile.
+    theirs = {**item, "profile": "nahida"}
+    assert report.after_done_section(live.home, [theirs], UTC) == ""
+    assert "Backfill complete." in report.after_done_section(live.home, [theirs], UTC, [("nahida", live.home)])
+
+
 # What ended -----------------------------------------------------------------------------------
 
 def ended_day(home):

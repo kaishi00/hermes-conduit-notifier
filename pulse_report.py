@@ -106,6 +106,7 @@ AFTER_DONE_TITLE = ("## Later in the chat each was done in (its newest lines aft
                     "for one done another way, after the line it came from; memory reads these chats, so they're "
                     "mostly not under the chats below)")
 AFTER_DONE_ROWS = 4
+AFTER_DONE_SCAN = 40  # read to find them past copies compression carried over
 AFTER_DONE_PER_ITEM = 700
 AFTER_DONE_BUDGET = 1_800
 ENDED_BUDGET = 2_000
@@ -552,17 +553,19 @@ def done_section(items: Sequence[dict], zone: tzinfo) -> tuple[str, dict[int, di
     return (DONE_TITLE + "\n" + "\n".join(lines), listed) if lines else ("", {})
 
 
-def after_done_section(home: Path, items: Sequence[dict], zone: tzinfo) -> str:
+def after_done_section(home: Path, items: Sequence[dict], zone: tzinfo,
+                       others: Sequence[tuple[str, Path]] = ()) -> str:
     """For each of ``items`` (``done_section``'s), the newest lines the
     chat that showed it done (and the sessions it continued into) said after
     the line that did; for one done another way (Done on its card, Do it,
     Pulse's checks), its own chat's after the line it came from. At most
     AFTER_DONE_ROWS within AFTER_DONE_PER_ITEM each; "" when none has any.
     So a next step can see the work that came after a done step, which
-    memory read and the report's chats leave out."""
-    homes: dict[str, Path] = {"": Path(home)}
-    if any(item["profile"] for item in items):
-        homes.update(dict(profile_homes(home)))
+    memory read and the report's chats leave out. Another profile's only
+    from ``others``, the profiles the report reads. Rows written at or
+    before the anchor line are left out: compression copies a chat's tail
+    into the session it continues in, with new ids and the old times."""
+    homes: dict[str, Path] = {"": Path(home), **dict(others)}
     out, used = [], 0
     for item in items:
         closed = _CHAT_CLOSED_AT.match(item["closed_by"] if isinstance(item["closed_by"], str) else "")
@@ -572,10 +575,14 @@ def after_done_section(home: Path, items: Sequence[dict], zone: tzinfo) -> str:
         if not chat_id or where is None:
             continue  # from the Shortcuts inbox: no chat
         try:
+            anchor = hermes.chat_messages(where, chat_id=chat_id, after_id=after_id - 1, since=0.0, max_chars=1,
+                                          limit=1)
             rows = hermes.chain_messages(where, chat_id=chat_id, after_id=after_id,
-                                         max_chars=PER_MESSAGE, limit=AFTER_DONE_ROWS)
+                                         max_chars=PER_MESSAGE, limit=AFTER_DONE_SCAN)
         except hermes.HermesUnreadable:
             continue
+        said_at = anchor[0]["timestamp"] if anchor and anchor[0]["id"] == after_id else None
+        rows = [row for row in rows if said_at is None or row["timestamp"] > said_at][-AFTER_DONE_ROWS:]
         lines, size = [], 0
         for row in reversed(rows):  # the newest that fit
             text = _clip(row["content"], PER_MESSAGE)
@@ -929,7 +936,7 @@ def gather(home: Path, pulse_store: store.PulseStore, *, home_chat_id: str, now:
     done_text, after_done, ended_text, done, ended = "", "", "", {}, {}
     if next_steps:
         done_text, done = done_section(done_items(pulse_store, since) if memory_on else [], zone)
-        after_done = after_done_section(home, list(done.values()), zone) if done else ""
+        after_done = after_done_section(home, list(done.values()), zone, others) if done else ""
         ended_text, ended = ended_section(pulse_store, ended_events(home, since, now), zone, now)
     sections = [header, ratings_section(pulse_store) if ratings else "", listed, later, done_text, after_done,
                 ended_text, extra, phone,
