@@ -20,6 +20,14 @@ checks it). The format is fixed, because Conduit reads it:
   profile: a count on the profile strip, a banner when another chat starts
   waiting, and a Needs you list that opens each one at its card.
 
+## 0.130.5 (2026-11-05)
+
+### Fixes
+- Pulse could remember the same thing twice and bring it up twice: when you
+  said it in two profiles' chats, said it again in other words around it, or
+  it was noted once as something you want to do and once as something you're
+  considering. It now keeps one, and brings the one it has up to date.
+
 ## 0.130.4 (2026-11-04)
 
 ### Fixes

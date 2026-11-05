@@ -230,7 +230,7 @@ def test_a_repeat_moves_a_deadline_a_new_date_replaces_it_and_a_payment_closes_i
 def test_a_chat_can_close_a_deadline(live):
     logged = time.time() - 3600
     [item_id] = kept(live, trial(date.today() + timedelta(days=5), logged=logged))
-    remembered = live.store.remembered_items(profile="", limit=50, reminded_since=0)
+    remembered = live.store.remembered_items(limit=50, reminded_since=0)
     assert [row["id"] for row in remembered] == [item_id]
     assert "(logged on the phone from Netflix " in memory.render_remembered(remembered, UTC)
     chunk = [{"id": 3, "role": "user", "content": "I cancelled the Netflix trial this morning", "timestamp": logged}]
