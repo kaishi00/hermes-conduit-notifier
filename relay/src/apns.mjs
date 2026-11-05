@@ -16,14 +16,15 @@ const SEND_TIMEOUT_MS = 10_000;
 // every reply, card and ring. While it is open a ping checks it every
 // minute, so a connection that died without a word (a NAT that dropped it)
 // is noticed before a push waits out SEND_TIMEOUT_MS on it; an unanswered
-// ping retires it. After IDLE_CLOSE_MS without a send it is closed, and the
-// next send connects again.
+// ping retires it. A ping tick that finds no send for IDLE_CLOSE_MS closes
+// it, and the next send connects again. The constructor takes other values
+// for tests.
 const PING_INTERVAL_MS = 60_000;
 const PING_TIMEOUT_MS = 10_000;
 const IDLE_CLOSE_MS = 15 * 60_000;
 
 export class ApnsClient {
-  constructor({ keyPath, keyId, teamId, topic, origin }) {
+  constructor({ keyPath, keyId, teamId, topic, origin, pingIntervalMs = PING_INTERVAL_MS, pingTimeoutMs = PING_TIMEOUT_MS, idleCloseMs = IDLE_CLOSE_MS }) {
     this.keyId = keyId;
     this.teamId = teamId;
     this.topic = topic;
@@ -31,6 +32,9 @@ export class ApnsClient {
     this.privateKey = createPrivateKey(readFileSync(keyPath));
     this.cachedToken = null;
     this.tokenCreatedAt = 0;
+    this.pingIntervalMs = pingIntervalMs;
+    this.pingTimeoutMs = pingTimeoutMs;
+    this.idleCloseMs = idleCloseMs;
     this.session = null;
     // Sessions opened, for tests and the logs.
     this.connects = 0;
@@ -59,6 +63,7 @@ export class ApnsClient {
     const session = connect(this.origin);
     this.connects += 1;
     session.inflight = 0;
+    session.lastSendAt = Date.now();
     this.session = session;
     const retire = () => {
       clearInterval(ping);
@@ -76,16 +81,19 @@ export class ApnsClient {
       retire();
       try { session.close(); } catch { /* already closing */ }
     });
-    session.setTimeout(IDLE_CLOSE_MS, () => {
-      retire();
-      session.close();
-    });
     const ping = setInterval(() => {
       if (session.closed || session.destroyed) return;
+      // The pings themselves keep the socket busy, so idleness is counted
+      // from the last send, not from socket activity.
+      if (session.inflight === 0 && Date.now() - session.lastSendAt >= this.idleCloseMs) {
+        retire();
+        session.close();
+        return;
+      }
       const deadline = setTimeout(() => {
         retire();
         session.destroy();
-      }, PING_TIMEOUT_MS);
+      }, this.pingTimeoutMs);
       deadline.unref?.();
       try {
         session.ping((error) => {
@@ -97,7 +105,7 @@ export class ApnsClient {
         retire();
         session.destroy();
       }
-    }, PING_INTERVAL_MS);
+    }, this.pingIntervalMs);
     ping.unref?.();
     // An idle session never holds the process open; sendOn refs it while a
     // push is in flight.
@@ -131,6 +139,10 @@ export class ApnsClient {
       const fail = (error) => {
         if (settled) return;
         settled = true;
+        // APNs answered before this broke (the session may fail before the
+        // stream does): it may have delivered the push, so send() does not
+        // send it again.
+        if (status !== 0 && error && typeof error === 'object') error.apnsAnswered = true;
         finish();
         // Cancel only this stream: the session is shared with other sends,
         // and its own listeners retire it if it is the thing that broke.
@@ -143,7 +155,9 @@ export class ApnsClient {
         finish();
         resolve(result);
       };
+      let status = 0;
       session.inflight += 1;
+      session.lastSendAt = Date.now();
       session.ref();
       const stall = setTimeout(() => {
         // A session that leaves a push unanswered this long is not one to
@@ -174,7 +188,6 @@ export class ApnsClient {
         fail(error);
         return;
       }
-      let status = 0;
       let body = '';
       request.setEncoding('utf8');
       request.on('response', (headers) => { status = Number(headers[':status'] ?? 0); });
@@ -192,18 +205,11 @@ export class ApnsClient {
         try { detail = body ? JSON.parse(body) : null; } catch { detail = null; }
         succeed({ ok: status === 200, status, reason: detail?.reason ?? null });
       });
-      request.on('error', (error) => {
-        // Answered, then broke: APNs may have delivered it, so it is not
-        // sent again.
-        if (status !== 0 && error && typeof error === 'object') error.apnsAnswered = true;
-        fail(error);
-      });
+      request.on('error', fail);
       // Final net so the promise settles even if the stream closes without
       // 'end' or 'error' (settle-once turns later events into no-ops).
       request.on('close', () => {
-        const error = new Error('apns stream closed before settling');
-        if (status !== 0) error.apnsAnswered = true;
-        fail(error);
+        fail(new Error('apns stream closed before settling'));
       });
       try {
         request.end(JSON.stringify(notification.payload));

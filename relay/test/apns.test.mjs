@@ -29,8 +29,8 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 const clients = [];
 afterEach(() => { for (const apns of clients.splice(0)) apns.close(); });
 
-function client(origin) {
-  const apns = new ApnsClient({ keyPath, keyId: 'AAAAAAAAAA', teamId: 'BBBBBBBBBB', topic: 'com.milim.relay', origin });
+function client(origin, timings = {}) {
+  const apns = new ApnsClient({ keyPath, keyId: 'AAAAAAAAAA', teamId: 'BBBBBBBBBB', topic: 'com.milim.relay', origin, ...timings });
   clients.push(apns);
   return apns;
 }
@@ -217,6 +217,44 @@ test('a kept session that broke before its next push is retried once on a fresh 
     assert.equal((await apns.send('a'.repeat(64), notification)).ok, true);
     assert.deepEqual(await apns.send('b'.repeat(64), notification), { ok: true, status: 200, reason: null });
     assert.equal(apns.connects, 2, 'one retry on a fresh session');
+  } finally {
+    server.close();
+  }
+});
+
+test('a kept session whose ping goes unanswered is retired, and the next push connects again', async () => {
+  const { server, origin } = await startH2Server((stream) => {
+    stream.respond({ ':status': 200, 'content-type': 'application/json' });
+    stream.end('{}');
+  });
+  try {
+    const apns = client(origin, { pingIntervalMs: 20, pingTimeoutMs: 20 });
+    assert.equal((await apns.send('a'.repeat(64), notification)).ok, true);
+    const kept = apns.session;
+    // A ping that never comes back: the shape of a connection a NAT dropped.
+    kept.ping = () => true;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(apns.session, null, 'the silent session was retired');
+    assert.ok(kept.destroyed);
+    assert.equal((await apns.send('b'.repeat(64), notification)).ok, true);
+    assert.equal(apns.connects, 2);
+  } finally {
+    server.close();
+  }
+});
+
+test('a kept session with no push for the idle time is closed though pings keep it busy', async () => {
+  const { server, origin } = await startH2Server((stream) => {
+    stream.respond({ ':status': 200, 'content-type': 'application/json' });
+    stream.end('{}');
+  });
+  try {
+    const apns = client(origin, { pingIntervalMs: 20, idleCloseMs: 60 });
+    assert.equal((await apns.send('a'.repeat(64), notification)).ok, true);
+    const kept = apns.session;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(apns.session, null);
+    assert.ok(kept.closed);
   } finally {
     server.close();
   }
