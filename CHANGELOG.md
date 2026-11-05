@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.132.1 (2026-11-05)
+## 0.132.2 (2026-11-05)
 
 ### Fixes
 - One reading the host can't keep, like a sleep or workout that ends
@@ -21,6 +21,13 @@ checks it). The format is fixed, because Conduit reads it:
   sync, and with it every good reading in it. The host leaves that one out,
   counts it and keeps the rest. Calendar events, reminders and arrivals at
   a saved place work the same way.
+
+## 0.132.1 (2026-11-05)
+
+### Fixes
+- A tapped file name now opens the file when its folder has spaces or
+  brackets in its name, like `My Project` or `Report (final).pdf`, and when
+  the name ends in punctuation. Before, Conduit said it wasn't on the server.
 
 ## 0.132.0 (2026-11-05)
 
