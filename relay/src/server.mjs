@@ -324,6 +324,7 @@ function main() {
   // server.close waiting until the container is killed.
   const shutdown = () => {
     flushStore();
+    apns?.close();
     // Upgraded sockets would hold server.close open; both ends reconnect.
     audioBridges.endAll(1001, 'going_away');
     server.close(() => process.exit(0));

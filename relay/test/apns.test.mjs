@@ -5,7 +5,7 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer as createHttp2Server } from 'node:http2';
-import { after, before, test } from 'node:test';
+import { after, afterEach, before, test } from 'node:test';
 
 import { ApnsClient } from '../src/apns.mjs';
 
@@ -24,8 +24,15 @@ writeFileSync(keyPath, privateKey.export({ type: 'sec1', format: 'pem' }));
 
 after(() => rmSync(dir, { recursive: true, force: true }));
 
+// Each client keeps its HTTP/2 session open between sends (#560); close
+// them after every test so the test servers can finish.
+const clients = [];
+afterEach(() => { for (const apns of clients.splice(0)) apns.close(); });
+
 function client(origin) {
-  return new ApnsClient({ keyPath, keyId: 'AAAAAAAAAA', teamId: 'BBBBBBBBBB', topic: 'com.milim.relay', origin });
+  const apns = new ApnsClient({ keyPath, keyId: 'AAAAAAAAAA', teamId: 'BBBBBBBBBB', topic: 'com.milim.relay', origin });
+  clients.push(apns);
+  return apns;
 }
 
 const notification = { payload: { aps: { alert: { title: 't', body: 'b' } } } };
@@ -154,4 +161,63 @@ test('a call goes out as a VoIP push on the voip topic with its expiration; othe
 test('the default origin is production APNs', () => {
   const apns = new ApnsClient({ keyPath, keyId: 'AAAAAAAAAA', teamId: 'BBBBBBBBBB', topic: 'com.milim.relay' });
   assert.equal(apns.origin, 'https://api.push.apple.com');
+});
+
+test('sends share one HTTP/2 session: a burst and later sends open it once (#560)', async () => {
+  const sessions = new Set();
+  const { server, origin } = await startH2Server((stream) => {
+    sessions.add(stream.session);
+    stream.respond({ ':status': 200, 'content-type': 'application/json' });
+    stream.end('{}');
+  });
+  try {
+    const apns = client(origin);
+    const burst = await Promise.all(Array.from({ length: 5 }, (_, index) => apns.send(String(index).repeat(64), notification)));
+    assert.ok(burst.every((result) => result.ok));
+    assert.deepEqual(await apns.send('a'.repeat(64), notification), { ok: true, status: 200, reason: null });
+    assert.equal(apns.connects, 1, 'six sends, one connect');
+    assert.equal(sessions.size, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test('after APNs sends GOAWAY the next push connects again and goes through', async () => {
+  const { server, origin } = await startH2Server((stream) => {
+    stream.respond({ ':status': 200, 'content-type': 'application/json' });
+    stream.end('{}');
+    stream.session.goaway();
+  });
+  try {
+    const apns = client(origin);
+    assert.equal((await apns.send('a'.repeat(64), notification)).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal((await apns.send('b'.repeat(64), notification)).ok, true);
+    assert.equal(apns.connects, 2);
+  } finally {
+    server.close();
+  }
+});
+
+test('a kept session that broke before its next push is retried once on a fresh one', async () => {
+  // The server answers each session's first stream and drops the session on
+  // its second: the shape of a kept connection that died between pushes.
+  const answered = new WeakSet();
+  const { server, origin } = await startH2Server((stream) => {
+    if (answered.has(stream.session)) {
+      stream.session.destroy();
+      return;
+    }
+    answered.add(stream.session);
+    stream.respond({ ':status': 200, 'content-type': 'application/json' });
+    stream.end('{}');
+  });
+  try {
+    const apns = client(origin);
+    assert.equal((await apns.send('a'.repeat(64), notification)).ok, true);
+    assert.deepEqual(await apns.send('b'.repeat(64), notification), { ok: true, status: 200, reason: null });
+    assert.equal(apns.connects, 2, 'one retry on a fresh session');
+  } finally {
+    server.close();
+  }
 });
