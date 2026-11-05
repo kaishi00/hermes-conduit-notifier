@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.133.1 (2026-11-05)
+## 0.133.2 (2026-11-05)
 
 ### Fixes
 - A tapped file name now opens the file when its folder or file name has an
@@ -21,7 +21,17 @@ checks it). The format is fixed, because Conduit reads it:
   in a folder with brackets in its name no longer opens a wrong file of the
   same name.
 - A tapped file name opens the right file when a folder in its path ends in
-  a comma, semicolon or bar, rather than a file of the same name elsewhere.
+  a comma, semicolon, bar or space, rather than a file of the same name
+  elsewhere.
+
+## 0.133.1 (2026-11-05)
+
+### Fixes
+- A diff card names a file with accents or other non-English letters as
+  it's spelled, like `café.txt`, where it showed escape codes before.
+- When cards can't be drawn, their text version no longer ends inside an
+  unclosed code block when it's cut to fit, so a long diff or code sample
+  shows whole lines and the rest of the reply reads as text.
 
 ## 0.133.0 (2026-11-05)
 
