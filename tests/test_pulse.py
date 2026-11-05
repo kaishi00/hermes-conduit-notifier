@@ -2776,6 +2776,15 @@ def test_a_word_for_word_repeat_the_shortlist_missed_is_still_a_repeat():
     assert [item["same_as"] for item in items] == [None, None, None]
 
 
+def test_this_chats_newest_are_its_own_profiles():
+    # Another profile's chat may share this chat's id: its items aren't this chat's.
+    mine = [{**_open(n, "fact", f"Fact {n}.", f"fact {n}", chat="c1"), "profile": ""} for n in range(1, 4)]
+    theirs = [{**_open(n, "fact", f"Fact {n}.", f"fact {n}", chat="c1", at=DAY + 9), "profile": "nahida"}
+              for n in range(10, 30)]
+    shown = memory.candidates(theirs + mine, [_row(1, "user", "hello there", DAY + 60)], "c1", "")
+    assert [item["id"] for item in shown] == [1, 2, 3]
+
+
 def test_an_intention_and_an_interest_about_one_plan_are_one_item():
     # Notifier #550: one idea kept as both an intention and an interest made two cards.
     remembered = [_open(3, "intention", "The user wants to set up a Home Assistant voice assistant.",
@@ -2789,6 +2798,7 @@ def test_an_intention_and_an_interest_about_one_plan_are_one_item():
     # A commitment taken as a fact's repeat would lose its reminder: only the plan's two kinds cross.
     assert [(item["kind"], item["same_as"]) for item in items] == [("interest", 3), ("commitment", None)]
     assert "one plan is an intention or an interest, never both" in memory.INSTRUCTIONS
+    assert 'For "same_as" and "replaces", an intention and an interest' in memory.INSTRUCTIONS
 
 
 def test_model_calls_run_in_this_profiles_secret_scope(remembering, monkeypatch):

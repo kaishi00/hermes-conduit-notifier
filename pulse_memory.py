@@ -159,8 +159,9 @@ Each item has:
 - "due_words": the exact words that gave the date ("due" or "every_year"), or null.
 - "place": only for a commitment or a promise said for a place rather than a time ("next time I'm at Costco", "when I get home", "when I leave work"): the place's words as said on its line ("Costco", "home", "work"). Otherwise null. Never guess a place.
 - "place_on": with "place", "leave" when it's for leaving the place, else "arrive". Otherwise null.
-- "same_as": the number of a remembered thing of the same kind this says again, or null; an intention and an interest about the same plan count as the same kind. Say it again rather than repeating it as a new item. Never one marked "reminded": Pulse already reminded the user of it, and said again it's a new item.
+- "same_as": the number of a remembered thing of the same kind this says again, or null. Say it again rather than repeating it as a new item. Never one marked "reminded": Pulse already reminded the user of it, and said again it's a new item.
 - "replaces": the number of a remembered thing of the same kind this changes (a new date, a changed plan, a fact that is no longer true, an interest the user has now decided on), or null. Never one marked "reminded".
+For "same_as" and "replaces", an intention and an interest about the same plan count as the same kind.
 
 Note each thing once, as the kind that fits it best: one plan is an intention or an interest, never both. What the user asks Hermes to do is not the user's commitment, unless they ask to be reminded: when Hermes says it will do it, that is Hermes's promise alone.
 
@@ -392,12 +393,14 @@ def stem(word: str) -> str:
     return word[:-1] + "i" if word.endswith("y") else word
 
 
-def candidates(remembered: Sequence[dict], chunk: Sequence[Any], chat_id: str) -> list[dict]:
+def candidates(remembered: Sequence[dict], chunk: Sequence[Any], chat_id: str, profile: str = "") -> list[dict]:
     """The remembered items (open, or reminded lately) the model should see
-    beside a chunk: this chat's newest, then the ones sharing the most
-    words with the chunk."""
+    beside a chunk: this chat's newest (``profile``'s chat: another
+    profile's may share its id), then the ones sharing the most words with
+    the chunk, any profile's."""
     words = set().union(*(_words(_text(row["content"])) for row in chunk)) if chunk else set()
-    same = [item for item in remembered if item["chat_id"] == chat_id][:MAX_CANDIDATES // 2]
+    same = [item for item in remembered
+            if item["chat_id"] == chat_id and item.get("profile", "") == profile][:MAX_CANDIDATES // 2]
     taken = {item["id"] for item in same}
     scored = sorted(((len(words & _words(item["text"] + " " + item["evidence"])), item) for item in remembered
                      if item["id"] not in taken), key=lambda pair: (-pair[0], -pair[1]["mentioned_at"]))
@@ -758,7 +761,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
             # Every profile's: what the model weighs is the shortlist, and the
             # plain-repeat check reads all of it.
             standing = pulse_store.remembered_items(limit=MAX_OPEN, reminded_since=now - REMINDED_KEEP_S)
-            remembered = candidates(standing, chunk, chat.chat_id)
+            remembered = candidates(standing, chunk, chat.chat_id, chat.profile)
             found: list[dict] = []
             try:
                 # Only older chats (a backfill) set a commitment learned late
