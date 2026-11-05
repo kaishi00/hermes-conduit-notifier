@@ -672,6 +672,16 @@ def test_a_quoted_path_with_spaces_or_brackets_is_read_whole(tmp_path):
     joined = _db(tmp_path / "home5", [("s1", "tool", json.dumps({"detail": "/srv/other.md,/b/plan.md"}), None,
                                        "terminal")])
     assert index.resolve_name(joined, ["s1"], "plan.md")["path"] == "/b/plan.md"
+    # Unchecked (an SSH profile), quoted prose is never taken for a path.
+    prose = _db(tmp_path / "home6", [("s1", "tool", json.dumps({"detail": "/srv/app moved to backup/old.md"}),
+                                      None, "terminal")])
+    assert index.resolve_name(prose, ["s1"], "old.md") == {"path": None}
+    # Checked, a quoted run the host doesn't have falls back to its pieces,
+    # and a piece of a folder's name (/Project/AppState.swift) isn't one.
+    spaced = _db(tmp_path / "home7", [("s1", "tool", '"/srv/app moved to /w/AppState.swift"', None, "terminal"),
+                                      ("s1", "tool", '"/Users/me/My Project/AppState.swift"', None, "terminal")])
+    assert index.resolve_name(spaced, ["s1"], "AppState.swift",
+                              exists=lambda p: p == "/w/AppState.swift")["path"] == "/w/AppState.swift"
     renamed = _db(tmp_path / "home4", [("s1", "tool", json.dumps({"detail": "/srv/old.md renamed to backup/old.md"}),
                                         None, "terminal")])
     assert index.resolve_name(renamed, ["s1"], "old.md")["path"] == "/srv/old.md"

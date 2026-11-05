@@ -651,16 +651,18 @@ def _bare_candidate(raw: str, suffix: str) -> Optional[str]:
             or _path_candidate(_name_end(raw, suffix, _TRAILING + "'\"\\") or "", suffix, strip=""))
 
 
-def _path_tokens(text: str, suffix: str) -> Iterable[str]:
+def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterable[str]:
     """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
     whole trailing folders: ``/a/b/AppState.swift`` for
     ``AppState.swift``, never ``/a/MyAppState.swift``), in the order they
-    appear. A quoted path is read whole, spaces and brackets included."""
+    appear. With ``quoted_whole``, a quoted path is also read whole, spaces
+    and brackets included, just after its pieces (so, newest first, before
+    them): only a host that checks each candidate can tell a quoted path
+    from quoted prose that ends in one."""
     if suffix.rsplit("/", 1)[-1] not in text:
         return
     found: list = []
-    quoted: list = []
-    for match in _QUOTED_PATH_RE.finditer(text):
+    for match in (_QUOTED_PATH_RE.finditer(text) if quoted_whole else ()):
         run = match.group(2)
         if not _PATH_BREAK_RE.search(run) or _ANOTHER_PATH_RE.search(run):
             continue  # the bare-path pattern reads it, piece by piece
@@ -674,17 +676,12 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
         path = (_path_candidate(run, suffix, strip=" \t\\")
                 or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
         if path:
-            # Its pieces aren't candidates; a quote that only starts with
-            # a path ("/srv/plan.md is done") leaves them to the bare reading.
-            quoted.append(match.span(2))
-            found.append((match.start(2), path))
+            # Its pieces stay candidates, tried after it.
+            found.append((match.end(2), path))
     for match in _ABS_PATH_RE.finditer(text):
-        start = match.start()
-        if any(lo <= start < hi for lo, hi in quoted):
-            continue  # a piece of a quoted path, read whole above
         path = _bare_candidate(match.group(0), suffix)
         if path:
-            found.append((start, path))
+            found.append((match.start(), path))
     for _, path in sorted(found, key=lambda item: item[0]):
         yield path
 
@@ -768,7 +765,7 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
             # a result can hold one as an escaped string.
             text = text[:MAX_SCAN_CHARS].replace("\\/", "/").replace("\\\\", "\\")
             # Newest mention in the row first, as rows are.
-            for path in reversed(list(_path_tokens(text, suffix))):
+            for path in reversed(list(_path_tokens(text, suffix, quoted_whole=exists is not None))):
                 if found(path):
                     return {"path": path, "via": "chat"}
         if len(checked) >= MAX_RESOLVE_CANDIDATES:
