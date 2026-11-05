@@ -523,7 +523,7 @@ def test_at_most_four_devices(store):
 
 def test_a_sealed_batch_lands_and_reads_back(store, iphone):
     result = store.ingest(iphone.seal(_batch()))
-    assert result == {"events": 5, "reminders": 3, "deleted": 0, "pending": 0, "generation": result["generation"]}
+    assert result == {"events": 5, "reminders": 3, "deleted": 0, "skipped": 0, "pending": 0, "generation": result["generation"]}
     events = _events(store)
     dentist = events["e_dentist"]
     assert dentist["calendar"] == "Personal" and dentist["start"] == "2026-10-16T15:00:00+01:00"
@@ -782,18 +782,8 @@ def test_titles_are_capped_and_control_characters_neutralized(store, iphone):
     (lambda b: b.update(sharing=None), "malformed"),
     (lambda b: b["sharing"].update(calendar="sometimes"), "malformed"),
     (lambda b: b.update(sent_at="2026-10-14T08:00:00"), "malformed"),
-    (lambda b: b["events"]["upsert"][0].update(start="tomorrow"), "malformed"),
-    (lambda b: b["events"]["upsert"][0].update(end="2026-10-16T14:00:00+01:00"), "malformed"),
-    (lambda b: b["events"]["upsert"][0].update(availability="maybe"), "malformed"),
-    (lambda b: b["events"]["upsert"][0].update(id="e 1"), "malformed"),
-    (lambda b: b["events"]["upsert"][0].update(lat=123), "malformed"),
-    (lambda b: b["events"]["upsert"][0]["attendees"][0].update(role="boss"), "malformed"),
-    (lambda b: b["events"]["upsert"][0].update(alarms_min="30"), "malformed"),
     (lambda b: b["events"].update(upsert={}), "malformed"),
     (lambda b: b["events"].update(to=None), "malformed"),
-    (lambda b: b["reminders"]["upsert"][0].update(priority=12), "malformed"),
-    (lambda b: b["reminders"]["upsert"][0].update(due="2026-02-30"), "malformed"),
-    (lambda b: b["reminders"]["upsert"][0].update(location_alarm={"name": "Home", "proximity": "near"}), "malformed"),
     (lambda b: b["calendars"][0].update(kind="task"), "malformed"),
     (lambda b: b["calendars"][0].update(color="blue"), "malformed"),
     (lambda b: b["status"].update(battery=1.5), "malformed"),
@@ -809,6 +799,39 @@ def test_bad_batches_are_refused_whole(store, iphone, change, code):
         store.ingest(iphone.seal(batch))
     assert error.value.code == code
     assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0}
+
+
+@pytest.mark.parametrize("change", [
+    lambda b: b["events"]["upsert"][0].update(start="tomorrow"),
+    lambda b: b["events"]["upsert"][0].update(end="2026-10-16T14:00:00+01:00"),
+    lambda b: b["events"]["upsert"][0].update(availability="maybe"),
+    lambda b: b["events"]["upsert"][0].update(id="e 1"),
+    lambda b: b["events"]["upsert"][0].update(lat=123),
+    lambda b: b["events"]["upsert"][0]["attendees"][0].update(role="boss"),
+    lambda b: b["events"]["upsert"][0].update(alarms_min="30"),
+    lambda b: b["reminders"]["upsert"][0].update(priority=12),
+    lambda b: b["reminders"]["upsert"][0].update(due="2026-02-30"),
+    lambda b: b["reminders"]["upsert"][0].update(location_alarm={"name": "Home", "proximity": "near"}),
+])
+def test_an_item_the_store_cant_keep_is_left_out_not_the_batch(store, iphone, change):
+    # Issue 555: one bad event or reminder used to refuse the whole sync.
+    batch = _batch()
+    change(batch)
+    result = store.ingest(iphone.seal(batch))
+    assert result["skipped"] == 1
+    assert result["events"] + result["reminders"] == 7
+    counts = store.status(DEVICE)["device"]["counts"]
+    assert counts["events"] + counts["reminders"] == 7 and counts["calendars"] == 5
+
+
+def test_a_left_out_update_takes_the_older_copy_away(store, iphone):
+    store.ingest(iphone.seal(_batch()))
+    assert "e_dentist" in _events(store)
+    later = _batch(sent_at="2026-10-14T08:01:00+01:00",
+                   events={"full": False, "upsert": [_event(end="2028-01-01T00:00:00+01:00")]})
+    result = store.ingest(iphone.seal(later))
+    assert result["skipped"] == 1
+    assert set(_events(store)) == {"e_standup", "e_review", "e_lunch", "e_holiday"}
 
 
 def test_unshared_sections_are_dropped_unread(store, iphone):

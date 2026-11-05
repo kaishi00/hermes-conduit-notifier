@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 import os
 import re
@@ -46,6 +47,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from . import sealing
+
+logger = logging.getLogger(__name__)
 
 try:
     import fcntl
@@ -1400,8 +1403,18 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
         current = {place["id"]: place for place in places_list}
     paused = sharing_paused(sharing, now)
     events_raw = _list(batch.get("events"), "events", MAX_EVENTS)
-    # Validate everything before writing anything.
-    events = [_parse_event(event, index, current, sharing) for index, event in enumerate(events_raw)]
+    # Validate everything before writing anything. An arrival or departure
+    # the store can't keep (its place deleted in the meantime) is left out
+    # and counted, never the fix and the rest with it (notifier issue 555).
+    events, unusable = [], []
+    for index, event in enumerate(events_raw):
+        try:
+            events.append(_parse_event(event, index, current, sharing))
+        except LocationError as error:
+            unusable.append(str(error))
+    if unusable:
+        logger.warning("conduit location: left out %d of %d arrivals and departures the store can't keep"
+                       " (first: %s)", len(unusable), len(events_raw), unusable[0])
     if events and not sharing["background"]:
         raise LocationError("layer_off", "Arrivals and departures need background sharing on", status=409)
     fix = None if batch.get("fix") is None or paused else _parse_fix(batch.get("fix"), sharing, current)
@@ -1419,7 +1432,8 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
         # An older batch (a retry that arrived late, or a replay) never
         # undoes a newer one: not its sharing or pause, places, fix or moves.
         db.execute("UPDATE devices SET last_seen=? WHERE id=?", (now, device_id))
-        return {"accepted": True, "stale": True, "fix": False, "events": 0, "rules_fired": []}
+        return {"accepted": True, "stale": True, "fix": False, "events": 0, "skipped_events": len(unusable),
+                "rules_fired": []}
     db.execute("UPDATE devices SET last_seen=?, last_sent=?, sharing=? WHERE id=?",
                (now, sent, json.dumps(sharing), device_id))
     if places_list is not None:
@@ -1481,7 +1495,8 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: f
     watching = not paused and sharing["background"] and sharing["background_precision"] == "precise"
     spots = _spot_entries(batch.get("spot_entries"), now) if watching else []
     room = batch.get("spots_room")
-    return {"accepted": True, "fix": stored_fix, "events": added, "rules_fired": fired, "moments": moments,
+    return {"accepted": True, "fix": stored_fix, "events": added, "skipped_events": len(unusable),
+            "rules_fired": fired, "moments": moments,
             "spot_entries": spots, "spots_watching": watching, "spots_keep": sharing["retention_days"] > 0,
             "spots_room": room if isinstance(room, int) and not isinstance(room, bool) and 0 <= room <= 20 else None}
 
