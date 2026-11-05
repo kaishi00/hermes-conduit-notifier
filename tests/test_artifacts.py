@@ -583,3 +583,19 @@ def test_the_resolve_route_never_answers_with_a_secret_file(tmp_path, monkeypatc
     client = TestClient(app)
     for params in ({"path": str(tmp_path / ".ssh" / "id_rsa")}, {"path": ".env", "session_id": "s1"}):
         assert client.get(f"{BASE}/workspace/resolve", params=params).json() == {"ok": True, "path": None}
+
+
+def test_the_chats_own_folder_wins_over_a_continuations(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT, cwd TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('sub', 't', 'main', '/tree')")
+    conn.execute("INSERT INTO sessions VALUES ('main', 't', NULL, 'C:\\proj')")
+    conn.commit()
+    conn.close()
+    db = index.open_db(home)
+    assert index.resolve_name(db, ["main"], "README.md", exists=lambda p: True) == {
+        "path": "C:/proj/README.md", "via": "folder"}

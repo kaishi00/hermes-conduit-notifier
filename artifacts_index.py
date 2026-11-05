@@ -660,9 +660,17 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
         return exists is None or exists(os.path.expanduser(path))
 
     if "cwd" in session_columns:
-        for row in conn.execute(f"SELECT DISTINCT cwd FROM sessions WHERE id IN ({marks})", chat):
-            cwd = str(row[0] or "").strip().rstrip("/")
-            if cwd.startswith(("/", "~/")):
+        # The chat's own folder first, then those of the sessions it
+        # continues or that continue it, in lineage order.
+        folders = {str(row[0]): str(row[1] or "") for row in conn.execute(
+            f"SELECT id, cwd FROM sessions WHERE id IN ({marks})", chat)}
+        order = [sid for sid in wanted if sid in folders] + [sid for sid in chat if sid not in wanted]
+        for cwd in dict.fromkeys(folders.get(sid, "") for sid in order):
+            cwd = cwd.strip()
+            if re.match(r"^[A-Za-z]:[\\/]", cwd):
+                cwd = re.sub(r"/+", "/", cwd.replace("\\", "/"))
+            cwd = cwd.rstrip("/")
+            if _is_local_path(cwd + "/"):
                 candidate = f"{cwd}/{suffix}"
                 if found(candidate):
                     return {"path": candidate, "via": "folder"}

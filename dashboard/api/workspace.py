@@ -190,10 +190,8 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
     Hermes' own mapping of a Docker profile's paths) a file. A profile whose
     files are on its SSH machine checks only the first, and the folder's
     join, else the newest path, is taken."""
-    try:
-        sensitive_default = _workspace_files().default_sensitive
-    except Exception:
-        sensitive_default = None
+    # Without the plugin's own denylist, refuse as the Folder's routes do.
+    sensitive_default = _workspace_files().default_sensitive
     try:
         from hermes_cli.web_routers.files import _fs_backend, _fs_profile_home, _is_sensitive_path
         remote = _fs_backend(profile) is not None
