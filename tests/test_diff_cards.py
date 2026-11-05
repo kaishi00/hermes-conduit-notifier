@@ -126,6 +126,25 @@ def test_a_patch_file_is_read_from_the_host(tmp_path, monkeypatch):
     assert _one({"patch": GIT_SHOW}, notes) is None and notes[0].startswith("cards[0].diff.patch: over 2 MB")
 
 
+def test_git_quoted_names_are_read_as_git_wrote_them():
+    patch = ('diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"\n--- "a/caf\\303\\251.txt"\n'
+             '+++ "b/caf\\303\\251.txt"\n@@ -1 +1 @@\n-a\n+b\n')
+    assert _one({"patch": patch})["files"][0]["path"] == "caf\u00e9.txt"
+    assert card_schema._unquoted('"a\\"b\\\\c"') == 'a"b\\c'
+
+
+def test_read_files_with_a_name_stay_as_read():
+    diff = _one({"patch": GIT_SHOW})
+    assert _one({**diff, "name": "x"}) == diff
+
+
+def test_a_long_diffs_markdown_closes_its_fence():
+    long = _one({"patch": "@@ -1,40 +1,40 @@\n" + "".join(f"-{'x' * 900}\n+{'y' * 900}\n" for _ in range(20))})
+    text = card_schema.fallback_markdown([{"type": "diff", "diff": long}])
+    assert len(text) <= card_schema.MARKDOWN_DIFF_CHARS
+    assert text.count("```") == 2 and "more lines_" in text
+
+
 def test_two_texts_are_compared():
     diff = _one({"before": "listen 80;\nroot /srv;\n", "after": "listen 443 ssl;\nroot /srv;\n", "name": "site.conf"})
     assert diff["files"] == [{"path": "site.conf", "status": "modified", "added": 1, "removed": 1, "hunks": [

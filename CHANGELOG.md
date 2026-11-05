@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.133.1 (2026-11-05)
+
+### Fixes
+- A diff card names a file with accents or other non-English letters as
+  it's spelled, like `café.txt`, where it showed escape codes before.
+- When a diff can't be drawn as a card, its text version shows a whole
+  code block even when its lines are long.
+
 ## 0.133.0 (2026-11-05)
 
 ### New and improved
