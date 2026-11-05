@@ -18,8 +18,9 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 - A diff card names a file with accents or other non-English letters as
   it's spelled, like `café.txt`, where it showed escape codes before.
-- When a diff can't be drawn as a card, its text version shows a whole
-  code block even when its lines are long.
+- When cards can't be drawn, their text version no longer ends inside an
+  unclosed code block when it's cut to fit, so a long diff or code sample
+  shows whole lines and the rest of the reply reads as text.
 
 ## 0.133.0 (2026-11-05)
 

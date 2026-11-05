@@ -5,6 +5,7 @@ Markdown."""
 
 import contextlib
 import json
+import sys
 
 import pytest
 from fastapi import FastAPI
@@ -143,6 +144,14 @@ def test_a_long_diffs_markdown_closes_its_fence():
     text = card_schema.fallback_markdown([{"type": "diff", "diff": long}])
     assert len(text) <= card_schema.MARKDOWN_DIFF_CHARS
     assert text.count("```") == 2 and "more lines_" in text
+
+
+def test_a_board_cut_inside_a_code_block_closes_it():
+    lines = "".join(f"-{'x' * 900}\n+{'y' * 900}\n" for _ in range(20))
+    long = _one({"patch": "@@ -1,20 +1,20 @@\n" + lines})
+    text = tool.clip_markdown(card_schema.fallback_markdown([{"type": "diff", "diff": long}] * 2))
+    assert len(text) <= sys.modules[PresentStore.__module__].MAX_CARD_MARKDOWN_CHARS
+    assert text.rstrip().endswith("```") and text.count("```") % 2 == 0
 
 
 def test_two_texts_are_compared():
