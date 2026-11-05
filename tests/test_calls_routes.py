@@ -327,3 +327,28 @@ def test_a_malformed_call_answer_is_refused(paired, body):
         {"qid": "q0", "question": "Which?", "choices": ["a", "b"], "multi_select": False}])
     response = http.post(f"{BASE}/calls/waiting/answer", json=body)
     assert response.status_code == 400
+
+
+def test_the_waiting_list_names_every_chat_hermes_waits_on_but_workstreams(paired, monkeypatch):
+    http = _http()
+    store = api.hermes_calls._calls_store().CallStore(paired)
+    # Alert calls off: still listed, for the Needs you list.
+    store.note_waiting(["rt-1", "st-1"], "approval", description="Run the migration?",
+                       command="rm -rf build", title="Release prep")
+    store.note_waiting("w-1", "approval", description="Push it?", command="git push", title="W3")
+    monkeypatch.setattr(api.waiting, "_workstream_sessions", lambda home: ["w-1"])
+    response = http.get(f"{BASE}/waiting")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    listed = response.json()["waiting"]
+    assert [(item["title"], item["summary"], item["kind"]) for item in listed] == [
+        ("Release prep", "Run the migration?", "approval")]
+    assert "command" not in listed[0]
+    # Hermes gave up on it: gone from the list.
+    monkeypatch.setattr(api.watch_local_live, "_hermes_approval_timeout", lambda: -1000.0)
+    assert http.get(f"{BASE}/waiting").json() == {"ok": True, "waiting": []}
+
+
+def test_the_waiting_list_reads_an_unreadable_registry_as_no_workstreams(paired, monkeypatch):
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: (_ for _ in ()).throw(RuntimeError(name)))
+    assert api.waiting._workstream_sessions(paired) == []
