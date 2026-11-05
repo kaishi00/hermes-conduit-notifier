@@ -219,6 +219,76 @@ def test_the_done_section_numbers_each_item_and_says_where_and_how(live):
     assert sorted(listed) == [n for n in range(30) if f"\n- #{n} [" in many]
 
 
+def test_what_its_chat_said_after_a_done_item_comes_with_it(live):
+    # Notifier issue 532: the folders were cleared, then the copy ran and finished in the same chat.
+    # Memory read it all, so the report's chats leave it out; without these lines a next step saw
+    # only the cleared folders and said the copy hadn't started.
+    now = time.time()
+    since = now - 12 * 3600
+    folders = commitment(live, "The user will clear out the archive, spam and trash folders.",
+                         words="I'll clear out the archive/spam/trash folders first", said_at=now - 11 * 3600)
+    done_in_chat(live, folders, "archive, spam and trash are now all empty", at=now - 10 * 3600)
+    live.db.message("user", "imapsync run 3: 0 errors", sid=CHAT, at=now - 9 * 3600)
+    live.db.message("assistant", "Backfill complete. Every folder ties out.", sid=CHAT, at=now - 8 * 3600)
+    [item] = report.done_items(live.store, since)
+    section = report.after_done_section(live.home, [item], UTC)
+    assert section == (f"{report.AFTER_DONE_TITLE}\n#{folders}:\n"
+                       f"[{report._local(now - 9 * 3600, UTC)}] User: imapsync run 3: 0 errors\n"
+                       f"[{report._local(now - 8 * 3600, UTC)}] Hermes: Backfill complete. Every folder ties out.")
+    # Only its newest lines, and only for what a chat showed done.
+    for n in range(10):
+        live.db.message("assistant", f"note {n}", sid=CHAT, at=now - 7 * 3600 + n)
+    newest = report.after_done_section(live.home, [item], UTC)
+    assert newest.count("\n[") == report.AFTER_DONE_ROWS and newest.endswith("Hermes: note 9")
+    # Done another way (Done on its card, Do it, Pulse's checks): its own chat, after the line it came from.
+    marked = report.after_done_section(live.home, [{**item, "closed_by": learning.DONE_BY}], UTC)
+    assert marked == newest
+    assert report.after_done_section(live.home, [{**item, "closed_by": learning.ACT_DONE_BY,
+                                                  "message_id": live.db.message("user", "last", sid=CHAT)}], UTC) == ""
+    assert report.after_done_section(live.home, [{**item, "closed_by": "inbox dev1/e4: paid", "chat_id": ""}],
+                                     UTC) == ""
+    assert report.after_done_section(live.home, [], UTC) == ""
+    # The candidate list reads it beside what got done, and hears never to infer from silence.
+    live.store.set("memory", True)
+    found = report.gather(live.home, live.store, home_chat_id=SID, now=now, keyed=True, next_steps=True,
+                          room=100_000)
+    assert found.text.index(report.DONE_TITLE) < found.text.index(report.AFTER_DONE_TITLE)
+    assert "Hermes: note 9" in found.text
+    assert "never that nothing shows it happening" in candidates.INSTRUCTIONS
+    assert "never that something hasn't happened, started or been done" in candidates.INSTRUCTIONS
+    assert "never say something hasn't happened, started or been done" in report.REPORT_TEXT
+    brief = _load("conduit_push.pulse_brief", ROOT / "pulse_brief.py")
+    for note in (brief.NOTE, brief.LOOK_NOTE):
+        assert "Never say something hasn't happened or started because nothing here shows it" in note
+
+
+def test_the_lines_after_a_done_item_skip_what_compression_copied_and_profiles_the_report_skips(live):
+    now = time.time()
+    folders = commitment(live, "The user will clear out the old folders.", words="I'll clear out the old folders",
+                         said_at=now - 11 * 3600)
+    done_in_chat(live, folders, "the old folders are all empty now", at=now - 10 * 3600)
+    [item] = report.done_items(live.store, now - 12 * 3600)
+    # The chat is compressed: its tail is copied into the session it continues in, new ids and old times,
+    # and compaction leaves the old rows inactive.
+    live.db._exec("UPDATE messages SET active=0 WHERE session_id=?", (CHAT,))
+    live.db.session("tip", parent=CHAT, started=now - 9 * 3600)
+    live.db.message("user", "I'll clear out the old folders", sid="tip", at=now - 11 * 3600)
+    live.db.message("user", "the old folders are all empty now", sid="tip", at=now - 10 * 3600)
+    live.db.message("assistant", "Backfill complete.", sid="tip", at=now - 8 * 3600)
+    for n in range(report.AFTER_DONE_SCAN + 1):  # tool-only replies after it say nothing
+        live.db.message("assistant", "" if n % 2 else "  ", sid="tip", at=now - 7 * 3600 + n)
+    assert report.after_done_section(live.home, [item], UTC) == (
+        f"{report.AFTER_DONE_TITLE}\n#{folders}:\n[{report._local(now - 8 * 3600, UTC)}] Hermes: Backfill complete.")
+    # Only from the homes the report reads. Memory keeps one item across profiles, so one of nahida's
+    # can be closed from a chat here: it's found where that chat is, when the report reads that home.
+    theirs = {**item, "profile": "nahida"}
+    other = live.home / "profiles" / "nahida"
+    other.mkdir(parents=True)
+    assert "Backfill complete." in report.after_done_section(live.home, [theirs], UTC)
+    assert report.after_done_section(other, [theirs], UTC) == ""
+    assert "Backfill complete." in report.after_done_section(other, [theirs], UTC, [("default", live.home)])
+
+
 # What ended -----------------------------------------------------------------------------------
 
 def ended_day(home):

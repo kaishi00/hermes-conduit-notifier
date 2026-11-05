@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.131.1 (2026-11-05)
+## 0.131.2 (2026-11-05)
 
 ### Fixes
 - Updating the plugin from Conduit while a chat was running left Hermes
@@ -21,6 +21,15 @@ checks it). The format is fixed, because Conduit reads it:
   restart. The update now waits for running chats to finish while the
   gateway keeps serving, then restarts it. A restart that still has to wait
   shows as waiting rather than failing.
+
+## 0.131.1 (2026-11-05)
+
+### Fixes
+- Pulse could tell you work hadn't started when it had already finished in
+  a chat: after a first step got done, the rest of that chat was hidden from
+  its report, so it read the silence as "not started". Pulse now reads what
+  the chat said after each step got done, and never claims something hasn't
+  happened just because it can't see it.
 
 ## 0.131.0 (2026-11-05)
 
