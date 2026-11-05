@@ -23,6 +23,15 @@ checks it). The format is fixed, because Conduit reads it:
 - A workstream that needs you on the bot's screen (a sign-in, a 2FA code, a
   CAPTCHA) says so on its card in Conduit, with the screen one tap away.
 
+## 0.133.1 (2026-11-05)
+
+### Fixes
+- A diff card names a file with accents or other non-English letters as
+  it's spelled, like `café.txt`, where it showed escape codes before.
+- When cards can't be drawn, their text version no longer ends inside an
+  unclosed code block when it's cut to fit, so a long diff or code sample
+  shows whole lines and the rest of the reply reads as text.
+
 ## 0.133.0 (2026-11-05)
 
 ### New and improved

@@ -926,12 +926,37 @@ def _for_device(card: dict[str, Any], features: list[str]) -> dict[str, Any]:
     return card
 
 
+def _open_fence(text: str) -> str | None:
+    """The fence a Markdown text leaves open at its end, if any."""
+    fence = None
+    for line in text.split("\n"):
+        run = re.match(r"`{3,}", line)
+        if not run:
+            continue
+        if fence is None:
+            fence = run.group()
+        elif run.group() == fence and not line[len(fence):].strip():
+            fence = None
+    return fence
+
+
 def clip_markdown(text: str) -> str:
-    """Markdown cut at a line to fit a card."""
+    """Markdown cut at a line to fit a card, closing a code block the cut
+    lands in."""
+    def at_line(limit: int) -> str:
+        cut = text[:limit]
+        return cut[:cut.rfind("\n")] if "\n" in cut else cut
+
     if len(text) <= MAX_CARD_MARKDOWN_CHARS:
         return text
-    cut = text[:MAX_CARD_MARKDOWN_CHARS]
-    return cut[:cut.rfind("\n")] if "\n" in cut else cut
+    cut = at_line(MAX_CARD_MARKDOWN_CHARS)
+    if _open_fence(cut) is None:
+        return cut
+    # Room for the longest fence the text could leave open.
+    longest = max((len(run) for run in re.findall(r"`{3,}", text)), default=3)
+    cut = at_line(MAX_CARD_MARKDOWN_CHARS - 1 - longest)
+    fence = _open_fence(cut)
+    return cut if fence is None else f"{cut}\n{fence}"
 
 
 def _without_live(old: dict[str, Any], live: set[str], session: str, schema: Any) -> dict[str, Any] | None:
