@@ -136,6 +136,7 @@ ROOM_CONTACTS_NOTE = ("cards: a contact card holds the user's own details and dr
 ROOM_SHOWN_NOTE = ("Shown as cards under your next message in the room, for the people reading it in Conduit. "
                    "The room's other agents read only your message, so give them what they need from it in a "
                    "sentence or two; don't repeat the cards.")
+ROOM_MARKDOWN_NOTE = "A group room shows messages, not a screen, so nothing was shown: write it in your reply."
 ROOM_NOTHING_NOTE = "A group room shows messages, and nothing on this board can go to one."
 ROOM_PROBLEMS_NOTE = ("Some of it was left out; problems says what and why. Give the rest in your reply if it "
                       "matters, never the contact.")
@@ -264,6 +265,9 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20]}
     layout = card_schema.normalize_layout(args.get("layout"), problems)
     follow_ups = card_schema.normalize_next(args.get("next"), problems)
+    if not cards and session and is_room(session):
+        # A room has no call screen: Markdown alone would wait for one.
+        return {"ok": False, "error": "group_room", "note": ROOM_MARKDOWN_NOTE}
     if cards and session and is_room(session):
         # A room this host runs keeps the board for Conduit to draw under
         # the agent's message; elsewhere, or for an older Conduit, it goes in

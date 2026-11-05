@@ -326,7 +326,6 @@ def note(from_conduit: bool, message: Any, transport: Any = None,
          clock: Callable[[], float] = time.monotonic, session_id: Any = None) -> Optional[str]:
     """The line for this turn, or None. Never raises: a hook calls this."""
     try:
-        _keep_entry(session_id, None)
         # A chat the gateway's authority runs: its report is the evidence.
         kept = _take_for_authority(session_id, message, clock)
         if kept is None and not from_conduit:

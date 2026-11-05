@@ -281,6 +281,14 @@ def test_the_turns_tools_hear_how_its_message_was_entered(gateway, client):
     assert surfaces.turn_entry("stored-1") is None, "a turn sent from elsewhere starts unknown"
 
 
+def test_a_forks_hook_leaves_the_running_turns_entry(gateway, client, monkeypatch):
+    client.post(f"{BASE}/turn-surface", json=_report("iphone", "hi", "typed"))
+    gateway.turn(CONDUIT, "hi")
+    monkeypatch.setattr(plugin.forks, "inside", lambda: True)
+    gateway.turn(CONDUIT, "a side question")
+    assert surfaces.turn_entry("stored-1") == "typed"
+
+
 def test_no_gateway_in_this_process_means_no_line(monkeypatch):
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     assert surfaces.note(True, "hi", CONDUIT) is None

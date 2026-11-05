@@ -381,6 +381,13 @@ def test_a_group_room_gets_its_board_as_markdown(tool_home, monkeypatch):
     assert _call({"title": "Dinner", "cards": [MAP]}, is_room=lambda s: s == "room-1")["ok"] is True, "a chat draws it"
 
 
+def test_markdown_alone_in_a_group_room_is_refused_and_kept_off_the_call_screen(tool_home):
+    _exchange(PresentStore(tool_home))
+    answer = _call({"title": "Forecast", "markdown": TABLE}, is_room=lambda s: s == "s1")
+    assert answer == {"ok": False, "error": "group_room", "note": tool.ROOM_MARKDOWN_NOTE}
+    assert "cards" not in _exchange(PresentStore(tool_home))
+
+
 def test_a_room_this_host_runs_keeps_its_board_for_conduit(tool_home, monkeypatch):
     _exchange(PresentStore(tool_home), features=(*BOARD_FEATURES, tool.ROOM_BOARDS_FEATURE))
     monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
