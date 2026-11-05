@@ -380,8 +380,9 @@ def cancel_alerts(session_id: str, kind: str | None = None) -> None:
 
 
 def note_waiting(session_id: str, kind: str, *, turn_session_id: str = "", **detail: Any) -> bool:
-    """Keeps what Hermes waits on (``CallStore.note_waiting``) for a call
-    to read and answer. Never raises: a hook calls this."""
+    """Keeps what Hermes waits on (``CallStore.note_waiting``) for Conduit's
+    "Needs you" list, and for a call to read and answer: True when a call
+    may (alert calls on). Never raises: a hook calls this."""
     ids = list(dict.fromkeys(value for value in (session_id, turn_session_id) if value))
     if not ids:
         return False

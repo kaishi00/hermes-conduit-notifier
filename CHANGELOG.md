@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.130.6 (2026-11-05)
+## 0.131.1 (2026-11-05)
 
 ### Fixes
 - Pulse could tell you work hadn't started when it had already finished in
@@ -21,6 +21,13 @@ checks it). The format is fixed, because Conduit reads it:
   its report, so it read the silence as "not started". Pulse now reads what
   the chat said after each step got done, and never claims something hasn't
   happened just because it can't see it.
+
+## 0.131.0 (2026-11-05)
+
+### New and improved
+- Conduit can show every chat waiting on your approval or answer, in every
+  profile: a count on the profile strip, a banner when another chat starts
+  waiting, and a Needs you list that opens each one at its card.
 
 ## 0.130.5 (2026-11-05)
 

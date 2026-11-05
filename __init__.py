@@ -884,12 +884,13 @@ def _pre_approval_request(**kwargs: Any) -> None:
     # user too (#449), beside the answerable notification.
     calls.alert(session_id, "approval", description, profile=_profile,
                 turn_session_id=_text(kwargs.get("session_id")))
-    # The command and description, for a call answered with no chat open (the
-    # Watch) to read out; its spoken answer reaches Hermes from here.
+    # The command and description, for Conduit's "Needs you" list, and for a
+    # call answered with no chat open (the Watch) to read out; its spoken
+    # answer reaches Hermes from here (followed only with alert calls on).
     command = kwargs.get("command") if isinstance(kwargs.get("command"), str) else ""
     if session_id and description and calls.note_waiting(
             session_id, "approval", turn_session_id=_text(kwargs.get("session_id")),
-            description=description, command=command):
+            description=description, command=command, title=_session_title(session_id)):
         calls.follow_approval(session_id, command)
 
 
