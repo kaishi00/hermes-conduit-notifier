@@ -567,6 +567,8 @@ def _chart_rules(chart: dict[str, Any], path: str = "cards[0].chart",
 # The most a diff may hold, whatever it came in: a patch file's bytes or a
 # patch's (or a text's) characters.
 MAX_DIFF_INPUT = 2_000_000
+# The longest before or after compared on the host, as the schema says.
+MAX_COMPARED_TEXT = 20_000
 # What a diff keeps: the files the schema lists, then the lines over all of
 # them; past either, the card says how many more and the model hears why.
 MAX_DIFF_LINES = 20_000
@@ -625,11 +627,16 @@ def read_diff(given: dict[str, Any]) -> list[dict[str, Any]]:
             raise DiffError("not a unified diff (no ---/+++ file lines or @@ hunks), nothing shown", ".patch_file")
         return files
     before, after = given.get("before"), given.get("after")
-    if isinstance(before, str) or isinstance(after, str):
-        before = before if isinstance(before, str) else ""
-        after = after if isinstance(after, str) else ""
-        if len(before) > MAX_DIFF_INPUT or len(after) > MAX_DIFF_INPUT:
-            raise DiffError("over 2 MB; compare a part of it")
+    if before is not None or after is not None:
+        for key, text in (("before", before), ("after", after)):
+            if text is not None and not isinstance(text, str):
+                raise DiffError("before and after are text", f".{key}")
+        before, after = before or "", after or ""
+        # difflib grows faster than the texts, so two long ones go as a
+        # patch the shell made.
+        if len(before) > MAX_COMPARED_TEXT or len(after) > MAX_COMPARED_TEXT:
+            raise DiffError(f"over {MAX_COMPARED_TEXT:,} characters; diff them with the shell (diff -u) "
+                            "and pass patch or patch_file")
         if before == after:
             raise DiffError("before and after are the same, nothing to show")
         name = clean_text(given["name"]) if isinstance(given.get("name"), str) else ""

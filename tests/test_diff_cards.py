@@ -135,6 +135,11 @@ def test_two_texts_are_compared():
     notes = []
     assert _one({"before": "same", "after": "same"}, notes) is None
     assert notes[0] == "cards[0].diff: before and after are the same, nothing to show"
+    notes = []
+    assert _one({"before": ["old"], "after": "new"}, notes) is None
+    assert notes[0] == "cards[0].diff.before: before and after are text"
+    notes = []
+    assert _one({"before": "x" * 20_001, "after": "y"}, notes) is None and "diff -u" in notes[0]
     for before, after in (("a\n", "a"), ("a\r\nb", "a\nb")):
         notes = []
         assert _one({"before": before, "after": after}, notes) is None

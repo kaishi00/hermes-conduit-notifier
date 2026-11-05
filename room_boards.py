@@ -282,7 +282,7 @@ class KeptDiffs:
                           reverse=True)
         except OSError:
             return
-        now = time.time()
+        now = self.clock()
         for index, (mtime, path) in enumerate(kept):
             if index >= MAX_KEPT_DIFFS or now - mtime >= KEEP_S:
                 try:
