@@ -294,6 +294,26 @@ _SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _thread_lock = threading.Lock()
 
+# answers_ready's "not yet" per (file, batch), kept while the file is unchanged.
+_not_ready: dict[tuple[str, str], tuple[int, int, int, int]] = {}
+NOT_READY_KEPT = 64
+# A file written this recently could be written again within the same
+# timestamp tick, unseen by a stat (git's "racy" files): never trusted.
+SETTLED_NS = 2_000_000_000
+
+
+def _settled_signature(path: Path) -> tuple[int, int, int, int] | None:
+    """The file as a stat sees it, once it is old enough that any later write
+    shows up as a change; None while it is missing or just written. Every
+    writer replaces the file whole (_save), so a write always changes this."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    if time.time_ns() - stat.st_mtime_ns < SETTLED_NS:
+        return None
+    return (stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+
 
 class CallStore:
     def __init__(self, home: Path, clock: Callable[[], float] = time.time,
@@ -664,10 +684,26 @@ class CallStore:
 
     def answers_ready(self, request_id: Any) -> bool:
         """Whether a call has answered every question of the clarify loop's
-        batch ``request_id``. Reads only."""
-        if not isinstance(request_id, str) or not request_id or not self.path.exists():
+        batch ``request_id``. Reads only.
+
+        A parked question asks every second for up to an hour (#563), so a
+        "not yet" is remembered against the file as it was: until the file
+        changes, the answer can't have come (only expiry happens without a
+        write, and that can't complete a batch)."""
+        if not isinstance(request_id, str) or not request_id:
             return False
-        return any(_complete(item, request_id) for item in self._load()["waiting"])
+        signature = _settled_signature(self.path)
+        key = (str(self.path), request_id)
+        if signature is None and not self.path.exists():
+            return False
+        if signature is not None and _not_ready.get(key) == signature:
+            return False
+        ready = any(_complete(item, request_id) for item in self._load()["waiting"])
+        if not ready and signature is not None:
+            if len(_not_ready) >= NOT_READY_KEPT:
+                _not_ready.pop(next(iter(_not_ready)), None)
+            _not_ready[key] = signature
+        return ready
 
     def take_answers(self, request_id: Any) -> dict[str, str] | None:
         """The clarify loop's question batch ``request_id``, once every

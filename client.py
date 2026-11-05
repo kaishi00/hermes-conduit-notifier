@@ -36,6 +36,7 @@ from hermes_constants import get_hermes_home
 
 from . import e2e, link_status
 from .events import PLUGIN_VERSION, redact_event
+from .keep_alive import KeepAliveHTTPSHandler
 from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url, replaced_pairing_query
 
 
@@ -672,7 +673,9 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_opener = urllib.request.build_opener(_RefuseRedirects)
+# HTTPS to the relay keeps its connection between requests (#562).
+_keep_alive = KeepAliveHTTPSHandler()
+_opener = urllib.request.build_opener(_RefuseRedirects, _keep_alive)
 # Plain HTTP (loopback, or a LAN/Tailscale pairing claim) never goes through
 # an HTTP(S)_PROXY, which would see the credential or pairing code in clear.
 _direct_opener = urllib.request.build_opener(_RefuseRedirects, urllib.request.ProxyHandler({}))

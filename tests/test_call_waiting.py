@@ -340,3 +340,36 @@ def test_an_answer_whose_delivery_record_is_gone_is_still_taken_back(store):
     store.path.write_text(json.dumps(state))
     assert store.approval_delivery(answer_id, wait_s=0) == "withdrawn"
     assert store.waiting_for("s1")["answered"] is False
+
+
+def test_a_parked_question_rereads_only_when_the_file_changes(store, monkeypatch):
+    # The clarify loop asks every second for up to an hour (#563).
+    store.note_waiting("s1", "question", request_id="conduit-push-m", questions=BATCH)
+    monkeypatch.setattr(store_module, "SETTLED_NS", 0)
+    loads = []
+    real_load = CallStore._load
+
+    def counting_load(self, **kwargs):
+        loads.append(kwargs)
+        return real_load(self, **kwargs)
+
+    monkeypatch.setattr(CallStore, "_load", counting_load)
+    for _ in range(5):
+        assert store.answers_ready("conduit-push-m") is False
+    assert len(loads) == 1, "an unchanged file is read once"
+
+    store.answer_waiting("s1", answer="prod")
+    store.answer_waiting("s1", answer="unit")
+    assert store.answers_ready("conduit-push-m") is True, "a write is seen at once"
+
+
+def test_a_just_written_file_is_never_trusted_unchanged(store, monkeypatch):
+    store.note_waiting("s1", "question", request_id="conduit-push-r", questions=BATCH)
+    loads = []
+    real_load = CallStore._load
+    monkeypatch.setattr(CallStore, "_load", lambda self, **kw: loads.append(kw) or real_load(self, **kw))
+    # Written within the last two seconds: a second write in the same
+    # timestamp tick could look the same to a stat.
+    assert store.answers_ready("conduit-push-r") is False
+    assert store.answers_ready("conduit-push-r") is False
+    assert len(loads) == 2
