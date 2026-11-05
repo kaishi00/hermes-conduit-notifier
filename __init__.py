@@ -1063,6 +1063,10 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)
+    if not forks.inside():
+        # A fork takes its chat's id but isn't a turn of it: the running
+        # turn's entry stays for its tools.
+        turn_surface.start_turn(session_id)
     if forks.inside():
         # Pulse holds a fork of its home chat as it holds the chat's turns:
         # only one that started after its attempt (pulse._held_home_turn).

@@ -276,6 +276,41 @@ def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float
     return kept
 
 
+# How the message of each chat's running turn was entered, by the session id
+# its hooks and tools are given: conduit_show puts a card on a call's screen
+# only for a turn that wasn't typed (hermes-conduit#1808). The turn's hook
+# writes it and the turn's tools read it, both in the agent's process.
+_turn_entries: "dict[str, Optional[str]]" = {}
+_turn_entries_lock = threading.Lock()
+MAX_TURN_ENTRIES = 256
+
+
+def start_turn(session_id: Any) -> None:
+    """A turn of ``session_id`` starts: what an earlier turn's message was
+    sent as no longer counts."""
+    _keep_entry(session_id, None)
+
+
+def turn_entry(session_id: Any) -> Optional[str]:
+    """How the message of ``session_id``'s running turn was entered, as
+    Conduit reported it ("typed" or "spoken"); None when unknown."""
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    with _turn_entries_lock:
+        return _turn_entries.get(session_id)
+
+
+def _keep_entry(session_id: Any, entry: Optional[str]) -> None:
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _turn_entries_lock:
+        _turn_entries.pop(session_id, None)
+        if entry in INPUTS:
+            _turn_entries[session_id] = entry
+            while len(_turn_entries) > MAX_TURN_ENTRIES:
+                _turn_entries.pop(next(iter(_turn_entries)))
+
+
 def current_session() -> Any:
     """Hermes' record of the chat whose turn runs on this thread, if Hermes'
     app gateway runs in this process. Never imports it: a copy this plugin
@@ -304,6 +339,7 @@ def note(from_conduit: bool, message: Any, transport: Any = None,
         if kept is None:
             return None
         surface, entry = kept
+        _keep_entry(session_id, entry)
         return line(surface, entry if entry in INPUTS else None)
     except Exception:  # noqa: BLE001
         return None

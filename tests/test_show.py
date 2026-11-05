@@ -238,6 +238,52 @@ def test_cards_show_in_a_chat_without_a_call_screen(tool_home):
         "Markdown alone still needs a call screen"
 
 
+@pytest.fixture()
+def typed_turn():
+    """A turn whose message Conduit reported as typed (hermes-conduit#1808)."""
+    turn_surface = tool.turn_surface
+    turn_surface._keep_entry("s1", "typed")
+    yield
+    turn_surface.start_turn("s1")
+
+
+def test_markdown_alone_in_a_typed_chat_is_refused_and_kept_off_the_call_screen(tool_home, typed_turn):
+    # A phone that polled in the last hours counts as a call screen; the
+    # typed message says no call screen is open (hermes-conduit#1808).
+    _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards"))
+    answer = _call({"title": "Forecast", "markdown": TABLE})
+    assert answer == {"ok": False, "error": "typed_chat", "note": tool.TYPED_CHAT_NOTE}
+    assert "cards" not in _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards")), \
+        "nothing waits for a call screen that isn't open"
+
+
+def test_cards_in_a_typed_chat_are_drawn_there_and_not_kept_for_a_call(tool_home, typed_turn):
+    _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards"))
+    answer = _call({"title": "Dinner", "markdown": TABLE, "cards": [MAP]})
+    assert answer["ok"] is True and answer["cards"] == [CLEAN_MAP] and "id" not in answer
+    assert answer["note"].startswith(tool.IN_CHAT_NOTE), "Hermes hears its Markdown wasn't shown"
+    assert "cards" not in _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards"))
+
+
+def test_a_spoken_or_unreported_turn_still_reaches_the_call_screen(tool_home):
+    _exchange(PresentStore(tool_home))
+    turn_surface = tool.turn_surface
+    for entry in ("spoken", None):
+        turn_surface._keep_entry("s1", entry)
+        answer = _call({"title": "Forecast", "markdown": TABLE})
+        assert answer["ok"] is True and answer["note"] == tool.SHOWN_NOTE, entry
+    turn_surface.start_turn("s1")
+
+
+def test_a_typed_turn_counts_only_for_its_own_chat_until_the_next_turn(tool_home):
+    _exchange(PresentStore(tool_home))
+    turn_surface = tool.turn_surface
+    turn_surface._keep_entry("s1", "typed")
+    assert _call({"title": "Forecast", "markdown": TABLE}, session_id="s2")["ok"] is True, "another chat's turn"
+    turn_surface.start_turn("s1")
+    assert _call({"title": "Forecast", "markdown": TABLE})["ok"] is True, "the next turn starts unknown"
+
+
 def test_cards_that_are_all_invalid_are_refused(tool_home):
     _exchange(PresentStore(tool_home))
     answer = _call({"title": "Dinner", "cards": [{"type": "weather", "places": [{"name": "x"}]}]})
@@ -333,6 +379,13 @@ def test_a_group_room_gets_its_board_as_markdown(tool_home, monkeypatch):
     assert answer["ok"] is False and answer["error"] == "group_room"
     assert answer["markdown"].startswith("**Kin Khao**") and "markdown below" in answer["note"]
     assert _call({"title": "Dinner", "cards": [MAP]}, is_room=lambda s: s == "room-1")["ok"] is True, "a chat draws it"
+
+
+def test_markdown_alone_in_a_group_room_is_refused_and_kept_off_the_call_screen(tool_home):
+    _exchange(PresentStore(tool_home))
+    answer = _call({"title": "Forecast", "markdown": TABLE}, is_room=lambda s: s == "s1")
+    assert answer == {"ok": False, "error": "group_room", "note": tool.ROOM_MARKDOWN_NOTE}
+    assert "cards" not in _exchange(PresentStore(tool_home))
 
 
 def test_a_room_this_host_runs_keeps_its_board_for_conduit(tool_home, monkeypatch):

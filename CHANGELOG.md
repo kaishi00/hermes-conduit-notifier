@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.131.3 (2026-11-05)
+
+### Fixes
+- In a typed chat, Hermes could say something was on your screen when
+  nothing was shown: text it put up for a call's screen waited for a call
+  that wasn't open. Hermes now hears to write it in its reply, and cards it
+  shows in a typed chat stay in the chat.
+
 ## 0.131.2 (2026-11-05)
 
 ### Fixes

@@ -265,6 +265,30 @@ def test_a_subagent_turn_leaves_the_report_alone(gateway, client):
     assert gateway.turn(CONDUIT, "hi") == surfaces.line("ipad", "typed")
 
 
+def test_the_turns_tools_hear_how_its_message_was_entered(gateway, client):
+    # conduit_show reads it: a typed message's chat has no call screen (hermes-conduit#1808).
+    client.post(f"{BASE}/turn-surface", json=_report("iphone", "hi", "typed"))
+    gateway.turn(CONDUIT, "hi")
+    assert surfaces.turn_entry("stored-1") == "typed"
+    client.post(f"{BASE}/turn-surface", json=_report("iphone", "again", "spoken"))
+    gateway.turn(CONDUIT, "again")
+    assert surfaces.turn_entry("stored-1") == "spoken"
+    gateway.turn(CONDUIT, "unreported")
+    assert surfaces.turn_entry("stored-1") is None, "a turn with no report says nothing of the last one"
+    client.post(f"{BASE}/turn-surface", json=_report("iphone", "typed again", "typed"))
+    gateway.turn(CONDUIT, "typed again")
+    gateway.turn(DESKTOP, "typed again")
+    assert surfaces.turn_entry("stored-1") is None, "a turn sent from elsewhere starts unknown"
+
+
+def test_a_forks_hook_leaves_the_running_turns_entry(gateway, client, monkeypatch):
+    client.post(f"{BASE}/turn-surface", json=_report("iphone", "hi", "typed"))
+    gateway.turn(CONDUIT, "hi")
+    monkeypatch.setattr(plugin.forks, "inside", lambda: True)
+    gateway.turn(CONDUIT, "a side question")
+    assert surfaces.turn_entry("stored-1") == "typed"
+
+
 def test_no_gateway_in_this_process_means_no_line(monkeypatch):
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     assert surfaces.note(True, "hi", CONDUIT) is None
