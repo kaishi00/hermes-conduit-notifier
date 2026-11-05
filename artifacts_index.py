@@ -572,3 +572,103 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
             next_before = top
             break
     return {"items": items, "next_before": next_before}
+
+
+# --- A file a reply names ------------------------------------------------------
+#
+# A reply often names a file by its name or a path inside a project
+# (`AppState.swift`, `Conduit/Views/X.swift`), not where it lives: the chat's
+# working folder is often unset, and the agent worked somewhere else. The
+# chat's own history says where: the tool calls and results that read or
+# wrote the file carry its full path (hermes-conduit#1809). ``resolve_name``
+# looks there, newest first, after the chat's folder.
+
+# Rows of one chat read for a name, newest first.
+RESOLVE_MAX_ROWS = 20_000
+MAX_RESOLVE_NAME_CHARS = 512
+# Paths a row offers, and how many a request checks on disk at most.
+MAX_RESOLVE_CANDIDATES = 400
+_ABS_PATH_RE = re.compile(r"""(?:~/|/)[^\s'"`<>()\[\]{},;|\\]+""")
+
+
+def _clean_name(name: str) -> str:
+    text = str(name or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.rstrip("/")
+
+
+def _path_tokens(text: str, suffix: str) -> Iterable[str]:
+    """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
+    whole trailing folders: ``/a/b/AppState.swift`` for
+    ``AppState.swift``, never ``/a/MyAppState.swift``)."""
+    if suffix not in text:
+        return
+    for match in _ABS_PATH_RE.finditer(text):
+        path = match.group(0).rstrip(_TRAILING + "'\"")
+        # grep's `path:12:` and a compiler's `path:12:5:`.
+        path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
+        if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
+            yield path
+
+
+def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str, *,
+                 exists: Optional[Callable[[str], bool]] = None,
+                 max_rows: int = RESOLVE_MAX_ROWS) -> dict:
+    """Where the file a chat's reply names as ``name`` (a bare name or a
+    relative path) is: joined to the chat's working folder, else the newest
+    absolute path ending in it that the chat's own messages (tool calls,
+    tool results, replies) carry. ``exists`` checks a candidate on the host;
+    without it (a profile whose files are on another machine) the newest
+    candidate is taken. ``{"path": None}`` when nothing names it."""
+    suffix = _clean_name(name)
+    if not suffix or len(suffix) > MAX_RESOLVE_NAME_CHARS or "\n" in suffix:
+        return {"path": None}
+    if _is_local_path(suffix):
+        found = exists is None or exists(os.path.expanduser(suffix))
+        return {"path": suffix if found else None, "via": "absolute"}
+    if any(part == ".." for part in suffix.split("/")):
+        return {"path": None}
+    chat = lineage(conn, [sid for sid in session_ids if sid])
+    if not chat:
+        return {"path": None}
+    session_columns = _columns(conn, "sessions")
+    marks = ",".join("?" * len(chat))
+    checked: set = set()
+
+    def found(path: str) -> bool:
+        if path in checked or len(checked) >= MAX_RESOLVE_CANDIDATES:
+            return False
+        checked.add(path)
+        return exists is None or exists(os.path.expanduser(path))
+
+    if "cwd" in session_columns:
+        for row in conn.execute(f"SELECT DISTINCT cwd FROM sessions WHERE id IN ({marks})", chat):
+            cwd = str(row[0] or "").strip().rstrip("/")
+            if cwd.startswith(("/", "~/")):
+                candidate = f"{cwd}/{suffix}"
+                if found(candidate):
+                    return {"path": candidate, "via": "folder"}
+
+    message_columns = _columns(conn, "messages")
+    tool_calls = "tool_calls" if "tool_calls" in message_columns else "NULL"
+    # The name's last part narrows the rows sqlite hands back.
+    leaf = suffix.rsplit("/", 1)[-1].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    sql = (f"SELECT content, {tool_calls} AS tool_calls FROM messages WHERE session_id IN ({marks}) "
+           f"AND (content LIKE ? ESCAPE '\\' OR {tool_calls} LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT ?")
+    pattern = f"%/{leaf}%"
+    for row in conn.execute(sql, [*chat, pattern, pattern, max(1, int(max_rows))]):
+        for column in ("content", "tool_calls"):
+            text = row[column]
+            if not isinstance(text, str):
+                continue
+            # A JSON-encoded tool call escapes nothing in a POSIX path, but
+            # a result can hold one as an escaped string.
+            text = text[:MAX_SCAN_CHARS].replace("\\/", "/")
+            # Newest mention in the row first, as rows are.
+            for path in reversed(list(_path_tokens(text, suffix))):
+                if found(path):
+                    return {"path": path, "via": "chat"}
+        if len(checked) >= MAX_RESOLVE_CANDIDATES:
+            break
+    return {"path": None}

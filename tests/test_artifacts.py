@@ -445,3 +445,106 @@ def test_the_route_hides_missing_files_on_request(tmp_path, monkeypatch):
     assert [i["name"] for i in client.get(f"{BASE}/artifacts?missing=show").json()["items"]] == ["gone.png"]
     assert client.get(f"{BASE}/artifacts?missing=hide").json()["items"] == []
     assert client.get(f"{BASE}/artifacts?missing=bogus").status_code == 400
+
+
+# --- A file a reply names (hermes-conduit#1809) -----------------------------
+
+
+def _read_call(path):
+    return json.dumps([{"function": {"name": "read_file", "arguments": json.dumps({"path": path})}}])
+
+
+def test_a_bare_name_resolves_to_the_path_the_chat_read_it_at(tmp_path):
+    real = tmp_path / "yelan-audits" / "hermes-conduit" / "Conduit" / "Services"
+    real.mkdir(parents=True)
+    (real / "AppState.swift").write_text("x")
+    (tmp_path / "MyAppState.swift").write_text("x")
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call(str(tmp_path / "MyAppState.swift"))),
+        ("s1", "assistant", "", _read_call(str(real / "AppState.swift"))),
+        ("s1", "assistant", "The fix is in `AppState.swift`."),
+    ])
+    found = index.resolve_name(conn, ["s1"], "AppState.swift", exists=lambda p: pathlib.Path(p).is_file())
+    assert found == {"path": str(real / "AppState.swift"), "via": "chat"}
+    rel = index.resolve_name(conn, ["s1"], "./Services/AppState.swift", exists=lambda p: pathlib.Path(p).is_file())
+    assert rel["path"] == str(real / "AppState.swift")
+    # A name that only ends the same way isn't the file.
+    assert index.resolve_name(conn, ["s1"], "pState.swift", exists=lambda p: True) == {"path": None}
+
+
+def test_the_newest_existing_mention_wins_and_tool_output_counts(tmp_path):
+    old = tmp_path / "old" / "report.json"
+    new = tmp_path / "new" / "report.json"
+    for path in (old, new):
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    gone = tmp_path / "gone" / "report.json"
+    conn = _db(tmp_path / "home", [
+        ("s1", "tool", f"{old}:12: match", None, "terminal"),
+        ("s1", "tool", json.dumps({"output": f"wrote {new}"}), None, "terminal"),
+        ("s1", "assistant", f"Also tried {gone}."),
+    ])
+    found = index.resolve_name(conn, ["s1"], "report.json", exists=lambda p: pathlib.Path(p).is_file())
+    assert found["path"] == str(new)
+
+
+def test_the_chats_folder_comes_first_and_lineage_is_read(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT, cwd TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('parent', 't', NULL, ?)", (str(tmp_path / "work"),))
+    conn.execute("INSERT INTO sessions VALUES ('child', 't', 'parent', NULL)")
+    conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('parent', 'assistant', ?)",
+                 (f"see {tmp_path}/elsewhere/notes.md",))
+    conn.commit()
+    conn.close()
+    (tmp_path / "work" / "docs").mkdir(parents=True)
+    (tmp_path / "work" / "docs" / "notes.md").write_text("x")
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "notes.md").write_text("x")
+    db = index.open_db(home)
+    check = lambda p: pathlib.Path(p).is_file()  # noqa: E731
+    assert index.resolve_name(db, ["child"], "docs/notes.md", exists=check) == {
+        "path": str(tmp_path / "work" / "docs" / "notes.md"), "via": "folder"}
+    assert index.resolve_name(db, ["child"], "notes.md", exists=check) == {
+        "path": str(tmp_path / "elsewhere" / "notes.md"), "via": "chat"}
+
+
+def test_nothing_resolves_outside_the_chat_or_past_the_folder(tmp_path):
+    conn = _db(tmp_path / "home", [("s2", "assistant", "/root/secret/plan.md")],
+               sessions=[("s1", "a"), ("s2", "b")])
+    assert index.resolve_name(conn, ["s1"], "plan.md", exists=lambda p: True) == {"path": None}
+    assert index.resolve_name(conn, ["s2"], "../plan.md", exists=lambda p: True) == {"path": None}
+    assert index.resolve_name(conn, [], "plan.md", exists=lambda p: True) == {"path": None}
+    assert index.resolve_name(conn, ["s2"], "", exists=lambda p: True) == {"path": None}
+    # A file the chat named that is gone is reported as not found.
+    assert index.resolve_name(conn, ["s2"], "plan.md", exists=lambda p: False) == {"path": None}
+    # Without a check (an SSH profile), the newest mention is taken.
+    assert index.resolve_name(conn, ["s2"], "plan.md")["path"] == "/root/secret/plan.md"
+
+
+def test_an_absolute_path_is_only_checked(tmp_path):
+    conn = _db(tmp_path / "home", [])
+    (tmp_path / "a.md").write_text("x")
+    check = lambda p: pathlib.Path(p).is_file()  # noqa: E731
+    assert index.resolve_name(conn, ["s1"], str(tmp_path / "a.md"), exists=check)["path"] == str(tmp_path / "a.md")
+    assert index.resolve_name(conn, ["s1"], str(tmp_path / "b.md"), exists=check)["path"] is None
+
+
+def test_the_resolve_route_reads_the_profile_store(tmp_path, monkeypatch):
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "report.xlsx").write_text("x")
+    _db(tmp_path, [("s1", "tool", json.dumps({"file_path": str(tmp_path / "out" / "report.xlsx")}), None,
+                    "execute_code")]).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "report.xlsx", "session_id": ["gone", "s1"]}).json()
+    assert body == {"ok": True, "path": str(tmp_path / "out" / "report.xlsx"), "via": "chat"}
+    missing = client.get(f"{BASE}/workspace/resolve", params={"path": "nope.xlsx", "session_id": "s1"}).json()
+    assert missing == {"ok": True, "path": None}

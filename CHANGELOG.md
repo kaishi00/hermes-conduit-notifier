@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.132.0 (2026-11-05)
+
+### New and improved
+- Tapping a file a reply names by its name, like `AppState.swift`, opens the
+  file Hermes actually worked on, found from the chat's own steps, instead
+  of saying it can't be found.
+
 ## 0.131.3 (2026-11-05)
 
 ### Fixes

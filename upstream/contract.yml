@@ -545,6 +545,7 @@ routes:
   - GET /web-search/status
   - GET /workspace/list
   - GET /workspace/recent
+  - GET /workspace/resolve
   - GET /workspace/search
   - POST /workspace/{action}
   - GET /workstreams
