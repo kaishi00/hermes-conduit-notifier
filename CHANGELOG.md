@@ -13,12 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.132.2 (2026-11-05)
+
+### Fixes
+- A tapped file name now opens the file when its folder or file name has an
+  apostrophe in it, like `John's Projects`. On an SSH profile, a tap on a file
+  in a folder with brackets in its name no longer opens a wrong file of the
+  same name.
+
 ## 0.132.1 (2026-11-05)
 
 ### Fixes
-- A tapped file name now opens the file when its folder has spaces or
-  brackets in its name, like `My Project` or `Report (final).pdf`, and when
-  the name ends in punctuation. Before, Conduit said it wasn't on the server.
+- A tapped file name now opens the file when its folder or file name has
+  spaces or brackets in it, like `My Project` or `Report (final).pdf`, and
+  when the name ends in punctuation. Before, Conduit said it wasn't on the
+  server.
 
 ## 0.132.0 (2026-11-05)
 

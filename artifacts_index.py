@@ -603,7 +603,8 @@ def _clean_name(name: str) -> str:
 
 # A path between quotes or backticks, where it may hold spaces or brackets
 # (`/Users/me/My Project/Report (final).pdf`, a tool call's JSON string).
-_QUOTED_PATH_RE = re.compile(r"""(["'`])((?:~/|/|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/])[^"'`\n]{1,%d})\1""" % MAX_PATH_CHARS)
+# Only its own quote ends it, so `/Users/me/John's Projects/a.md` is whole.
+_QUOTED_PATH_RE = re.compile(r"""(["'`])((?:~/|/|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/])(?:(?!\1)[^\n]){1,%d})\1""" % MAX_PATH_CHARS)
 # A sentence's own end after a path, which a name ending in `_` or `*` keeps.
 _SENTENCE_END = ".,;:!?"
 # What the bare-path pattern stops at, so a quoted path holding one is read whole.
@@ -655,30 +656,38 @@ def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterab
     """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
     whole trailing folders: ``/a/b/AppState.swift`` for
     ``AppState.swift``, never ``/a/MyAppState.swift``), in the order they
-    appear. With ``quoted_whole``, a quoted path is also read whole, spaces
-    and brackets included, just after its pieces (so, newest first, before
-    them): only a host that checks each candidate can tell a quoted path
-    from quoted prose that ends in one."""
+    appear. A quoted run that is one path with spaces, brackets or an
+    apostrophe in it is never read in pieces; with ``quoted_whole`` it is
+    read whole. Only a host that checks each candidate can tell a quoted
+    path from quoted prose that ends in one, so an SSH profile, which
+    can't, reads neither."""
     if suffix.rsplit("/", 1)[-1] not in text:
         return
     found: list = []
-    for match in (_QUOTED_PATH_RE.finditer(text) if quoted_whole else ()):
+    whole_runs: list = []
+    for match in _QUOTED_PATH_RE.finditer(text):
         run = match.group(2)
-        if not _PATH_BREAK_RE.search(run) or _ANOTHER_PATH_RE.search(run):
+        if not _PATH_BREAK_RE.search(run.replace("'", " ")) or _ANOTHER_PATH_RE.search(run):
             continue  # the bare-path pattern reads it, piece by piece
         head = _ABS_PATH_RE.match(run)
         if head and _bare_candidate(head.group(0), suffix):
             # It opens with the whole path ("/srv/old.md renamed to
             # backup/old.md"): what follows is prose, read as such.
             continue
+        # One path: a piece of it (/AppState.swift after `Reports (2026)`)
+        # isn't a file the chat named.
+        whole_runs.append(match.span(2))
+        if not quoted_whole:
+            continue
         # A nested JSON string's quote comes escaped: \" ends the path.
         strip = " \t\\" + _SENTENCE_END
         path = (_path_candidate(run, suffix, strip=" \t\\")
                 or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
         if path:
-            # Its pieces stay candidates, tried after it.
-            found.append((match.end(2), path))
+            found.append((match.start(2), path))
     for match in _ABS_PATH_RE.finditer(text):
+        if any(lo <= match.start() < hi for lo, hi in whole_runs):
+            continue
         path = _bare_candidate(match.group(0), suffix)
         if path:
             found.append((match.start(), path))

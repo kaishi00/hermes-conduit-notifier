@@ -775,3 +775,22 @@ def test_an_ssh_profile_never_takes_quoted_prose_for_a_path(tmp_path, monkeypatc
     assert resolve("old.md") is None
     # Unchecked, a quoted path with a space is left out too.
     assert resolve("notes.md") is None
+
+
+def test_a_quoted_path_with_an_apostrophe_is_read_whole(tmp_path):
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call("/Users/me/John's Projects/AppState.swift")),
+        ("s1", "assistant", "Saved `/Users/me/Ann's/notes.md`."),
+    ])
+    check = lambda p: True  # noqa: E731
+    assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=check)["path"] == (
+        "/Users/me/John's Projects/AppState.swift")
+    assert index.resolve_name(conn, ["s1"], "notes.md", exists=check)["path"] == "/Users/me/Ann's/notes.md"
+
+
+def test_an_ssh_profile_never_opens_a_piece_of_a_quoted_bracket_path(tmp_path, monkeypatch):
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", '"/Users/me/Reports (2026)/AppState.swift"', None, "terminal")])
+    monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: object())
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "AppState.swift", "session_id": "s1"}).json()
+    assert body["path"] is None, "never /AppState.swift"
