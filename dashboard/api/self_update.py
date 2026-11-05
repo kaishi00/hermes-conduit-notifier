@@ -417,6 +417,9 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., 
 def _self_update_failed(job: Dict[str, Any], detail: str, code: Optional[str] = None) -> None:
     # failed_step says how far it got: Conduit runs the steps itself only
     # when the pull itself failed.
+    # The gateway's stage belonged to the step that ended.
+    for key in ("gateway_stage", "running_chats"):
+        job.pop(key, None)
     job.update(failed_step=job.get("step"), step="failed", detail=detail, finished_at=time.time())
     if code:
         job["code"] = code
@@ -455,6 +458,10 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
                 _write_self_update(path, job)
             sleep(SELF_UPDATE_CHATS_RECHECK_S)
             waited += SELF_UPDATE_CHATS_RECHECK_S
+        if job.pop("gateway_stage", None) is not None:
+            # Restarting now, no longer waiting.
+            job.pop("running_chats", None)
+            _write_self_update(path, job)
 
         def draining() -> None:
             if job.get("gateway_stage") != "draining":
@@ -670,7 +677,7 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
     # Pulled (it has a version) and this process loaded it: done, whatever
     # restarted the dashboard (an update's own re-exec or a /self/restart).
     if job.get("version") is not None and capabilities.LOADED_VERSION == job["version"]:
-        for key in ("failed_step", "detail", "code"):
+        for key in ("failed_step", "detail", "code", "gateway_stage", "running_chats"):
             job.pop(key, None)
         job.update(step="done", loaded_version=capabilities.LOADED_VERSION, finished_at=time.time())
     else:

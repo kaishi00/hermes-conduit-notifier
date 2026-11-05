@@ -136,7 +136,8 @@ def test_the_gateways_running_work_is_waited_for_before_its_restart(monkeypatch,
                                      lambda: [tmp_path], lambda job: None, sleep=sleep, point_profiles=lambda: None,
                                      gateway_work=gateway_work)
     assert seen[:2] == [("waiting", 2), ("waiting", 1)]
-    assert seen[2][0] == "restart" and seen[2][1]["step"] == "restarting_gateway"
+    # Restarting, no longer waiting.
+    assert seen[2][0] == "restart" and seen[2][1]["step"] == "restarting_gateway" and "gateway_stage" not in seen[2][1]
     final = json.loads(path.read_text())
     assert final["step"] == "restarting_dashboard" and "gateway_stage" not in final and final["running_chats"] == 0
 
@@ -145,6 +146,19 @@ def test_work_that_never_ends_doesnt_hold_the_gateway_restart_forever(monkeypatc
     monkeypatch.setattr(api.self_update, "SELF_UPDATE_GATEWAY_WAIT_S", 3 * api.self_update.SELF_UPDATE_CHATS_RECHECK_S)
     job, scheduled, _, sleeps = _run(tmp_path, monkeypatch=monkeypatch, gateway_work=lambda: 1, markers={})
     assert len(sleeps) == 3 and job["step"] == "restarting_dashboard" and len(scheduled) == 1
+
+
+def test_a_job_that_fails_while_waiting_drops_the_gateway_stage(monkeypatch, tmp_path):
+    work = [1]
+
+    def gateway_work():
+        if not work:
+            raise RuntimeError("socket")
+        return work.pop()
+
+    job, _, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway_work=gateway_work, markers={})
+    assert job["step"] == "failed" and job["failed_step"] == "restarting_gateway"
+    assert "gateway_stage" not in job and "running_chats" not in job
 
 
 def test_a_draining_gateway_shows_as_draining_and_isnt_a_failure(monkeypatch, tmp_path):
