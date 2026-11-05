@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import Response
+from fastapi import HTTPException, Response
 
 from . import core, hermes_calls, watch_local_live
 
@@ -24,6 +24,13 @@ router = core.router
 WAITING_GRACE_S = 30.0
 # Hermes' clarify timeout when it can't be read.
 CLARIFY_TIMEOUT_S = 3600.0
+# Its own bucket: Conduit reads the list every 20 s per profile while it's
+# on screen, which must never crowd out a call's presence or watch renewals
+# in the calls routes' bucket.
+WAITING_LIMIT = 120
+WAITING_WINDOW_S = 60.0
+_waiting_limiter = core._MintLimiter(WAITING_LIMIT, WAITING_WINDOW_S,
+                                     message="Too many waiting-list reads; try again shortly")
 
 
 def _clarify_timeout() -> Optional[float]:
@@ -59,4 +66,13 @@ def waiting_list() -> Dict[str, Any]:
 
 @router.get("/waiting")
 async def get_waiting(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
-    return await hermes_calls._calls_route(profile, response, waiting_list, "waiting list")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await core._run_scoped(profile, core._limited(_waiting_limiter, profile, waiting_list)))}
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise core._unexpected("waiting list", exc, feature="Calls")

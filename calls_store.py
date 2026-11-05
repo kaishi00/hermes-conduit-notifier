@@ -149,7 +149,10 @@ MAX_TOLD = 64
 # designs/hermes-call-clarify.md). Only a wait kept with alert calls on is
 # ``followed``, so only those are a call's to read or answer. Gone once
 # answered anywhere.
-WAITING_TTL_S = 2 * 3600
+# As long as Hermes' longest clarify wait (clarify_loop's day), so a question
+# still waiting stays listed; the list itself drops one Hermes gave up on
+# sooner (``waiting_list``'s ``max_age``).
+WAITING_TTL_S = 24 * 3600
 # Every chat waiting at once, in one profile.
 MAX_WAITING = 32
 # The list's line for a wait: an approval's description, a question's text.

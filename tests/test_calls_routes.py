@@ -29,6 +29,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(api.core, "_pairing_state_path", lambda: tmp_path / "conduit-push.json")
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     api.hermes_calls._calls_limiter._mints.clear()
+    api.waiting._waiting_limiter._mints.clear()
     return tmp_path
 
 
@@ -352,3 +353,11 @@ def test_the_waiting_list_names_every_chat_hermes_waits_on_but_workstreams(paire
 def test_the_waiting_list_reads_an_unreadable_registry_as_no_workstreams(paired, monkeypatch):
     monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: (_ for _ in ()).throw(RuntimeError(name)))
     assert api.waiting._workstream_sessions(paired) == []
+
+
+def test_the_waiting_list_reads_from_a_bucket_of_its_own(paired):
+    http = _http()
+    for _ in range(api.hermes_calls.CALLS_LIMIT + 5):
+        assert http.get(f"{BASE}/waiting").status_code == 200
+    # A call's renewals still go through.
+    assert http.get(f"{BASE}/calls").status_code == 200
