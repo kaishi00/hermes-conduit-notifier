@@ -637,6 +637,8 @@ def read_diff(given: dict[str, Any]) -> list[dict[str, Any]]:
         lines = difflib.unified_diff(before.splitlines(), after.splitlines(), f"a/{name}", f"b/{name}",
                                      lineterm="", n=3)
         files = parse_patch("\n".join(lines))
+        if not files:
+            raise DiffError("before and after have the same lines (only line endings differ), nothing to show")
         if not before:
             files[0]["status"] = "added"
         elif not after:

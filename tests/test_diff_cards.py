@@ -135,6 +135,10 @@ def test_two_texts_are_compared():
     notes = []
     assert _one({"before": "same", "after": "same"}, notes) is None
     assert notes[0] == "cards[0].diff: before and after are the same, nothing to show"
+    for before, after in (("a\n", "a"), ("a\r\nb", "a\nb")):
+        notes = []
+        assert _one({"before": before, "after": after}, notes) is None
+        assert "only line endings differ" in notes[0]
 
 
 def test_a_diff_keeps_what_fits_and_says_what_it_left_out(monkeypatch):

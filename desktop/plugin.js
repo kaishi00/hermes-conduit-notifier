@@ -868,7 +868,8 @@ function DiffFile({ file, open, onOpen, loading, failed }) {
             })
           : jsx('div', {
               className: cn('px-2 pb-2 text-xs', muted),
-              children: failed ?? (loading ? 'Loading the diff…' : 'No lines changed.')
+              children: failed ?? (loading ? 'Loading the diff…'
+                : file.added || file.removed ? 'Its lines weren’t kept on Hermes.' : 'No lines changed.')
             })
     ]
   })
