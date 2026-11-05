@@ -3741,7 +3741,8 @@ def _row_screen(work: work_store.Work, screen: dict) -> tuple[str, float]:
     used = float(last.get("at") or 0) if last.get("session_id") == work.session_id else 0.0
     if controlling.get("session_id") == work.session_id:
         return "controlling", used
-    if any((item or {}).get("session_id") == work.session_id for item in screen.get("waiting") or []):
+    if not work.closed_at and any((item or {}).get("session_id") == work.session_id
+                                  for item in screen.get("waiting") or []):
         return "waiting", used
     return "", used
 
@@ -3854,7 +3855,12 @@ def _screen_freed(home: Path) -> bool:
     if item is None:
         return not screen_lock.snapshot(home).get("waiting")
     _, work, _ = _lookup(str(item.get("session_id") or ""), home)
+    who = {key: item[key] for key in ("profile", "kind", "ref", "title", "label") if key in item}
     if work is None or not work.session_id:
+        # Not readable just now: back on the list; the next look drops it
+        # if it no longer waits.
+        screen_lock.wait(home, str(item.get("session_id") or ""), who)
+        _watch_screen(home)
         return False
     store = work_store.Store(home)
     # Behind its turn when it's running (never redirecting it), else its next turn.
@@ -3863,7 +3869,6 @@ def _screen_freed(home: Path) -> bool:
         # Still waiting (at the running limit, say): kept on the list for
         # the next release or the watch's next look.
         logger.debug("conduit_push: couldn't tell %s the screen is free: %s", work.ref, result.get("note"))
-        who = {key: item[key] for key in ("profile", "kind", "ref", "title", "label") if key in item}
         screen_lock.wait(home, work.session_id, who)
         _watch_screen(home)
     return False

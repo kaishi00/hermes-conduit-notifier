@@ -288,3 +288,19 @@ def test_unloading_ends_the_screen_watch(on, hermes):
     work._screen_watchers.add(str(on.home))
     work.stop()
     assert work._screen_generation[0] == before + 1 and not work._screen_watchers
+
+
+def test_work_that_no_longer_waits_leaves_the_waiting_list(home):
+    lock.wait(home, "gone", {"ref": "W1"})
+    lock.wait(home, "still", {"ref": "W2"})
+    taken = lock.take_next_waiting(home, lambda item: item["session_id"] == "still")
+    assert taken["session_id"] == "still"
+    assert lock.snapshot(home)["waiting"] == []
+
+
+def test_past_the_cap_the_longest_wait_is_kept(home):
+    now = time.time()
+    for index in range(lock.MAX_WAITING + 1):
+        lock.wait(home, f"s{index}", {"ref": f"W{index}"}, now=now + index)
+    taken = lock.take_next_waiting(home, lambda item: True, now=now + 50)
+    assert taken["session_id"] == "s0"

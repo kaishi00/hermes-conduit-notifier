@@ -255,7 +255,8 @@ def wait(home: Path, session_id: str, who: dict, where: Optional[str] = None,
         waiting = [item for item in state.get("waiting") or [] if isinstance(item, dict)
                    and item.get("session_id") != session_id and now - float(item.get("at") or 0) < WAIT_KEEP_S]
         waiting.append({**who, "session_id": session_id, "home": str(home), "at": now})
-        state["waiting"] = waiting[-MAX_WAITING:]
+        # Past the cap the newest ask goes: the longest wait is woken first.
+        state["waiting"] = waiting[:MAX_WAITING]
 
 
 def take_next_waiting(home: Path, still_waits: Callable[[dict], bool], now: Optional[float] = None) -> Optional[dict]:
@@ -273,8 +274,10 @@ def take_next_waiting(home: Path, still_waits: Callable[[dict], bool], now: Opti
             found = None
             kept = []
             for item in waiting:
-                if found is None and item.get("home") == str(home) and still_waits(item):
-                    found = item
+                if found is None and item.get("home") == str(home):
+                    if still_waits(item):
+                        found = item
+                    # Work that no longer waits (resolved, failed) leaves the list.
                     continue
                 kept.append(item)
             state["waiting"] = kept
