@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.132.3 (2026-11-05)
+## 0.133.1 (2026-11-05)
 
 ### Fixes
 - A tapped file name now opens the file when its folder or file name has an
@@ -22,6 +22,14 @@ checks it). The format is fixed, because Conduit reads it:
   same name.
 - A tapped file name opens the right file when a folder in its path ends in
   a comma, semicolon or bar, rather than a file of the same name elsewhere.
+
+## 0.133.0 (2026-11-05)
+
+### New and improved
+- Hermes can show changes as a diff card: a review, a commit, a config it
+  edited or two versions of a text, with each file's added and removed
+  lines, line numbers and colors. Long diffs stay on your host and open a
+  file at a time, so they don't slow the chat down.
 
 ## 0.132.2 (2026-11-05)
 

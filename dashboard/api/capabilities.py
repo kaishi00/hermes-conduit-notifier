@@ -254,6 +254,9 @@ ROUTE_CAPABILITIES = (
     # GET /boards/desktop and POST /boards/desktop/seen: the boards the
     # plugin's Desktop half draws in Hermes Desktop chats (Cards Hermes shows).
     "desktop-boards",
+    # GET /boards/diffs: the whole of a diff card too long for conduit_show's
+    # answer, read when the user opens a file (Cards Hermes shows).
+    "diff-cards",
 )
 
 
