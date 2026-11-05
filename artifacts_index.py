@@ -626,6 +626,22 @@ def _path_candidate(path: str, suffix: str, *, strip: str) -> Optional[str]:
     return None
 
 
+# Inside a quoted run, a second path after a space: the run holds several
+# paths ("/a/old.md moved to /b/new.md"), not one with spaces in it.
+_ANOTHER_PATH_RE = re.compile(r"""\s(?:~/|/|[A-Za-z]:[\\/])""")
+
+
+def _name_end(raw: str, suffix: str, strip: str) -> Optional[str]:
+    """``raw`` up to where ``suffix`` ends it, when only ``strip``
+    characters follow (``/notes/why?.`` for ``why?``)."""
+    end = raw.replace("\\", "/").rfind("/" + suffix)
+    if end < 0:
+        return None
+    end += 1 + len(suffix)
+    tail = raw[end:]
+    return raw[:end] if all(char in strip for char in tail) else None
+
+
 def _path_tokens(text: str, suffix: str) -> Iterable[str]:
     """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
     whole trailing folders: ``/a/b/AppState.swift`` for
@@ -636,11 +652,13 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
     found: list = []
     quoted: list = []
     for match in _QUOTED_PATH_RE.finditer(text):
-        if not _PATH_BREAK_RE.search(match.group(2)):
-            continue  # the bare-path pattern reads it the same
+        run = match.group(2)
+        if not _PATH_BREAK_RE.search(run) or _ANOTHER_PATH_RE.search(run):
+            continue  # the bare-path pattern reads it, piece by piece
         # A nested JSON string's quote comes escaped: \" ends the path.
-        path = (_path_candidate(match.group(2), suffix, strip=" \t\\")
-                or _path_candidate(match.group(2), suffix, strip=" \t\\" + _SENTENCE_END))
+        strip = " \t\\" + _SENTENCE_END
+        path = (_path_candidate(run, suffix, strip=" \t\\")
+                or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
         if path:
             # Its pieces aren't candidates; a quote that only starts with
             # a path ("/srv/plan.md is done") leaves them to the bare reading.
@@ -653,8 +671,7 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
         raw = match.group(0)
         # Trailing punctuation is the sentence's, unless the name ends in it.
         path = (_path_candidate(raw, suffix, strip=_TRAILING + "'\"")
-                or _path_candidate(raw, suffix, strip=_SENTENCE_END + "'\"")
-                or _path_candidate(raw, suffix, strip="'\""))
+                or _path_candidate(_name_end(raw, suffix, _TRAILING + "'\"\\") or "", suffix, strip=""))
         if path:
             found.append((start, path))
     for _, path in sorted(found, key=lambda item: item[0]):
