@@ -384,3 +384,35 @@ def test_a_host_desktop_has_no_bot_screen_to_ask_for(monkeypatch):
     assert work.screen_possible()
     monkeypatch.setattr(work.sys, "platform", "darwin")
     assert not work.screen_possible()
+
+
+def test_a_background_child_that_outlived_its_parents_turn_lets_the_screen_go(on, hermes):
+    start()
+    plugin_init._subagent_start(child_session_id="child-bg", parent_session_id=WORKER)
+    assert click("child-bg") is None
+    assert lock.snapshot(on.home)["controlling"]["session_id"] == WORKER
+    plugin_init._subagent_stop(child_session_id="child-bg", parent_session_id=WORKER, child_status="completed")
+    assert lock.snapshot(on.home)["controlling"] is None
+
+
+def test_a_child_ending_inside_its_parents_turn_leaves_the_turns_screen(on, hermes):
+    start()
+    plugin_init._start_parent_turn(WORKER, "t1")
+    try:
+        plugin_init._subagent_start(child_session_id="child-in", parent_session_id=WORKER)
+        assert click("child-in") is None
+        plugin_init._subagent_stop(child_session_id="child-in", parent_session_id=WORKER,
+                                   parent_turn_id="t1", child_status="completed")
+        assert lock.snapshot(on.home)["controlling"]["session_id"] == WORKER
+    finally:
+        plugin_init._end_parent_turn(WORKER)
+
+
+def test_a_watch_asleep_through_an_unload_sends_nothing(on, hermes, monkeypatch):
+    freed = []
+    monkeypatch.setattr(work, "_screen_freed", lambda home: freed.append(home) or True)
+    lock.wait(on.home, "someone", {"ref": "W1"})
+    work._watch_screen(on.home)
+    work.stop()
+    time.sleep(0.1)
+    assert freed == []

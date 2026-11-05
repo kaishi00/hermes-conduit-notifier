@@ -993,7 +993,12 @@ def _subagent_start(**kwargs: Any) -> None:
 
 def _subagent_stop(**kwargs: Any) -> None:
     child = _text(kwargs.get("child_session_id"))
+    owner = screen_lock.owner_of(child) if child else ""
     _quietly(screen_lock.child_stopped, child)
+    if owner and owner != child and not _turn_running(owner):
+        # A background child that outlived its parent's turn took the screen
+        # for it: nothing else would let it go.
+        _quietly(work_tool.screen_turn_ended, owner)
     if child:
         # Hermes reports the id the child ends under, which a compaction may
         # have moved from the one subagent_start reported.
@@ -1394,6 +1399,13 @@ def _start_parent_turn(session_id: str, turn_id: Any) -> None:
 def _end_parent_turn(session_id: str) -> None:
     with _parent_turns_lock:
         _parent_turns.pop(session_id, None)
+
+
+def _turn_running(session_id: str) -> bool:
+    """Whether any turn of ``session_id`` runs now."""
+    with _parent_turns_lock:
+        running = _parent_turns.get(session_id)
+    return running is not None and time.monotonic() - running[1] < PARENT_TURN_MAX_S
 
 
 def _inside_parent_turn(session_id: str, turn_id: Any) -> bool:

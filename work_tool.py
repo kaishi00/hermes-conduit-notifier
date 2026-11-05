@@ -3923,18 +3923,22 @@ def _watch_screen(home: Path) -> None:
         if key in _screen_watchers:
             return
         _screen_watchers.add(key)
-
-    generation = _screen_generation[0]
+        # Read with the key, so a stop() between them can't hand it the new one.
+        generation = _screen_generation[0]
 
     def run() -> None:
         try:
             deadline = time.time() + screen_lock.WAIT_KEEP_S
             while time.time() < deadline and generation == _screen_generation[0]:
                 time.sleep(SCREEN_POLL_S)
+                if generation != _screen_generation[0]:
+                    return  # Unloaded while asleep: nothing more goes out.
                 try:
                     # Decided under the lock a refusal takes to start a
                     # watch, so a waiter added as this one ends isn't missed.
                     with _wake_lock:
+                        if generation != _screen_generation[0]:
+                            return
                         if not screen_lock.snapshot(home).get("waiting"):
                             _screen_watchers.discard(key)
                             return
