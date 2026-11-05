@@ -856,6 +856,8 @@ def stop(timeout: float = 1.0) -> None:
         logger.info("Conduit dropped %d queued notification(s): the plugin was unloaded", dropped)
     if running is not None:
         running.join(timeout)
+        # The send that was in progress may have handed its connection back.
+        _keep_alive.close_idle()
 
 
 # A delivery that fails on the way (no connection, a timeout, the relay busy
