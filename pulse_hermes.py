@@ -259,6 +259,13 @@ def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_
     return rows[::-1] if newest else rows
 
 
+def row_time(home: Path, *, chat_id: str, row_id: int) -> Optional[float]:
+    """When row ``row_id`` of the chat was written, whether or not
+    compaction has since made it inactive; None when it isn't there."""
+    rows = _run(home, "SELECT timestamp FROM messages WHERE id = ? AND session_id = ?", (row_id, chat_id))
+    return float(rows[0]["timestamp"]) if rows else None
+
+
 def user_row_before(home: Path, *, chat_id: str, before_id: int, max_chars: int) -> Optional[sqlite3.Row]:
     """One chat's last visible user row before row ``before_id``, cut to
     ``max_chars``: the one Hermes's rows from there on answer."""

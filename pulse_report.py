@@ -575,13 +575,11 @@ def after_done_section(home: Path, items: Sequence[dict], zone: tzinfo,
         if not chat_id or where is None:
             continue  # from the Shortcuts inbox: no chat
         try:
-            anchor = hermes.chat_messages(where, chat_id=chat_id, after_id=after_id - 1, since=0.0, max_chars=1,
-                                          limit=1)
+            said_at = hermes.row_time(where, chat_id=chat_id, row_id=after_id)  # compaction leaves it inactive
             rows = hermes.chain_messages(where, chat_id=chat_id, after_id=after_id,
                                          max_chars=PER_MESSAGE, limit=AFTER_DONE_SCAN)
         except hermes.HermesUnreadable:
             continue
-        said_at = anchor[0]["timestamp"] if anchor and anchor[0]["id"] == after_id else None
         rows = [row for row in rows if said_at is None or row["timestamp"] > said_at][-AFTER_DONE_ROWS:]
         lines, size = [], 0
         for row in reversed(rows):  # the newest that fit

@@ -268,7 +268,9 @@ def test_the_lines_after_a_done_item_skip_what_compression_copied_and_profiles_t
                          said_at=now - 11 * 3600)
     done_in_chat(live, folders, "the old folders are all empty now", at=now - 10 * 3600)
     [item] = report.done_items(live.store, now - 12 * 3600)
-    # The chat is compressed: its tail is copied into the session it continues in, new ids and old times.
+    # The chat is compressed: its tail is copied into the session it continues in, new ids and old times,
+    # and compaction leaves the old rows inactive.
+    live.db._exec("UPDATE messages SET active=0 WHERE session_id=?", (CHAT,))
     live.db.session("tip", parent=CHAT, started=now - 9 * 3600)
     live.db.message("user", "I'll clear out the old folders", sid="tip", at=now - 11 * 3600)
     live.db.message("user", "the old folders are all empty now", sid="tip", at=now - 10 * 3600)
