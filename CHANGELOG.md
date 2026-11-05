@@ -19,6 +19,7 @@ checks it). The format is fixed, because Conduit reads it:
 - Notifications, Live Activity updates and answers to Hermes' questions
   reach the relay sooner: the connection to it stays open between them
   instead of being set up again every time.
+
 ## 0.132.2 (2026-11-05)
 
 ### Fixes
