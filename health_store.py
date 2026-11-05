@@ -820,12 +820,15 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
             parsed_events.append(_parse_event(event, index))
         except HealthError as error:
             unusable.append(str(error))
+    # A deletion id the store could never have kept matches nothing: left
+    # out and counted the same way.
+    usable_ids = [event_id for event_id in deleted if isinstance(event_id, str) and _EVENT_ID.match(event_id)]
+    unusable += [f"deleted[{index}] is malformed" for index, event_id in enumerate(deleted)
+                 if not (isinstance(event_id, str) and _EVENT_ID.match(event_id))]
+    deleted = usable_ids
     if unusable:
-        logger.warning("conduit health: left out %d of %d readings the store can't keep (first: %s)",
-                       len(unusable), len(events), unusable[0])
-    for index, event_id in enumerate(deleted):
-        if not isinstance(event_id, str) or not _EVENT_ID.match(event_id):
-            raise HealthError("malformed", f"deleted[{index}] is malformed")
+        logger.warning("conduit health: left out %d items the store can't keep (first: %s)",
+                       len(unusable), unusable[0])
 
     replaced = skipped = 0
     for window in parsed_windows:

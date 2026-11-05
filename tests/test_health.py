@@ -264,6 +264,11 @@ def test_a_reading_the_store_cant_keep_is_left_out_not_the_batch(store, phone, c
     assert ids == ["6A1C2C9E-0000-4000-8000-000000000001"]
 
 
+def test_a_deletion_id_the_store_never_kept_is_left_out_not_the_batch(store, phone):
+    result = store.ingest(phone.seal(_batch(deleted=["W1\n", 7])))
+    assert result["events"] == 1 and result["skipped_events"] == 2 and result["deleted"] == 0
+
+
 def test_wipe_deletes_the_device_and_then_the_file(store, phone):
     store.ingest(phone.seal(_batch()))
     other = Phone("ipad-installation-2")

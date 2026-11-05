@@ -1673,19 +1673,18 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         if end <= start or end - start > timedelta(days=2 * MAX_WINDOW_DAYS):
             raise PhoneError("malformed", "events.from must be before events.to, within two years")
         window = (start, end)
-    if share_events:
-        for index, event_id in enumerate(event_deletes):
-            _item_id(event_id, f"events.delete[{index}]")
+    # A deletion id the store could never have kept matches nothing: left
+    # out and counted with the upserts that don't parse.
+    event_deletes, unusable_ids = _usable_ids(event_deletes)
+    reminder_deletes, unusable_reminder_ids = _usable_ids(reminder_deletes)
     parsed_events, unusable = _usable(event_upserts, lambda event, index: _parse_event(event, index, sharing),
                                       event_deletes) if share_events else ([], 0)
     reminder_full = share_reminders and _bool(reminders.get("full"), "reminders.full", False)
-    if share_reminders:
-        for index, reminder_id in enumerate(reminder_deletes):
-            _item_id(reminder_id, f"reminders.delete[{index}]")
     parsed_reminders, unusable_reminders = _usable(
         reminder_upserts, lambda item, index: _parse_reminder(item, index, sharing),
         reminder_deletes) if share_reminders else ([], 0)
-    unusable += unusable_reminders
+    unusable += unusable_reminders + (unusable_ids if share_events else 0) \
+        + (unusable_reminder_ids if share_reminders else 0)
     status = _parse_status(batch.get("status"), now) if sharing["status"] and batch.get("status") is not None else None
     focus = _parse_focus(batch.get("focus"), now) if sharing["focus"] and batch.get("focus") is not None else None
     parsed_alarms = _parse_alarms(alarms) if sharing["alarms"] and alarms is not None else None
@@ -1706,7 +1705,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         if window is not None and (window[0].tzinfo is None or window[1].tzinfo is None or window[1] <= window[0]):
             window = None
 
-    counts = {"events": 0, "reminders": 0, "deleted": 0, "skipped": unusable}
+    counts = {"events": 0, "reminders": 0, "deleted": 0, "skipped_events": unusable}
     if stale:
         # An older batch (a retry that arrived late) never undoes a newer
         # one: it neither widens nor narrows what the newer one said is
@@ -1795,6 +1794,11 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     db.execute("UPDATE devices SET last_seen=?, last_sent=?, sharing=?, tz=COALESCE(?, tz) WHERE id=?",
                (now, sent_epoch, json.dumps(sharing), tz, device_id))
     return counts
+
+
+def _usable_ids(ids: list[Any]) -> tuple[list[str], int]:
+    usable = [item_id for item_id in ids if isinstance(item_id, str) and _ITEM_ID.match(item_id)]
+    return usable, len(ids) - len(usable)
 
 
 def _usable(items: list[Any], parse: Callable[[Any, int], dict[str, Any]],

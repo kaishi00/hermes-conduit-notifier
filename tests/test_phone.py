@@ -523,7 +523,7 @@ def test_at_most_four_devices(store):
 
 def test_a_sealed_batch_lands_and_reads_back(store, iphone):
     result = store.ingest(iphone.seal(_batch()))
-    assert result == {"events": 5, "reminders": 3, "deleted": 0, "skipped": 0, "pending": 0, "generation": result["generation"]}
+    assert result == {"events": 5, "reminders": 3, "deleted": 0, "skipped_events": 0, "pending": 0, "generation": result["generation"]}
     events = _events(store)
     dentist = events["e_dentist"]
     assert dentist["calendar"] == "Personal" and dentist["start"] == "2026-10-16T15:00:00+01:00"
@@ -818,10 +818,18 @@ def test_an_item_the_store_cant_keep_is_left_out_not_the_batch(store, iphone, ch
     batch = _batch()
     change(batch)
     result = store.ingest(iphone.seal(batch))
-    assert result["skipped"] == 1
+    assert result["skipped_events"] == 1
     assert result["events"] + result["reminders"] == 7
     counts = store.status(DEVICE)["device"]["counts"]
     assert counts["events"] + counts["reminders"] == 7 and counts["calendars"] == 5
+
+
+def test_a_deletion_id_the_store_never_kept_is_left_out_not_the_batch(store, iphone):
+    batch = _batch()
+    batch["events"]["delete"] = ["e 1"]
+    batch["reminders"]["delete"] = [None]
+    result = store.ingest(iphone.seal(batch))
+    assert result["skipped_events"] == 2 and result["events"] == 5 and result["reminders"] == 3
 
 
 def test_a_left_out_update_takes_the_older_copy_away(store, iphone):
@@ -830,7 +838,7 @@ def test_a_left_out_update_takes_the_older_copy_away(store, iphone):
     later = _batch(sent_at="2026-10-14T08:01:00+01:00",
                    events={"full": False, "upsert": [_event(end="2028-01-01T00:00:00+01:00")]})
     result = store.ingest(iphone.seal(later))
-    assert result["skipped"] == 1
+    assert result["skipped_events"] == 1
     assert set(_events(store)) == {"e_standup", "e_review", "e_lunch", "e_holiday"}
 
 
