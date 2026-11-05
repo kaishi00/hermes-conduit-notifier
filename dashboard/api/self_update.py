@@ -312,17 +312,21 @@ def _write_self_update(path: Path, job: Dict[str, Any]) -> None:
 
 def _gateway_homes() -> List[Path]:
     """The homes whose gateway `hermes gateway restart` from here takes down, as Hermes' own
-    guard picks them (a host multiplexer's included), or the root on a Hermes that can't say."""
+    guard picks them (a host multiplexer's included), or the root on a Hermes that can't say;
+    none when even the root can't be found (the callers then read "no gateway")."""
     try:
         from hermes_cli.gateway_lifecycle_guards import _candidate_homes
-    except ImportError:
-        return _hermes_homes()[:1]
-    try:
         homes = [Path(home) for home in _candidate_homes()]
     except Exception:  # noqa: BLE001 — the root's gateway is the one to ask then
         logger.debug("Conduit plugin: couldn't list the gateway's homes", exc_info=True)
         homes = []
-    return homes or _hermes_homes()[:1]
+    if homes:
+        return homes
+    try:
+        return _hermes_homes()[:1]
+    except Exception:  # noqa: BLE001
+        logger.debug("Conduit plugin: couldn't find the Hermes home", exc_info=True)
+        return []
 
 
 def _gateway_work() -> int:
@@ -331,7 +335,7 @@ def _gateway_work() -> int:
     can't say."""
     try:
         from hermes_cli.gateway_lifecycle_guards import live_work
-    except ImportError:
+    except Exception:  # noqa: BLE001 — a broken import reads as one that's missing
         return 0
     for home in _gateway_homes():
         try:
@@ -353,7 +357,7 @@ def _gateway_draining() -> bool:
     """Whether the gateway is letting running work finish before its restart stops it."""
     try:
         from gateway.status import read_runtime_status, runtime_status_is_stale
-    except ImportError:
+    except Exception:  # noqa: BLE001 — a broken import reads as one that's missing
         return False
     for home in _gateway_homes():
         try:

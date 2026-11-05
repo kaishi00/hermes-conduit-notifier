@@ -264,6 +264,24 @@ def test_a_draining_gateway_reads_from_its_state_file(monkeypatch, tmp_path):
     assert not api.self_update._gateway_draining()
 
 
+def test_a_gateway_check_that_cant_find_hermes_reads_as_no_gateway(monkeypatch):
+    # Review on #554: a raise here escaped restart_gateway before the kill and reap.
+    monkeypatch.setitem(sys.modules, "hermes_cli.gateway_lifecycle_guards", None)
+
+    def no_root():
+        raise RuntimeError("no Hermes home")
+
+    monkeypatch.setattr(api.self_update, "_hermes_homes", no_root)
+    assert api.self_update._gateway_homes() == []
+    assert api.self_update._gateway_draining() is False and api.self_update._gateway_work() == 0
+    proc = _SlowRestart(1)
+    _fake_hermes(monkeypatch, lambda profile=None, *, interrupt=False: (proc, False))
+    _, restart_gateway = api.self_update._hermes_update_steps()
+    with pytest.raises(api.self_update.subprocess.TimeoutExpired):
+        restart_gateway()
+    assert proc.killed and len(proc.waits) == 2
+
+
 def test_a_crash_fails_the_job(monkeypatch, tmp_path):
     def boom():
         raise RuntimeError("disk")
