@@ -62,6 +62,9 @@ export class ApnsClient {
     if (this.session && !this.session.closed && !this.session.destroyed) return this.session;
     const session = connect(this.origin);
     this.connects += 1;
+    // The sends in flight on this session, each by its fail(): one session
+    // 'error' listener settles them all, however many share the session.
+    session.pending = new Set();
     session.inflight = 0;
     session.lastSendAt = Date.now();
     this.session = session;
@@ -71,9 +74,12 @@ export class ApnsClient {
     };
     // Required: without an 'error' listener a connection-level failure
     // (refused, TLS, socket reset) reaches Node as an unhandled 'error'
-    // event and terminates the whole relay. The streams in flight on it fail
-    // through their own handlers in sendOn.
-    session.on('error', retire);
+    // event and terminates the whole relay. It also settles every send in
+    // flight on the session, so a burst never stacks a listener per send.
+    session.on('error', (error) => {
+      retire();
+      for (const fail of [...session.pending]) fail(error);
+    });
     session.on('close', retire);
     // GOAWAY: APNs is closing this connection. Streams already on it may
     // still finish; new pushes go on a new one.
@@ -132,7 +138,7 @@ export class ApnsClient {
       let request;
       const finish = () => {
         clearTimeout(stall);
-        session.off('error', fail);
+        session.pending.delete(fail);
         session.inflight -= 1;
         if (session.inflight === 0 && !session.destroyed) session.unref();
       };
@@ -168,7 +174,7 @@ export class ApnsClient {
         error.apnsTimedOut = true;
         fail(error);
       }, SEND_TIMEOUT_MS);
-      session.on('error', fail);
+      session.pending.add(fail);
       try {
         request = session.request({
           ':method': 'POST',

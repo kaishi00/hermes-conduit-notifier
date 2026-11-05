@@ -259,3 +259,26 @@ test('a kept session with no push for the idle time is closed though pings keep 
     server.close();
   }
 });
+
+test('a burst larger than Node\'s listener limit shares the session without a warning', async () => {
+  const warnings = [];
+  const onWarning = (warning) => warnings.push(warning.name);
+  process.on('warning', onWarning);
+  const { server, origin } = await startH2Server((stream) => {
+    setTimeout(() => {
+      stream.respond({ ':status': 200, 'content-type': 'application/json' });
+      stream.end('{}');
+    }, 20);
+  });
+  try {
+    const apns = client(origin);
+    const results = await Promise.all(Array.from({ length: 30 }, (_, index) => apns.send(String(index % 10).repeat(64), notification)));
+    assert.ok(results.every((result) => result.ok));
+    assert.equal(apns.connects, 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(warnings.filter((name) => name === 'MaxListenersExceededWarning'), []);
+  } finally {
+    process.off('warning', onWarning);
+    server.close();
+  }
+});
