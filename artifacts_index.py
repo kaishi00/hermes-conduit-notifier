@@ -614,6 +614,9 @@ def _path_tokens(text: str, suffix: str) -> Iterable[str]:
             path = re.sub(r"/+", "/", path.replace("\\", "/"))
         # grep's `path:12:` and a compiler's `path:12:5:`.
         path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
+        # A URL's //host/... (and a UNC share) is never a file here.
+        if path.startswith("//"):
+            continue
         if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
             yield path
 
@@ -635,6 +638,8 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
     if not suffix or len(suffix) > MAX_RESOLVE_NAME_CHARS or "\n" in suffix:
         return {"path": None}
     if _is_local_path(suffix):
+        if suffix.startswith("//"):
+            return {"path": None}
         if exists is None or exists(os.path.expanduser(suffix)):
             return {"path": suffix, "via": "absolute"}
         return {"path": None}

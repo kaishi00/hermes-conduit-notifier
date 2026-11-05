@@ -643,3 +643,9 @@ def test_a_chat_without_a_folder_skips_the_join(tmp_path):
     # Unchecked (an SSH profile): the chat's own path, never /README.md.
     for sid in ("s1", "s2", "s3"):
         assert index.resolve_name(db, [sid], "README.md") == {"path": "/srv/app/README.md", "via": "chat"}
+
+
+def test_a_url_ending_in_the_name_is_not_a_file(tmp_path):
+    conn = _db(tmp_path / "home", [("s1", "assistant", "Mirror: https://mirror.example/AppState.swift")])
+    assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=lambda p: True) == {"path": None}
+    assert index.resolve_name(conn, ["s1"], "//mirror.example/AppState.swift", exists=lambda p: True) == {"path": None}
