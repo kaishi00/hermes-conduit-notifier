@@ -185,3 +185,12 @@ def test_a_fork_starts_with_no_connections(relay, monkeypatch):
     monkeypatch.setattr(keep_alive.os, "getpid", lambda: -1)
     _get(opener, f"{base}/two")
     assert server.connections == 2
+
+
+def test_a_connection_in_flight_across_a_fork_is_not_pooled(relay, monkeypatch):
+    server, handler, opener, base = relay
+    with opener.open(urllib.request.Request(f"{base}/one"), timeout=5.0) as response:
+        # The process forks while the answer is read: neither side pools it.
+        monkeypatch.setattr(keep_alive.os, "getpid", lambda: -1)
+        response.read()
+    assert handler._idle == {} or all(not idle for idle in handler._idle.values())

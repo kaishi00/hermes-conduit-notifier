@@ -12,11 +12,14 @@ request.
   end and the relay didn't ask to close it; one read part way is closed.
 - A pooled connection the relay (or what's in front of it) closed while it
   sat idle fails on the next send. That request is sent again once on a new
-  connection, as browsers and urllib3 do: the request never reached a live
-  connection, so the relay hasn't seen it.
+  connection, as browsers and urllib3 do. Almost always the relay never saw
+  it; a relay that took it and then dropped the connection unanswered sees
+  it twice, which the relay's event ids dedupe and polls and cancels don't
+  mind.
 - Through an HTTP(S) proxy, urllib's own handler runs (a tunnel each time).
-- A forked process starts with an empty pool: it never shares a socket with
-  its parent.
+- A forked process starts with an empty pool, and a connection that was in
+  flight across the fork is closed rather than pooled: it never shares a
+  socket with its parent.
 """
 
 from __future__ import annotations
@@ -89,8 +92,11 @@ class KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
             connection.close()
             raise
 
+        opened_in = os.getpid()
+
         def release(reusable: bool) -> None:
-            if reusable:
+            # Across a fork both processes hold this socket: neither pools it.
+            if reusable and os.getpid() == opened_in:
                 self._give_back(origin, connection)
             else:
                 connection.close()

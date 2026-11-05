@@ -296,6 +296,7 @@ _thread_lock = threading.Lock()
 
 # answers_ready's "not yet" per (file, batch), kept while the file is unchanged.
 _not_ready: dict[tuple[str, str], tuple[int, int, int, int]] = {}
+_not_ready_lock = threading.Lock()
 NOT_READY_KEPT = 64
 # A file written this recently could be written again within the same
 # timestamp tick, unseen by a stat (git's "racy" files): never trusted.
@@ -696,13 +697,17 @@ class CallStore:
         key = (str(self.path), request_id)
         if signature is None and not self.path.exists():
             return False
-        if signature is not None and _not_ready.get(key) == signature:
-            return False
+        if signature is not None:
+            with _not_ready_lock:
+                if _not_ready.get(key) == signature:
+                    return False
         ready = any(_complete(item, request_id) for item in self._load()["waiting"])
         if not ready and signature is not None:
-            if len(_not_ready) >= NOT_READY_KEPT:
-                _not_ready.pop(next(iter(_not_ready)), None)
-            _not_ready[key] = signature
+            # Each parked question asks from its own thread.
+            with _not_ready_lock:
+                if len(_not_ready) >= NOT_READY_KEPT:
+                    _not_ready.pop(next(iter(_not_ready)), None)
+                _not_ready[key] = signature
         return ready
 
     def take_answers(self, request_id: Any) -> dict[str, str] | None:
