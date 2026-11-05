@@ -378,8 +378,18 @@ def test_one_entry_questions_invocation_round_trips_batch_through_the_real_relay
 
 
 def _parked(relay, request_id):
-    data = json.loads((relay["capture"].parent / "relay-data.json").read_text(encoding="utf-8"))
-    matches = [entry for entry in data["pendingDecisions"].values() if entry["id"] == request_id]
+    # The relay writes a decision's changes within a second rather than on
+    # each (relay 0.26.2), so wait for the parked record to reach the file.
+    path = relay["capture"].parent / "relay-data.json"
+    deadline = time.time() + 5
+    while True:
+        matches = []
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            matches = [entry for entry in data.get("pendingDecisions", {}).values() if entry.get("id") == request_id]
+        if matches or time.time() >= deadline:
+            break
+        time.sleep(0.05)
     assert len(matches) == 1
     return matches[0]
 
