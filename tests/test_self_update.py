@@ -441,15 +441,17 @@ def test_a_failed_handover_lets_a_later_restart_through(monkeypatch, tmp_path):
     monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: "9.9.9")
     job = {"id": "j1", "step": "downloading", "boot_id": api.capabilities.BOOT_ID}
     notified = []
-    api.self_update._run_self_update(job, tmp_path / "job.json", lambda: {"ok": True}, lambda: 0, lambda *a: None,
-                         lambda: [tmp_path], notified.append, sleep=lambda s: None)
+    api.self_update._run_self_update(job, tmp_path / "job.json", lambda: {"ok": True}, _restarted, lambda *a: None,
+                         lambda: [tmp_path], notified.append, sleep=lambda s: None, gateway_work=lambda: 0)
     assert job["step"] == "failed" and api.self_update._self_restart_scheduled is False and len(notified) == 1
+    # Failed at the handover itself, not earlier.
+    assert job["failed_step"] == "restarting_dashboard" and "OSError" in job["detail"]
 
 
 def test_starts_are_rate_limited(monkeypatch, tmp_path):
     def run(i):
         path = tmp_path / f"job{i}.json"
-        api.self_update.start_self_update(None, lambda *a: None, path=path, steps=(lambda: {"ok": False, "error": "x"}, int),
+        api.self_update.start_self_update(None, lambda *a: None, path=path, steps=(lambda: {"ok": False, "error": "x"}, _restarted),
                               homes=lambda: [tmp_path], notify=lambda job: None)
         api.self_update._self_update_thread.join(5)
 

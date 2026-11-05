@@ -519,7 +519,7 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
 
 def start_self_update(profile: Optional[str], schedule: Callable[[float, Callable[[], None]], Any], *,
                       path: Optional[Path] = None,
-                      steps: Optional[Tuple[Callable[[], Dict[str, Any]], Callable[[], int]]] = None,
+                      steps: Optional[Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]] = None,
                       homes: Optional[Callable[[], List[Path]]] = None,
                       notify: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Starts the update on the host, or returns the one still under way."""
