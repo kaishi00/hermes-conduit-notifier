@@ -143,7 +143,7 @@ def register(ctx: Any) -> None:
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
     show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn, room_board=_save_room_board,
-                       desktop_board=_save_desktop_board,
+                       desktop_board=_save_desktop_board, keep_diff=_keep_diff,
                        skill_path=Path(__file__).resolve().parent / "skills" / show_tool.SKILL_NAME / "SKILL.md")
     # Hermes writes the title and body of the push its turn sends when it
     # ends, for a result the user asked to be told about (#1415).
@@ -394,6 +394,17 @@ def _save_desktop_board(board: dict) -> str | None:
     except Exception:  # noqa: BLE001 — the board goes in the reply as text instead
         room_rules.warn_often("desktop board", "conduit_push: couldn't keep a Desktop board; it goes in the reply as "
                               "text")
+        return None
+
+
+def _keep_diff(diff: dict) -> str | None:
+    """Keeps a diff too long for conduit_show's answer to carry whole
+    (room_boards.KeptDiffs); its id, or None when it can't be kept."""
+    try:
+        from . import room_boards, room_identity
+        return room_boards.KeptDiffs(room_identity.root_home(get_hermes_home())).add(diff)
+    except Exception:  # noqa: BLE001 — the card lists the diff's files alone
+        room_rules.warn_often("kept diff", "conduit_push: couldn't keep a diff; its card lists the files alone")
         return None
 
 

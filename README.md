@@ -2541,6 +2541,39 @@ the schema's `board` section.
   and tells Hermes to give the rest in its reply; a call screen's phone
   without it gets four cards and the Markdown.
 
+### Diff cards (plugin 0.133+)
+
+A `diff` card shows changes line by line: a code review, a commit, a config
+change or two versions of any text. It's for showing work, not doing Git:
+the plugin never runs git, it reads a diff the agent already has.
+
+- **Input** (`inputs.diff` in the schema, the only card field tools take in
+  another shape): `patch`, a unified diff as `git diff`, `git show`,
+  `gh pr diff` or `diff -u` print it; or `patch_file`, the absolute path of
+  such a file on this host (up to 2 MB), so a long review costs the model a
+  path instead of writing the diff out; or `before` and `after`, two texts
+  the plugin compares, with `name` for the file. Put the pull request or
+  commit link in the card's `source`.
+- **What's kept.** Files (path, old path for a rename, added, deleted,
+  renamed or modified, binary), each hunk's starts and the function after
+  `@@`, and each line with its `+`, `-` or space; tabs become four spaces
+  and a line past 1,000 characters is cut. At most 300 files and 20,000
+  lines; the totals count everything, and `problems` says what was left out.
+  A file that doesn't read as a diff is refused and nothing of it is said
+  back, so `patch_file` can't put any other file on screen.
+- **Long diffs stay on the host.** A diff up to 150 lines over up to 20 files
+  travels whole in the answer. A longer one is kept in the root home's
+  `conduit-diffs/` (200 at most, forgotten after 30 days), and the answer's
+  card lists its first 100 files with their counts and an `id`; Conduit and
+  the Desktop half read the whole diff with `GET /boards/diffs?id=<id>`
+  (capability `diff-cards`) when the user opens a file. The chat's history,
+  and so the model's context, never holds a long diff.
+- **Markdown** lists the files with their counts and shows the first 40
+  lines in a `diff` block.
+- **Older Conduits.** A Conduit says `diff-cards` in its exchange when it
+  draws them; until every Conduit that draws cards does, a diff card is left
+  out and Hermes hears to give it in its reply.
+
 ### Boards in Hermes Desktop (plugin 0.130+)
 
 Hermes Desktop lets a plugin draw only where the model writes a
@@ -2568,8 +2601,9 @@ Plugins as "Conduit boards", off until you turn it on there.
   been in touch lately, so boards in Desktop need the Conduit app too.
 - **Drawing.** The half reads the board with `GET /boards/desktop?id=<id>`
   and draws stats, charts, comparisons, steps, status, tables (sortable),
-  timelines, checklists, lists, progress and callouts as cards, tabs when the
-  board has them, and its follow-ups as buttons that send to that chat;
+  timelines, checklists, lists, progress, callouts and diffs (each file
+  folding open to its lines, a long diff read from `GET /boards/diffs` when a
+  file is opened) as cards, tabs when the board has them, and its follow-ups as buttons that send to that chat;
   maps, places, weather, media and contacts show as their own Markdown.
   Checklist ticks go through `/boards/checklists`, the same ticks Conduit
   shows. A board that's gone says so.

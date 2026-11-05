@@ -1,6 +1,6 @@
 ---
 name: drawing-boards
-description: Recipes for boards in Conduit (conduit_show cards) - a trip plan, comparing options, a dashboard from the user's own data, and a tracker - with which cards to use, in what order, and what to leave to the reply.
+description: Recipes for boards in Conduit (conduit_show cards) - a trip plan, comparing options, a dashboard from the user's own data, a tracker, and showing changes (a review, a commit, a config) as a diff - with which cards to use, in what order, and what to leave to the reply.
 ---
 
 # Drawing boards in Conduit
@@ -83,3 +83,27 @@ For "track my 30-day walking streak" or "a checklist for moving house".
   chat's next turn; give it a `live` name so it stays the same list as you
   add items.
 - `status` with a `live` name for something in progress you'll update.
+
+## Showing changes
+
+For "review PR 42", "what did you change?", "show me the diff" or a config
+you edited.
+
+1. Get the diff with the tools you have: `git diff`, `git show <commit>`,
+   `gh pr diff 42`, or `diff -u old new` for files outside Git.
+2. A `diff` card. For anything past a few dozen lines, write it to a file
+   and pass `patch_file` (`git diff main > /tmp/review.diff`, then
+   `patch_file: "/tmp/review.diff"`) rather than writing the diff out;
+   Conduit lists the files and the user opens each. A short one can go as
+   `patch`. Two versions of a text with no diff yet go as `before` and
+   `after`, with `name`.
+3. Put the pull request or commit in `source` (`name`: "PR #42", `url`:
+   its page) when there is one, and a title that says what changed.
+4. For a review, add a `list` of findings (each `title` the file and line,
+   `detail` the issue) or a `callout` (warning) for the one that matters
+   most. `stats` with files, lines added and removed and checks can head it.
+
+Your reply says what changed and why in a sentence or two; never paste the
+diff again. `next`: "Explain the change in Login.swift", "Fix the warning",
+"Show only the tests". If your terminal runs in a container or on another
+machine, `patch_file` can't see its files: pass `patch` instead.

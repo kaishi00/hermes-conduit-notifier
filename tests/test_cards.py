@@ -33,7 +33,7 @@ def test_the_schema_uses_only_what_both_sides_implement():
         assert set(schema) <= allowed, f"{path} uses {set(schema) - allowed}"
         assert schema["type"] in ("object", "array", "string", "number", "integer", "boolean"), path
         if schema.get("format") is not None:
-            assert schema["format"] == "uri", path
+            assert schema["format"] in ("uri", "line"), path
         for key, inner in schema.get("properties", {}).items():
             walk(inner, f"{path}.{key}")
         if "items" in schema:
@@ -101,7 +101,8 @@ def test_every_type_has_its_field_and_markdown():
     fields = {"map": "places", "place": "places", "places": "places", "stats": "stats", "chart": "chart",
               "weather": "weather", "comparison": "options", "steps": "steps", "media": "media",
               "contact": "people", "status": "status", "table": "table", "timeline": "timeline",
-              "checklist": "checklist", "list": "list", "progress": "progress", "callout": "callout"}
+              "checklist": "checklist", "list": "list", "progress": "progress", "callout": "callout",
+              "diff": "diff"}
     assert set(card_schema.CARD_SCHEMA["properties"]["type"]["enum"]) == set(fields)
     for kind, field in fields.items():
         assert card_schema._TYPE_FIELDS[kind][0] == field
@@ -164,8 +165,11 @@ def test_long_lists_stop_once_full():
 
 def test_the_tool_parameter_wraps_the_card():
     parameter = card_schema.tool_parameter("Cards.")
-    assert parameter == {"type": "array", "maxItems": card_schema.MAX_CARDS, "description": "Cards.",
-                         "items": card_schema.CARD_SCHEMA}
+    items = parameter.pop("items")
+    assert parameter == {"type": "array", "maxItems": card_schema.MAX_CARDS, "description": "Cards."}
+    assert items["properties"]["diff"] == card_schema.DEFINITION["inputs"]["diff"], "a diff is given as its input"
+    assert {**items, "properties": {**items["properties"], "diff": card_schema.CARD_SCHEMA["properties"]["diff"]}} \
+        == card_schema.CARD_SCHEMA, "the rest is the card as is"
 
 
 def test_fallback_markdown_shows_the_board_kinds():
