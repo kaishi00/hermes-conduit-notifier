@@ -174,6 +174,9 @@ ROUTE_CAPABILITIES = (
     "artifacts",
     # /workspace/*: the Folder tab's listings, search, recent files and file actions.
     "workspace-files",
+    # GET /workspace/resolve: where a file a reply names by its name is, from
+    # the chat's folder and its own tool calls (hermes-conduit#1809).
+    "workspace-resolve",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).

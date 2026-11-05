@@ -572,3 +572,137 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
             next_before = top
             break
     return {"items": items, "next_before": next_before}
+
+
+# --- A file a reply names ------------------------------------------------------
+#
+# A reply often names a file by its name or a path inside a project
+# (`AppState.swift`, `Conduit/Views/X.swift`), not where it lives: the chat's
+# working folder is often unset, and the agent worked somewhere else. The
+# chat's own history says where: the tool calls and results that read or
+# wrote the file carry its full path (hermes-conduit#1809). ``resolve_name``
+# looks there, newest first, after the chat's folder.
+
+# Rows of one chat read for a name, newest first.
+RESOLVE_MAX_ROWS = 20_000
+MAX_RESOLVE_NAME_CHARS = 512
+# Paths a row offers, and how many a request checks on disk at most.
+MAX_RESOLVE_CANDIDATES = 400
+_ABS_PATH_RE = re.compile(r"""(?:~/|/)[^\s'"`<>()\[\]{},;|\\]+"""
+                          r"""|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/][^\s'"`<>()\[\]{},;|]+""")
+
+
+def _clean_name(name: str) -> str:
+    text = str(name or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.rstrip("/")
+
+
+def _path_tokens(text: str, suffix: str) -> Iterable[str]:
+    """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
+    whole trailing folders: ``/a/b/AppState.swift`` for
+    ``AppState.swift``, never ``/a/MyAppState.swift``)."""
+    if suffix.rsplit("/", 1)[-1] not in text:
+        return
+    for match in _ABS_PATH_RE.finditer(text):
+        path = match.group(0).rstrip(_TRAILING + "'\"")
+        if not path.startswith(("/", "~")):
+            # The escape before a JSON string's closing quote isn't the path's.
+            path = path.rstrip(_TRAILING + "'\"\\")
+            # A Windows path, compared and opened with forward slashes.
+            path = re.sub(r"/+", "/", path.replace("\\", "/"))
+        # grep's `path:12:` and a compiler's `path:12:5:`.
+        path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
+        # A URL's //host/... (and a UNC share) is never a file here.
+        if path.startswith("//"):
+            continue
+        if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
+            yield path
+
+
+def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str, *,
+                 exists: Optional[Callable[[str], bool]] = None,
+                 max_rows: int = RESOLVE_MAX_ROWS) -> dict:
+    """Where the file a chat's reply names as ``name`` (a bare name or a
+    relative path) is: joined to the chat's working folder, else the newest
+    absolute path ending in it that the chat's own messages (tool calls,
+    tool results, replies) carry. Hidden sessions in the lineage (a room
+    the chat was branched from) are left out, as the Artifacts list leaves
+    them out, except the ids asked for and the Bot Chat's. ``exists`` checks
+    a candidate on the host (and refuses one it won't show); without it (a
+    profile whose files are on another machine) the folder's join, else the
+    newest candidate, is taken unchecked. ``{"path": None}`` when nothing
+    names it."""
+    suffix = _clean_name(name)
+    if not suffix or len(suffix) > MAX_RESOLVE_NAME_CHARS or "\n" in suffix:
+        return {"path": None}
+    if _is_local_path(suffix):
+        if suffix.startswith("//"):
+            return {"path": None}
+        if exists is None or exists(os.path.expanduser(suffix)):
+            return {"path": suffix, "via": "absolute"}
+        return {"path": None}
+    if any(part == ".." for part in suffix.split("/")):
+        return {"path": None}
+    wanted = [sid for sid in session_ids if sid]
+    chat = lineage(conn, wanted)
+    session_columns = _columns(conn, "sessions")
+    if chat and "hidden" in session_columns:
+        shown = {*wanted, *bot_chat_lineage(conn, session_columns)}
+        hidden = {str(row[0]) for row in conn.execute(
+            f"SELECT id FROM sessions WHERE COALESCE(hidden, 0) != 0 AND id IN ({','.join('?' * len(chat))})", chat)}
+        chat = [sid for sid in chat if sid in shown or sid not in hidden]
+    if not chat:
+        return {"path": None}
+    marks = ",".join("?" * len(chat))
+    checked: set = set()
+
+    def found(path: str) -> bool:
+        if path in checked or len(checked) >= MAX_RESOLVE_CANDIDATES:
+            return False
+        checked.add(path)
+        return exists is None or exists(os.path.expanduser(path))
+
+    if "cwd" in session_columns:
+        # The chat's own folder first, then those of the sessions it
+        # continues or that continue it, the most recently active first.
+        rows = conn.execute(
+            f"SELECT s.id, s.cwd FROM sessions s WHERE s.id IN ({marks}) ORDER BY "
+            f"(SELECT MAX(m.id) FROM messages m WHERE m.session_id = s.id) DESC, s.id", chat).fetchall()
+        folders = {str(row[0]): str(row[1] or "") for row in rows}
+        order = [sid for sid in wanted if sid in folders] + [str(row[0]) for row in rows if str(row[0]) not in wanted]
+        for cwd in dict.fromkeys(folders.get(sid, "") for sid in order):
+            cwd = cwd.strip()
+            if re.match(r"^[A-Za-z]:[\\/]", cwd):
+                cwd = re.sub(r"/+", "/", cwd.replace("\\", "/"))
+            cwd = cwd.rstrip("/")
+            # No folder recorded (or the disk's top) isn't a folder to join.
+            if cwd and cwd != "~" and not re.fullmatch(r"[A-Za-z]:", cwd) and _is_local_path(cwd + "/"):
+                candidate = f"{cwd}/{suffix}"
+                if found(candidate):
+                    return {"path": candidate, "via": "folder"}
+
+    message_columns = _columns(conn, "messages")
+    tool_calls = "tool_calls" if "tool_calls" in message_columns else "NULL"
+    # The name's last part narrows the rows sqlite hands back (after a / or,
+    # on Windows, a \\).
+    leaf = suffix.rsplit("/", 1)[-1].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    sql = (f"SELECT content, {tool_calls} AS tool_calls FROM messages WHERE session_id IN ({marks}) "
+           f"AND (content LIKE ? ESCAPE '\\' OR {tool_calls} LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT ?")
+    pattern = f"%{leaf}%"
+    for row in conn.execute(sql, [*chat, pattern, pattern, max(1, int(max_rows))]):
+        for column in ("content", "tool_calls"):
+            text = row[column]
+            if not isinstance(text, str):
+                continue
+            # A JSON-encoded tool call escapes nothing in a POSIX path, but
+            # a result can hold one as an escaped string.
+            text = text[:MAX_SCAN_CHARS].replace("\\/", "/").replace("\\\\", "\\")
+            # Newest mention in the row first, as rows are.
+            for path in reversed(list(_path_tokens(text, suffix))):
+                if found(path):
+                    return {"path": path, "via": "chat"}
+        if len(checked) >= MAX_RESOLVE_CANDIDATES:
+            break
+    return {"path": None}

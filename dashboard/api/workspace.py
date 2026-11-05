@@ -41,6 +41,10 @@ ARTIFACTS_MAX_ID_LENGTH = 200
 ARTIFACTS_TIMEOUT_S = 25.0
 _artifacts_limiter = core._MintLimiter(ARTIFACTS_LIMIT, ARTIFACTS_WINDOW_S,
                                   message="Too many artifact requests; try again shortly")
+# File lookups (GET /workspace/resolve) share the readers, with a bucket
+# of their own.
+_resolve_limiter = core._MintLimiter(ARTIFACTS_LIMIT, ARTIFACTS_WINDOW_S,
+                                     message="Too many file lookups; try again shortly")
 _artifacts_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-artifacts")
 # A timed-out read keeps its worker until it ends, so a request finding both
 # busy is turned away rather than queued behind them.
@@ -155,6 +159,130 @@ async def get_artifacts(response: Response, profile: Optional[str] = None, befor
         raise core._unexpected("list", exc, feature="Artifacts")
     return {"ok": True, **page}
 
+
+
+# GET /workspace/resolve: where a file a chat's reply names by its name or a
+# relative path is (hermes-conduit#1809), from the chat's folder and its own
+# tool calls (artifacts_index.resolve_name). Conduit asks when such a link is
+# tapped, with each id the chat goes by, and opens the Folder at the answer.
+
+def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[str]) -> Dict[str, Any]:
+    """Where ``name`` is, for the profile's chat (called inside the profile scope)."""
+    from hermes_constants import get_hermes_home
+
+    ids = [sid.strip() for sid in session_ids or []
+           if sid and sid.strip() and len(sid) <= ARTIFACTS_MAX_ID_LENGTH][:ARTIFACTS_MAX_SESSIONS]
+    index = _artifacts_index()
+    try:
+        conn = index.open_db(get_hermes_home())
+    except FileNotFoundError:
+        return {"path": None}
+    try:
+        exists = _host_file_check(profile)
+        return index.resolve_name(conn, ids, name, exists=exists)
+    finally:
+        conn.close()
+
+
+def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
+    """Whether a path the chat named is one the Folder would open: not a
+    secret file, inside a hosted install's folder, and (on this host, through
+    Hermes' own mapping of a Docker profile's paths) a file. A profile whose
+    files are on its SSH machine checks only the first, and the folder's
+    join, else the newest path, is taken."""
+    # Without the plugin's own denylist, refuse as the Folder's routes do.
+    sensitive_default = _workspace_files().default_sensitive
+    try:
+        from hermes_cli.web_routers.files import _fs_backend, _fs_profile_home, _is_sensitive_path
+        remote = _fs_backend(profile) is not None
+        home = None if remote else _fs_profile_home(profile)
+    except Exception:
+        # Without Hermes' own routing an SSH profile's paths would be checked
+        # on this host and its secret-file check lost: refuse, as the Folder does.
+        raise core.TokenError(501, "This Hermes can't route workspace files; update Hermes")
+    try:
+        from hermes_cli.web_server_files import _agent_fs_path
+    except Exception:
+        global _workspace_unmapped_logged
+        if not _workspace_unmapped_logged:
+            _workspace_unmapped_logged = True
+            logger.warning("Conduit workspace files: Hermes has no _agent_fs_path; Docker paths aren't mapped")
+        _agent_fs_path = None
+    boundary = None
+    if not remote:
+        try:
+            from hermes_cli.web_server_files import _managed_files_policy
+            locked = _managed_files_policy(None, create_root=False).locked_root
+            boundary = os.path.realpath(str(locked)) if locked is not None else None
+        except Exception:
+            boundary = None
+
+    def exists(path: str) -> bool:
+        try:
+            if sensitive_default is not None and sensitive_default(path):
+                return False
+            if _is_sensitive_path is not None and _is_sensitive_path(Path(path)):
+                return False
+            if remote:
+                return True
+            target = str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
+            if boundary is not None:
+                real = os.path.realpath(target)
+                if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
+                    return False
+            return os.path.isfile(target)
+        except Exception:
+            return False
+
+    return exists
+
+
+@router.get("/workspace/resolve")
+async def get_workspace_resolve(response: Response, path: str, session_id: Optional[List[str]] = Query(None),
+                                profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    # The slot is freed exactly once, as for /artifacts.
+    state = {"started": False, "abandoned": False}
+    state_lock = threading.Lock()
+
+    def job() -> Dict[str, Any]:
+        with state_lock:
+            if state["abandoned"]:
+                return {"path": None}
+            state["started"] = True
+        try:
+            return resolve_file(path, session_id, profile)
+        finally:
+            _artifacts_slots.release()
+
+    try:
+        await core._scoped_acquire(_resolve_limiter, profile)
+        if not _artifacts_slots.acquire(blocking=False):
+            raise HTTPException(status_code=503, detail="Hermes is still reading chats; try again shortly",
+                                headers=no_store)
+        try:
+            result = await asyncio.wait_for(core._run_scoped(profile, job, _artifacts_executor),
+                                            timeout=ARTIFACTS_TIMEOUT_S)
+        except BaseException:
+            with state_lock:
+                if not state["started"]:
+                    state["abandoned"] = True
+                    _artifacts_slots.release()
+            raise
+    except HTTPException:
+        raise
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Finding that file took too long; try again", headers=no_store)
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except sqlite3.Error as exc:
+        logger.warning("Conduit couldn't read the session store to find a file: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Hermes' session store is busy; try again shortly",
+                            headers=no_store)
+    except Exception as exc:
+        raise core._unexpected("resolve", exc, feature="Workspace files")
+    return {"ok": True, **result}
 
 # --- Workspace files -----------------------------------------------------------
 #
