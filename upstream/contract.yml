@@ -384,6 +384,7 @@ routes:
   - POST /boards/checklists
   - GET /boards/desktop
   - POST /boards/desktop/seen
+  - GET /boards/diffs
   - GET /boards/rooms
   - GET /calls
   - PUT /calls

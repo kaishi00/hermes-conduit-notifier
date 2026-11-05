@@ -14,6 +14,10 @@ id (``DesktopBoards``) for the half to read (``GET /boards/desktop``), and the
 half says it's loaded (``POST /boards/desktop/seen``) so the agent is asked
 for the line only where something will draw it.
 
+A diff card too long for conduit_show's answer to carry whole is kept here
+too (``KeptDiffs``), by the id its card names, for Conduit and the half to
+read when the user opens it (``GET /boards/diffs``).
+
 Imports nothing from the plugin package, so the dashboard can load it too.
 """
 
@@ -54,6 +58,10 @@ MAX_ID_CHARS = 200
 MAX_DESKTOP_BOARDS = 500
 HALF_LIVE_S = 30 * 60
 DESKTOP_BOARD_ID = re.compile(r"cb-[0-9a-f]{12}")
+# Diffs kept for their cards (KeptDiffs).
+DIFF_DIRECTORY = "conduit-diffs"
+MAX_KEPT_DIFFS = 200
+DIFF_ID = re.compile(r"cd-[0-9a-f]{16}")
 
 _lock = threading.Lock()
 
@@ -214,6 +222,73 @@ class DesktopBoards(_BoardFile):
         if not isinstance(seen, (int, float)) or isinstance(seen, bool):
             return False
         return 0 <= self.clock() - seen < HALF_LIVE_S
+
+
+class KeptDiffs:
+    """Diffs too long for a conduit_show answer to carry whole (a diff
+    card), each in a file of its own by the id the card names, for Conduit
+    and the Desktop half to read when the user opens a file
+    (``GET /boards/diffs``). In the root home, as Desktop's boards are: the
+    id is all a reader needs. The newest MAX_KEPT_DIFFS stay, for a month."""
+
+    def __init__(self, root: Any, clock: Callable[[], float] = time.time,
+                 new_id: Callable[[], str] = lambda: "cd-" + secrets.token_hex(8)) -> None:
+        self.directory = Path(root) / DIFF_DIRECTORY
+        self.clock = clock
+        self.new_id = new_id
+
+    def add(self, diff: dict[str, Any]) -> str:
+        """Keeps a diff; answers its id."""
+        diff_id = self.new_id()
+        if not DIFF_ID.fullmatch(diff_id):
+            raise ValueError("a diff's id is cd- and 16 hex digits")
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handle, temporary = tempfile.mkstemp(dir=self.directory, prefix=".conduit-diff-")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as file:
+                json.dump({"at": self.clock(), "diff": diff}, file, ensure_ascii=False)
+                file.flush()
+                os.fsync(file.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.directory / f"{diff_id}.json")
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+        self._prune()
+        return diff_id
+
+    def get(self, diff_id: Any) -> dict[str, Any] | None:
+        """The diff an id names, or None when it's gone."""
+        if not isinstance(diff_id, str) or not DIFF_ID.fullmatch(diff_id):
+            raise ValueError("id names a diff: cd- and 16 hex digits")
+        try:
+            entry = json.loads((self.directory / f"{diff_id}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(entry, dict) or not isinstance(entry.get("diff"), dict):
+            return None
+        at = entry.get("at")
+        if not isinstance(at, (int, float)) or isinstance(at, bool) or self.clock() - at >= KEEP_S:
+            return None
+        return entry["diff"]
+
+    def _prune(self) -> None:
+        """The oldest past MAX_KEPT_DIFFS go, and any kept a month."""
+        try:
+            kept = sorted(((path.stat().st_mtime, path) for path in self.directory.glob("cd-*.json")),
+                          reverse=True)
+        except OSError:
+            return
+        now = time.time()
+        for index, (mtime, path) in enumerate(kept):
+            if index >= MAX_KEPT_DIFFS or now - mtime >= KEEP_S:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
 
 @contextmanager

@@ -1,5 +1,6 @@
 """Boards: the ticks on conduit_show's checklist cards, the boards agents
-showed in group rooms, and the boards Hermes Desktop draws, kept on the host."""
+showed in group rooms, the boards Hermes Desktop draws, and the diffs too long
+for a card to carry, kept on the host."""
 
 from __future__ import annotations
 
@@ -202,3 +203,41 @@ async def post_desktop_half_seen(request: Request, response: Response,
         raise
     except Exception as exc:
         raise core._unexpected("desktop-boards", exc, feature="Boards in Hermes Desktop")
+
+
+# --- Diffs kept for their cards ------------------------------------------------
+#
+# A diff card too long for conduit_show's answer to carry whole lists its
+# files and names an id (room_boards.KeptDiffs, in the root home); Conduit and
+# the Desktop half read the whole diff here when the user opens a file.
+
+_kept_diffs_limiter = core._MintLimiter(240, 60.0, message="Too many diff reads; try again shortly")
+
+
+def read_kept_diff(diff_id: Optional[str]) -> Dict[str, Any]:
+    module = core._plugin_package_module("room_boards")
+    root = core._plugin_package_module("room_identity").root_home(core._calls_home())
+    try:
+        diff = module.KeptDiffs(root).get(diff_id)
+    except ValueError as exc:
+        raise core.TokenError(400, str(exc))
+    if diff is None:
+        raise core.TokenError(404, "That diff is gone")
+    return {"diff": diff}
+
+
+@router.get("/boards/diffs")
+async def get_kept_diff(request: Request, response: Response, profile: Optional[str] = None,
+                        id: Optional[str] = None) -> Dict[str, Any]:  # noqa: A002 — the query's name
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    try:
+        return await core._run_scoped(profile, core._limited(_kept_diffs_limiter, profile,
+                                                             lambda: read_kept_diff(id)))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+    except Exception as exc:
+        raise core._unexpected("diff-cards", exc, feature="Diff cards")

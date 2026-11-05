@@ -197,7 +197,8 @@ def test_the_schema_matches_the_store():
     assert properties["markdown"]["maxLength"] == store_module.MAX_CARD_MARKDOWN_CHARS
     assert tool.SCHEMA["parameters"]["required"] == ["title"]
     assert "voice call" in tool.SCHEMA["description"]
-    assert properties["cards"]["items"] == tool.card_schema.CARD_SCHEMA, "the card schema comes from the one file"
+    assert properties["cards"] == tool.card_schema.tool_parameter(properties["cards"]["description"]), \
+        "the card schema comes from the one file"
 
 
 MAP = {"type": "map", "places": [{"name": "Kin Khao", "lat": 37.7853, "lon": -122.4089,
