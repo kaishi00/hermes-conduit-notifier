@@ -628,9 +628,9 @@ def _path_candidate(path: str, suffix: str, *, strip: str) -> Optional[str]:
     return None
 
 
-# Inside a quoted run, a second path after a space: the run holds several
+# Inside a quoted run, a second path after a space or a , ; |: the run holds several
 # paths ("/a/old.md moved to /b/new.md"), not one with spaces in it.
-_ANOTHER_PATH_RE = re.compile(r"""\s(?:~/|/|[A-Za-z]:[\\/])""")
+_ANOTHER_PATH_RE = re.compile(r"""[\s,;|](?:~/|/|[A-Za-z]:[\\/])""")
 
 
 def _name_end(raw: str, suffix: str, strip: str) -> Optional[str]:
