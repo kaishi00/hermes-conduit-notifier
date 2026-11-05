@@ -633,11 +633,13 @@ def test_a_chat_without_a_folder_skips_the_join(tmp_path):
                  " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
     conn.execute("INSERT INTO sessions VALUES ('s1', 't', NULL, NULL)")
     conn.execute("INSERT INTO sessions VALUES ('s2', 't', NULL, '/')")
+    conn.execute("INSERT INTO sessions VALUES ('s3', 't', NULL, 'C:\\')")
     conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('s1', 'tool', '/srv/app/README.md')")
     conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('s2', 'tool', '/srv/app/README.md')")
+    conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('s3', 'tool', '/srv/app/README.md')")
     conn.commit()
     conn.close()
     db = index.open_db(home)
     # Unchecked (an SSH profile): the chat's own path, never /README.md.
-    for sid in ("s1", "s2"):
+    for sid in ("s1", "s2", "s3"):
         assert index.resolve_name(db, [sid], "README.md") == {"path": "/srv/app/README.md", "via": "chat"}
