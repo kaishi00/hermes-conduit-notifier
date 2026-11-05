@@ -837,6 +837,7 @@ def stop(timeout: float = 1.0) -> None:
         _generation += 1
         # A reload (after pairing again, say) starts unpaused.
         _clear_refusal()
+        _keep_alive.close_idle()
         running, _worker, _worker_started = _worker, None, False
         dropped = 0
         while True:

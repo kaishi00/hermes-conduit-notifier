@@ -194,3 +194,47 @@ def test_a_connection_in_flight_across_a_fork_is_not_pooled(relay, monkeypatch):
         monkeypatch.setattr(keep_alive.os, "getpid", lambda: -1)
         response.read()
     assert handler._idle == {} or all(not idle for idle in handler._idle.values())
+
+
+
+class _DroppedAfterWriting:
+    """A kept connection the relay dropped after taking the request."""
+    sock = types.SimpleNamespace(settimeout=lambda timeout: None)
+
+    def __init__(self):
+        self.timeout = None
+        self.sent = []
+
+    def request(self, method, selector, body, headers, encode_chunked=False):
+        self.sent.append(method)
+
+    def getresponse(self):
+        raise keep_alive.http.client.RemoteDisconnected("closed")
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("method, resent", [("POST", False), ("GET", True), ("DELETE", True)])
+def test_only_a_request_asked_twice_safely_is_sent_again(monkeypatch, method, resent):
+    handler = keep_alive.KeepAliveHTTPSHandler()
+    dropped = _DroppedAfterWriting()
+    fresh = []
+    monkeypatch.setattr(handler, "_take", lambda origin: dropped)
+
+    class Refused(_DroppedAfterWriting):
+        def request(self, *args, **kwargs):
+            raise ConnectionRefusedError("the test stops here")
+
+    def connect(origin, timeout):
+        fresh.append(origin)
+        return Refused()
+
+    monkeypatch.setattr(handler, "_connect", connect)
+    request = urllib.request.Request("https://relay.example/v1/pairings/claim",
+                                     data=b"{}" if method == "POST" else None, method=method)
+    request.timeout = 5.0
+    with pytest.raises(urllib.error.URLError):
+        handler.https_open(request)
+    assert dropped.sent == [method]
+    assert bool(fresh) is resent

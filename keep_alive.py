@@ -12,10 +12,10 @@ request.
   end and the relay didn't ask to close it; one read part way is closed.
 - A pooled connection the relay (or what's in front of it) closed while it
   sat idle fails on the next send. That request is sent again once on a new
-  connection, as browsers and urllib3 do. Almost always the relay never saw
-  it; a relay that took it and then dropped the connection unanswered sees
-  it twice, which the relay's event ids dedupe and polls and cancels don't
-  mind.
+  connection when it failed while being written, or when asking twice
+  changes nothing (a GET or DELETE; urllib3's rule): a POST the relay may
+  have taken before dropping the connection, a pairing claim say, is never
+  replayed.
 - Through an HTTP(S) proxy, urllib's own handler runs (a tunnel each time).
 - A forked process starts with an empty pool, and a connection that was in
   flight across the fork is closed rather than pooled: it never shares a
@@ -37,6 +37,9 @@ from typing import Any
 # Kept at most this long between requests, and at most this many per relay.
 IDLE_SECONDS = 60.0
 MAX_IDLE_PER_ORIGIN = 4
+
+# Asking these again changes nothing on the relay.
+_IDEMPOTENT = frozenset({"GET", "HEAD", "DELETE", "PUT", "OPTIONS"})
 
 # A pooled connection that fails like this was closed while it sat idle.
 _STALE = (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
@@ -73,15 +76,19 @@ class KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
         reused = connection is not None
         if connection is None:
             connection = self._connect(origin, req.timeout)
+        written: list[bool] = []
         try:
-            response = self._send(connection, req)
+            response = self._send(connection, req, written)
         except _STALE as error:
             connection.close()
-            if not reused:
+            # Sent again only when the relay can't have acted on it: it
+            # failed while being written, or asking again changes nothing
+            # (a pairing claim must never be replayed).
+            if not reused or (written and req.get_method() not in _IDEMPOTENT):
                 raise urllib.error.URLError(error) from error
             connection = self._connect(origin, req.timeout)
             try:
-                response = self._send(connection, req)
+                response = self._send(connection, req, [])
             except OSError as retry_error:
                 connection.close()
                 raise urllib.error.URLError(retry_error) from retry_error
@@ -114,7 +121,8 @@ class KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
         return connection
 
     @staticmethod
-    def _send(connection: http.client.HTTPSConnection, req: urllib.request.Request) -> http.client.HTTPResponse:
+    def _send(connection: http.client.HTTPSConnection, req: urllib.request.Request,
+              written: list[bool]) -> http.client.HTTPResponse:
         # The request's timeout covers this request, a reused connection too.
         connection.timeout = req.timeout
         if connection.sock is not None and req.timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
@@ -125,6 +133,7 @@ class KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
         headers = {name.title(): value for name, value in headers.items()}
         connection.request(req.get_method(), req.selector, req.data, headers,
                            encode_chunked=req.has_header("Transfer-encoding"))
+        written.append(True)
         return connection.getresponse()
 
     def _take(self, origin: str) -> http.client.HTTPSConnection | None:
