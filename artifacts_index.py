@@ -588,7 +588,9 @@ RESOLVE_MAX_ROWS = 20_000
 MAX_RESOLVE_NAME_CHARS = 512
 # Paths a row offers, and how many a request checks on disk at most.
 MAX_RESOLVE_CANDIDATES = 400
-_ABS_PATH_RE = re.compile(r"""(?:~/|/)[^\s'"`<>()\[\]{},;|\\]+"""
+# A path starts at a / or ~/ of its own, never inside a relative one
+# (backup/old.md isn't /old.md).
+_ABS_PATH_RE = re.compile(r"""(?:(?<![A-Za-z0-9_.~-])~/|(?<![A-Za-z0-9_.~-])/)[^\s'"`<>()\[\]{},;|\\]+"""
                           r"""|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/][^\s'"`<>()\[\]{},;|]+""")
 
 
@@ -599,26 +601,89 @@ def _clean_name(name: str) -> str:
     return text.rstrip("/")
 
 
-def _path_tokens(text: str, suffix: str) -> Iterable[str]:
+# A path between quotes or backticks, where it may hold spaces or brackets
+# (`/Users/me/My Project/Report (final).pdf`, a tool call's JSON string).
+_QUOTED_PATH_RE = re.compile(r"""(["'`])((?:~/|/|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/])[^"'`\n]{1,%d})\1""" % MAX_PATH_CHARS)
+# A sentence's own end after a path, which a name ending in `_` or `*` keeps.
+_SENTENCE_END = ".,;:!?"
+# What the bare-path pattern stops at, so a quoted path holding one is read whole.
+_PATH_BREAK_RE = re.compile(r"""[\s<>()\[\]{},;|]""")
+
+
+def _path_candidate(path: str, suffix: str, *, strip: str) -> Optional[str]:
+    """``path`` as a file path ending in ``suffix``, or None."""
+    path = path.rstrip(strip)
+    if not path.startswith(("/", "~")):
+        # The escape before a JSON string's closing quote isn't the path's.
+        path = path.rstrip(strip + "\\")
+        # A Windows path, compared and opened with forward slashes.
+        path = re.sub(r"/+", "/", path.replace("\\", "/"))
+    # grep's `path:12:` and a compiler's `path:12:5:`.
+    path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
+    # A URL's //host/... (and a UNC share) is never a file here.
+    if path.startswith("//"):
+        return None
+    if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
+        return path
+    return None
+
+
+# Inside a quoted run, a second path after a space or a , ; |: the run holds several
+# paths ("/a/old.md moved to /b/new.md"), not one with spaces in it.
+_ANOTHER_PATH_RE = re.compile(r"""[\s,;|](?:~/|/|[A-Za-z]:[\\/])""")
+
+
+def _name_end(raw: str, suffix: str, strip: str) -> Optional[str]:
+    """``raw`` up to where ``suffix`` ends it, when only ``strip``
+    characters follow (``/notes/why?.`` for ``why?``)."""
+    end = raw.replace("\\", "/").rfind("/" + suffix)
+    if end < 0:
+        return None
+    end += 1 + len(suffix)
+    tail = raw[end:]
+    return raw[:end] if all(char in strip for char in tail) else None
+
+
+def _bare_candidate(raw: str, suffix: str) -> Optional[str]:
+    """A bare-pattern match as a path ending in ``suffix``, or None.
+    Trailing punctuation is the sentence's, unless the name ends in it."""
+    return (_path_candidate(raw, suffix, strip=_TRAILING + "'\"")
+            or _path_candidate(_name_end(raw, suffix, _TRAILING + "'\"\\") or "", suffix, strip=""))
+
+
+def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterable[str]:
     """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
     whole trailing folders: ``/a/b/AppState.swift`` for
-    ``AppState.swift``, never ``/a/MyAppState.swift``)."""
+    ``AppState.swift``, never ``/a/MyAppState.swift``), in the order they
+    appear. With ``quoted_whole``, a quoted path is also read whole, spaces
+    and brackets included, just after its pieces (so, newest first, before
+    them): only a host that checks each candidate can tell a quoted path
+    from quoted prose that ends in one."""
     if suffix.rsplit("/", 1)[-1] not in text:
         return
-    for match in _ABS_PATH_RE.finditer(text):
-        path = match.group(0).rstrip(_TRAILING + "'\"")
-        if not path.startswith(("/", "~")):
-            # The escape before a JSON string's closing quote isn't the path's.
-            path = path.rstrip(_TRAILING + "'\"\\")
-            # A Windows path, compared and opened with forward slashes.
-            path = re.sub(r"/+", "/", path.replace("\\", "/"))
-        # grep's `path:12:` and a compiler's `path:12:5:`.
-        path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
-        # A URL's //host/... (and a UNC share) is never a file here.
-        if path.startswith("//"):
+    found: list = []
+    for match in (_QUOTED_PATH_RE.finditer(text) if quoted_whole else ()):
+        run = match.group(2)
+        if not _PATH_BREAK_RE.search(run) or _ANOTHER_PATH_RE.search(run):
+            continue  # the bare-path pattern reads it, piece by piece
+        head = _ABS_PATH_RE.match(run)
+        if head and _bare_candidate(head.group(0), suffix):
+            # It opens with the whole path ("/srv/old.md renamed to
+            # backup/old.md"): what follows is prose, read as such.
             continue
-        if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
-            yield path
+        # A nested JSON string's quote comes escaped: \" ends the path.
+        strip = " \t\\" + _SENTENCE_END
+        path = (_path_candidate(run, suffix, strip=" \t\\")
+                or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
+        if path:
+            # Its pieces stay candidates, tried after it.
+            found.append((match.end(2), path))
+    for match in _ABS_PATH_RE.finditer(text):
+        path = _bare_candidate(match.group(0), suffix)
+        if path:
+            found.append((match.start(), path))
+    for _, path in sorted(found, key=lambda item: item[0]):
+        yield path
 
 
 def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str, *,
@@ -683,6 +748,9 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
                 if found(candidate):
                     return {"path": candidate, "via": "folder"}
 
+    # Only a host that checks each candidate can tell a quoted path from
+    # quoted prose that ends in one.
+    host_checks = exists is not None and getattr(exists, "checks_host", True)
     message_columns = _columns(conn, "messages")
     tool_calls = "tool_calls" if "tool_calls" in message_columns else "NULL"
     # The name's last part narrows the rows sqlite hands back (after a / or,
@@ -700,7 +768,7 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
             # a result can hold one as an escaped string.
             text = text[:MAX_SCAN_CHARS].replace("\\/", "/").replace("\\\\", "\\")
             # Newest mention in the row first, as rows are.
-            for path in reversed(list(_path_tokens(text, suffix))):
+            for path in reversed(list(_path_tokens(text, suffix, quoted_whole=host_checks))):
                 if found(path):
                     return {"path": path, "via": "chat"}
         if len(checked) >= MAX_RESOLVE_CANDIDATES:
