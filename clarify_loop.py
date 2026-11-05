@@ -163,10 +163,12 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     # the user (#449); any answer, from anywhere, stops it.
     # A batch says how many wait, so a reason clipped to its length keeps it.
     reason = question if len(batch) == 1 else f"{len(batch)} questions, first: {question}"
-    # The whole batch, for a call answered with no chat open (the Watch) to
+    # The whole batch, for Conduit's "Needs you" list, and for a call
+    # answered with no chat open (the Watch) to
     # read out and answer; the answers come back through
     # ``calls.taken_answers``.
-    calls.note_waiting(session_id, "question", request_id=request_id, questions=batch)
+    calls.note_waiting(session_id, "question", request_id=request_id, questions=batch,
+                       title=chat_title(session_id))
     calls.alert(session_id, "question", reason, profile=profile)
     try:
         return _first_answer_wins(

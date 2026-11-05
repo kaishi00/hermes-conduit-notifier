@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.130.6 (2026-11-05)
+## 0.131.1 (2026-11-05)
 
 ### Fixes
 - Updating the plugin from Conduit while a chat was running left Hermes
@@ -21,6 +21,13 @@ checks it). The format is fixed, because Conduit reads it:
   restart. The update now waits for running chats to finish while the
   gateway keeps serving, then restarts it. A restart that still has to wait
   shows as waiting rather than failing.
+
+## 0.131.0 (2026-11-05)
+
+### New and improved
+- Conduit can show every chat waiting on your approval or answer, in every
+  profile: a count on the profile strip, a banner when another chat starts
+  waiting, and a Needs you list that opens each one at its card.
 
 ## 0.130.5 (2026-11-05)
 

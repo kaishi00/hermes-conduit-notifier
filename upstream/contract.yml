@@ -536,6 +536,7 @@ routes:
   - POST /voice/summary
   - GET /voice/tags
   - POST /voice/tags
+  - GET /waiting
   - POST /watch-audio/prepare
   - GET /watch-audio/status
   - POST /watch-tools/grant
