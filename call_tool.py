@@ -156,11 +156,14 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
         calls.tool_watch(session, reason, asked=asked)
     except ValueError as error:
         if str(error) == "calls_off":
-            note = ("The user hasn't turned on calls they ask for in Conduit. Tell them in your reply, and that "
-                    f"they turn them on in Conduit's Settings, under {SETTINGS_LINK} (a link that opens it; "
-                    "leave the link out of anything spoken). Don't set up a call watch or anything else to call "
-                    "instead: it can't ring either.") if asked else (
-                    "The user hasn't let Hermes decide when to call. Don't call; put the news in your reply.")
+            # Off as a whole ("Hermes can call me") or only this kind of call.
+            off = (("The user has calls from Hermes off in Conduit" if not calls.settings()["enabled"] else
+                    "The user hasn't turned on calls they ask for in Conduit") if asked else
+                   "The user hasn't let Hermes decide when to call")
+            note = (f"{off}. Tell them in your reply, and that they turn them on in Conduit's Settings, under "
+                    f"{SETTINGS_LINK} (a link that opens it; leave the link out of anything spoken). Don't set up "
+                    "a call watch or anything else to call instead: it can't ring either.") if asked else (
+                    f"{off}. Don't call; put the news in your reply.")
             return {"ok": False, "error": "calls_off", "note": note}
         if str(error) == "too_many":
             return {"ok": False, "error": "too_many", "note": "Too many calls are already waiting. Put the news in your reply."}

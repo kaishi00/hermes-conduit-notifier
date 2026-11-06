@@ -735,7 +735,12 @@ def test_the_tool_shows_whenever_paired_even_with_calls_off(home, paired, monkey
     # and Hermes set up a watch to fake a call; shown, it answers calls_off.
     _settings(home, enabled=False)
     assert call_tool.available() is True
-    assert _tool({"reason": "You asked me to call.", "asked_by_user": True})["error"] == "calls_off"
+    answer = _tool({"reason": "You asked me to call.", "asked_by_user": True})
+    assert answer["error"] == "calls_off"
+    assert "calls from Hermes off" in answer["note"] and "can't ring either" in answer["note"]
+    assert "Never a way to call now" in sys.modules["conduit_push.call_watches"].SETUP_SCHEMA["description"]
+    _settings(home, when_asked=False)
+    assert "calls they ask for" in _tool({"reason": "Call me.", "asked_by_user": True}, session_id="st-2")["note"]
     _settings(home, enabled=True, when_asked=False, decides=False)
     assert call_tool.available() is True
     monkeypatch.setattr(call_tool.client, "load_state", lambda: None)
