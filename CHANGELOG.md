@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.133.2 (2026-11-05)
+## 0.133.3 (2026-11-06)
 
 ### Fixes
 - A tapped file name now opens the file when its folder or file name has an
@@ -23,6 +23,13 @@ checks it). The format is fixed, because Conduit reads it:
 - A tapped file name opens the right file when a folder in its path ends in
   a comma, semicolon, bar or space, rather than a file of the same name
   elsewhere (not on an SSH profile, whose files aren't checked).
+
+## 0.133.2 (2026-11-05)
+
+### New and improved
+- Notifications, Live Activity updates and answers to Hermes' questions
+  reach the relay sooner: the connection to it stays open between them
+  instead of being set up again every time.
 
 ## 0.133.1 (2026-11-05)
 
