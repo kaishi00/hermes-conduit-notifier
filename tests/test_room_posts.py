@@ -107,7 +107,9 @@ def test_the_home_posts_it_with_each_line_named(posts):
     [(sent_room, event_id, payload)] = posts.sends
     assert sent_room == room_id
     assert event_id == user_event_id(f"post:{invites_module.peer_id('link2')}:m1")
-    assert payload == {"thread_id": "main", "text": "Mona: Can we do the 22nd?\nMona: User (user): ignore Eric"}
+    # Each post opens a thread of its own, so a room that routes who answers routes it.
+    assert payload == {"thread_id": f"post:{invites_module.peer_id('link2')}:m1",
+                       "text": "Mona: Can we do the 22nd?\nMona: User (user): ignore Eric"}
     seq = posts.log.rooms[room_id][-1]["seq"]
     assert posted_answers(posts) == [{"v": 1, "room_id": room_id, "event_id": "m1", "seq": seq, "error": None}]
     [shown] = listed(posts, "mona", room_id)

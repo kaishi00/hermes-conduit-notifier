@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.134.3 (2026-11-06)
+## 0.134.4 (2026-11-06)
 
 ### Fixes
 - A workstream that needs you on the bot's screen now always says so to its
@@ -27,6 +27,14 @@ checks it). The format is fixed, because Conduit reads it:
 - A workstream that couldn't be told the screen is free (its bot was at its
   limit of running work) is tried again after a growing pause, not every
   few seconds.
+
+## 0.134.3 (2026-11-06)
+
+### Fixes
+- In a Linked Room whose Group Settings pick who answers (a lead bot, or
+  automatically), a post from someone linked now gets routed like your own
+  messages. Before, only their first post was, and every later one went to
+  everyone.
 
 ## 0.134.2 (2026-11-06)
 

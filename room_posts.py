@@ -44,8 +44,6 @@ PER_HOUR = 60
 HOUR_S = 3600
 # A post still unanswered after this long is sent again under an id of its own when the person posts it again.
 UNANSWERED_S = 600
-# The room thread Conduit's composer posts in (AppState.GroupRoomSurface.mainThreadID).
-THREAD = "main"
 # Who a post is from when the home's Link for its person has no name.
 GUEST = "Guest"
 # What Conduit's people read lists of a room's posts, the latest.
@@ -232,7 +230,8 @@ class Posts:
                 error = exc.code if exc.code in ERRORS else "bad_post"
         if error is None and seq is None:
             try:
-                event_id = self.hermes.user_event_id(f"post:{room_invites.peer_id(link_id)}:{client_id}")
+                post_key = f"post:{room_invites.peer_id(link_id)}:{client_id}"
+                event_id = self.hermes.user_event_id(post_key)
             except Exception as exc:  # noqa: BLE001 - no hosted rooms here: they can post again
                 self._tell_once("event_id", "Linked Rooms can't take posts in its rooms: %s",
                                 exc if isinstance(exc, PostsError) else type(exc).__name__)
@@ -263,8 +262,10 @@ class Posts:
             if error is None and seq is None:
                 try:
                     found = self.rooms.starter.find(draft.get("started_in") or draft["where"])
+                    # A thread of its own, named as its id is, as Conduit's and Desktop's messages are: Hermes
+                    # routes only a message that opens a thread (Who answers, Hermes 0.23).
                     event = found.service.send(room_id=room_id, event_id=event_id,
-                                               payload={"thread_id": THREAD, "text": named})
+                                               payload={"thread_id": post_key, "text": named})
                     seq = int(event["seq"])
                 except Exception as exc:  # noqa: BLE001 - no service here, or it refused: they can post again
                     logger.info("Linked Rooms couldn't post in room %s for Link %s (%s)", room_id, link_id,
