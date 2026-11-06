@@ -2884,7 +2884,9 @@ Limits: 4 devices per profile, 20 places, 256 KiB per batch.
 `conduit_maps` gives Hermes Apple Maps: `search` (places or categories near
 the user, a place or an address), `lookup` (one place or address),
 `reverse_geocode`, `directions` (routes with traffic, tolls, steps, by car,
-on foot, by transit or bike, and `leave_by` for `arrive_by`) and
+on foot, by transit or bike, and `leave_by` for `arrive_by`; no steps to or
+from a saved place, and distances to or from one rounded to 100 m, so its
+coordinates stay on the phone) and
 `travel_times` (up to 10 destinations at once). Places can be `"me"`, a saved
 place's name, an address or a name, `place_id:<id>` from an earlier answer,
 or `lat,lon`. It's a building block like location: crons, place rules and
