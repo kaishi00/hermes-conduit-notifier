@@ -279,11 +279,12 @@ def empty_turn(kind: str, reply: Optional[str]) -> bool:
 
 
 def drop_empty_turns(pulse_store: store.PulseStore) -> int:
-    """Takes away the cards of reports that brought nothing up, and of
-    reports and briefs that were only Hermes' status line (made before
-    those stopped getting one)."""
-    return pulse_store.drop_cards([card["id"] for kind in TURN_KINDS for card in pulse_store.turn_cards(kind)
-                                   if empty_turn(kind, card["news"])])
+    """Takes away the cards of reports that brought nothing up, and any card
+    whose words were only Hermes' status line for a turn its compaction
+    ended (a report's, a brief's, a held pick's moment; made before those
+    stopped getting one)."""
+    return pulse_store.drop_cards([card["id"] for card in pulse_store.turn_cards()
+                                   if empty_turn(card["kind"], card["news"])])
 
 
 # One item of a report, as its own card (the report's lines, split).

@@ -1101,8 +1101,9 @@ def test_cards_that_were_only_hermes_status_line_are_taken_away(live):
 
     card("report", line)
     card("brief", line)
+    card("noticed", line)  # a held pick's moment, released with the turn's words
     kept = card("brief", "Good morning. " + line)
-    assert learning.drop_empty_turns(live.store) == 2
+    assert learning.drop_empty_turns(live.store) == 3
     assert [c["id"] for c in live.store.cards()] == [kept]
 
 

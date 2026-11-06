@@ -1892,9 +1892,12 @@ class PulseStore:
                                 "OR rest_until IS NOT NULL) GROUP BY item_id", (now - rest_s,)).fetchall()
         return {int(row["item_id"]): float(row["at"]) for row in rows}
 
-    def turn_cards(self, kind: str) -> list[dict]:
+    def turn_cards(self, kind: Optional[str] = None) -> list[dict]:
+        """Each card's id, kind and news: ``kind``'s, or every card's."""
         with self._connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT id, news FROM cards WHERE kind=?", (kind,))]
+            if kind is None:
+                return [dict(row) for row in conn.execute("SELECT id, kind, news FROM cards")]
+            return [dict(row) for row in conn.execute("SELECT id, kind, news FROM cards WHERE kind=?", (kind,))]
 
     def drop_cards(self, ids: Sequence[int]) -> int:
         if not ids:
