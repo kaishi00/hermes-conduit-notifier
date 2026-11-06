@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.133.2 (2026-11-05)
+
+### New and improved
+- Notifications, Live Activity updates and answers to Hermes' questions
+  reach the relay sooner: the connection to it stays open between them
+  instead of being set up again every time.
+
 ## 0.133.1 (2026-11-05)
 
 ### Fixes
