@@ -439,6 +439,8 @@ def test_a_waiter_whose_session_moved_is_still_told(on, hermes):
 
 
 def test_a_send_that_raises_keeps_the_waiter(on, hermes, monkeypatch):
+    # No watch thread racing the take below.
+    monkeypatch.setattr(work, "_watch_screen", lambda home: None)
     start()
     assert click(BOT_CHAT) is None
     assert click(WORKER)["action"] == "block"
@@ -449,7 +451,6 @@ def test_a_send_that_raises_keeps_the_waiter(on, hermes, monkeypatch):
         raise RuntimeError("database is locked")
 
     monkeypatch.setattr(work, "_deliver", broken)
-    monkeypatch.setattr(work, "_watch_screen", lambda home: None)
     work.screen_turn_ended(BOT_CHAT)
     assert [item["session_id"] for item in lock.snapshot(on.home)["waiting"]] == [WORKER]
 

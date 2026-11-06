@@ -2055,8 +2055,9 @@ through Hermes' `/api/fs/*` routes.
   `docs/plan.md`) is. Pass each id the chat goes by. It tries the chat's
   working folder, then the newest full path ending in that name that the
   chat's own tool calls, tool output and replies carry (a quoted path is
-  also read whole, spaces and brackets included, except on an SSH
-  profile, whose paths aren't checked), and answers with
+  read whole, spaces, brackets and apostrophes included, and never in
+  pieces; an SSH profile, whose paths aren't checked, leaves such a path
+  out), and answers with
   `path` (and `via`: `folder`, `chat`, or `absolute` for a full path
   checked as it is), or `path: null` when none is a file on this host the
   Folder would open (secret files and, on a hosted install, files outside
