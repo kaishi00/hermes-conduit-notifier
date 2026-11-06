@@ -13,13 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.133.5 (2026-11-06)
+## 0.134.1 (2026-11-06)
 
 ### Security
 - A card no longer draws hidden characters that make text read in a
   different order than it holds, like the Trojan Source trick in code. In a
   diff line each one now shows as a � mark, so the review and Copy Changes
   show it's there; in titles and other text they're dropped.
+
+## 0.134.0 (2026-11-06)
+
+### New and improved
+- One of a bot's chats drives its screen at a time: while a workstream, the
+  Bot Chat or another chat is clicking on it, the others wait their turn
+  instead of fighting over the mouse, and a workstream that waited hears
+  when the screen is free. Conduit shows who has the screen now.
+- A workstream that needs you on the bot's screen (a sign-in, a 2FA code, a
+  CAPTCHA) says so on its card in Conduit, with the screen one tap away.
 
 ## 0.133.4 (2026-11-06)
 

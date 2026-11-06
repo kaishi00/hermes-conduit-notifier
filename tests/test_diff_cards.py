@@ -209,6 +209,9 @@ def test_hidden_bidi_characters_in_a_patch_show_as_marks_and_leave_the_names():
                                          {"type": "tabl\u200be", "table": {"columns": ["n"], "rows": [[1]]}}])
     assert [card["type"] for card in typed] == ["diff", "table"], "the kind is read cleaned, as the enum matches it"
     assert typed[1]["table"]["rows"] == [["1"]]
+    kept = "\u200c\u200d\u200e\u200f\u061c"
+    assert card_schema.clean_text(f"a{kept}b") == f"a{kept}b", "ZWNJ, ZWJ, LRM, RLM and ALM stay"
+    assert card_schema._clean_line(f" a{kept}b") == f" a{kept}b"
 
 
 def test_the_markdown_lists_the_files_and_shows_the_first_lines():
