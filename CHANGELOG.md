@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.134.5 (2026-11-06)
+
+### Fixes
+- On a Local Live call with a read-back speech server, a filler the server
+  starts on its own (a short line it speaks before the reply lands) was
+  dropped whole, so you heard silence while it worked. That filler now opens
+  the reply you hear, and talking over it or stopping cancels it like any
+  other sentence.
+
 ## 0.134.4 (2026-11-06)
 
 ### Fixes
