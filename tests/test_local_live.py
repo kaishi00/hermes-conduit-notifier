@@ -1105,6 +1105,37 @@ def test_a_filler_after_a_sentence_plays_on_the_reply_already_open(client, herme
     assert done["response"]["status"] == "completed"
 
 
+def test_fillers_in_several_deltas_and_back_to_back_are_spaced_once(client, hermes, server):
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        _heard(upstream, "Plan my evening")
+        turn, _ = _next(ws, "conduit.turn")
+        seen = []
+        for rid in ("filler1", "filler2"):
+            upstream.push({"type": "response.created", "response": {"id": rid, "status": "in_progress"}})
+            for delta in ("One ", "sec."):
+                upstream.push({"type": "response.output_audio_transcript.delta", "response_id": rid,
+                               "delta": delta})
+            upstream.push({"type": "response.output_audio_transcript.done", "response_id": rid,
+                           "transcript": "One sec."})
+            _, frames = _next(ws, "response.output_audio_transcript.done")
+            seen += frames
+            upstream.push({"type": "response.done", "response": {"id": rid, "status": "completed"}})
+        _say(ws, turn, "Dinner is at seven.")
+        done, frames = _next(ws, "response.done")
+        seen += frames
+        _finish(ws)
+    assert [frame["type"] for frame in seen].count("response.created") == 1
+    assert "".join(frame["delta"] for frame in seen
+                   if frame["type"] == "response.output_audio_transcript.delta") == \
+        "One sec. One sec. Dinner is at seven."
+    assert [frame["transcript"] for frame in seen
+            if frame["type"] == "response.output_audio_transcript.done"] == \
+        ["One sec.", " One sec.", " Dinner is at seven."]
+    assert done["response"]["id"] == "filler1"
+
+
 def test_a_server_response_between_turns_stays_with_the_plugin(client, hermes, server):
     server.upstream = upstream = ReadBackUpstream()
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:

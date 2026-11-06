@@ -286,6 +286,10 @@ class _LocalLiveReadBack:
         # Only a filler inside an open reply reaches the call: one between
         # turns has no reply to open, and stays with the plugin as before.
         self.filler_plays = False
+        # Words of the reply came before this filler: its transcript joins
+        # them with a space (its first delta, and its done).
+        self.filler_after_words = False
+        self.filler_spaced = False
         self.filler_said = False
         # The user started speaking before the reply said anything: it waits
         # for their words (or for nothing to come of them).
@@ -446,13 +450,14 @@ class _LocalLiveReadBack:
                 self.server_response = str(response.get("id")
                                            or f"resp_conduit_{uuid.uuid4().hex[:16]}")
                 self.filler_plays = self.reply_open
+                self.filler_after_words = self.filler_spaced = (
+                    self.reply_open and (self.reply_sentences > 0 or self.filler_said))
                 self.started = True
                 self.heard_at = self.clock()
                 self._arm_watchdog(LOCAL_LIVE_READ_BACK_RESPONSE_TIMEOUT_S)
                 if self.reply_open and self.reply_id is None:
                     self.reply_id = self.server_response
                     return text
-                self.spaced = self.spaced or self.reply_sentences > 0
                 return None
             self.started = True
             self.heard_at = self.clock()
@@ -468,7 +473,8 @@ class _LocalLiveReadBack:
                 # The filler's words are the reply's: spaced from words before
                 # them, and the next sentence joins them with a space.
                 self.filler_said = True
-                if self.spaced and isinstance(event.get("delta"), str):
+                if self.filler_spaced and isinstance(event.get("delta"), str):
+                    self.filler_spaced = False
                     event["delta"] = " " + event["delta"]
                     text = json.dumps(event)
                 self.spaced = True
@@ -486,7 +492,7 @@ class _LocalLiveReadBack:
                 # read-back check compares against the sentence this one
                 # asked for, and there is none.
                 said = event.get("transcript")
-                if self.reply_sentences > 0 and isinstance(said, str):
+                if self.filler_after_words and isinstance(said, str):
                     event["transcript"] = " " + said
                     text = json.dumps(event)
                 self.filler_said = True
