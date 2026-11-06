@@ -1086,8 +1086,24 @@ def test_cards_of_reports_that_brought_nothing_up_are_taken_away(live):
     assert learning.empty_turn("brief", "Nothing worth bringing up right now.") is False
     # The words the report is told to use when it has nothing.
     assert learning._REPORT_NOTHING.search(pulse.report.REPORT_TEXT)
-    assert learning.drop_empty_reports(live.store) == 1
+    assert learning.drop_empty_turns(live.store) == 1
     assert {c["id"] for c in live.store.cards()} == {full, bold} and empty not in {c["id"] for c in live.store.cards()}
+
+
+def test_cards_that_were_only_hermes_status_line_are_taken_away(live):
+    # Made before compaction_skip: Hermes compacted the chat and ended the
+    # turn on its status line, which became a report's card and a brief's.
+    line = "Context was compacted. The previous response is complete — awaiting your next message."
+
+    def card(kind, news):
+        return live.store.add_card({"kind": kind, "item_id": None, "level": "screen", "news": news, "why": "",
+                                    "chat_id": SID, "chat_title": "Pulse", "message_id": 1, "created_at": time.time()})
+
+    card("report", line)
+    card("brief", line)
+    kept = card("brief", "Good morning. " + line)
+    assert learning.drop_empty_turns(live.store) == 2
+    assert [c["id"] for c in live.store.cards()] == [kept]
 
 
 def test_feed_names_no_chat_while_pulse_is_off(live):

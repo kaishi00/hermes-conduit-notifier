@@ -78,6 +78,7 @@ host = _load("conduit_push.pulse_host", ROOT / "pulse_host.py")
 ledger = _load("conduit_push.pulse_ledger", ROOT / "pulse_ledger.py")
 report = _load("conduit_push.pulse_report", ROOT / "pulse_report.py")
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
+compaction_skip = _load("conduit_push.compaction_skip", ROOT / "compaction_skip.py")
 memory = _load("conduit_push.pulse_memory", ROOT / "pulse_memory.py")
 
 SID = "20261019_165824_560887"  # a Conduit chat's stored id, as Eric's host showed it
@@ -317,6 +318,18 @@ def test_a_failed_turn_is_seen(db, tmp_path):
     assert turn.failed and turn.reply == ""
 
 
+def test_hermes_status_line_after_a_compaction_is_no_reply(db, tmp_path):
+    # Hermes compacted the chat as the hidden turn began and wrote its status
+    # line instead of running the model (compaction_skip): no report there.
+    db.session()
+    db.message("user", "Pulse shadow report pBBBB-1.", display_kind="hidden")
+    db.message("assistant", "Context was compacted. The previous response is complete — awaiting your next message.")
+    turn = hermes.find_turn(tmp_path, chat_id=SID, tag="pBBBB-1", since=0)
+    assert (turn.reply, turn.reply_id, turn.skipped) == ("", None, compaction_skip.SKIPPED_DETAIL)
+    state, detail = delivery.derive_state(turn, state=store.RUNNING, age_s=9, sent_by_earlier_process=False)
+    assert (state, detail) == (store.FAILED, compaction_skip.SKIPPED_DETAIL)
+
+
 def test_missing_state_db_is_unreadable_not_empty(tmp_path):
     with pytest.raises(hermes.HermesUnreadable):
         hermes.find_home_chat(tmp_path, "Pulse")
@@ -344,6 +357,7 @@ S = store
     (TURN(SID, "", False, False), S.RUNNING, 9, False, delivery.ENDED, 10, S.RUNNING),
     (TURN(SID, "", False, False), S.RUNNING, 90, False, delivery.ENDED, delivery.REPLY_GRACE_S, S.FAILED),
     (TURN(SID, "", False, False), S.RUNNING, delivery.STUCK_S, False, "", 0, S.FAILED),
+    (TURN(SID, "", False, False, skipped=compaction_skip.TIMED_OUT_DETAIL), S.RUNNING, 9, False, "", 0, S.FAILED),
 ])
 def test_state_comes_from_hermes_rows(turn, state, age, earlier, prior, unchanged, expected):
     got, _detail = delivery.derive_state(turn, state=state, age_s=age, sent_by_earlier_process=earlier,
