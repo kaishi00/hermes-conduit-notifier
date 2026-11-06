@@ -3612,7 +3612,9 @@ def test_an_app_the_user_never_connected_is_left_out(recording):
                    sys.modules["conduit_push.pulse_followup"].NOTE, sys.modules["conduit_push.pulse_followup"].LOOK_NOTE):
         assert ledger.UNSET_RULE in prompt
     assert "isn't connected or set up is never an item" in sys.modules["conduit_push.pulse_memory"].INSTRUCTIONS
-    assert "isn't connected or set up, which is the user's choice" in sys.modules["conduit_push.pulse_followup"].FOUND_INSTRUCTIONS
+    for stale in ("FOUND_INSTRUCTIONS", "HELD_INSTRUCTIONS", "RESTED_INSTRUCTIONS"):  # a card already made goes
+        assert "isn't connected or set up, which is the user's choice" in getattr(
+            sys.modules["conduit_push.pulse_followup"], stale)
     followups = sys.modules["conduit_push.pulse_followup"]
     for checks in (followups.INSTRUCTIONS, followups.COMMITMENT_INSTRUCTIONS, followups.WATCH_INSTRUCTIONS):
         assert checks.endswith(ledger.UNSET_RULE)  # a check's news can be a card with no turn after it
