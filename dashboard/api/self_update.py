@@ -265,6 +265,12 @@ SELF_UPDATE_STALE_S = 3600.0
 # A gateway restart that fails this shortly before a new dashboard starts
 # took the dashboard down with it (a service manager restarting both).
 SELF_UPDATE_TAKEN_DOWN_S = 300.0
+# The pull in a fresh Hermes process (below): git, the install scan and any dependencies.
+SELF_UPDATE_FRESH_PULL_LIMIT_S = 900.0
+_FRESH_PULL_MARK = "conduit-self-update-result:"
+# A process's start time is only roughly the wall clock (Linux counts it from boot), so a
+# file written as the dashboard started could read as newer than it.
+_HERMES_CHANGED_MARGIN_S = 5.0
 SELF_UPDATE_RUNNING = ("downloading", "restarting_gateway", "waiting_for_chats", "restarting_dashboard")
 # Reentrant: a start reads the status under it too.
 _self_update_lock = threading.RLock()
@@ -394,6 +400,14 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., 
         restart_kwargs = {"interrupt": True}
 
     def pull() -> Dict[str, Any]:
+        # A dashboard still running the Hermes it started with, after Hermes was updated
+        # under it, mixes the two in one process: what it loaded is old, what the pull
+        # imports now is new, and the new code calls into the old ("'PythonDeclaration'
+        # object has no attribute 'installs_packages'", a dashboard started on Hermes 0.22.3
+        # updated to 0.22.4). A fresh process runs the Hermes on disk, whole; the dashboard
+        # restart at the end of the update then loads it here too.
+        if _hermes_changed_on_disk(sys.modules.get("hermes_cli")):
+            return _pull_in_fresh_process()
         return dashboard_update_user_plugin(core.PLUGIN_NAME)
 
     def restart_gateway(draining: Callable[[], None] = lambda: None) -> int:
@@ -417,6 +431,76 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., 
                 raise
 
     return pull, restart_gateway
+
+
+def _process_start_time() -> Optional[float]:
+    try:
+        import psutil  # a Hermes dependency
+        return float(psutil.Process(os.getpid()).create_time())
+    except Exception:  # noqa: BLE001 — not knowing reads as unchanged: the pull runs here, as before
+        return None
+
+
+def _hermes_root(hermes_cli: Any) -> Optional[str]:
+    """The Hermes checkout this process runs: the folder holding hermes_cli."""
+    file = getattr(hermes_cli, "__file__", None)
+    return os.path.dirname(os.path.dirname(os.path.abspath(file))) if file else None
+
+
+def _hermes_changed_on_disk(hermes_cli: Any, started: Optional[float] = None) -> bool:
+    """Whether Hermes' code this process loaded changed on disk after it started (a
+    `hermes update` without a dashboard restart)."""
+    root = _hermes_root(hermes_cli)
+    started = _process_start_time() if started is None else started
+    if root is None or started is None:
+        return False
+    prefix = root + os.sep
+    plugin = os.path.abspath(core._plugin_root()) + os.sep
+    for module in list(sys.modules.values()):
+        file = getattr(module, "__file__", None)
+        if not isinstance(file, str):
+            continue
+        file = os.path.abspath(file)
+        if not file.startswith(prefix) or file.startswith(plugin):
+            continue
+        try:
+            if os.stat(file).st_mtime > started + _HERMES_CHANGED_MARGIN_S:
+                return True
+        except OSError:  # gone from disk: changed too
+            return True
+    return False
+
+
+def _pull_in_fresh_process() -> Dict[str, Any]:
+    """Hermes' plugin pull in a new process of the Hermes on disk, for this dashboard's home."""
+    env = dict(os.environ)
+    with contextlib.suppress(Exception):
+        from hermes_constants import get_hermes_home
+        env["HERMES_HOME"] = str(get_hermes_home())
+    script = ("import json, sys\n"
+              "from hermes_cli.plugins_cmd import dashboard_update_user_plugin\n"
+              "result = dashboard_update_user_plugin(sys.argv[1])\n"
+              f"print({_FRESH_PULL_MARK!r} + json.dumps(result, default=str), flush=True)\n")
+    restart = ("Hermes was updated on this host after the dashboard started. Restart the Hermes "
+               "dashboard, then update the plugin again.")
+    try:
+        done = subprocess.run([sys.executable, "-c", script, core.PLUGIN_NAME], env=env,
+                              cwd=_hermes_root(sys.modules.get("hermes_cli")) or None,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                              timeout=SELF_UPDATE_FRESH_PULL_LIMIT_S,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning("Conduit plugin: the update's pull in a fresh Hermes process didn't finish", exc_info=True)
+        return {"ok": False, "error": restart}
+    for line in reversed(done.stdout.splitlines()):
+        if line.startswith(_FRESH_PULL_MARK):
+            with contextlib.suppress(ValueError):
+                result = json.loads(line[len(_FRESH_PULL_MARK):])
+                if isinstance(result, dict):
+                    return result
+    logger.warning("Conduit plugin: the update's pull in a fresh Hermes process failed (exit %s): %s",
+                   done.returncode, (done.stderr or "")[-2000:])
+    return {"ok": False, "error": restart}
 
 
 def _self_update_failed(job: Dict[str, Any], detail: str, code: Optional[str] = None) -> None:
