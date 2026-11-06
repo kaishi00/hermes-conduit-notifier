@@ -730,11 +730,18 @@ def test_the_tool_never_raises(home, fake, paired, monkeypatch):
     assert _tool({"reason": "Done.", "asked_by_user": True})["error"] == "unavailable"
 
 
-def test_the_tool_shows_only_while_calls_it_can_ask_for_are_on(home, paired, monkeypatch):
-    assert call_tool.available() is False
+def test_the_tool_shows_whenever_paired_even_with_calls_off(home, paired, monkeypatch):
+    # Hidden while calls were off, "call me" found only the call watch tool
+    # and Hermes set up a watch to fake a call; shown, it answers calls_off.
+    _settings(home, enabled=False)
+    assert call_tool.available() is True
+    answer = _tool({"reason": "You asked me to call.", "asked_by_user": True})
+    assert answer["error"] == "calls_off"
+    assert "calls from Hermes off" in answer["note"] and "can't ring either" in answer["note"]
+    assert "Never a way to call now" in sys.modules["conduit_push.call_watches"].SETUP_SCHEMA["description"]
     _settings(home, when_asked=False)
-    assert call_tool.available() is False
-    _settings(home, decides=True)
+    assert "calls they ask for" in _tool({"reason": "Call me.", "asked_by_user": True}, session_id="st-2")["note"]
+    _settings(home, enabled=True, when_asked=False, decides=False)
     assert call_tool.available() is True
     monkeypatch.setattr(call_tool.client, "load_state", lambda: None)
     assert call_tool.available() is False

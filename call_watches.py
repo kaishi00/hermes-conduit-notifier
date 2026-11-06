@@ -119,7 +119,8 @@ SETUP_SCHEMA: dict[str, Any] = {
         "every watch the note describes, each with the note's limits that apply to it; it changes the ones "
         "that exist, adds the missing ones, and lists the ones the note no longer mentions. action list: "
         "the watches. action remove: stop one, only after the user says yes. If you don't know how to check "
-        "something (which address, which page), ask the user first."
+        "something (which address, which page), ask the user first. Never a way to call now: for a call "
+        "about this turn (\"call me\", \"call me when it's done\"), use conduit_call_user."
     ),
     "parameters": {
         "type": "object",
