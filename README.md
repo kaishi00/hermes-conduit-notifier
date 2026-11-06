@@ -1146,6 +1146,11 @@ bridge alike:
 - Conduit sees one response per reply, however many sentences it takes, with
   its transcript spaced between them, and an empty reply as a response that
   begins and ends.
+- A response the server starts on its own while a turn is open (a filler it
+  says while Hermes works, as ConvFill does) plays on the call and opens the
+  reply: its id is the reply's, the reply's sentences wait for its
+  `response.done` and follow it spaced, and talking over it or the call's
+  `response.cancel` stops it like a sentence (plugin 0.134.8).
 - When the user starts speaking over the reply (`input_audio_buffer.speech_started`),
   the reply stops: the plugin cancels the server's response, drops its late
   audio, and lets the turn go, as a server that answers by itself would.
@@ -2279,7 +2284,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
 - A call the user asked for while calls are off answers `calls_off` with a
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
   Hermes in Conduit, and tells Hermes not to set up a call watch instead.
-- The tool shows whenever this profile is paired, calls off included (0.134.8+),
+- The tool shows whenever this profile is paired, calls off included (0.134.9+),
   so "call me" reaches it and gets that answer; before, it was hidden while
   calls were off and Hermes faked a call with a watch that "fires right
   away". The watch tool's description says it is never a way to call now.
