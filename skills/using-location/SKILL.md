@@ -113,7 +113,8 @@ get home", "when should I leave", "will I make it") or finding a place
 looked up on the user's iPhone, with real routes and traffic.
 
 - `directions` with `to` (and `arrive_by` when there's a time to make):
-  duration, traffic delay, `leave_by`, steps. `from` defaults to `"me"`.
+  duration, traffic delay, `leave_by`, steps (none to or from a saved
+  place). `from` defaults to `"me"`.
 - `travel_times` for "which is quickest" (up to 10 destinations).
 - `search` / `lookup` for places, `reverse_geocode` for "what's here".
 - `navigate` with `to` (and `mode`) when the user wants to go there

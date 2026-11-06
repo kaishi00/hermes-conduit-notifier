@@ -13,13 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.134.7 (2026-11-06)
+## 0.134.8 (2026-11-06)
 
 ### Fixes
 - Asking Hermes to call you while calls are off for that profile now gets a
   clear answer and a link to turn them on. Before, Hermes said it couldn't
   call and set up a call watch to ring instead, which checked every 5
   minutes and couldn't ring either.
+
+## 0.134.7 (2026-11-06)
+
+### Fixes
+- Maps lookups from or to a saved place, such as Home, no longer give
+  distances to the metre or turn-by-turn steps, which together could show
+  where the place is. Distances are rounded to 100 m (with Conduit's next
+  update), and the maps tool tells the agent so.
 
 ## 0.134.6 (2026-11-06)
 

@@ -2279,7 +2279,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
 - A call the user asked for while calls are off answers `calls_off` with a
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
   Hermes in Conduit, and tells Hermes not to set up a call watch instead.
-- The tool shows whenever this profile is paired, calls off included (0.134.7+),
+- The tool shows whenever this profile is paired, calls off included (0.134.8+),
   so "call me" reaches it and gets that answer; before, it was hidden while
   calls were off and Hermes faked a call with a watch that "fires right
   away". The watch tool's description says it is never a way to call now.
@@ -2887,7 +2887,9 @@ Limits: 4 devices per profile, 20 places, 256 KiB per batch.
 `conduit_maps` gives Hermes Apple Maps: `search` (places or categories near
 the user, a place or an address), `lookup` (one place or address),
 `reverse_geocode`, `directions` (routes with traffic, tolls, steps, by car,
-on foot, by transit or bike, and `leave_by` for `arrive_by`) and
+on foot, by transit or bike, and `leave_by` for `arrive_by`; no steps to or
+from a saved place, and distances to or from one rounded to 100 m, so its
+coordinates stay on the phone) and
 `travel_times` (up to 10 destinations at once). Places can be `"me"`, a saved
 place's name, an address or a name, `place_id:<id>` from an earlier answer,
 or `lat,lon`. It's a building block like location: crons, place rules and
