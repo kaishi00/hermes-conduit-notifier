@@ -147,9 +147,12 @@ def _prepared(raw: Any, notes: list[str] | None = None, path: str = "card") -> A
     (``read_diff``)."""
     if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
         return raw
-    if raw["type"].lower() == "diff":
+    # The kind as _normalize will match it, cleaned, so a hidden character
+    # or a space can't make the two disagree.
+    kind = clean_text(raw["type"]).lower()
+    if kind == "diff":
         return _prepared_diff(raw, notes, path)
-    if raw["type"].lower() != "table":
+    if kind != "table":
         return raw
     table = raw.get("table")
     if not isinstance(table, dict):
@@ -283,14 +286,27 @@ def _normalize(schema: dict[str, Any], value: Any, path: str = "", notes: list[s
     return _INVALID
 
 
+# Invisible characters that can make text read differently from what it
+# holds (Trojan Source): the bidi embeddings, overrides and isolates, and the
+# zero-width space, word joiner and BOM. ZWJ and ZWNJ stay (emoji, Persian
+# and Indic spelling need them), and so do the plain marks LRM, RLM and ALM.
+_HIDDEN = frozenset(chr(code) for code in (*range(0x202A, 0x202F), *range(0x2066, 0x206A), 0x200B, 0x2060, 0xFEFF))
+
+
 def clean_text(text: str) -> str:
-    """Control characters become spaces; trimmed."""
-    return _clean_line(text).strip()
+    """Control characters become spaces and hidden ones are dropped; trimmed."""
+    return _cleaned(text, "").strip()
 
 
 def _clean_line(text: str) -> str:
-    """Control characters become spaces."""
-    return "".join(" " if unicodedata.category(char) == "Cc" else char for char in text)
+    """Control characters become spaces; a hidden one becomes \ufffd, so a
+    line of code shows where one was and a copied patch doesn't hide it."""
+    return _cleaned(text, "\ufffd")
+
+
+def _cleaned(text: str, hidden: str) -> str:
+    return "".join(" " if unicodedata.category(char) == "Cc" else hidden if char in _HIDDEN else char
+                   for char in text)
 
 
 # Each type's own field; a card keeps it and the shared fields, and nothing else.
