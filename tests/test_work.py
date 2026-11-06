@@ -2170,7 +2170,7 @@ def test_what_counts_as_the_users_go_ahead_follows_the_approval_mode(on, hermes,
 def test_a_ready_mark_from_before_this_turn_doesnt_settle_it_as_ready(on, hermes):
     start()
     call("work_progress", {"ready": True}, session_id=WORKER)
-    work._turn_began[WORKER] = __import__("time").time() + 60  # a turn whose start couldn't clear the mark
+    work._turn_began[work._began_key(on.home, "W1")] = __import__("time").time() + 60  # a turn whose start couldn't clear the mark
     work.turn_ended(WORKER, "A plain answer.")
     work.turn_finished(WORKER, failed=False, interrupted=False)
     assert on.get("W1").status == "done"

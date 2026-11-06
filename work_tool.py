@@ -2370,7 +2370,9 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         work = store.get(row["ref"])
         if work is not None and not work.closed_at and work.session_id \
                 and not _in_transcript(home, work.session_id, row["text"]):
-            screen_lock.wait(home, work.session_id, screen_who(home, work.session_id))
+            # A put-back of one that was promised: in its place, past a full list.
+            screen_lock.wait(home, work.session_id, screen_who(home, work.session_id),
+                             since=float(row.get("created_at") or time.time()))
             _watch_screen(home)
         return
     if kind in ("send", "answer", "user_send") and row["target"]:
@@ -2832,6 +2834,10 @@ def _checklist_only(tool_name: Any, args: Any = None) -> bool:
 
 # When each workstream's current turn started (a ready mark counts only if set since).
 _turn_began: dict[str, float] = {}
+
+
+def _began_key(home: Path, ref: str) -> str:
+    return f"{home}\0{ref}"
 # Bridged checklist calls left out of the journal, by call id, so their end
 # doesn't close another bridged step.
 _unjournaled: set[str] = set()
@@ -2928,7 +2934,9 @@ def _turn_started(session_id: Any) -> bool:
     with _wake_lock:
         if len(_turn_began) > 512:
             _turn_began.clear()
-        _turn_began[str(session_id)] = began
+        # By its workstream, not its session: a mid-turn compaction moves the
+        # session the turn ends under.
+        _turn_began[_began_key(home, work.ref)] = began
     # On disk too: after a restart, the steps since then are the turn it stopped.
     work_store.Store(home).update(work.ref, turn_at=began)
     if work_store.Store(home).get_meta(_CHECK + work.ref):
@@ -3029,7 +3037,7 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     current = store.get(work.ref) or work  # its checklist may have changed during the turn
     marked = current.progress or {}
     with _wake_lock:
-        began = _turn_began.pop(session_id, None)
+        began = _turn_began.pop(_began_key(home, work.ref), None)
     # No start recorded (the turn began before the plugin loaded): an old
     # mark can't be told from this turn's, so it isn't taken.
     ready = bool(marked.get("ready")) and began is not None and float(marked.get("ready_at") or 0) >= began
@@ -3742,8 +3750,11 @@ def _row_screen(work: work_store.Work, screen: dict, profile: str = "") -> tuple
         return "", 0.0
     controlling = screen.get("controlling") or {}
     last = screen.get("last") or {}
-    used = float(last.get("at") or 0) if last.get("session_id") == work.session_id else 0.0
-    if controlling.get("session_id") == work.session_id:
+    # By its session, or by its ref when a compaction moved the session the
+    # hold or the last use was taken under.
+    used = float(last.get("at") or 0) if last.get("session_id") == work.session_id \
+        or _same_waiter(last, work, profile) else 0.0
+    if controlling.get("session_id") == work.session_id or _same_waiter(controlling, work, profile):
         return "controlling", used
     if not work.closed_at and work.status not in ("stopped", "failed", "interrupted") and any(
             (item or {}).get("session_id") == work.session_id or _same_waiter(item or {}, work, profile)
@@ -3832,11 +3843,15 @@ def screen_block(session_id: Any, tool_name: Any, args: Any) -> Optional[dict[st
             return None
         # A workstream is told when the screen is free: its turn may end
         # waiting for it, and nobody else would send it on.
-        told = who.get("kind") == "workstream" and work_broker.unavailable_reason() == ""
-        if told:
-            screen_lock.wait(home, owner, who, where)
-            _watch_screen(home)
-        return {"action": "block", "message": screen_lock.block_message(holder, told=told)}
+        told = full = False
+        if who.get("kind") == "workstream":
+            # Off the list (it's full, or workstreams are off), it isn't
+            # told to wait for a message that won't come.
+            if work_broker.unavailable_reason() == "":
+                told = screen_lock.wait(home, owner, who, where)
+                _watch_screen(home)
+            full = not told
+        return {"action": "block", "message": screen_lock.block_message(holder, told=told, full=full)}
     except Exception:  # noqa: BLE001 — coordination, not a fence
         logger.warning("conduit_push: couldn't check who has the screen; letting the call through", exc_info=True)
         return None
@@ -3910,8 +3925,8 @@ def screen_turn_ended(session_id: Any) -> None:
 
 
 def _same_waiter(item: dict, work: work_store.Work, profile: str) -> bool:
-    """A waiting entry names this workstream by its ref, in its own bot (a
-    host's list is every bot's)."""
+    """A screen entry (waiting, holder or last use) names this workstream by
+    its ref, in its own bot (a host's file is every bot's)."""
     return bool(item.get("ref")) and item.get("ref") == work.ref and item.get("kind") == "workstream" \
         and item.get("profile") == profile
 
@@ -3955,7 +3970,8 @@ def _screen_freed(home: Path) -> bool:
         return _send_screen_free(home, item, who)
     except Exception:  # noqa: BLE001 — taken off the list: never lost
         logger.debug("conduit_push: couldn't tell a waiter the screen is free", exc_info=True)
-        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"))
+        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"),
+                         retry=int(item.get("tries") or 0) + 1)
         _watch_screen(home)
         return False
 
@@ -3965,7 +3981,8 @@ def _send_screen_free(home: Path, item: dict, who: dict) -> bool:
     if work is None or not work.session_id:
         # Not readable just now: back on the list; the next look drops it
         # if it no longer waits.
-        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"))
+        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"),
+                         retry=int(item.get("tries") or 0) + 1)
         _watch_screen(home)
         return False
     store = work_store.Store(home)
@@ -3975,7 +3992,7 @@ def _send_screen_free(home: Path, item: dict, who: dict) -> bool:
         # Still waiting (at the running limit, say): kept on the list for
         # the next release or the watch's next look.
         logger.debug("conduit_push: couldn't tell %s the screen is free: %s", work.ref, result.get("note"))
-        screen_lock.wait(home, work.session_id, who, since=item.get("at"))
+        screen_lock.wait(home, work.session_id, who, since=item.get("at"), retry=int(item.get("tries") or 0) + 1)
         _watch_screen(home)
     return False
 
