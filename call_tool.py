@@ -98,13 +98,14 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool], skill_path: Any) -> N
 
 
 def available() -> bool:
-    """Shown to the model only while this profile is paired and some call
-    Hermes can ask for is on."""
+    """Shown to the model whenever this profile is paired, calls off
+    included: the handler then tells the user how to turn them on. Hidden
+    while they were off, a model asked "call me" found only the call watch
+    tool and set up a watch that "fires right away" instead. Hermes also
+    caches a tool's availability for the whole process, across profiles, so
+    it can't follow one profile's call settings (see call_watches)."""
     try:
-        if client.load_state() is None:
-            return False
-        settings = calls.settings()
-        return bool(settings["enabled"] and (settings["when_asked"] or settings["decides"]))
+        return client.load_state() is not None
     except Exception:  # noqa: BLE001
         return False
 
@@ -157,7 +158,8 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
         if str(error) == "calls_off":
             note = ("The user hasn't turned on calls they ask for in Conduit. Tell them in your reply, and that "
                     f"they turn them on in Conduit's Settings, under {SETTINGS_LINK} (a link that opens it; "
-                    "leave the link out of anything spoken).") if asked else (
+                    "leave the link out of anything spoken). Don't set up a call watch or anything else to call "
+                    "instead: it can't ring either.") if asked else (
                     "The user hasn't let Hermes decide when to call. Don't call; put the news in your reply.")
             return {"ok": False, "error": "calls_off", "note": note}
         if str(error) == "too_many":

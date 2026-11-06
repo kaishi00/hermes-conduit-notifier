@@ -730,11 +730,13 @@ def test_the_tool_never_raises(home, fake, paired, monkeypatch):
     assert _tool({"reason": "Done.", "asked_by_user": True})["error"] == "unavailable"
 
 
-def test_the_tool_shows_only_while_calls_it_can_ask_for_are_on(home, paired, monkeypatch):
-    assert call_tool.available() is False
-    _settings(home, when_asked=False)
-    assert call_tool.available() is False
-    _settings(home, decides=True)
+def test_the_tool_shows_whenever_paired_even_with_calls_off(home, paired, monkeypatch):
+    # Hidden while calls were off, "call me" found only the call watch tool
+    # and Hermes set up a watch to fake a call; shown, it answers calls_off.
+    _settings(home, enabled=False)
+    assert call_tool.available() is True
+    assert _tool({"reason": "You asked me to call.", "asked_by_user": True})["error"] == "calls_off"
+    _settings(home, enabled=True, when_asked=False, decides=False)
     assert call_tool.available() is True
     monkeypatch.setattr(call_tool.client, "load_state", lambda: None)
     assert call_tool.available() is False

@@ -17,6 +17,7 @@ notification.
 
 | What's going on | What to do |
 | --- | --- |
+| The user asks to be called now ("call me", "can you call me?") | `conduit_call_user` with `asked_by_user: true`; it rings when this turn ends |
 | The user asked to be called when something is done ("call me when it's done") | `conduit_call_user` with `asked_by_user: true`, in the turn that has the result |
 | The user wants a call if something happens later ("call me if the site goes down"), or when a one-time event comes ("call me when the results are certified") | `conduit_call_watch`, action `set` (a call watch) |
 | Conduit sent the user's What's worth a call note ("make my checks match this note") | `conduit_call_watch`, action `sync` |
@@ -33,6 +34,10 @@ notification.
 
 If the work hands off to a background process, call in the turn that gets
 the result.
+
+If it answers `calls_off`, tell the user how to turn calls on, as the answer
+says. Don't set up a call watch, or anything else, to ring instead: a watch
+follows the same settings, so it can't ring either.
 
 ## Call watches
 

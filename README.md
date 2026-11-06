@@ -2278,8 +2278,11 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   setting one again by name or id moves it onto the report.
 - A call the user asked for while calls are off answers `calls_off` with a
   `conduit://settings/calls` link for Hermes' reply, which opens Calls from
-  Hermes in Conduit.
-- The tool shows only while this profile is paired and one of those is on.
+  Hermes in Conduit, and tells Hermes not to set up a call watch instead.
+- The tool shows whenever this profile is paired, calls off included (0.134.7+),
+  so "call me" reaches it and gets that answer; before, it was hidden while
+  calls were off and Hermes faked a call with a watch that "fires right
+  away". The watch tool's description says it is never a way to call now.
   Subagents can't call; their parent can. `conduit_call_watch` shows while
   the profile is paired on a Hermes with scheduled jobs, and
   `conduit_watch_report` while it's paired (it only works in a watch's run).
