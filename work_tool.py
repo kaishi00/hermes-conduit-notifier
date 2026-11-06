@@ -3842,10 +3842,13 @@ def screen_block(session_id: Any, tool_name: Any, args: Any) -> Optional[dict[st
         # A workstream is told when the screen is free: its turn may end
         # waiting for it, and nobody else would send it on.
         told = full = False
-        if who.get("kind") == "workstream" and work_broker.unavailable_reason() == "":
-            told = screen_lock.wait(home, owner, who, where)
+        if who.get("kind") == "workstream":
+            # Off the list (it's full, or workstreams are off), it isn't
+            # told to wait for a message that won't come.
+            if work_broker.unavailable_reason() == "":
+                told = screen_lock.wait(home, owner, who, where)
+                _watch_screen(home)
             full = not told
-            _watch_screen(home)
         return {"action": "block", "message": screen_lock.block_message(holder, told=told, full=full)}
     except Exception:  # noqa: BLE001 — coordination, not a fence
         logger.warning("conduit_push: couldn't check who has the screen; letting the call through", exc_info=True)
@@ -3965,7 +3968,8 @@ def _screen_freed(home: Path) -> bool:
         return _send_screen_free(home, item, who)
     except Exception:  # noqa: BLE001 — taken off the list: never lost
         logger.debug("conduit_push: couldn't tell a waiter the screen is free", exc_info=True)
-        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"))
+        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"),
+                         retry=int(item.get("tries") or 0) + 1)
         _watch_screen(home)
         return False
 
@@ -3975,7 +3979,8 @@ def _send_screen_free(home: Path, item: dict, who: dict) -> bool:
     if work is None or not work.session_id:
         # Not readable just now: back on the list; the next look drops it
         # if it no longer waits.
-        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"))
+        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"),
+                         retry=int(item.get("tries") or 0) + 1)
         _watch_screen(home)
         return False
     store = work_store.Store(home)

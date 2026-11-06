@@ -478,6 +478,8 @@ def test_a_send_that_raises_keeps_the_waiter(on, hermes, monkeypatch):
     monkeypatch.setattr(work, "_deliver", broken)
     work.screen_turn_ended(BOT_CHAT)
     assert [item["session_id"] for item in lock.snapshot(on.home)["waiting"]] == [WORKER]
+    # Put back with a pause, as a refused send is: not taken again at once.
+    assert lock.take_next_waiting(on.home, lambda item: True) is None
 
 
 def test_a_workstream_waits_once_across_a_compaction(home):
@@ -537,3 +539,20 @@ def test_a_refused_free_screen_send_waits_longer_each_time(home):
     lock.wait(home, "w1", who, now=now, since=taken["at"], retry=3)
     assert lock.take_next_waiting(home, lambda item: True, now=now + lock.RETRY_FIRST_S * 3) is None
     assert lock.take_next_waiting(home, lambda item: True, now=now + lock.RETRY_FIRST_S * 4)["tries"] == 3
+
+
+def test_asking_again_keeps_its_place_in_line(on):
+    lock.wait(on.home, "s1", {"kind": "workstream", "ref": "W1"}, now=100.0)
+    lock.wait(on.home, "s2", {"kind": "workstream", "ref": "W2"}, now=200.0)
+    lock.wait(on.home, "s1", {"kind": "workstream", "ref": "W1"}, now=300.0)
+    first = lock.take_next_waiting(on.home, lambda item: True, now=301.0)
+    assert first["ref"] == "W1" and first["at"] == 100.0
+
+
+def test_a_workstream_refused_with_workstreams_off_is_promised_nothing(on, hermes, monkeypatch):
+    start()
+    assert click(BOT_CHAT) is None
+    monkeypatch.setattr(work.work_broker, "unavailable_reason", lambda: "off")
+    refused = click(WORKER)
+    assert "you won't get a message when it's free" in refused["message"]
+    assert "say you're waiting for the screen" not in refused["message"]
