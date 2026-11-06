@@ -13,13 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.133.4 (2026-11-06)
+## 0.133.5 (2026-11-06)
 
 ### Security
 - A card no longer draws hidden characters that make text read in a
   different order than it holds, like the Trojan Source trick in code. In a
   diff line each one now shows as a � mark, so the review and Copy Changes
   show it's there; in titles and other text they're dropped.
+
+## 0.133.4 (2026-11-06)
+
+### Fixes
+- Pulse's reports and morning brief no longer come back as "Context was
+  compacted. The previous response is complete — awaiting your next
+  message." When Hermes compacts Pulse's chat as a report starts, the report
+  still gets written, and the cards and pushes that only said that are gone.
+  A bot woken in its Bot Chat as Hermes compacts it gets to work rather than
+  answering with that line.
 
 ## 0.133.3 (2026-11-06)
 
