@@ -195,6 +195,18 @@ def test_a_diff_keeps_what_fits_and_says_what_it_left_out(monkeypatch):
     assert "cards[0].diff: 1 lines over 1000 characters were cut" in notes
 
 
+def test_hidden_bidi_characters_in_a_patch_show_as_marks_and_leave_the_names():
+    """Issue 1852 (Trojan Source): an override in a patch line would draw the
+    line in another order than it runs, and Copy Changes would paste it."""
+    diff = _one({"patch": "diff --git a/auth\u200b.py b/auth\u200b.py\n--- a/auth\u200b.py\n+++ b/auth\u200b.py\n"
+                          "@@ -1 +1 @@ def is\u2066_admin\n-ok = role == 'admin'\n+ok = role != 'user\u202e \u2066'\n"})
+    [file] = diff["files"]
+    assert file["path"] == "auth.py" and file["hunks"][0]["context"] == "def is_admin", "names drop them"
+    assert file["hunks"][0]["lines"][1] == "+ok = role != 'user\ufffd \ufffd'", "a line shows where each was"
+    text = card_schema.fallback_markdown([{"type": "diff", "diff": diff}])
+    assert "\u202e" not in text and "\u2066" not in text and "\u200b" not in text
+
+
 def test_the_markdown_lists_the_files_and_shows_the_first_lines():
     [card] = card_schema.normalize_cards([{"type": "diff", "title": "Login fix", "diff": {"patch": GIT_SHOW},
                                            "source": {"name": "PR #12", "url": "https://example.com/pull/12"}}])
