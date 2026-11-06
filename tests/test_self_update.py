@@ -743,6 +743,38 @@ def test_a_changed_hermes_pulls_in_a_fresh_process(monkeypatch):
     assert argv[0] == sys.executable and argv[-1] == "conduit_push" and kwargs["stdin"] is api.self_update.subprocess.DEVNULL
 
 
+def test_a_fresh_pull_runs_the_hermes_on_disk_for_this_home(monkeypatch, tmp_path):
+    package = tmp_path / "hermes" / "hermes_cli"
+    package.mkdir(parents=True)
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__file__ = str(package / "__init__.py")
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    constants = types.ModuleType("hermes_constants")
+    constants.get_hermes_home = lambda: tmp_path / "home"
+    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
+    runs = []
+
+    def run(argv, **kwargs):
+        runs.append(kwargs)
+        return types.SimpleNamespace(returncode=0, stderr="", stdout=api.self_update._FRESH_PULL_MARK + '{"ok": true}')
+
+    monkeypatch.setattr(api.self_update.subprocess, "run", run)
+    assert api.self_update._pull_in_fresh_process() == {"ok": True}
+    kwargs, = runs
+    # The checkout's folder first on the path, so `-c` imports the Hermes on disk.
+    assert kwargs["cwd"] == str((tmp_path / "hermes").resolve())
+    assert kwargs["env"]["HERMES_HOME"] == str(tmp_path / "home")
+
+
+def test_a_re_exec_counts_from_when_it_loaded_hermes_again(monkeypatch):
+    # _reexec keeps the pid, so the process's creation time stays the first start's.
+    monkeypatch.setattr(api.self_update, "_MODULE_LOADED_AT", 2_000.0)
+    psutil = types.ModuleType("psutil")
+    psutil.Process = lambda pid: types.SimpleNamespace(create_time=lambda: 1_000.0)
+    monkeypatch.setitem(sys.modules, "psutil", psutil)
+    assert api.self_update._process_start_time() == 2_000.0
+
+
 def test_a_fresh_pull_that_gives_no_answer_says_to_restart_the_dashboard(monkeypatch):
     monkeypatch.setattr(api.self_update.subprocess, "run",
                         lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="Traceback"))
@@ -753,7 +785,8 @@ def test_a_fresh_pull_that_gives_no_answer_says_to_restart_the_dashboard(monkeyp
         raise api.self_update.subprocess.TimeoutExpired("python", 1)
 
     monkeypatch.setattr(api.self_update.subprocess, "run", timeout)
-    assert "Restart the Hermes dashboard" in api.self_update._pull_in_fresh_process()["error"]
+    error = api.self_update._pull_in_fresh_process()["error"]
+    assert error.startswith("The update didn't finish on the host within 15 minutes.") and "Restart the Hermes dashboard" in error
 
 
 def test_a_fresh_pull_passes_hermes_refusals_through(monkeypatch):

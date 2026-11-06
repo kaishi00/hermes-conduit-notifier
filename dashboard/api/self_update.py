@@ -433,10 +433,16 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., 
     return pull, restart_gateway
 
 
+# When this module loaded: after a re-exec (_reexec keeps the pid, so its creation time) it
+# loads again, with the Hermes on disk then.
+_MODULE_LOADED_AT = time.time()
+
+
 def _process_start_time() -> Optional[float]:
+    """When this process loaded the Hermes it runs: its start, or its last re-exec."""
     try:
         import psutil  # a Hermes dependency
-        return float(psutil.Process(os.getpid()).create_time())
+        return max(float(psutil.Process(os.getpid()).create_time()), _MODULE_LOADED_AT)
     except Exception:  # noqa: BLE001 — not knowing reads as unchanged: the pull runs here, as before
         return None
 
@@ -444,7 +450,7 @@ def _process_start_time() -> Optional[float]:
 def _hermes_root(hermes_cli: Any) -> Optional[str]:
     """The Hermes checkout this process runs: the folder holding hermes_cli."""
     file = getattr(hermes_cli, "__file__", None)
-    return os.path.dirname(os.path.dirname(os.path.abspath(file))) if file else None
+    return os.path.dirname(os.path.dirname(os.path.realpath(file))) if file else None
 
 
 def _hermes_changed_on_disk(hermes_cli: Any, started: Optional[float] = None) -> bool:
@@ -455,12 +461,12 @@ def _hermes_changed_on_disk(hermes_cli: Any, started: Optional[float] = None) ->
     if root is None or started is None:
         return False
     prefix = root + os.sep
-    plugin = os.path.abspath(core._plugin_root()) + os.sep
+    plugin = os.path.realpath(core._plugin_root()) + os.sep
     for module in list(sys.modules.values()):
         file = getattr(module, "__file__", None)
         if not isinstance(file, str):
             continue
-        file = os.path.abspath(file)
+        file = os.path.realpath(file)
         if not file.startswith(prefix) or file.startswith(plugin):
             continue
         try:
@@ -489,8 +495,12 @@ def _pull_in_fresh_process() -> Dict[str, Any]:
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
                               timeout=SELF_UPDATE_FRESH_PULL_LIMIT_S,
                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.TimeoutExpired):
-        logger.warning("Conduit plugin: the update's pull in a fresh Hermes process didn't finish", exc_info=True)
+    except subprocess.TimeoutExpired:
+        logger.warning("Conduit plugin: the update's pull in a fresh Hermes process timed out")
+        return {"ok": False, "error": f"The update didn't finish on the host within "
+                                      f"{int(SELF_UPDATE_FRESH_PULL_LIMIT_S // 60)} minutes. {restart}"}
+    except OSError:
+        logger.warning("Conduit plugin: couldn't start a fresh Hermes process for the update's pull", exc_info=True)
         return {"ok": False, "error": restart}
     for line in reversed(done.stdout.splitlines()):
         if line.startswith(_FRESH_PULL_MARK):
