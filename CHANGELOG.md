@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.134.0 (2026-11-05)
+## 0.134.0 (2026-11-06)
 
 ### New and improved
 - One of a bot's chats drives its screen at a time: while a workstream, the
@@ -22,6 +22,13 @@ checks it). The format is fixed, because Conduit reads it:
   when the screen is free. Conduit shows who has the screen now.
 - A workstream that needs you on the bot's screen (a sign-in, a 2FA code, a
   CAPTCHA) says so on its card in Conduit, with the screen one tap away.
+
+## 0.133.2 (2026-11-05)
+
+### New and improved
+- Notifications, Live Activity updates and answers to Hermes' questions
+  reach the relay sooner: the connection to it stays open between them
+  instead of being set up again every time.
 
 ## 0.133.1 (2026-11-05)
 
