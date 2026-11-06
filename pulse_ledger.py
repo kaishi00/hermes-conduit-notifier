@@ -51,6 +51,15 @@ FAILURE_MARK = re.compile(
     r"unauthori[sz]ed|unreachable|not permitted|not allowed|broken pipe|\breset\b|\bmissing\b|\bbad\b|"
     r"\bwrong\b|\bunknown\b|\bno route\b|\bresolve\b|\busage:|no rule|\bstop\.|\*\*\*|packet loss|\brejected\b|"
     r"\bconflict|\bnot ok\b|nxdomain|\bnot a\b|no space|\blocked\b|\bunmet\b|corrupt|is a directory|already in use|read-only|not empty|unavailable|\blimit\b|exceeded|quota|out of memory|\boom\b|unexpected eof|(?-i:\bE[A-Z]{3,}\b)", re.I)
+# An app the user hasn't connected (Hermes's hosted connectors: none set up,
+# or this one not connected) is their choice, not something that went wrong:
+# its "failed" calls never reach a report, and UNSET_RULE tells each Pulse
+# prompt to leave it out. An expired connection the user did set up still counts.
+UNSET_ERROR = re.compile(r"CONNECTION_REQUIRED|Hosted connectors are not set up|is not connected for this account|"
+                         r"This app is not connected")
+UNSET_RULE = ("An app, connector or account the user hasn't connected or set up (a calendar, reminders, mail or any "
+              "other) is their choice: never bring it up or suggest setting it up, and never say something may be "
+              "missing or incomplete because of it.")
 # Exit codes that are never harmless whatever was printed: a timeout (124),
 # a command that couldn't run (126, 127) or one killed by a signal (128+).
 LOUD_EXITS = 124
@@ -404,6 +413,13 @@ def terminal_failure(result: Any, command: Any = None) -> Optional[str]:
         if len(excerpt) > room:
             excerpt = "…" + excerpt[-(room - 1):]
     return _clip(f"{head}: {excerpt}", MAX_ERROR)
+
+
+def unset_source(row: dict[str, Any]) -> bool:
+    """A failed call whose error says the app it needs isn't connected or
+    set up (UNSET_ERROR). The whole row goes: Hermes's connector errors say
+    only that, and the call never reached the app."""
+    return row.get("status") == "error" and bool(UNSET_ERROR.search(str(row.get("error") or "")))
 
 
 def harmless_exit(row: dict[str, Any]) -> bool:
