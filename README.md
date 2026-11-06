@@ -1150,7 +1150,7 @@ bridge alike:
   says while Hermes works, as ConvFill does) plays on the call and opens the
   reply: its id is the reply's, the reply's sentences wait for its
   `response.done` and follow it spaced, and talking over it or the call's
-  `response.cancel` stops it like a sentence (plugin 0.134.7).
+  `response.cancel` stops it like a sentence (plugin 0.134.8).
 - When the user starts speaking over the reply (`input_audio_buffer.speech_started`),
   the reply stops: the plugin cancels the server's response, drops its late
   audio, and lets the turn go, as a server that answers by itself would.
@@ -2889,7 +2889,9 @@ Limits: 4 devices per profile, 20 places, 256 KiB per batch.
 `conduit_maps` gives Hermes Apple Maps: `search` (places or categories near
 the user, a place or an address), `lookup` (one place or address),
 `reverse_geocode`, `directions` (routes with traffic, tolls, steps, by car,
-on foot, by transit or bike, and `leave_by` for `arrive_by`) and
+on foot, by transit or bike, and `leave_by` for `arrive_by`; no steps to or
+from a saved place, and distances to or from one rounded to 100 m, so its
+coordinates stay on the phone) and
 `travel_times` (up to 10 destinations at once). Places can be `"me"`, a saved
 place's name, an address or a name, `place_id:<id>` from an earlier answer,
 or `lat,lon`. It's a building block like location: crons, place rules and
