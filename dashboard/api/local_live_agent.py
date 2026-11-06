@@ -63,7 +63,9 @@ LOCAL_LIVE_AGENT_TOOL_TIMEOUT_S = 30.0
 # To connect, and between chunks of the front model's stream.
 LOCAL_LIVE_FRONT_TIMEOUT_S = 30.0
 LOCAL_LIVE_FRONT_MAX_LINE_BYTES = 1024 * 1024
-LOCAL_LIVE_FRONT_UNREACHABLE_REPLY = "I can't reach my quick model right now, so I'll pass that to Hermes."
+# Said in the first person, as the call's one assistant: the fast model and
+# Hermes are one voice to the user, never a go-between (issue 583).
+LOCAL_LIVE_FRONT_UNREACHABLE_REPLY = "My quick model isn't answering right now, so this one will take me a little longer."
 LOCAL_LIVE_AGENT_SPEECH_HINT = (
     "\nEverything you write is spoken aloud by a speech server as it streams: plain spoken sentences only, "
     "no markdown, lists, code, emoji or links. Keep replies short unless the user asks for more.")
