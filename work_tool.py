@@ -3920,8 +3920,18 @@ def _screen_freed(home: Path) -> bool:
     item = screen_lock.take_next_waiting(home, _still_waits)
     if item is None:
         return not screen_lock.snapshot(home).get("waiting")
-    work, _ = _waiting_work(item, home)
     who = {key: item[key] for key in ("profile", "kind", "ref", "title", "label") if key in item}
+    try:
+        return _send_screen_free(home, item, who)
+    except Exception:  # noqa: BLE001 — taken off the list: never lost
+        logger.debug("conduit_push: couldn't tell a waiter the screen is free", exc_info=True)
+        screen_lock.wait(home, str(item.get("session_id") or ""), who, since=item.get("at"))
+        _watch_screen(home)
+        return False
+
+
+def _send_screen_free(home: Path, item: dict, who: dict) -> bool:
+    work, _ = _waiting_work(item, home)
     if work is None or not work.session_id:
         # Not readable just now: back on the list; the next look drops it
         # if it no longer waits.

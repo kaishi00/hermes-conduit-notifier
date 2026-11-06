@@ -436,3 +436,33 @@ def test_a_waiter_whose_session_moved_is_still_told(on, hermes):
     sent = [params for name, params, _ in list(hermes.calls) if name == "prompt.submit"
             and params.get("text") == work.SCREEN_FREE]
     assert len(sent) == 1
+
+
+def test_a_send_that_raises_keeps_the_waiter(on, hermes, monkeypatch):
+    start()
+    assert click(BOT_CHAT) is None
+    assert click(WORKER)["action"] == "block"
+    work.turn_ended(WORKER, "Waiting for the screen.")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(work, "_deliver", broken)
+    monkeypatch.setattr(work, "_watch_screen", lambda home: None)
+    work.screen_turn_ended(BOT_CHAT)
+    assert [item["session_id"] for item in lock.snapshot(on.home)["waiting"]] == [WORKER]
+
+
+def test_a_workstream_waits_once_across_a_compaction(home):
+    who = {"profile": "default", "kind": "workstream", "ref": "W1", "title": "Sign in"}
+    lock.wait(home, "before", who)
+    lock.wait(home, "after", who)
+    assert [item["session_id"] for item in lock.snapshot(home)["waiting"]] == ["after"]
+    lock.wait(home, "before", who)
+    assert lock.claim(home, "after", who) is None
+    assert lock.snapshot(home)["waiting"] == []
+    # Chats are never merged by a ref they don't have.
+    lock.wait(home, "chat-a", {"profile": "default", "kind": "chat", "ref": ""})
+    lock.wait(home, "chat-b", {"profile": "default", "kind": "chat", "ref": ""})
+    assert len(lock.snapshot(home)["waiting"]) == 2

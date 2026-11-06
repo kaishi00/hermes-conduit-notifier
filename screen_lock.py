@@ -231,9 +231,18 @@ def claim(home: Path, session_id: str, who: dict, where: Optional[str] = None,
         state["holder"] = entry
         state["last"] = {**who, "session_id": session_id, "at": now}
         waiting = [item for item in state.get("waiting") or [] if isinstance(item, dict)
-                   and item.get("session_id") != session_id]
+                   and not _same_entry(item, session_id, who)]
         state["waiting"] = waiting
     return None
+
+
+def _same_entry(item: dict, session_id: str, who: dict) -> bool:
+    """A waiting entry is this session's, or this workstream's under the id
+    it had before a compaction (its ref, in its own bot)."""
+    if item.get("session_id") == session_id:
+        return True
+    return (who.get("kind") == "workstream" and item.get("kind") == "workstream" and bool(who.get("ref"))
+            and item.get("ref") == who.get("ref") and item.get("profile") == who.get("profile"))
 
 
 def release(home: Path, session_id: str, now: Optional[float] = None) -> bool:
@@ -262,7 +271,7 @@ def wait(home: Path, session_id: str, who: dict, where: Optional[str] = None,
     now = time.time() if now is None else now
     with _locked(_path(home, where)) as state:
         waiting = [item for item in state.get("waiting") or [] if isinstance(item, dict)
-                   and item.get("session_id") != session_id and now - float(item.get("at") or 0) < WAIT_KEEP_S]
+                   and not _same_entry(item, session_id, who) and now - float(item.get("at") or 0) < WAIT_KEEP_S]
         waiting.append({**who, "session_id": session_id, "home": str(home), "at": now if since is None else since})
         waiting.sort(key=lambda item: float(item.get("at") or 0))
         # Past the cap the newest ask goes: the longest wait is woken first.
