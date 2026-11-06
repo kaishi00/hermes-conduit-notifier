@@ -79,3 +79,33 @@ def test_the_key_survives_another_tag(tmp_path):
     again = report.failures(_junit(tmp_path, [("t", "test_x", "failure", "HTTP 501: refused")]))
     assert first[0]["key"] == again[0]["key"]
     assert report.MARKER.format(key=first[0]["key"]) in report.issue_body(first[0], "v1", "", "")
+
+
+def test_a_failure_two_versions_share_opens_one_issue(tmp_path, monkeypatch):
+    # The issue list can lag a just-opened issue, so the second version's run
+    # learns about the first's issue from --opened (notifier #573).
+    calls = []
+
+    def fake_gh(*args, input=None):
+        calls.append(args[:2])
+        if args[:2] == ("issue", "list"):
+            return "[]"
+        if args[:2] == ("issue", "create"):
+            return "https://github.com/o/r/issues/572\n"
+        if args[:2] == ("issue", "view"):
+            return '{"comments": []}'
+        return ""
+
+    monkeypatch.setattr(report, "gh", fake_gh)
+    opened = tmp_path / "opened.json"
+    for ref in ("v0.22.7+canary.1", "v0.23.0"):
+        assert report.main(["report.py", "--no-results", "--ref", ref, "--opened", str(opened)]) == 0
+    assert calls.count(("issue", "create")) == 1
+    assert calls.count(("issue", "comment")) == 1
+
+
+def test_a_cancelled_run_reports_nothing():
+    workflow = (ROOT / ".github" / "workflows" / "upstream-contract.yml").read_text()
+    report_job = workflow.split("\n  report:\n", 1)[1]
+    condition = next(line for line in report_job.splitlines() if line.strip().startswith("if:"))
+    assert "!cancelled()" in condition and "always()" not in condition
