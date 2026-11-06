@@ -283,6 +283,9 @@ class _LocalLiveReadBack:
         # arrive under ids it never saw a created for), so later sentences
         # join it without rewriting.
         self.server_response: Optional[str] = None
+        # Only a filler inside an open reply reaches the call: one between
+        # turns has no reply to open, and stays with the plugin as before.
+        self.filler_plays = False
         self.filler_said = False
         # The user started speaking before the reply said anything: it waits
         # for their words (or for nothing to come of them).
@@ -372,10 +375,10 @@ class _LocalLiveReadBack:
         if any(kind in text for kind in _LOCAL_LIVE_READ_BACK_AUDIO):
             if not self.on:
                 return text
-            if self.muting or (self.speaking is None and self.server_response is None):
+            if self.muting or (self.speaking is None and not self.filler_plays):
                 return None
             self.heard_at = self.clock()
-            if self.server_response is not None and self.speaking is None:
+            if self.speaking is None:
                 # Filler audio is reply speech: talking over it stops the turn.
                 self.reply_said = True
             return text
@@ -437,15 +440,20 @@ class _LocalLiveReadBack:
                 # The server started a response of its own (a ConvFill filler):
                 # it opens the reply the call already sees, so its frames go
                 # on and its id becomes the reply's; the sentences wait for
-                # its end (_pump's guard) and join it as later items.
+                # its end (_pump's guard) and join it as later items. One that
+                # comes after a sentence plays on the response already open,
+                # spaced from its words, so the call still sees one created.
                 self.server_response = str(response.get("id")
                                            or f"resp_conduit_{uuid.uuid4().hex[:16]}")
-                if self.reply_open and self.reply_id is None:
-                    self.reply_id = self.server_response
+                self.filler_plays = self.reply_open
                 self.started = True
                 self.heard_at = self.clock()
                 self._arm_watchdog(LOCAL_LIVE_READ_BACK_RESPONSE_TIMEOUT_S)
-                return text
+                if self.reply_open and self.reply_id is None:
+                    self.reply_id = self.server_response
+                    return text
+                self.spaced = self.spaced or self.reply_sentences > 0
+                return None
             self.started = True
             self.heard_at = self.clock()
             if self.reply_id is None:
@@ -453,14 +461,17 @@ class _LocalLiveReadBack:
                 return text
             return None
         if kind in _LOCAL_LIVE_READ_BACK_TRANSCRIPT_DELTAS:
-            if self.muting or (self.speaking is None and self.server_response is None):
+            if self.muting or (self.speaking is None and not self.filler_plays):
                 return None
             self.heard_at = self.clock()
-            if self.server_response is not None and self.speaking is None:
-                # The filler's words open the reply: the next sentence joins
-                # them with a space.
-                self.spaced = True
+            if self.speaking is None:
+                # The filler's words are the reply's: spaced from words before
+                # them, and the next sentence joins them with a space.
                 self.filler_said = True
+                if self.spaced and isinstance(event.get("delta"), str):
+                    event["delta"] = " " + event["delta"]
+                    text = json.dumps(event)
+                self.spaced = True
                 return text
             if self.spaced and isinstance(event.get("delta"), str):
                 self.spaced = False
@@ -468,12 +479,16 @@ class _LocalLiveReadBack:
                 return json.dumps(event)
             return text
         if kind in _LOCAL_LIVE_READ_BACK_TRANSCRIPT_DONE:
-            if self.muting or (self.speaking is None and self.server_response is None):
+            if self.muting or (self.speaking is None and not self.filler_plays):
                 return None
             if self.speaking is None:
                 # The gate leaves only the filler's own transcript here: the
                 # read-back check compares against the sentence this one
                 # asked for, and there is none.
+                said = event.get("transcript")
+                if self.reply_sentences > 0 and isinstance(said, str):
+                    event["transcript"] = " " + said
+                    text = json.dumps(event)
                 self.filler_said = True
                 return text
             said = event.get("transcript")
@@ -493,7 +508,7 @@ class _LocalLiveReadBack:
                         return None
                 elif verdict:
                     self.misses = 0
-                if self.reply_sentences > 1:
+                if self.reply_sentences > 1 or self.filler_said:
                     event["transcript"] = " " + said
                     return json.dumps(event)
             return text
@@ -507,6 +522,7 @@ class _LocalLiveReadBack:
                 # cancelled filler overtaken by a sentence must not clear
                 # that sentence's state.
                 self.server_response = None
+                self.filler_plays = False
                 if self.speaking is None:
                     self._response_over()
                 await self._pump()
@@ -542,7 +558,7 @@ class _LocalLiveReadBack:
             return text
         if kind in ("response.output_item.added", "response.output_item.done", "response.output_audio.done",
                     "response.audio.done", "response.content_part.added", "response.content_part.done"):
-            if self.muting or (self.speaking is None and self.server_response is None):
+            if self.muting or (self.speaking is None and not self.filler_plays):
                 return None
             return text
         return text
@@ -704,6 +720,7 @@ class _LocalLiveReadBack:
         self.muting = False
         self.blocked = False
         self.server_response = None
+        self.filler_plays = False
         if self.watchdog is not None:
             self.watchdog.cancel()
             self.watchdog = None
