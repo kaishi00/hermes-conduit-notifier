@@ -335,6 +335,8 @@ def test_a_refused_workstream_is_promised_nothing_when_the_list_is_full(on, herm
     refused = click(WORKER)
     assert refused["action"] == "block"
     assert "You'll get a message in this chat when it's free" not in refused["message"]
+    assert "you won't get a message when it's free" in refused["message"]
+    assert "say you're waiting for the screen" not in refused["message"]
 
 
 def test_a_resolved_waiter_isnt_named_as_waiting(on, hermes, monkeypatch):

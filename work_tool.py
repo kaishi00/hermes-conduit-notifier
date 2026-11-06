@@ -3841,11 +3841,12 @@ def screen_block(session_id: Any, tool_name: Any, args: Any) -> Optional[dict[st
             return None
         # A workstream is told when the screen is free: its turn may end
         # waiting for it, and nobody else would send it on.
-        told = who.get("kind") == "workstream" and work_broker.unavailable_reason() == ""
-        if told:
+        told = full = False
+        if who.get("kind") == "workstream" and work_broker.unavailable_reason() == "":
             told = screen_lock.wait(home, owner, who, where)
+            full = not told
             _watch_screen(home)
-        return {"action": "block", "message": screen_lock.block_message(holder, told=told)}
+        return {"action": "block", "message": screen_lock.block_message(holder, told=told, full=full)}
     except Exception:  # noqa: BLE001 — coordination, not a fence
         logger.warning("conduit_push: couldn't check who has the screen; letting the call through", exc_info=True)
         return None
