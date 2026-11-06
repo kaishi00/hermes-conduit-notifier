@@ -7,7 +7,9 @@ location push ``locate`` uses (the relay sees a request id inside the sealed
 envelope, never the lookup), and the phone fetches the lookup, answers it and
 posts the answer sealed (location_store, ``/location/maps/{id}``). The user's
 own position stays on the phone: "from me" answers give durations, distances
-and places, at the detail the user chose for background sharing.
+and places, at the detail the user chose for background sharing. So do saved
+places' coordinates: the phone rounds a distance to or from one to 100 m and
+gives a route to or from one no steps.
 
 Like location, it's a building block: search, look a place up, directions
 with leave-by times and travel times to several places, for any chat, cron
@@ -113,7 +115,10 @@ SCHEMA: dict[str, Any] = {
             "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LIST, "description": "search: how many, "
                                                                                            "default 10."},
             "alternatives": {"type": "boolean", "description": "directions: up to 3 routes (default true)."},
-            "steps": {"type": "boolean", "description": "directions: turn-by-turn steps (default true)."},
+            "steps": {"type": "boolean", "description": "directions: turn-by-turn steps (default true). None for "
+                                                     "a route to or from a saved place, whose street stays on "
+                                                     "the phone, or from me when the user shares their area "
+                                                     "only."},
         },
         "required": ["action"],
     },
