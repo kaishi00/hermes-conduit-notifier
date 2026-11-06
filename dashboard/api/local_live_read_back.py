@@ -32,6 +32,12 @@ logger = core.logger
 #     -> one read-back response.create per sentence (inline input)
 #   server: input_audio_buffer.speech_started -> the reply stops (barge-in)
 #
+# A server that starts a response of its own while a turn is open (a ConvFill
+# filler it speaks before the reply lands) is passed through: its response
+# opens the reply the call sees, the sentences wait for its end and continue
+# it, and its transcript joins with a space. The call still sees one response
+# per reply.
+#
 # The call's own side doesn't change: the phone's or the Watch's
 # LocalLiveSession sends the same session.update and readiness check, and
 # sees one response per reply, as from a server that answers by itself. The
@@ -270,6 +276,21 @@ class _LocalLiveReadBack:
         self.reply_sentences = 0
         # Something of the reply went to the server: speech over it stops it.
         self.reply_said = False
+        # The server started a response of its own (a ConvFill filler): its
+        # audio is the reply's opening — the call hears it, the sentences wait
+        # for its end, and its id becomes the reply's. The call keys playback
+        # on the active response, not the id (multi-sentence replies already
+        # arrive under ids it never saw a created for), so later sentences
+        # join it without rewriting.
+        self.server_response: Optional[str] = None
+        # Only a filler inside an open reply reaches the call: one between
+        # turns has no reply to open, and stays with the plugin as before.
+        self.filler_plays = False
+        # Words of the reply came before this filler: its transcript joins
+        # them with a space (its first delta, and its done).
+        self.filler_after_words = False
+        self.filler_spaced = False
+        self.filler_said = False
         # The user started speaking before the reply said anything: it waits
         # for their words (or for nothing to come of them).
         self.held = False
@@ -358,9 +379,12 @@ class _LocalLiveReadBack:
         if any(kind in text for kind in _LOCAL_LIVE_READ_BACK_AUDIO):
             if not self.on:
                 return text
-            if self.muting or self.speaking is None:
+            if self.muting or (self.speaking is None and not self.filler_plays):
                 return None
             self.heard_at = self.clock()
+            if self.speaking is None:
+                # Filler audio is reply speech: talking over it stops the turn.
+                self.reply_said = True
             return text
         if not self.on and self.update is None:
             return text
@@ -402,37 +426,77 @@ class _LocalLiveReadBack:
             # nothing of it has been said yet (Hermes still at work), only
             # words make a new turn: a cough doesn't cost the reply.
             if self.interrupts and self.reply_open:
-                if (self.speaking is not None and not self.muting) or self.reply_said:
+                if ((self.speaking is not None and not self.muting) or self.reply_said
+                        or self.server_response is not None):
                     await self._stop(cancel_turn=True)
                 else:
                     self._hold()
             return None
         if kind == "response.created":
-            if self.speaking is None or self.muting:
+            if self.muting:
                 if self.speaking is not None:
                     self.started = True
                     # Cancelled before it started: its end should follow soon.
                     self._arm_watchdog(LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S)
                 return None
+            response = event.get("response") if isinstance(event.get("response"), dict) else {}
+            if self.speaking is None:
+                # The server started a response of its own (a ConvFill filler):
+                # it opens the reply the call already sees, so its frames go
+                # on and its id becomes the reply's; the sentences wait for
+                # its end (_pump's guard) and join it as later items. One that
+                # comes after a sentence plays on the response already open,
+                # spaced from its words, so the call still sees one created.
+                self.server_response = str(response.get("id")
+                                           or f"resp_conduit_{uuid.uuid4().hex[:16]}")
+                self.filler_plays = self.reply_open
+                self.filler_after_words = self.filler_spaced = (
+                    self.reply_open and (self.reply_sentences > 0 or self.filler_said))
+                self.started = True
+                self.heard_at = self.clock()
+                self._arm_watchdog(LOCAL_LIVE_READ_BACK_RESPONSE_TIMEOUT_S)
+                if self.reply_open and self.reply_id is None:
+                    self.reply_id = self.server_response
+                    return text
+                return None
             self.started = True
             self.heard_at = self.clock()
             if self.reply_id is None:
-                response = event.get("response") if isinstance(event.get("response"), dict) else {}
                 self.reply_id = str(response.get("id") or f"resp_conduit_{uuid.uuid4().hex[:16]}")
                 return text
             return None
         if kind in _LOCAL_LIVE_READ_BACK_TRANSCRIPT_DELTAS:
-            if self.muting or self.speaking is None:
+            if self.muting or (self.speaking is None and not self.filler_plays):
                 return None
             self.heard_at = self.clock()
+            if self.speaking is None:
+                # The filler's words are the reply's: spaced from words before
+                # them, and the next sentence joins them with a space.
+                self.filler_said = True
+                if self.filler_spaced and isinstance(event.get("delta"), str):
+                    self.filler_spaced = False
+                    event["delta"] = " " + event["delta"]
+                    text = json.dumps(event)
+                self.spaced = True
+                return text
             if self.spaced and isinstance(event.get("delta"), str):
                 self.spaced = False
                 event["delta"] = " " + event["delta"]
                 return json.dumps(event)
             return text
         if kind in _LOCAL_LIVE_READ_BACK_TRANSCRIPT_DONE:
-            if self.muting or self.speaking is None:
+            if self.muting or (self.speaking is None and not self.filler_plays):
                 return None
+            if self.speaking is None:
+                # The gate leaves only the filler's own transcript here: the
+                # read-back check compares against the sentence this one
+                # asked for, and there is none.
+                said = event.get("transcript")
+                if self.filler_after_words and isinstance(said, str):
+                    event["transcript"] = " " + said
+                    text = json.dumps(event)
+                self.filler_said = True
+                return text
             said = event.get("transcript")
             if isinstance(said, str):
                 verdict = _local_live_read_back_matches(said, self.speaking)
@@ -450,11 +514,25 @@ class _LocalLiveReadBack:
                         return None
                 elif verdict:
                     self.misses = 0
-                if self.reply_sentences > 1:
+                if self.reply_sentences > 1 or self.filler_said:
                     event["transcript"] = " " + said
                     return json.dumps(event)
             return text
         if kind == "response.done":
+            done = event.get("response") if isinstance(event.get("response"), dict) else {}
+            done_id = str(done.get("id") or "")
+            if self.server_response is not None and done_id in ("", self.server_response):
+                # The filler's end: the reply's response stays open (its
+                # sentences go on it), so this end stays here — the plugin
+                # ends the call's response itself, as between sentences. A
+                # cancelled filler overtaken by a sentence must not clear
+                # that sentence's state.
+                self.server_response = None
+                self.filler_plays = False
+                if self.speaking is None:
+                    self._response_over()
+                await self._pump()
+                return None
             self._response_over()
             await self._pump()
             return None
@@ -486,7 +564,9 @@ class _LocalLiveReadBack:
             return text
         if kind in ("response.output_item.added", "response.output_item.done", "response.output_audio.done",
                     "response.audio.done", "response.content_part.added", "response.content_part.done"):
-            return None if self.muting or self.speaking is None else text
+            if self.muting or (self.speaking is None and not self.filler_plays):
+                return None
+            return text
         return text
 
     # Turns.
@@ -525,7 +605,7 @@ class _LocalLiveReadBack:
         self.sentences.clear()
         # A response already being cancelled was told before.
         cancelled = self.muting
-        if self.speaking is not None and not self.muting:
+        if (self.speaking is not None or self.server_response is not None) and not self.muting:
             cancelled = True
             self.muting = True
             # A server may drop a response it hadn't started without a word.
@@ -574,14 +654,18 @@ class _LocalLiveReadBack:
 
     async def _pump(self) -> None:
         """The next sentence to the server once it's free, or the reply's end."""
-        if self.closed or self.speaking is not None or self.blocked or self.held:
+        if (self.closed or self.speaking is not None or self.blocked or self.held
+                or self.server_response is not None):
+            # A filler the server started plays out first: its end is the
+            # seam the sentence continues from (ConvFill), and sending over
+            # it would have the server cut its own words.
             return
         if self.sentences:
             sentence = self.sentences.popleft()
             self.speaking, self.started = sentence, False
             self.reply_sentences += 1
             self.reply_said = True
-            self.spaced = self.reply_sentences > 1
+            self.spaced = self.reply_sentences > 1 or self.filler_said
             self.heard_at = self.clock()
             self._arm_watchdog(LOCAL_LIVE_READ_BACK_RESPONSE_TIMEOUT_S)
             item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": sentence}]}
@@ -599,6 +683,7 @@ class _LocalLiveReadBack:
         self.reply_sentences = 0
         self.reply_said = False
         self.spaced = False
+        self.filler_said = False
         frames = []
         if reply_id is None:
             # Nothing was said (an empty reply, or the readiness check's):
@@ -640,6 +725,8 @@ class _LocalLiveReadBack:
         self.speaking, self.started = None, False
         self.muting = False
         self.blocked = False
+        self.server_response = None
+        self.filler_plays = False
         if self.watchdog is not None:
             self.watchdog.cancel()
             self.watchdog = None

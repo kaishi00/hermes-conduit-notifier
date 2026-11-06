@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.134.8 (2026-11-06)
+
+### Fixes
+- On a Local Live call with a speech server that reads text aloud, a filler
+  the server says on its own while Hermes works ("let me look that
+  up") was dropped, so you heard silence instead. You now hear it, Hermes'
+  answer plays once it ends, and talking over it or tapping Stop stops it like
+  the rest of the reply.
+
 ## 0.134.7 (2026-11-06)
 
 ### Fixes

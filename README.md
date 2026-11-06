@@ -1146,6 +1146,11 @@ bridge alike:
 - Conduit sees one response per reply, however many sentences it takes, with
   its transcript spaced between them, and an empty reply as a response that
   begins and ends.
+- A response the server starts on its own while a turn is open (a filler it
+  says while Hermes works, as ConvFill does) plays on the call and opens the
+  reply: its id is the reply's, the reply's sentences wait for its
+  `response.done` and follow it spaced, and talking over it or the call's
+  `response.cancel` stops it like a sentence (plugin 0.134.8).
 - When the user starts speaking over the reply (`input_audio_buffer.speech_started`),
   the reply stops: the plugin cancels the server's response, drops its late
   audio, and lets the turn go, as a server that answers by itself would.
