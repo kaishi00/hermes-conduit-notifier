@@ -416,8 +416,9 @@ def terminal_failure(result: Any, command: Any = None) -> Optional[str]:
 
 
 def unset_source(row: dict[str, Any]) -> bool:
-    """A failed call whose error only says the app it needs isn't connected
-    or set up (UNSET_ERROR)."""
+    """A failed call whose error says the app it needs isn't connected or
+    set up (UNSET_ERROR). The whole row goes: Hermes's connector errors say
+    only that, and the call never reached the app."""
     return row.get("status") == "error" and bool(UNSET_ERROR.search(str(row.get("error") or "")))
 
 
