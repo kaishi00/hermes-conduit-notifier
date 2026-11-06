@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.133.6 (2026-11-06)
+
+### Fixes
+- Pulse no longer brings up apps you haven't connected in Hermes (a calendar,
+  reminders, mail or any other): leaving one unconnected is your choice, so it
+  stops sending a card about it every day, and briefs no longer say they may
+  be missing something because of it. Cards like that from the last three
+  days go away at their next daily check.
+
 ## 0.133.4 (2026-11-06)
 
 ### Fixes

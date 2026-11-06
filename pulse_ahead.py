@@ -48,6 +48,7 @@ from . import pulse_candidates as candidates
 from . import pulse_dates
 from . import pulse_followup as followup
 from . import pulse_learning as learning
+from . import pulse_ledger as ledger
 from . import pulse_places as places
 from . import pulse_push as push
 from . import pulse_quiet as quiet
@@ -104,7 +105,9 @@ Return a JSON object {{"dates": [...], "ahead": [...]}}.
 - "reminder" (ahead only): the key of the reminder it's about (like r1), when it's about one.
 - "source" (ahead only): calendar, reminders or chat (a remembered item); "area": one of {areas}.
 
-What belongs in "ahead" is what needs getting ready for in time: a trip to book or pack for, a party that needs a gift, a deadline that needs starting on. Leave out what happens today or tomorrow (the morning brief covers it), the dates under "Dates that come back every year" and "Deadlines" (they come up in "dates" when it's time), and what the material shows done or covered."""
+What belongs in "ahead" is what needs getting ready for in time: a trip to book or pack for, a party that needs a gift, a deadline that needs starting on. Leave out what happens today or tomorrow (the morning brief covers it), the dates under "Dates that come back every year" and "Deadlines" (they come up in "dates" when it's time), and what the material shows done or covered.
+
+""" + ledger.UNSET_RULE
 
 # Added to INSTRUCTIONS when Pulse may hold a pick for a place (pulse_places).
 MOMENT_RULE = """

@@ -35,6 +35,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from . import pulse_hours as hours
 from . import pulse_learning as learning
+from . import pulse_ledger as ledger
 from . import pulse_prefs as prefs
 from . import pulse_report as report
 from . import pulse_store as store
@@ -119,6 +120,8 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 - "after" (found, kind "next" only): the #number under "Done since the last report", or the key under "Events that ended since the last report" (like e1), that it follows.
 
 A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen.
+
+""" + ledger.UNSET_RULE + """
 
 A scheduled job marked failing covers nothing: weigh what rests on it as if there were no job, and say in its "why" that the job is failing.
 

@@ -3584,3 +3584,31 @@ def test_do_it_checks_run_with_follow_ups_off(remembering, monkeypatch):
     assert ran == [("acts", float("inf")), "followups"]
     assert store_.get("followup_usage")["checks"] == 2  # each act check counted once
     assert store_.get("followup_today") == {"day": day, "tokens": 0}  # nor spent from follow-ups' day
+
+
+def test_an_app_the_user_never_connected_is_left_out(recording):
+    """An unconnected app is the user's choice (Eric, 2026-11-06: cards every
+    day that calendar and reminders connectors weren't set up). Hermes's own
+    wordings are dropped, recorded the way its hook sends them (str of the
+    result's "error"); an expired connection the user did set up stays."""
+    home = pulse.get_hermes_home()
+    unset = ["Hosted connectors are not set up for this user yet. Call manage_connections to connect the app first; "
+             "that sets them up.",
+             {"code": "CONNECTION_REQUIRED", "message": "The google_calendar connector is not connected for this "
+                                                        "account."},
+             "This app is not connected. Call manage_connections to open a connection card for it; there is no "
+             "link to show the user."]
+    for at, error in enumerate(unset):
+        ledger.record(home, tool_name=f"connector_{at}", args={"query": "calendar"}, status="error",
+                      error_message=str(error), result=json.dumps({"error": error}), now=DAY + at)
+    expired = {"code": "CONNECTION_EXPIRED",
+               "message": "The gmail connector connection for this account has expired and must be reconnected."}
+    ledger.record(home, tool_name="connector_x", args={"query": "mail"}, status="error", error_message=str(expired),
+                  result=json.dumps({"error": expired}), now=DAY + 10)
+    failed = _failed(recording)
+    assert "connector_x" in failed and failed.count("\n- ") == 1
+    for prompt in (candidates.INSTRUCTIONS, report.REPORT_TEXT, sys.modules["conduit_push.pulse_ahead"].INSTRUCTIONS,
+                   sys.modules["conduit_push.pulse_brief"].NOTE, sys.modules["conduit_push.pulse_brief"].LOOK_NOTE):
+        assert ledger.UNSET_RULE in prompt
+    assert "isn't connected or set up is never an item" in sys.modules["conduit_push.pulse_memory"].INSTRUCTIONS
+    assert "isn't connected or set up, which is the user's choice" in sys.modules["conduit_push.pulse_followup"].FOUND_INSTRUCTIONS
