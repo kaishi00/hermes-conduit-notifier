@@ -556,3 +556,12 @@ def test_a_workstream_refused_with_workstreams_off_is_promised_nothing(on, herme
     refused = click(WORKER)
     assert "you won't get a message when it's free" in refused["message"]
     assert "say you're waiting for the screen" not in refused["message"]
+
+
+def test_a_card_keeps_driving_the_screen_after_its_chat_is_compacted(on, hermes):
+    start()
+    assert click(WORKER) is None
+    store = store_mod.Store(on.home)
+    store.update(store.by_session(WORKER).ref, session_id="worker-compacted")
+    row = work.app_list(on.home)["work"][0]
+    assert row["screen"] == "controlling" and row["screen_used_at"] > 0
