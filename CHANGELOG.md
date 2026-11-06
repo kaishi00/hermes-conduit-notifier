@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.134.2 (2026-11-06)
+## 0.134.3 (2026-11-06)
 
 ### Fixes
 - A workstream that needs you on the bot's screen now always says so to its
@@ -27,6 +27,15 @@ checks it). The format is fixed, because Conduit reads it:
 - A workstream that couldn't be told the screen is free (its bot was at its
   limit of running work) is tried again after a growing pause, not every
   few seconds.
+
+## 0.134.2 (2026-11-06)
+
+### Fixes
+- Pulse no longer brings up apps you haven't connected in Hermes (a calendar,
+  reminders, mail or any other): leaving one unconnected is your choice, so it
+  stops sending a card about it every day, and briefs no longer say they may
+  be missing something because of it. Cards like that from the last three
+  days go away at their next daily check.
 
 ## 0.134.1 (2026-11-06)
 
