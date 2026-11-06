@@ -360,6 +360,29 @@ def test_a_follow_up_turn_gets_its_note_and_pushes(live, monkeypatch):
     assert [event["type"] for event in queued] == ["response.ready"]
 
 
+def test_hermes_status_line_after_a_compaction_pushes_nothing(live, monkeypatch):
+    # Hermes compacted the chat and ended the turn on its status line: no
+    # follow-up there, and the attempt goes again (compaction_skip).
+    tell(live)
+    pulse.tick()
+    text = live.sent()[0]
+    line = "Context was compacted. The previous response is complete — awaiting your next message."
+    assert not pulse.pushes(SID, "t1", line)
+    queued = []
+    monkeypatch.setattr(plugin, "enqueue", queued.append)
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: None)
+    monkeypatch.setattr(plugin, "_pending_ready", {})
+    monkeypatch.setattr(plugin, "_desktop_watched", lambda *args: False)
+    monkeypatch.setattr(plugin.calls, "turn_ended", lambda *args, **kwargs: False)
+    plugin._pre_llm_call(session_id=SID, turn_id="t1", user_message=text, conversation_history=[])
+    plugin._post_llm_call(session_id=SID, turn_id="t1", assistant_response=line)
+    plugin._on_session_end(session_id=SID, turn_id="t1", completed=True, failed=False, interrupted=False)
+    # Nor in any other chat: it says nothing happened.
+    plugin._post_llm_call(session_id="another", turn_id="t2", assistant_response=line)
+    plugin._on_session_end(session_id="another", turn_id="t2", completed=True, failed=False, interrupted=False)
+    assert queued == []
+
+
 def test_a_probe_turn_still_pushes_nothing(live):
     live.store.set("probe_requested", True)
     pulse.tick()

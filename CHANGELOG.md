@@ -23,6 +23,16 @@ checks it). The format is fixed, because Conduit reads it:
 - A workstream that needs you on the bot's screen (a sign-in, a 2FA code, a
   CAPTCHA) says so on its card in Conduit, with the screen one tap away.
 
+## 0.133.4 (2026-11-06)
+
+### Fixes
+- Pulse's reports and morning brief no longer come back as "Context was
+  compacted. The previous response is complete — awaiting your next
+  message." When Hermes compacts Pulse's chat as a report starts, the report
+  still gets written, and the cards and pushes that only said that are gone.
+  A bot woken in its Bot Chat as Hermes compacts it gets to work rather than
+  answering with that line.
+
 ## 0.133.3 (2026-11-06)
 
 ### Fixes

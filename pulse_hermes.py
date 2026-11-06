@@ -43,6 +43,9 @@ class TurnRows:
     closed: bool  # a later user row exists, so the turn is over
     prompt: str = ""  # the tagged user row's own text
     reply_id: Optional[int] = None  # the reply's messages.id
+    # What Hermes' status line in place of a reply said happened, when
+    # compaction ended the turn before the model ran (compaction_skip).
+    skipped: str = ""
 
 
 def _connect(home: Path) -> sqlite3.Connection:
@@ -156,7 +159,9 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
     into (compression, branches), written at or after ``since``, and the rows
     after it. Archived rows count too: compaction keeps them as inactive.
     The latest copy wins: compressing mid-turn carries the user row into the
-    new session, and the reply follows it there."""
+    new session, and the reply follows it there. Hermes' status line for a
+    turn its compaction ended before the model ran is never the reply: it
+    goes in ``skipped``."""
     users = _run(home, (
         "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
         "ON s.parent_session_id = c.id) "
@@ -170,7 +175,7 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
     rows = _run(home, (
         "SELECT id, role, content, display_kind FROM messages WHERE session_id = ? AND id > ? ORDER BY id"
     ), (session_id, user_id))
-    reply, reply_id, failed, closed = "", None, False, False
+    reply, reply_id, failed, closed, skipped = "", None, False, False, ""
     for row in rows:
         if row["role"] == "user":
             closed = True
@@ -181,9 +186,21 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
             failed = True
             continue
         text = row["content"].strip() if isinstance(row["content"], str) else ""
-        if text:
+        # Hermes' status line for a turn its compaction ended is no reply.
+        notice = _skip_notice(text)
+        if notice:
+            skipped = notice
+        elif text:
             reply, reply_id = text, row["id"]
-    return TurnRows(session_id, reply, failed, closed, prompt, reply_id)
+    return TurnRows(session_id, reply, failed, closed, prompt, reply_id, skipped)
+
+
+def _skip_notice(text: str) -> str:
+    try:
+        from . import compaction_skip  # this module is also read on its own
+    except ImportError:
+        return ""
+    return compaction_skip.notice(text)
 
 
 # A bot's workstreams, a json list for ``_NOT_WORK``: Hermes hides an open
