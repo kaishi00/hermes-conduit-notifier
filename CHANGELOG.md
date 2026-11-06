@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.134.1 (2026-11-06)
+
+### Security
+- A card no longer draws hidden characters that make text read in a
+  different order than it holds, like the Trojan Source trick in code. In a
+  diff line each one now shows as a � mark, so the review and Copy Changes
+  show it's there; in titles and other text they're dropped.
+
 ## 0.134.0 (2026-11-06)
 
 ### New and improved
