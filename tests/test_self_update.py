@@ -693,3 +693,104 @@ def test_profiles_are_pointed_from_the_main_home(monkeypatch, tmp_path):
     (shared / "profile_copies.py").write_text((ROOT / "profile_copies.py").read_text())
     assert api.self_update._point_profiles() == ["profile coder: linked to the main install (9.9.9)"]
     assert (home / "plugins" / "conduit_push").resolve() == shared.resolve()
+
+
+def _module_at(path):
+    module = types.ModuleType(f"fake_{path.stem}")
+    module.__file__ = str(path)
+    return module
+
+
+def test_hermes_changed_on_disk_reads_the_loaded_files_against_the_start(monkeypatch, tmp_path):
+    # issue 1889: a dashboard started on Hermes 0.22.3 kept running after Hermes moved to 0.22.4+.
+    package = tmp_path / "hermes" / "hermes_cli"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    declarations = tmp_path / "hermes" / "pm" / "plugin_declarations.py"
+    declarations.parent.mkdir()
+    declarations.write_text("")
+    hermes_cli = _module_at(package / "__init__.py")
+    monkeypatch.setitem(sys.modules, "fake_hermes_declarations", _module_at(declarations))
+    started = declarations.stat().st_mtime
+    assert not api.self_update._hermes_changed_on_disk(hermes_cli, started)
+    os_utime = __import__("os").utime
+    os_utime(declarations, (started + 60, started + 60))
+    assert api.self_update._hermes_changed_on_disk(hermes_cli, started)
+    # A file written as the process started isn't a change: the start time is rough.
+    os_utime(declarations, (started + 2, started + 2))
+    assert not api.self_update._hermes_changed_on_disk(hermes_cli, started)
+
+
+def test_hermes_without_a_file_or_a_start_time_reads_as_unchanged():
+    assert not api.self_update._hermes_changed_on_disk(types.ModuleType("hermes_cli"), 0.0)
+
+
+def test_a_changed_hermes_pulls_in_a_fresh_process(monkeypatch):
+    _fake_hermes(monkeypatch, lambda profile=None: (None, False))
+    sys.modules["hermes_cli.plugins_cmd"].dashboard_update_user_plugin = lambda name: pytest.fail("pulled in the mixed process")
+    monkeypatch.setattr(api.self_update, "_hermes_changed_on_disk", lambda hermes_cli: True)
+    runs = []
+
+    def run(argv, **kwargs):
+        runs.append((argv, kwargs))
+        return types.SimpleNamespace(returncode=0, stderr="", stdout="Updating abc..def\n"
+                                     + api.self_update._FRESH_PULL_MARK + json.dumps({"ok": True, "name": argv[-1]}) + "\n")
+
+    monkeypatch.setattr(api.self_update.subprocess, "run", run)
+    pull, _ = api.self_update._hermes_update_steps()
+    assert pull() == {"ok": True, "name": "conduit_push"}
+    (argv, kwargs), = runs
+    assert argv[0] == sys.executable and argv[-1] == "conduit_push" and kwargs["stdin"] is api.self_update.subprocess.DEVNULL
+
+
+def test_a_fresh_pull_runs_the_hermes_on_disk_for_this_home(monkeypatch, tmp_path):
+    package = tmp_path / "hermes" / "hermes_cli"
+    package.mkdir(parents=True)
+    hermes_cli = types.ModuleType("hermes_cli")
+    hermes_cli.__file__ = str(package / "__init__.py")
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    constants = types.ModuleType("hermes_constants")
+    constants.get_hermes_home = lambda: tmp_path / "home"
+    monkeypatch.setitem(sys.modules, "hermes_constants", constants)
+    runs = []
+
+    def run(argv, **kwargs):
+        runs.append(kwargs)
+        return types.SimpleNamespace(returncode=0, stderr="", stdout=api.self_update._FRESH_PULL_MARK + '{"ok": true}')
+
+    monkeypatch.setattr(api.self_update.subprocess, "run", run)
+    assert api.self_update._pull_in_fresh_process() == {"ok": True}
+    kwargs, = runs
+    # The checkout's folder first on the path, so `-c` imports the Hermes on disk.
+    assert kwargs["cwd"] == str((tmp_path / "hermes").resolve())
+    assert kwargs["env"]["HERMES_HOME"] == str(tmp_path / "home")
+
+
+def test_a_re_exec_counts_from_when_it_loaded_hermes_again(monkeypatch):
+    # _reexec keeps the pid, so the process's creation time stays the first start's.
+    monkeypatch.setattr(api.self_update, "_MODULE_LOADED_AT", 2_000.0)
+    psutil = types.ModuleType("psutil")
+    psutil.Process = lambda pid: types.SimpleNamespace(create_time=lambda: 1_000.0)
+    monkeypatch.setitem(sys.modules, "psutil", psutil)
+    assert api.self_update._process_start_time() == 2_000.0
+
+
+def test_a_fresh_pull_that_gives_no_answer_says_to_restart_the_dashboard(monkeypatch):
+    monkeypatch.setattr(api.self_update.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="Traceback"))
+    result = api.self_update._pull_in_fresh_process()
+    assert result["ok"] is False and "Restart the Hermes dashboard" in result["error"]
+
+    def timeout(*a, **k):
+        raise api.self_update.subprocess.TimeoutExpired("python", 1)
+
+    monkeypatch.setattr(api.self_update.subprocess, "run", timeout)
+    error = api.self_update._pull_in_fresh_process()["error"]
+    assert error.startswith("The update didn't finish on the host within 15 minutes.") and "Restart the Hermes dashboard" in error
+
+
+def test_a_fresh_pull_passes_hermes_refusals_through(monkeypatch):
+    refusal = {"ok": False, "scan_blocked": True, "error": "blocked"}
+    monkeypatch.setattr(api.self_update.subprocess, "run", lambda *a, **k: types.SimpleNamespace(
+        returncode=0, stderr="", stdout=api.self_update._FRESH_PULL_MARK + json.dumps(refusal)))
+    assert api.self_update._pull_in_fresh_process() == refusal
