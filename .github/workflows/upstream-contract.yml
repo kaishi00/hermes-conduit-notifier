@@ -132,7 +132,10 @@ jobs:
   report:
     name: Open or update upstream-break issues
     needs: [refs, contract]
-    if: always() && github.event_name != 'pull_request' && needs.refs.result == 'success'
+    # Not on a cancelled run: a newer run on the same branch cancels this one
+    # mid-test, and its versions would look as if Hermes never installed
+    # (notifier #572 and #573). A version that timed out still reports.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.refs.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -157,20 +160,21 @@ jobs:
           gh label create upstream-break --color B60205 \
             --description "A Hermes change breaks the plugin's contract (upstream/contract.yml)" 2>/dev/null || true
           declare -A reported
+          opened="$RUNNER_TEMP/opened.json"
           for dir in "$RUNNER_TEMP"/results/contract-*; do
             [ -f "$dir/ref.txt" ] || continue
             ref=$(head -1 "$dir/ref.txt")
             [ -n "$ref" ] || continue
             reported[$ref]=1
             if [ -f "$dir/junit.xml" ]; then
-              python3 upstream/report.py "$dir/junit.xml" --ref "$ref" --run-url "$RUN_URL" --changed "$dir/changed.txt"
+              python3 upstream/report.py "$dir/junit.xml" --ref "$ref" --run-url "$RUN_URL" --changed "$dir/changed.txt" --opened "$opened"
             else
               # Hermes didn't install, or the tests never ran: one harness issue.
-              python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL"
+              python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL" --opened "$opened"
             fi
           done
           # A version whose job left nothing at all.
           mapfile -t refs < <(echo "$REFS" | jq -r '.[]')
           for ref in "${refs[@]}"; do
-            [ -n "${reported[$ref]:-}" ] || python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL"
+            [ -n "${reported[$ref]:-}" ] || python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL" --opened "$opened"
           done

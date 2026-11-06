@@ -9,6 +9,11 @@ open gets a comment naming the new tag instead of a second issue, and only a
 new contract or a new way of failing opens one. A known failure that starts
 passing fails its test ("no longer fails"), which is a new signature and so
 its own issue. Needs `gh` with issues: write, unless --dry-run.
+
+The workflow runs this once per Hermes version. GitHub's issue list can lag a
+just-opened issue by seconds, so --opened names a file where each run keeps
+the issues it opened, and the next version's run reads it: a failure both
+versions share gets one issue and a comment, not two issues (notifier #573).
 """
 
 from __future__ import annotations
@@ -87,6 +92,22 @@ def open_issues() -> Dict[str, Dict]:
     return by_key
 
 
+def read_opened(path: Optional[Path]) -> Dict[str, Dict]:
+    """The issues earlier versions in this workflow run opened, by key."""
+    if not path or not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text() or "{}")
+    except ValueError:
+        return {}
+
+
+def issue_number(url: str) -> Optional[int]:
+    """The number from the URL `gh issue create` prints."""
+    match = re.search(r"/issues/(\d+)\s*$", url.strip())
+    return int(match.group(1)) if match else None
+
+
 def issue_body(failure: Dict[str, str], ref: str, run_url: str, changed: str) -> str:
     parts = [
         MARKER.format(key=failure["key"]),
@@ -113,6 +134,8 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--ref", required=True)
     parser.add_argument("--run-url", default="")
     parser.add_argument("--changed", type=Path)
+    parser.add_argument("--opened", type=Path,
+                        help="JSON file of the issues this workflow run opened, read and then added to")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv[1:])
 
@@ -125,14 +148,22 @@ def main(argv: List[str]) -> int:
         print(f"No contract failures on {args.ref}.")
         return 0
     known = {} if args.dry_run else open_issues()
+    opened = read_opened(args.opened)
+    for key, issue in opened.items():
+        known.setdefault(key, issue)
     for failure in found:
         issue = known.get(failure["key"])
         if issue is None:
             title = f"Upstream contract: {failure['test'].rsplit('.', 1)[-1]} fails on Hermes {args.ref}"
             print(f"new  {failure['key']}  {failure['test']}: {failure['signature']}")
+            body = issue_body(failure, args.ref, args.run_url, changed)
             if not args.dry_run:
-                gh("issue", "create", "--label", LABEL, "--title", title[:250], "--body-file", "-",
-                   input=issue_body(failure, args.ref, args.run_url, changed))
+                url = gh("issue", "create", "--label", LABEL, "--title", title[:250], "--body-file", "-",
+                         input=body)
+                number = issue_number(url)
+                if number and args.opened:
+                    opened[failure["key"]] = {"number": number, "body": body}
+                    args.opened.write_text(json.dumps(opened))
             continue
         number = str(issue["number"])
         comments = json.loads(gh("issue", "view", number, "--json", "comments"))["comments"]
