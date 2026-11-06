@@ -3007,13 +3007,16 @@ whether notes and attendees are included (off by default).
   (`seconds`) and `cancel_alarm`, as pending changes like calendar writes.
   They ring through Silent and Focus. Setting one goes without asking when
   the user lets Hermes add without asking; cancelling always asks.
-- **Contacts (plugin 0.30+).** Only the people the user picks in Conduit
-  (no address book permission): name, nickname, a relation the user types
-  ("wife"), phone numbers, emails, birthday and organization, read with
+- **Contacts (plugin 0.30+).** Only the people the user picks in Conduit:
+  name, nickname, a relation the user types ("wife"), phone numbers, emails,
+  birthday and organization, read with
   `conduit_contacts` (`people`, with an optional `query`). With Pulse and
   its memory on (plugin 0.88+), its daily look ahead brings up their
   birthdays two weeks ahead, the day before and on the day. Turned off, they
-  are deleted here.
+  are deleted here. Picking needs no permission; with Contacts access
+  (Select Contacts is enough) each sync reads the picked people again, so
+  edits made in Contacts arrive, and Conduit flags a person it can't read
+  while the host keeps their last copy.
 
 Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms and
 200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
