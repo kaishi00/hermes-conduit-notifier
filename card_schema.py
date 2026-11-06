@@ -147,9 +147,12 @@ def _prepared(raw: Any, notes: list[str] | None = None, path: str = "card") -> A
     (``read_diff``)."""
     if not isinstance(raw, dict) or not isinstance(raw.get("type"), str):
         return raw
-    if raw["type"].lower() == "diff":
+    # The kind as _normalize will match it, cleaned, so a hidden character
+    # or a space can't make the two disagree.
+    kind = clean_text(raw["type"]).lower()
+    if kind == "diff":
         return _prepared_diff(raw, notes, path)
-    if raw["type"].lower() != "table":
+    if kind != "table":
         return raw
     table = raw.get("table")
     if not isinstance(table, dict):

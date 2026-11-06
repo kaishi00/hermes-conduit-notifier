@@ -205,6 +205,10 @@ def test_hidden_bidi_characters_in_a_patch_show_as_marks_and_leave_the_names():
     assert file["hunks"][0]["lines"][1] == "+ok = role != 'user\ufffd \ufffd'", "a line shows where each was"
     text = card_schema.fallback_markdown([{"type": "diff", "diff": diff}])
     assert "\u202e" not in text and "\u2066" not in text and "\u200b" not in text
+    typed = card_schema.normalize_cards([{"type": "dif\u202ef ", "diff": {"patch": "@@ -1 +1 @@\n-a\n+b\n"}},
+                                         {"type": "tabl\u200be", "table": {"columns": ["n"], "rows": [[1]]}}])
+    assert [card["type"] for card in typed] == ["diff", "table"], "the kind is read cleaned, as the enum matches it"
+    assert typed[1]["table"]["rows"] == [["1"]]
 
 
 def test_the_markdown_lists_the_files_and_shows_the_first_lines():
