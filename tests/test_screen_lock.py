@@ -256,6 +256,8 @@ def test_a_waiter_whose_message_couldnt_go_stays_waiting(on, hermes, monkeypatch
     monkeypatch.setattr(work, "_deliver", lambda *_a, **_k: {"ok": False, "note": "at the limit"})
     work.screen_turn_ended(BOT_CHAT)
     assert [item["ref"] for item in lock.snapshot(on.home)["waiting"]] == ["W1"]
+    # Tried again after a pause, not on the next look.
+    assert lock.take_next_waiting(on.home, lambda item: True) is None
 
 
 def test_a_compacted_chat_keeps_its_own_screen(on, hermes):
@@ -318,14 +320,17 @@ def test_past_the_cap_the_longest_wait_is_kept(home, tmp_path):
     assert "late" not in [item["session_id"] for item in lock.snapshot(home)["waiting"]]
 
 
-def test_the_cap_is_each_bots(home, tmp_path, monkeypatch):
+def test_the_cap_is_each_bots(tmp_path, monkeypatch):
     monkeypatch.setattr(lock, "scope", lambda: lock.HOST)  # one file for every bot
-    other = tmp_path / "profiles" / "other"
+    mine, other = tmp_path / "profiles" / "mine", tmp_path / "profiles" / "other"
+    mine.mkdir(parents=True)
     other.mkdir(parents=True)
+    assert lock._path(mine, lock.HOST) == lock._path(other, lock.HOST)
     now = time.time()
     for index in range(lock.MAX_WAITING):
-        assert lock.wait(home, f"s{index}", {"ref": f"W{index}"}, now=now + index)
-    assert lock.wait(other, "theirs", {"ref": "W1"}, now=now + 30)
+        assert lock.wait(mine, f"s{index}", {"profile": "mine", "ref": f"W{index}"}, now=now + index)
+    assert not lock.wait(mine, "late", {"profile": "mine", "ref": "W99"}, now=now + 29)
+    assert lock.wait(other, "theirs", {"profile": "other", "ref": "W1"}, now=now + 30)
 
 
 def test_a_refused_workstream_is_promised_nothing_when_the_list_is_full(on, hermes, monkeypatch):
@@ -565,3 +570,12 @@ def test_a_card_keeps_driving_the_screen_after_its_chat_is_compacted(on, hermes)
     store.update(store.by_session(WORKER).ref, session_id="worker-compacted")
     row = work.app_list(on.home)["work"][0]
     assert row["screen"] == "controlling" and row["screen_used_at"] > 0
+
+
+def test_another_bots_workstream_with_the_same_ref_isnt_this_ones(on, hermes):
+    start()
+    row = store_mod.Store(on.home).by_session(WORKER)
+    mine = {"kind": "workstream", "ref": row.ref, "profile": "default"}
+    assert work._same_waiter(mine, row, "default")
+    # A host's file holds every bot's entries: another bot's W1 isn't this W1.
+    assert not work._same_waiter({**mine, "profile": "other"}, row, "default")

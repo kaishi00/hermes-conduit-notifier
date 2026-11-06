@@ -2370,7 +2370,9 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         work = store.get(row["ref"])
         if work is not None and not work.closed_at and work.session_id \
                 and not _in_transcript(home, work.session_id, row["text"]):
-            screen_lock.wait(home, work.session_id, screen_who(home, work.session_id))
+            # A put-back of one that was promised: in its place, past a full list.
+            screen_lock.wait(home, work.session_id, screen_who(home, work.session_id),
+                             since=float(row.get("created_at") or time.time()))
             _watch_screen(home)
         return
     if kind in ("send", "answer", "user_send") and row["target"]:
