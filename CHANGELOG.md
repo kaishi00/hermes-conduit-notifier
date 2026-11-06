@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.134.6 (2026-11-06)
+
+### New and improved
+- When Local Live's fast model can't be reached, the call now says so as
+  itself ("this one will take me a little longer") instead of saying it's
+  passing your request to Hermes.
+
 ## 0.134.5 (2026-11-06)
 
 ### Fixes
