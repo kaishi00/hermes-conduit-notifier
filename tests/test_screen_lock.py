@@ -466,3 +466,21 @@ def test_a_workstream_waits_once_across_a_compaction(home):
     lock.wait(home, "chat-a", {"profile": "default", "kind": "chat", "ref": ""})
     lock.wait(home, "chat-b", {"profile": "default", "kind": "chat", "ref": ""})
     assert len(lock.snapshot(home)["waiting"]) == 2
+
+
+def test_a_fork_that_took_the_screen_lets_it_go_when_it_ends(on, hermes, monkeypatch):
+    start()
+    monkeypatch.setattr(work, "_in_fork", lambda: True)
+    assert click(BOT_CHAT) is None
+    assert lock.snapshot(on.home)["controlling"]["session_id"] == BOT_CHAT
+    work.fork_ended(BOT_CHAT)
+    assert lock.snapshot(on.home)["controlling"] is None
+
+
+def test_a_fork_inside_the_chats_own_hold_leaves_it(on, hermes, monkeypatch):
+    start()
+    assert click(BOT_CHAT) is None
+    monkeypatch.setattr(work, "_in_fork", lambda: True)
+    assert click(BOT_CHAT) is None
+    work.fork_ended(BOT_CHAT)
+    assert lock.snapshot(on.home)["controlling"]["session_id"] == BOT_CHAT

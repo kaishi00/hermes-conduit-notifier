@@ -775,6 +775,7 @@ def _on_session_end(**kwargs: Any) -> None:
     if forks.inside():
         # Only when it started is forgotten, as for any turn's end (pre_llm_call).
         _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
+        _quietly(work_tool.fork_ended, session_id)
         return
     if _is_child(session_id):
         return
