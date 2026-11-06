@@ -52,6 +52,7 @@ from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
 
+from . import compaction_skip
 from . import pulse_delivery as delivery
 from . import pulse_ahead as ahead
 from . import pulse_brief as brief
@@ -360,6 +361,8 @@ def pushes(session_id: str, turn_id: Any, response: Any = None) -> bool:
     for the user), and so does a report with something that came up as a
     push (``_pushed_lines``: a report whose picks all came up quieter lands
     as cards only); a probe doesn't."""
+    if compaction_skip.notice(response):
+        return False  # Hermes' status line: compaction ended the turn before the model ran
     attempt = _turn_attempt(session_id, turn_id)
     kind = attempt["kind"] if attempt else ""
     if kind == REPORT:
@@ -735,7 +738,7 @@ def tick(now: Optional[float] = None) -> None:
     # Not now until a time that has come: the card comes back as new (one
     # about something still open after its chat is read, in _memory_run).
     followup.return_rested(pulse_store, now)
-    learning.drop_empty_reports(pulse_store)
+    learning.drop_empty_turns(pulse_store)
     pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     pulse_store.prune_candidates(now - candidates.JOURNAL_DAYS * 86400.0)
     pulse_store.prune_signals(now - prefs.KEEP_S)

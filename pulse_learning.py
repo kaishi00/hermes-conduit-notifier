@@ -44,6 +44,7 @@ import json
 import re
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from . import compaction_skip
 from . import pulse_dates as dates
 from . import pulse_hours as hours
 from . import pulse_prefs as prefs
@@ -270,15 +271,20 @@ _REPORT_NOTHING = re.compile(r"nothing worth bringing up", re.IGNORECASE)
 
 def empty_turn(kind: str, reply: Optional[str]) -> bool:
     """A report that brought nothing up: no card, it would only crowd the
-    ones that did."""
+    ones that did. Nor does Hermes' status line for a turn its compaction
+    ended before the model ran, a report's or a brief's (compaction_skip)."""
+    if compaction_skip.notice((reply or "").strip()):
+        return True
     return kind == "report" and bool(_REPORT_NOTHING.search(reply or "")) and not _REPORT_ITEM.search(reply or "")
 
 
-def drop_empty_reports(pulse_store: store.PulseStore) -> int:
-    """Takes away the cards of reports that brought nothing up (made before
-    those stopped getting one)."""
-    return pulse_store.drop_cards([card["id"] for card in pulse_store.turn_cards("report")
-                                   if empty_turn("report", card["news"])])
+def drop_empty_turns(pulse_store: store.PulseStore) -> int:
+    """Takes away the cards of reports that brought nothing up, and any card
+    whose words were only Hermes' status line for a turn its compaction
+    ended (a report's, a brief's, a held pick's moment; made before those
+    stopped getting one)."""
+    return pulse_store.drop_cards([card["id"] for card in pulse_store.turn_cards()
+                                   if empty_turn(card["kind"], card["news"])])
 
 
 # One item of a report, as its own card (the report's lines, split).

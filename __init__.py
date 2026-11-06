@@ -14,7 +14,7 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_bot_chat, cron_runs,
+from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity,
                location_tool, maps_tool, notify_tool, phone_tool, present_tool, profile_copies, pulse, reply_sources,
                review_notices,
@@ -108,6 +108,10 @@ def register(ctx: Any) -> None:
     # A cron job delivered to a Bot Chat just shows its report there, no
     # turn, unless the user lets the bot act on it (cron_bot_chat).
     cron_bot_chat.install()
+    # A hidden turn (Pulse's, a bot's wake) that Hermes' compaction catches
+    # still goes on to the model, rather than ending on Hermes' status line
+    # (compaction_skip).
+    compaction_skip.install()
     # A fork of a chat (the self-improvement review, /btw, Conduit's
     # predictions) shares the chat's session id: its turn is never the
     # chat's (forks).
@@ -457,7 +461,10 @@ def _post_llm_call(**kwargs: Any) -> None:
     # A workstream's turn tells its coordinator (work_tool), whose reply is
     # the one push.
     workstream = _work_turn_ended(session_id, response)
-    quiet = (workstream or is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
+    # Hermes' line for a turn its compaction ended before the model ran
+    # (compaction_skip) is no news either.
+    quiet = (workstream or is_silent_response(response) or compaction_skip.notice(response) == compaction_skip.SKIPPED_DETAIL
+             or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
              or _member_room_turn(session_id))
     chat_title = "" if quiet or pulse_turn else _session_title(session_id)
@@ -702,6 +709,7 @@ def _unload() -> None:
     room_wakeups.uninstall()
     room_cleanup.uninstall()
     cron_bot_chat.uninstall()
+    compaction_skip.uninstall()
     room_rules.forget()
     review_notices.uninstall()
     forks.uninstall()
