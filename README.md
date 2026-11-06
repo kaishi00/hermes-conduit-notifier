@@ -1524,7 +1524,9 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   until it hasn't touched it for 10 minutes; any other chat's `computer_use`
   is refused, naming who has the screen. The browser tools aren't held. A
   workstream refused the screen gets a message in its chat once it's free,
-  the one that waited longest first. On a host with a real desktop and no Bot
+  the one that waited longest first (up to 20 waiting per bot; past that it
+  isn't promised one). One that can't be told yet is tried again after a
+  growing pause. On a host with a real desktop and no Bot
   Screen, every bot drives that one desktop, so the hold covers them all.
   The Work panel shows which workstream drives the screen now, apart from
   which one used it last. A workstream that needs you on the screen (a

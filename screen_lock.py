@@ -55,6 +55,10 @@ HOLD_IDLE_S = 600.0
 # Sessions told to wait, kept this long at most.
 WAIT_KEEP_S = 2 * 3600.0
 MAX_WAITING = 20
+# A waiter its free-screen message couldn't reach (its bot at its running
+# limit) is tried again after 5 s, then 10, 20 ... up to 5 minutes.
+RETRY_FIRST_S = 5.0
+RETRY_MAX_S = 300.0
 BOT = "bot"
 HOST = "host"
 
@@ -264,18 +268,28 @@ def release(home: Path, session_id: str, now: Optional[float] = None) -> bool:
 
 
 def wait(home: Path, session_id: str, who: dict, where: Optional[str] = None,
-         now: Optional[float] = None, since: Optional[float] = None) -> None:
+         now: Optional[float] = None, since: Optional[float] = None, retry: int = 0) -> bool:
     """A session refused the screen asks to be told when it's free. ``since``
-    puts back one taken off the list in its place, with its own expiry."""
+    puts back one taken off the list in its place, with its own expiry.
+    False when its bot's list is full, so nobody is promised a message.
+    ``retry`` counts the sends refused so far: the next waits longer each time."""
     where = where or scope()
     now = time.time() if now is None else now
     with _locked(_path(home, where)) as state:
         waiting = [item for item in state.get("waiting") or [] if isinstance(item, dict)
                    and not _same_entry(item, session_id, who) and now - float(item.get("at") or 0) < WAIT_KEEP_S]
-        waiting.append({**who, "session_id": session_id, "home": str(home), "at": now if since is None else since})
+        # The cap is each bot's: a host's file holds every bot's waiters. A
+        # full list takes no new ask; one put back keeps its place.
+        if since is None and sum(1 for item in waiting if item.get("home") == str(home)) >= MAX_WAITING:
+            state["waiting"] = waiting
+            return False
+        entry = {**who, "session_id": session_id, "home": str(home), "at": now if since is None else since}
+        if retry:
+            entry.update(tries=retry, retry_at=now + min(RETRY_FIRST_S * 2 ** (retry - 1), RETRY_MAX_S))
+        waiting.append(entry)
         waiting.sort(key=lambda item: float(item.get("at") or 0))
-        # Past the cap the newest ask goes: the longest wait is woken first.
-        state["waiting"] = waiting[:MAX_WAITING]
+        state["waiting"] = waiting
+    return True
 
 
 def take_next_waiting(home: Path, still_waits: Callable[[dict], bool], now: Optional[float] = None) -> Optional[dict]:
@@ -297,7 +311,7 @@ def take_next_waiting(home: Path, still_waits: Callable[[dict], bool], now: Opti
                     # Work that no longer waits (resolved, failed) leaves the list.
                     if not still_waits(item):
                         continue
-                    if found is None:
+                    if found is None and float(item.get("retry_at") or 0) <= now:
                         found = item
                         continue
                 kept.append(item)

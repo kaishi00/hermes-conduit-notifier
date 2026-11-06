@@ -13,6 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.134.2 (2026-11-06)
+
+### Fixes
+- A workstream that needs you on the bot's screen now always says so to its
+  Bot Chat, also when its chat was compacted during that turn. Before, the
+  Bot Chat could hear only that it finished.
+- A workstream's card keeps showing that it drives the screen after its
+  chat is compacted.
+- When many chats wait for the screen at once, a workstream is no longer
+  told it will hear when the screen is free unless it's on the list, and one
+  bot's waiters no longer push another bot's off a shared host's list.
+- A workstream that couldn't be told the screen is free (its bot was at its
+  limit of running work) is tried again after a growing pause, not every
+  few seconds.
+
 ## 0.134.1 (2026-11-06)
 
 ### Security

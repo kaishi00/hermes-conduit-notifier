@@ -306,12 +306,35 @@ def test_work_that_no_longer_waits_leaves_the_waiting_list(home):
     assert lock.snapshot(home)["waiting"] == []
 
 
-def test_past_the_cap_the_longest_wait_is_kept(home):
+def test_past_the_cap_the_longest_wait_is_kept(home, tmp_path):
     now = time.time()
-    for index in range(lock.MAX_WAITING + 1):
-        lock.wait(home, f"s{index}", {"ref": f"W{index}"}, now=now + index)
+    for index in range(lock.MAX_WAITING):
+        assert lock.wait(home, f"s{index}", {"ref": f"W{index}"}, now=now + index)
+    # A full list promises nothing more, but takes one put back in its place.
+    assert not lock.wait(home, "late", {"ref": "W99"}, now=now + 30)
+    assert lock.wait(home, "back", {"ref": "W98"}, now=now + 31, since=now - 1)
     taken = lock.take_next_waiting(home, lambda item: True, now=now + 50)
-    assert taken["session_id"] == "s0"
+    assert taken["session_id"] == "back"
+    assert "late" not in [item["session_id"] for item in lock.snapshot(home)["waiting"]]
+
+
+def test_the_cap_is_each_bots(home, tmp_path, monkeypatch):
+    monkeypatch.setattr(lock, "scope", lambda: lock.HOST)  # one file for every bot
+    other = tmp_path / "profiles" / "other"
+    other.mkdir(parents=True)
+    now = time.time()
+    for index in range(lock.MAX_WAITING):
+        assert lock.wait(home, f"s{index}", {"ref": f"W{index}"}, now=now + index)
+    assert lock.wait(other, "theirs", {"ref": "W1"}, now=now + 30)
+
+
+def test_a_refused_workstream_is_promised_nothing_when_the_list_is_full(on, hermes, monkeypatch):
+    start()
+    assert click(BOT_CHAT) is None
+    monkeypatch.setattr(lock, "wait", lambda *args, **kwargs: False)
+    refused = click(WORKER)
+    assert refused["action"] == "block"
+    assert "You'll get a message in this chat when it's free" not in refused["message"]
 
 
 def test_a_resolved_waiter_isnt_named_as_waiting(on, hermes, monkeypatch):
@@ -485,3 +508,30 @@ def test_a_fork_inside_the_chats_own_hold_leaves_it(on, hermes, monkeypatch):
     assert click(BOT_CHAT) is None
     work.fork_ended(BOT_CHAT)
     assert lock.snapshot(on.home)["controlling"]["session_id"] == BOT_CHAT
+
+
+def test_a_screen_ask_in_a_turn_that_compacted_reaches_the_coordinator(on, hermes):
+    start()
+    work.turn_started(WORKER)
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    assert call("work_progress", {"screen": "Sign in to GitHub"}, session_id=WORKER)["ok"]
+    store = store_mod.Store(on.home)
+    store.update(store.by_session(WORKER).ref, session_id="worker-compacted")  # compacted mid-turn
+    work.turn_ended("worker-compacted", "I need you to sign in on the screen.")
+    work.turn_finished("worker-compacted", failed=False, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "needs the user on the bot's screen" in params["text"]
+
+
+def test_a_refused_free_screen_send_waits_longer_each_time(home):
+    now = time.time()
+    who = {"profile": "default", "kind": "workstream", "ref": "W1"}
+    lock.wait(home, "w1", who, now=now, since=now - 10, retry=1)
+    assert lock.take_next_waiting(home, lambda item: True, now=now + 1) is None  # not yet
+    taken = lock.take_next_waiting(home, lambda item: True, now=now + lock.RETRY_FIRST_S)
+    assert taken["session_id"] == "w1" and taken["tries"] == 1
+    lock.wait(home, "w1", who, now=now, since=taken["at"], retry=3)
+    assert lock.take_next_waiting(home, lambda item: True, now=now + lock.RETRY_FIRST_S * 3) is None
+    assert lock.take_next_waiting(home, lambda item: True, now=now + lock.RETRY_FIRST_S * 4)["tries"] == 3
