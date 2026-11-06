@@ -212,7 +212,7 @@ _NOTE = ("This turn was started by Pulse, the part of Hermes that keeps what Her
          "promised the user, what the user said they'd do or what they asked to be told, in another chat, and "
          "what Pulse found. Tell the user in one or two short, friendly sentences, "
          "starting with what it's about so it makes sense on its own; if the message says nothing shows it "
-         "happened, ask if they still want it. Make clear it's a follow-up on what was said in that chat, and "
+         "happened, ask if they still want it. " + ledger.UNSET_RULE + " Make clear it's a follow-up on what was said in that chat, and "
          "only pass on what the message says")
 # While Pulse looks things up first, pulse_tools.look_note follows LOOK_NOTE.
 NOTE, LOOK_NOTE = _NOTE + ". Don't use any tools.", _NOTE + " and what you look up about it."

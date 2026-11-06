@@ -3608,7 +3608,8 @@ def test_an_app_the_user_never_connected_is_left_out(recording):
     failed = _failed(recording)
     assert "connector_x" in failed and failed.count("\n- ") == 1
     for prompt in (candidates.INSTRUCTIONS, report.REPORT_TEXT, sys.modules["conduit_push.pulse_ahead"].INSTRUCTIONS,
-                   sys.modules["conduit_push.pulse_brief"].NOTE, sys.modules["conduit_push.pulse_brief"].LOOK_NOTE):
+                   sys.modules["conduit_push.pulse_brief"].NOTE, sys.modules["conduit_push.pulse_brief"].LOOK_NOTE,
+                   sys.modules["conduit_push.pulse_followup"].NOTE, sys.modules["conduit_push.pulse_followup"].LOOK_NOTE):
         assert ledger.UNSET_RULE in prompt
     assert "isn't connected or set up is never an item" in sys.modules["conduit_push.pulse_memory"].INSTRUCTIONS
     assert "isn't connected or set up, which is the user's choice" in sys.modules["conduit_push.pulse_followup"].FOUND_INSTRUCTIONS
