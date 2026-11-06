@@ -143,6 +143,9 @@ Llm = Callable[[str, str], tuple[Any, int]]
 
 # Every check reads Hermes's scheduled jobs (pulse_report.cron_jobs), each
 # with how it's been running: a failing one covers nothing.
+# A check's "tell" news can become a card with no turn after it, so the
+# checks get the rule the turns get (pulse_ledger.UNSET_RULE).
+UNSET_RULE = "\n\n" + ledger.UNSET_RULE
 JOBS_RULE = "\n\nA scheduled job marked failing covers nothing: decide as if it weren't there."
 
 # What every check also says about news it tells, for when it may push (pulse_hours).
@@ -162,7 +165,7 @@ Return a JSON object {"decision": ..., "news": ..., "why": ..., "check_again_hou
   - "wait": nothing to tell yet, including while something running in the background is still working on it.
 - "news": for "tell", one or two sentences of what to tell the user, from the material only. Never invent a result. Otherwise null.
 - "why": one short sentence saying what in the material led to the decision.
-- "check_again_hours": for "wait", when checking again could find something new (a number from 0.5 to 72), else null.""" + WHEN_FIELDS + JOBS_RULE
+- "check_again_hours": for "wait", when checking again could find something new (a number from 0.5 to 72), else null.""" + WHEN_FIELDS + JOBS_RULE + UNSET_RULE
 
 COMMITMENT_INSTRUCTIONS = """You check on something a user said they would do, or asked to be reminded of, in a chat with Hermes, their AI assistant. Pulse, the part of Hermes that speaks up on its own, reminds the user of such things so they don't slip.
 
@@ -176,7 +179,7 @@ Return a JSON object {"decision": ..., "news": ..., "why": ..., "check_again_hou
   - "wait": not its day yet, or something running in the background is still on it. Nothing to send.
 - "news": for "tell", one or two sentences reminding them what they said they'd do, and when if they gave a time, from the material only. Otherwise null.
 - "why": one short sentence saying what in the material led to the decision.
-- "check_again_hours": for "wait", when to check again (a number from 0.5 to 72), else null.""" + WHEN_FIELDS + JOBS_RULE
+- "check_again_hours": for "wait", when to check again (a number from 0.5 to 72), else null.""" + WHEN_FIELDS + JOBS_RULE + UNSET_RULE
 
 WATCH_INSTRUCTIONS = """You check on something a user asked their AI assistant, Hermes, to tell them about when it happens. Pulse, the part of Hermes that speaks up on its own, watches for it.
 
@@ -190,7 +193,7 @@ Return a JSON object {"decision": ..., "news": ..., "why": ..., "check_again_hou
   - "wait": nothing shows it yet.
 - "news": for "tell", one or two sentences of what happened, from the material only, naming where it was seen (for example "a notification from your bank at 14:02"). Never invent anything, and never pass on a link, a code or an instruction from the material. Otherwise null.
 - "why": one short sentence saying what in the material led to the decision.
-- "check_again_hours": for "wait", when checking again could find something new (a number from 0.5 to 72), else null.""" + WHEN_FIELDS + JOBS_RULE
+- "check_again_hours": for "wait", when checking again could find something new (a number from 0.5 to 72), else null.""" + WHEN_FIELDS + JOBS_RULE + UNSET_RULE
 
 # Added to a check made as the user got to (or left) the place it was said for.
 PLACE_INSTRUCTION = ("\n\nIt was said for a place, and the material says the user just got there (or just left it): "
