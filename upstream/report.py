@@ -97,9 +97,10 @@ def read_opened(path: Optional[Path]) -> Dict[str, Dict]:
     if not path or not path.exists():
         return {}
     try:
-        return json.loads(path.read_text() or "{}")
+        opened = json.loads(path.read_text() or "{}")
     except ValueError:
         return {}
+    return opened if isinstance(opened, dict) else {}
 
 
 def issue_number(url: str) -> Optional[int]:
@@ -148,7 +149,7 @@ def main(argv: List[str]) -> int:
         print(f"No contract failures on {args.ref}.")
         return 0
     known = {} if args.dry_run else open_issues()
-    opened = read_opened(args.opened)
+    opened = {} if args.dry_run else read_opened(args.opened)
     for key, issue in opened.items():
         known.setdefault(key, issue)
     for failure in found:
@@ -161,7 +162,10 @@ def main(argv: List[str]) -> int:
                 url = gh("issue", "create", "--label", LABEL, "--title", title[:250], "--body-file", "-",
                          input=body)
                 number = issue_number(url)
-                if number and args.opened:
+                if number is None:
+                    print(f"::warning::couldn't read the new issue's number from {url.strip()!r}; "
+                          "a later version may open a second issue for it")
+                elif args.opened:
                     opened[failure["key"]] = {"number": number, "body": body}
                     args.opened.write_text(json.dumps(opened))
             continue

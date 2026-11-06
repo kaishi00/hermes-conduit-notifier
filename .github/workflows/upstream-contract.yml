@@ -161,20 +161,24 @@ jobs:
             --description "A Hermes change breaks the plugin's contract (upstream/contract.yml)" 2>/dev/null || true
           declare -A reported
           opened="$RUNNER_TEMP/opened.json"
+          failed=0
+          # One version's gh hiccup doesn't drop the others; the step still fails at the end.
+          report() { python3 upstream/report.py "$@" --opened "$opened" || { echo "::warning::report failed for $ref"; failed=1; }; }
           for dir in "$RUNNER_TEMP"/results/contract-*; do
             [ -f "$dir/ref.txt" ] || continue
             ref=$(head -1 "$dir/ref.txt")
             [ -n "$ref" ] || continue
             reported[$ref]=1
             if [ -f "$dir/junit.xml" ]; then
-              python3 upstream/report.py "$dir/junit.xml" --ref "$ref" --run-url "$RUN_URL" --changed "$dir/changed.txt" --opened "$opened"
+              report "$dir/junit.xml" --ref "$ref" --run-url "$RUN_URL" --changed "$dir/changed.txt"
             else
               # Hermes didn't install, or the tests never ran: one harness issue.
-              python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL" --opened "$opened"
+              report --no-results --ref "$ref" --run-url "$RUN_URL"
             fi
           done
           # A version whose job left nothing at all.
           mapfile -t refs < <(echo "$REFS" | jq -r '.[]')
           for ref in "${refs[@]}"; do
-            [ -n "${reported[$ref]:-}" ] || python3 upstream/report.py --no-results --ref "$ref" --run-url "$RUN_URL" --opened "$opened"
+            [ -n "${reported[$ref]:-}" ] || report --no-results --ref "$ref" --run-url "$RUN_URL"
           done
+          exit "$failed"
