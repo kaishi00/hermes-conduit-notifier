@@ -1067,3 +1067,50 @@ def test_a_force_names_the_update_it_was_sent_during(monkeypatch):
     api.self_update.force_gateway_restart()
     alive.set()
     assert api.self_update._forced_for_job == "j9"
+
+
+def test_work_in_a_later_home_is_seen_when_the_first_errs_or_idles(monkeypatch, tmp_path):
+    guards = types.ModuleType("hermes_cli.gateway_lifecycle_guards")
+    answers = {"a": RuntimeError("down"), "b": {"active_agents": 0, "active_work": []},
+               "c": {"active_work": [{"kind": "chat", "session": "agent:main:local:dm:s1"}]}}
+
+    def live_work(home):
+        answer = answers[home.name]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    guards.live_work = live_work
+    monkeypatch.setitem(sys.modules, "hermes_cli.gateway_lifecycle_guards", guards)
+    monkeypatch.setattr(api.self_update, "_gateway_homes", lambda: [tmp_path / "a", tmp_path / "b", tmp_path / "c"])
+    units, count = api.self_update._gateway_live_work()
+    assert count == 1 and units[0]["_home"] == tmp_path / "c"
+
+
+def test_the_spawned_restart_beats_an_older_sighting(monkeypatch):
+    monkeypatch.setattr(api.self_update, "_gateway_live_work", lambda: ([], 0))
+    monkeypatch.setattr(api.self_update, "_restart_timeout_s", lambda: 1800.0)
+    monkeypatch.setattr(api.self_update, "_gateway_draining", lambda: True)
+    now = api.self_update.time.time()
+    monkeypatch.setattr(api.self_update, "_draining_seen_at", now - 1000)
+    monkeypatch.setattr(api.self_update, "_restart_spawned_at", lambda: now - 100)
+    report = api.self_update.gateway_work_report()
+    assert abs(report["restarts_by"] - (now + 1700)) < 5
+
+
+def test_a_forced_restart_systemd_ran_keeps_its_slot(monkeypatch):
+    monkeypatch.setattr(api.self_update, "_restart_now", api.self_update.threading.Event())
+    limiter = api.core._MintLimiter(1, 300.0, message="slow down")
+    monkeypatch.setattr(api.self_update, "_forced_restart_limiter", limiter)
+
+    def fails():
+        raise api.core.TokenError(502, "systemd didn't answer the restart in 30 seconds")
+
+    monkeypatch.setattr(api.self_update, "force_gateway_restart", fails)
+    response = types.SimpleNamespace(headers={})
+    with pytest.raises(api.self_update.HTTPException) as first:
+        asyncio.run(api.self_update.post_gateway_restart_now(response, force=True))
+    assert first.value.status_code == 502
+    with pytest.raises(api.self_update.HTTPException) as second:
+        asyncio.run(api.self_update.post_gateway_restart_now(response, force=True))
+    assert second.value.status_code == 429

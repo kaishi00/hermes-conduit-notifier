@@ -347,23 +347,28 @@ def _gateway_live_work() -> Tuple[List[Dict[str, Any]], int]:
         from hermes_cli.gateway_lifecycle_guards import live_work
     except Exception:  # noqa: BLE001 — a broken import reads as one that's missing
         return [], 0
+    # Every home whose gateway the restart takes down: one that errors or is idle doesn't hide
+    # another's work. Not knowing is no reason to hold the update.
+    awaited: List[Dict[str, Any]] = []
+    unnamed = 0
     for home in _gateway_homes():
         try:
             work = live_work(home)
-        except Exception:  # noqa: BLE001 — not knowing is no reason to hold the update
+        except Exception:  # noqa: BLE001
             logger.debug("Conduit plugin: couldn't read the gateway's running work", exc_info=True)
-            return [], 0
+            continue
         if not isinstance(work, dict):
             continue
         units = [unit for unit in work.get("active_work") or [] if isinstance(unit, dict)]
         if units:
             # Each unit keeps the home it came from, to name it from there (a cron job's title).
-            awaited = [dict(unit, _home=home) for unit in units
-                       if not unit.get("wedged") and not unit.get("restart_safe")]
-            return awaited, len(awaited)
+            awaited += [dict(unit, _home=home) for unit in units
+                        if not unit.get("wedged") and not unit.get("restart_safe")]
+            continue
         count = work.get("active_agents")
-        return [], count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
-    return [], 0
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            unnamed += count  # an older gateway gives only the count
+    return awaited, len(awaited) + unnamed
 
 
 def _gateway_work() -> int:
@@ -441,7 +446,9 @@ def _named_work_unit(unit: Dict[str, Any]) -> Dict[str, Any]:
             _cron_job_name = None
         if _cron_job_name is not None:
             with contextlib.suppress(Exception):
-                named["title"] = _cron_job_name(job_id, unit.get("_home") or _gateway_homes()[0]) or ""
+                home = unit.get("_home") or next(iter(_gateway_homes()), None)
+                if home is not None:
+                    named["title"] = _cron_job_name(job_id, home) or ""
     return named
 
 
@@ -484,8 +491,10 @@ def _draining_since(draining: bool) -> Optional[float]:
     # before it ended: no drain outlasts its cap, so it's no start of this one.
     if _draining_seen_at is None or time.time() - _draining_seen_at > (_restart_timeout_s() or 1800.0):
         _draining_seen_at = time.time()
+    # The restart this dashboard spawned, still running, is the current drain's start (a second
+    # restart joins it rather than spawning anew); a sighting is the fallback.
     spawned = _restart_spawned_at()
-    return min(spawned, _draining_seen_at) if spawned is not None else _draining_seen_at
+    return spawned if spawned is not None else _draining_seen_at
 
 
 def gateway_work_report() -> Dict[str, Any]:
@@ -1166,9 +1175,11 @@ async def post_gateway_restart_now(response: Response, force: bool = False) -> D
         mint = _forced_restart_limiter.acquire("")
         try:
             await asyncio.to_thread(force_gateway_restart)
-        except core.TokenError:
-            # Refused before any restart (off systemd, systemd said no): no slot spent.
-            _forced_restart_limiter.release("", mint)
+        except core.TokenError as refused:
+            # Off systemd nothing ran: no slot spent. A systemctl that ran and failed or hung
+            # keeps its slot, so a retry loop is capped too.
+            if refused.status == 501:
+                _forced_restart_limiter.release("", mint)
             raise
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
