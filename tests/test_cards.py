@@ -102,7 +102,7 @@ def test_every_type_has_its_field_and_markdown():
               "weather": "weather", "comparison": "options", "steps": "steps", "media": "media",
               "contact": "people", "status": "status", "table": "table", "timeline": "timeline",
               "checklist": "checklist", "list": "list", "progress": "progress", "callout": "callout",
-              "diff": "diff"}
+              "diff": "diff", "composed": "sections"}
     assert set(card_schema.CARD_SCHEMA["properties"]["type"]["enum"]) == set(fields)
     for kind, field in fields.items():
         assert card_schema._TYPE_FIELDS[kind][0] == field

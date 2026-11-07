@@ -197,7 +197,8 @@ def test_the_schema_matches_the_store():
     assert properties["markdown"]["maxLength"] == store_module.MAX_CARD_MARKDOWN_CHARS
     assert tool.SCHEMA["parameters"]["required"] == ["title"]
     assert "voice call" in tool.SCHEMA["description"]
-    assert properties["cards"] == tool.card_schema.tool_parameter(properties["cards"]["description"]), \
+    assert properties["cards"] == tool.card_schema.tool_parameter(
+        properties["cards"]["description"], {"template": tool.card_templates.TEMPLATE_INPUT}), \
         "the card schema comes from the one file"
 
 

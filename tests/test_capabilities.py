@@ -164,6 +164,7 @@ def test_every_capability_names_a_served_route_family():
         "room-boards": "/boards/rooms",
         "desktop-boards": "/boards/desktop",
         "diff-cards": "/boards/diffs",
+        "card-taps": "/boards/taps",
     }
     assert set(prefixes) == set(api.capabilities.ROUTE_CAPABILITIES)
     for capability, prefix in prefixes.items():

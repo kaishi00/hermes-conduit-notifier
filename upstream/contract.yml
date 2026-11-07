@@ -454,6 +454,7 @@ routes:
   - POST /boards/desktop/seen
   - GET /boards/diffs
   - GET /boards/rooms
+  - POST /boards/taps
   - GET /calls
   - PUT /calls
   - POST /calls/outcomes

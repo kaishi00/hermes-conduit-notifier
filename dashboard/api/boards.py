@@ -1,5 +1,5 @@
-"""Boards: the ticks on conduit_show's checklist cards, the boards agents
-showed in group rooms, the boards Hermes Desktop draws, and the diffs too long
+"""Boards: the ticks on conduit_show's checklist cards, the taps on its cards'
+buttons, the boards agents showed in group rooms, the boards Hermes Desktop draws, and the diffs too long
 for a card to carry, kept on the host."""
 
 from __future__ import annotations
@@ -98,6 +98,43 @@ async def post_board_checklists(request: Request, response: Response,
         raise
     except Exception as exc:
         raise core._unexpected("board-checklists", exc, feature="Checklist ticks")
+
+
+# --- Taps on a card's buttons ---------------------------------------------------
+#
+# A card's tap button (conduit_show, issue 1946): Conduit posts the tap here,
+# then sends the user's message about it, and that message's turn hears the
+# tap with the card the user saw (card_actions.note, from the pre_llm_call
+# hook).
+
+TAP_MAX_BODY_BYTES = 64 * 1024
+_tap_limiter = core._MintLimiter(60, 60.0, message="Too many taps; try again shortly")
+
+
+def save_tap(body: Any) -> Dict[str, Any]:
+    module = core._plugin_package_module("card_actions")
+    try:
+        return module.TapStore(core._calls_home()).save(body)
+    except module.TapError as exc:
+        raise core.TokenError(400, str(exc))
+    except OSError:
+        raise core.TokenError(503, "The tap can't be saved right now")
+
+
+@router.post("/boards/taps")
+async def post_board_tap(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    body = await core._read_json_body(request, TAP_MAX_BODY_BYTES)
+    try:
+        return await core._run_scoped(profile, core._limited(_tap_limiter, profile, lambda: save_tap(body)))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+    except Exception as exc:
+        raise core._unexpected("card-taps", exc, feature="Card buttons")
 
 
 # --- Boards in group rooms -------------------------------------------------------

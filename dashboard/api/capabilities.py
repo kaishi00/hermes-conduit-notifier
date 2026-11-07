@@ -268,6 +268,9 @@ ROUTE_CAPABILITIES = (
     # GET /boards/diffs: the whole of a diff card too long for conduit_show's
     # answer, read when the user opens a file (Cards Hermes shows).
     "diff-cards",
+    # POST /boards/taps: a tap on a card's tap button, heard by Hermes with
+    # the user's message about it (Cards Hermes shows, issue 1946).
+    "card-taps",
 )
 
 
