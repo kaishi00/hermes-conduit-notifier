@@ -506,7 +506,7 @@ MAX_FIELDS = 6
 # apps, never a card in a chat the model reads.
 _SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime", "privatekey", "recoverykey",
                  "licensekey", "seedphrase", "verificationcode", "securitycode", "authcode", "backupcode",
-                 "passphrase", "totp", "masterkey", "credential")
+                 "passphrase", "totp", "masterkey", "credential", "2fa", "twofactor", "logincode")
 _SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc"))
 _NOT_ALNUM = re.compile(r"[^0-9a-z]+")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2})?$")
