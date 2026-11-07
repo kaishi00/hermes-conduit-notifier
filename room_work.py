@@ -96,12 +96,16 @@ def room_of(session_id: Any, home: Path, profile: str) -> Optional[Room]:
 
 
 def handle_of(room_id: str, home: Path, profile: str) -> str:
-    """This bot's handle in the room: the local member that runs on its profile."""
+    """This bot's handle in the room: the local member that runs on its
+    profile, "" when the roster names none. Raises Unreadable when the
+    roster couldn't be read or found, which a retry may mend."""
     try:
         members = room_rules._room_members(room_id, home)
-    except room_rules.RoomStoreError:
-        return ""
-    for member in members or ():
+    except room_rules.RoomStoreError as error:
+        raise Unreadable(str(error)) from error
+    if members is None:
+        raise Unreadable(f"no store has {room_id}")
+    for member in members:
         if not isinstance(member, dict):
             continue  # a damaged row: skipped, as room_rules skips it
         target = member.get("target")

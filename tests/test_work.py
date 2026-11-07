@@ -4787,3 +4787,29 @@ def test_a_room_post_refused_on_the_bots_profile_is_made_from_another(on, hermes
 def test_a_damaged_roster_row_is_skipped(on, hermes, room):
     room["members"] = ["junk", *room["members"]]
     assert room_start()["ok"]
+
+
+def test_a_roster_that_cant_be_read_is_unreadable_not_a_missing_member(on, hermes, room, monkeypatch):
+    def unreadable(room_id, home):
+        raise room_rules.RoomStoreError("locked")
+
+    monkeypatch.setattr(room_rules, "_room_members", unreadable)
+    assert room_start()["error"] == "unavailable"
+    monkeypatch.setattr(room_rules, "_room_members", lambda room_id, home: None)
+    assert room_start()["error"] == "unavailable"
+
+
+def test_a_room_line_is_kept_until_the_bot_chats_line_is(on, hermes, room, monkeypatch):
+    room["refuse"].add("room-1@default")
+    room_start()
+    order = []
+    real_wake, real_done = work._queue_wake, work.work_store.Store.outbox_done
+    monkeypatch.setattr(work, "_queue_wake", lambda *a, **k: (order.append("wake"), real_wake(*a, **k)))
+
+    def done(self, item, outcome):
+        order.append(outcome)
+        return real_done(self, item, outcome)
+
+    monkeypatch.setattr(work.work_store.Store, "outbox_done", done)
+    _finish("20261031_work_1", "Done.")
+    assert order.index("wake") < order.index("refused")

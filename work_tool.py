@@ -2422,9 +2422,10 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
             store.outbox_done(row["id"], "dropped")
             return
         if not _in_room(work):
-            # A send from the Bot Chat took its reports back meanwhile: they hear it.
-            store.outbox_done(row["id"], "dropped")
+            # A send from the Bot Chat took its reports back meanwhile: they
+            # hear it, and the row is settled once their line is kept.
             _report(home, work, row["text"])
+            store.outbox_done(row["id"], "dropped")
             return
         _report(home, work, row["text"], key=row["target"], item=row["id"])
         return
@@ -4172,25 +4173,35 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
         if error is None:
             error = room_work.post({**work.reply_to, "handle": handle}, bot=_bot_name(home), key=key,
                                    lines=[line], profiles=[profile, *others])
-        if item:
-            try:
-                store.outbox_done(item, "posted" if error is None else "refused")
-            except Exception:  # noqa: BLE001
-                logger.debug("conduit_push: couldn't mark a room's work line", exc_info=True)
         if error is None:
+            _settle_room_line(store, item, "posted")
             return
         line += (f" (Its reports go to a group room, where this couldn't be posted: {_cut(error, 120)}. Tell "
                  "the user here.)")
+    else:
+        store, item = None, ""
     target = chat or work.coordinator or _bot_chat_of(home)
     if target:
         _queue_wake(home, target, line, kind=kind)
+        # Settled only once the Bot Chat's line is kept: a restart in between posts it again.
+        _settle_room_line(store, item, "refused")
     else:
+        _settle_room_line(store, item, "refused")
         # No room post and no Bot Chat: kept on its row (work_read) and logged.
         logger.warning("conduit_push: %s's report reached no room and no Bot Chat", work.ref)
         try:
             work_store.Store(home).update(work.ref, error=_cut(f"Its report couldn't be posted: {line}", 300))
         except Exception:  # noqa: BLE001
             logger.debug("conduit_push: couldn't keep why a report went nowhere", exc_info=True)
+
+
+def _settle_room_line(store: Optional[work_store.Store], item: str, outcome: str) -> None:
+    if store is None or not item:
+        return
+    try:
+        store.outbox_done(item, outcome)
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: couldn't mark a room's work line", exc_info=True)
 
 
 def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", item: str = "") -> None:
