@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.136.0 (2026-11-07)
+
+### New and improved
+- A bot in one of your group rooms can now start work from the room, like
+  making an image you asked for there, instead of asking you to repeat it in
+  its Bot Chat. The work shows in its Work panel as usual, and when it's
+  done the result is posted back in the room and the bot passes it on.
+
 ## 0.135.0 (2026-11-07)
 
 ### Fixes

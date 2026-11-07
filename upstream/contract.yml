@@ -22,6 +22,8 @@ watch_paths:
   - hermes_cli/config*.py
   - hermes_state_schema.py
   - gateway/hosted_room*.py
+  # room_work posts a room workstream's report with deliver_to_room (loaded with importlib).
+  - cron/scheduler_delivery_room.py
   - website/docs/user-guide/features/plugins.md
   - website/docs/user-guide/features/extending-the-dashboard.md
   - tui_gateway/server.py
@@ -96,6 +98,12 @@ notes:
     event with gateway.hosted_rooms.user_event_id (loaded with importlib) and posts it with the
     running room service's HostedRoomService.send(room_id=, event_id=, payload={thread_id, text}),
     as the room's user. Without them, every post is answered unavailable.
+  room work reports: >-
+    A workstream a bot started from a group room reports back into it (feature map: "Bot
+    workstreams"). room_work posts the report with cron.scheduler_delivery_room.deliver_to_room
+    (job, content, "room@profile"), loaded with importlib, as an automated post whose @mention
+    gives the bot the next turn (upstream/test_room_work.py). Without it, the report goes to the
+    bot's Bot Chat instead.
   workspace files: >-
     The Folder tab in Conduit's Artifacts (feature map: "Workspace files"). /workspace/* reads a
     profile's SSH workspace through hermes_cli.web_routers.files._fs_backend (and the adapter's

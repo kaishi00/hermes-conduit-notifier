@@ -4,8 +4,10 @@ coordinates work sessions of its own.
 The coordinator gets nine tools (``work_list``, ``work_start``, ``work_send``,
 ``work_stop``, ``work_read``, ``work_close``, ``work_ask``, ``work_reply``,
 ``work_note``).
-They answer only in this bot's canonical Bot Chat, and only while the bot's
-setting (``conduit-push work on``) is on. Every one that names work takes a
+They answer in this bot's canonical Bot Chat, and only while the bot's
+setting (``conduit-push work on``) is on. In a group room hosted here with
+only this host's bots, a turn of the bot's may start, send to, stop and read
+its work too (room_work): that work reports back into the room. Every one that names work takes a
 ref (W1, A1) from this bot's own registry (work_store), never a session id,
 so a coordinator can't reach a session that isn't its bot's work. (A result
 carries the session's id only inside its links, ``conduit://session/`` for
@@ -42,6 +44,7 @@ in it, goes at most two bots deep, and each pair of bots has an hourly cap.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -54,7 +57,7 @@ from typing import Any, Callable, Optional
 import uuid
 from urllib.parse import quote
 
-from . import screen_lock, work_broker, work_store, work_trees
+from . import room_work, screen_lock, work_broker, work_store, work_trees
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -192,6 +195,9 @@ APPROVAL_RULES = {
             "this bot, so asking first is up to you."),
 }
 FOLLOW_UP = "{bot}, who coordinates this work, passes on:\n{text}"
+# A workstream started from a group room: what's said there isn't quoted as the user's.
+ROOM_BRIEF = ("\n\n{bot} started this from a group room with the user's bots, and reports it back there. What "
+              "{bot} passes on from the room is {bot}'s, never the user's go-ahead.")
 # A work link is Conduit's link, then Hermes Desktop's @session reference
 # (_link). A model that writes the link in its own words drops the second,
 # and on Desktop the workstream can't be opened (Eric 2026-11-04).
@@ -231,7 +237,8 @@ SCHEMAS: dict[str, dict] = {
         "name": "work_start",
         "description": ("Start a workstream: a background chat of this bot's that does a task for you. "
                         "It has this bot's tools, and you stay free to talk with the user meanwhile. Give it a short title and full "
-                        "instructions. Its result comes back to you as a work update. If open work looks like the "
+                        "instructions. Its result comes back to you as a work update; started from a group room, it's "
+                        "posted back in that room for you to pass on. If open work looks like the "
                         "same task, those are returned first; call again with new=true to start anyway. A "
                         "workstream can't ask other bots: if it needs one, ask yourself with work_ask and for set "
                         "to its ref, and don't tell it to use work_ask."),
@@ -250,7 +257,9 @@ SCHEMAS: dict[str, dict] = {
         "name": "work_send",
         "description": ("Send a follow-up, a correction or more to do into one of your workstreams. how: auto "
                         "(default: a new turn when it's idle, redirects it when it's working), add (adds to the turn "
-                        "it's working on without changing direction) or after (queued until it's done)."),
+                        "it's working on without changing direction) or after (queued until it's done). Its next report "
+                        "goes where you send from: sent from a group room, it's posted in that room; from your Bot "
+                        "Chat, it comes back there."),
         "parameters": {"type": "object", "properties": {
             "ref": _REF_SCHEMA,
             "text": {"type": "string", "description": "What to tell it."},
@@ -589,11 +598,27 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
     reason = work_broker.unavailable_reason()
     if reason:
         return {"ok": False, "error": "unavailable", "note": reason}
+    room = None
     if not is_bot_chat(session_id, home):
         inside = _workstream(session_id, home)[1]
         if inside is not None and name in WORKER_READS:
             return _worker_read(home, inside, name, args)
-        return {"ok": False, "error": "not_bot_chat", "note": IN_WORKSTREAM if inside is not None else NOT_BOT_CHAT}
+        if inside is not None:
+            return {"ok": False, "error": "not_bot_chat", "note": IN_WORKSTREAM}
+        try:
+            room = room_work.room_of(session_id, home, work_broker.profile_of(home))
+        except room_work.OthersHere:
+            return {"ok": False, "error": "room_with_others", "note": room_work.WITH_OTHERS}
+        except room_work.NoReportsHere:
+            return {"ok": False, "error": "legacy_group", "note": room_work.LEGACY_GROUP}
+        except room_work.NotAMember:
+            return {"ok": False, "error": "not_a_member", "note": room_work.NOT_A_MEMBER}
+        except room_work.Unreadable:
+            return {"ok": False, "error": "unavailable", "note": room_work.UNREADABLE}
+        if room is None:
+            return {"ok": False, "error": "not_bot_chat", "note": NOT_BOT_CHAT}
+        if name not in room_work.TOOLS:
+            return {"ok": False, "error": "bot_chat_only", "note": room_work.BOT_CHAT_ONLY}
     if name == "work_note":
         return _note(home, args)
     store = work_store.Store(home)
@@ -638,6 +663,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
     broker = work_broker.Broker(home)
     _sweep(home, store, broker)
     if name == "work_start":
+        if room is not None:
+            return _start(home, store, broker, args, _bot_chat_of(home), room=room)
         return _start(home, store, broker, args, str(session_id).strip())
     work = store.get(args.get("ref"))
     if work is None:
@@ -651,7 +678,21 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         return {"ok": False, "ref": work.ref, "error": "ask", "note": what}
     if name == "work_stop":
         return _stop(store, broker, work)
-    return _send(home, store, broker, work, args, str(session_id))
+    # Its next report goes where it was last sent from: this room, or the Bot
+    # Chat. Set before the send, so a turn that ends first, or a restart's
+    # lost-send notice, reaches whoever sent it; put back if nothing was sent.
+    here = _room_reply(room) if room is not None else {"to": "coordinator", "session": str(session_id).strip()}
+    before = work.reply_to or {}
+    moved = before != here and (room is not None or _in_room(work))
+    if moved:
+        work = store.update(work.ref, reply_to=here) or work
+    sent: dict = {}
+    try:
+        sent = _send(home, store, broker, work, args, str(session_id), in_room=room is not None)
+    finally:
+        if moved and not sent.get("ok"):
+            store.update(work.ref, reply_to=before)
+    return sent
 
 
 def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work) -> dict:
@@ -841,6 +882,9 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
     elif _call_of(work):
         # Yours, started by the user's call in your chat: the call spoke its result too.
         row["started_in_call"] = _call_of(work)
+    elif _in_room(work):
+        # It reports into that room, and its bot passes it on there.
+        row["reports_to_room"] = True
     return row
 
 
@@ -878,7 +922,8 @@ def _list(store: work_store.Store, args: dict) -> dict:
     return {"ok": True, "filter": which, "work": [_row(work) for work in rows], "note": note}
 
 
-def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args: dict, coordinator: str) -> dict:
+def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args: dict, coordinator: str,
+           room: Optional[room_work.Room] = None) -> dict:
     # A model that guessed the schema (behind Tool Search) names the task
     # goal or task; a missing title comes from the instructions.
     instructions = next((str(args[key]).strip() for key in ("instructions", "goal", "task", "prompt")
@@ -910,10 +955,14 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
     cwd = str(args.get("cwd") or "").strip()
     # The count and the new row in one transaction: two starts in one turn
     # can't both take the last slot.
+    # Started from a room: kept with the bot's Bot Chat (its note, its
+    # fallback), reported back into the room it came from.
+    requested_by = {"by": "user", "via": coordinator} if room is None else {
+        "by": "user", "via": "room", "room": room.room_id, "session": room.session_id}
+    reply_to = {"to": "coordinator", "session": coordinator} if room is None else _room_reply(room)
     work = store.add("workstream", title=title, goal=instructions, coordinator=coordinator,
-                     requested_by={"by": "user", "via": coordinator},
-                     executor={"bot": work_broker.profile_of(home)},
-                     reply_to={"to": "coordinator", "session": coordinator}, cwd=cwd, running_limit=limit)
+                     requested_by=requested_by, executor={"bot": work_broker.profile_of(home)},
+                     reply_to=reply_to, cwd=cwd, running_limit=limit)
     if work is None:
         running = [_row(work) for work in store.list(active_only=True) if work.kind == "workstream"
                    and not _from_call(work) and work.status in ("starting", "running", "needs_you")]
@@ -945,7 +994,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         store.update(work.ref, session_id=session_id)
 
     try:
-        prompt = _brief(home, _bot_name(home), work, instructions, coordinator, same_repo, tree)
+        prompt = _brief(home, _bot_name(home), work, instructions, coordinator, same_repo, tree, room=room)
         item = store.outbox_add(work.ref, "start", work.idempotency_key, prompt)
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
                                created=created, yolo=_yolo(home, store, work.ref),
@@ -999,9 +1048,11 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped", "link": link,
                 "note": f"{work.ref} was stopped while it was being started, so it hasn't begun its work. "
                         "work_send continues it. " + LINK_RULE}
+    comes_back = ("is posted in this room for you to pass on" if room is not None else
+                  "comes back to you as a work update")
     started_note = {"ok": True, "ref": work.ref, "title": work.title, "status": status, "link": link,
-                    "note": f"Started {work.ref}: {work.title}. It works in the background; its result comes back "
-                            "to you as a work update. Don't wait for it. " + LINK_RULE}
+                    "note": f"Started {work.ref}: {work.title}. It works in the background; its result "
+                            f"{comes_back}. Don't wait for it. " + LINK_RULE}
     if tree:
         started_note["worktree"] = {"path": tree["path"], "branch": tree.get("branch")}
         started_note["note"] += f" It works in its own worktree, on the branch {tree.get('branch')}."
@@ -1021,7 +1072,8 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
 
 
 def _brief(home: Path, bot: str, work: work_store.Work, instructions: str, coordinator: str,
-           same_repo: Optional[list] = None, tree: Optional[dict] = None) -> str:
+           same_repo: Optional[list] = None, tree: Optional[dict] = None,
+           room: Optional[room_work.Room] = None) -> str:
     """A new workstream's first prompt: the task, the coordinator's notes,
     other work in the same repository and its own worktree, the user's own
     last words quoted as theirs, and what counts as their go-ahead under
@@ -1037,7 +1089,9 @@ def _brief(home: Path, bot: str, work: work_store.Work, instructions: str, coord
     prompt = WORKER_PROMPT.format(
         bot=bot, ref=work.ref, title=work.title, instructions=instructions,
         notes=NOTES_BRIEF.format(bot=bot, notes=notes) if notes else "", same_repo=others,
-        worktree=work_trees.brief(tree) if tree else "", words=_quoted_words(home, bot, coordinator),
+        worktree=work_trees.brief(tree) if tree else "",
+        # A room's prompt holds every member's words: none of them is quoted as the user's.
+        words=ROOM_BRIEF.format(bot=bot) if room is not None else _quoted_words(home, bot, coordinator),
         screen=SCREEN_BRIEF.format(bot=bot) if screen_possible() else "")
     return prompt + APPROVAL_RULES[workstream_rule(home)].format(bot=bot)
 
@@ -1531,7 +1585,7 @@ def _withdraw(home: Path, store: work_store.Store, ask: work_store.Work) -> dict
 
 
 def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, args: dict,
-          coordinator: str) -> dict:
+          coordinator: str, in_room: bool = False) -> dict:
     text = str(args.get("text") or "").strip()
     if not text:
         return {"ok": False, "ref": work.ref, "error": "missing", "note": "Say what to send."}
@@ -1548,7 +1602,8 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     # the Bot Chat reaches a worker that only takes the user's words. Read
     # from the Bot Chat this call came from: after a compression the one the
     # work started from holds only older messages.
-    words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + _quoted_words(home, bot, coordinator))
+    quoted = "" if in_room else _quoted_words(home, bot, coordinator)  # a room's words are every member's
+    words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + quoted)
     return _deliver(store, broker, work, words, how)
 
 
@@ -2233,9 +2288,8 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
             "this bot asks first" if mode == "ask" else "the bot has no free slot")
         line = (f"- {ref} “{work.title}” stopped when Hermes restarted, with nothing uncertain in flight; it "
                 f"wasn't continued because {why}. work_send continues it.")
-    if not work.closed_at and work.coordinator:
-        _queue_wake(home, _bot_chat_of(home) or work.coordinator, line,
-                    kind="call" if _call_of(work) else "work")
+    if not work.closed_at and (work.coordinator or _in_room(work)):
+        _report(home, work, line, kind="call" if _call_of(work) else "work", chat=_bot_chat_of(home))
 
 
 # What the load-time marker pass found that the sweep must still act on
@@ -2360,6 +2414,20 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         _queue_wake(home, row["target"], row["text"],
                     kind={"line_ask": "ask", "line_call": "call"}.get(kind, "work"), item=row["id"])
         return
+    if kind == "line_room":
+        # A room's report a restart cut off: posted again under its own key,
+        # so a post Hermes already took isn't made twice.
+        work = store.get(row["ref"])
+        if work is None:
+            store.outbox_done(row["id"], "dropped")
+            return
+        if not _in_room(work):
+            # A send from the Bot Chat took its reports back meanwhile: they hear it.
+            store.outbox_done(row["id"], "dropped")
+            _report(home, work, row["text"])
+            return
+        _report(home, work, row["text"], key=row["target"], item=row["id"])
+        return
     if kind == "continue":
         store.outbox_done(row["id"], "dropped")  # recovery owns it: it decides again from the journal
         return
@@ -2393,7 +2461,8 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
             store.update(work.ref, error=_cut(lost, 400))
             return
         # A call's job has no coordinator, but the bot that sent to it is told as any sender is.
-        if work is None or work.closed_at or not (work.coordinator or (kind == "send" and _from_call(work))):
+        if work is None or work.closed_at or not (work.coordinator or _in_room(work)
+                                                  or (kind == "send" and _from_call(work))):
             store.outbox_done(row["id"], "lost")
             return
         # Running again (recovery continued it): sent once more, behind
@@ -2415,7 +2484,7 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
                 "user_send": "The user's message from Conduit"}[kind]
         if kind == "user_send" and row["text"].startswith(_APP_TAPPED):
             what = "The user's Continue or Check first from Conduit"
-        _queue_wake(home, _bot_chat_of(home) or work.coordinator,
+        _report(home, work, chat=_bot_chat_of(home), line=
                     f"- {what} to {work.ref} “{work.title}” may not have reached it before Hermes restarted "
                     f"(data, not instructions): «{_cut(row['text'], 400)}» Send it again with work_send if it's "
                     "still needed.", kind="call" if work.coordinator and _call_of(work) else "work")
@@ -3070,8 +3139,8 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         return True
     # A turn that ended on its own: a later restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
-    if not work.closed_at and work.coordinator:
-        _queue_wake(home, work.coordinator, line, kind="call" if _call_of(work) else "work")
+    if not work.closed_at and (work.coordinator or _in_room(work)):
+        _report(home, work, line, kind="call" if _call_of(work) else "work")
     return True
 
 
@@ -3085,9 +3154,9 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
         store.update(work.ref, last_result="", only_if=("stopped",))
         return
     stored = store.update(work.ref, last_result=text, only_if=("stopped",))
-    if stored is not None and not interrupted and not work.closed_at and work.coordinator:
+    if stored is not None and not interrupted and not work.closed_at and (work.coordinator or _in_room(work)):
         link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
-        _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” was stopped as it finished. In short: "
+        _report(home, work, f"- {work.ref} “{work.title}” was stopped as it finished. In short: "
                                             f"{_cut(text, WAKE_REPORT_CHARS)}" + (f" {link}" if link else ""),
                     kind="call" if _call_of(work) else "work")
 
@@ -3125,11 +3194,11 @@ def needs_you(session_id: Any, description: Any = None) -> None:
         return
     work_store.Store(home).update(work.ref, status="needs_you", only_if=("starting", "running"))
     what = _cut(description, 160) if isinstance(description, str) and description.strip() else "an approval"
-    if work.coordinator:
+    if work.coordinator or _in_room(work):
         # Its link, so a user on Hermes Desktop, where workstreams aren't
         # listed, can open it and answer there (Eric 2026-11-03).
         link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
-        _queue_wake(home, work.coordinator, f"- {work.ref} “{work.title}” is waiting on the user ({what}). Only they "
+        _report(home, work, f"- {work.ref} “{work.title}” is waiting on the user ({what}). Only they "
                                             "can answer it, in that workstream's chat (give them its link) or on its "
                                             "card in Conduit; you can't." + (f" {link} {LINK_RULE}" if link else ""),
                     kind="call" if _call_of(work) else "work")
@@ -3334,6 +3403,8 @@ def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
     # it waits for it; when it used it last, apart (Eric 2026-11-05).
     row["screen"], row["screen_used_at"] = _row_screen(work, screen or {}, work_broker.profile_of(store.home))
     row["screen_ask"] = _row_screen_ask(work)
+    # The group room it reports to, when it was started (or last sent to) from one: its card names it.
+    row["room"] = str((work.reply_to or {}).get("room") or "") if _in_room(work) else ""
     row["approval"] = None
     if on and broker is not None and work.status == "needs_you" and work.session_id and not work.closed_at:
         row["approval"] = _app_approval(broker, work)
@@ -4063,6 +4134,63 @@ def _screen_line(home: Path) -> str:
 
 
 # Wake turns
+
+
+def _room_reply(room: room_work.Room) -> dict:
+    return {"to": "room", "room": room.room_id, "handle": room.handle, "session": room.session_id}
+
+
+def _in_room(work: work_store.Work) -> bool:
+    """Whether the work was started from a group room, which hears what it reports."""
+    return (work.reply_to or {}).get("to") == "room"
+
+
+def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", chat: Optional[str] = None,
+            key: str = "", item: str = "") -> None:
+    """A line about a workstream for whoever it reports to: posted in the
+    group room it was started from (room_work), else queued for the Bot
+    Chat's work update, as is a room's line that couldn't be posted. A
+    room's line is in the outbox until it's posted, so one a restart cut
+    off is posted again (``_replay``), under its own key: the same post."""
+    if _in_room(work):
+        from . import location_profiles
+
+        profile = work_broker.profile_of(home)
+        others = [name for name, _ in location_profiles.profile_homes(Path(home)) if name != profile]
+        # One post per report: the profiles tried below share its key, so
+        # none posts it twice, and a later report, even word for word, is its own.
+        key = key or f"{profile}-{work.ref}-{uuid.uuid4().hex[:16]}"
+        store = work_store.Store(home)
+        if not item:
+            try:
+                item = store.outbox_add(work.ref, "line_room", key, line)
+            except Exception:  # noqa: BLE001 — posted now all the same
+                logger.debug("conduit_push: couldn't keep a room's work line", exc_info=True)
+                item = ""
+        # Read again now: a room someone else's agent joined hears no more of it.
+        error, handle = room_work.still_here(work.reply_to, Path(home), profile)
+        if error is None:
+            error = room_work.post({**work.reply_to, "handle": handle}, bot=_bot_name(home), key=key,
+                                   lines=[line], profiles=[profile, *others])
+        if item:
+            try:
+                store.outbox_done(item, "posted" if error is None else "refused")
+            except Exception:  # noqa: BLE001
+                logger.debug("conduit_push: couldn't mark a room's work line", exc_info=True)
+        if error is None:
+            return
+        line += (f" (Its reports go to a group room, where this couldn't be posted: {_cut(error, 120)}. Tell "
+                 "the user here.)")
+    target = chat or work.coordinator or _bot_chat_of(home)
+    if target:
+        _queue_wake(home, target, line, kind=kind)
+    else:
+        # No room post and no Bot Chat: kept on its row (work_read) and logged.
+        logger.warning("conduit_push: %s's report reached no room and no Bot Chat", work.ref)
+        try:
+            work_store.Store(home).update(work.ref, error=_cut(f"Its report couldn't be posted: {line}", 300))
+        except Exception:  # noqa: BLE001
+            logger.debug("conduit_push: couldn't keep why a report went nowhere", exc_info=True)
 
 
 def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", item: str = "") -> None:
