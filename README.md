@@ -4605,12 +4605,27 @@ while it runs:
   until the turn ends (up to `agent.restart_after_turn_timeout`, 30 minutes
   by default), so Conduit couldn't reach it. The update first waits for the
   gateway's running work while it still serves: `restarting_gateway` with
-  `gateway_stage: waiting` and `running_chats`, for up to 30 minutes, then
-  restarts anyway. A restart that still meets work (a turn started
+  `gateway_stage: waiting` and `running_chats`, for up to 10 minutes, then
+  restarts anyway (past that the gateway's own wait would only add to it). A restart that still meets work (a turn started
   meanwhile) shows `gateway_stage: draining` and is waited on until Hermes
   finishes it (up to two hours, then the update reports the restart
   failed), rather than failing after three minutes. A dashboard
   restarted during the wait restarts the gateway itself and ends the job.
+- `GET /api/plugins/conduit_push/self/gateway-work` names what a gateway
+  restart waits on, for this update and for one Conduit runs itself (Restart
+  Gateway in Settings, or an update on an older host): `{ok, units, count,
+  draining, restart_timeout_s, restarts_by}`. Each unit has its `kind`
+  (`chat`, `cron`, `managed`, `api`, `deferred`) and `elapsed_s`; a chat its
+  `profile`, `bot`, `title`, `platform` and `session_id` (null when Conduit
+  can't reach it), a cron run its `job_id` and `title`. `restarts_by` is when
+  the gateway restarts anyway, while it drains.
+- `POST /api/plugins/conduit_push/self/gateway-work/restart-now` is Restart
+  now: the update stops waiting for that work and restarts the gateway, and
+  Conduit stops the chats it named (`session.interrupt`, which a draining
+  gateway still takes). With `?force=true` it also restarts a gateway systemd
+  runs with `systemctl restart --no-block`, which ends what's left after the
+  gateway's stop drain (`agent.restart_drain_timeout`, 60 seconds by default);
+  a draining restart can't be cut any other way. 501 off systemd.
 - The job is kept in `conduit-self-update.json` in the Hermes root. The
   restarted dashboard marks it done and sends the profile that asked a
   notification saying which version is running, or why the update didn't

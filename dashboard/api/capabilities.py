@@ -158,6 +158,9 @@ ROUTE_CAPABILITIES = (
     "self-restart",
     # POST /self/update runs the whole update on the host and notifies.
     "self-update",
+    # GET /self/gateway-work names what a gateway restart waits on; POST
+    # /self/gateway-work/restart-now ends the update's wait for it.
+    "gateway-work",
     "cron-notifications",
     # "act" on /cron/notifications: a job delivered to a Bot Chat just shows
     # its report there unless it lets the bot act on it (cron_bot_chat).

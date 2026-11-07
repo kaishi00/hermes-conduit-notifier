@@ -794,3 +794,135 @@ def test_a_fresh_pull_passes_hermes_refusals_through(monkeypatch):
     monkeypatch.setattr(api.self_update.subprocess, "run", lambda *a, **k: types.SimpleNamespace(
         returncode=0, stderr="", stdout=api.self_update._FRESH_PULL_MARK + json.dumps(refusal)))
     assert api.self_update._pull_in_fresh_process() == refusal
+
+
+def test_restart_now_ends_the_wait_for_the_gateways_work(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.self_update, "_restart_now", api.self_update.threading.Event())
+    waits = []
+
+    def gateway_work():
+        waits.append(1)
+        if len(waits) == 2:
+            api.self_update._restart_now.set()
+        return 1
+
+    job, scheduled, _, sleeps = _run(tmp_path, monkeypatch=monkeypatch, gateway_work=gateway_work, markers={})
+    assert len(sleeps) == 2 and job["step"] == "restarting_dashboard" and len(scheduled) == 1
+    assert "gateway_restart_at" not in job
+
+
+def test_the_pre_restart_wait_is_short_so_it_doesnt_stack_on_the_gateways_own(monkeypatch):
+    # Past it the gateway's restart waits again, up to agent.restart_after_turn_timeout (30 min).
+    assert api.self_update.SELF_UPDATE_GATEWAY_WAIT_S <= 600
+
+
+def test_the_gateways_work_is_named_for_conduit(monkeypatch, tmp_path):
+    (tmp_path / "profiles" / "rei").mkdir(parents=True)
+    _fake_guards(monkeypatch, tmp_path, {"active_agents": 4, "active_work": [
+        {"kind": "chat", "session": "agent:rei:local:dm:20260815_115050_45f123", "elapsed_s": 1449.1},
+        {"kind": "chat", "session": "agent:main:telegram:dm:42", "elapsed_s": 3},
+        {"kind": "managed", "pid": 7},
+        {"kind": "cron", "job_id": "dc18", "wedged": True}]})
+    monkeypatch.setattr(api.self_update, "_hermes_homes", lambda: [tmp_path, tmp_path / "profiles" / "rei"])
+    monkeypatch.setattr(api.self_update, "_gateway_draining", lambda: True)
+    monkeypatch.setattr(api.self_update, "_restart_timeout_s", lambda: 1800.0)
+    rows = {"agent:main:telegram:dm:42": {"id": "tg-session", "title": "Groceries  list"}}
+    homes = []
+
+    def session_row(home, key):
+        homes.append(home)
+        return rows.get(key, {})
+
+    monkeypatch.setattr(api.self_update, "_session_row", session_row)
+    report = api.self_update.gateway_work_report()
+    assert report["count"] == 3 and report["draining"] and report["restart_timeout_s"] == 1800.0
+    rei, telegram, managed = report["units"]
+    # A local chat's id is its key's chat id when no row names it.
+    assert rei["profile"] == "rei" and rei["session_id"] == "20260815_115050_45f123" and rei["elapsed_s"] == 1449
+    assert telegram["profile"] == "default" and telegram["session_id"] == "tg-session" and telegram["title"] == "Groceries list"
+    assert managed == {"kind": "managed"}
+    assert homes == [tmp_path / "profiles" / "rei", tmp_path]
+
+
+def test_a_chat_on_another_platform_without_a_row_has_no_session_to_stop(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.self_update, "_hermes_homes", lambda: [tmp_path])
+    monkeypatch.setattr(api.self_update, "_session_row", lambda home, key: {})
+    unit = api.self_update._named_work_unit({"kind": "chat", "session": "agent:main~:discord:group:9"})
+    assert unit["profile"] == "main" and unit["session_id"] is None and unit["platform"] == "discord"
+
+
+def test_the_gateway_work_route_answers_and_restart_now_sets_the_flag(monkeypatch):
+    from fastapi.testclient import TestClient
+    from fastapi import FastAPI
+    monkeypatch.setattr(api.self_update, "_restart_now", api.self_update.threading.Event())
+    monkeypatch.setattr(api.self_update, "gateway_work_report",
+                        lambda: {"units": [], "count": 0, "draining": False, "restart_timeout_s": None})
+    app = FastAPI()
+    app.include_router(api.router)
+    client = TestClient(app)
+    answer = client.get("/self/gateway-work")
+    assert answer.status_code == 200 and answer.json()["count"] == 0
+    assert client.post("/self/gateway-work/restart-now").json() == {"ok": True, "forced": False}
+    assert api.self_update._restart_now.is_set()
+    assert "gateway-work" in api.capabilities.ROUTE_CAPABILITIES
+
+
+def test_a_draining_gateway_says_when_it_restarts_anyway(monkeypatch):
+    monkeypatch.setattr(api.self_update, "_gateway_live_work", lambda: ([], 0))
+    monkeypatch.setattr(api.self_update, "_restart_timeout_s", lambda: 1800.0)
+    monkeypatch.setattr(api.self_update, "_draining_seen_at", None)
+    monkeypatch.setattr(api.self_update, "_gateway_draining", lambda: True)
+
+    class Proc:
+        def poll(self):
+            return None
+
+    web_server = types.ModuleType("hermes_cli.web_server")
+    web_server._LAST_GATEWAY_RESTART = (api.self_update.time.monotonic() - 600, Proc(), ("restart",))
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", web_server)
+    report = api.self_update.gateway_work_report()
+    assert abs(report["restarts_by"] - (api.self_update.time.time() + 1200)) < 5
+    monkeypatch.setattr(api.self_update, "_gateway_draining", lambda: False)
+    assert api.self_update.gateway_work_report()["restarts_by"] is None
+
+
+def _fake_gateway_cli(monkeypatch, kind="systemd", scope=True):
+    gw = types.ModuleType("hermes_cli.gateway")
+    gw.supports_systemd_services = lambda: kind == "systemd"
+    gw._installed_service_kind_for = lambda windows: kind
+    gw._systemctl_cmd = lambda system: ["systemctl"] if system else ["systemctl", "--user"]
+    gw._select_systemd_scope = lambda system: scope
+    gw.get_service_name = lambda: "hermes-gateway"
+    package = types.ModuleType("hermes_cli")
+    package.gateway = gw
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.gateway", gw)
+
+
+def test_a_forced_restart_goes_through_systemd_without_waiting(monkeypatch):
+    _fake_gateway_cli(monkeypatch)
+    ran = []
+
+    def run(command, **kwargs):
+        ran.append(command)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(api.self_update.subprocess, "run", run)
+    api.self_update.force_gateway_restart()
+    assert ran == [["systemctl", "restart", "--no-block", "hermes-gateway"]]
+
+
+def test_a_forced_restart_says_why_it_cant_off_systemd(monkeypatch):
+    _fake_gateway_cli(monkeypatch, kind="launchd")
+    with pytest.raises(api.core.TokenError) as raised:
+        api.self_update.force_gateway_restart()
+    assert raised.value.status == 501
+
+
+def test_a_forced_restart_systemd_refuses_is_reported(monkeypatch):
+    _fake_gateway_cli(monkeypatch, scope=False)
+    monkeypatch.setattr(api.self_update.subprocess, "run",
+                        lambda command, **kwargs: types.SimpleNamespace(returncode=1, stdout="", stderr="Access denied"))
+    with pytest.raises(api.core.TokenError) as raised:
+        api.self_update.force_gateway_restart()
+    assert raised.value.status == 502 and "Access denied" in str(raised.value)
