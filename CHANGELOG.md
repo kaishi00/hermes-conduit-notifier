@@ -20,7 +20,8 @@ checks it). The format is fixed, because Conduit reads it:
   call whose turn a gateway restart cut off held every later message in that
   chat until someone discarded it. The plugin now lets go of its own cut-off
   turn before its next message. A turn you sent yourself is left for you, and
-  Conduit shows it so you can resend or discard it.
+  Conduit shows it so you can resend or discard it. A turn cut off before
+  this update is left for you too.
 
 ## 0.137.5 (2026-11-07)
 

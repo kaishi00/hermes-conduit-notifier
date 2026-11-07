@@ -122,6 +122,8 @@ _TURN_CONTROLS = ("session.steer", "session.redirect", "session.interrupt")
 # theirs a gateway restart lost is theirs to discard (``_settle_lost``), a
 # person's (a different id) never.
 OWN_SUBMISSION_PREFIX = "conduit-plugin-"
+# A discard refused for these reasons finds the lost turn already gone.
+_SETTLED_LOST_REASONS = frozenset({"stale_generation", "not_found", "admission_terminal", "already_resolved"})
 
 
 def _reason(response: Any) -> Optional[str]:
@@ -384,7 +386,10 @@ class _AuthorityLink:
             except Exception:  # noqa: BLE001 — the send goes on; a refused read is the send's to report
                 logger.debug("Conduit: reading a chat's queue before a send failed", exc_info=True)
                 return
-            self._note_snapshot(snapshot.get("result") if isinstance(snapshot, dict) else None)
+            result = snapshot.get("result") if isinstance(snapshot, dict) else None
+            if not isinstance(result, dict) or result.get("session_id") != sid:
+                return  # Not read: the next send reads it again.
+            self._note_snapshot(result)
             with self.lock:
                 # Read: a Hermes whose snapshot lists no queue isn't read again.
                 self.lost.setdefault(sid, {})
@@ -402,7 +407,11 @@ class _AuthorityLink:
                 logger.debug("Conduit: discarding a chat's lost turn failed", exc_info=True)
                 continue
             if isinstance(answer, dict) and answer.get("error"):
-                logger.info("Conduit: Hermes kept a lost turn in %s: %s", sid, _reason(answer))
+                reason = _reason(answer)
+                if reason not in _SETTLED_LOST_REASONS:
+                    # Still holding the chat: the next send tries again.
+                    logger.info("Conduit: Hermes kept a lost turn in %s: %s", sid, reason)
+                    continue
             with self.lock:
                 (self.lost.get(sid) or {}).pop(admission_id, None)
 

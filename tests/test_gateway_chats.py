@@ -514,3 +514,27 @@ def test_a_discard_hermes_refuses_still_lets_the_send_go(gateway):
     assert sent["result"]["status"] == "queued"
     assert [r["method"] for r in connections[0].requests] == ["session.resume", "prompt.resolve_unknown",
                                                                "prompt.submit"]
+
+
+def test_a_discard_refused_for_another_reason_is_tried_again_at_the_next_send(gateway):
+    chats, answers, connections = gateway
+    answers["session.resume"] = {"result": {"session_id": "lost-4", "pending": [_lost("a4", 2)]}}
+    answers["prompt.resolve_unknown"] = {"error": {"code": 5000, "message": "busy",
+                                                   "data": {"reason": "storage_unavailable"}}}
+    answers["prompt.submit"] = {"result": {"status": "queued"}}
+    transport = Transport()
+    _call(chats, transport, "prompt.submit", {"session_id": "lost-4", "text": "next"})
+    _call(chats, transport, "prompt.submit", {"session_id": "lost-4", "text": "again"})
+    assert [r["method"] for r in connections[0].requests] == [
+        "session.resume", "prompt.resolve_unknown", "prompt.submit", "prompt.resolve_unknown", "prompt.submit"]
+
+
+def test_a_queue_read_hermes_refuses_is_read_again_at_the_next_send(gateway):
+    chats, answers, connections = gateway
+    answers["session.resume"] = {"error": {"code": 4001, "message": "nope", "data": {"reason": "permission_denied"}}}
+    answers["prompt.submit"] = {"result": {"status": "queued"}}
+    transport = Transport()
+    _call(chats, transport, "prompt.submit", {"session_id": "lost-5", "text": "next"})
+    _call(chats, transport, "prompt.submit", {"session_id": "lost-5", "text": "again"})
+    assert [r["method"] for r in connections[0].requests] == [
+        "session.resume", "prompt.submit", "session.resume", "prompt.submit"]
