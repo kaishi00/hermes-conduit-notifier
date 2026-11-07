@@ -113,8 +113,9 @@ def handle_of(room_id: str, home: Path, profile: str) -> str:
 
 
 # A mention in what a workstream reported would give that bot a turn here: only
-# the post's own @mention does. Desktop's @session: references, email addresses and URL paths stay as they are.
-_MENTION = re.compile(r"(?<![A-Za-z0-9._%+/-])@(?!session:)(?=[A-Za-z0-9])")
+# the post's own @mention does. Hermes reads "@Name" anywhere in a line (an
+# address or a URL path too), so every one is broken, but Desktop's @session: references.
+_MENTION = re.compile(r"@(?!session:)(?=[A-Za-z0-9])")
 
 
 def post_text(handle: str, lines: list[str]) -> str:
@@ -124,6 +125,24 @@ def post_text(handle: str, lines: list[str]) -> str:
         cut = max(0, len(body) - (len(text) - MAX_POST_CHARS) - 1)
         text = POST.format(handle=handle, lines=body[:cut].rstrip() + "…")
     return text
+
+
+def still_here(reply_to: dict, home: Path, profile: str) -> tuple[Optional[str], str]:
+    """Whether the room ``reply_to`` names may still hear the work's
+    reports, read again now (someone else's agent may have joined since the
+    work started): (None, the bot's handle there) if so, else (why not, "")."""
+    session = str(reply_to.get("session") or "")
+    try:
+        room = room_of(session, home, profile)
+    except OthersHere:
+        return "other people's agents are in the room now", ""
+    except NoReportsHere:
+        return "the group can't take posts", ""
+    except Unreadable as error:
+        return f"the room couldn't be read ({error})", ""
+    if room is None or room.room_id != str(reply_to.get("room") or ""):
+        return "the room is gone", ""
+    return None, room.handle
 
 
 def _deliver() -> Optional[Callable[..., Optional[str]]]:

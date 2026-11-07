@@ -4688,7 +4688,7 @@ def test_a_reports_own_mentions_give_no_bot_a_turn():
     text = room_work.post_text("Furina", ["- W1 done: ask @Nahida next [Open W1](conduit://x) @session:default/abc"])
     assert text.startswith("@Furina ") and "@\u200bNahida" in text and "@Nahida" not in text
     assert "@session:default/abc" in text
-    assert "ops@example.com" in room_work.post_text("Furina", ["- mail ops@example.com"])
+    assert "ops@\u200bexample.com" in room_work.post_text("Furina", ["- mail ops@example.com"])
 
 
 def test_a_word_for_word_second_report_is_posted_again(on, hermes, room):
@@ -4716,8 +4716,8 @@ def test_a_room_report_with_nowhere_to_go_is_kept_on_its_row(on, hermes, room, m
     room_start()
     _finish("20261031_work_1", "Done.")
     assert "couldn't be posted" in on.get("W1").error
-    assert "ops@example.com/@me" not in room_work.post_text("F", ["- see https://x.io/@me"]) and \
-        "https://x.io/@me" in room_work.post_text("F", ["- see https://x.io/@me"])
+    # Hermes reads "@Name" anywhere, a URL path too.
+    assert "https://x.io/@\u200bNahida" in room_work.post_text("F", ["- see https://x.io/@Nahida"])
 
 
 def test_a_send_points_its_reports_at_the_sender_before_it_goes_and_back_if_it_didnt(on, hermes, room, monkeypatch):
@@ -4761,3 +4761,24 @@ def test_a_room_report_cut_off_after_its_reports_moved_back_reaches_the_bot_chat
     work._replay(on.home, on)
     assert room["posted"] == []
     assert any("finished." in line for line in batched())
+
+
+def test_a_room_someone_elses_agent_joined_hears_no_more_reports(on, hermes, room, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    room_start()
+    room["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=True, session_id=ROOM_CHAT)
+    _finish("20261031_work_1", "Here it is.")
+    assert room["posted"] == []
+    line, = batched()
+    assert "Here it is." in line and "other people's agents are in the room now" in line
+
+
+def test_a_room_post_refused_on_the_bots_profile_is_made_from_another(on, hermes, room, monkeypatch):
+    location_profiles = sys.modules["conduit_push.location_profiles"]
+    monkeypatch.setattr(location_profiles, "profile_homes",
+                        lambda home: [("default", home), ("nahida", home / "profiles" / "nahida")])
+    room["refuse"].add("room-1@default")
+    room_start()
+    _finish("20261031_work_1", "Done.")
+    posted, = room["posted"]
+    assert posted["address"] == "room-1@nahida" and "Done." in posted["text"]

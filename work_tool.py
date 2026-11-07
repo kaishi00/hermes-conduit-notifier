@@ -4167,8 +4167,11 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
             except Exception:  # noqa: BLE001 — posted now all the same
                 logger.debug("conduit_push: couldn't keep a room's work line", exc_info=True)
                 item = ""
-        error = room_work.post(work.reply_to, bot=_bot_name(home), key=key, lines=[line],
-                               profiles=[profile, *others])
+        # Read again now: a room someone else's agent joined hears no more of it.
+        error, handle = room_work.still_here(work.reply_to, Path(home), profile)
+        if error is None:
+            error = room_work.post({**work.reply_to, "handle": handle}, bot=_bot_name(home), key=key,
+                                   lines=[line], profiles=[profile, *others])
         if item:
             try:
                 store.outbox_done(item, "posted" if error is None else "refused")
