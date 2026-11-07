@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.139.0 (2026-11-07)
+
+### New and improved
+- Linked Rooms: everyone in a room now sees the other people's agents with
+  their own pictures and glow colors, and each person's picture by their
+  messages, as their owner's Conduit shows them.
+
 ## 0.137.5 (2026-11-07)
 
 ### Fixes
