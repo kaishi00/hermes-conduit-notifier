@@ -211,21 +211,7 @@ class TapStore:
 
 
 def _open_fence(text: str) -> str | None:
-    """The code fence a card's Markdown leaves open at its end, if any; a
-    mono element's inline code (fenced on its own line, opened and closed
-    there) is no fence. present_store._open_fence reads the same."""
-    fence = None
-    for line in text.split("\n"):
-        run = re.match(r"`{3,}", line)
-        if not run:
-            continue
-        rest = line[len(run.group()):]
-        if fence is None:
-            if not (rest.strip() and rest.rstrip().endswith(run.group())):
-                fence = run.group()
-        elif run.group() == fence and not rest.strip():
-            fence = None
-    return fence
+    return card_schema.open_fence(text)  # one reading for the tap note and the answer
 
 
 def _card_markdown(card: dict[str, Any]) -> str:

@@ -507,11 +507,15 @@ MAX_FIELDS = 6
 _SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime", "privatekey", "recoverykey",
                  "licensekey", "seedphrase", "verificationcode", "securitycode", "authcode", "backupcode",
                  "passphrase", "totp", "masterkey", "credential", "2fa", "twofactor", "logincode",
-                 "accesscode", "unlockcode", "securitykey",
+                 "accesscode", "unlockcode", "securitykey", "resetcode", "recoverycode",
+                 "activationcode", "authkey", "verificationkey", "backupkey",
                  # The same in the languages Conduit ships, as a model writes labels in the user's.
                  "passwort", "kennwort", "contraseña", "motdepasse", "senha", "пароль", "hasło", "şifre",
                  "katasandi", "パスワード", "暗証番号", "認証コード", "密码", "密碼", "验证码", "驗證碼",
-                 "비밀번호", "인증번호")
+                 "비밀번호", "인증번호", "bestätigungscode", "verifizierungscode", "zugangscode",
+                 "códigodeverificación", "codigodeverificacion", "códigodeverificação", "codedevérification",
+                 "codedeverification", "codicediverifica", "kodeverifikasi", "doğrulamakodu", "kodweryfikacyjny",
+                 "кодподтверждения", "clavedeacceso", "contrasena")
 _SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc"))
 # Letters of any script count, so a label in Japanese or Russian is read too.
 _NOT_ALNUM = re.compile(r"[\W_]+")
@@ -1694,3 +1698,22 @@ def _maps_params(place: dict[str, Any]) -> str:
 
 def _escape(text: str) -> str:
     return re.sub(r"([\\`*_\[\]<>|])", r"\\\1", text)
+
+
+def open_fence(text: str) -> str | None:
+    """The code fence a Markdown text leaves open at its end, if any; a
+    composed card's mono element (inline code fenced on its own line, opened
+    and closed there) is no fence. The tap note's clip and the answer's
+    (present_store.clip_markdown) both read it."""
+    fence = None
+    for line in text.split("\n"):
+        run = re.match(r"`{3,}", line)
+        if not run:
+            continue
+        rest = line[len(run.group()):]
+        if fence is None:
+            if not (rest.strip() and rest.rstrip().endswith(run.group())):
+                fence = run.group()
+        elif run.group() == fence and not rest.strip():
+            fence = None
+    return fence

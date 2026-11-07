@@ -2629,8 +2629,9 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
   `options`), `toggle` (on or off), `date` (YYYY-MM-DD, or with THH:MM) and
   `number` (within `min` and `max`), each with an `id`, a `label` and a
   starting `value`; six per card. A field whose id, label or placeholder
-  names a password, passcode, PIN, one-time, 2FA, login, access, unlock or
-  verification code, token, API, private, master, security or recovery key, passphrase, seed
+  names a password, passcode, PIN, one-time, 2FA, login, access, unlock, reset,
+  recovery, activation or verification code, token, API, auth, private, master,
+  security, backup, verification or recovery key, passphrase, seed
   phrase, credentials or other secret is refused, in the languages Conduit
   ships as well as English.
 - **Taps.** Conduit posts a tap to `POST /boards/taps` (capability

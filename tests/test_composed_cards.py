@@ -107,7 +107,10 @@ def test_any_card_carries_buttons_and_its_markdown_shows_them():
                                   "Passphrase", "TOTP", "Master key", "App credentials",
                                   "2FA code", "Two-factor code", "Login code",
                                   "パスワード", "Passwort", "Contraseña", "Mot de passe", "Пароль", "Kata sandi",
-                                  "비밀번호를 입력", "密码", "Access code", "Unlock code", "Security key"])
+                                  "비밀번호를 입력", "密码", "Access code", "Unlock code", "Security key", "Reset code",
+                                  "Recovery code", "Activation code", "Auth key", "Verification key",
+                                  "Bestätigungscode", "Código de verificación", "Code de vérification",
+                                  "Kode verifikasi", "Doğrulama kodu", "Код подтверждения"])
 def test_a_field_never_asks_for_a_secret(name):
     assert card_schema.names_secret(name)
 
@@ -456,3 +459,9 @@ def test_a_text_fields_lines_reach_hermes_as_written(tmp_path):
     note = store.note("s1", "Send · Email to Mei")
     assert 'body: "Hi Mei,\\n\\nSee you Friday.\\n\\n—Alex"' in note
     assert "… (cut at 2,000 characters)" in note
+
+
+@pytest.mark.parametrize("text", ["```\ncode", "```` a `` b ````", "```` a `` b ````\n```\ncode", "```py\nx\n```",
+                                  "````\n```\n````", "plain", "``` x ```\n```"])
+def test_the_answers_and_the_tap_notes_fence_reading_agree(text):
+    assert store_module._open_fence(text) == card_schema.open_fence(text)

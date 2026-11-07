@@ -966,7 +966,8 @@ def _for_device(card: dict[str, Any], features: list[str]) -> dict[str, Any]:
 def _open_fence(text: str) -> str | None:
     """The fence a Markdown text leaves open at its end, if any; a composed
     card's mono element (inline code fenced on its own line, opened and
-    closed there) is no fence. card_actions._open_fence reads the same."""
+    closed there) is no fence. card_schema.open_fence reads the same (this
+    module can't count on card_schema loading); a test holds them together."""
     fence = None
     for line in text.split("\n"):
         run = re.match(r"`{3,}", line)
