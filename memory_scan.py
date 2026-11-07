@@ -59,11 +59,11 @@ def _is_own(path: Any) -> bool:
 
 def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
     # Hands on whatever Hermes passes, so a change to the signature upstream
-    # still reaches Hermes' own function.
-    def defines_memory_provider(path: Any, *args: Any, **kwargs: Any) -> Any:
-        if _is_own(path):
+    # still reaches Hermes' own function; the folder is its first argument.
+    def defines_memory_provider(*args: Any, **kwargs: Any) -> Any:
+        if args and _is_own(args[0]):
             return False
-        return original(path, *args, **kwargs)
+        return original(*args, **kwargs)
 
     functools.update_wrapper(defines_memory_provider, original)
     setattr(defines_memory_provider, _GUARD_FLAG, True)
@@ -89,6 +89,9 @@ def install() -> bool:
         while callable(own) and getattr(own, _GUARD_FLAG, False):
             own = getattr(own, "__wrapped__", None)
         if not callable(own):
+            # A Hermes that parses under another name would parse the plugin again.
+            logger.info("conduit_push: Hermes' memory provider discovery has no %s, so it may parse the plugin's "
+                        "code each time it lists providers", FUNCTION)
             return False
         guard = _guard(own)
         setattr(memory, FUNCTION, guard)
@@ -97,11 +100,17 @@ def install() -> bool:
 
 
 def uninstall() -> None:
-    """Puts Hermes' own function back (the plugin unloads). A guard another
+    """Takes this plugin's folder off (the plugin unloads), and puts Hermes'
+    own function back once no loaded copy's folder is left. A guard another
     load of the plugin has put on since is left to that load."""
     global _wrapped_module, _wrapped
     with _lock:
+        folders = _own_folders()
+        folders.discard(str(HERE))
         module, wrapped = _wrapped_module, _wrapped
         _wrapped_module, _wrapped = None, None
+        # Another copy still loaded keeps the guard, which answers for its folder.
+        if folders:
+            return
         if module is not None and wrapped is not None and getattr(module, FUNCTION, None) is wrapped[1]:
             setattr(module, FUNCTION, wrapped[0])

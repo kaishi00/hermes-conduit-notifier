@@ -64,6 +64,23 @@ def test_a_second_copy_adds_its_folder_to_the_one_guard(scan, tmp_path):
     assert scan.asked == []
 
 
+def test_the_later_copy_unloading_first_leaves_the_earlier_one_guarded(scan, tmp_path):
+    assert scan.install()
+    first = scan.HERE
+    scan._wrapped_module = None
+    copy = tmp_path / "conduit_push"
+    copy.mkdir()
+    scan.HERE = copy.resolve()
+    assert scan.install()
+    scan.uninstall()  # the later copy unloads
+    assert scan.memory._defines_memory_provider(ROOT) is False
+    assert scan.asked == []
+    # The unloaded copy's folder is Hermes' to judge again.
+    scan.memory._defines_memory_provider(copy)
+    assert scan.asked == [copy]
+    scan.HERE = first
+
+
 def test_unload_puts_hermes_own_back(scan):
     assert scan.install()
     scan.uninstall()
