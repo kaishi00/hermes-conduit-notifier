@@ -776,8 +776,14 @@ def test_reload_mcp_and_skills_run_in_conduits_shapes_on_the_listener(listener):
 
         asked = await sock.result("reload.mcp", {"session_id": sid})
         assert asked["status"] == "confirm_required" and asked.get("message"), asked
-        reloaded = await sock.result("reload.mcp", {"session_id": sid, "confirm": True})
-        assert reloaded["status"] == "reloaded", reloaded
+        # Reloaded, or refused naming the servers that didn't connect when nothing took effect
+        # (the host-verbs test above adds a catalog preset with no real key): Conduit shows both.
+        reloaded = await sock.call("reload.mcp", {"session_id": sid, "confirm": True})
+        if "error" in reloaded:
+            assert _refusal(reloaded) == "mcp_servers_unavailable", reloaded
+            assert reloaded["error"]["data"]["detail"].startswith("did not connect: "), reloaded
+        else:
+            assert reloaded["result"]["status"] == "reloaded", reloaded
         # The dashboard's persistent opt-out isn't the authority's: refused before anything runs.
         assert _refusal(await sock.call("reload.mcp", {"session_id": sid, "confirm": True, "always": True}))
 
