@@ -26,6 +26,14 @@ checks it). The format is fixed, because Conduit reads it:
   asks you first.
 - Hermes can save a card it builds as a template and fill it by name later,
   so cards it shows often come up faster.
+## 0.137.5 (2026-11-07)
+
+### Fixes
+- Updating the plugin from Conduit, or setting up Linked Rooms, could leave
+  the gateway on the old plugin on a host where systemd runs it as root (an
+  LXC host, say): Hermes' own restart stopped with "Refusing to install the
+  gateway system service as root". The plugin now restarts the gateway
+  through systemd there.
 
 ## 0.137.4 (2026-11-07)
 
