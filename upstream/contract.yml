@@ -587,6 +587,8 @@ routes:
   - DELETE /rooms/links/invites
   - POST /rooms/links/invites
   - POST /rooms/links/preview
+  - GET /rooms/looks
+  - PUT /rooms/looks
   - GET /rooms/people
   - DELETE /rooms/sessions
   - GET /rooms/setup

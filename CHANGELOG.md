@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.137.6 (2026-11-07)
+## 0.139.1 (2026-11-07)
 
 ### Fixes
 - A bot with workstreams on couldn't show cards in its Bot Chat: asked for
@@ -24,6 +24,13 @@ checks it). The format is fixed, because Conduit reads it:
 - A chat open in Conduit on two devices at once didn't get Conduit's cards
   (the weather, a plan, a chart) or know which device sent the message, so
   answers came as plain text.
+
+## 0.139.0 (2026-11-07)
+
+### New and improved
+- Linked Rooms: everyone in a room now sees the other people's agents with
+  their own pictures and glow colors, and each person's picture by their
+  messages, as their owner's Conduit shows them.
 
 ## 0.137.5 (2026-11-07)
 

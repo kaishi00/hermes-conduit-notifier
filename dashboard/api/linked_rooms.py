@@ -397,9 +397,10 @@ def room_invites(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
         logger.warning("Conduit plugin: couldn't start Linked Rooms' mailbox loop", exc_info=True)
         loop = None
     posts = core._plugin_package_module("room_posts")
+    looks = core._plugin_package_module("room_looks")
     try:
         answer = action(module.start(root))
-    except (module.RoomsError, posts.PostsError) as exc:
+    except (module.RoomsError, posts.PostsError, looks.LooksError) as exc:
         raise core.TokenError(exc.status, str(exc), exc.code)
     if loop is not None:
         loop.wake()
@@ -554,6 +555,36 @@ async def get_room_people(response: Response, room_id: Optional[str] = None) -> 
     it's yours), and each member with its owner's name (null for yours)."""
     response.headers["Cache-Control"] = "no-store"
     return await _room_invites_route(None, lambda rooms: _room_people(rooms, room_id), "people")
+
+
+# How your bots and you look in rooms over Links (room_looks.py): Conduit
+# gives its Hermes each bot's picture and glow color, and yours, and reads
+# how everyone else in a room looks, as their own Conduits gave it.
+ROOM_LOOKS_MAX_BODY_BYTES = 512 * 1024
+
+
+@router.put("/rooms/looks")
+async def put_room_looks(request: Request, response: Response) -> Any:
+    """How your agents and you look to the other people in rooms over
+    Links: ``agents``, profile to ``{picture, color}`` (a JPEG or PNG of at
+    most 8 KB, base64, and ``#RRGGBB``, each null when there's none), and
+    ``person``, yours. It takes the place of what was sent before, and goes
+    to each started room's people on the rooms loop's next pass."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await core._read_json_body(request, ROOM_LOOKS_MAX_BODY_BYTES)
+    looks = core._plugin_package_module("room_looks")
+    return await _room_invites_route(None, lambda rooms: {"looks": looks.put_own(rooms.root, body)}, "looks")
+
+
+@router.get("/rooms/looks")
+async def get_room_looks(response: Response, room_id: Optional[str] = None) -> Any:
+    """How a room over Links looks: ``members``, member id to ``{picture,
+    color}`` for other people's agents; ``people``, each other person but
+    the host as ``{name, poster, look}``; and ``home``, the host's look
+    when it isn't you. Empty until their Hermes sends them."""
+    response.headers["Cache-Control"] = "no-store"
+    looks = core._plugin_package_module("room_looks")
+    return await _room_invites_route(None, lambda rooms: looks.shown(rooms.root, room_id), "room looks")
 
 
 # Your agents' approvals from rooms other people host (room_approvals.py):
