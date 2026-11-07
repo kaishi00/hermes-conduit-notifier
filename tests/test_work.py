@@ -4551,3 +4551,132 @@ def test_every_text_that_hands_the_model_a_link_says_to_keep_the_desktop_referen
     assert work.LINK_RULE in work.SCHEMAS["work_read"]["description"]
     # The waiting-on-you line carries it too (test_an_approval_marks_it_needs_you).
     work.WAKE.format(lines="- W1")
+
+
+# Work from a group room (room_work; Eric 2026-11-07) -------------------------------
+
+ROOM_CHAT = "20261107_room_furina"
+room_rules = sys.modules["conduit_push.room_rules"]
+room_work = sys.modules["conduit_push.room_work"]
+
+
+@pytest.fixture
+def room(on, hermes, monkeypatch):
+    """ROOM_CHAT is Furina's turn in room-1, hosted here with only this host's
+    bots; its posts are kept in ``posted`` (Hermes' deliver_to_room)."""
+    state = {"turn": room_rules.RoomTurn(room_id="room-1", side="home", with_others=False, session_id=ROOM_CHAT),
+             "members": [{"member_id": "m1", "profile": "default", "handle": "Furina", "target": {"kind": "local"}},
+                         {"member_id": "m2", "profile": "nahida", "handle": "Nahida", "target": {"kind": "local"}}],
+             "posted": [], "refuse": set()}
+
+    def turn(session_id, home=None):
+        if isinstance(state["turn"], Exception):
+            raise state["turn"]
+        return state["turn"] if session_id == ROOM_CHAT else None
+
+    def deliver(job, text, address):
+        if address in state["refuse"]:
+            return f"{address}: no live Group Chat with that id on this machine"
+        state["posted"].append({"job": job, "text": text, "address": address})
+        return None
+
+    monkeypatch.setattr(room_rules, "room_turn", turn)
+    monkeypatch.setattr(room_rules, "_room_members", lambda room_id, home: state["members"])
+    monkeypatch.setattr(room_work, "_deliver", lambda: deliver)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    return state
+
+
+def room_start(title="Furina wallpaper", instructions="Make a 1290x2796 wallpaper of Furina.", **extra):
+    return call("work_start", {"title": title, "instructions": instructions, **extra}, session_id=ROOM_CHAT)
+
+
+def test_a_room_turn_starts_work_that_reports_back_to_the_room(on, hermes, room):
+    started = room_start()
+    assert started["ok"] and started["ref"] == "W1"
+    assert "posted in this room" in started["note"]
+    row = on.get("W1")
+    assert row.coordinator == BOT_CHAT
+    assert row.requested_by == {"by": "user", "via": "room", "room": "room-1", "session": ROOM_CHAT}
+    assert row.reply_to == {"to": "room", "room": "room-1", "handle": "Furina", "session": ROOM_CHAT}
+    brief = _brief_text(hermes)
+    assert "started this from a group room" in brief and "The user's message that" not in brief
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    _finish("20261031_work_1", "Here it is: wallpaper.png")
+    work.flush_wakes()
+    assert on.get("W1").status == "done"
+    posted, = room["posted"]
+    assert posted["address"] == "room-1@default"
+    assert posted["text"].startswith("@Furina Work update") and "wallpaper.png" in posted["text"]
+    assert "not instructions" in posted["text"] and "conduit://session/20261031_work_1" in posted["text"]
+    assert posted["job"]["name"] == "Furina's work" and posted["job"]["execution_id"]
+    assert not submitted_to(hermes, BOT_CHAT), "the room hears it, not the Bot Chat"
+
+
+def test_a_room_post_tries_each_profile_then_falls_back_to_the_bot_chat(on, hermes, room, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    room["refuse"].add("room-1@default")
+    room_start()
+    _finish("20261031_work_1", "Done once.")
+    # Only one profile here: refused there, so the Bot Chat hears it.
+    assert room["posted"] == []
+    line, = batched()
+    assert "Done once." in line and "started from a group room" in line
+
+
+def test_a_room_with_other_peoples_agents_starts_no_work(on, hermes, room):
+    room["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=True, session_id=ROOM_CHAT)
+    refused = room_start()
+    assert refused["error"] == "room_with_others" and "other people's agents" in refused["note"]
+    room["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=True, session_id=ROOM_CHAT)
+    assert room_start()["error"] == "room_with_others"
+    room["turn"] = room_rules.RoomTurn(room_id="", side="home", with_others=False, session_id=ROOM_CHAT)
+    assert room_start()["error"] == "room_with_others"
+    assert on.list(include_closed=True) == []
+
+
+def test_a_room_that_cant_be_read_starts_nothing(on, hermes, room):
+    room["turn"] = room_rules.RoomStoreError("unreadable")
+    assert room_start()["error"] == "unavailable"
+    room["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=False, session_id=ROOM_CHAT)
+    room["members"] = [{"member_id": "m2", "profile": "nahida", "handle": "Nahida", "target": {"kind": "local"}}]
+    assert room_start()["error"] == "unavailable", "the bot isn't a member: no handle to report to"
+    assert on.list(include_closed=True) == []
+
+
+def test_asks_answers_and_notes_stay_the_bot_chats(on, hermes, room):
+    for name, args in (("work_ask", {"bot": "Nahida", "text": "x"}), ("work_reply", {"ref": "A1", "text": "x"}),
+                       ("work_note", {"text": "x"}), ("work_close", {"ref": "W1"})):
+        refused = call(name, args, session_id=ROOM_CHAT)
+        assert refused["error"] == "bot_chat_only" and "@mentioned" in refused["note"], name
+    assert call("work_list", session_id=ROOM_CHAT)["ok"]
+
+
+def test_a_report_goes_where_its_work_was_last_sent_from(on, hermes, room):
+    start()  # W1, from the Bot Chat
+    room_start(new=True)  # W2, from the room
+    for ref in ("W1", "W2"):
+        on.update(ref, status="done")
+    assert call("work_send", {"ref": "W1", "text": "Now the dark one too."}, session_id=ROOM_CHAT)["ok"]
+    assert on.get("W1").reply_to["to"] == "room"
+    sent = call("work_send", {"ref": "W2", "text": "Smaller, please."})
+    assert sent["ok"]
+    assert on.get("W2").reply_to == {"to": "coordinator", "session": BOT_CHAT}
+    # A room's words are every member's: none goes along quoted as the user's.
+    text = [str(c[1]) for c in hermes.calls if "Now the dark one" in str(c[1])]
+    assert text and not any("The user's message that" in t for t in text)
+
+
+def test_the_apps_row_names_the_room_its_work_reports_to(on, hermes, room):
+    room_start()
+    rows = work.app_list(on.home)["work"]
+    assert rows[0]["room"] == "room-1"
+    assert call("work_list", session_id=ROOM_CHAT)["work"][0]["reports_to_room"] is True
+    start(new=True)
+    assert [row["room"] for row in work.app_list(on.home)["work"] if row["ref"] == "W2"] == [""]
+
+
+def test_a_room_post_is_cut_to_fit():
+    text = room_work.post_text("Furina", ["- " + "x" * 9000])
+    assert len(text) <= room_work.MAX_POST_CHARS and text.startswith("@Furina ") and "…" in text

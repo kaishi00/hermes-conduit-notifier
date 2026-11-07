@@ -1420,9 +1420,20 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
 
 - The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
   `work_read`, `work_close`, `work_note`, `work_ask` and `work_reply` (behind
-  Hermes' Tool Search). They answer only in that bot's canonical Bot Chat, and
+  Hermes' Tool Search). They answer in that bot's canonical Bot Chat, and
   name work by ref (W1, W2 for workstreams, A1, A2 for asks), never by session
   id, so a bot only ever reaches its own work.
+- In a group room hosted on this Hermes with only its own bots in it, a bot's
+  turn can use `work_list`, `work_start`, `work_send`, `work_stop` and
+  `work_read` too, so it starts work from the room instead of asking for a
+  hand-off. The workstream is the bot's like any other (Work panel, limit,
+  Bot Chat note), and what it reports is posted back into the room as a
+  message from "<bot>'s work" that @mentions the bot, through Hermes' room
+  delivery for scheduled jobs, so the bot passes it on there. A report goes
+  where its work was last sent from, the room or the Bot Chat, and one that
+  can't be posted goes to the Bot Chat. Asks between bots, answers and notes
+  stay the Bot Chat's, and a room with other people's agents in it starts no
+  work.
 - A workstream can read the bot's other workstreams with `work_list` and
   `work_read` (read only, and not the asks between bots), so it can use what
   another found or made without the coordinator passing it on. It can't send
