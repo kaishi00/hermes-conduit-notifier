@@ -507,6 +507,9 @@ _restart_now = threading.Event()
 # When Restart now last forced a restart: the update's own restart child, cut short by it, may
 # exit non-zero although the gateway came back under systemd.
 _forced_restart_at: Optional[float] = None
+# The update the force was sent during (its job id), or None when none ran: only that update's
+# restart counts it.
+_forced_for_job: Optional[str] = None
 # A forced restart under way: the update's own restart, cut short by it, may return before the
 # force is stamped, so the update waits for it before it decides whether its restart failed.
 _forcing = threading.Event()
@@ -514,9 +517,10 @@ _forcing = threading.Event()
 
 def _forget_restart_now() -> None:
     """A new update starts with no Restart now and no forced restart of its own."""
-    global _forced_restart_at
+    global _forced_restart_at, _forced_for_job
     _restart_now.clear()
     _forced_restart_at = None
+    _forced_for_job = None
 
 
 def _wait_for_force(limit_s: float = 35.0) -> None:
@@ -542,7 +546,9 @@ def force_gateway_restart() -> None:
     if not systemd:
         raise core.TokenError(501, "Conduit can force a restart only for a gateway systemd runs. "
                                    "Run hermes gateway stop, then hermes gateway start, on the host.")
-    global _forced_restart_at
+    global _forced_restart_at, _forced_for_job
+    running = _self_update_thread is not None and _self_update_thread.is_alive()
+    owner = str((_self_update_job or {}).get("id") or "") if running else None
     command = _systemctl_cmd(_select_systemd_scope(False)) + ["restart", "--no-block", get_service_name()]
     logger.warning("Conduit plugin: forcing a gateway restart (%s)", " ".join(command))
     try:
@@ -554,7 +560,7 @@ def force_gateway_restart() -> None:
         detail = (done.stderr or done.stdout or "").strip()[-300:]
         raise core.TokenError(502, f"systemd didn't take the restart: {detail}" if detail
                               else "systemd didn't take the restart")
-    _forced_restart_at = time.time()
+    _forced_restart_at, _forced_for_job = time.time(), owner
 
 
 def _gateway_draining() -> bool:
@@ -784,9 +790,9 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
             exit_code = None
         if exit_code != 0 and _forcing.is_set():
             _wait_for_force()
-        # A force is this job's (_forget_restart_now clears it at the start), whether it came
-        # while the update waited for the gateway's work or while this restart drained.
-        if exit_code != 0 and _forced_restart_at is not None:
+        # A force sent during this job, whether while it waited for the gateway's work or while
+        # this restart drained (a force from before it started is no restart of its own).
+        if exit_code != 0 and _forced_restart_at is not None and _forced_for_job == job.get("id"):
             # Restart now forced it through systemd: that restart is the one that happened, and
             # the dashboard goes on as if this one had.
             logger.info("Conduit plugin: the update's gateway restart was forced through systemd")

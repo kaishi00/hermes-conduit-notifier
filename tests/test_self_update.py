@@ -945,6 +945,7 @@ def test_a_restart_forced_while_the_update_waited_counts_as_the_restart(monkeypa
     def gateway(draining):
         draining()
         api.self_update._forced_restart_at = api.self_update.time.time()
+        api.self_update._forced_for_job = "j1"
         return 1
 
     job, scheduled, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=gateway)
@@ -955,6 +956,7 @@ def test_a_restart_forced_while_the_update_waited_for_work_counts_too(monkeypatc
     # Restart now during the wait for the gateway's work: the force lands before the update's own
     # restart is sent.
     monkeypatch.setattr(api.self_update, "_forced_restart_at", api.self_update.time.time() - 5)
+    monkeypatch.setattr(api.self_update, "_forced_for_job", "j1")
     job, scheduled, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=1)
     assert job["step"] == "restarting_dashboard" and len(scheduled) == 1
 
@@ -1012,6 +1014,7 @@ def test_a_force_still_under_way_when_the_restart_returns_is_waited_for(monkeypa
         def lands():
             api.self_update.time.sleep(0.3)
             api.self_update._forced_restart_at = api.self_update.time.time()
+            api.self_update._forced_for_job = "j1"
             forcing.clear()
 
         api.self_update.threading.Thread(target=lands, daemon=True).start()
@@ -1041,3 +1044,26 @@ def test_a_cron_run_is_named_from_the_home_it_came_from(monkeypatch, tmp_path):
     monkeypatch.setattr(api.self_update, "_gateway_homes", lambda: [tmp_path / "root", tmp_path / "rei"])
     unit = api.self_update._named_work_unit({"kind": "cron", "job_id": "j1", "_home": tmp_path / "rei"})
     assert unit["title"] == "Profile job" and seen == [tmp_path / "rei"]
+
+
+def test_a_force_sent_before_the_update_started_isnt_its_restart(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.self_update, "_forced_restart_at", api.self_update.time.time())
+    monkeypatch.setattr(api.self_update, "_forced_for_job", None)
+    job, _, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=1)
+    assert job["step"] == "failed" and job["failed_step"] == "restarting_gateway"
+
+
+def test_a_force_names_the_update_it_was_sent_during(monkeypatch):
+    _fake_gateway_cli(monkeypatch)
+    monkeypatch.setattr(api.self_update.subprocess, "run",
+                        lambda command, **kwargs: types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+    alive = api.self_update.threading.Event()
+    thread = api.self_update.threading.Thread(target=alive.wait, daemon=True)
+    thread.start()
+    monkeypatch.setattr(api.self_update, "_self_update_thread", thread)
+    monkeypatch.setattr(api.self_update, "_self_update_job", {"id": "j9"})
+    monkeypatch.setattr(api.self_update, "_forced_for_job", None)
+    monkeypatch.setattr(api.self_update, "_forced_restart_at", None)
+    api.self_update.force_gateway_restart()
+    alive.set()
+    assert api.self_update._forced_for_job == "j9"
