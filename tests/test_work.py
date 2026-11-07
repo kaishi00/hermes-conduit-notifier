@@ -5162,6 +5162,16 @@ def test_the_ask_watcher_stays_for_a_row_kept_while_it_was_checking(on, monkeypa
     assert str(on.home) not in work._ask_watchers, "gone, so the next ask arms its own"
 
 
+def test_a_linked_rooms_wake_a_restart_cut_off_is_posted_again_under_its_key(on, hermes, linked, monkeypatch):
+    item = on.outbox_add("", "post_linked", "default-room-1-abc", json.dumps(
+        {"room": "room-1", "session": ROOM_CHAT, "handle": "Furina", "line": "- W1 has news."}))
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    posted, = linked["posted"]
+    assert posted["job"]["execution_id"] == "default-room-1-abc"
+    assert not [row for row in on.outbox_pending() if row["id"] == item]
+
+
 def test_the_room_rules_let_the_room_work_tool_through_only_with_run_work():
     on_ = room_rules.RoomChoices(run_work=True)
     assert room_rules.tool_block(room_rules.WORK_TOOL, on_) is None

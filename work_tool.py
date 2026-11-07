@@ -2447,6 +2447,13 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
             return
         _report(home, work, row["text"], key=row["target"], item=row["id"])
         return
+    if kind == "post_linked":
+        # A Linked Room's wake a restart cut off: posted again under its own key.
+        asked = json.loads(row["text"])
+        room = room_work.Room(room_id=asked["room"], session_id=asked["session"], handle=asked["handle"],
+                              linked=True, side="home")
+        _post_linked(home, room, row["target"], asked["line"], row["id"])
+        return
     if kind == "continue":
         store.outbox_done(row["id"], "dropped")  # recovery owns it: it decides again from the journal
         return
@@ -4860,7 +4867,8 @@ def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id:
             # Until the watcher is done, a tool turn waiting on this answer hears what's being done.
             _acted[prompt_id] = {"ok": True, "status": "acting", "note": (
                 "Your owner said yes, and it's being done now: what comes of it reaches you here privately.")} \
-                if acts else {"ok": False, "error": "declined", "note": _ASK_NOTES[action]["declined"]}
+                if acts else {"ok": False, "error": status if status in _ASK_NOTES[action] else "declined",
+                              "note": _ASK_NOTES[action].get(status, _ASK_NOTES[action]["declined"])}
     room = room_work.Room(room_id=asked["room"], session_id=asked["session"], handle=asked.get("handle", ""),
                           linked=True, side=asked.get("side", "home"))
     words = asked["words"]
@@ -4931,11 +4939,27 @@ def _tell_room(home: Path, room: room_work.Room, line: str) -> None:
         logger.info("conduit_push: a Linked Room's private line couldn't be kept (%s)", type(error).__name__)
     if room.side == "home" and room.handle:
         profile = work_broker.profile_of(home)
-        error = room_work.post(_room_reply(room), bot=_bot_name(home),
-                               key=f"{profile}-{room.room_id}-{uuid.uuid4().hex[:16]}", lines=[line],
-                               profiles=[profile])
-        if error is not None:
-            logger.info("conduit_push: a Linked Room's work news couldn't be posted (%s)", error)
+        key = f"{profile}-{room.room_id}-{uuid.uuid4().hex[:16]}"
+        # Journaled under its key, so a restart that cut it off posts it again (as line_room is).
+        try:
+            item = store.outbox_add("", "post_linked", key, json.dumps(
+                {"room": room.room_id, "session": room.session_id, "handle": room.handle, "line": line}))
+        except (OSError, sqlite3.Error):
+            item = ""
+        _post_linked(home, room, key, line, item)
+
+
+def _post_linked(home: Path, room: room_work.Room, key: str, line: str, item: str = "") -> None:
+    """The post that wakes the bot in a Linked Room hosted here (it says nothing of the news itself)."""
+    profile = work_broker.profile_of(home)
+    error = room_work.post(_room_reply(room), bot=_bot_name(home), key=key, lines=[line], profiles=[profile])
+    if error is not None:
+        logger.info("conduit_push: a Linked Room's work news couldn't be posted (%s)", error)
+    if item:
+        try:
+            work_store.Store(home).outbox_done(item, "posted" if error is None else "lost")
+        except (OSError, sqlite3.Error):
+            pass
 
 
 _ask_watchers: dict[str, Any] = {}
