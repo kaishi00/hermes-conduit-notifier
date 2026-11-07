@@ -4959,7 +4959,15 @@ def _watch_asks(home: Path) -> None:
                 if generation != _ask_generation[0]:
                     return
                 try:
-                    if not check_asks(home):
+                    if check_asks(home):
+                        continue
+                    # Exit only with no row left, decided under the lock asks are kept under: a row kept
+                    # meanwhile is seen here, or finds this watcher gone and arms its own.
+                    with _ask_lock:
+                        if any(row["kind"] == "room_ask" for row in work_store.Store(home).outbox_pending()):
+                            continue
+                        if _ask_watchers.get(key) is threading.current_thread():
+                            del _ask_watchers[key]
                         return
                 except Exception:  # noqa: BLE001 — read again next time
                     logger.debug("conduit_push: watching a room's work asks failed", exc_info=True)

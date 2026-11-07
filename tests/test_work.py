@@ -5140,6 +5140,28 @@ def test_a_restart_keeps_a_waiting_ask_and_the_rooms_private_lines(on, hermes, l
     assert watched and [row["kind"] for row in on.outbox_pending()] == ["room_ask"]
 
 
+def test_the_ask_watcher_stays_for_a_row_kept_while_it_was_checking(on, monkeypatch):
+    monkeypatch.setattr(work, "ROOM_ASK_POLL_S", 0.01)
+    store = store_mod.Store(on.home)
+    calls = []
+
+    def check(home):
+        calls.append(1)
+        if len(calls) == 1:
+            # An ask is kept while this check runs, after its snapshot: it says none waits.
+            store.outbox_add("", "room_ask", "p-late", "{}")
+            return False
+        store.outbox_done(next(r for r in store.outbox_pending() if r["kind"] == "room_ask")["id"], "answered")
+        return False
+
+    monkeypatch.setattr(work, "check_asks", check)
+    work._watch_asks(on.home)
+    thread = work._ask_watchers[str(on.home)]
+    thread.join(5)
+    assert not thread.is_alive() and len(calls) == 2, "it checked again for the row kept meanwhile"
+    assert str(on.home) not in work._ask_watchers, "gone, so the next ask arms its own"
+
+
 def test_the_room_rules_let_the_room_work_tool_through_only_with_run_work():
     on_ = room_rules.RoomChoices(run_work=True)
     assert room_rules.tool_block(room_rules.WORK_TOOL, on_) is None
