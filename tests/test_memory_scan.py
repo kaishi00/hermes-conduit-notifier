@@ -79,6 +79,9 @@ def test_the_later_copy_unloading_first_leaves_the_earlier_one_guarded(scan, tmp
     scan.memory._defines_memory_provider(copy)
     assert scan.asked == [copy]
     scan.HERE = first
+    scan._wrapped_module = scan.memory
+    scan.uninstall()  # the earlier copy unloads last: Hermes' own is back
+    assert scan.memory._defines_memory_provider is scan.own
 
 
 def test_unload_puts_hermes_own_back(scan):

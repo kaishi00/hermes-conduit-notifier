@@ -89,9 +89,10 @@ def install() -> bool:
         while callable(own) and getattr(own, _GUARD_FLAG, False):
             own = getattr(own, "__wrapped__", None)
         if not callable(own):
-            # A Hermes that parses under another name would parse the plugin again.
-            logger.info("conduit_push: Hermes' memory provider discovery has no %s, so it may parse the plugin's "
-                        "code each time it lists providers", FUNCTION)
+            # Hermes before 0.21.7 has none and doesn't parse; a later one that
+            # parses under another name would parse the plugin again.
+            logger.info("conduit_push: Hermes' memory provider discovery has no %s to answer for the plugin; a "
+                        "Hermes that parses plugins under another name parses this one on each listing", FUNCTION)
             return False
         guard = _guard(own)
         setattr(memory, FUNCTION, guard)
@@ -101,16 +102,21 @@ def install() -> bool:
 
 def uninstall() -> None:
     """Takes this plugin's folder off (the plugin unloads), and puts Hermes'
-    own function back once no loaded copy's folder is left. A guard another
-    load of the plugin has put on since is left to that load."""
+    own function back once no loaded copy's folder is left, whichever copy's
+    guard is on."""
     global _wrapped_module, _wrapped
     with _lock:
         folders = _own_folders()
         folders.discard(str(HERE))
-        module, wrapped = _wrapped_module, _wrapped
+        module = _wrapped_module
         _wrapped_module, _wrapped = None, None
         # Another copy still loaded keeps the guard, which answers for its folder.
-        if folders:
+        if folders or module is None:
             return
-        if module is not None and wrapped is not None and getattr(module, FUNCTION, None) is wrapped[1]:
-            setattr(module, FUNCTION, wrapped[0])
+        # Whichever copy's guard is on, Hermes' own is under it.
+        current = getattr(module, FUNCTION, None)
+        own = current
+        while callable(own) and getattr(own, _GUARD_FLAG, False):
+            own = getattr(own, "__wrapped__", None)
+        if callable(own) and own is not current:
+            setattr(module, FUNCTION, own)
