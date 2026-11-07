@@ -127,6 +127,7 @@ def test_every_capability_names_a_served_route_family():
         "reply-sources": "/notifications/reply-sources",
         "chat-on-screen": "/notifications/on-screen",
         "predict": "/predict",
+        "side-question": "/side-question",
         "room-files": "/room-files",
         "room-images": "/room-images",
         "speech-server": "/speech-server/",

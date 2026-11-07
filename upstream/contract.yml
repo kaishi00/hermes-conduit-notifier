@@ -593,6 +593,7 @@ routes:
   - GET /sessions/desktop-views
   - POST /sessions/history-page
   - POST /sessions/takeover
+  - POST /side-question
   - WS /speech-server/socket
   - GET /speech-server/status
   - POST /speech-server/test

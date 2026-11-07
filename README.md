@@ -1923,6 +1923,26 @@ it as a `[btw …]` note), the route answers only the device that asked.
 - The chat must be live in this dashboard (404 otherwise). On a Hermes without
   the fork's parts the route falls back to its plain side question.
 
+## Step summaries for Conduit (plugin 0.137.4+)
+
+Conduit's step summaries (Settings > Chat, and a run's Explain these steps)
+ask Hermes a side question about the chat. Asked with `prompt.btw`, the
+question and its answer went to every client on the chat, so Hermes Desktop
+showed them as a `[btw …]` note. The plugin's route asks it the way Hermes'
+`/btw` does (`agent.side_question.answer_side_question`: a fork of the live
+chat on its warm cache, every tool refused, nothing saved, routed by
+`auxiliary.side_question` when set) and answers only the device that asked.
+
+- `POST /api/plugins/conduit_push/side-question` with
+  `{"session_id": "<runtime session id>", "question": "<text>", "wait_s": 90}`
+  answers `{"text": "<answer>"}`. Capability `side-question`.
+- A question is at most 40,000 characters and `wait_s` at most 110. Two at a
+  time per chat (429), four on the host (503), 30 a minute for the whole
+  host. One that outlasts `wait_s` answers 504 and is left to finish.
+- The chat must be open on this host (404 otherwise). One whose agent isn't
+  loaded is answered by Hermes' one-shot fallback, from the history the host
+  still holds, or on the gateway's own listener from the question alone.
+
 ## Files in group chats (plugin 0.38+)
 
 A group chat room isn't a session, so Hermes' attach RPCs can't take a file
