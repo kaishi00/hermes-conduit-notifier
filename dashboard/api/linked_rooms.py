@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException, Request, Response
 
-from . import core, phone_data
+from . import core, phone_data, self_update
 
 logger = core.logger
 router = core.router
@@ -770,6 +770,14 @@ def _optional_module(name: str) -> Any:
         return None
 
 
+def _watch_room_restart(gateway: Any) -> None:
+    """Watches the restart just spawned: on a root system unit Hermes' restart dies on its own
+    install check, and systemd restarts the gateway instead (self_update)."""
+    proc = (getattr(gateway, "_ACTION_PROCS", None) or {}).get("gateway-restart")
+    if proc is not None:
+        self_update.watch_restart_for_root_refusal(proc)
+
+
 def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
     """Restarts the host gateway (the default profile's), which starts the
     API server: Hermes' own restart after a settings save, which says so
@@ -784,6 +792,7 @@ def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
                 spawn("default", interrupt=True)
             else:
                 spawn("default")
+            _watch_room_restart(gateway)
             return {"started": True, "busy": False, "error": None}
         refusal_of = getattr(gateway, "live_session_refusal", None)
         refusal = refusal_of("default", "restart") if callable(refusal_of) else None
@@ -792,10 +801,13 @@ def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
         after = getattr(gateway, "_restart_gateway_after", None)
         if callable(after):
             answer = after("default", what="Linked Rooms setup", label="Linked Rooms setup")
+            if answer.get("restart_started"):
+                _watch_room_restart(gateway)
             return {"started": bool(answer.get("restart_started")), "busy": bool(answer.get("restart_busy")),
                     "error": answer.get("restart_error") or None}
         if callable(spawn):
             spawn("default")
+            _watch_room_restart(gateway)
             return {"started": True, "busy": False, "error": None}
     except Exception as exc:  # noqa: BLE001 - the save stays; the answer says the restart didn't start
         # Its text stays in the log: it can name this host's paths.

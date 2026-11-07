@@ -1584,3 +1584,14 @@ def test_cli_setup_says_why_the_api_server_isnt_running(cli, hermes, capsys):
     assert cli.dispatch(_setup_args(yes=True, no_restart=True)) == 0
     said = capsys.readouterr().out
     assert "Port 8642 already in use" in said and "\x1b" not in said
+
+
+def test_the_setup_restart_is_watched_for_hermes_root_refusal(client, hermes, monkeypatch):
+    # On a root system unit Hermes' restart dies on its install check; self_update restarts
+    # through systemd when the watched restart ends that way.
+    proc = types.SimpleNamespace(pid=4242)
+    sys.modules["hermes_cli.web_server_gateway"]._ACTION_PROCS = {"gateway-restart": proc}
+    watched = []
+    monkeypatch.setattr(api.self_update, "watch_restart_for_root_refusal", watched.append)
+    body = client.post(f"{BASE}/rooms/setup", json={}).json()
+    assert body["restart"]["started"] and watched == [proc]
