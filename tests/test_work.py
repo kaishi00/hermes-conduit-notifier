@@ -5003,6 +5003,23 @@ def test_a_yes_the_watcher_took_during_the_wait_is_the_tools_answer(on, hermes, 
     assert started["ok"] and started["ref"] == "W1" and "Your owner said yes" in started["note"]
 
 
+def test_a_yes_the_watcher_is_still_acting_on_says_so(on, hermes, linked, monkeypatch):
+    real_start = work._start
+    seen = {}
+
+    def slow_start(*args, **kwargs):
+        # The tool turn asks while the watcher's start is still running.
+        seen["tool"] = work._acted.get(seen["id"])
+        return real_start(*args, **kwargs)
+
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    seen["id"] = answer(on.home, "confirmed")["id"]
+    monkeypatch.setattr(work, "_start", slow_start)
+    work.check_asks(on.home)
+    assert seen["tool"]["status"] == "acting" and "being done now" in seen["tool"]["note"]
+    assert work._acted[seen["id"]]["ref"] == "W1", "replaced by what came of it"
+
+
 def test_linked_work_reports_privately_and_the_bot_chat_hears_it(on, hermes, linked, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})

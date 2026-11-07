@@ -4816,6 +4816,10 @@ def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id:
         action = asked["action"]
         store.outbox_done(row["id"], "answered")
         present.mark_heard([prompt_id])
+        if not tool_turn:
+            # Until the watcher is done, a tool turn waiting on this answer hears it's being acted on.
+            _acted[prompt_id] = {"ok": True, "status": "acting", "note": (
+                "Your owner said yes, and it's being done now: what comes of it reaches you here privately.")}
     room = room_work.Room(room_id=asked["room"], session_id=asked["session"], handle=asked.get("handle", ""),
                           linked=True, side=asked.get("side", "home"))
     status = prompt["status"]
