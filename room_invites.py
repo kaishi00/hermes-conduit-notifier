@@ -35,8 +35,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_posts,
-               room_start, session_titles)
+from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_looks,
+               room_posts, room_start, session_titles)
 from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
 GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
-KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS)
+KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS, *room_looks.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -148,6 +148,7 @@ class Rooms:
         self._api_waits: dict[str, int] = {}
         self.copies = room_copies.Copies(self, hermes=copier)
         self.posts = room_posts.Posts(self, hermes=poster)
+        self.looks = room_looks.Looks(self)
         self._notes: Any = None
 
     # --- The home's drafts ---------------------------------------------------------
@@ -421,7 +422,7 @@ class Rooms:
         handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
                    LEAVE: self.on_leave, ENDED: self.on_ended, room_copies.PAGE: self.copies.on_page,
                    room_copies.COPIED: self.copies.on_copied, room_posts.POST: self.posts.on_post,
-                   room_posts.POSTED: self.posts.on_posted}.get(received.kind)
+                   room_posts.POSTED: self.posts.on_posted, room_looks.LOOKS: self.looks.on_looks}.get(received.kind)
         if handler is not None:
             handler(received)
 
@@ -925,6 +926,10 @@ class Rooms:
         if self.starter is not None:
             self._start_ready()
             self.copies.send_pages()
+        # How the started rooms' agents and people look, to the others in them (room_looks): after the starts
+        # have gone, so a member's Hermes knows the room before its first looks arrive.
+        self.flush()
+        self.looks.send_looks()
         self.flush()
         # Notes in the private chats of the rooms elsewhere your agents only listen in (room_chats).
         self.notes.pass_once()

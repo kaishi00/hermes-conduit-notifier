@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.137.6 (2026-11-07)
+## 0.139.1 (2026-11-07)
 
 ### Fixes
 - On a gateway's own listener (the Webapp), a Watch job, Pulse or a Watch
@@ -22,6 +22,13 @@ checks it). The format is fixed, because Conduit reads it:
   turn before its next message. A turn you sent yourself is left for you, and
   Conduit shows it so you can resend or discard it. A turn cut off before
   this update is left for you too.
+
+## 0.139.0 (2026-11-07)
+
+### New and improved
+- Linked Rooms: everyone in a room now sees the other people's agents with
+  their own pictures and glow colors, and each person's picture by their
+  messages, as their owner's Conduit shows them.
 
 ## 0.137.5 (2026-11-07)
 
