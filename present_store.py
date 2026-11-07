@@ -389,6 +389,14 @@ class PresentStore:
         return self._keep(title, instructions, label, spoken_yes=spoken, session_id=session_id,
                           ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
 
+    def withdraw_room_work(self, prompt_id: Any) -> None:
+        """Takes back a room's work ask still waiting (work_tool couldn't keep
+        what a yes would do), so the phone never offers it."""
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is not None and prompt.get("room", {}).get("work") and prompt["status"] == "waiting":
+                prompt.update(status="cancelled", finished_at=int(self.clock()), reported=True)
+
     def ask_link(self, title: Any, preview: Any, *, link: Any, ttl_minutes: Any = ROOM_ASK_TTL_MINUTES
                  ) -> dict[str, Any]:
         """Keeps a Link's ask (link_asks) for a Conduit that shows them: what's asked as its title, what would be

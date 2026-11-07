@@ -4750,8 +4750,8 @@ def _ask_for_room(home: Path, store: work_store.Store, room: room_work.Room, act
                  "handle": room.handle, "side": room.side}))
         except (OSError, sqlite3.Error) as error:
             try:
-                present.cancel(prompt["id"])
-            except (OSError, PresentError):
+                present.withdraw_room_work(prompt["id"])
+            except OSError:
                 pass
             return {"ok": False, "error": "unavailable",
                     "note": ROOM_ASK_UNAVAILABLE.format(why=f"the ask couldn't be kept ({type(error).__name__})")}
