@@ -121,6 +121,7 @@ def test_every_capability_names_a_served_route_family():
         "pairing": "/pair",
         "self-restart": "/self/restart",
         "self-update": "/self/update",
+        "gateway-work": "/self/gateway-work",
         "cron-notifications": "/cron/notifications",
         "cron-bot-chat-reports": "/cron/notifications",
         "reply-sources": "/notifications/reply-sources",
