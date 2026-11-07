@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 import pathlib
@@ -985,3 +986,16 @@ def test_a_failed_restart_without_a_forced_one_still_fails(monkeypatch, tmp_path
 def test_a_chat_id_with_colons_survives():
     assert api.self_update._chat_of("agent:rei:slack:group:T1:C2") == ("rei", "slack", "T1:C2")
     assert api.self_update._chat_of("agent:main:local:dm") == ("default", "local", None)
+
+
+def test_forced_restarts_are_capped(monkeypatch):
+    calls = []
+    monkeypatch.setattr(api.self_update, "_restart_now", api.self_update.threading.Event())
+    monkeypatch.setattr(api.self_update, "force_gateway_restart", lambda: calls.append(1))
+    monkeypatch.setattr(api.self_update, "_forced_restart_limiter", api.core._MintLimiter(2, 300.0, message="slow down"))
+    response = types.SimpleNamespace(headers={})
+    for _ in range(2):
+        assert asyncio.run(api.self_update.post_gateway_restart_now(response, force=True))["forced"]
+    with pytest.raises(api.self_update.HTTPException) as refused:
+        asyncio.run(api.self_update.post_gateway_restart_now(response, force=True))
+    assert refused.value.status_code == 429 and len(calls) == 2

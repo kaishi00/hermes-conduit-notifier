@@ -281,6 +281,8 @@ _self_update_thread: Optional[threading.Thread] = None
 _self_update_job: Optional[Dict[str, Any]] = None
 # Each start pulls and restarts the gateway: a few per hour is plenty.
 _self_update_limiter = core._MintLimiter(3, 600.0, message="Too many plugin updates; try again in a few minutes")
+# Each forced restart cuts the gateway's work: a few in five minutes, not a loop of them.
+_forced_restart_limiter = core._MintLimiter(3, 300.0, message="Too many forced restarts; try again in a few minutes")
 
 
 def _self_update_path() -> Path:
@@ -1133,7 +1135,13 @@ async def post_gateway_restart_now(response: Response, force: bool = False) -> D
     if not force:
         return {"ok": True, "forced": False}
     try:
-        await asyncio.to_thread(force_gateway_restart)
+        mint = _forced_restart_limiter.acquire("")
+        try:
+            await asyncio.to_thread(force_gateway_restart)
+        except core.TokenError:
+            # Refused before any restart (off systemd, systemd said no): no slot spent.
+            _forced_restart_limiter.release("", mint)
+            raise
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except Exception as exc:

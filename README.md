@@ -4618,14 +4618,16 @@ while it runs:
   (`chat`, `cron`, `managed`, `api`, `deferred`) and `elapsed_s`; a chat its
   `profile`, `bot`, `title`, `platform` and `session_id`, those it could read (`session_id` null when Conduit
   can't reach it), a cron run its `job_id` and, when it could read it, `title`. `restarts_by` is when
-  the gateway restarts anyway, while it drains.
+  the gateway restarts anyway, while it drains, from the dashboard's own
+  profile's `agent.restart_after_turn_timeout`.
 - `POST /api/plugins/conduit_push/self/gateway-work/restart-now` is Restart
   now: the update stops waiting for that work and restarts the gateway, and
   Conduit stops the chats it named (`session.interrupt`, which a draining
   gateway still takes). With `?force=true` it also restarts a gateway systemd
   runs with `systemctl restart --no-block`, which ends what's left after the
   gateway's stop drain (`agent.restart_drain_timeout`, 60 seconds by default);
-  a draining restart can't be cut any other way. 501 off systemd.
+  a draining restart can't be cut any other way. 501 off systemd; 429 after
+  three forced restarts in five minutes.
 - The job is kept in `conduit-self-update.json` in the Hermes root. The
   restarted dashboard marks it done and sends the profile that asked a
   notification saying which version is running, or why the update didn't
