@@ -4736,7 +4736,7 @@ def _ask_for_room(home: Path, store: work_store.Store, room: room_work.Room, act
     try:
         prompt, new = present.ask_room_work(asked, words, room_id=room.room_id,
                                             room_name=room_asks._room_name(room.room_id),
-                                            session_id=room.session_id)
+                                            session_id=room.session_id, send=action != "start")
     except PresentError as error:
         return {"ok": False, "error": error.code, "note": ROOM_ASK_UNAVAILABLE.format(why=error)}
     if new:

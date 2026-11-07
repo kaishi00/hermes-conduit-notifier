@@ -4945,6 +4945,7 @@ def test_a_send_to_linked_work_asks_the_owner_too(on, hermes, linked):
     assert not [c for c in hermes.calls if "Add the toilets." in str(c[1])]
     shown = answer(on.home, "confirmed")
     assert shown["title"].startswith("Send to W1")
+    assert shown["action_label"] == "Send" and shown["spoken_yes"] == ["send it"]
     work.check_asks(on.home)
     assert [c for c in hermes.calls if "Add the toilets." in str(c[1])]
 

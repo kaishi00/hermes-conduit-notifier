@@ -3662,7 +3662,9 @@ for rooms with none of their own:
   When it's on, the agent can start work for the room with `conduit_room_work` (in `conduit_rooms`, so
   a room hosted elsewhere has it too), and each start, and each message to
   that work, asks your phone first: Start, Change it (start with your words)
-  or Don't start. Unanswered within 30 seconds, it waits for your answer,
+  or Don't start (a message to work asks Send or Not now). In a call, only
+  its phrase ("start it", "send it") answers it, never a plain yes.
+  Unanswered within 30 seconds, it waits for your answer,
   and a yes later starts it by itself. The room sees only its own work.
   What the work reports reaches the agent privately at the start of its next
   turn in the room (credential-shaped text removed), with a post that

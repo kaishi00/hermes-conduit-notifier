@@ -375,16 +375,18 @@ class PresentStore:
         return self._keep(question, share, "Share", spoken_yes=["share it"], session_id=session_id,
                           ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
 
-    def ask_room_work(self, title: Any, instructions: Any, *, room_id: Any, room_name: Any, session_id: Any
-                      ) -> tuple[dict[str, Any], bool]:
+    def ask_room_work(self, title: Any, instructions: Any, *, room_id: Any, room_name: Any, session_id: Any,
+                      send: bool = False) -> tuple[dict[str, Any], bool]:
         """Keeps a room's work ask (work_tool) for a Conduit that shows them:
-        what would start as its title, the instructions as its preview. The
-        same one still waiting in the room is returned instead; the bool says
-        whether it's new. Raises PresentError when it won't."""
+        what would start (or, with send, what running work is sent) as its
+        title, the instructions as its preview. The same one still waiting in
+        the room is returned instead; the bool says whether it's new. Raises
+        PresentError when it won't."""
         room = _room({"id": room_id, "name": room_name, "work": True})
         if room is None or not _session_key(session_id):
             raise PresentError("invalid", "A room's work ask needs the room and its session.")
-        return self._keep(title, instructions, "Start", spoken_yes=["start it"], session_id=session_id,
+        label, spoken = ("Send", ["send it"]) if send else ("Start", ["start it"])
+        return self._keep(title, instructions, label, spoken_yes=spoken, session_id=session_id,
                           ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
 
     def ask_link(self, title: Any, preview: Any, *, link: Any, ttl_minutes: Any = ROOM_ASK_TTL_MINUTES

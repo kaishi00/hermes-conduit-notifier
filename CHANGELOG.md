@@ -23,7 +23,7 @@ checks it). The format is fixed, because Conduit reads it:
 - In a Linked Room, a room with other people's agents, you can now turn on
   Run work for your bot. It can then start work for the room, and each
   start asks you on your phone first: Start, change the words, or Don't
-  start. What the work finds reaches your bot privately, and it shares only
+  start. In a call, say "start it": a plain yes doesn't start work. What the work finds reaches your bot privately, and it shares only
   what your rules for that room allow. You turn it on for each room: a
   new room never starts with it on.
 
