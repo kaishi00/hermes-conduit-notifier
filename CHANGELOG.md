@@ -13,13 +13,29 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.135.0 (2026-11-07)
+## 0.136.0 (2026-11-07)
 
 ### New and improved
 - A bot in one of your group rooms can now start work from the room, like
   making an image you asked for there, instead of asking you to repeat it in
   its Bot Chat. The work shows in its Work panel as usual, and when it's
   done the result is posted back in the room and the bot passes it on.
+
+## 0.135.0 (2026-11-07)
+
+### Fixes
+- A plugin update or gateway restart that met a running task said only
+  "Letting running tasks finish…", for up to half an hour, without naming
+  the task. Conduit now shows each one (which bot's chat, its title, how
+  long it has run) and when the gateway restarts anyway.
+- The update waited up to 30 minutes for running tasks before it even sent
+  the restart, and then the gateway could wait 30 more. Its own wait is now
+  10 minutes.
+
+### New and improved
+- Restart now, under that list, stops the chats it names and restarts the
+  gateway at once. Work Conduit can't stop, such as a scheduled job, is
+  ended by a forced restart through systemd.
 
 ## 0.134.10 (2026-11-07)
 

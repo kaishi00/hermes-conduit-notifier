@@ -159,6 +159,16 @@ notes:
     waits for it before the restart, and reads gateway.status' gateway_state.json for a restart
     that is draining. Without them it restarts at once and gives up after 180 s, so an update
     during a turn reports a failure while the gateway refuses new work (notifier #546).
+    GET /self/gateway-work names that work for Conduit (each chat's session row by its key in
+    hermes_state, a cron job's name by hermes_cli.update_cmd_drain_report._cron_job_name) with the
+    gateway's own cap (gateway.restart's parse of agent.restart_after_turn_timeout), so the update
+    says what it waits on and Restart now can stop it; without them it names only the kind. When
+    it restarts anyway starts from hermes_cli.web_server's _LAST_GATEWAY_RESTART (the restart this
+    dashboard spawned), read by getattr; without it, from when the dashboard first saw the drain.
+    Restart now's force (POST /self/gateway-work/restart-now?force=true) restarts a gateway systemd
+    runs with `systemctl restart --no-block`, using hermes_cli.gateway's supports_systemd_services,
+    _installed_service_kind_for, _systemctl_cmd, _select_systemd_scope and get_service_name: a
+    drain under way can't be cut otherwise. Without them it answers 501.
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
@@ -246,6 +256,8 @@ imports:
     optional: ["BasePlatformAdapter"]
   gateway.response_filters:
     optional: ["is_autonomous_silence_response"]
+  gateway.restart:
+    optional: ["DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT", "parse_restart_after_turn_timeout"]
   gateway.session_controls:
     required: ["AuthorityConnection"]
   gateway.status:
@@ -273,6 +285,8 @@ imports:
     optional: ["registry", "token_auth"]
   hermes_cli.dashboard_auth.base:
     required: ["DashboardAuthProvider", "TokenPrincipal"]
+  hermes_cli.gateway:
+    optional: ["_installed_service_kind_for", "_select_systemd_scope", "_systemctl_cmd", "get_service_name", "supports_systemd_services"]
   hermes_cli.gateway_lifecycle_guards:
     optional: ["_candidate_homes", "live_work"]
   hermes_cli.gateway_runtime_start:
@@ -285,6 +299,8 @@ imports:
     optional: ["get_active_profile_name", "list_profile_names"]
   hermes_cli.tools_config:
     optional: ["_get_platform_tools", "_get_plugin_toolset_keys"]
+  hermes_cli.update_cmd_drain_report:
+    optional: ["_cron_job_name"]
   hermes_cli.web_routers:
     optional: ["sessions"]
   hermes_cli.web_routers.files:
@@ -362,6 +378,7 @@ module_paths:
   - gateway/config
   - gateway/platforms/base
   - gateway/response_filters
+  - gateway/restart
   - gateway/session_controls
   - gateway/status
   - gateway/warning_notifications
@@ -375,11 +392,13 @@ module_paths:
   - hermes_cli/config_effective
   - hermes_cli/dashboard_auth
   - hermes_cli/dashboard_auth/base
+  - hermes_cli/gateway
   - hermes_cli/gateway_lifecycle_guards
   - hermes_cli/gateway_runtime_start
   - hermes_cli/plugins
   - hermes_cli/profiles
   - hermes_cli/tools_config
+  - hermes_cli/update_cmd_drain_report
   - hermes_cli/web_routers
   - hermes_cli/web_routers/files
   - hermes_cli/web_server_chat
@@ -548,6 +567,8 @@ routes:
   - DELETE /rooms/sessions
   - GET /rooms/setup
   - POST /rooms/setup
+  - GET /self/gateway-work
+  - POST /self/gateway-work/restart-now
   - POST /self/restart
   - GET /self/update
   - POST /self/update
