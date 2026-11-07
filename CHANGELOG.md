@@ -26,6 +26,7 @@ checks it). The format is fixed, because Conduit reads it:
   asks you first.
 - Hermes can save a card it builds as a template and fill it by name later,
   so cards it shows often come up faster.
+
 ## 0.137.5 (2026-11-07)
 
 ### Fixes
