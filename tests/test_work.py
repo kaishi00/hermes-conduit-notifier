@@ -4934,6 +4934,27 @@ def test_a_linked_room_sees_only_its_own_work(on, hermes, linked, monkeypatch):
     assert room_work_call({"action": "read", "ref": "W2"})["ref"] == "W2"
 
 
+def test_a_start_whose_ask_couldnt_be_kept_takes_it_back(on, hermes, linked, monkeypatch):
+    real = store_mod.Store.outbox_add
+
+    def full(self, ref, kind, target, text):
+        if kind == "room_ask":
+            raise OSError("disk full")
+        return real(self, ref, kind, target, text)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_add", full)
+    asked = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    assert not asked["ok"] and asked["error"] == "unavailable" and "nothing was done" in asked["note"]
+    # The phone never offers a Start that would start nothing.
+    assert present_mod.PresentStore(on.home).exchange(PHONE)["prompts"] == []
+    monkeypatch.setattr(store_mod.Store, "outbox_add", real)
+    again = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    assert again["status"] == "waiting"
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
+
+
 def test_a_send_to_linked_work_asks_the_owner_too(on, hermes, linked):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     answer(on.home, "confirmed")

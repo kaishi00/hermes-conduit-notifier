@@ -48,6 +48,7 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -4739,13 +4740,24 @@ def _ask_for_room(home: Path, store: work_store.Store, room: room_work.Room, act
                                             session_id=room.session_id, send=action != "start")
     except PresentError as error:
         return {"ok": False, "error": error.code, "note": ROOM_ASK_UNAVAILABLE.format(why=error)}
+    # Kept for a later answer, so a restart's watcher still acts on it; an ask
+    # still waiting whose row was never kept gets it now. Kept before the
+    # phone hears of it: a yes with no row would start nothing.
+    if not any(row["kind"] == "room_ask" and row["target"] == prompt["id"] for row in store.outbox_pending()):
+        try:
+            store.outbox_add(work.ref if work is not None else "", "room_ask", prompt["id"], json.dumps(
+                {"action": action, "title": title, "words": words, "room": room.room_id, "session": room.session_id,
+                 "handle": room.handle, "side": room.side}))
+        except (OSError, sqlite3.Error) as error:
+            try:
+                present.cancel(prompt["id"])
+            except (OSError, PresentError):
+                pass
+            return {"ok": False, "error": "unavailable",
+                    "note": ROOM_ASK_UNAVAILABLE.format(why=f"the ask couldn't be kept ({type(error).__name__})")}
     if new:
         room_asks._nudge(prompt, f"{room_asks._room_name(room.room_id)}: {first_line(words)}", client_enqueue(),
                          work_broker.profile_of(home))
-        # Kept for a later answer, so a restart's watcher still acts on it.
-        store.outbox_add(work.ref if work is not None else "", "room_ask", prompt["id"], json.dumps(
-            {"action": action, "title": title, "words": words, "room": room.room_id, "session": room.session_id,
-             "handle": room.handle, "side": room.side}))
         prompt = _wait_for_owner(present, prompt)
     if prompt["status"] == "waiting":
         _watch_asks(home)
