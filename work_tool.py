@@ -611,6 +611,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
             return {"ok": False, "error": "room_with_others", "note": room_work.WITH_OTHERS}
         except room_work.NoReportsHere:
             return {"ok": False, "error": "legacy_group", "note": room_work.LEGACY_GROUP}
+        except room_work.NotAMember:
+            return {"ok": False, "error": "not_a_member", "note": room_work.NOT_A_MEMBER}
         except room_work.Unreadable:
             return {"ok": False, "error": "unavailable", "note": room_work.UNREADABLE}
         if room is None:
@@ -684,9 +686,12 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
     moved = before != here and (room is not None or _in_room(work))
     if moved:
         work = store.update(work.ref, reply_to=here) or work
-    sent = _send(home, store, broker, work, args, str(session_id), in_room=room is not None)
-    if moved and not sent.get("ok"):
-        store.update(work.ref, reply_to=before)
+    sent: dict = {}
+    try:
+        sent = _send(home, store, broker, work, args, str(session_id), in_room=room is not None)
+    finally:
+        if moved and not sent.get("ok"):
+            store.update(work.ref, reply_to=before)
     return sent
 
 
@@ -2413,8 +2418,13 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         # A room's report a restart cut off: posted again under its own key,
         # so a post Hermes already took isn't made twice.
         work = store.get(row["ref"])
-        if work is None or not _in_room(work):
+        if work is None:
             store.outbox_done(row["id"], "dropped")
+            return
+        if not _in_room(work):
+            # A send from the Bot Chat took its reports back meanwhile: they hear it.
+            store.outbox_done(row["id"], "dropped")
+            _report(home, work, row["text"])
             return
         _report(home, work, row["text"], key=row["target"], item=row["id"])
         return

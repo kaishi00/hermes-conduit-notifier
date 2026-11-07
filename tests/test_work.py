@@ -4642,7 +4642,8 @@ def test_a_room_that_cant_be_read_starts_nothing(on, hermes, room):
     assert room_start()["error"] == "unavailable"
     room["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=False, session_id=ROOM_CHAT)
     room["members"] = [{"member_id": "m2", "profile": "nahida", "handle": "Nahida", "target": {"kind": "local"}}]
-    assert room_start()["error"] == "unavailable", "the bot isn't a member: no handle to report to"
+    refused = room_start()
+    assert refused["error"] == "not_a_member" and "don't list you" in refused["note"], "no handle to report to"
     assert on.list(include_closed=True) == []
 
 
@@ -4737,3 +4738,26 @@ def test_a_send_points_its_reports_at_the_sender_before_it_goes_and_back_if_it_d
     monkeypatch.setattr(work, "_deliver", lambda *a, **k: {"ok": False, "error": "busy", "note": "x"})
     assert not call("work_send", {"ref": "W1", "text": "Smaller."})["ok"]
     assert on.get("W1").reply_to["to"] == "room", "nothing went from the Bot Chat: reports stay the room's"
+
+
+def test_a_send_that_raises_leaves_its_reports_where_they_were(on, hermes, room, monkeypatch):
+    start()
+    on.update("W1", status="done")
+
+    def boom(*a, **k):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(work, "_deliver", boom)
+    assert not call("work_send", {"ref": "W1", "text": "x"}, session_id=ROOM_CHAT)["ok"]
+    assert on.get("W1").reply_to == {"to": "coordinator", "session": BOT_CHAT}
+
+
+def test_a_room_report_cut_off_after_its_reports_moved_back_reaches_the_bot_chat(on, hermes, room, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    room_start()
+    on.update("W1", reply_to={"to": "coordinator", "session": BOT_CHAT})
+    on.outbox_add("W1", "line_room", "default-W1-abc", "- W1 “Furina wallpaper” finished.")
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    assert room["posted"] == []
+    assert any("finished." in line for line in batched())
