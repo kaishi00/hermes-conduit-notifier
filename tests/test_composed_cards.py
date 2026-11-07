@@ -313,3 +313,20 @@ def test_a_taps_note_says_when_part_of_the_card_was_folded(tmp_path):
     store = card_actions.TapStore(tmp_path)
     store.save({"sessions": ["s1"], "card": card, "action": "go"})
     assert "folded under Show more" in store.note("s1")
+
+
+def test_a_tap_button_whose_label_isnt_a_plain_message_is_dropped():
+    notes = []
+    cards = card_schema.normalize_cards([{"type": "callout", "callout": {"text": "Hi"}, "actions": [
+        {"label": "/reset", "action": "tap", "id": "r"}, {"label": "Go", "action": "tap", "id": "g"}]}], notes)
+    assert [button["label"] for button in cards[0]["actions"]] == ["Go"]
+    assert any("plain message" in note for note in notes)
+
+
+def test_a_taps_number_out_of_bounds_goes_empty(tmp_path):
+    card = {"type": "composed", "title": "Seats", "sections": [{"items": [
+        {"kind": "field", "id": "seats", "input": "number", "min": 1, "max": 8, "value": "2"}]}],
+        "actions": [{"label": "Book", "action": "tap", "id": "book"}]}
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": card, "action": "book", "values": {"seats": "12"}})
+    assert "seats: (empty)" in store.note("s1")

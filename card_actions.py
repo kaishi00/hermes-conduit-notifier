@@ -88,8 +88,9 @@ def _values(value: Any, fields: dict[str, dict[str, Any]]) -> dict[str, str]:
         elif isinstance(raw, (int, float)):
             raw = card_schema._cell(raw)
         text = _clean(raw, MAX_VALUE_CHARS)
-        if field["input"] == "choice" and text:
-            text = next((option for option in field["options"] if option.lower() == text.lower()), "")
+        if text and field["input"] in ("choice", "toggle", "date", "number"):
+            # Only what the field could hold: an option, on or off, a date, a number within its bounds.
+            text = card_schema._field_value({**field, "value": text}) or ""
         values[key] = text
     return values
 

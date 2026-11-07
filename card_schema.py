@@ -635,6 +635,9 @@ def _button_rules(button: dict[str, Any], controls: _Controls, path: str, notes:
             return False
         if button.pop("target", None) is not None:
             _note(notes, f"{path}.target: a tap button has none, left out")
+        if not plain_message(button["label"]):
+            _note(notes, f"{path}.label: \"{button['label']}\" isn't a plain message, and a tap sends it, dropped")
+            return False
         if button["id"] in controls.taps:
             _note(notes, f"{path}.id: another tap button has it, dropped")
             return False

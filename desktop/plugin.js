@@ -430,7 +430,8 @@ function Buttons({ buttons, card, sessionId, values }) {
       setBusy(button.id)
       try {
         await rest('/boards/taps', { method: 'POST', body: { sessions: [sessionId], card, action: button.id, values } })
-        const said = card.title ? `${button.label} · ${card.title}` : button.label
+        const titled = card.title ? `${button.label} · ${card.title}` : button.label
+        const said = /`|@[\w/.~]/u.test(titled) ? button.label : titled
         if (host.composer?.submit?.(sessionId, said) === false) {
           host.notify?.({ kind: 'warning', message: 'Open that chat to send it' })
         }
