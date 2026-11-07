@@ -170,6 +170,9 @@ ROUTE_CAPABILITIES = (
     # POST /predict, GET /predict: Conduit's Predictive features, answered
     # by a no-tools fork of the chat for the asking device only.
     "predict",
+    # POST /side-question: Conduit's step summaries, answered as Hermes' /btw
+    # answers but only to the asking device (no "[btw …]" note in Desktop).
+    "side-question",
     "room-files",
     "room-images",
     "speech-server",

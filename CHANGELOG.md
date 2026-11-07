@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.137.4 (2026-11-07)
+
+### Fixes
+- With step summaries on in Conduit, Hermes Desktop showed each summary's
+  long "Look back at the tool calls…" question and its answer as a btw note
+  in the chat. Conduit now asks the plugin, which answers only the phone
+  that asked.
+
 ## 0.137.3 (2026-11-07)
 
 ### Fixes
