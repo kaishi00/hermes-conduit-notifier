@@ -4743,18 +4743,22 @@ def _ask_for_room(home: Path, store: work_store.Store, room: room_work.Room, act
     # Kept for a later answer, so a restart's watcher still acts on it; an ask
     # still waiting whose row was never kept gets it now. Kept before the
     # phone hears of it: a yes with no row would start nothing.
-    if not any(row["kind"] == "room_ask" and row["target"] == prompt["id"] for row in store.outbox_pending()):
-        try:
-            store.outbox_add(work.ref if work is not None else "", "room_ask", prompt["id"], json.dumps(
-                {"action": action, "title": title, "words": words, "room": room.room_id, "session": room.session_id,
-                 "handle": room.handle, "side": room.side}))
-        except (OSError, sqlite3.Error) as error:
+    failed = ""
+    with _ask_lock:  # two identical asks at once keep one row
+        if not any(row["kind"] == "room_ask" and row["target"] == prompt["id"] for row in store.outbox_pending()):
             try:
-                present.withdraw_room_work(prompt["id"])
-            except OSError:
-                pass
-            return {"ok": False, "error": "unavailable",
-                    "note": ROOM_ASK_UNAVAILABLE.format(why=f"the ask couldn't be kept ({type(error).__name__})")}
+                store.outbox_add(work.ref if work is not None else "", "room_ask", prompt["id"], json.dumps(
+                    {"action": action, "title": title, "words": words, "room": room.room_id,
+                     "session": room.session_id, "handle": room.handle, "side": room.side}))
+            except (OSError, sqlite3.Error) as error:
+                failed = type(error).__name__
+    if failed:
+        try:
+            present.withdraw_room_work(prompt["id"])
+        except OSError:
+            pass
+        return {"ok": False, "error": "unavailable",
+                "note": ROOM_ASK_UNAVAILABLE.format(why=f"the ask couldn't be kept ({failed})")}
     if new:
         room_asks._nudge(prompt, f"{room_asks._room_name(room.room_id)}: {first_line(words)}", client_enqueue(),
                          work_broker.profile_of(home))
@@ -4820,13 +4824,16 @@ def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id:
         except OSError:
             return None
         if prompt is None:
-            store.outbox_done(row["id"], "dropped")
+            for each in rows:
+                store.outbox_done(each["id"], "dropped")
             return None
         if prompt["status"] == "waiting":
             return None
         asked = json.loads(row["text"])
         action = asked["action"]
-        store.outbox_done(row["id"], "answered")
+        # Every row for it: one answer acts once, even if two were ever kept.
+        for each in rows:
+            store.outbox_done(each["id"], "answered")
         present.mark_heard([prompt_id])
         if not tool_turn:
             # Until the watcher is done, a tool turn waiting on this answer hears it's being acted on.

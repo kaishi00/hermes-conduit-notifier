@@ -4955,6 +4955,18 @@ def test_a_start_whose_ask_couldnt_be_kept_takes_it_back(on, hermes, linked, mon
     assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
 
 
+def test_one_answer_acts_once_even_with_two_rows_kept(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    store = store_mod.Store(on.home)
+    row = next(r for r in store.outbox_pending() if r["kind"] == "room_ask")
+    store.outbox_add(row["ref"], "room_ask", row["target"], row["text"])
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    work.check_asks(on.home)
+    assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
+    assert not [r for r in store.outbox_pending() if r["kind"] == "room_ask"]
+
+
 def test_a_send_to_linked_work_asks_the_owner_too(on, hermes, linked):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     answer(on.home, "confirmed")
