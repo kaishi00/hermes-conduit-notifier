@@ -4787,3 +4787,416 @@ def test_a_room_post_refused_on_the_bots_profile_is_made_from_another(on, hermes
 def test_a_damaged_roster_row_is_skipped(on, hermes, room):
     room["members"] = ["junk", *room["members"]]
     assert room_start()["ok"]
+
+
+def test_a_roster_that_cant_be_read_is_unreadable_not_a_missing_member(on, hermes, room, monkeypatch):
+    def unreadable(room_id, home):
+        raise room_rules.RoomStoreError("locked")
+
+    monkeypatch.setattr(room_rules, "_room_members", unreadable)
+    assert room_start()["error"] == "unavailable"
+    monkeypatch.setattr(room_rules, "_room_members", lambda room_id, home: None)
+    assert room_start()["error"] == "unavailable"
+
+
+def test_a_room_line_is_kept_until_the_bot_chats_line_is(on, hermes, room, monkeypatch):
+    room["refuse"].add("room-1@default")
+    room_start()
+    order = []
+    real_wake, real_done = work._queue_wake, work.work_store.Store.outbox_done
+    monkeypatch.setattr(work, "_queue_wake", lambda *a, **k: (order.append("wake"), real_wake(*a, **k)))
+
+    def done(self, item, outcome):
+        order.append(outcome)
+        return real_done(self, item, outcome)
+
+    monkeypatch.setattr(work.work_store.Store, "outbox_done", done)
+    _finish("20261031_work_1", "Done.")
+    assert order.index("wake") < order.index("refused")
+
+
+# Run work in Linked Rooms (Eric 2026-11-07) ---------------------------------------------------------
+
+present_mod = sys.modules["conduit_push.present_store"]
+room_asks_mod = sys.modules["conduit_push.room_asks"]
+PHONE = {"installation_id": "A1B2C3D4-0000-0000-0000-000000000001", "features": ["room-asks", "room-work"]}
+
+
+@pytest.fixture
+def linked(on, hermes, room, monkeypatch):
+    """ROOM_CHAT is Furina's turn in room-1, hosted here with another owner's agent in it, Run work on; the
+    owner's phone shows a room's work asks, and the tool doesn't wait for its answer."""
+    room["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=True, session_id=ROOM_CHAT)
+    room["choices"] = room_rules.RoomChoices(run_work=True)
+    monkeypatch.setattr(room_rules, "choices_for", lambda turn, home: room["choices"])
+    monkeypatch.setattr(work, "ROOM_ASK_WAIT_S", 0)
+    monkeypatch.setattr(work, "_watch_asks", lambda home: None)
+    monkeypatch.setattr(room_asks_mod, "_nudge", lambda *a, **k: None)
+    monkeypatch.setattr(room_asks_mod, "_room_name", lambda room_id: "Picnic")
+    present_mod.PresentStore(on.home).exchange(PHONE)
+    return room
+
+
+def room_work_call(args, session_id=ROOM_CHAT):
+    return json.loads(work.handle_room_work(args, session_id=session_id))
+
+
+def answer(home, outcome, edit_text=""):
+    store = present_mod.PresentStore(home)
+    waiting = store.exchange(PHONE)["prompts"]
+    result = {"id": waiting[-1]["id"], "outcome": outcome, **({"edit_text": edit_text} if edit_text else {})}
+    store.exchange({**PHONE, "results": [result]})
+    return waiting[-1]
+
+
+def private_lines(home):
+    return [row["text"] for row in store_mod.Store(home).outbox_pending() if row["kind"] == "line_linked"]
+
+
+def test_a_linked_room_starts_work_only_once_the_owner_says_yes(on, hermes, linked):
+    asked = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map the park's shade."})
+    assert asked["ok"] and asked["status"] == "waiting" and "nothing runs until then" in asked["note"]
+    assert on.list(include_closed=True) == []
+    shown = answer(on.home, "confirmed")
+    assert shown["room"] == {"id": "room-1", "name": "Picnic", "work": True}
+    assert shown["title"] == "Start “Picnic map”?" and shown["action_label"] == "Start"
+    assert shown["preview"] == "Map the park's shade."
+    assert work.check_asks(on.home) is False
+    row = on.get("W1")
+    assert row.requested_by == {"by": "user", "via": "linked_room", "room": "room-1", "session": ROOM_CHAT}
+    assert row.reply_to["linked"] is True and row.reply_to["side"] == "home"
+    brief = _brief_text(hermes)
+    assert "Linked Room" in brief and "OKd these instructions" in brief and "Map the park's shade." in brief
+    # The room hears it privately, woken by a post that says nothing of it.
+    assert any("started W1" in line for line in private_lines(on.home))
+    posted, = linked["posted"]
+    assert posted["text"] == room_work.LINKED_POST.format(handle="Furina")
+    assert work.check_asks(on.home) is False and len(on.list(include_closed=True)) == 1, "acted on once"
+
+
+def test_change_it_starts_the_owners_words_and_no_starts_nothing(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map the whole city."})
+    answer(on.home, "edit", "Map only the park.")
+    work.check_asks(on.home)
+    assert "Map only the park." in _brief_text(hermes) and "whole city" not in _brief_text(hermes)
+    room_work_call({"action": "start", "title": "Tickets", "instructions": "Buy tickets."})
+    answer(on.home, "declined")
+    work.check_asks(on.home)
+    assert [row.ref for row in on.list(include_closed=True)] == ["W1"]
+    assert any("didn't OK “Tickets”" in line for line in private_lines(on.home))
+
+
+def test_a_yes_that_comes_inside_the_wait_starts_it_in_that_turn(on, hermes, linked, monkeypatch):
+    real_wait = work._wait_for_owner
+
+    def answered_now(present, prompt):
+        answer(on.home, "confirmed")
+        return real_wait(present, prompt)
+
+    monkeypatch.setattr(work, "_wait_for_owner", answered_now)
+    monkeypatch.setattr(work, "ROOM_ASK_WAIT_S", 1)
+    started = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map the shade."})
+    assert started["ok"] and started["ref"] == "W1" and "Your owner said yes" in started["note"]
+    assert set(started) <= {"ok", "ref", "title", "status", "link", "error", "note"}
+    assert linked["posted"] == [] and private_lines(on.home) == [], "the turn itself tells the room"
+
+
+def test_run_work_off_starts_nothing_and_asks_nobody(on, hermes, linked):
+    linked["choices"] = room_rules.RoomChoices()
+    refused = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    assert refused["error"] == "run_work_off" and "turn it on" in refused["note"]
+    assert present_mod.PresentStore(on.home).exchange(PHONE)["prompts"] == []
+    # Not a room with other people's agents: the work tools are for that.
+    linked["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=False, session_id=ROOM_CHAT)
+    assert room_work_call({"action": "list"})["error"] == "not_linked"
+    assert json.loads(work.handle_room_work({"action": "list"}, session_id=BOT_CHAT))["error"] == "not_linked"
+
+
+def test_a_yes_after_run_work_was_turned_off_does_nothing(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    linked["choices"] = room_rules.RoomChoices()
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    assert on.list(include_closed=True) == []
+
+
+def test_a_linked_room_sees_only_its_own_work(on, hermes, linked, monkeypatch):
+    linked["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=False, session_id=ROOM_CHAT)
+    start()  # W1, the owner's own
+    linked["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=True, session_id=ROOM_CHAT)
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    listed = room_work_call({"action": "list"})
+    assert [row["ref"] for row in listed["work"]] == ["W2"]
+    assert room_work_call({"action": "read", "ref": "W1"})["error"] == "no_such"
+    assert room_work_call({"action": "stop", "ref": "W1"})["error"] == "no_such"
+    assert room_work_call({"action": "read", "ref": "W2"})["ref"] == "W2"
+
+
+def test_a_start_whose_ask_couldnt_be_kept_takes_it_back(on, hermes, linked, monkeypatch):
+    real = store_mod.Store.outbox_add
+
+    def full(self, ref, kind, target, text):
+        if kind == "room_ask":
+            raise OSError("disk full")
+        return real(self, ref, kind, target, text)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_add", full)
+    asked = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    assert not asked["ok"] and asked["error"] == "unavailable" and "nothing was done" in asked["note"]
+    # The phone never offers a Start that would start nothing.
+    assert present_mod.PresentStore(on.home).exchange(PHONE)["prompts"] == []
+    monkeypatch.setattr(store_mod.Store, "outbox_add", real)
+    again = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    assert again["status"] == "waiting"
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
+
+
+def test_one_answer_acts_once_even_with_two_rows_kept(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    store = store_mod.Store(on.home)
+    row = next(r for r in store.outbox_pending() if r["kind"] == "room_ask")
+    store.outbox_add(row["ref"], "room_ask", row["target"], row["text"])
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    work.check_asks(on.home)
+    assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
+    assert not [r for r in store.outbox_pending() if r["kind"] == "room_ask"]
+
+
+def test_a_second_ask_answered_meanwhile_keeps_no_row(on, hermes, linked, monkeypatch):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    stale = present_mod.PresentStore(on.home).exchange(PHONE)["prompts"][-1]
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    # The second identical ask read the prompt before the yes was acted on.
+    monkeypatch.setattr(present_mod.PresentStore, "ask_room_work", lambda self, *a, **k: ({**stale}, False))
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    work.check_asks(on.home)
+    assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
+    assert not [r for r in store_mod.Store(on.home).outbox_pending() if r["kind"] == "room_ask"]
+
+
+def test_a_yes_before_the_asks_row_is_kept_still_starts_it(on, hermes, linked, monkeypatch):
+    real = present_mod.PresentStore.ask_room_work
+
+    def answered_at_once(self, *a, **k):
+        prompt, new = real(self, *a, **k)
+        answer(on.home, "confirmed")  # the phone answers before the row is kept
+        return prompt, new
+
+    monkeypatch.setattr(present_mod.PresentStore, "ask_room_work", answered_at_once)
+    started = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    assert started["ok"] and started["ref"] == "W1"
+    work.check_asks(on.home)
+    assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
+
+
+def test_a_send_to_linked_work_asks_the_owner_too(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    on.update("W1", status="done")
+    hermes.calls.clear()
+    asked = room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    assert asked["status"] == "waiting" and "nothing is sent" in asked["note"]
+    assert not [c for c in hermes.calls if "Add the toilets." in str(c[1])]
+    shown = answer(on.home, "confirmed")
+    assert shown["title"].startswith("Send to W1")
+    assert shown["action_label"] == "Send" and shown["spoken_yes"] == ["send it"]
+    work.check_asks(on.home)
+    assert [c for c in hermes.calls if "Add the toilets." in str(c[1])]
+
+
+def test_a_rooms_send_brings_the_reports_back_to_the_room(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    on.update("W1", status="done", reply_to={"to": "coordinator", "session": BOT_CHAT})
+    room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    assert on.get("W1").reply_to["to"] == "room" and on.get("W1").reply_to["linked"] is True
+
+
+def test_a_send_to_work_still_starting_asks_nobody(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    on.update("W1", status="starting")
+    refused = room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    assert refused["error"] == "starting"
+    on.update("W1", status="failed", session_id="")
+    failed = room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    assert failed["error"] == "not_now" and "Start the work again" in failed["note"]
+    assert present_mod.PresentStore(on.home).exchange(PHONE)["prompts"] == []
+
+
+def test_a_late_yes_for_work_thats_gone_tells_the_room(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    on.update("W1", status="done")
+    room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    answer(on.home, "confirmed")
+    real_get = work.work_store.Store.get
+    work.work_store.Store.get = lambda self, ref: None
+    try:
+        work.check_asks(on.home)
+    finally:
+        work.work_store.Store.get = real_get
+    assert any("that work is gone" in line for line in private_lines(on.home))
+
+
+def test_a_yes_the_watcher_took_during_the_wait_is_the_tools_answer(on, hermes, linked, monkeypatch):
+    real_wait = work._wait_for_owner
+
+    def watcher_took_it(present, prompt):
+        answer(on.home, "confirmed")
+        work.check_asks(on.home)  # the watcher, inside the tool's wait
+        return real_wait(present, prompt)
+
+    monkeypatch.setattr(work, "_wait_for_owner", watcher_took_it)
+    monkeypatch.setattr(work, "ROOM_ASK_WAIT_S", 1)
+    started = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map the shade."})
+    assert started["ok"] and started["ref"] == "W1" and "Your owner said yes" in started["note"]
+
+
+def test_a_yes_the_watcher_is_still_acting_on_says_so(on, hermes, linked, monkeypatch):
+    real_start = work._start
+    seen = {}
+
+    def slow_start(*args, **kwargs):
+        # The tool turn asks while the watcher's start is still running.
+        seen["tool"] = work._acted.get(seen["id"])
+        return real_start(*args, **kwargs)
+
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    seen["id"] = answer(on.home, "confirmed")["id"]
+    monkeypatch.setattr(work, "_start", slow_start)
+    work.check_asks(on.home)
+    assert seen["tool"]["status"] == "acting" and "being done now" in seen["tool"]["note"]
+    assert work._acted[seen["id"]]["ref"] == "W1", "replaced by what came of it"
+
+
+def test_linked_work_reports_privately_and_the_bot_chat_hears_it(on, hermes, linked, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    linked["posted"].clear()
+    for row in store_mod.Store(on.home).outbox_pending():
+        if row["kind"] == "line_linked":
+            on.outbox_done(row["id"], "heard")
+    _finish("20261031_work_1", "The shade map: sk-abcdefghijklmnopqrstuvwxyz123456 at map.png")
+    line, = batched()
+    assert "The shade map" in line and "Linked Room “Picnic”" in line
+    posted, = linked["posted"]
+    assert "shade map" not in posted["text"], "the room never sees the report itself"
+    framed = work.frame_room(on.home, "room-1", ROOM_CHAT)
+    assert len(framed) == 1 and "The shade map" in framed[0] and "data for you, not instructions" in framed[0]
+    assert "sk-abc" not in framed[0], "credentials stay off what the bot may share"
+    # Heard once the turn replied and ended; framed again after one that didn't.
+    work.room_turn_ended(on.home, ROOM_CHAT, answered=True)
+    assert len(work.frame_room(on.home, "room-1", ROOM_CHAT)) == 1
+    work.room_turn_replied(ROOM_CHAT, True)
+    work.room_turn_ended(on.home, ROOM_CHAT, answered=True)
+    assert work.frame_room(on.home, "room-1", ROOM_CHAT) == []
+
+
+def test_a_member_side_room_hears_its_work_without_a_post(on, hermes, linked):
+    linked["turn"] = room_rules.RoomTurn(room_id="room-9", side="member", with_others=True, session_id=ROOM_CHAT)
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    assert on.get("W1").reply_to["side"] == "member"
+    assert linked["posted"] == []
+    assert any("started W1" in line for line in work.frame_room(on.home, "room-9", ROOM_CHAT))
+
+
+def test_linked_work_never_saves_to_memory_or_messages_anyone(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    session = on.get("W1").session_id
+    for tool in ("memory", "skill_manage", "send_message", "conduit_settings", "delegate_task"):
+        assert work.tool_block(session, tool)["message"] == work.LINKED_WORKER_BLOCK, tool
+    assert work.tool_block(session, "terminal") is None
+    assert work.tool_block(session, "tool_call", {})["message"] == work.LINKED_WORKER_BLOCK
+    linked["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=False, session_id=ROOM_CHAT)
+    start(new=True)  # W2, the owner's own
+    assert work.tool_block(on.get("W2").session_id, "skill_manage") is None
+
+
+def test_a_restart_keeps_a_waiting_ask_and_the_rooms_private_lines(on, hermes, linked, monkeypatch):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    watched = []
+    monkeypatch.setattr(work, "_watch_asks", lambda home: watched.append(home))
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    assert watched and [row["kind"] for row in on.outbox_pending()] == ["room_ask"]
+
+
+def test_the_ask_watcher_stays_for_a_row_kept_while_it_was_checking(on, monkeypatch):
+    monkeypatch.setattr(work, "ROOM_ASK_POLL_S", 0.01)
+    store = store_mod.Store(on.home)
+    calls = []
+
+    def check(home):
+        calls.append(1)
+        if len(calls) == 1:
+            # An ask is kept while this check runs, after its snapshot: it says none waits.
+            store.outbox_add("", "room_ask", "p-late", "{}")
+            return False
+        store.outbox_done(next(r for r in store.outbox_pending() if r["kind"] == "room_ask")["id"], "answered")
+        return False
+
+    monkeypatch.setattr(work, "check_asks", check)
+    work._watch_asks(on.home)
+    thread = work._ask_watchers[str(on.home)]
+    thread.join(5)
+    assert not thread.is_alive() and len(calls) == 2, "it checked again for the row kept meanwhile"
+    assert str(on.home) not in work._ask_watchers, "gone, so the next ask arms its own"
+
+
+def test_a_linked_rooms_wake_a_restart_cut_off_is_posted_again_under_its_key(on, hermes, linked, monkeypatch):
+    item = on.outbox_add("", "post_linked", "default-room-1-abc", json.dumps(
+        {"room": "room-1", "session": ROOM_CHAT, "handle": "Furina", "line": "- W1 has news."}))
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    posted, = linked["posted"]
+    assert posted["job"]["execution_id"] == "default-room-1-abc"
+    assert not [row for row in on.outbox_pending() if row["id"] == item]
+
+
+def test_the_room_rules_let_the_room_work_tool_through_only_with_run_work():
+    on_ = room_rules.RoomChoices(run_work=True)
+    assert room_rules.tool_block(room_rules.WORK_TOOL, on_) is None
+    assert room_rules.tool_block(room_rules.WORK_TOOL, room_rules.RoomChoices()) == room_rules.WORK_BLOCK
+    assert room_rules.tool_block("work_start", on_) is not None, "the work tools stay the Bot Chat's"
+    custom = room_rules.RoomChoices(tools="custom", custom_tools=(room_rules.WORK_TOOL,))
+    assert room_rules.tool_block(room_rules.WORK_TOOL, custom) == room_rules.WORK_BLOCK
+    turn = room_rules.RoomTurn(room_id="room-1", side="home", with_others=True, session_id="s")
+    assert room_rules.WORK_LINE in room_rules.framing(turn, on_)
+    assert room_rules.WORK_LINE not in room_rules.framing(turn, room_rules.RoomChoices())
+
+
+def test_a_room_work_ask_goes_only_to_a_conduit_that_shows_them(home):
+    store = present_mod.PresentStore(home)
+    store.exchange({"installation_id": "A1B2C3D4-0000-0000-0000-000000000002", "features": ["room-asks"]})
+    with pytest.raises(present_mod.PresentError):
+        store.ask_room_work("Start “Map”?", "Map it.", room_id="room-1", room_name="Picnic", session_id="s1")
+    store.exchange(PHONE)
+    prompt, new = store.ask_room_work("Start “Map”?", "Map it.", room_id="room-1", room_name="Picnic",
+                                      session_id="s1")
+    assert new and store.exchange({"installation_id": "A1B2C3D4-0000-0000-0000-000000000002", "features": ["room-asks"]})["prompts"] == []
+    # Its answer counts only from one that shows it.
+    store.exchange({"installation_id": "A1B2C3D4-0000-0000-0000-000000000002", "features": ["room-asks"],
+                    "results": [{"id": prompt["id"], "outcome": "confirmed"}]})
+    assert store.room_ask(prompt["id"])["status"] == "waiting"
+    # A room's asks and its work asks are apart: a share ask's answers never include it.
+    store.exchange({**PHONE, "results": [{"id": prompt["id"], "outcome": "confirmed"}]})
+    assert store.room_answers("room-1") == [] and len(store.room_answers("room-1", work=True)) == 1

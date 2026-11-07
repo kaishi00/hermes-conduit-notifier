@@ -73,6 +73,12 @@ MAX_FEATURES = 16
 # show it as a plain confirm, whose Edit opens the room's hidden session.
 ROOM_ASK_FEATURE = "room-asks"
 ROOM_ASK_TTL_MINUTES = 24 * 60
+# A room's work ask (work_tool, Linked Rooms' Run work): an agent asks its
+# owner before it starts work for a room with other people's agents, or sends
+# running work more. Only a Conduit that says it shows them gets one (Start,
+# Change it, Don't start), and only its answer counts: a room's-asks Conduit
+# would offer Share and Say instead.
+ROOM_WORK_FEATURE = "room-work"
 MAX_ROOM_ASKS_WAITING = 3
 ROOM_ASKS_PER_HOUR = 6
 ROOM_ASKS_ALL_PER_HOUR = 12
@@ -204,6 +210,7 @@ class PresentStore:
             shown = [prompt for prompt in state["prompts"] if prompt["status"] == "waiting"
                      and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])
                      and (not prompt.get("room") or ROOM_ASK_FEATURE in device["features"])
+                     and (not prompt.get("room", {}).get("work") or ROOM_WORK_FEATURE in device["features"])
                      and (not prompt.get("link") or LINK_ASK_FEATURE in device["features"])]
             # Each the newest within its own cap: a room's or a Link's asks never push the owner's own prompts off
             # the phone.
@@ -291,10 +298,11 @@ class PresentStore:
         with self._locked() as state:
             now = self.clock()
             if room is not None:
-                same = _room_waiting(state, room["id"], clean_title, clean_preview)
+                same = _room_waiting(state, room["id"], clean_title, clean_preview, work=bool(room.get("work")))
                 if same is not None:
                     return _shown(same), False
-                if not any(ROOM_ASK_FEATURE in device.get("features", []) and now - device["seen_at"]
+                feature = ROOM_WORK_FEATURE if room.get("work") else ROOM_ASK_FEATURE
+                if not any(feature in device.get("features", []) and now - device["seen_at"]
                            < CARD_DEVICE_RECENT_S for device in state["devices"].values()):
                     raise PresentError("no_device", "No Conduit that shows a room's asks has connected to this "
                                                     "Hermes profile recently.")
@@ -367,6 +375,28 @@ class PresentStore:
         return self._keep(question, share, "Share", spoken_yes=["share it"], session_id=session_id,
                           ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
 
+    def ask_room_work(self, title: Any, instructions: Any, *, room_id: Any, room_name: Any, session_id: Any,
+                      send: bool = False) -> tuple[dict[str, Any], bool]:
+        """Keeps a room's work ask (work_tool) for a Conduit that shows them:
+        what would start (or, with send, what running work is sent) as its
+        title, the instructions as its preview. The same one still waiting in
+        the room is returned instead; the bool says whether it's new. Raises
+        PresentError when it won't."""
+        room = _room({"id": room_id, "name": room_name, "work": True})
+        if room is None or not _session_key(session_id):
+            raise PresentError("invalid", "A room's work ask needs the room and its session.")
+        label, spoken = ("Send", ["send it"]) if send else ("Start", ["start it"])
+        return self._keep(title, instructions, label, spoken_yes=spoken, session_id=session_id,
+                          ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
+
+    def withdraw_room_work(self, prompt_id: Any) -> None:
+        """Takes back a room's work ask still waiting (work_tool couldn't keep
+        what a yes would do), so the phone never offers it."""
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is not None and prompt.get("room", {}).get("work") and prompt["status"] == "waiting":
+                prompt.update(status="cancelled", finished_at=int(self.clock()), reported=True)
+
     def ask_link(self, title: Any, preview: Any, *, link: Any, ttl_minutes: Any = ROOM_ASK_TTL_MINUTES
                  ) -> dict[str, Any]:
         """Keeps a Link's ask (link_asks) for a Conduit that shows them: what's asked as its title, what would be
@@ -402,7 +432,7 @@ class PresentStore:
                 prompt["edit_text"] = _text(edit_text, MAX_EDIT_TEXT_CHARS)
             return True
 
-    def room_answers(self, room_id: Any) -> list[dict[str, Any]]:
+    def room_answers(self, room_id: Any, work: bool = False) -> list[dict[str, Any]]:
         """The answered (or expired) asks of a room its agent hasn't heard
         yet (``mark_heard``), oldest first, each with its question (``title``)
         and what it would share (``preview``). By room, not session: a
@@ -411,6 +441,7 @@ class PresentStore:
             return []
         with self._locked() as state:
             found = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
+                     and bool(prompt["room"].get("work")) == work
                      and prompt["status"] != "waiting" and not prompt["reported"]]
             return [{**_shown(prompt), "preview": prompt["preview"]} for prompt in found]
 
@@ -649,15 +680,16 @@ def _public(prompt: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
-def _room_waiting(state: dict[str, Any], room_id: str, title: str | None = None, preview: str | None = None) -> Any:
-    """A room's waiting asks, or the one asking ``title`` (case-folded) to share exactly ``preview``, or None: a
-    yes covers only the share the owner saw."""
+def _room_waiting(state: dict[str, Any], room_id: str, title: str | None = None, preview: str | None = None,
+                  work: bool = False) -> Any:
+    """A room's waiting asks, or the one asking ``title`` (case-folded) to share exactly ``preview`` (to start
+    exactly ``preview``, for a ``work`` ask), or None: a yes covers only what the owner saw."""
     waiting = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
                and prompt["status"] == "waiting"]
     if title is None:
         return waiting
     return next((prompt for prompt in waiting if prompt["title"].casefold() == title.casefold()
-                 and prompt["preview"] == preview), None)
+                 and prompt["preview"] == preview and bool(prompt["room"].get("work")) == work), None)
 
 
 def _room(value: Any) -> dict[str, str] | None:
@@ -667,7 +699,10 @@ def _room(value: Any) -> dict[str, str] | None:
     room_id = value["id"].strip()
     if not room_id or len(room_id) > MAX_ROOM_ID_CHARS or _SESSION_KEY_CONTROL.search(room_id):
         return None
-    return {"id": room_id, "name": _line(value.get("name"), MAX_ROOM_NAME_CHARS) or "a room"}
+    room = {"id": room_id, "name": _line(value.get("name"), MAX_ROOM_NAME_CHARS) or "a room"}
+    if value.get("work") is True:
+        room["work"] = True  # a work ask (ask_room_work), never a share
+    return room
 
 
 def _link(value: Any) -> dict[str, Any] | None:
@@ -732,6 +767,8 @@ def _take_result(state: dict[str, Any], installation: str, features: list[str], 
     if prompt.get("maps") and NAVIGATE_FEATURE not in features:
         return
     if prompt.get("room") and ROOM_ASK_FEATURE not in features:
+        return
+    if prompt.get("room", {}).get("work") and ROOM_WORK_FEATURE not in features:
         return
     if prompt.get("link") and LINK_ASK_FEATURE not in features:
         return

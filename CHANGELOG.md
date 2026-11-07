@@ -13,6 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.137.0 (2026-11-07)
+
+### Fixes
+- A work update a group room couldn't take now reaches your Bot Chat even if
+  Hermes restarts at just the wrong moment.
+
+### New and improved
+- In a Linked Room, a room with other people's agents, you can now turn on
+  Run work for your bot. It can then start work for the room, and each
+  start asks you on your phone first: Start, change the words, or Don't
+  start. In a call, say "start it": a plain yes doesn't start work. What the work finds reaches your bot privately, and it shares only
+  what your rules for that room allow. You turn it on for each room: a
+  new room never starts with it on.
+
 ## 0.136.0 (2026-11-07)
 
 ### New and improved

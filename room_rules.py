@@ -88,6 +88,8 @@ BRIDGE_TOOLS = frozenset({"tool_search", "tool_describe", BRIDGE_CALL})
 _LEARNING_TOOLS = frozenset({"memory", "skill_manage"})
 # Ask me first's tool (room_asks): allowed by the room's share, not its tools.
 ASK_TOOL = "conduit_ask_owner"
+# Run work's tool (work_tool, Eric 2026-11-07): allowed by the room's Run work, not its tools.
+WORK_TOOL = "conduit_room_work"
 
 _RULES = "Blocked by your owner's rules for this group room"
 TALK_ONLY_BLOCK = (f"{_RULES}: here you talk, without tools. Answer from what you know, or say you can't "
@@ -101,6 +103,8 @@ LEARNING_BLOCK = (f"{_RULES}: nothing from a room with other people's agents is 
 NEVER_BLOCK = f"{_RULES}: {{tool}} is never used in a room with other people's agents."
 ASK_BLOCK = (f"{_RULES}: asking your owner is for rooms set to Ask me first, and this one isn't. Follow what "
              "your owner allows you to share here.")
+WORK_BLOCK = (f"{_RULES}: your owner hasn't turned on Run work for this room, so no work starts from it. Say "
+              "your owner can turn it on for this room, or ask you in your Bot Chat.")
 UNKNOWN_ROOM_BLOCK = ("Blocked: the room this turn is in couldn't be read, so your owner's rules for it couldn't "
                       "be checked. Answer without tools this time.")
 SESSION_UNREAD_BLOCK = ("Blocked for now: this chat's record couldn't be read, so whether your owner's rules for "
@@ -172,6 +176,9 @@ FREE_BUSY_LINES = {
             "those times here, and share nothing else about their plans."),
 }
 SEARCH_ON_LINE = "You may search your owner's past chats when it helps the room."
+WORK_LINE = (f"Your owner lets you start work for this room with {WORK_TOOL}. Each start, and each message to work "
+             "that's running, waits for your owner's OK on their phone; until they say yes, nothing runs. What the "
+             "work reports reaches you privately: share from it only what the rules above allow.")
 LEARNING_LINE = "Nothing is saved from this room to your memory or skills."
 NOTE_LINE = "Your owner's private note for this room (follow it; never quote or mention it): {note}"
 # Who wrote what, once people post from their own Hermes (room_posts.py): on the home, the others' names; on a
@@ -266,7 +273,7 @@ def allowed_tools(choices: RoomChoices) -> frozenset[str]:
     if choices.share == "nothing":
         # Busy times are something personal (FREE_BUSY_LINES).
         allowed.discard(FREE_BUSY_TOOL)
-    return frozenset(allowed - NEVER - {ASK_TOOL})
+    return frozenset(allowed - NEVER - {ASK_TOOL, WORK_TOOL})
 
 
 def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Optional[str]:
@@ -285,6 +292,8 @@ def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Option
             return TALK_ONLY_BLOCK
     if name == ASK_TOOL:
         return None if choices.share == "ask" else ASK_BLOCK
+    if name == WORK_TOOL:
+        return None if choices.run_work else WORK_BLOCK
     if name in _LEARNING_TOOLS:
         return LEARNING_BLOCK
     if name in NEVER:
@@ -293,7 +302,7 @@ def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Option
         return SEARCH_BLOCK
     allowed = allowed_tools(choices)
     # Tool Search's bridge reaches the allowed tools Hermes defers behind it.
-    if name in allowed or (name in BRIDGE_TOOLS and (allowed or choices.share == "ask")):
+    if name in allowed or (name in BRIDGE_TOOLS and (allowed or choices.share == "ask" or choices.run_work)):
         return None
     if not allowed - {SEARCH_TOOL}:
         return TALK_SEARCH_BLOCK if SEARCH_TOOL in allowed else TALK_ONLY_BLOCK
@@ -363,6 +372,8 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
         lines.append(f"- {FREE_BUSY_LINES.get(choices.share, FREE_BUSY_LINES['ask'])}")
     if choices.search_chats:
         lines.append(f"- {SEARCH_ON_LINE}")
+    if choices.run_work:
+        lines.append(f"- {WORK_LINE}")
     lines.append(f"- {LEARNING_LINE}")
     if choices.note:
         lines.append(f"- {NOTE_LINE.format(note=choices.note)}")

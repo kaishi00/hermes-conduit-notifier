@@ -152,6 +152,7 @@ def test_every_capability_names_a_served_route_family():
         "room-dashboard-profiles": "/rooms/setup",
         # Use my data's free/busy, set in the choices.
         "room-free-busy": "/rooms/choices",
+        "room-run-work": "/rooms/choices",
         "link-asks": "/links/rules",
         "bot-workstreams": "/workstreams",
         "waiting-list": "/waiting",

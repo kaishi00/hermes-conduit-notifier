@@ -179,6 +179,8 @@ def register(ctx: Any) -> None:
     # Bot workstreams (designs/bot-mode-coordinator): a bot's Bot Chat
     # coordinates work sessions of its own; on for every bot unless turned off.
     work_tool.register(ctx, is_child=_is_child)
+    # Run work in Linked Rooms: the room's own work tool, in the rooms toolset; only room turns.
+    work_tool.register_room_work(ctx)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
@@ -458,6 +460,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         return
     # A room turn that replied read its owner's answers (room_asks), heard once on_session_end says it didn't fail.
     _quietly(room_asks.replied, session_id, isinstance(response, str) and bool(response.strip()))
+    _quietly(work_tool.room_turn_replied, session_id, isinstance(response, str) and bool(response.strip()))
     _quietly(link_ask_tool.replied, session_id, isinstance(response, str) and bool(response.strip()))
     # The Lock Screen's end waits for on_session_end too: this hook also runs
     # for a failed turn, and the first end the phone gets is the one it keeps.
@@ -810,6 +813,7 @@ def _on_session_end(**kwargs: Any) -> None:
     # A room turn's owner's answers are heard when it answered; a failed or stopped one, or one Hermes doesn't say
     # (its held reply is dropped too), is framed with them again.
     _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
+    _quietly(_room_work_ended, session_id, answered)
     _quietly(_link_asks_ended, session_id, answered)
     if not pulse_turn and (not workstream or _has_live_turn(session_id)):
         # A Pulse turn or a workstream's never started a Live Activity, so there is none to end, unless
@@ -1299,6 +1303,7 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     child = _is_child(session_id)
     if not child:
         _quietly(room_asks.begin, lambda: PresentStore(get_hermes_home()), session_id)
+        _quietly(_room_work_ended, session_id, None)
     try:
         home = get_hermes_home()
     except Exception:  # noqa: BLE001
@@ -1353,7 +1358,16 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
                                                                             session_id))
         except Exception:  # noqa: BLE001 — the answers wait for the next turn
             _warn_room_once("asks", "conduit_push: couldn't read the answers to session %s's asks", session_id)
+        try:
+            # What the room's work reported since (Run work), once.
+            framing += "".join(f"\n- {line}" for line in work_tool.frame_room(home, turn.room_id, session_id))
+        except Exception:  # noqa: BLE001 — the lines wait for the next turn
+            _warn_room_once("work", "conduit_push: couldn't read what room %s's work reported", turn.room_id)
     return framing
+
+
+def _room_work_ended(session_id: str, answered: Any) -> None:
+    work_tool.room_turn_ended(get_hermes_home(), session_id, answered)
 
 
 _room_warned: set[tuple[str, str]] = set()
