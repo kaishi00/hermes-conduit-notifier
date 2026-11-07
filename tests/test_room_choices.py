@@ -355,7 +355,7 @@ def test_room_rules_is_a_listed_capability(client):
 
 def _rooms_args(action, room="", **changes):
     values = {"tools": None, "tool": None, "share": None, "search": None, "takes_part": None, "limit": None,
-              "note": None, **changes}
+              "note": None, "work": None, **changes}
     return argparse.Namespace(conduit_push_action="rooms", rooms_action=action, room=room, **values)
 
 
@@ -376,6 +376,15 @@ def test_cli_shows_and_sets_room_choices(tmp_path, monkeypatch, capsys):
     assert "Defaults" in shown and f"Room {ROOM}" in shown and "terminal, read_file" in shown
     assert cli.dispatch(_rooms_args("show", OTHER)) == 0
     assert "the defaults" in capsys.readouterr().out
+
+
+def test_cli_turns_run_work_on_and_off_for_a_room(tmp_path, monkeypatch, capsys):
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    assert cli.dispatch(_rooms_args("set", ROOM, work="on")) == 0
+    assert ChoicesStore(tmp_path).get(ROOM).run_work is True
+    assert cli.dispatch(_rooms_args("set", ROOM, work="off")) == 0
+    assert ChoicesStore(tmp_path).get(ROOM).run_work is False
 
 
 def test_cli_refuses_choices_the_store_wont_keep(tmp_path, monkeypatch, capsys):

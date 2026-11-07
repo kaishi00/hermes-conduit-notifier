@@ -4432,6 +4432,7 @@ def stop() -> None:
         _ask_generation[0] += 1
         _ask_watchers.clear()
         _acted.clear()
+        _asks_done.clear()
     with _linked_lock:
         _linked_framed.clear()
         _linked_replied.clear()
@@ -4677,13 +4678,14 @@ def _room_work(args: dict, session_id: Any) -> dict:
                 "note": "" if mine else "No work for this room yet."}
     if name == "work_start":
         return _ask_for_room(home, store, room, "start", args)
+    # Swept first, as handle does: a row recovered after a restart is read and stopped as it is now.
+    broker = work_broker.Broker(home)
+    _sweep(home, store, broker)
     work = store.get(args.get("ref"))
     if work is None or work.kind != "workstream" or not _of_room(work, room.room_id):
         # Only this room's: the owner's other work isn't the room's to see.
         return {"ok": False, "error": "no_such", "note": "That isn't one of this room's workstreams. "
                                                          f"{ROOM_WORK_TOOL} action=list shows them."}
-    broker = work_broker.Broker(home)
-    _sweep(home, store, broker)
     if name == "work_read":
         read = _read(home, work, False)
         return {key: read[key] for key in ("ok", "ref", "title", "status", "result", "error", "note") if key in read}
@@ -4750,7 +4752,8 @@ def _ask_for_room(home: Path, store: work_store.Store, room: room_work.Room, act
             prompt = present.room_ask(prompt["id"]) or prompt
         except OSError:
             pass
-        if prompt["status"] == "waiting" and not any(
+        # An ask this call just made keeps its row even if it's answered already.
+        if (new or prompt["status"] == "waiting") and not any(
                 row["kind"] == "room_ask" and row["target"] == prompt["id"] for row in store.outbox_pending()):
             try:
                 store.outbox_add(work.ref if work is not None else "", "room_ask", prompt["id"], json.dumps(
@@ -4803,6 +4806,8 @@ def _wait_for_owner(present: Any, prompt: dict) -> dict:
 _ask_lock = threading.Lock()
 # What the watcher did with an answer while the tool's own wait ran (by prompt id), for the tool's result.
 _acted: dict[str, dict] = {}
+# The asks acted on in this load (by prompt id, oldest first): a row kept for one since never acts again.
+_asks_done: dict[str, None] = {}
 
 
 def _answered(home: Path, store: work_store.Store, present: Any, prompt_id: str, tool_turn: bool = False
@@ -4824,6 +4829,11 @@ def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id:
         rows = [row for row in store.outbox_pending() if row["kind"] == "room_ask" and row["target"] == prompt_id]
         if not rows:
             return None
+        if prompt_id in _asks_done:
+            # Acted on already: a row kept since never acts a second time.
+            for each in rows:
+                store.outbox_done(each["id"], "dropped")
+            return None
         row = rows[-1]
         try:
             prompt = present.room_ask(prompt_id)
@@ -4841,13 +4851,18 @@ def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id:
         for each in rows:
             store.outbox_done(each["id"], "answered")
         present.mark_heard([prompt_id])
+        status = prompt["status"]
+        acts = status == "confirmed" or (status == "edit" and bool(prompt.get("edit_text")))
+        _asks_done[prompt_id] = None
+        while len(_asks_done) > 256:
+            _asks_done.pop(next(iter(_asks_done)))
         if not tool_turn:
-            # Until the watcher is done, a tool turn waiting on this answer hears it's being acted on.
+            # Until the watcher is done, a tool turn waiting on this answer hears what's being done.
             _acted[prompt_id] = {"ok": True, "status": "acting", "note": (
-                "Your owner said yes, and it's being done now: what comes of it reaches you here privately.")}
+                "Your owner said yes, and it's being done now: what comes of it reaches you here privately.")} \
+                if acts else {"ok": False, "error": "declined", "note": _ASK_NOTES[action]["declined"]}
     room = room_work.Room(room_id=asked["room"], session_id=asked["session"], handle=asked.get("handle", ""),
                           linked=True, side=asked.get("side", "home"))
-    status = prompt["status"]
     words = asked["words"]
     if status == "edit" and prompt.get("edit_text"):
         words = prompt["edit_text"]
@@ -4865,6 +4880,8 @@ def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id:
         if not tool_turn:
             _queue_wake(home, _bot_chat_of(home), f"- Your OK for “{_cut(asked['title'], 60)}” in a Linked Room "
                                                   f"came after {error}, so nothing was done.")
+            _tell_room(home, room, f"- Your owner's OK for “{_cut(asked['title'], 60)}” came after {error}, "
+                                   "so nothing was done.")
         return result
     broker = work_broker.Broker(home)
     if action == "start":

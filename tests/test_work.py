@@ -4980,6 +4980,21 @@ def test_a_second_ask_answered_meanwhile_keeps_no_row(on, hermes, linked, monkey
     assert not [r for r in store_mod.Store(on.home).outbox_pending() if r["kind"] == "room_ask"]
 
 
+def test_a_yes_before_the_asks_row_is_kept_still_starts_it(on, hermes, linked, monkeypatch):
+    real = present_mod.PresentStore.ask_room_work
+
+    def answered_at_once(self, *a, **k):
+        prompt, new = real(self, *a, **k)
+        answer(on.home, "confirmed")  # the phone answers before the row is kept
+        return prompt, new
+
+    monkeypatch.setattr(present_mod.PresentStore, "ask_room_work", answered_at_once)
+    started = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    assert started["ok"] and started["ref"] == "W1"
+    work.check_asks(on.home)
+    assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
+
+
 def test_a_send_to_linked_work_asks_the_owner_too(on, hermes, linked):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     answer(on.home, "confirmed")
