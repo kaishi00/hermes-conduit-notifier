@@ -4431,6 +4431,9 @@ def stop() -> None:
         _ask_generation[0] += 1
         _ask_watchers.clear()
         _acted.clear()
+    with _linked_lock:
+        _linked_framed.clear()
+        _linked_replied.clear()
     for _, timer in pending:
         if timer is not None:
             timer.cancel()
@@ -4686,10 +4689,14 @@ def _room_work(args: dict, session_id: Any) -> dict:
     if name == "work_stop":
         stopped = _stop(store, broker, work)
         return {key: stopped[key] for key in ("ok", "ref", "title", "status", "error", "note") if key in stopped}
-    if work.status == "starting" or not work.session_id:
-        # Refused before the owner is asked: a yes couldn't send it yet.
+    # Refused before the owner is asked: a yes couldn't send it.
+    if work.status == "starting":
         return {"ok": False, "ref": work.ref, "error": "starting",
                 "note": f"{work.ref} is still being started. Send it this once it's running."}
+    if not work.session_id:
+        return {"ok": False, "ref": work.ref, "error": "not_now",
+                "note": f"{work.ref} never got a chat, so there's nothing to send to. Start the work again "
+                        f"with {ROOM_WORK_TOOL} action=start."}
     return _ask_for_room(home, store, room, "send", args, work)
 
 

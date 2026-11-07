@@ -4967,6 +4967,9 @@ def test_a_send_to_work_still_starting_asks_nobody(on, hermes, linked):
     on.update("W1", status="starting")
     refused = room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
     assert refused["error"] == "starting"
+    on.update("W1", status="failed", session_id="")
+    failed = room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    assert failed["error"] == "not_now" and "Start the work again" in failed["note"]
     assert present_mod.PresentStore(on.home).exchange(PHONE)["prompts"] == []
 
 
