@@ -559,7 +559,7 @@ def test_a_chat_with_no_folder_joins_the_terminal_folder(tmp_path):
     assert index.resolve_name(db, ["s1"], "notes/todo.md", exists=check, default_folder="") == {"path": None}
 
 
-def test_the_resolve_route_passes_the_profiles_terminal_folder(tmp_path, monkeypatch):
+def test_the_terminal_folder_is_read_from_a_local_terminals_config(tmp_path, monkeypatch):
     config = types.ModuleType("hermes_cli.config")
     monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
     work = tmp_path / "work"
@@ -875,3 +875,17 @@ def test_a_quoted_path_whose_folder_ends_in_a_separator_is_tried_whole(tmp_path)
     assert index.resolve_name(conn, ["s3"], "old.md", exists=real.__contains__)["path"] == "/data/a;/b/old.md"
     # Two paths: the whole run isn't a file, so its pieces still answer.
     assert index.resolve_name(conn, ["s2"], "old.md", exists=real.__contains__)["path"] == "/x/old.md"
+
+
+def test_the_resolve_route_finds_a_link_in_the_terminal_folder(tmp_path, monkeypatch):
+    # The route hands resolve_name the profile's terminal folder; the helper's
+    # store keeps no cwd column, so no chat has a folder of its own.
+    work = tmp_path / "work"
+    (work / "notes").mkdir(parents=True)
+    (work / "notes" / "todo.md").write_text("x")
+    config = types.ModuleType("hermes_cli.config")
+    config.load_config = lambda: {"terminal": {"backend": "local", "cwd": str(work)}}
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
+    client = _resolve_client(tmp_path, monkeypatch, [("s1", "assistant", "Wrote `notes/todo.md`.")])
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "notes/todo.md", "session_id": "s1"}).json()
+    assert body == {"ok": True, "path": str(work / "notes" / "todo.md"), "via": "folder"}
