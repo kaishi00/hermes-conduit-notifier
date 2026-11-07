@@ -2071,7 +2071,10 @@ through Hermes' `/api/fs/*` routes.
 - `GET …/workspace/resolve?path=…&session_id=…`: where a file a chat's reply
   names by its name or a path inside a project (`AppState.swift`,
   `docs/plan.md`) is. Pass each id the chat goes by. It tries the chat's
-  working folder, then the newest full path ending in that name that the
+  working folder, then the top of its git repository (a project chat often
+  works in a subfolder), then, for a chat with no folder recorded, the
+  profile's `terminal.cwd` on a local terminal (where Hermes' file tools put
+  such a chat's relative paths), then the newest full path ending in that name that the
   chat's own tool calls, tool output and replies carry (a quoted path is
   read whole, spaces, brackets and apostrophes included, and never in
   pieces; an SSH profile, whose paths aren't checked, leaves such a path

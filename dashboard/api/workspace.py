@@ -162,7 +162,8 @@ async def get_artifacts(response: Response, profile: Optional[str] = None, befor
 
 
 # GET /workspace/resolve: where a file a chat's reply names by its name or a
-# relative path is (hermes-conduit#1809), from the chat's folder and its own
+# relative path is (hermes-conduit#1809), from the chat's folder, its git
+# repository's top, the terminal's folder for a chat with none, and its own
 # tool calls (artifacts_index.resolve_name). Conduit asks when such a link is
 # tapped, with each id the chat goes by, and opens the Folder at the answer.
 
@@ -179,9 +180,30 @@ def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[
         return {"path": None}
     try:
         exists = _host_file_check(profile)
-        return index.resolve_name(conn, ids, name, exists=exists)
+        return index.resolve_name(conn, ids, name, exists=exists, default_folder=_terminal_folder())
     finally:
         conn.close()
+
+
+def _terminal_folder() -> Optional[str]:
+    """The profile's configured terminal folder (``terminal.cwd``), which
+    Hermes' file tools resolve a relative path against when a chat recorded
+    no folder of its own; None when it isn't set to an absolute folder on
+    this host (unset, ``.``, ``auto``, or a sandbox's own path). Read inside
+    the profile scope."""
+    try:
+        from hermes_cli.config import load_config
+        terminal = load_config().get("terminal") or {}
+    except Exception:
+        return None
+    if not isinstance(terminal, dict):
+        return None
+    backend = str(terminal.get("backend") or "local").strip().lower()
+    raw = terminal.get("cwd")
+    if backend != "local" or not isinstance(raw, str):
+        return None
+    folder = os.path.expanduser(raw.strip())
+    return folder if os.path.isabs(folder) else None
 
 
 def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
