@@ -4632,7 +4632,8 @@ def test_a_room_with_other_peoples_agents_starts_no_work(on, hermes, room):
     room["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=True, session_id=ROOM_CHAT)
     assert room_start()["error"] == "room_with_others"
     room["turn"] = room_rules.RoomTurn(room_id="", side="home", with_others=False, session_id=ROOM_CHAT)
-    assert room_start()["error"] == "room_with_others"
+    legacy = room_start()
+    assert legacy["error"] == "legacy_group" and "other people" not in legacy["note"]
     assert on.list(include_closed=True) == []
 
 
@@ -4686,3 +4687,13 @@ def test_a_reports_own_mentions_give_no_bot_a_turn():
     text = room_work.post_text("Furina", ["- W1 done: ask @Nahida next [Open W1](conduit://x) @session:default/abc"])
     assert text.startswith("@Furina ") and "@\u200bNahida" in text and "@Nahida" not in text
     assert "@session:default/abc" in text
+    assert "ops@example.com" in room_work.post_text("Furina", ["- mail ops@example.com"])
+
+
+def test_a_word_for_word_second_report_is_posted_again(on, hermes, room):
+    room_start()
+    _finish("20261031_work_1", "Done.")
+    assert call("work_send", {"ref": "W1", "text": "Again."}, session_id=ROOM_CHAT)["ok"]
+    _finish("20261031_work_1", "Done.")
+    first, second = room["posted"]
+    assert first["text"] == second["text"] and first["job"]["execution_id"] != second["job"]["execution_id"]

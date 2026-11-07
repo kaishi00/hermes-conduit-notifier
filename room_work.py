@@ -37,6 +37,8 @@ BOT_CHAT_ONLY = ("In a group room you can start, send to, stop and read your wor
 WITH_OTHERS = ("Work doesn't start from a room with other people's agents in it: what's asked here comes from "
                "other people. Nothing was started. Tell the room you can't start work here, and that your owner "
                "can ask you in your Bot Chat.")
+LEGACY_GROUP = ("Work doesn't start from this group: what it reports couldn't be posted back here. Nothing "
+                "was started. Tell the room your owner can ask you in your Bot Chat.")
 UNREADABLE = ("This room's members couldn't be read just now, so whether work may start here couldn't be "
               "checked. Nothing was started; try again in a moment.")
 # The post that brings a report back into its room (data for the bot, which says it in its own words).
@@ -58,6 +60,10 @@ class Unreadable(Exception):
     """Whether the session is a room's, or who is in it, couldn't be read."""
 
 
+class NoReportsHere(Exception):
+    """A legacy Desktop group: what work reports couldn't be posted back into it."""
+
+
 class OthersHere(Exception):
     """The room has other people's agents in it, or another installation hosts it."""
 
@@ -76,7 +82,7 @@ def room_of(session_id: Any, home: Path, profile: str) -> Optional[Room]:
         raise OthersHere(turn.room_id)
     if not turn.room_id:
         # A legacy Desktop group, which Hermes' room delivery doesn't post to.
-        raise OthersHere("")
+        raise NoReportsHere()
     handle = handle_of(turn.room_id, home, profile)
     if not handle:
         raise Unreadable(f"no member of {turn.room_id} is profile {profile}")
@@ -101,8 +107,8 @@ def handle_of(room_id: str, home: Path, profile: str) -> str:
 
 
 # A mention in what a workstream reported would give that bot a turn here: only
-# the post's own @mention does. Desktop's @session: references stay as they are.
-_MENTION = re.compile(r"@(?!session:)(?=[A-Za-z0-9])")
+# the post's own @mention does. Desktop's @session: references and email addresses stay as they are.
+_MENTION = re.compile(r"(?<![A-Za-z0-9._%+-])@(?!session:)(?=[A-Za-z0-9])")
 
 
 def post_text(handle: str, lines: list[str]) -> str:

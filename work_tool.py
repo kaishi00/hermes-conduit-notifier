@@ -609,6 +609,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
             room = room_work.room_of(session_id, home, work_broker.profile_of(home))
         except room_work.OthersHere:
             return {"ok": False, "error": "room_with_others", "note": room_work.WITH_OTHERS}
+        except room_work.NoReportsHere:
+            return {"ok": False, "error": "legacy_group", "note": room_work.LEGACY_GROUP}
         except room_work.Unreadable:
             return {"ok": False, "error": "unavailable", "note": room_work.UNREADABLE}
         if room is None:
@@ -4128,7 +4130,9 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
 
         profile = work_broker.profile_of(home)
         others = [name for name, _ in location_profiles.profile_homes(Path(home)) if name != profile]
-        key = f"{profile}-{work.ref}-{hashlib.sha256(line.encode()).hexdigest()[:16]}"
+        # One post per report: the profiles tried below share its key, so
+        # none posts it twice, and a later report, even word for word, is its own.
+        key = f"{profile}-{work.ref}-{uuid.uuid4().hex[:16]}"
         error = room_work.post(work.reply_to, bot=_bot_name(home), key=key, lines=[line],
                                profiles=[profile, *others])
         if error is None:
