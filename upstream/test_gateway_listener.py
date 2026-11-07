@@ -785,7 +785,8 @@ def test_reload_mcp_and_skills_run_in_conduits_shapes_on_the_listener(listener):
         else:
             assert reloaded["result"]["status"] == "reloaded", reloaded
         # The dashboard's persistent opt-out isn't the authority's: refused before anything runs.
-        assert _refusal(await sock.call("reload.mcp", {"session_id": sid, "confirm": True, "always": True}))
+        always = await sock.call("reload.mcp", {"session_id": sid, "confirm": True, "always": True})
+        assert _refusal(always) == "invalid_params", always
 
         rescanned = await sock.result("skills.reload", {"session_id": sid})
         assert "skill(s) available" in rescanned["output"], rescanned
