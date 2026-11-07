@@ -573,6 +573,74 @@ def force_gateway_restart() -> None:
     _forced_restart_at, _forced_for_job = time.time(), owner
 
 
+# Hermes' `hermes gateway restart` checks the installed unit against the one it would write
+# first, and writing a system unit for root without a User= line raises (its "pass
+# --run-as-user root" refusal, meant for `gateway install`). On a gateway systemd runs as
+# root that way (an LXC host), every restart Hermes runs dies there, before stopping anything.
+_ROOT_UNIT_REFUSAL = "Refusing to install the gateway system service as root"
+_RESTART_LOG_TAIL_BYTES = 16384
+
+
+def _restart_log_says_root_refusal() -> bool:
+    """Whether the last `hermes gateway restart` the dashboard spawned died on Hermes' root
+    refusal: the end of its log, from its last header on."""
+    try:
+        gateway = importlib.import_module("hermes_cli.web_server_gateway")
+        path = Path(gateway._ACTION_LOG_DIR) / gateway._ACTION_LOG_FILES["gateway-restart"]
+        with open(path, "rb") as log:
+            log.seek(max(0, os.fstat(log.fileno()).st_size - _RESTART_LOG_TAIL_BYTES))
+            tail = log.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 — no log to read: not this failure
+        logger.debug("Conduit plugin: couldn't read the gateway restart's log", exc_info=True)
+        return False
+    section = tail.rsplit("=== gateway-restart started", 1)[-1]
+    return _ROOT_UNIT_REFUSAL in section
+
+
+def restart_after_root_refusal() -> bool:
+    """When Hermes' own gateway restart died on its root refusal (above) and systemd runs the
+    gateway as a system unit and this dashboard is root, restarts it with `systemctl restart
+    --no-block`, as Hermes would have once its check passed. Nothing was stopped, so the
+    gateway's stop still lets running work finish (TimeoutStopSec). Whether it was sent."""
+    if not _restart_log_says_root_refusal():
+        return False
+    try:
+        from hermes_cli.gateway import (_installed_service_kind_for, _select_systemd_scope, _systemctl_cmd,
+                                        get_service_name, supports_systemd_services)
+        system = (os.geteuid() == 0 and supports_systemd_services()
+                  and _installed_service_kind_for(lambda: False) == "systemd" and _select_systemd_scope(False))
+        command = _systemctl_cmd(True) + ["restart", "--no-block", get_service_name()] if system else None
+    except Exception:  # noqa: BLE001 — a Hermes that can't say: leave the failure as it is
+        logger.debug("Conduit plugin: couldn't tell how the gateway is run", exc_info=True)
+        return False
+    if command is None:
+        return False
+    logger.warning("Conduit plugin: Hermes' gateway restart refused a root system unit; restarting "
+                   "through systemd (%s)", " ".join(command))
+    try:
+        done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                              timeout=30, start_new_session=True)
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning("Conduit plugin: systemd didn't take the gateway restart", exc_info=True)
+        return False
+    if done.returncode != 0:
+        logger.warning("Conduit plugin: systemd didn't take the gateway restart: %s",
+                       (done.stderr or done.stdout or "").strip()[-300:])
+        return False
+    return True
+
+
+def watch_restart_for_root_refusal(proc: Any) -> None:
+    """For a restart spawned and left to run (a settings save's): when it ends failed on the
+    root refusal, restarts through systemd in its place."""
+    def watch() -> None:
+        with contextlib.suppress(Exception):
+            if proc.wait() != 0:
+                restart_after_root_refusal()
+
+    threading.Thread(target=watch, name="conduit-gateway-restart-watch", daemon=True).start()
+
+
 def _gateway_draining() -> bool:
     """Whether the gateway is letting running work finish before its restart stops it."""
     try:
@@ -629,7 +697,7 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., 
         waited = 0.0
         while True:
             try:
-                return proc.wait(timeout=SELF_UPDATE_GATEWAY_LIMIT_S)
+                code = proc.wait(timeout=SELF_UPDATE_GATEWAY_LIMIT_S)
             except subprocess.TimeoutExpired:
                 waited += SELF_UPDATE_GATEWAY_LIMIT_S
                 # Hermes' restart waits out the drain, then forces it: still going, not failed.
@@ -643,6 +711,9 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., 
                 with contextlib.suppress(OSError, subprocess.TimeoutExpired):
                     proc.wait(timeout=5)
                 raise
+            # Hermes' restart dies on a root system unit without User= (its install check):
+            # systemd restarts it instead.
+            return 0 if code != 0 and restart_after_root_refusal() else code
 
     return pull, restart_gateway
 
