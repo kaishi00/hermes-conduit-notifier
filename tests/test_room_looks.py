@@ -246,3 +246,24 @@ def test_the_routes_take_your_looks_and_show_a_rooms(rooms, monkeypatch):
     refused = client.put(f"{BASE}/rooms/looks", json={"agents": {"default": {"picture": None, "color": "red"}}})
     assert (refused.status_code, refused.json()["code"]) == (400, "bad_looks")
     assert "room-looks" in api.capabilities.ROUTE_CAPABILITIES
+
+
+def test_a_person_with_no_name_is_dropped(rooms):
+    room_id = _started(rooms, links=("link1",))
+    body = {"v": 1, "room_id": room_id, "members": {},
+            "people": [{"name": None, "poster": "Guest", "look": look()}], "person": None}
+
+    rooms.wire.sender("furina")("link1", "room.looks", body, message_id="room.looks:n")
+
+    assert shown(rooms, "laifu", room_id)["people"] == []
+
+
+def test_a_file_holding_a_look_that_isnt_one_reads_as_empty(rooms):
+    give(rooms, "furina", {"default": look()})
+    file = rooms.tmp_path / "furina" / "conduit-rooms" / "looks.json"
+    state = json.loads(file.read_text())
+    state["own"]["agents"]["default"] = "not a look"
+    file.write_text(json.dumps(state))
+
+    assert looks_module.own(rooms.tmp_path / "furina") == {"agents": {}, "person": None}
+    rooms.furina.pass_once()

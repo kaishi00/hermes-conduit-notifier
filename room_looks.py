@@ -325,8 +325,11 @@ def _looks_from(body: Any) -> Optional[dict[str, Any]]:
         if not isinstance(person, dict) or set(person) != {"name", "poster", "look"}:
             continue
         look = look_from(person["look"])
-        name = room_links._checked_name(person["name"]) if isinstance(person["name"], str) else None
-        if look is not None and name == person["name"] and person["poster"] == room_posts.poster(name):
+        if not isinstance(person["name"], str):
+            continue
+        name = room_links._checked_name(person["name"])
+        if look is not None and name is not None and name == person["name"] \
+                and person["poster"] == room_posts.poster(name):
             people.append({"name": name, "poster": person["poster"], "look": look})
     person = look_from(body["person"]) if body["person"] is not None else None
     return {"room_id": body["room_id"], "members": members, "people": people, "person": person}
@@ -383,6 +386,7 @@ class Store:
                 handle.flush()
                 os.fsync(handle.fileno())
             temporary.replace(self.path)
+            room_identity._sync_directory(self.directory)
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
@@ -393,12 +397,21 @@ def _empty() -> dict[str, Any]:
     return {"version": VERSION, "own": {"agents": {}, "person": None}, "rooms": {}, "sent": {}}
 
 
+def _is_look(value: Any, empty: bool = False) -> bool:
+    """A look as this file keeps it (None where `empty`), so a pass never meets one that isn't."""
+    return (empty and value is None) or (value is not None and look_from(value) == value)
+
+
 def _well_formed(state: Any) -> bool:
     return isinstance(state, dict) and state.get("version") == VERSION \
         and isinstance(state.get("own"), dict) and isinstance(state["own"].get("agents"), dict) \
-        and "person" in state["own"] and isinstance(state.get("rooms"), dict) \
+        and all(_is_look(look) for look in state["own"]["agents"].values()) \
+        and _is_look(state["own"].get("person"), empty=True) and isinstance(state.get("rooms"), dict) \
         and all(isinstance(room, dict) and all(
             isinstance(kept, dict) and isinstance(kept.get("members"), dict)
-            and isinstance(kept.get("people"), list) and "person" in kept for kept in room.values())
+            and all(_is_look(look) for look in kept["members"].values())
+            and isinstance(kept.get("people"), list)
+            and all(isinstance(person, dict) and _is_look(person.get("look")) for person in kept["people"])
+            and _is_look(kept.get("person"), empty=True) for kept in room.values())
             for room in state["rooms"].values()) \
         and isinstance(state.get("sent"), dict) and all(isinstance(links, dict) for links in state["sent"].values())
