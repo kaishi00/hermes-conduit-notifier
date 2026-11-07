@@ -4717,3 +4717,23 @@ def test_a_room_report_with_nowhere_to_go_is_kept_on_its_row(on, hermes, room, m
     assert "couldn't be posted" in on.get("W1").error
     assert "ops@example.com/@me" not in room_work.post_text("F", ["- see https://x.io/@me"]) and \
         "https://x.io/@me" in room_work.post_text("F", ["- see https://x.io/@me"])
+
+
+def test_a_send_points_its_reports_at_the_sender_before_it_goes_and_back_if_it_didnt(on, hermes, room, monkeypatch):
+    start()  # W1, from the Bot Chat
+    on.update("W1", status="done")
+    seen = []
+    real = work._deliver
+
+    def deliver(store, broker, w, words, how, kind="send"):
+        # A restart's lost-send notice, or a turn ending first, reads this.
+        seen.append(store.get(w.ref).reply_to)
+        return real(store, broker, w, words, how, kind)
+
+    monkeypatch.setattr(work, "_deliver", deliver)
+    assert call("work_send", {"ref": "W1", "text": "Now the dark one."}, session_id=ROOM_CHAT)["ok"]
+    assert seen[-1]["to"] == "room"
+    on.update("W1", status="done")
+    monkeypatch.setattr(work, "_deliver", lambda *a, **k: {"ok": False, "error": "busy", "note": "x"})
+    assert not call("work_send", {"ref": "W1", "text": "Smaller."})["ok"]
+    assert on.get("W1").reply_to["to"] == "room", "nothing went from the Bot Chat: reports stay the room's"

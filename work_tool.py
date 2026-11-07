@@ -676,12 +676,17 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
         return {"ok": False, "ref": work.ref, "error": "ask", "note": what}
     if name == "work_stop":
         return _stop(store, broker, work)
+    # Its next report goes where it was last sent from: this room, or the Bot
+    # Chat. Set before the send, so a turn that ends first, or a restart's
+    # lost-send notice, reaches whoever sent it; put back if nothing was sent.
+    here = _room_reply(room) if room is not None else {"to": "coordinator", "session": str(session_id).strip()}
+    before = work.reply_to or {}
+    moved = before != here and (room is not None or _in_room(work))
+    if moved:
+        work = store.update(work.ref, reply_to=here) or work
     sent = _send(home, store, broker, work, args, str(session_id), in_room=room is not None)
-    if sent.get("ok"):
-        # Its next report goes where it was last sent from: this room, or the Bot Chat.
-        here = _room_reply(room) if room is not None else {"to": "coordinator", "session": str(session_id).strip()}
-        if (work.reply_to or {}) != here and (room is not None or _in_room(work)):
-            store.update(work.ref, reply_to=here)
+    if moved and not sent.get("ok"):
+        store.update(work.ref, reply_to=before)
     return sent
 
 
