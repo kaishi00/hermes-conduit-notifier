@@ -287,3 +287,29 @@ def test_a_file_missing_a_person_reads_as_empty(rooms):
     file.write_text(json.dumps(state))
 
     assert looks_module.own(rooms.tmp_path / "furina") == {"agents": {}, "person": None}
+
+
+def test_a_member_that_dropped_the_homes_looks_gets_them_again_once_it_sends_its_own(rooms):
+    give(rooms, "furina", {"default": look(color="#111111")})
+    room_id = _started(rooms, links=("link1",))
+    everyone_passes(rooms)
+    # As if Laifu's Hermes had dropped them (an older plugin, or a handler that failed).
+    with looks_module.Store(rooms.tmp_path / "laifu").update() as state:
+        state["rooms"] = {}
+    assert shown(rooms, "laifu", room_id)["members"] == {}
+
+    give(rooms, "laifu", {"default": look(color="#333333")})
+    everyone_passes(rooms, times=3)
+
+    assert shown(rooms, "laifu", room_id)["members"] == {"default": look(color="#111111")}
+    # And no more after that: the member doesn't answer the home's.
+    before = len(looks_sent(rooms))
+    everyone_passes(rooms)
+    assert len(looks_sent(rooms)) == before
+
+
+def test_agents_that_arent_an_object_are_refused(rooms):
+    give(rooms, "furina", {"default": look()})
+    with pytest.raises(looks_module.LooksError):
+        looks_module.put_own(rooms.tmp_path / "furina", {"agents": [], "person": None})
+    assert looks_module.own(rooms.tmp_path / "furina")["agents"] == {"default": look()}

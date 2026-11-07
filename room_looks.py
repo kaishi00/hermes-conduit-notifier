@@ -99,7 +99,8 @@ def put_own(root: Any, body: Any) -> dict[str, Any]:
     or null. It takes the place of what was there; a profile or person without one is drawn as before."""
     if not isinstance(body, dict) or not set(body) <= {"agents", "person"}:
         raise LooksError("bad_looks", "Send {agents: {profile: {picture, color}}, person: {picture, color}}")
-    agents = body.get("agents") or {}
+    agents = body.get("agents")
+    agents = {} if agents is None else agents
     if not isinstance(agents, dict) or len(agents) > MAX_AGENTS:
         raise LooksError("bad_looks", f"Send looks for at most {MAX_AGENTS} profiles")
     kept: dict[str, Any] = {}
@@ -125,6 +126,10 @@ def put_own(root: Any, body: Any) -> dict[str, Any]:
 
 
 # --- In rooms ----------------------------------------------------------------------------------------
+
+
+# What ``sent`` keeps for a Link that ended, so it isn't tried again.
+_GONE = "gone"
 
 
 class Looks:
@@ -156,16 +161,20 @@ class Looks:
             body = _fitted(body)
             digest = _digest(body)
             before = sent.get(room_id, {}).get(link_id)
-            if before == digest:
+            if before in (digest, _GONE):
                 continue
             # The one before it in the id too: looks that change back go again.
             message_id = f"{LOOKS}:" + hashlib.sha256(json.dumps([room_id, before, digest]).encode()).hexdigest()[:32]
             try:
                 self.rooms.send(link_id, LOOKS, body, message_id=message_id)
             except room_links.LinkError as exc:
-                logger.info("Linked Rooms will send room %s's looks over Link %s later (%s)", room_id, link_id,
-                            exc.code)
-                continue
+                if exc.code != "not_linked":
+                    logger.info("Linked Rooms will send room %s's looks over Link %s later (%s)", room_id,
+                                link_id, exc.code)
+                    continue
+                # An ended Link doesn't come back (a new one has a new id): it isn't tried again.
+                logger.info("Linked Rooms stopped sending room %s's looks: Link %s ended", room_id, link_id)
+                digest = _GONE
             with self.store.update() as kept:
                 kept["sent"].setdefault(room_id, {})[link_id] = digest
         rooms = set(state["drafts"]) | {invite["room_id"] for invite in state["invites"].values()}
@@ -184,7 +193,8 @@ class Looks:
         room_id = body["room_id"]
         state = self.rooms.store.read()
         draft = state["drafts"].get(room_id)
-        if draft is not None and draft.get("members") and received.link_id in draft["links"]:
+        home = draft is not None and bool(draft.get("members")) and received.link_id in draft["links"]
+        if home:
             # The home: only the sender's own agents and person.
             theirs = {member["member_id"] for member in draft["members"] if member["link"] == received.link_id}
             kept = {"members": {member_id: look for member_id, look in body["members"].items()
@@ -204,12 +214,19 @@ class Looks:
                                 if member_id in seated}, "people": body["people"], "person": body["person"]}
         with self.store.update() as stored:
             stored["rooms"].setdefault(room_id, {})[received.link_id] = kept
+            if home:
+                # A member's looks say its Hermes takes them now (one that had no room.looks yet, or dropped
+                # the home's): the home's go to it again, under an id of their own. Only the home does this,
+                # so the two never answer each other's.
+                links = stored["sent"].setdefault(room_id, {})
+                if links.get(received.link_id) != _GONE:
+                    links[received.link_id] = f"asked:{received.message_id}"
 
 
 def shown(root: Any, room_id: Any) -> dict[str, Any]:
     """How a room over Links looks from here, for Conduit: ``members``, member id to look, for the agents of
     other installations; ``people``, each other person but the home's, as ``{name, poster, look}`` (``name`` as
-    your Link names them, ``poster`` the name their posts carry); and ``home``, the home's person's look when it
+    the room's home's Link names them, ``poster`` the name their posts carry); and ``home``, the home's person's look when it
     isn't you. Empty for a room this Hermes has no looks for."""
     from . import room_invites
 
