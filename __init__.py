@@ -16,8 +16,8 @@ from hermes_constants import get_hermes_home
 
 from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity,
-               location_tool, maps_tool, notify_tool, phone_tool, present_tool, profile_copies, pulse, reply_sources,
-               review_notices,
+               location_tool, maps_tool, memory_scan, notify_tool, phone_tool, present_tool, profile_copies, pulse,
+               reply_sources, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
                room_wakeups, screen_lock, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
@@ -116,6 +116,10 @@ def register(ctx: Any) -> None:
     # predictions) shares the chat's session id: its turn is never the
     # chat's (forks).
     forks.install()
+    # Hermes' memory provider discovery never parses this plugin's code,
+    # which made each dashboard plugins hub build take seconds, minutes on a
+    # phone (memory_scan, hermes-conduit#1931).
+    memory_scan.install()
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
@@ -726,6 +730,7 @@ def _unload() -> None:
     room_rules.forget()
     review_notices.uninstall()
     forks.uninstall()
+    memory_scan.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
     client.stop(timeout=max(0.0, deadline - time.monotonic()))

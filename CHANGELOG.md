@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.137.2 (2026-11-07)
+
+### Fixes
+- The Hermes dashboard no longer reads all of the plugin's code each time it
+  lists its plugins. That took seconds on a server and minutes on a phone,
+  enough to freeze the dashboard and drop Conduit's connection.
+
 ## 0.137.1 (2026-11-07)
 
 ### Fixes

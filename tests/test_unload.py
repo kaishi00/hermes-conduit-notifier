@@ -337,3 +337,24 @@ def test_the_fork_mark_comes_on_and_off_with_the_plugin(fork_builder, unloaded_p
     unloaded_plugin()
 
     assert fork_builder.build_cache_parity_fork is own
+
+
+@pytest.fixture
+def memory_discovery(monkeypatch):
+    """Hermes' memory provider discovery, as far as memory_scan touches it."""
+    memory = types.ModuleType("plugins.memory")
+    memory._defines_memory_provider = lambda path: False
+    plugins = types.ModuleType("plugins")
+    plugins.__path__ = []
+    plugins.memory = memory
+    monkeypatch.setitem(sys.modules, "plugins", plugins)
+    monkeypatch.setitem(sys.modules, "plugins.memory", memory)
+    return memory
+
+
+def test_the_memory_scan_guard_comes_on_and_off_with_the_plugin(memory_discovery, unloaded_plugin):
+    own = memory_discovery._defines_memory_provider.__wrapped__
+
+    unloaded_plugin()
+
+    assert memory_discovery._defines_memory_provider is own
