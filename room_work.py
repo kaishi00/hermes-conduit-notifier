@@ -107,8 +107,8 @@ def handle_of(room_id: str, home: Path, profile: str) -> str:
 
 
 # A mention in what a workstream reported would give that bot a turn here: only
-# the post's own @mention does. Desktop's @session: references and email addresses stay as they are.
-_MENTION = re.compile(r"(?<![A-Za-z0-9._%+-])@(?!session:)(?=[A-Za-z0-9])")
+# the post's own @mention does. Desktop's @session: references, email addresses and URL paths stay as they are.
+_MENTION = re.compile(r"(?<![A-Za-z0-9._%+/-])@(?!session:)(?=[A-Za-z0-9])")
 
 
 def post_text(handle: str, lines: list[str]) -> str:

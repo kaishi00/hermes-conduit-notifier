@@ -4697,3 +4697,23 @@ def test_a_word_for_word_second_report_is_posted_again(on, hermes, room):
     _finish("20261031_work_1", "Done.")
     first, second = room["posted"]
     assert first["text"] == second["text"] and first["job"]["execution_id"] != second["job"]["execution_id"]
+
+
+def test_a_room_report_a_restart_cut_off_is_posted_again_under_its_key(on, hermes, room, monkeypatch):
+    room_start()
+    item = on.outbox_add("W1", "line_room", "default-W1-abc", "- W1 “Furina wallpaper” finished.")
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    posted, = room["posted"]
+    assert posted["job"]["execution_id"] == "default-W1-abc" and "finished." in posted["text"]
+    assert not [row for row in on.outbox_pending() if row["id"] == item]
+
+
+def test_a_room_report_with_nowhere_to_go_is_kept_on_its_row(on, hermes, room, monkeypatch):
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: "")
+    room["refuse"].add("room-1@default")
+    room_start()
+    _finish("20261031_work_1", "Done.")
+    assert "couldn't be posted" in on.get("W1").error
+    assert "ops@example.com/@me" not in room_work.post_text("F", ["- see https://x.io/@me"]) and \
+        "https://x.io/@me" in room_work.post_text("F", ["- see https://x.io/@me"])

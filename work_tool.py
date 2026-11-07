@@ -2404,6 +2404,15 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         _queue_wake(home, row["target"], row["text"],
                     kind={"line_ask": "ask", "line_call": "call"}.get(kind, "work"), item=row["id"])
         return
+    if kind == "line_room":
+        # A room's report a restart cut off: posted again under its own key,
+        # so a post Hermes already took isn't made twice.
+        work = store.get(row["ref"])
+        if work is None or not _in_room(work):
+            store.outbox_done(row["id"], "dropped")
+            return
+        _report(home, work, row["text"], key=row["target"], item=row["id"])
+        return
     if kind == "continue":
         store.outbox_done(row["id"], "dropped")  # recovery owns it: it decides again from the journal
         return
@@ -4121,10 +4130,13 @@ def _in_room(work: work_store.Work) -> bool:
     return (work.reply_to or {}).get("to") == "room"
 
 
-def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", chat: Optional[str] = None) -> None:
+def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", chat: Optional[str] = None,
+            key: str = "", item: str = "") -> None:
     """A line about a workstream for whoever it reports to: posted in the
     group room it was started from (room_work), else queued for the Bot
-    Chat's work update, as is a room's line that couldn't be posted."""
+    Chat's work update, as is a room's line that couldn't be posted. A
+    room's line is in the outbox until it's posted, so one a restart cut
+    off is posted again (``_replay``), under its own key: the same post."""
     if _in_room(work):
         from . import location_profiles
 
@@ -4132,9 +4144,21 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
         others = [name for name, _ in location_profiles.profile_homes(Path(home)) if name != profile]
         # One post per report: the profiles tried below share its key, so
         # none posts it twice, and a later report, even word for word, is its own.
-        key = f"{profile}-{work.ref}-{uuid.uuid4().hex[:16]}"
+        key = key or f"{profile}-{work.ref}-{uuid.uuid4().hex[:16]}"
+        store = work_store.Store(home)
+        if not item:
+            try:
+                item = store.outbox_add(work.ref, "line_room", key, line)
+            except Exception:  # noqa: BLE001 — posted now all the same
+                logger.debug("conduit_push: couldn't keep a room's work line", exc_info=True)
+                item = ""
         error = room_work.post(work.reply_to, bot=_bot_name(home), key=key, lines=[line],
                                profiles=[profile, *others])
+        if item:
+            try:
+                store.outbox_done(item, "posted" if error is None else "refused")
+            except Exception:  # noqa: BLE001
+                logger.debug("conduit_push: couldn't mark a room's work line", exc_info=True)
         if error is None:
             return
         line += (f" (It was started from a group room, where this couldn't be posted: {_cut(error, 120)}. Tell "
@@ -4142,6 +4166,13 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
     target = chat or work.coordinator or _bot_chat_of(home)
     if target:
         _queue_wake(home, target, line, kind=kind)
+    else:
+        # No room post and no Bot Chat: kept on its row (work_read) and logged.
+        logger.warning("conduit_push: %s's report reached no room and no Bot Chat", work.ref)
+        try:
+            work_store.Store(home).update(work.ref, error=_cut(f"Its report couldn't be posted: {line}", 300))
+        except Exception:  # noqa: BLE001
+            logger.debug("conduit_push: couldn't keep why a report went nowhere", exc_info=True)
 
 
 def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", item: str = "") -> None:
