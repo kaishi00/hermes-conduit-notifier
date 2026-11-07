@@ -2630,7 +2630,8 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
   `number` (within `min` and `max`), each with an `id`, a `label` and a
   starting `value`; six per card. A field whose id or label names a
   password, passcode, PIN, one-time or verification code, token, API,
-  private or recovery key, seed phrase or other secret is refused.
+  private, master or recovery key, passphrase, seed phrase, credentials or
+  other secret is refused.
 - **Taps.** Conduit posts a tap to `POST /boards/taps` (capability
   `card-taps`; `sessions`, the `card` as the chat holds it, the button's
   `action` id and the fields' `values`), then sends the user's message about

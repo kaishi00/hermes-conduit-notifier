@@ -103,7 +103,8 @@ def test_any_card_carries_buttons_and_its_markdown_shows_them():
 
 @pytest.mark.parametrize("name", ["password", "Your Passcode", "api_key", "apiKey", "OTP", "PIN", "card-cvv",
                                   "One time code", "auth token", "client_secret",
-                                  "SSH private key", "Recovery key", "Verification code", "license_key"])
+                                  "SSH private key", "Recovery key", "Verification code", "license_key",
+                                  "Passphrase", "TOTP", "Master key", "App credentials"])
 def test_a_field_never_asks_for_a_secret(name):
     assert card_schema.names_secret(name)
 
@@ -351,3 +352,11 @@ def test_a_taps_note_closes_the_fence_a_mono_element_leaves_open(tmp_path):
     markdown = store.note("s1").split("The card they saw:\n", 1)[1]
     assert not markdown.rstrip("]").rstrip().endswith("\n`````"), "inline code is no fence to close"
     assert card_actions._open_fence("````` a ```` b `````\n```\ncode") == "```"
+
+
+def test_a_turn_with_no_message_leaves_the_taps_waiting(tmp_path):
+    card = {"type": "callout", "callout": {"text": "Due"}, "actions": [{"label": "Go", "action": "tap", "id": "go"}]}
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": card, "action": "go"})
+    assert store.note("s1", None) is None
+    assert store.note("s1", "Go") is not None

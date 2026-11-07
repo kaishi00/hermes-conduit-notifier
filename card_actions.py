@@ -169,7 +169,7 @@ class TapStore:
             state["taps"] = state["taps"][-MAX_TAPS:]
         return {"ok": True, "id": tap["id"]}
 
-    def note(self, session_id: Any, message: Any = None) -> str | None:
+    def note(self, session_id: Any, message: Any = ...) -> str | None:
         """The taps in this chat Hermes hasn't heard yet, once, for the turn
         of the user's message about them (it starts with the button's label):
         another turn in the chat meanwhile (a cron report, a workstream's)
@@ -177,7 +177,14 @@ class TapStore:
         session = _clean(session_id, MAX_SESSION_CHARS)
         if not session:
             return None
-        said = message.strip() if isinstance(message, str) else None
+        if message is ...:
+            said = None
+        elif isinstance(message, str) and message.strip():
+            said = message.strip()
+        else:
+            # A turn with no message of the user's (a cron or workstream turn)
+            # leaves the taps for the message about them.
+            return None
         with self._locked() as state:
             taps = [tap for tap in state["taps"] if tap["session"] == session and not tap["heard"]
                     and (said is None or said.startswith(tap["label"]))]

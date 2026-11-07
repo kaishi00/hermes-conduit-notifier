@@ -419,8 +419,13 @@ function Buttons({ buttons, card, sessionId, values }) {
       if (os?.openExternal) os.openExternal(button.target)
       else window.open(button.target, '_blank', 'noreferrer')
     } else if (button.action === 'copy') {
-      navigator.clipboard?.writeText(button.target)
-      host.notify?.({ kind: 'success', message: 'Copied' })
+      try {
+        if (!navigator.clipboard) throw new Error('no clipboard')
+        await navigator.clipboard.writeText(button.target)
+        host.notify?.({ kind: 'success', message: 'Copied' })
+      } catch {
+        host.notify?.({ kind: 'warning', message: "Couldn't copy" })
+      }
     } else if (button.action === 'send') {
       if (host.composer?.submit?.(sessionId ?? null, button.target) === false) {
         host.notify?.({ kind: 'warning', message: 'Open that chat to send it' })
