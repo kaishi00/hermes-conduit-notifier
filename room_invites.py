@@ -926,7 +926,9 @@ class Rooms:
         if self.starter is not None:
             self._start_ready()
             self.copies.send_pages()
-        # How the started rooms' agents and people look, to the others in them (room_looks).
+        # How the started rooms' agents and people look, to the others in them (room_looks): after the starts
+        # have gone, so a member's Hermes knows the room before its first looks arrive.
+        self.flush()
         self.looks.send_looks()
         self.flush()
         # Notes in the private chats of the rooms elsewhere your agents only listen in (room_chats).

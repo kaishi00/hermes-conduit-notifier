@@ -267,3 +267,23 @@ def test_a_file_holding_a_look_that_isnt_one_reads_as_empty(rooms):
 
     assert looks_module.own(rooms.tmp_path / "furina") == {"agents": {}, "person": None}
     rooms.furina.pass_once()
+
+
+def test_a_one_person_room_gets_the_hosts_looks_given_before_it_started(rooms):
+    give(rooms, "furina", {"default": look(color="#111111")}, person=look(color="#222222"))
+    room_id = _started(rooms, links=("link1",))
+
+    everyone_passes(rooms)
+
+    assert shown(rooms, "laifu", room_id)["home"] == look(color="#222222")
+    assert shown(rooms, "laifu", room_id)["members"] == {"default": look(color="#111111")}
+
+
+def test_a_file_missing_a_person_reads_as_empty(rooms):
+    give(rooms, "furina", {"default": look()})
+    file = rooms.tmp_path / "furina" / "conduit-rooms" / "looks.json"
+    state = json.loads(file.read_text())
+    del state["own"]["person"]
+    file.write_text(json.dumps(state))
+
+    assert looks_module.own(rooms.tmp_path / "furina") == {"agents": {}, "person": None}

@@ -406,12 +406,15 @@ def _well_formed(state: Any) -> bool:
     return isinstance(state, dict) and state.get("version") == VERSION \
         and isinstance(state.get("own"), dict) and isinstance(state["own"].get("agents"), dict) \
         and all(_is_look(look) for look in state["own"]["agents"].values()) \
-        and _is_look(state["own"].get("person"), empty=True) and isinstance(state.get("rooms"), dict) \
+        and "person" in state["own"] and _is_look(state["own"]["person"], empty=True) \
+        and isinstance(state.get("rooms"), dict) \
         and all(isinstance(room, dict) and all(
             isinstance(kept, dict) and isinstance(kept.get("members"), dict)
             and all(_is_look(look) for look in kept["members"].values())
             and isinstance(kept.get("people"), list)
-            and all(isinstance(person, dict) and _is_look(person.get("look")) for person in kept["people"])
-            and _is_look(kept.get("person"), empty=True) for kept in room.values())
+            and all(isinstance(person, dict) and set(person) == {"name", "poster", "look"}
+                    and isinstance(person["name"], str) and isinstance(person["poster"], str)
+                    and _is_look(person["look"]) for person in kept["people"])
+            and "person" in kept and _is_look(kept["person"], empty=True) for kept in room.values())
             for room in state["rooms"].values()) \
         and isinstance(state.get("sent"), dict) and all(isinstance(links, dict) for links in state["sent"].values())
