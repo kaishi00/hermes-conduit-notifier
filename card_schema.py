@@ -507,6 +507,7 @@ MAX_FIELDS = 6
 _SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime", "privatekey", "recoverykey",
                  "licensekey", "seedphrase", "verificationcode", "securitycode", "authcode", "backupcode",
                  "passphrase", "totp", "masterkey", "credential", "2fa", "twofactor", "logincode",
+                 "accesscode", "unlockcode", "securitykey",
                  # The same in the languages Conduit ships, as a model writes labels in the user's.
                  "passwort", "kennwort", "contraseña", "motdepasse", "senha", "пароль", "hasło", "şifre",
                  "katasandi", "パスワード", "暗証番号", "認証コード", "密码", "密碼", "验证码", "驗證碼",

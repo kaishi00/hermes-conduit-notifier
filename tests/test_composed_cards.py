@@ -107,7 +107,7 @@ def test_any_card_carries_buttons_and_its_markdown_shows_them():
                                   "Passphrase", "TOTP", "Master key", "App credentials",
                                   "2FA code", "Two-factor code", "Login code",
                                   "パスワード", "Passwort", "Contraseña", "Mot de passe", "Пароль", "Kata sandi",
-                                  "비밀번호를 입력", "密码"])
+                                  "비밀번호를 입력", "密码", "Access code", "Unlock code", "Security key"])
 def test_a_field_never_asks_for_a_secret(name):
     assert card_schema.names_secret(name)
 
@@ -427,3 +427,12 @@ def test_a_taps_note_cut_inside_a_diff_closes_its_fence(tmp_path):
     markdown = store.note("s1", "Apply · Patch").split("The card they saw:\n", 1)[1].rsplit("]", 1)[0]
     assert len(markdown) <= card_actions.MAX_CARD_MARKDOWN_CHARS
     assert markdown.rstrip().endswith("```") and card_actions._open_fence(markdown) is None
+
+
+def test_a_number_filled_into_a_text_slot_is_shown_as_text():
+    template = {"type": "composed", "title": "Count", "sections": [{"items": [
+        {"kind": "text", "text": "{{count}}"}, {"kind": "progress", "progress": "{{busy}}"}]}]}
+    notes = []
+    card = card_templates.expand_template(template, {"count": 3, "busy": 0.5}, notes, "t")
+    items = card["sections"][0]["items"]
+    assert items[0]["text"] == "3" and items[1]["progress"] == 0.5 and notes == []

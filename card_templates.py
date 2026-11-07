@@ -275,10 +275,10 @@ def _a_kind(value: Any) -> str:
     return "a list" if isinstance(value, list) else "an object" if isinstance(value, dict) else "a value"
 
 
-def _filled(value: Any, fill: dict[str, Any], missing: dict[str, str], prefix: str = "") -> Any:
+def _filled(value: Any, fill: dict[str, Any], missing: dict[str, str], prefix: str = "", key: str = "") -> Any:
     if isinstance(value, str):
         whole = _SLOT.fullmatch(value.strip())
-        if whole and (not prefix or whole.group(1).startswith(prefix)):
+        if whole and key in _NUMBER_KEYS and (not prefix or whole.group(1).startswith(prefix)):
             given = fill.get(whole.group(1))
             # A slot that is the whole value takes a number or true/false as
             # it is (a progress, a min), so it stays one.
@@ -300,9 +300,9 @@ def _filled(value: Any, fill: dict[str, Any], missing: dict[str, str], prefix: s
             return ""
         return _SLOT.sub(put, value)
     if isinstance(value, dict):
-        return {key: _filled(inner, fill, missing, prefix) for key, inner in value.items()}
+        return {inner_key: _filled(inner, fill, missing, prefix, inner_key) for inner_key, inner in value.items()}
     if isinstance(value, list):
-        return [_filled(inner, fill, missing, prefix) for inner in value]
+        return [_filled(inner, fill, missing, prefix, key) for inner in value]
     return value
 
 
