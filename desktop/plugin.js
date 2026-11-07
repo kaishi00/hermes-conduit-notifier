@@ -275,7 +275,7 @@ function Composed({ card, sessionId }) {
   const [open, setOpen] = useState(false)
   const sections = card.sections ?? []
   const folded = sections.some(section => section.more)
-  const set = (id, value) => setValues({ ...values, [id]: value })
+  const set = (id, value) => setValues(current => ({ ...current, [id]: value }))
   return jsxs('div', {
     className: 'flex flex-col gap-2',
     children: [

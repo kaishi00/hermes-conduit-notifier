@@ -2628,10 +2628,10 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
 - **Fields**: `text` (with `lines` and a `placeholder`), `choice` (2 to 6
   `options`), `toggle` (on or off), `date` (YYYY-MM-DD, or with THH:MM) and
   `number` (within `min` and `max`), each with an `id`, a `label` and a
-  starting `value`; six per card. A field whose id or label names a
-  password, passcode, PIN, one-time or verification code, token, API,
-  private, master or recovery key, passphrase, seed phrase, credentials or
-  other secret is refused.
+  starting `value`; six per card. A field whose id, label or placeholder
+  names a password, passcode, PIN, one-time, 2FA, login or verification
+  code, token, API, private, master or recovery key, passphrase, seed
+  phrase, credentials or other secret is refused.
 - **Taps.** Conduit posts a tap to `POST /boards/taps` (capability
   `card-taps`; `sessions`, the `card` as the chat holds it, the button's
   `action` id and the fields' `values`), then sends the user's message about

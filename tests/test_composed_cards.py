@@ -233,12 +233,12 @@ def test_a_tap_is_heard_once_with_the_card_and_its_fields(tmp_path):
                         "values": {"to": "mei@example.com", "subject": "Friday!", "body": "See you",
                                    "unknown": "dropped"}})
     assert answer["ok"] is True
-    note = taps.note("alias-1")
+    note = taps.note("alias-1", "Send · Email to Mei")
     assert '"Send" (tap send) on "Email to Mei" (live name email-mei)' in note
     assert "OK for exactly what the card showed" in note
     assert "subject: Friday!" in note and "unknown" not in note
     assert "### Email to Mei" in note, "the card the user saw"
-    assert taps.note("chat-1") is None, "heard under one id, heard under them all"
+    assert taps.note("chat-1", "Send · Email to Mei") is None, "heard under one id, heard under them all"
 
 
 def test_a_tap_must_name_one_of_the_cards_tap_buttons(tmp_path):
@@ -255,7 +255,7 @@ def test_an_unheard_tap_is_forgotten(tmp_path):
     taps = card_actions.TapStore(tmp_path, clock=lambda: clock[0])
     taps.save({"sessions": ["c"], "card": EMAIL, "action": "discard"})
     clock[0] += card_actions.KEEP_S
-    assert taps.note("c") is None
+    assert taps.note("c", "Discard") is None
 
 
 _api_spec = importlib.util.spec_from_file_location("conduit_plugin_api_taps", ROOT / "dashboard" / "plugin_api.py")
@@ -283,7 +283,7 @@ def test_the_tap_route_keeps_a_tap_for_the_next_turn(route_home):
                                                       "values": {"to": "mei@example.com"}})
     assert response.status_code == 200 and response.json()["ok"] is True
     assert response.headers["cache-control"] == "no-store"
-    assert "tap send" in card_actions.TapStore(route_home).note("chat-1")
+    assert "tap send" in card_actions.TapStore(route_home).note("chat-1", "Send")
     assert http.post(f"{BASE}/boards/taps", json={"sessions": ["chat-1"], "card": EMAIL,
                                                   "action": "x"}).status_code == 400
     assert http.post(f"{BASE}/boards/taps", json=[1]).status_code == 400
@@ -300,7 +300,7 @@ def test_a_taps_note_cuts_a_long_card_at_a_line_and_closes_its_code(tmp_path):
     ], "actions": [{"label": "Go", "action": "tap", "id": "go"}]}
     store = card_actions.TapStore(tmp_path)
     store.save({"sessions": ["s1"], "card": card, "action": "go"})
-    note = store.note("s1")
+    note = store.note("s1", "Go")
     markdown = note.split("The card they saw:\n", 1)[1]
     assert len(markdown) <= card_actions.MAX_CARD_MARKDOWN_CHARS + 1
     assert markdown.count("```") % 2 == 0
@@ -314,7 +314,7 @@ def test_a_taps_note_says_when_part_of_the_card_was_folded(tmp_path):
     ], "actions": [{"label": "Go", "action": "tap", "id": "go"}]}
     store = card_actions.TapStore(tmp_path)
     store.save({"sessions": ["s1"], "card": card, "action": "go"})
-    assert "folded under Show more" in store.note("s1")
+    assert "folded under Show more" in store.note("s1", "Go")
 
 
 def test_a_tap_button_whose_label_isnt_a_plain_message_is_dropped():
@@ -331,7 +331,7 @@ def test_a_taps_number_out_of_bounds_goes_empty(tmp_path):
         "actions": [{"label": "Book", "action": "tap", "id": "book"}]}
     store = card_actions.TapStore(tmp_path)
     store.save({"sessions": ["s1"], "card": card, "action": "book", "values": {"seats": "12"}})
-    assert "seats: (empty)" in store.note("s1")
+    assert "seats: (empty)" in store.note("s1", "Book · Seats")
 
 
 def test_a_tap_waits_for_the_users_message_about_it(tmp_path):
@@ -350,7 +350,7 @@ def test_a_taps_note_closes_the_fence_a_mono_element_leaves_open(tmp_path):
         "actions": [{"label": "Go", "action": "tap", "id": "go"}]}
     store = card_actions.TapStore(tmp_path)
     store.save({"sessions": ["s1"], "card": card, "action": "go"})
-    markdown = store.note("s1").split("The card they saw:\n", 1)[1]
+    markdown = store.note("s1", "Go").split("The card they saw:\n", 1)[1]
     assert not markdown.rstrip("]").rstrip().endswith("\n`````"), "inline code is no fence to close"
     assert card_actions._open_fence("````` a ```` b `````\n```\ncode") == "```"
 
@@ -381,3 +381,44 @@ def test_one_message_hears_one_tap(tmp_path):
     note = store.note("s1", "Send to all · Card")
     assert "(tap b)" in note and "(tap a)" not in note
     assert "(tap a)" in store.note("s1", "Send")
+
+
+def test_a_repeat_section_fills_the_cards_own_slots_too():
+    template = {"type": "composed", "title": "Agenda", "sections": [
+        {"repeat": "events", "items": [{"kind": "text", "text": "{{day}}: {{events.time}} {{events.what}}"}]}]}
+    notes = []
+    card = card_templates.expand_template(template, {"day": "Mon", "events": [{"time": "9", "what": "Vet"}]},
+                                          notes, "t")
+    assert card["sections"][0]["items"][0]["text"] == "Mon: 9 Vet" and notes == []
+
+
+def test_a_slot_the_fill_leaves_out_says_its_element_may_go():
+    template = {"type": "composed", "title": "{{title}}", "sections": [
+        {"items": [{"kind": "text", "text": "{{note}}"}, {"kind": "field", "id": "n", "input": "text",
+                                                         "value": "{{start}}"}]}]}
+    notes = []
+    card_templates.expand_template(template, {"title": "T"}, notes, "t")
+    assert "t.fill.note: not given, left empty (an element left with nothing is left out)" in notes
+
+
+def test_a_field_whose_placeholder_asks_for_a_secret_is_dropped():
+    notes = []
+    cards = card_schema.normalize_cards([{"type": "composed", "title": "Notes", "sections": [{"items": [
+        {"kind": "field", "id": "notes", "input": "text", "placeholder": "Paste your API key"},
+        {"kind": "field", "id": "topic", "input": "text", "placeholder": "What it's about"}]}]}], notes)
+    fields = [item["id"] for item in cards[0]["sections"][0]["items"]]
+    assert fields == ["topic"] and any("never asks for a password" in line for line in notes)
+
+
+def test_a_taps_note_clips_a_card_over_the_cap(tmp_path):
+    card = {"type": "composed", "title": "Form", "sections": [{"items": [
+        {"kind": "field", "id": f"f{n}", "input": "text", "lines": 4, "value": "word " * 390} for n in range(5)]}],
+        "actions": [{"label": "Send", "action": "tap", "id": "send"}]}
+    full = card_schema.fallback_markdown(card_schema.normalize_cards([card], []))
+    assert len(full) > card_actions.MAX_CARD_MARKDOWN_CHARS
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": card, "action": "send"})
+    note = store.note("s1", "Send · Form")
+    assert note and len(note) < len(full)
+    markdown = note.split("The card they saw:\n", 1)[1]
+    assert len(markdown) <= card_actions.MAX_CARD_MARKDOWN_CHARS + 200 and note.endswith("]")

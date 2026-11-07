@@ -531,7 +531,7 @@ def _a(word: str) -> str:
 
 
 def names_secret(text: str) -> bool:
-    """Whether a field's id or label asks for a secret."""
+    """Whether a field's id, label or placeholder asks for a secret."""
     words = _NOT_ALNUM.sub(" ", text.lower()).split()
     joined = "".join(words)
     return any(part in joined for part in _SECRET_PARTS) or bool(_SECRET_WORDS.intersection(words))
@@ -578,7 +578,7 @@ def _element_rules(element: dict[str, Any], controls: _Controls, path: str,
 
 def _field_rules(field: dict[str, Any], controls: _Controls, path: str,
                  notes: list[str] | None) -> dict[str, Any] | None:
-    if names_secret(field["id"]) or names_secret(field.get("label", "")):
+    if any(isinstance(field.get(key), str) and names_secret(field[key]) for key in ("id", "label", "placeholder")):
         _note(notes, f"{path}: a card never asks for a password, code or key, dropped")
         return None
     if field["id"] in controls.fields:

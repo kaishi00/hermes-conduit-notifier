@@ -267,7 +267,7 @@ def expand_template(card: dict[str, Any], fill: dict[str, Any], notes: list[str]
         card["sections"] = drawn
     card = _filled(card, fill, missing)
     for slot in sorted(missing):
-        notes.append(f"{path}.fill.{slot}: not given, left empty")
+        notes.append(f"{path}.fill.{slot}: not given, left empty (an element left with nothing is left out)")
     return card
 
 
