@@ -132,7 +132,8 @@ Any card can carry up to three `actions` at its foot. A button can:
 A tap is the user's OK for exactly what the card showed, nothing more. So
 put on the card what will happen (the recipient, the text, the amount) and
 give a button that sends, buys or deletes a `confirm` question. Fields never
-ask for passwords, codes or keys. Every composed card needs a `live` name
+ask for passwords, PINs, one-time or verification codes, tokens or keys
+(a field named so is dropped). Every composed card needs a `live` name
 when it has a tap button, so you can show the result in its place.
 
 ### An email ready to send

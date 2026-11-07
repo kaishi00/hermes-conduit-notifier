@@ -160,7 +160,7 @@ class TapStore:
         values = _values(body.get("values"), _fields(card))
         tap = {"id": uuid.uuid4().hex, "at": self.clock(), "heard": False, "action": action,
                "label": button["label"], "title": card.get("title", ""), "live": card.get("live", ""),
-               "markdown": card_schema.fallback_markdown([card])[:MAX_CARD_MARKDOWN_CHARS], "values": values}
+               "markdown": _card_markdown(card), "values": values}
         with self._locked() as state:
             for session in sessions:
                 state["taps"].append({**tap, "session": session})
@@ -181,6 +181,21 @@ class TapStore:
                 if tap["id"] in heard:
                     tap["heard"] = True
         return "\n".join(_line(tap) for tap in taps) or None
+
+
+def _card_markdown(card: dict[str, Any]) -> str:
+    """The card's Markdown for the tap's note: cut at a line, a code block
+    the cut lands in closed, and folded sections said to be folded."""
+    text = card_schema.fallback_markdown([card])
+    if len(text) > MAX_CARD_MARKDOWN_CHARS:
+        cut = text[:MAX_CARD_MARKDOWN_CHARS - 4]
+        text = cut[:cut.rfind("\n")] if "\n" in cut else cut
+        if sum(1 for line in text.split("\n") if line.lstrip().startswith("```")) % 2:
+            text += "\n```"
+    if any(section.get("more") for section in card.get("sections", [])):
+        text += ("\n(Part of this card was folded under Show more, so they may not have opened it; its fields "
+                 "went with their starting values unless they changed them.)")
+    return text
 
 
 def _line(tap: dict[str, Any]) -> str:

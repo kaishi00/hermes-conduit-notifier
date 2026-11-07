@@ -102,12 +102,13 @@ def test_any_card_carries_buttons_and_its_markdown_shows_them():
 
 
 @pytest.mark.parametrize("name", ["password", "Your Passcode", "api_key", "apiKey", "OTP", "PIN", "card-cvv",
-                                  "One time code", "auth token", "client_secret"])
+                                  "One time code", "auth token", "client_secret",
+                                  "SSH private key", "Recovery key", "Verification code", "license_key"])
 def test_a_field_never_asks_for_a_secret(name):
     assert card_schema.names_secret(name)
 
 
-@pytest.mark.parametrize("name", ["Spin class", "Subject", "Opinion", "Pinned note", "to", "Topic"])
+@pytest.mark.parametrize("name", ["Spin class", "Subject", "Opinion", "Pinned note", "to", "Topic", "Key dates", "Zip code"])
 def test_ordinary_fields_are_not_secrets(name):
     assert not card_schema.names_secret(name)
 
@@ -288,3 +289,27 @@ def test_the_tap_route_keeps_a_tap_for_the_next_turn(route_home):
 
 def test_card_taps_are_a_capability():
     assert "card-taps" in api.capabilities.ROUTE_CAPABILITIES
+
+
+def test_a_taps_note_cuts_a_long_card_at_a_line_and_closes_its_code(tmp_path):
+    card = {"type": "composed", "title": "Long", "live": "long", "sections": [
+        {"items": [{"kind": "text", "text": "line " * 300, "role": "body"}]},
+        {"items": [{"kind": "text", "text": "\n".join(["code"] * 600), "role": "mono"}]},
+    ], "actions": [{"label": "Go", "action": "tap", "id": "go"}]}
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": card, "action": "go"})
+    note = store.note("s1")
+    markdown = note.split("The card they saw:\n", 1)[1]
+    assert len(markdown) <= card_actions.MAX_CARD_MARKDOWN_CHARS + 1
+    assert markdown.count("```") % 2 == 0
+    assert note.endswith("]")
+
+
+def test_a_taps_note_says_when_part_of_the_card_was_folded(tmp_path):
+    card = {"type": "composed", "title": "Folded", "sections": [
+        {"items": [{"kind": "text", "text": "Shown"}]},
+        {"more": True, "items": [{"kind": "text", "text": "Hidden"}]},
+    ], "actions": [{"label": "Go", "action": "tap", "id": "go"}]}
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": card, "action": "go"})
+    assert "folded under Show more" in store.note("s1")

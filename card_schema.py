@@ -504,7 +504,8 @@ _FIELD_EXTRAS = {"lines": "text", "placeholder": "text", "options": "choice", "m
 MAX_FIELDS = 6
 # What a field may never ask for: the user's secrets go through their own
 # apps, never a card in a chat the model reads.
-_SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime")
+_SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime", "privatekey", "recoverykey",
+                 "licensekey", "seedphrase", "verificationcode", "securitycode", "authcode", "backupcode")
 _SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc"))
 _NOT_ALNUM = re.compile(r"[^0-9a-z]+")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2})?$")
