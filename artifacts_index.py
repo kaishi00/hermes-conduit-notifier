@@ -35,7 +35,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, List, Optional
 from urllib.parse import urlparse
 
 # Rows scanned per window, and the most one request reads before it hands back
@@ -765,10 +765,13 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
         checked.add(path)
         return exists is None or exists(os.path.expanduser(path))
 
+    # The chat's own folder first, then those of the sessions it continues
+    # or that continue it, the most recently active first; after them, the
+    # tops of their git repositories; with no folder recorded at all (or a
+    # store that keeps none), the terminal's.
+    cwds: List[str] = []
+    roots: List[str] = []
     if "cwd" in session_columns:
-        # The chat's own folder first, then those of the sessions it
-        # continues or that continue it, the most recently active first;
-        # after them, the tops of their git repositories.
         repo = "s.git_repo_root" if "git_repo_root" in session_columns else "NULL"
         rows = conn.execute(
             f"SELECT s.id, s.cwd, {repo} FROM sessions s WHERE s.id IN ({marks}) ORDER BY "
@@ -777,13 +780,13 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
         order = [sid for sid in wanted if sid in folders] + [str(row[0]) for row in rows if str(row[0]) not in wanted]
         cwds = [_join_folder(folders[sid][0]) for sid in order]
         roots = [_join_folder(folders[sid][1]) for sid in order]
-        tried = [*cwds, *roots]
-        if not any(cwds) and default_folder:
-            tried.append(_join_folder(default_folder))
-        for folder in dict.fromkeys(f for f in tried if f):
-            candidate = f"{folder}/{suffix}"
-            if found(candidate):
-                return {"path": candidate, "via": "folder"}
+    tried = [*cwds, *roots]
+    if not any(cwds) and default_folder:
+        tried.append(_join_folder(default_folder))
+    for folder in dict.fromkeys(f for f in tried if f):
+        candidate = f"{folder}/{suffix}"
+        if found(candidate):
+            return {"path": candidate, "via": "folder"}
 
     # Only a host that checks each candidate can tell a quoted path from
     # quoted prose that ends in one.
