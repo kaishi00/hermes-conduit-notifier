@@ -188,6 +188,10 @@ class TapStore:
         with self._locked() as state:
             taps = [tap for tap in state["taps"] if tap["session"] == session and not tap["heard"]
                     and (said is None or said.startswith(tap["label"]))]
+            if said is not None and taps:
+                # One message is one tap: the longest label it starts with, the latest
+                # of those, so "Send to all" never hears a waiting "Send" too.
+                taps = [max(taps, key=lambda tap: (len(tap["label"]), tap["at"]))]
             heard = {tap["id"] for tap in taps}
             # A tap kept under each of the chat's ids is heard under them all.
             for tap in state["taps"]:

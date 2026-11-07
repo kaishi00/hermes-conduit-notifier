@@ -360,3 +360,14 @@ def test_a_turn_with_no_message_leaves_the_taps_waiting(tmp_path):
     store.save({"sessions": ["s1"], "card": card, "action": "go"})
     assert store.note("s1", None) is None
     assert store.note("s1", "Go") is not None
+
+
+def test_one_message_hears_one_tap(tmp_path):
+    clock = iter([100.0, 200.0, 300.0, 400.0])
+    store = card_actions.TapStore(tmp_path, clock=lambda: next(clock, 500.0))
+    for label, ident in (("Send", "a"), ("Send to all", "b")):
+        store.save({"sessions": ["s1"], "card": {"type": "callout", "callout": {"text": "x"},
+                    "actions": [{"label": label, "action": "tap", "id": ident}]}, "action": ident})
+    note = store.note("s1", "Send to all · Card")
+    assert "(tap b)" in note and "(tap a)" not in note
+    assert "(tap a)" in store.note("s1", "Send")
