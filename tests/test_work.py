@@ -4967,6 +4967,19 @@ def test_one_answer_acts_once_even_with_two_rows_kept(on, hermes, linked):
     assert not [r for r in store.outbox_pending() if r["kind"] == "room_ask"]
 
 
+def test_a_second_ask_answered_meanwhile_keeps_no_row(on, hermes, linked, monkeypatch):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    stale = present_mod.PresentStore(on.home).exchange(PHONE)["prompts"][-1]
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    # The second identical ask read the prompt before the yes was acted on.
+    monkeypatch.setattr(present_mod.PresentStore, "ask_room_work", lambda self, *a, **k: ({**stale}, False))
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    work.check_asks(on.home)
+    assert [w.title for w in on.list(include_closed=True)] == ["Picnic map"]
+    assert not [r for r in store_mod.Store(on.home).outbox_pending() if r["kind"] == "room_ask"]
+
+
 def test_a_send_to_linked_work_asks_the_owner_too(on, hermes, linked):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     answer(on.home, "confirmed")

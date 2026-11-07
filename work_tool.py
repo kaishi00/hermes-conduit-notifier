@@ -4745,7 +4745,13 @@ def _ask_for_room(home: Path, store: work_store.Store, room: room_work.Room, act
     # phone hears of it: a yes with no row would start nothing.
     failed = ""
     with _ask_lock:  # two identical asks at once keep one row
-        if not any(row["kind"] == "room_ask" and row["target"] == prompt["id"] for row in store.outbox_pending()):
+        # Answered meanwhile (the other ask's row already acted on): no new row, it's answered below.
+        try:
+            prompt = present.room_ask(prompt["id"]) or prompt
+        except OSError:
+            pass
+        if prompt["status"] == "waiting" and not any(
+                row["kind"] == "room_ask" and row["target"] == prompt["id"] for row in store.outbox_pending()):
             try:
                 store.outbox_add(work.ref if work is not None else "", "room_ask", prompt["id"], json.dumps(
                     {"action": action, "title": title, "words": words, "room": room.room_id,
@@ -4901,7 +4907,11 @@ def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id:
 def _tell_room(home: Path, room: room_work.Room, line: str) -> None:
     """A line for the bot's next turn in the room, privately, with a post that wakes it where it's hosted here."""
     store = work_store.Store(home)
-    store.outbox_add("", "line_linked", room.room_id, room_rules.scrub(line))
+    try:
+        store.outbox_add("", "line_linked", room.room_id, room_rules.scrub(line))
+    except (OSError, sqlite3.Error) as error:
+        # What was done stands; the work's next report reaches the room again.
+        logger.info("conduit_push: a Linked Room's private line couldn't be kept (%s)", type(error).__name__)
     if room.side == "home" and room.handle:
         profile = work_broker.profile_of(home)
         error = room_work.post(_room_reply(room), bot=_bot_name(home),
