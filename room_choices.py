@@ -89,13 +89,16 @@ class RoomChoices:
     custom_tools: tuple[str, ...] = ()
     share: str = "ask"
     search_chats: bool = False
+    # Run work (Eric 2026-11-07): it may start workstreams for the room, each
+    # start asking its owner first. Off unless the owner turns it on.
+    run_work: bool = False
     takes_part: str = "joins"
     daily_limit: int = 40
     note: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {"tools": self.tools, "custom_tools": list(self.custom_tools), "share": self.share,
-                "search_chats": self.search_chats, "takes_part": self.takes_part,
+                "search_chats": self.search_chats, "run_work": self.run_work, "takes_part": self.takes_part,
                 "daily_limit": self.daily_limit, "note": self.note}
 
 
@@ -123,6 +126,10 @@ def choices_from(value: Any, base: Optional[RoomChoices] = None) -> RoomChoices:
         if not isinstance(value["search_chats"], bool):
             raise ChoicesError("search_chats is true or false")
         changes["search_chats"] = value["search_chats"]
+    if "run_work" in value:
+        if not isinstance(value["run_work"], bool):
+            raise ChoicesError("run_work is true or false")
+        changes["run_work"] = value["run_work"]
     if "takes_part" in value:
         changes["takes_part"] = _one_of(value["takes_part"], TAKES_PART, "takes_part")
     if "daily_limit" in value:

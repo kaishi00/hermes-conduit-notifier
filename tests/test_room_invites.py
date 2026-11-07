@@ -2385,7 +2385,8 @@ def test_the_cli_shows_the_choices_your_agent_would_join_with(commands, capsys):
     assert room_id in picnic[0]
     # Its last room with the same people's, as the join card's.
     assert picnic[3:] == ["  default would join with:", "    Can do: Talk only", "    Shares: asks you first",
-                          "    Searches your past chats: no", "    Takes part: when asked", "    Turns a day: 12"]
+                          "    Searches your past chats: no", "    Runs work: no", "    Takes part: when asked",
+                          "    Turns a day: 12"]
 
 
 def test_the_cli_starts_a_room_now_and_takes_one_back(commands, capsys, monkeypatch):

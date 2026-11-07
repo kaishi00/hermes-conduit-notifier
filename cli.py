@@ -180,6 +180,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     rooms.add_argument("--share", choices=["helps", "ask", "nothing"],
                        help="what it may share about you: what helps, ask you first, or nothing personal")
     rooms.add_argument("--search", choices=["on", "off"], help="whether it may search your past chats")
+    rooms.add_argument("--work", choices=["on", "off"],
+                       help="whether it may start work for the room (it asks you before each start)")
     rooms.add_argument("--takes-part", dest="takes_part", choices=["joins", "asked", "listens"],
                        help="joins in, only when asked, or listens only")
     rooms.add_argument("--limit", type=int, help="its turns a day in the room")
@@ -809,6 +811,8 @@ def _rooms(args: argparse.Namespace) -> int:
                 changes[field] = value
         if args.search is not None:
             changes["search_chats"] = args.search == "on"
+        if getattr(args, "work", None) is not None:
+            changes["run_work"] = args.work == "on"
         if not changes:
             print("Name a choice to set, for example: hermes conduit-push rooms set --room <id> --tools look")
             return 2
@@ -1555,6 +1559,7 @@ def _print_room_choices(label: str, choices: Any, indent: str = "") -> None:
     print(f"{indent}  Can do: {_printable(tools)}")
     print(f"{indent}  Shares: {_ROOM_SHARE.get(choices.share, choices.share)}")
     print(f"{indent}  Searches your past chats: {'yes' if choices.search_chats else 'no'}")
+    print(f"{indent}  Runs work: {'yes, asking you before each start' if choices.run_work else 'no'}")
     print(f"{indent}  Takes part: {_ROOM_TAKES_PART.get(choices.takes_part, choices.takes_part)}")
     print(f"{indent}  Turns a day: {choices.daily_limit}")
     if choices.note:

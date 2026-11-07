@@ -60,8 +60,8 @@ def test_a_room_without_choices_gets_the_defaults(tmp_path):
     choices = ChoicesStore(tmp_path).get(ROOM)
     assert choices == RoomChoices()
     assert choices.as_dict() == {
-        "tools": "talk", "custom_tools": [], "share": "ask", "search_chats": False, "takes_part": "joins",
-        "daily_limit": 40, "note": ""}
+        "tools": "talk", "custom_tools": [], "share": "ask", "search_chats": False, "run_work": False,
+        "takes_part": "joins", "daily_limit": 40, "note": ""}
     # Reading writes nothing.
     assert not (tmp_path / choices_module.FILE_NAME).exists()
 

@@ -3657,6 +3657,18 @@ for rooms with none of their own:
   in the room.
 - **Search my past chats**: off by default; `session_search` is blocked
   unless it's on.
+- **Run work** (plugin 0.137+): off by default. When it's on, the agent can
+  start work for the room with `conduit_room_work` (in `conduit_rooms`, so
+  a room hosted elsewhere has it too), and each start, and each message to
+  that work, asks your phone first: Start, Change it (start with your words)
+  or Don't start. Unanswered within 30 seconds, it waits for your answer,
+  and a yes later starts it by itself. The room sees only its own work.
+  What the work reports reaches the agent privately at the start of its next
+  turn in the room (credential-shaped text removed), with a post that
+  mentions it where this Hermes hosts the room, and your Bot Chat hears it
+  too. The work itself can't write memory or skills, message anyone, or
+  change Conduit's settings. Only a Conduit that shows a room's work asks
+  (`room-work`) gets one.
 - **What it may share**: what helps, ask you first (the default) or nothing
   personal. With ask you first, the agent asks your phone before it shares
   something personal (plugin 0.118+, see Ask me first below). The agent is told, every room turn, along with who's asking (in a
@@ -3935,7 +3947,7 @@ It changes only what needs it:
   Conduit's own tools (`conduit`) are never in it, nor toolsets whose every
   tool rooms never allow (memory, running code, delegation, scheduled jobs).
   Conduit's room tools (`conduit_rooms`, with Ask me first's
-  `conduit_ask_owner` and Use my data's `conduit_free_busy`) are always in it, and aren't one of the choices: the
+  `conduit_ask_owner`, Use my data's `conduit_free_busy` and Run work's `conduit_room_work`) are always in it, and aren't one of the choices: the
   room rules let each through per room (plugin 0.118+). A ceiling saved
   before then gets them on the next setup, which counts as a change.
   If the API server was already on, for Open WebUI say, the ceiling is also
