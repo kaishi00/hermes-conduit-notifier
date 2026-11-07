@@ -54,7 +54,8 @@ SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "One short spoken sentence: why you're calling and the news, said first when they "
-                    "answer (for example \"The deploy finished, and two tests failed.\"). Up to 200 characters."
+                    "answer, so never tell them to pick up or that you'll tell them more (for example \"The deploy "
+                    "finished, and two tests failed.\"). Up to 200 characters."
                 ),
             },
             "asked_by_user": {

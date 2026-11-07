@@ -16,9 +16,9 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.134.10 (2026-11-07)
 
 ### Fixes
-- A call could open with "pick up and I'll tell you more", which is nonsense
-  to hear because that sentence plays once you have already answered. The
-  call now says the news itself in that first sentence.
+- A call could open with "pick up and I'll tell you more", which makes no
+  sense once you've answered. The call now says the news itself in that
+  first sentence.
 
 ## 0.134.9 (2026-11-06)
 
