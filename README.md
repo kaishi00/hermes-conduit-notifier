@@ -1518,7 +1518,9 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   plugin turned it off in, so a turn you start there yourself asks too. A
   resolved workstream, or a change made with `--approvals`, turns back at
   its next turn through Conduit.
-- Strict leaves the coordinator the work tools, `clarify` and `memory`;
+- Strict leaves the coordinator the work tools, `clarify`, `memory` and
+  `conduit_show` (its cards are its own: a workstream's would show in the
+  workstream's chat, not the Bot Chat);
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
   health, location and inbox). `message_agent` is refused there in favour of
   `work_ask`.

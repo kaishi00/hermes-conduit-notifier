@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.137.6 (2026-11-07)
+
+### Fixes
+- A bot with workstreams on couldn't show cards in its Bot Chat: asked for
+  a card, it started a workstream, whose card showed only in the
+  workstream's own chat. The Bot Chat now draws its own cards.
+- A Bot Chat looking something up couldn't read the rest of a long web page
+  it had just fetched, so it answered from the start of the page.
+- A chat open in Conduit on two devices at once didn't get Conduit's cards
+  (the weather, a plan, a chart) or know which device sent the message, so
+  answers came as plain text.
+
 ## 0.137.5 (2026-11-07)
 
 ### Fixes
