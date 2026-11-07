@@ -4949,6 +4949,57 @@ def test_a_send_to_linked_work_asks_the_owner_too(on, hermes, linked):
     assert [c for c in hermes.calls if "Add the toilets." in str(c[1])]
 
 
+def test_a_rooms_send_brings_the_reports_back_to_the_room(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    on.update("W1", status="done", reply_to={"to": "coordinator", "session": BOT_CHAT})
+    room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    assert on.get("W1").reply_to["to"] == "room" and on.get("W1").reply_to["linked"] is True
+
+
+def test_a_send_to_work_still_starting_asks_nobody(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    on.update("W1", status="starting")
+    refused = room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    assert refused["error"] == "starting"
+    assert present_mod.PresentStore(on.home).exchange(PHONE)["prompts"] == []
+
+
+def test_a_late_yes_for_work_thats_gone_tells_the_room(on, hermes, linked):
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    on.update("W1", status="done")
+    room_work_call({"action": "send", "ref": "W1", "text": "Add the toilets."})
+    answer(on.home, "confirmed")
+    real_get = work.work_store.Store.get
+    work.work_store.Store.get = lambda self, ref: None
+    try:
+        work.check_asks(on.home)
+    finally:
+        work.work_store.Store.get = real_get
+    assert any("that work is gone" in line for line in private_lines(on.home))
+
+
+def test_a_yes_the_watcher_took_during_the_wait_is_the_tools_answer(on, hermes, linked, monkeypatch):
+    real_wait = work._wait_for_owner
+
+    def watcher_took_it(present, prompt):
+        answer(on.home, "confirmed")
+        work.check_asks(on.home)  # the watcher, inside the tool's wait
+        return real_wait(present, prompt)
+
+    monkeypatch.setattr(work, "_wait_for_owner", watcher_took_it)
+    monkeypatch.setattr(work, "ROOM_ASK_WAIT_S", 1)
+    started = room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map the shade."})
+    assert started["ok"] and started["ref"] == "W1" and "Your owner said yes" in started["note"]
+
+
 def test_linked_work_reports_privately_and_the_bot_chat_hears_it(on, hermes, linked, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
@@ -4989,7 +5040,7 @@ def test_linked_work_never_saves_to_memory_or_messages_anyone(on, hermes, linked
     answer(on.home, "confirmed")
     work.check_asks(on.home)
     session = on.get("W1").session_id
-    for tool in ("memory", "skill_manage", "send_message", "conduit_settings"):
+    for tool in ("memory", "skill_manage", "send_message", "conduit_settings", "delegate_task"):
         assert work.tool_block(session, tool)["message"] == work.LINKED_WORKER_BLOCK, tool
     assert work.tool_block(session, "terminal") is None
     assert work.tool_block(session, "tool_call", {})["message"] == work.LINKED_WORKER_BLOCK

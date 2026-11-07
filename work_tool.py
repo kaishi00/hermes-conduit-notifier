@@ -202,7 +202,7 @@ ROOM_BRIEF = ("\n\n{bot} started this from a group room with the user's bots, an
 LINKED_BRIEF = ("\n\n{bot} started this for a Linked Room, a group room with other people's agents in it, and the "
                 "user OKd these instructions on their phone. Do only what they say: anything more the room asks for "
                 "goes back through {bot}, and the user OKs it too. Nothing from this work is saved to memory or "
-                "skills (those tools are off here). What you report reaches {bot} privately, and {bot} shares with "
+                "skills, and it isn't handed to a helper (those tools are off here). What you report reaches {bot} privately, and {bot} shares with "
                 "the room only what the user's rules for it allow.")
 # A work link is Conduit's link, then Hermes Desktop's @session reference
 # (_link). A model that writes the link in its own words drops the second,
@@ -2796,7 +2796,7 @@ def _allowed(called: str, called_args: Any, allowed: frozenset) -> bool:
 
 
 def _linked_worker_block(session_id: Any, home: Path, name: str, names: list[str]) -> Optional[dict[str, str]]:
-    """A Linked Room's workstream never saves to memory or skills, messages anyone or changes settings
+    """A Linked Room's workstream never saves to memory or skills, messages anyone, delegates or changes settings
     (LINKED_WORKER_NEVER), a bridged call naming nothing readable included."""
     bridged_blind = name == "tool_call" and (not names or any(called in BRIDGE for called in names))
     if not (bridged_blind or LINKED_WORKER_NEVER.intersection(names)):
@@ -4427,6 +4427,10 @@ def stop() -> None:
         _redirecting.clear()
         _screen_watchers.clear()
         _screen_generation[0] += 1
+    with _ask_lock:
+        _ask_generation[0] += 1
+        _ask_watchers.clear()
+        _acted.clear()
     for _, timer in pending:
         if timer is not None:
             timer.cancel()
@@ -4532,7 +4536,7 @@ def _ago(when: float) -> str:
 # Don't start. Unanswered in a little while, the ask waits, and a yes later starts it by itself (_watch_asks).
 # The room sees only its own work, and what the work reports reaches the bot privately, at the start of its next
 # turn in the room (frame_room), with a post that @mentions it where the room is hosted here; the Bot Chat hears
-# it too. The worker can't write memory or skills, nor message or call anyone (tool_block).
+# it too. The worker can't write memory or skills, delegate, nor message or call anyone (tool_block).
 
 ROOM_WORK_TOOL = room_rules.WORK_TOOL
 ROOM_WORK_TOOLSET = "conduit_rooms"
@@ -4543,9 +4547,11 @@ ROOM_WORK_ACTIONS = {"start": "work_start", "list": "work_list", "read": "work_r
 LINKED_WORKER_NEVER = frozenset({
     "memory", "skill_manage", "send_message", "message_agent", "react_to_message", "cronjob", "cronjob_manage",
     "conduit_call_user", "conduit_call_watch", "conduit_settings", "conduit_room",
+    # A helper's chat isn't this work's, so the limits wouldn't follow it.
+    "delegate_task",
 })
 LINKED_WORKER_BLOCK = ("Blocked: this work is for a Linked Room, a group room with other people's agents, so it "
-                       "doesn't save to memory or skills, message anyone or change settings. Do the task and "
+                       "doesn't save to memory or skills, message anyone, hand it to a helper or change settings. Do the task and "
                        "report it; your bot passes on what the user's rules for the room allow.")
 # How long the tool waits for the owner's answer: a room turn holds the room meanwhile.
 ROOM_ASK_WAIT_S = 30
@@ -4680,6 +4686,10 @@ def _room_work(args: dict, session_id: Any) -> dict:
     if name == "work_stop":
         stopped = _stop(store, broker, work)
         return {key: stopped[key] for key in ("ok", "ref", "title", "status", "error", "note") if key in stopped}
+    if work.status == "starting" or not work.session_id:
+        # Refused before the owner is asked: a yes couldn't send it yet.
+        return {"ok": False, "ref": work.ref, "error": "starting",
+                "note": f"{work.ref} is still being started. Send it this once it's running."}
     return _ask_for_room(home, store, room, "send", args, work)
 
 
@@ -4733,7 +4743,7 @@ def _ask_for_room(home: Path, store: work_store.Store, room: room_work.Room, act
     if prompt["status"] == "waiting":
         _watch_asks(home)
         return {"ok": True, "status": "waiting", "note": _ASK_NOTES[action]["waiting"]}
-    return _answered(home, store, present, prompt["id"], tool_turn=True) or {
+    return _answered(home, store, present, prompt["id"], tool_turn=True) or _acted.pop(prompt["id"], None) or {
         "ok": False, "error": "answered", "note": "Your owner answered that already; nothing more was done."}
 
 
@@ -4762,12 +4772,25 @@ def _wait_for_owner(present: Any, prompt: dict) -> dict:
 
 
 _ask_lock = threading.Lock()
+# What the watcher did with an answer while the tool's own wait ran (by prompt id), for the tool's result.
+_acted: dict[str, dict] = {}
 
 
 def _answered(home: Path, store: work_store.Store, present: Any, prompt_id: str, tool_turn: bool = False
               ) -> Optional[dict]:
     """Acts on the owner's answer to a room's work ask, once: a yes starts the work (or sends to it), with the
     owner's words when they changed them. The result, or None when it was acted on already."""
+    result = _act_on_answer(home, store, present, prompt_id, tool_turn)
+    if result is not None and not tool_turn:
+        with _ask_lock:
+            _acted[prompt_id] = result
+            while len(_acted) > 64:
+                _acted.pop(next(iter(_acted)))
+    return result
+
+
+def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id: str, tool_turn: bool
+                   ) -> Optional[dict]:
     with _ask_lock:
         rows = [row for row in store.outbox_pending() if row["kind"] == "room_ask" and row["target"] == prompt_id]
         if not rows:
@@ -4819,8 +4842,23 @@ def _answered(home: Path, store: work_store.Store, present: Any, prompt_id: str,
     else:
         work = store.get(row["ref"])
         if work is None:
-            return {"ok": False, "error": "no_such", "note": "That work is gone, so nothing was sent."}
-        result = _send(home, store, broker, work, {"text": words, "how": "auto"}, _bot_chat_of(home), in_room=True)
+            gone = {"ok": False, "error": "no_such", "note": "That work is gone, so nothing was sent."}
+            if not tool_turn:
+                _tell_room(home, room, f"- Your owner OK'd sending to {row['ref'] or 'your work'}, but that work "
+                                       "is gone, so nothing was sent.")
+            return gone
+        # Its next report comes back to this room, as work_send's does; put back if nothing was sent.
+        here, before = _room_reply(room), work.reply_to or {}
+        moved = before != here
+        if moved:
+            work = store.update(work.ref, reply_to=here) or work
+        result = {}
+        try:
+            result = _send(home, store, broker, work, {"text": words, "how": "auto"}, _bot_chat_of(home),
+                           in_room=True)
+        finally:
+            if moved and not result.get("ok"):
+                store.update(work.ref, reply_to=before)
         shown = {key: result[key] for key in ("ok", "ref", "title", "status", "error") if key in result}
         shown["note"] = (f"Your owner said yes{' with their own words' if status == 'edit' else ''}: sent to "
                          f"{work.ref}." if result.get("ok") else
@@ -4844,6 +4882,8 @@ def _tell_room(home: Path, room: room_work.Room, line: str) -> None:
 
 
 _ask_watchers: dict[str, Any] = {}
+# Bumped when the plugin unloads: a watcher of an older load stops, and the next load's re-arms.
+_ask_generation = [0]
 
 
 def _watch_asks(home: Path) -> None:
@@ -4854,9 +4894,13 @@ def _watch_asks(home: Path) -> None:
         if key in _ask_watchers and _ask_watchers[key].is_alive():
             return
 
+        generation = _ask_generation[0]
+
         def watch() -> None:
             while True:
                 time.sleep(ROOM_ASK_POLL_S)
+                if generation != _ask_generation[0]:
+                    return
                 try:
                     if not check_asks(home):
                         return

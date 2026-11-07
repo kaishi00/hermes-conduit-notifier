@@ -3666,8 +3666,8 @@ for rooms with none of their own:
   What the work reports reaches the agent privately at the start of its next
   turn in the room (credential-shaped text removed), with a post that
   mentions it where this Hermes hosts the room, and your Bot Chat hears it
-  too. The work itself can't write memory or skills, message anyone, or
-  change Conduit's settings. Only a Conduit that shows a room's work asks
+  too. The work itself can't write memory or skills, message anyone, hand
+  the task to a helper, or change Conduit's settings. Only a Conduit that shows a room's work asks
   (`room-work`) gets one.
 - **What it may share**: what helps, ask you first (the default) or nothing
   personal. With ask you first, the agent asks your phone before it shares
