@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -99,8 +100,13 @@ def handle_of(room_id: str, home: Path, profile: str) -> str:
     return ""
 
 
+# A mention in what a workstream reported would give that bot a turn here: only
+# the post's own @mention does. Desktop's @session: references stay as they are.
+_MENTION = re.compile(r"@(?!session:)(?=[A-Za-z0-9])")
+
+
 def post_text(handle: str, lines: list[str]) -> str:
-    body = "\n".join(lines)
+    body = _MENTION.sub("@\u200b", "\n".join(lines))
     text = POST.format(handle=handle, lines=body)
     if len(text) > MAX_POST_CHARS:
         cut = max(0, len(body) - (len(text) - MAX_POST_CHARS) - 1)

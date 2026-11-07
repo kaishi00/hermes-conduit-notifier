@@ -257,7 +257,9 @@ SCHEMAS: dict[str, dict] = {
         "name": "work_send",
         "description": ("Send a follow-up, a correction or more to do into one of your workstreams. how: auto "
                         "(default: a new turn when it's idle, redirects it when it's working), add (adds to the turn "
-                        "it's working on without changing direction) or after (queued until it's done)."),
+                        "it's working on without changing direction) or after (queued until it's done). Its next report "
+                        "goes where you send from: sent from a group room, it's posted in that room; from your Bot "
+                        "Chat, it comes back there."),
         "parameters": {"type": "object", "properties": {
             "ref": _REF_SCHEMA,
             "text": {"type": "string", "description": "What to tell it."},

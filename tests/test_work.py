@@ -4680,3 +4680,9 @@ def test_the_apps_row_names_the_room_its_work_reports_to(on, hermes, room):
 def test_a_room_post_is_cut_to_fit():
     text = room_work.post_text("Furina", ["- " + "x" * 9000])
     assert len(text) <= room_work.MAX_POST_CHARS and text.startswith("@Furina ") and "…" in text
+
+
+def test_a_reports_own_mentions_give_no_bot_a_turn():
+    text = room_work.post_text("Furina", ["- W1 done: ask @Nahida next [Open W1](conduit://x) @session:default/abc"])
+    assert text.startswith("@Furina ") and "@\u200bNahida" in text and "@Nahida" not in text
+    assert "@session:default/abc" in text
