@@ -4,6 +4,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
 import types
 
 import pytest
@@ -1114,3 +1115,86 @@ def test_a_forced_restart_systemd_ran_keeps_its_slot(monkeypatch):
     with pytest.raises(api.self_update.HTTPException) as second:
         asyncio.run(api.self_update.post_gateway_restart_now(response, force=True))
     assert second.value.status_code == 429
+
+
+_ROOT_REFUSAL_LOG = ("\n=== gateway-restart started 2026-11-07 19:49:46 ===\nTraceback (most recent call last):\n"
+                     "ValueError: Refusing to install the gateway system service as root; pass --run-as-user root "
+                     "to override (e.g. in LXC containers)\n")
+
+
+def _fake_root_unit_host(monkeypatch, tmp_path, log_text, scope=True, euid=0):
+    """A host whose gateway systemd runs as a root system unit, with Hermes' restart log."""
+    _fake_gateway_cli(monkeypatch, scope=scope)
+    gateway = types.ModuleType("hermes_cli.web_server_gateway")
+    gateway._ACTION_LOG_DIR = tmp_path
+    gateway._ACTION_LOG_FILES = {"gateway-restart": "gateway-restart.log"}
+    (tmp_path / "gateway-restart.log").write_text(log_text)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_gateway", gateway)
+    monkeypatch.setattr(api.self_update.os, "geteuid", lambda: euid, raising=False)
+    ran = []
+
+    def run(command, **kwargs):
+        ran.append(command)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(api.self_update.subprocess, "run", run)
+    return ran
+
+
+def _failing_restart_steps(monkeypatch):
+    plugins_cmd = types.ModuleType("hermes_cli.plugins_cmd")
+    plugins_cmd.dashboard_update_user_plugin = lambda name: {"ok": True}
+    web_server = types.ModuleType("hermes_cli.web_server")
+    web_server._spawn_gateway_restart = lambda profile=None, *, interrupt=False: (
+        types.SimpleNamespace(wait=lambda timeout: 1), False)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins_cmd", plugins_cmd)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", web_server)
+    return api.self_update._hermes_update_steps()[1]
+
+
+def test_a_restart_hermes_refuses_on_a_root_system_unit_goes_through_systemd(monkeypatch, tmp_path):
+    # Eric's App Review host (2026-11-07): Hermes' restart died on its install check, so the
+    # update pulled the plugin and never restarted the gateway.
+    ran = _fake_root_unit_host(monkeypatch, tmp_path, "=== gateway-restart started earlier ===\nok\n" + _ROOT_REFUSAL_LOG)
+    restart_gateway = _failing_restart_steps(monkeypatch)
+    assert restart_gateway() == 0
+    assert ran == [["systemctl", "restart", "--no-block", "hermes-gateway"]]
+
+
+def test_a_restart_that_failed_otherwise_still_fails(monkeypatch, tmp_path):
+    ran = _fake_root_unit_host(monkeypatch, tmp_path, _ROOT_REFUSAL_LOG + "\n=== gateway-restart started later ===\n"
+                                                      "✗ Gateway service restart failed.\n")
+    restart_gateway = _failing_restart_steps(monkeypatch)
+    assert restart_gateway() == 1 and ran == []
+
+
+def test_the_root_refusal_falls_back_only_for_a_root_system_unit(monkeypatch, tmp_path):
+    for scope, euid in ((False, 0), (True, 1000)):
+        ran = _fake_root_unit_host(monkeypatch, tmp_path, _ROOT_REFUSAL_LOG, scope=scope, euid=euid)
+        restart_gateway = _failing_restart_steps(monkeypatch)
+        assert restart_gateway() == 1 and ran == []
+
+
+def test_a_systemd_that_refuses_the_fallback_leaves_the_restart_failed(monkeypatch, tmp_path):
+    _fake_root_unit_host(monkeypatch, tmp_path, _ROOT_REFUSAL_LOG)
+    monkeypatch.setattr(api.self_update.subprocess, "run",
+                        lambda command, **kwargs: types.SimpleNamespace(returncode=1, stdout="", stderr="denied"))
+    restart_gateway = _failing_restart_steps(monkeypatch)
+    assert restart_gateway() == 1
+
+
+def test_a_restart_left_to_run_falls_back_when_it_ends_on_the_root_refusal(monkeypatch, tmp_path):
+    ran = _fake_root_unit_host(monkeypatch, tmp_path, _ROOT_REFUSAL_LOG)
+    done = threading.Event()
+    original = api.self_update.restart_after_root_refusal
+
+    def fallback():
+        try:
+            return original()
+        finally:
+            done.set()
+
+    monkeypatch.setattr(api.self_update, "restart_after_root_refusal", fallback)
+    api.self_update.watch_restart_for_root_refusal(types.SimpleNamespace(wait=lambda: 1))
+    assert done.wait(5)
+    assert ran == [["systemctl", "restart", "--no-block", "hermes-gateway"]]

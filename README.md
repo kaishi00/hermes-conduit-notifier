@@ -4640,6 +4640,12 @@ while it runs:
   finishes it (up to two hours, then the update reports the restart
   failed), rather than failing after three minutes. A dashboard
   restarted during the wait restarts the gateway itself and ends the job.
+- Where systemd runs the gateway as root from a system unit with no `User=`
+  line (an LXC host, say), Hermes' own `hermes gateway restart` stops with
+  "Refusing to install the gateway system service as root" before it
+  restarts anything. When its log ends that way, the plugin restarts the
+  gateway with `systemctl restart --no-block` instead, for this update and
+  for Linked Rooms setup's restart (from 0.137.4).
 - `GET /api/plugins/conduit_push/self/gateway-work` names what a gateway
   restart waits on, for this update and for one Conduit runs itself (Restart
   Gateway in Settings, or an update on an older host): `{ok, units, count,
