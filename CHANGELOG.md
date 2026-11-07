@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.137.3 (2026-11-07)
+
+### Fixes
+- A bot that wrote a link to its work in its own words (Zhongli's "W7:
+  Provision the LXC") showed a plain link in its Bot Chat instead of the work
+  card. The plugin now puts the link back as Conduit and Hermes Desktop read
+  it.
+
 ## 0.137.2 (2026-11-07)
 
 ### Fixes

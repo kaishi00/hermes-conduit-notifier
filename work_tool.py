@@ -56,7 +56,7 @@ import types
 from pathlib import Path
 from typing import Any, Callable, Optional
 import uuid
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from . import room_rules, room_work, screen_lock, work_broker, work_store, work_trees
 
@@ -914,6 +914,45 @@ def _link(ref: str, session_id: str, profile: Any) -> str:
 
 _DESKTOP_ID = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_.:-]{0,126}[A-Za-z0-9_])?")
 _DESKTOP_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+
+# A Markdown link to a chat in Conduit, whatever its words: group 1 the label,
+# group 2 the session id as written.
+_APP_LINK = re.compile(r"\[([^\]\n]*)\]\(conduit://session/([^)?\s]+)(?:\?[^)\s]*)?\)")
+
+
+def mend_links(text: Any, home: Optional[Path] = None) -> Optional[str]:
+    """A reply with each link to one of this bot's workstreams put back as
+    ``_link`` writes it, else None. A bot that words the link its own way
+    ("[W7: Provision the LXC](conduit://session/…)", Zhongli 2026-11-07)
+    gets no work card in Conduit, which reads "[Open W7](…)": the rule asks
+    for it as written, and this holds it when a model doesn't. Desktop's
+    @session reference goes after it when the bot left it out; one it wrote
+    stays. A link to any other chat stays as written."""
+    if not isinstance(text, str) or "conduit://session/" not in text:
+        return None
+    store = _store(home)
+    if store is None:
+        return None
+    profile = work_broker.profile_of(home or _home())
+    out: list[str] = []
+    last = 0
+    changed = False
+    for match in _APP_LINK.finditer(text):
+        try:
+            work = store.by_session(unquote(match.group(2)))
+        except (sqlite3.Error, OSError):
+            return None
+        if work is None or not work.session_id:
+            continue
+        full = _link(work.ref, work.session_id, (work.executor or {}).get("bot") or profile)
+        link, desktop, reference = full.partition(" @session:")
+        after = text[match.end():].lstrip(" \t")
+        mended = link + (desktop + reference if desktop and not after.startswith("@session:") else "")
+        if mended != match.group(0):
+            out.append(text[last:match.start()] + mended)
+            last = match.end()
+            changed = True
+    return "".join(out) + text[last:] if changed else None
 
 
 def _list(store: work_store.Store, args: dict) -> dict:

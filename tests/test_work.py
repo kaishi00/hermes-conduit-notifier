@@ -4553,6 +4553,29 @@ def test_every_text_that_hands_the_model_a_link_says_to_keep_the_desktop_referen
     work.WAKE.format(lines="- W1")
 
 
+def test_a_work_link_the_bot_reworded_is_put_back_as_written(on, hermes):
+    # Zhongli wrote "[W7: Provision OmniRoute LXC on seele](conduit://…) @session:…" in his own words, and
+    # Conduit drew a text link, not W7's card (Eric 2026-11-07): the reply goes out with the link as _link writes it.
+    sid = "20261107_091300_ab12cd"
+    work_id = on.add("workstream", title="Provision OmniRoute LXC").ref
+    on.update(work_id, session_id=sid)
+    canonical = work._link(work_id, sid, "default")
+    link, _, desktop = canonical.partition(") ")
+    link += ")"
+    reworded = f"The build is commissioned — [{work_id}: Provision OmniRoute LXC on seele](conduit://session/{sid}?profile=default)"
+    assert work.mend_links(f"{reworded} {desktop}. The rite as ordered.") == f"The build is commissioned — {canonical}. The rite as ordered."
+    # Desktop's reference the bot left out goes after it; a label with no ref at all is mended too.
+    assert work.mend_links(f"See [the build](conduit://session/{sid}).") == f"See {canonical}."
+    # As written, a link to another chat, and a reply with no links stay as they are.
+    assert work.mend_links(f"Started: {canonical}") is None
+    assert work.mend_links(f"Started: {link}") == f"Started: {canonical}"
+    assert work.mend_links("[Old chat](conduit://session/20261101_other)") is None
+    assert work.mend_links("Nothing linked here.") is None
+    # Every reply goes through the plugin's output hook, a room's scrub after it.
+    assert plugin._transform_llm_output(response_text=f"Done: {reworded}", session_id=BOT_CHAT, model="m",
+                                        platform="api_server", turn_id="t1") == f"Done: The build is commissioned — {canonical}"
+
+
 # Work from a group room (room_work; Eric 2026-11-07) -------------------------------
 
 ROOM_CHAT = "20261107_room_furina"

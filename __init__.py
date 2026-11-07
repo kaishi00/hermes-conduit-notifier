@@ -1263,13 +1263,21 @@ def _transform_tool_result(**kwargs: Any) -> str | None:
 
 
 def _transform_llm_output(**kwargs: Any) -> str | None:
-    """A room reply with credential-shaped text replaced; None leaves the
-    reply as it is (every other turn, and a reply with none)."""
+    """A reply with its work links as the plugin writes them (work_tool.
+    mend_links), and a room reply with credential-shaped text replaced; None
+    leaves the reply as it is."""
     text = kwargs.get("response_text")
-    if not isinstance(text, str) or not text or not _in_room_with_others(
-            _text(kwargs.get("session_id")), kwargs.get("platform")):
+    if not isinstance(text, str) or not text:
         return None
-    scrubbed = room_rules.scrub(text)
+    try:
+        mended = work_tool.mend_links(text)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't check a reply's work links", exc_info=True)
+        mended = None
+    reply = mended or text
+    if not _in_room_with_others(_text(kwargs.get("session_id")), kwargs.get("platform")):
+        return mended
+    scrubbed = room_rules.scrub(reply)
     return scrubbed if scrubbed != text else None
 
 
