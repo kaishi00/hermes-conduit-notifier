@@ -111,8 +111,9 @@ def test_a_submit_gets_its_own_admission_and_names_the_watch(gateway, monkeypatc
     transport = Transport()
     _call(chats, transport, "prompt.submit", {"session_id": "s1", "text": "hi"})
     _call(chats, transport, "prompt.submit", {"session_id": "s1", "text": "hi"})
-    first, second = (r["params"]["submission_id"] for r in connections[0].requests)
+    first, second = (r["params"]["submission_id"] for r in connections[0].requests if r["method"] == "prompt.submit")
     assert first and first != second
+    assert first.startswith(gateway_chats.OWN_SUBMISSION_PREFIX)
     assert kept == {"session_id": "s1", "surface": "watch", "entry": "spoken"}
 
 
@@ -454,3 +455,62 @@ def test_a_callers_budget_holds_the_listeners_wait(gateway, monkeypatch):
     chats.dispatch({"jsonrpc": "2.0", "id": "r2", "method": "session.steer",
                     "params": {"session_id": "s9", "text": "x"}}, Transport(), timeout=20)
     assert len(waits) == 2 and all(wait <= 20 for wait in waits) and waits[1] <= waits[0]
+
+
+def _lost(admission_id, generation, input_id=None):
+    return {"admission_id": admission_id, "status": "unknown", "execution_generation": generation, "text": "lost",
+            "input_id": input_id or gateway_chats.OWN_SUBMISSION_PREFIX + admission_id}
+
+
+def test_a_turn_lost_in_a_restart_is_discarded_before_the_plugins_next_send(gateway):
+    chats, answers, connections = gateway
+    # A gateway restart left the chat's last turn unknown: Hermes holds every
+    # later message behind it until someone discards it.
+    answers["session.resume"] = {"result": {"session_id": "lost-1", "execution_generation": 4, "running": False,
+                                            "pending": [_lost("a1", 4),
+                                                        # A person's lost turn is theirs to decide in Conduit.
+                                                        _lost("p1", 3, input_id="4c1b0f7e-person"),
+                                                        {"admission_id": "q1", "status": "queued",
+                                                         "execution_generation": None}]}}
+    answers["prompt.resolve_unknown"] = {"result": {"admission_id": "a1", "status": "terminal",
+                                                    "outcome": "interrupted"}}
+    answers["prompt.submit"] = {"result": {"status": "queued"}}
+    transport = Transport()
+    _call(chats, transport, "prompt.submit", {"session_id": "lost-1", "text": "next"})
+    methods = [r["method"] for r in connections[0].requests]
+    assert methods == ["session.resume", "prompt.resolve_unknown", "prompt.submit"]
+    # Only the plugin's lost one, by the generation it ran as; the queued one stays.
+    assert connections[0].requests[1]["params"] == {"session_id": "lost-1", "admission_id": "a1",
+                                                    "execution_generation": 4}
+    # Read once: the next send knows the chat has nothing lost.
+    _call(chats, transport, "prompt.submit", {"session_id": "lost-1", "text": "again"})
+    assert [r["method"] for r in connections[0].requests][3:] == ["prompt.submit"]
+
+
+def test_a_turn_lost_as_the_chat_watched_is_discarded_from_its_event(gateway):
+    chats, answers, connections = gateway
+    answers["session.create"] = {"result": {"session_id": "lost-2", "execution_generation": 1, "pending": []}}
+    answers["prompt.submit"] = {"result": {"status": "queued"}}
+    transport = Transport()
+    _call(chats, transport, "session.create", {"title": "Pulse"})
+    link = chats.link(transport)
+    link.write(_event("lost-2", "session.info", {"pending": [_lost("a2", 1)], "running": False}))
+    _call(chats, transport, "prompt.submit", {"session_id": "lost-2", "text": "next"})
+    assert [r["method"] for r in connections[0].requests] == ["session.create", "prompt.resolve_unknown",
+                                                               "prompt.submit"]
+    # The info push that carries no queue says nothing about it.
+    link.write(_event("lost-2", "session.info", {"model": "m"}))
+    _call(chats, transport, "prompt.submit", {"session_id": "lost-2", "text": "more"})
+    assert [r["method"] for r in connections[0].requests][3:] == ["prompt.submit"]
+
+
+def test_a_discard_hermes_refuses_still_lets_the_send_go(gateway):
+    chats, answers, connections = gateway
+    answers["session.resume"] = {"result": {"session_id": "lost-3", "pending": [_lost("a3", 2)]}}
+    answers["prompt.resolve_unknown"] = {"error": {"code": 4001, "message": "stale",
+                                                   "data": {"reason": "stale_generation"}}}
+    answers["prompt.submit"] = {"result": {"status": "queued"}}
+    sent = _call(chats, Transport(), "prompt.submit", {"session_id": "lost-3", "text": "next"})
+    assert sent["result"]["status"] == "queued"
+    assert [r["method"] for r in connections[0].requests] == ["session.resume", "prompt.resolve_unknown",
+                                                               "prompt.submit"]

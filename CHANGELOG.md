@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.137.6 (2026-11-07)
+
+### Fixes
+- On a gateway's own listener (the Webapp), a Watch job, Pulse or a Watch
+  call whose turn a gateway restart cut off held every later message in that
+  chat until someone discarded it. The plugin now lets go of its own cut-off
+  turn before its next message. A turn you sent yourself is left for you, and
+  Conduit shows it so you can resend or discard it.
+
 ## 0.137.5 (2026-11-07)
 
 ### Fixes
