@@ -357,7 +357,9 @@ def _gateway_live_work() -> Tuple[List[Dict[str, Any]], int]:
             continue
         units = [unit for unit in work.get("active_work") or [] if isinstance(unit, dict)]
         if units:
-            awaited = [unit for unit in units if not unit.get("wedged") and not unit.get("restart_safe")]
+            # Each unit keeps the home it came from, to name it from there (a cron job's title).
+            awaited = [dict(unit, _home=home) for unit in units
+                       if not unit.get("wedged") and not unit.get("restart_safe")]
             return awaited, len(awaited)
         count = work.get("active_agents")
         return [], count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
@@ -439,7 +441,7 @@ def _named_work_unit(unit: Dict[str, Any]) -> Dict[str, Any]:
             _cron_job_name = None
         if _cron_job_name is not None:
             with contextlib.suppress(Exception):
-                named["title"] = _cron_job_name(job_id, _gateway_homes()[0]) or ""
+                named["title"] = _cron_job_name(job_id, unit.get("_home") or _gateway_homes()[0]) or ""
     return named
 
 
@@ -505,6 +507,9 @@ _restart_now = threading.Event()
 # When Restart now last forced a restart: the update's own restart child, cut short by it, may
 # exit non-zero although the gateway came back under systemd.
 _forced_restart_at: Optional[float] = None
+# A forced restart under way: the update's own restart, cut short by it, may return before the
+# force is stamped, so the update waits for it before it decides whether its restart failed.
+_forcing = threading.Event()
 
 
 def _forget_restart_now() -> None:
@@ -512,6 +517,13 @@ def _forget_restart_now() -> None:
     global _forced_restart_at
     _restart_now.clear()
     _forced_restart_at = None
+
+
+def _wait_for_force(limit_s: float = 35.0) -> None:
+    """Waits, up to the force's own 30 s timeout and a little, for a forced restart to finish."""
+    deadline = time.monotonic() + limit_s
+    while _forcing.is_set() and time.monotonic() < deadline:
+        time.sleep(0.25)
 
 
 def force_gateway_restart() -> None:
@@ -533,8 +545,11 @@ def force_gateway_restart() -> None:
     global _forced_restart_at
     command = _systemctl_cmd(_select_systemd_scope(False)) + ["restart", "--no-block", get_service_name()]
     logger.warning("Conduit plugin: forcing a gateway restart (%s)", " ".join(command))
-    done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
-                          timeout=30, start_new_session=True)
+    try:
+        done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                              timeout=30, start_new_session=True)
+    except subprocess.TimeoutExpired:
+        raise core.TokenError(502, "systemd didn't answer the restart in 30 seconds")
     if done.returncode != 0:
         detail = (done.stderr or done.stdout or "").strip()[-300:]
         raise core.TokenError(502, f"systemd didn't take the restart: {detail}" if detail
@@ -767,6 +782,8 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
             exit_code = restart_gateway(draining)
         except subprocess.TimeoutExpired:
             exit_code = None
+        if exit_code != 0 and _forcing.is_set():
+            _wait_for_force()
         # A force is this job's (_forget_restart_now clears it at the start), whether it came
         # while the update waited for the gateway's work or while this restart drained.
         if exit_code != 0 and _forced_restart_at is not None:
@@ -1131,9 +1148,13 @@ async def post_gateway_restart_now(response: Response, force: bool = False) -> D
     stops the chats it names itself; ``force`` restarts the gateway through its service manager
     for work it can't stop (force_gateway_restart)."""
     response.headers["Cache-Control"] = "no-store"
-    _restart_now.set()
     if not force:
+        _restart_now.set()
         return {"ok": True, "forced": False}
+    # Marked before the update stops waiting, so the restart it sends then, if the force cuts it
+    # short, waits for the force before it reports a failure.
+    _forcing.set()
+    _restart_now.set()
     try:
         mint = _forced_restart_limiter.acquire("")
         try:
@@ -1146,6 +1167,8 @@ async def post_gateway_restart_now(response: Response, force: bool = False) -> D
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except Exception as exc:
         raise core._unexpected("forced restart", exc, feature="Update")
+    finally:
+        _forcing.clear()
     return {"ok": True, "forced": True}
 
 

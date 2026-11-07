@@ -999,3 +999,45 @@ def test_forced_restarts_are_capped(monkeypatch):
     with pytest.raises(api.self_update.HTTPException) as refused:
         asyncio.run(api.self_update.post_gateway_restart_now(response, force=True))
     assert refused.value.status_code == 429 and len(calls) == 2
+
+
+def test_a_force_still_under_way_when_the_restart_returns_is_waited_for(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.self_update, "_forced_restart_at", None)
+    forcing = api.self_update.threading.Event()
+    monkeypatch.setattr(api.self_update, "_forcing", forcing)
+
+    def gateway(draining):
+        forcing.set()
+
+        def lands():
+            api.self_update.time.sleep(0.3)
+            api.self_update._forced_restart_at = api.self_update.time.time()
+            forcing.clear()
+
+        api.self_update.threading.Thread(target=lands, daemon=True).start()
+        return 1
+
+    job, scheduled, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=gateway)
+    assert job["step"] == "restarting_dashboard" and len(scheduled) == 1
+
+
+def test_a_forced_restart_systemd_doesnt_answer_is_reported(monkeypatch):
+    _fake_gateway_cli(monkeypatch)
+
+    def hangs(command, **kwargs):
+        raise api.self_update.subprocess.TimeoutExpired(command, 30)
+
+    monkeypatch.setattr(api.self_update.subprocess, "run", hangs)
+    with pytest.raises(api.core.TokenError) as raised:
+        api.self_update.force_gateway_restart()
+    assert raised.value.status == 502
+
+
+def test_a_cron_run_is_named_from_the_home_it_came_from(monkeypatch, tmp_path):
+    drain_report = types.ModuleType("hermes_cli.update_cmd_drain_report")
+    seen = []
+    drain_report._cron_job_name = lambda job_id, home: seen.append(home) or "Profile job"
+    monkeypatch.setitem(sys.modules, "hermes_cli.update_cmd_drain_report", drain_report)
+    monkeypatch.setattr(api.self_update, "_gateway_homes", lambda: [tmp_path / "root", tmp_path / "rei"])
+    unit = api.self_update._named_work_unit({"kind": "cron", "job_id": "j1", "_home": tmp_path / "rei"})
+    assert unit["title"] == "Profile job" and seen == [tmp_path / "rei"]
