@@ -4782,3 +4782,8 @@ def test_a_room_post_refused_on_the_bots_profile_is_made_from_another(on, hermes
     _finish("20261031_work_1", "Done.")
     posted, = room["posted"]
     assert posted["address"] == "room-1@nahida" and "Done." in posted["text"]
+
+
+def test_a_damaged_roster_row_is_skipped(on, hermes, room):
+    room["members"] = ["junk", *room["members"]]
+    assert room_start()["ok"]

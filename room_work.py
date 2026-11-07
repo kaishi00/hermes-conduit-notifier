@@ -102,7 +102,9 @@ def handle_of(room_id: str, home: Path, profile: str) -> str:
     except room_rules.RoomStoreError:
         return ""
     for member in members or ():
-        target = member.get("target") if isinstance(member, dict) else None
+        if not isinstance(member, dict):
+            continue  # a damaged row: skipped, as room_rules skips it
+        target = member.get("target")
         if isinstance(target, dict) and target.get("kind") == "peer":
             continue
         if str(member.get("profile") or "") == profile:
