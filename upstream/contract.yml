@@ -290,7 +290,7 @@ imports:
   hermes_cli.tools_config:
     optional: ["_get_platform_tools", "_get_plugin_toolset_keys"]
   hermes_cli.update_cmd_drain_report:
-    required: ["_cron_job_name"]
+    optional: ["_cron_job_name"]
   hermes_cli.web_routers:
     optional: ["sessions"]
   hermes_cli.web_routers.files:

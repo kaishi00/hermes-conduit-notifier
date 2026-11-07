@@ -431,9 +431,13 @@ def _named_work_unit(unit: Dict[str, Any]) -> Dict[str, Any]:
     elif named["kind"] == "cron":
         job_id = str(unit.get("job_id") or "")
         named["job_id"] = job_id
-        with contextlib.suppress(Exception):
+        try:
             from hermes_cli.update_cmd_drain_report import _cron_job_name
-            named["title"] = _cron_job_name(job_id, _gateway_homes()[0]) or ""
+        except ImportError:
+            _cron_job_name = None
+        if _cron_job_name is not None:
+            with contextlib.suppress(Exception):
+                named["title"] = _cron_job_name(job_id, _gateway_homes()[0]) or ""
     return named
 
 
@@ -498,6 +502,13 @@ _restart_now = threading.Event()
 # When Restart now last forced a restart: the update's own restart child, cut short by it, may
 # exit non-zero although the gateway came back under systemd.
 _forced_restart_at: Optional[float] = None
+
+
+def _forget_restart_now() -> None:
+    """A new update starts with no Restart now and no forced restart of its own."""
+    global _forced_restart_at
+    _restart_now.clear()
+    _forced_restart_at = None
 
 
 def force_gateway_restart() -> None:
@@ -835,7 +846,7 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
         try:
             _write_self_update(path, job)
             # A Restart now from an earlier update isn't this one's.
-            _restart_now.clear()
+            _forget_restart_now()
             thread = threading.Thread(
                 target=_run_self_update, name="conduit-self-update", daemon=True,
                 args=(job, path, pull, restart_gateway, schedule, homes or _hermes_homes, notify or _notify_self_update))
@@ -1016,7 +1027,7 @@ def _resume_gateway_restart(path: Path, job: Dict[str, Any],
         try:
             _write_self_update(path, job)
             # A Restart now from an earlier update isn't this one's.
-            _restart_now.clear()
+            _forget_restart_now()
             thread = threading.Thread(target=_run_self_update, name="conduit-self-update", daemon=True,
                                       args=(job, path, pull, restart_gateway, schedule, _hermes_homes, notify))
             thread.start()
