@@ -156,9 +156,9 @@ REPORT_SCHEMA: dict[str, Any] = {
             "happening": {"type": "boolean", "description": "True if the watched thing is happening right now."},
             "saw": {
                 "type": "string",
-                "description": ("One short spoken sentence of what you saw, said first if this calls the user "
-                                "(\"The homelab doesn't answer pings; the router is down too.\"). No markdown, "
-                                "links or secrets."),
+                "description": ("One short spoken sentence of what you saw, said first if this calls the user, "
+                                "so never tell them to pick up (\"The homelab doesn't answer pings; the router "
+                                "is down too.\"). No markdown, links or secrets."),
             },
         },
         "required": ["happening", "saw"],

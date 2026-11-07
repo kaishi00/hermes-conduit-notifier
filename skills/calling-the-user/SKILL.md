@@ -153,3 +153,10 @@ it still matters. Don't call again about it unless they ask.
 One short spoken sentence, said first when they answer. Lead with the news.
 No markdown, links, ids or code. Keep private details (passwords, keys,
 personal data) out of it.
+
+Say the news itself, and never tell them to pick up or promise more later.
+They hear the reason once they've already answered, with your reply right
+after it, so "pick up the call and I'll tell you more", "answer to hear the
+details" and "call me back to find out" make no sense by then. Put the fact
+in the reason: "The deploy finished and two tests failed", not "It's done,
+pick up and I'll tell you more".

@@ -21,6 +21,13 @@ checks it). The format is fixed, because Conduit reads it:
   its Bot Chat. The work shows in its Work panel as usual, and when it's
   done the result is posted back in the room and the bot passes it on.
 
+## 0.134.10 (2026-11-07)
+
+### Fixes
+- A call could open with "pick up and I'll tell you more", which makes no
+  sense once you've answered. The call now says the news itself in that
+  first sentence.
+
 ## 0.134.9 (2026-11-06)
 
 ### Fixes
