@@ -293,20 +293,6 @@ def test_card_taps_are_a_capability():
     assert "card-taps" in api.capabilities.ROUTE_CAPABILITIES
 
 
-def test_a_taps_note_cuts_a_long_card_at_a_line_and_closes_its_code(tmp_path):
-    card = {"type": "composed", "title": "Long", "live": "long", "sections": [
-        {"items": [{"kind": "text", "text": "line " * 300, "role": "body"}]},
-        {"items": [{"kind": "text", "text": "\n".join(["code"] * 600), "role": "mono"}]},
-    ], "actions": [{"label": "Go", "action": "tap", "id": "go"}]}
-    store = card_actions.TapStore(tmp_path)
-    store.save({"sessions": ["s1"], "card": card, "action": "go"})
-    note = store.note("s1", "Go")
-    markdown = note.split("The card they saw:\n", 1)[1]
-    assert len(markdown) <= card_actions.MAX_CARD_MARKDOWN_CHARS + 1
-    assert markdown.count("```") % 2 == 0
-    assert note.endswith("]")
-
-
 def test_a_taps_note_says_when_part_of_the_card_was_folded(tmp_path):
     card = {"type": "composed", "title": "Folded", "sections": [
         {"items": [{"kind": "text", "text": "Shown"}]},
@@ -397,8 +383,10 @@ def test_a_slot_the_fill_leaves_out_says_its_element_may_go():
         {"items": [{"kind": "text", "text": "{{note}}"}, {"kind": "field", "id": "n", "input": "text",
                                                          "value": "{{start}}"}]}]}
     notes = []
-    card_templates.expand_template(template, {"title": "T"}, notes, "t")
+    card_templates.expand_template(template, {"title": "T", "start": ["a"]}, notes, "t")
     assert "t.fill.note: not given, left empty (an element left with nothing is left out)" in notes
+    assert "t.fill.start: a list, which this slot can't take, left empty (an element left with nothing is left out)" \
+        in notes
 
 
 def test_a_field_whose_placeholder_asks_for_a_secret_is_dropped():
@@ -422,3 +410,17 @@ def test_a_taps_note_clips_a_card_over_the_cap(tmp_path):
     assert note and len(note) < len(full)
     markdown = note.split("The card they saw:\n", 1)[1]
     assert len(markdown) <= card_actions.MAX_CARD_MARKDOWN_CHARS + 200 and note.endswith("]")
+
+
+def test_a_taps_note_cut_inside_a_diff_closes_its_fence(tmp_path):
+    before = "".join(f"line {n} {'a' * 160}\n" for n in range(80))
+    after = "".join(f"line {n} {'b' * 160}\n" for n in range(80))
+    card = {"type": "diff", "title": "Patch", "diff": {"before": before, "after": after, "name": "a.txt"},
+            "actions": [{"label": "Apply", "action": "tap", "id": "apply"}]}
+    full = card_schema.fallback_markdown(card_schema.normalize_cards([card], []))
+    assert len(full) > card_actions.MAX_CARD_MARKDOWN_CHARS and full.count("```") >= 2
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": card, "action": "apply"})
+    markdown = store.note("s1", "Apply · Patch").split("The card they saw:\n", 1)[1].rsplit("]", 1)[0]
+    assert len(markdown) <= card_actions.MAX_CARD_MARKDOWN_CHARS
+    assert markdown.rstrip().endswith("```") and card_actions._open_fence(markdown) is None

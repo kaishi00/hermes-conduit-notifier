@@ -220,18 +220,20 @@ def _card_markdown(card: dict[str, Any]) -> str:
     """The card's Markdown for the tap's note: cut at a line, a code block
     the cut lands in closed, and folded sections said to be folded."""
     text = card_schema.fallback_markdown([card])
-    if len(text) > MAX_CARD_MARKDOWN_CHARS:
+    folded = ("\n(Part of this card was folded under Show more, so they may not have opened it; its fields "
+              "went with their starting values unless they changed them.)") \
+        if any(section.get("more") for section in card.get("sections", [])) else ""
+    # The folded note counts against the cap too.
+    room = MAX_CARD_MARKDOWN_CHARS - len(folded)
+    if len(text) > room:
         # Room for the longest fence the card could leave open, as clip_markdown does.
         longest = max((len(run) for run in re.findall(r"`{3,}", text)), default=3)
-        cut = text[:MAX_CARD_MARKDOWN_CHARS - 1 - longest]
+        cut = text[:room - 1 - longest]
         text = cut[:cut.rfind("\n")] if "\n" in cut else cut
         fence = _open_fence(text)
         if fence is not None:
             text += "\n" + fence
-    if any(section.get("more") for section in card.get("sections", [])):
-        text += ("\n(Part of this card was folded under Show more, so they may not have opened it; its fields "
-                 "went with their starting values unless they changed them.)")
-    return text
+    return text + folded
 
 
 def _line(tap: dict[str, Any]) -> str:

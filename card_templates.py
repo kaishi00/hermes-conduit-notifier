@@ -246,7 +246,7 @@ def expand_template(card: dict[str, Any], fill: dict[str, Any], notes: list[str]
     """The template with its slots filled and its repeat sections drawn once
     per item; a slot the fill doesn't give becomes empty text."""
     card = copy.deepcopy(card)
-    missing: set[str] = set()
+    missing: dict[str, str] = {}
     sections = card.get("sections")
     if isinstance(sections, list):
         drawn = []
@@ -267,11 +267,15 @@ def expand_template(card: dict[str, Any], fill: dict[str, Any], notes: list[str]
         card["sections"] = drawn
     card = _filled(card, fill, missing)
     for slot in sorted(missing):
-        notes.append(f"{path}.fill.{slot}: not given, left empty (an element left with nothing is left out)")
+        notes.append(f"{path}.fill.{slot}: {missing[slot]}, left empty (an element left with nothing is left out)")
     return card
 
 
-def _filled(value: Any, fill: dict[str, Any], missing: set[str], prefix: str = "") -> Any:
+def _a_kind(value: Any) -> str:
+    return "a list" if isinstance(value, list) else "an object" if isinstance(value, dict) else "a value"
+
+
+def _filled(value: Any, fill: dict[str, Any], missing: dict[str, str], prefix: str = "") -> Any:
     if isinstance(value, str):
         whole = _SLOT.fullmatch(value.strip())
         if whole and (not prefix or whole.group(1).startswith(prefix)):
@@ -291,7 +295,8 @@ def _filled(value: Any, fill: dict[str, Any], missing: set[str], prefix: str = "
                 return card_schema._cell(given)
             if isinstance(given, str):
                 return given[:MAX_FILL_CHARS]
-            missing.add(slot)
+            # A list or object given for a text slot is the model's mistake, not a gap.
+            missing[slot] = "not given" if given is None else f"{_a_kind(given)}, which this slot can't take"
             return ""
         return _SLOT.sub(put, value)
     if isinstance(value, dict):
