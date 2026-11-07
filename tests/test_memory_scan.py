@@ -53,7 +53,7 @@ def test_a_second_copy_adds_its_folder_to_the_one_guard(scan, tmp_path):
     guard = scan.memory._defines_memory_provider
     copy = tmp_path / "conduit_push"
     copy.mkdir()
-    scan._wrapped_module = None  # as a fresh load of the module would start
+    scan._wrapped_module, scan._counted = None, False  # as a fresh load of the module would start
     scan.HERE = copy.resolve()
     assert scan.install()
     # The second load wraps Hermes' own function, not the first load's guard.
@@ -67,7 +67,7 @@ def test_a_second_copy_adds_its_folder_to_the_one_guard(scan, tmp_path):
 def test_the_later_copy_unloading_first_leaves_the_earlier_one_guarded(scan, tmp_path):
     assert scan.install()
     first = scan.HERE
-    scan._wrapped_module = None
+    scan._wrapped_module, scan._counted = None, False
     copy = tmp_path / "conduit_push"
     copy.mkdir()
     scan.HERE = copy.resolve()
@@ -79,8 +79,21 @@ def test_the_later_copy_unloading_first_leaves_the_earlier_one_guarded(scan, tmp
     scan.memory._defines_memory_provider(copy)
     assert scan.asked == [copy]
     scan.HERE = first
-    scan._wrapped_module = scan.memory
+    scan._wrapped_module, scan._counted = scan.memory, True
     scan.uninstall()  # the earlier copy unloads last: Hermes' own is back
+    assert scan.memory._defines_memory_provider is scan.own
+
+
+def test_a_copy_that_resolves_to_the_same_folder_unloading_first_leaves_the_other_guarded(scan):
+    # A profile's symlinked copy resolves to the main install's folder.
+    assert scan.install()
+    scan._wrapped_module, scan._counted = None, False
+    assert scan.install()
+    scan.uninstall()
+    assert scan.memory._defines_memory_provider(ROOT) is False
+    assert scan.asked == []
+    scan._wrapped_module, scan._counted = scan.memory, True
+    scan.uninstall()
     assert scan.memory._defines_memory_provider is scan.own
 
 

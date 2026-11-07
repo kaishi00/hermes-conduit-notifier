@@ -13,9 +13,11 @@ stall the dashboard's event loop and drop its sockets (hermes-conduit#1931,
 Hermes under Termux). This plugin is never a memory provider, so the plugin
 answers that for its own folder and leaves every other folder to Hermes.
 
-Each load of the plugin adds its folder to one set for the whole process,
-kept outside this module, so a second copy (another profile's, a reload)
-is answered too and one wrapper does it.
+Each load of the plugin counts its folder in one tally for the whole
+process, kept outside this module, so a second copy (another profile's, a
+reload, a symlinked profile copy that resolves to the same folder) is
+answered too, one wrapper does it, and the wrapper comes off only when the
+last loaded copy unloads.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import sys
 import threading
 import types
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 _lock = threading.Lock()
@@ -38,21 +40,23 @@ _GUARD_FLAG = "__conduit_not_a_memory_provider__"
 _SHARED = "conduit_push_memory_scan"
 HERE = Path(__file__).resolve().parent
 
+# The module this load guarded, and whether this load counts in the tally.
 _wrapped_module: Any = None
-_wrapped: Optional[tuple[Callable[..., Any], Callable[..., Any]]] = None
+_counted = False
 
 
-def _own_folders() -> set[str]:
+def _own_folders() -> dict[str, int]:
+    """Each loaded copy's folder, with how many loaded copies resolve to it."""
     holder = sys.modules.setdefault(_SHARED, types.ModuleType(_SHARED))
-    folders = getattr(holder, "folders", None)
-    if not isinstance(folders, set):
-        folders = holder.folders = set()
+    folders = getattr(holder, "tally", None)
+    if not isinstance(folders, dict):
+        folders = holder.tally = {}
     return folders
 
 
 def _is_own(path: Any) -> bool:
     try:
-        return str(Path(path).resolve()) in _own_folders()
+        return _own_folders().get(str(Path(path).resolve()), 0) > 0
     except (OSError, TypeError, ValueError, RuntimeError):
         return False
 
@@ -74,9 +78,12 @@ def install() -> bool:
     """Adds this plugin's folder to those Hermes doesn't parse, and wraps
     Hermes' parse once per process. False when this Hermes has no such
     parse (an older one only reads the first 8 KB, which is cheap)."""
-    global _wrapped_module, _wrapped
+    global _wrapped_module, _counted
     with _lock:
-        _own_folders().add(str(HERE))
+        if not _counted:
+            folders = _own_folders()
+            folders[str(HERE)] = folders.get(str(HERE), 0) + 1
+            _counted = True
         if _wrapped_module is not None:
             return True
         try:
@@ -96,7 +103,7 @@ def install() -> bool:
             return False
         guard = _guard(own)
         setattr(memory, FUNCTION, guard)
-        _wrapped_module, _wrapped = memory, (own, guard)
+        _wrapped_module = memory
         return True
 
 
@@ -104,12 +111,18 @@ def uninstall() -> None:
     """Takes this plugin's folder off (the plugin unloads), and puts Hermes'
     own function back once no loaded copy's folder is left, whichever copy's
     guard is on."""
-    global _wrapped_module, _wrapped
+    global _wrapped_module, _counted
     with _lock:
         folders = _own_folders()
-        folders.discard(str(HERE))
+        if _counted:
+            left = folders.get(str(HERE), 0) - 1
+            if left > 0:
+                folders[str(HERE)] = left
+            else:
+                folders.pop(str(HERE), None)
+            _counted = False
         module = _wrapped_module
-        _wrapped_module, _wrapped = None, None
+        _wrapped_module = None
         # Another copy still loaded keeps the guard, which answers for its folder.
         if folders or module is None:
             return
