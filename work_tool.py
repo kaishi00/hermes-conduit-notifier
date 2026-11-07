@@ -920,7 +920,7 @@ _DESKTOP_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _APP_LINK = re.compile(r"\[([^\]\n]*)\]\(conduit://session/([^)?\s]+)(?:\?[^)\s]*)?\)")
 # Desktop's reference the bot wrote after the link: after spaces, a dash, a
 # comma, a colon or an opening bracket, or on the next line.
-_WRITTEN_REF = re.compile(r"[\s,:(—–-]{0,6}@session:")
+_WRITTEN_REF = re.compile(r"[\s,:(—–-]{0,6}@session:(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63}/)?([A-Za-z0-9_.:-]+)")
 
 
 def mend_links(text: Any, home: Optional[Path] = None) -> Optional[str]:
@@ -949,7 +949,9 @@ def mend_links(text: Any, home: Optional[Path] = None) -> Optional[str]:
             continue
         full = _link(work.ref, work.session_id, (work.executor or {}).get("bot") or profile)
         link, desktop, reference = full.partition(" @session:")
-        written = _WRITTEN_REF.match(text, match.end())
+        # Only a reference to this workstream counts: another chat's stays, and this one's still goes after the link.
+        near = _WRITTEN_REF.match(text, match.end())
+        written = near is not None and near.group(1).rstrip(".:-") == work.session_id
         mended = link + (desktop + reference if desktop and not written else "")
         if mended != match.group(0):
             out.append(text[last:match.start()] + mended)

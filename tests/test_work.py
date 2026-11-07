@@ -4553,7 +4553,7 @@ def test_every_text_that_hands_the_model_a_link_says_to_keep_the_desktop_referen
     work.WAKE.format(lines="- W1")
 
 
-def test_a_work_link_the_bot_reworded_is_put_back_as_written(on, hermes):
+def test_a_work_link_the_bot_reworded_is_put_back_as_written(on, hermes, monkeypatch):
     # Zhongli wrote "[W7: Provision OmniRoute LXC on seele](conduit://…) @session:…" in his own words, and
     # Conduit drew a text link, not W7's card (Eric 2026-11-07): the reply goes out with the link as _link writes it.
     sid = "20261107_091300_ab12cd"
@@ -4577,6 +4577,12 @@ def test_a_work_link_the_bot_reworded_is_put_back_as_written(on, hermes):
     # Desktop's reference the bot wrote after a dash or on the next line isn't written twice.
     assert work.mend_links(f"{reworded} — {desktop}") == f"The build is commissioned — {link} — {desktop}"
     assert work.mend_links(f"{reworded}\n{desktop}") == f"The build is commissioned — {link}\n{desktop}"
+    # Another chat's reference right after it stays, and this workstream's goes in too.
+    assert work.mend_links(f"{reworded} (@session:other_1 is W8's)") == (
+        f"The build is commissioned — {canonical} (@session:other_1 is W8's)")
+    # A registry that can't be read leaves the reply as the bot wrote it.
+    monkeypatch.setattr(store_mod.Store, "by_session", lambda self, session_id: (_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+    assert work.mend_links(reworded) is None
 
 
 def test_a_room_reply_is_mended_and_then_scrubbed(on, hermes, monkeypatch):
