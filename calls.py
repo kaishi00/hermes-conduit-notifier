@@ -648,7 +648,9 @@ def _at_screen(home: Any, session_ids: list[str]) -> bool:
         if reply_sources.turn_source(platform, transport) in SCREEN_SOURCES:
             return True
         # Hermes' terminal app: no app socket, and not a messaging platform.
-        if (not reply_sources._is_app_socket(transport) and isinstance(platform, str)
+        # A fanout is app clients (a chat open on several), never a terminal.
+        if (not reply_sources._is_app_socket(transport) and reply_sources._fanout_peers(transport) is None
+                and isinstance(platform, str)
                 and platform.strip().lower() in TERMINAL_PLATFORMS):
             return True
     except Exception:  # noqa: BLE001

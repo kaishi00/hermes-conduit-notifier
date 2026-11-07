@@ -800,6 +800,7 @@ def test_lookups_tells_the_coordinator_to_answer_lookups_itself(on, home, hermes
     rules = work.digest(BOT_CHAT)
     assert "Hand anything that needs tools" not in rules
     assert rules.index("the weather") < rules.index("work_start")
+    assert "the rest of a page web_extract kept" in rules and "reading or changing the user's files" in rules
     for tool in ("web_search", "web_extract", "session_search", "conduit_location"):
         assert tool in rules and work.tool_block(BOT_CHAT, tool, {"action": "now"}) is None
 

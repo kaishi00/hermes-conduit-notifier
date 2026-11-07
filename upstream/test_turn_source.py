@@ -4,7 +4,8 @@
 Hermes binds the session's transport to the turn's thread
 (tui_gateway/prompt_turn.py rebinds ``session["transport"]``), not the
 socket that sent the prompt. A chat open on two clients holds a
-FanoutTransport of both (tui_gateway/session_transports.py), so the plugin
+FanoutTransport of both (tui_gateway/transport.py, attached by
+tui_gateway/session_transports.py), so the plugin
 reads the clients behind it: Eric's Bot Chat on .52 (2026-11-07) got no
 board rule and no Conduit surface note while it was open on two screens.
 

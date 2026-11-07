@@ -3869,9 +3869,10 @@ def digest(session_id: Any) -> Optional[str]:
                    "yourself, in this turn, without a workstream: the weather, news and other current facts "
                    "(web_search, web_extract), what was said in past chats (session_search), the bot's skills "
                    "(skills_list, skill_view), and the user's health, location and inbox (conduit_health, "
-                   "conduit_location, conduit_inbox). Call them through tool_call when they aren't listed. Hand "
+                   "conduit_location, conduit_inbox), and the rest of a page web_extract kept for you (read_file "
+                   "on the path it gives). Call them through tool_call when they aren't listed. Hand "
                    "a workstream (work_start) anything else that needs tools: running commands, reading or "
-                   "changing files, or work of several steps; send follow-ups to the one that's on it "
+                   "changing the user's files, or work of several steps; send follow-ups to the one that's on it "
                    "(work_send with its ref); answer from what you know otherwise. ")
     else:
         routing = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), "
