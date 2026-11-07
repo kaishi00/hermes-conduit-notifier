@@ -257,7 +257,7 @@ imports:
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
-    optional: ["active_sessions", "gateway", "lifecycle"]
+    optional: ["active_sessions", "lifecycle"]
   hermes_cli._launchers:
     optional: ["runtime_command"]
   hermes_cli.active_sessions:
@@ -277,6 +277,8 @@ imports:
     optional: ["registry", "token_auth"]
   hermes_cli.dashboard_auth.base:
     required: ["DashboardAuthProvider", "TokenPrincipal"]
+  hermes_cli.gateway:
+    optional: ["_installed_service_kind_for", "_select_systemd_scope", "_systemctl_cmd", "get_service_name", "supports_systemd_services"]
   hermes_cli.gateway_lifecycle_guards:
     optional: ["_candidate_homes", "live_work"]
   hermes_cli.gateway_runtime_start:
@@ -382,6 +384,7 @@ module_paths:
   - hermes_cli/config_effective
   - hermes_cli/dashboard_auth
   - hermes_cli/dashboard_auth/base
+  - hermes_cli/gateway
   - hermes_cli/gateway_lifecycle_guards
   - hermes_cli/gateway_runtime_start
   - hermes_cli/plugins

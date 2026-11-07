@@ -940,8 +940,34 @@ def test_a_restart_forced_while_the_update_waited_counts_as_the_restart(monkeypa
     assert job["step"] == "restarting_dashboard" and len(scheduled) == 1
 
 
-def test_a_failed_restart_without_a_forced_one_still_fails(monkeypatch, tmp_path):
+def test_a_restart_forced_while_the_update_waited_for_work_counts_too(monkeypatch, tmp_path):
+    # Restart now during the wait for the gateway's work: the force lands before the update's own
+    # restart is sent.
+    monkeypatch.setattr(api.self_update, "_forced_restart_at", api.self_update.time.time() - 5)
+    job, scheduled, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=1)
+    assert job["step"] == "restarting_dashboard" and len(scheduled) == 1
+
+
+def test_a_new_update_forgets_an_earlier_forced_restart(monkeypatch):
     monkeypatch.setattr(api.self_update, "_forced_restart_at", 1.0)
+    monkeypatch.setattr(api.self_update, "_restart_now", api.self_update.threading.Event())
+    api.self_update._restart_now.set()
+    api.self_update._forget_restart_now()
+    assert api.self_update._forced_restart_at is None and not api.self_update._restart_now.is_set()
+
+
+def test_a_drain_sighting_older_than_the_cap_is_a_new_drains_start(monkeypatch):
+    monkeypatch.setattr(api.self_update, "_gateway_live_work", lambda: ([], 0))
+    monkeypatch.setattr(api.self_update, "_restart_timeout_s", lambda: 1800.0)
+    monkeypatch.setattr(api.self_update, "_restart_spawned_at", lambda: None)
+    monkeypatch.setattr(api.self_update, "_gateway_draining", lambda: True)
+    monkeypatch.setattr(api.self_update, "_draining_seen_at", api.self_update.time.time() - 3600)
+    report = api.self_update.gateway_work_report()
+    assert abs(report["restarts_by"] - (api.self_update.time.time() + 1800)) < 5
+
+
+def test_a_failed_restart_without_a_forced_one_still_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.self_update, "_forced_restart_at", None)
     job, _, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=1)
     assert job["step"] == "failed" and job["failed_step"] == "restarting_gateway"
 
