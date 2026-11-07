@@ -132,6 +132,11 @@ class FanoutTransport:
         return list(self._peers)
 
 
+def _closed(transport):
+    transport._closed = True
+    return transport
+
+
 PHONE = WSTransport({"x-conduit-client": "conduit"})
 IPAD = WSTransport({"x-conduit-client": "conduit", "user-agent": "Conduit/1 CFNetwork"})
 DESKTOP = WSTransport({"user-agent": ELECTRON})
@@ -147,6 +152,10 @@ DESKTOP = WSTransport({"user-agent": ELECTRON})
     (FanoutTransport(PHONE, object()), None, False),
     (FanoutTransport(), None, False),
     (FanoutTransport(FanoutTransport(PHONE)), None, False),
+    # A client whose socket closed isn't counted (DeepSeek's review of #611).
+    (FanoutTransport(PHONE, _closed(WSTransport({"user-agent": ELECTRON}))), "conduit", False),
+    (FanoutTransport(_closed(WSTransport({"x-conduit-client": "conduit"})), DESKTOP), "desktop", True),
+    (FanoutTransport(_closed(WSTransport({"x-conduit-client": "conduit"}))), None, False),
 ])
 def test_a_chat_open_on_several_clients_is_theirs_when_they_agree(transport, expected, desktop):
     assert sources.turn_source("tui", transport) == expected

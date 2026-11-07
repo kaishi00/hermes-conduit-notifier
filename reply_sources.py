@@ -216,9 +216,11 @@ def is_desktop_app(transport: Any) -> bool:
 
 
 def _fanout_peers(transport: Any) -> list | None:
-    """The clients behind Hermes' FanoutTransport (one chat shown on several
-    clients), or None for any other transport. A fanout inside a fanout, or
-    one whose clients can't be read, counts as no clients."""
+    """The live clients behind Hermes' FanoutTransport (one chat shown on
+    several clients), or None for any other transport. A client whose socket
+    has closed (a failed write prunes it later) isn't counted, as in
+    conduit_claims.clients. A fanout inside a fanout, or one whose clients
+    can't be read, counts as no clients."""
     peers = getattr(transport, "transports", None)
     if transport is None or not callable(peers):
         return None
@@ -226,7 +228,21 @@ def _fanout_peers(transport: Any) -> list | None:
         found = list(peers())
     except Exception:  # noqa: BLE001 — unreadable: unknown
         return []
-    return [] if any(callable(getattr(peer, "transports", None)) for peer in found) else found
+    if any(callable(getattr(peer, "transports", None)) for peer in found):
+        return []
+    return [peer for peer in found if not _socket_closed(peer)]
+
+
+def _socket_closed(transport: Any) -> bool:
+    try:
+        closed = getattr(transport, "closed", None)
+        if closed is None:
+            closed = getattr(transport, "_closed", None)
+        if callable(closed):
+            closed = closed()
+    except Exception:  # noqa: BLE001 — unreadable: not counted
+        return True
+    return bool(closed)
 
 
 def _is_app_socket(transport: Any) -> bool:

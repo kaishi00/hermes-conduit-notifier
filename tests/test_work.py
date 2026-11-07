@@ -830,6 +830,11 @@ def test_lookups_reads_the_page_web_extract_kept(on, home, hermes):
     for elsewhere in (str(home / "config.yaml"), str(kept / ".." / ".." / "config.yaml"), str(kept),
                       "cache/web/www.accuweather.com-f8dff445e7.md", ""):
         assert work.tool_block(BOT_CHAT, "read_file", {"path": elsewhere})["action"] == "block"
+    legacy = home / "web_cache"  # an install from before cache/web keeps using it
+    legacy.mkdir()
+    (legacy / "example.com-0123456789.md").write_text("Rain")
+    assert work.tool_block(BOT_CHAT, "read_file", {"path": str(legacy / "example.com-0123456789.md")}) is None
+    assert work.tool_block(BOT_CHAT, "read_file", {"path": str(legacy) + "-other/x.md"})["action"] == "block"
     work.app_set_settings(home, {"policy": "strict"})
     assert work.tool_block(BOT_CHAT, "read_file", page)["action"] == "block"  # strict looks nothing up
 
