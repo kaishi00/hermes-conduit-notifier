@@ -4616,7 +4616,7 @@ while it runs:
   Gateway in Settings, or an update on an older host): `{ok, units, count,
   draining, restart_timeout_s, restarts_by}`. Each unit has its `kind`
   (`chat`, `cron`, `managed`, `api`, `deferred`) and `elapsed_s`; a chat its
-  `profile`, `bot`, `title`, `platform` and `session_id` (null when Conduit
+  `profile`, `bot`, `title`, `platform` and `session_id`, those it could read (`session_id` null when Conduit
   can't reach it), a cron run its `job_id` and `title`. `restarts_by` is when
   the gateway restarts anyway, while it drains.
 - `POST /api/plugins/conduit_push/self/gateway-work/restart-now` is Restart

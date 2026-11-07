@@ -926,3 +926,26 @@ def test_a_forced_restart_systemd_refuses_is_reported(monkeypatch):
     with pytest.raises(api.core.TokenError) as raised:
         api.self_update.force_gateway_restart()
     assert raised.value.status == 502 and "Access denied" in str(raised.value)
+
+
+def test_a_restart_forced_while_the_update_waited_counts_as_the_restart(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.self_update, "_forced_restart_at", None)
+
+    def gateway(draining):
+        draining()
+        api.self_update._forced_restart_at = api.self_update.time.time()
+        return 1
+
+    job, scheduled, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=gateway)
+    assert job["step"] == "restarting_dashboard" and len(scheduled) == 1
+
+
+def test_a_failed_restart_without_a_forced_one_still_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.self_update, "_forced_restart_at", 1.0)
+    job, _, _, _ = _run(tmp_path, monkeypatch=monkeypatch, gateway=1)
+    assert job["step"] == "failed" and job["failed_step"] == "restarting_gateway"
+
+
+def test_a_chat_id_with_colons_survives():
+    assert api.self_update._chat_of("agent:rei:slack:group:T1:C2") == ("rei", "slack", "T1:C2")
+    assert api.self_update._chat_of("agent:main:local:dm") == ("default", "local", None)

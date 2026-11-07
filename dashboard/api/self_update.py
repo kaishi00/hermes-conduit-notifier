@@ -384,7 +384,7 @@ def _chat_of(key: str) -> Tuple[str, Optional[str], Optional[str]]:
     if len(parts) < 4 or parts[0] != "agent":
         return "default", None, None
     profile = {"main": "default", "main~": "main"}.get(parts[1], parts[1])
-    return profile, parts[2], parts[4] if len(parts) > 4 else None
+    return profile, parts[2], ":".join(parts[4:]) or None
 
 
 def _session_row(home: Optional[Path], key: str) -> Dict[str, Any]:
@@ -472,7 +472,8 @@ def _draining_since(draining: bool) -> Optional[float]:
     if not draining:
         _draining_seen_at = None
         return None
-    if _draining_seen_at is None:
+    # A sighting from a drain this dashboard stopped watching before it ended is no drain's start.
+    if _draining_seen_at is None or time.time() - _draining_seen_at > SELF_UPDATE_DRAIN_LIMIT_S:
         _draining_seen_at = time.time()
     spawned = _restart_spawned_at()
     return min(spawned, _draining_seen_at) if spawned is not None else _draining_seen_at
@@ -494,6 +495,9 @@ def gateway_work_report() -> Dict[str, Any]:
 # Restart now: the update's wait for the gateway's work ends here; Conduit stops the chats
 # themselves (session.interrupt), which a draining gateway still takes.
 _restart_now = threading.Event()
+# When Restart now last forced a restart: the update's own restart child, cut short by it, may
+# exit non-zero although the gateway came back under systemd.
+_forced_restart_at: Optional[float] = None
 
 
 def force_gateway_restart() -> None:
@@ -511,6 +515,7 @@ def force_gateway_restart() -> None:
     if not systemd:
         raise core.TokenError(501, "Conduit can force a restart only for a gateway systemd runs. "
                                    "Run hermes gateway stop, then hermes gateway start, on the host.")
+    global _forced_restart_at
     command = gw._systemctl_cmd(gw._select_systemd_scope(False)) + ["restart", "--no-block", gw.get_service_name()]
     logger.warning("Conduit plugin: forcing a gateway restart (%s)", " ".join(command))
     done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
@@ -519,6 +524,7 @@ def force_gateway_restart() -> None:
         detail = (done.stderr or done.stdout or "").strip()[-300:]
         raise core.TokenError(502, f"systemd didn't take the restart: {detail}" if detail
                               else "systemd didn't take the restart")
+    _forced_restart_at = time.time()
 
 
 def _gateway_draining() -> bool:
@@ -746,6 +752,12 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
             exit_code = restart_gateway(draining)
         except subprocess.TimeoutExpired:
             exit_code = None
+        forced = _forced_restart_at
+        if exit_code != 0 and forced is not None and forced >= job["gateway_restart_at"]:
+            # Restart now forced it through systemd while this restart waited: that restart is the
+            # one that happened, and the dashboard goes on as if this one had.
+            logger.info("Conduit plugin: the update's gateway restart was forced through systemd")
+            exit_code = 0
         for key in ("gateway_stage", "running_chats", "gateway_restart_at"):
             job.pop(key, None)
         if exit_code != 0:
