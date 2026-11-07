@@ -705,13 +705,30 @@ def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterab
         yield path
 
 
+def _join_folder(folder: str) -> str:
+    """A recorded folder a relative name can be joined to, or "" for none
+    (nothing recorded, the disk's top, a bare ``~``)."""
+    folder = (folder or "").strip()
+    if re.match(r"^[A-Za-z]:[\\/]", folder):
+        folder = re.sub(r"/+", "/", folder.replace("\\", "/"))
+    folder = folder.rstrip("/")
+    if folder and folder != "~" and not re.fullmatch(r"[A-Za-z]:", folder) and _is_local_path(folder + "/"):
+        return folder
+    return ""
+
+
 def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str, *,
                  exists: Optional[Callable[[str], bool]] = None,
+                 default_folder: Optional[str] = None,
                  max_rows: int = RESOLVE_MAX_ROWS) -> dict:
     """Where the file a chat's reply names as ``name`` (a bare name or a
-    relative path) is: joined to the chat's working folder, else the newest
-    absolute path ending in it that the chat's own messages (tool calls,
-    tool results, replies) carry. Hidden sessions in the lineage (a room
+    relative path) is: joined to the chat's working folder, then to its git
+    repository's top (a project chat often works in a subfolder while its
+    replies name files from the top, hermes-conduit#1809), then, for a chat
+    with no folder recorded, to ``default_folder`` (the profile's configured
+    terminal folder, which Hermes' file tools resolve such a chat's relative
+    paths against); else the newest absolute path ending in it that the
+    chat's own messages (tool calls, tool results, replies) carry. Hidden sessions in the lineage (a room
     the chat was branched from) are left out, as the Artifacts list leaves
     them out, except the ids asked for and the Bot Chat's. ``exists`` checks
     a candidate on the host (and refuses one it won't show); without it (a
@@ -750,22 +767,23 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
 
     if "cwd" in session_columns:
         # The chat's own folder first, then those of the sessions it
-        # continues or that continue it, the most recently active first.
+        # continues or that continue it, the most recently active first;
+        # after them, the tops of their git repositories.
+        repo = "s.git_repo_root" if "git_repo_root" in session_columns else "NULL"
         rows = conn.execute(
-            f"SELECT s.id, s.cwd FROM sessions s WHERE s.id IN ({marks}) ORDER BY "
+            f"SELECT s.id, s.cwd, {repo} FROM sessions s WHERE s.id IN ({marks}) ORDER BY "
             f"(SELECT MAX(m.id) FROM messages m WHERE m.session_id = s.id) DESC, s.id", chat).fetchall()
-        folders = {str(row[0]): str(row[1] or "") for row in rows}
+        folders = {str(row[0]): (str(row[1] or ""), str(row[2] or "")) for row in rows}
         order = [sid for sid in wanted if sid in folders] + [str(row[0]) for row in rows if str(row[0]) not in wanted]
-        for cwd in dict.fromkeys(folders.get(sid, "") for sid in order):
-            cwd = cwd.strip()
-            if re.match(r"^[A-Za-z]:[\\/]", cwd):
-                cwd = re.sub(r"/+", "/", cwd.replace("\\", "/"))
-            cwd = cwd.rstrip("/")
-            # No folder recorded (or the disk's top) isn't a folder to join.
-            if cwd and cwd != "~" and not re.fullmatch(r"[A-Za-z]:", cwd) and _is_local_path(cwd + "/"):
-                candidate = f"{cwd}/{suffix}"
-                if found(candidate):
-                    return {"path": candidate, "via": "folder"}
+        cwds = [_join_folder(folders[sid][0]) for sid in order]
+        roots = [_join_folder(folders[sid][1]) for sid in order]
+        tried = [*cwds, *roots]
+        if not any(cwds) and default_folder:
+            tried.append(_join_folder(default_folder))
+        for folder in dict.fromkeys(f for f in tried if f):
+            candidate = f"{folder}/{suffix}"
+            if found(candidate):
+                return {"path": candidate, "via": "folder"}
 
     # Only a host that checks each candidate can tell a quoted path from
     # quoted prose that ends in one.
