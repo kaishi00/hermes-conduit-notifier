@@ -105,12 +105,15 @@ def test_any_card_carries_buttons_and_its_markdown_shows_them():
                                   "One time code", "auth token", "client_secret",
                                   "SSH private key", "Recovery key", "Verification code", "license_key",
                                   "Passphrase", "TOTP", "Master key", "App credentials",
-                                  "2FA code", "Two-factor code", "Login code"])
+                                  "2FA code", "Two-factor code", "Login code",
+                                  "パスワード", "Passwort", "Contraseña", "Mot de passe", "Пароль", "Kata sandi",
+                                  "비밀번호를 입력", "密码"])
 def test_a_field_never_asks_for_a_secret(name):
     assert card_schema.names_secret(name)
 
 
-@pytest.mark.parametrize("name", ["Spin class", "Subject", "Opinion", "Pinned note", "to", "Topic", "Key dates", "Zip code"])
+@pytest.mark.parametrize("name", ["Spin class", "Subject", "Opinion", "Pinned note", "to", "Topic", "Key dates",
+                                  "Zip code", "メモ", "Betreff", "Тема"])
 def test_ordinary_fields_are_not_secrets(name):
     assert not card_schema.names_secret(name)
 

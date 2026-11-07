@@ -506,9 +506,14 @@ MAX_FIELDS = 6
 # apps, never a card in a chat the model reads.
 _SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime", "privatekey", "recoverykey",
                  "licensekey", "seedphrase", "verificationcode", "securitycode", "authcode", "backupcode",
-                 "passphrase", "totp", "masterkey", "credential", "2fa", "twofactor", "logincode")
+                 "passphrase", "totp", "masterkey", "credential", "2fa", "twofactor", "logincode",
+                 # The same in the languages Conduit ships, as a model writes labels in the user's.
+                 "passwort", "kennwort", "contraseña", "motdepasse", "senha", "пароль", "hasło", "şifre",
+                 "katasandi", "パスワード", "暗証番号", "認証コード", "密码", "密碼", "验证码", "驗證碼",
+                 "비밀번호", "인증번호")
 _SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc"))
-_NOT_ALNUM = re.compile(r"[^0-9a-z]+")
+# Letters of any script count, so a label in Japanese or Russian is read too.
+_NOT_ALNUM = re.compile(r"[\W_]+")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2})?$")
 _NUMBER = re.compile(r"^-?[0-9]+(\.[0-9]+)?$")
 # What an open button may open: web pages and the links iOS hands to Maps,
