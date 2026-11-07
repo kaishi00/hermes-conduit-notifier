@@ -436,3 +436,23 @@ def test_a_number_filled_into_a_text_slot_is_shown_as_text():
     card = card_templates.expand_template(template, {"count": 3, "busy": 0.5}, notes, "t")
     items = card["sections"][0]["items"]
     assert items[0]["text"] == "3" and items[1]["progress"] == 0.5 and notes == []
+
+
+def test_a_room_drawn_by_a_conduit_without_composed_cards_leaves_them_out(tool_home):
+    _exchange(tool_home, features=(*FEATURES[:-1], tool.ROOM_BOARDS_FEATURE))
+    room = {"session_id": "room-1", "is_room": lambda s: s == "room-1", "room_board": lambda *_: True}
+    callout = {"type": "callout", "callout": {"text": "Due"}}
+    answer = _call({"title": "Mei", "cards": [EMAIL, callout]}, **room)
+    assert [card["type"] for card in answer["cards"]] == ["callout"]
+    assert answer["problems"][0] == tool.LEFT_OUT_NOTE.format(kinds="composed")
+    alone = _call({"title": "Mei", "cards": [EMAIL]}, **room)
+    assert alone["ok"] is False and alone["error"] == "unsupported_cards"
+
+
+def test_a_text_fields_lines_reach_hermes_as_written(tmp_path):
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": EMAIL, "action": "send",
+                "values": {"body": "Hi Mei,\r\n\r\nSee you Friday.\n\n—Alex", "subject": "x" * 2100}})
+    note = store.note("s1", "Send · Email to Mei")
+    assert 'body: "Hi Mei,\\n\\nSee you Friday.\\n\\n—Alex"' in note
+    assert "… (cut at 2,000 characters)" in note

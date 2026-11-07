@@ -53,6 +53,18 @@ def _clean(text: Any, limit: int) -> str:
     return card_schema.clean_text(text)[:limit].rstrip()
 
 
+def _field_text(text: Any) -> str:
+    """A text field's value as the user wrote it: its lines kept (an email's
+    paragraphs), each cleaned, and a cut past the cap marked."""
+    if not isinstance(text, str):
+        return ""
+    lines = [card_schema.clean_text(line) for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    joined = "\n".join(lines).strip()
+    if len(joined) > MAX_VALUE_CHARS:
+        joined = joined[:MAX_VALUE_CHARS].rstrip() + f" … (cut at {MAX_VALUE_CHARS:,} characters)"
+    return joined
+
+
 def _sessions(value: Any) -> list[str]:
     if not isinstance(value, list):
         raise TapError("sessions is a list of the chat's ids")
@@ -88,7 +100,7 @@ def _values(value: Any, fields: dict[str, dict[str, Any]]) -> dict[str, str]:
             raw = "on" if raw else "off"
         elif isinstance(raw, (int, float)):
             raw = card_schema._cell(raw)
-        text = _clean(raw, MAX_VALUE_CHARS)
+        text = _field_text(raw) if field["input"] == "text" else _clean(raw, MAX_VALUE_CHARS)
         if text and field["input"] in ("choice", "toggle", "date", "number"):
             # Only what the field could hold: an option, on or off, a date, a number within its bounds.
             text = card_schema._field_value({**field, "value": text}) or ""
@@ -243,7 +255,9 @@ def _line(tap: dict[str, Any]) -> str:
     line = (f'[Conduit: the user tapped "{tap["label"]}" (tap {tap["action"]}) on {name} in this chat; their '
             "message says so. The tap is their OK for exactly what the card showed them, nothing more")
     if tap["values"]:
-        filled = "; ".join(f"{key}: {value}" if value else f"{key}: (empty)" for key, value in tap["values"].items())
+        # A value of several lines goes quoted, its line breaks written \n, so it reads as one value.
+        filled = "; ".join(f"{key}: {json.dumps(value, ensure_ascii=False) if chr(10) in value else value}"
+                           if value else f"{key}: (empty)" for key, value in tap["values"].items())
         line += f", with the fields as they left them ({filled})"
     line += (". Do it now with your tools, then show the card again with the same live name, saying how it went "
              "(done, or what went wrong). The card they saw:\n" + tap["markdown"] + "]")

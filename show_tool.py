@@ -367,6 +367,14 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
             cards = [card for card in cards if card["type"] not in card_schema.DIFF_TYPES]
             if not cards:
                 return {"ok": False, "error": "unsupported_cards", "note": problems.pop(0), "problems": problems[:20]}
+        if any(card["type"] in card_schema.COMPOSED_TYPES for card in cards) and \
+                store.has_feature_everywhere(ROOM_BOARDS_FEATURE) and \
+                not store.has_feature_everywhere(card_schema.COMPOSED_FEATURE):
+            # The same for a Conduit that draws a room's boards but not cards built of blocks.
+            problems.insert(0, LEFT_OUT_NOTE.format(kinds="composed"))
+            cards = [card for card in cards if card["type"] not in card_schema.COMPOSED_TYPES]
+            if not cards:
+                return {"ok": False, "error": "unsupported_cards", "note": problems.pop(0), "problems": problems[:20]}
         board = {"cards": cards, "markdown": _fallback(cards)}
         if layout and len(cards) > 1:
             board["layout"] = layout
