@@ -19,3 +19,4 @@ node_modules/
 mailbox/deploy/.env
 mailbox/deploy/data/
 mailbox/data/
+*.whl

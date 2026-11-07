@@ -918,6 +918,9 @@ _DESKTOP_PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 # A Markdown link to a chat in Conduit, whatever its words: group 1 the label,
 # group 2 the session id as written.
 _APP_LINK = re.compile(r"\[([^\]\n]*)\]\(conduit://session/([^)?\s]+)(?:\?[^)\s]*)?\)")
+# Desktop's reference the bot wrote after the link: after spaces, a dash, a
+# comma, a colon or an opening bracket, or on the next line.
+_WRITTEN_REF = re.compile(r"[\s,:(—–-]{0,6}@session:")
 
 
 def mend_links(text: Any, home: Optional[Path] = None) -> Optional[str]:
@@ -946,8 +949,8 @@ def mend_links(text: Any, home: Optional[Path] = None) -> Optional[str]:
             continue
         full = _link(work.ref, work.session_id, (work.executor or {}).get("bot") or profile)
         link, desktop, reference = full.partition(" @session:")
-        after = text[match.end():].lstrip(" \t")
-        mended = link + (desktop + reference if desktop and not after.startswith("@session:") else "")
+        written = _WRITTEN_REF.match(text, match.end())
+        mended = link + (desktop + reference if desktop and not written else "")
         if mended != match.group(0):
             out.append(text[last:match.start()] + mended)
             last = match.end()

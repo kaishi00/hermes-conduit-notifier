@@ -4574,6 +4574,24 @@ def test_a_work_link_the_bot_reworded_is_put_back_as_written(on, hermes):
     # Every reply goes through the plugin's output hook, a room's scrub after it.
     assert plugin._transform_llm_output(response_text=f"Done: {reworded}", session_id=BOT_CHAT, model="m",
                                         platform="api_server", turn_id="t1") == f"Done: The build is commissioned — {canonical}"
+    # Desktop's reference the bot wrote after a dash or on the next line isn't written twice.
+    assert work.mend_links(f"{reworded} — {desktop}") == f"The build is commissioned — {link} — {desktop}"
+    assert work.mend_links(f"{reworded}\n{desktop}") == f"The build is commissioned — {link}\n{desktop}"
+
+
+def test_a_room_reply_is_mended_and_then_scrubbed(on, hermes, monkeypatch):
+    sid = "20261107_091300_ab12cd"
+    work_id = on.add("workstream", title="Provision OmniRoute LXC").ref
+    on.update(work_id, session_id=sid)
+    canonical = work._link(work_id, sid, "default")
+    monkeypatch.setattr(plugin, "_in_room_with_others", lambda session_id, platform=None: True)
+    secret = "sk-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6"
+    out = plugin._transform_llm_output(response_text=f"[{work_id}: LXC](conduit://session/{sid}) key {secret}",
+                                       session_id=BOT_CHAT, model="m", platform="api_server", turn_id="t1")
+    assert out.startswith(canonical) and secret not in out and "[credential removed]" in out
+    # A room reply with neither is left as it is.
+    assert plugin._transform_llm_output(response_text="Fine.", session_id=BOT_CHAT, model="m",
+                                        platform="api_server", turn_id="t2") is None
 
 
 # Work from a group room (room_work; Eric 2026-11-07) -------------------------------
