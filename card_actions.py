@@ -16,6 +16,7 @@ The dashboard loads this module through the plugin's package.
 from __future__ import annotations
 
 import json
+import re
 import os
 import tempfile
 import threading
@@ -168,14 +169,18 @@ class TapStore:
             state["taps"] = state["taps"][-MAX_TAPS:]
         return {"ok": True, "id": tap["id"]}
 
-    def note(self, session_id: Any) -> str | None:
-        """The taps in this chat Hermes hasn't heard yet, once, for this
-        turn's context."""
+    def note(self, session_id: Any, message: Any = None) -> str | None:
+        """The taps in this chat Hermes hasn't heard yet, once, for the turn
+        of the user's message about them (it starts with the button's label):
+        another turn in the chat meanwhile (a cron report, a workstream's)
+        leaves them for that message."""
         session = _clean(session_id, MAX_SESSION_CHARS)
         if not session:
             return None
+        said = message.strip() if isinstance(message, str) else None
         with self._locked() as state:
-            taps = [tap for tap in state["taps"] if tap["session"] == session and not tap["heard"]]
+            taps = [tap for tap in state["taps"] if tap["session"] == session and not tap["heard"]
+                    and (said is None or said.startswith(tap["label"]))]
             heard = {tap["id"] for tap in taps}
             # A tap kept under each of the chat's ids is heard under them all.
             for tap in state["taps"]:
@@ -184,15 +189,36 @@ class TapStore:
         return "\n".join(_line(tap) for tap in taps) or None
 
 
+def _open_fence(text: str) -> str | None:
+    """The code fence a card's Markdown leaves open at its end, if any; a
+    mono element's inline code (fenced on its own line, opened and closed
+    there) is no fence."""
+    fence = None
+    for line in text.split("\n"):
+        run = re.match(r"`{3,}", line)
+        if not run:
+            continue
+        rest = line[len(run.group()):]
+        if fence is None:
+            if not (rest.strip() and rest.rstrip().endswith(run.group())):
+                fence = run.group()
+        elif run.group() == fence and not rest.strip():
+            fence = None
+    return fence
+
+
 def _card_markdown(card: dict[str, Any]) -> str:
     """The card's Markdown for the tap's note: cut at a line, a code block
     the cut lands in closed, and folded sections said to be folded."""
     text = card_schema.fallback_markdown([card])
     if len(text) > MAX_CARD_MARKDOWN_CHARS:
-        cut = text[:MAX_CARD_MARKDOWN_CHARS - 4]
+        # Room for the longest fence the card could leave open, as clip_markdown does.
+        longest = max((len(run) for run in re.findall(r"`{3,}", text)), default=3)
+        cut = text[:MAX_CARD_MARKDOWN_CHARS - 1 - longest]
         text = cut[:cut.rfind("\n")] if "\n" in cut else cut
-        if sum(1 for line in text.split("\n") if line.lstrip().startswith("```")) % 2:
-            text += "\n```"
+        fence = _open_fence(text)
+        if fence is not None:
+            text += "\n" + fence
     if any(section.get("more") for section in card.get("sections", [])):
         text += ("\n(Part of this card was folded under Show more, so they may not have opened it; its fields "
                  "went with their starting values unless they changed them.)")

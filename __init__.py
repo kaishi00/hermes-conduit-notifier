@@ -1159,7 +1159,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         # Checklist cards the user ticked in Conduit since (checklist_store), once.
         None if child else _checklist_note(session_id),
         # A card's tap button the user tapped, with their message about it (card_actions), once.
-        None if child else _tap_note(session_id),
+        None if child else _tap_note(session_id, kwargs.get("user_message")),
         # When to draw a board instead of writing it out (show_tool).
         None if child else _board_rule(kwargs.get("platform")),
     ]
@@ -1177,11 +1177,11 @@ def _checklist_note(session_id: str) -> str | None:
         return None
 
 
-def _tap_note(session_id: str) -> str | None:
+def _tap_note(session_id: str, user_message: Any) -> str | None:
     try:
         from . import card_actions
 
-        return card_actions.TapStore(get_hermes_home()).note(session_id)
+        return card_actions.TapStore(get_hermes_home()).note(session_id, user_message)
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.debug("conduit_push: card tap note failed", exc_info=True)
         return None

@@ -330,3 +330,24 @@ def test_a_taps_number_out_of_bounds_goes_empty(tmp_path):
     store = card_actions.TapStore(tmp_path)
     store.save({"sessions": ["s1"], "card": card, "action": "book", "values": {"seats": "12"}})
     assert "seats: (empty)" in store.note("s1")
+
+
+def test_a_tap_waits_for_the_users_message_about_it(tmp_path):
+    card = {"type": "callout", "title": "Vet", "callout": {"text": "Due"},
+            "actions": [{"label": "Book it", "action": "tap", "id": "book"}]}
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": card, "action": "book"})
+    assert store.note("s1", "Here's your daily report") is None
+    assert "Book it" in store.note("s1", "Book it · Vet")
+    assert store.note("s1", "Book it · Vet") is None
+
+
+def test_a_taps_note_closes_the_fence_a_mono_element_leaves_open(tmp_path):
+    card = {"type": "composed", "title": "Log", "sections": [
+        {"items": [{"kind": "text", "text": "\n".join(["line ```` x"] * 400), "role": "mono"}]}],
+        "actions": [{"label": "Go", "action": "tap", "id": "go"}]}
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": card, "action": "go"})
+    markdown = store.note("s1").split("The card they saw:\n", 1)[1]
+    assert not markdown.rstrip("]").rstrip().endswith("\n`````"), "inline code is no fence to close"
+    assert card_actions._open_fence("````` a ```` b `````\n```\ncode") == "```"

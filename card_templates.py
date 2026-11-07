@@ -255,7 +255,7 @@ def expand_template(card: dict[str, Any], fill: dict[str, Any], notes: list[str]
                 slot = section.pop("repeat")
                 items = fill.get(slot)
                 if not isinstance(items, list):
-                    missing.add(slot)
+                    notes.append(f"{path}.fill.{slot}: not given, its section left out")
                     continue
                 if len(items) > MAX_REPEAT_ITEMS:
                     notes.append(f"{path}.fill.{slot}: at most {MAX_REPEAT_ITEMS} items, the rest were left out")
