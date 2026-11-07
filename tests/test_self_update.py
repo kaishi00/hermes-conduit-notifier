@@ -851,6 +851,16 @@ def test_a_chat_on_another_platform_without_a_row_has_no_session_to_stop(monkeyp
     assert unit["profile"] == "main" and unit["session_id"] is None and unit["platform"] == "discord"
 
 
+def test_a_cron_run_is_named_by_its_job(monkeypatch, tmp_path):
+    drain_report = types.ModuleType("hermes_cli.update_cmd_drain_report")
+    seen = []
+    drain_report._cron_job_name = lambda job_id, home: seen.append((job_id, home)) or "Morning mail"
+    monkeypatch.setitem(sys.modules, "hermes_cli.update_cmd_drain_report", drain_report)
+    monkeypatch.setattr(api.self_update, "_gateway_homes", lambda: [tmp_path])
+    unit = api.self_update._named_work_unit({"kind": "cron", "job_id": "j7", "elapsed_s": 40})
+    assert unit["job_id"] == "j7" and unit["title"] == "Morning mail" and seen == [("j7", tmp_path)]
+
+
 def test_the_gateway_work_route_answers_and_restart_now_sets_the_flag(monkeypatch):
     from fastapi.testclient import TestClient
     from fastapi import FastAPI
