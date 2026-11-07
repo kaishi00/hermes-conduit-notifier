@@ -13,12 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.137.1 (2026-11-07)
+## 0.137.2 (2026-11-07)
 
 ### Fixes
 - The Hermes dashboard no longer reads all of the plugin's code each time it
   lists its plugins. That took seconds on a server and minutes on a phone,
   enough to freeze the dashboard and drop Conduit's connection.
+
+## 0.137.1 (2026-11-07)
+
+### Fixes
+- Tapping a file link in a project chat now opens the file when the link
+  starts at the project's top folder and the chat worked in a subfolder.
+  Before, Conduit said the file wasn't on the server.
+- A file link in a chat with no folder of its own is also looked for in your
+  terminal's working folder, where Hermes wrote it.
 
 ## 0.137.0 (2026-11-07)
 

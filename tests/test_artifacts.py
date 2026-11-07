@@ -513,6 +513,69 @@ def test_the_chats_folder_comes_first_and_lineage_is_read(tmp_path):
         "path": str(tmp_path / "elsewhere" / "notes.md"), "via": "chat"}
 
 
+def _folders_db(home, rows):
+    home.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT, cwd TEXT,"
+                 " git_repo_root TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.executemany("INSERT INTO sessions VALUES (?, 't', NULL, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    return index.open_db(home)
+
+
+def test_a_project_chat_in_a_subfolder_finds_a_link_from_the_repos_top(tmp_path):
+    # hermes-conduit#1809: Hermes puts a chat in a project when its folder is
+    # anywhere inside it, and replies name files from the repository's top.
+    repo = tmp_path / "acme"
+    (repo / "docs" / "specs").mkdir(parents=True)
+    (repo / "docs" / "specs" / "plan.md").write_text("x")
+    (repo / "app").mkdir()
+    (repo / "app" / "README.md").write_text("x")
+    (repo / "README.md").write_text("x")
+    db = _folders_db(tmp_path / "home", [("s1", str(repo / "app"), str(repo))])
+    check = lambda p: pathlib.Path(p).is_file()  # noqa: E731
+    assert index.resolve_name(db, ["s1"], "docs/specs/plan.md", exists=check) == {
+        "path": str(repo / "docs" / "specs" / "plan.md"), "via": "folder"}
+    # The chat's own folder still comes first.
+    assert index.resolve_name(db, ["s1"], "README.md", exists=check)["path"] == str(repo / "app" / "README.md")
+
+
+def test_a_chat_with_no_folder_joins_the_terminal_folder(tmp_path):
+    work = tmp_path / "work"
+    (work / "notes").mkdir(parents=True)
+    (work / "notes" / "todo.md").write_text("x")
+    db = _folders_db(tmp_path / "home", [("s1", None, None), ("s2", str(tmp_path / "other"), None)])
+    check = lambda p: pathlib.Path(p).is_file()  # noqa: E731
+    assert index.resolve_name(db, ["s1"], "notes/todo.md", exists=check, default_folder=str(work)) == {
+        "path": str(work / "notes" / "todo.md"), "via": "folder"}
+    # A chat with a folder of its own doesn't fall back to the terminal's,
+    # as Hermes' file tools don't.
+    assert index.resolve_name(db, ["s2"], "notes/todo.md", exists=check, default_folder=str(work)) == {"path": None}
+    # Nor does a relative or blank one count.
+    assert index.resolve_name(db, ["s1"], "notes/todo.md", exists=check, default_folder="work") == {"path": None}
+    assert index.resolve_name(db, ["s1"], "notes/todo.md", exists=check, default_folder="") == {"path": None}
+
+
+def test_the_resolve_route_passes_the_profiles_terminal_folder(tmp_path, monkeypatch):
+    config = types.ModuleType("hermes_cli.config")
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
+    work = tmp_path / "work"
+    config.load_config = lambda: {"terminal": {"backend": "local", "cwd": str(work)}}
+    assert api.workspace._terminal_folder() == str(work)
+    config.load_config = lambda: {"terminal": {"backend": "docker", "cwd": "/workspace"}}
+    assert api.workspace._terminal_folder() is None
+    config.load_config = lambda: {"terminal": {"cwd": "."}}
+    assert api.workspace._terminal_folder() is None
+    config.load_config = lambda: {}
+    assert api.workspace._terminal_folder() is None
+    # Without Hermes' config (an older Hermes), there's no folder to add.
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", None)
+    assert api.workspace._terminal_folder() is None
+
+
 def test_nothing_resolves_outside_the_chat_or_past_the_folder(tmp_path):
     conn = _db(tmp_path / "home", [("s2", "assistant", "/root/secret/plan.md")],
                sessions=[("s1", "a"), ("s2", "b")])

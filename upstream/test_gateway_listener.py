@@ -755,3 +755,85 @@ def test_conduits_host_verbs_answer_on_the_listener(listener):
         assert (await sock.result("delegation.pause", {"paused": False}))["paused"] is False
 
     listener.run(script)
+
+
+def _reload_names(catalog: Dict[str, Any]) -> set:
+    """The command names commands.catalog lists, its categories and loose pairs both."""
+    pairs = list(catalog.get("pairs") or [])
+    for category in catalog.get("categories") or []:
+        pairs.extend(category.get("pairs") or [])
+    return {pair[0] for pair in pairs if pair}
+
+
+def test_reload_mcp_and_skills_run_in_conduits_shapes_on_the_listener(listener):
+    """hermes-conduit#1576: Conduit runs /reload-mcp and /reload-skills itself (slash.exec refuses
+    both): ``reload.mcp`` asks first and reloads with ``confirm``, ``skills.reload`` rescans and says
+    so in ``output``, and the catalog lists both for the suggestions."""
+    async def script(sock: ConduitSocket) -> None:
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        names = _reload_names(await sock.result("commands.catalog", {"session_id": sid}))
+        assert {"/reload-mcp", "/reload-skills"} <= names, sorted(names)
+
+        asked = await sock.result("reload.mcp", {"session_id": sid})
+        assert asked["status"] == "confirm_required" and asked.get("message"), asked
+        # Reloaded, or refused naming the servers that didn't connect when nothing took effect
+        # (the host-verbs test above adds a catalog preset with no real key): Conduit shows both.
+        reloaded = await sock.call("reload.mcp", {"session_id": sid, "confirm": True})
+        if "error" in reloaded:
+            assert _refusal(reloaded) == "mcp_servers_unavailable", reloaded
+            assert reloaded["error"]["data"]["detail"].startswith("did not connect: "), reloaded
+        else:
+            assert reloaded["result"]["status"] == "reloaded", reloaded
+        # The dashboard's persistent opt-out isn't the authority's: refused before anything runs.
+        always = await sock.call("reload.mcp", {"session_id": sid, "confirm": True, "always": True})
+        assert _refusal(always) == "invalid_params", always
+
+        rescanned = await sock.result("skills.reload", {"session_id": sid})
+        assert "skill(s) available" in rescanned["output"], rescanned
+
+    listener.run(script)
+
+
+def test_reload_mcp_and_skills_run_in_conduits_shapes_on_the_dashboard(dashboard):
+    """The same two on ``hermes dashboard``, whose ``reload.mcp`` follows
+    approvals.mcp_reload_confirm and takes ``always`` to turn that off."""
+    from conftest import TOKEN
+
+    async def script() -> None:
+        from websockets.asyncio.client import connect
+
+        async with connect(f"ws://127.0.0.1:{dashboard.port}/api/ws?token={TOKEN}", open_timeout=30,
+                           max_size=None) as ws:
+            pending: Dict[str, asyncio.Future] = {}
+
+            async def reader() -> None:
+                async for raw in ws:
+                    frame = json.loads(raw)
+                    if "id" in frame and "method" not in frame and frame["id"] in pending:
+                        pending.pop(frame["id"]).set_result(frame)
+
+            task = asyncio.create_task(reader())
+
+            async def result(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+                key = str(uuid.uuid4())
+                pending[key] = asyncio.get_running_loop().create_future()
+                await ws.send(json.dumps({"jsonrpc": "2.0", "id": key, "method": method, "params": params}))
+                frame = await asyncio.wait_for(pending[key], 120)
+                assert "result" in frame, frame
+                return frame["result"]
+
+            try:
+                sid = (await result("session.create", {"cols": 96, "source": "desktop"}))["session_id"]
+                names = _reload_names(await result("commands.catalog", {"session_id": sid}))
+                assert {"/reload-mcp", "/reload-skills"} <= names, sorted(names)
+                asked = await result("reload.mcp", {"session_id": sid})
+                assert asked["status"] == "confirm_required" and "/reload-mcp now" in asked["message"], asked
+                assert (await result("reload.mcp", {"session_id": sid, "confirm": True}))["status"] == "reloaded"
+                rescanned = await result("skills.reload", {"session_id": sid})
+                assert "skill(s) available" in rescanned["output"], rescanned
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+    asyncio.run(script())
