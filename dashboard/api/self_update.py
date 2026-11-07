@@ -437,7 +437,7 @@ def _named_work_unit(unit: Dict[str, Any]) -> Dict[str, Any]:
         named["job_id"] = job_id
         try:
             from hermes_cli.update_cmd_drain_report import _cron_job_name
-        except ImportError:
+        except Exception:  # noqa: BLE001 — a broken module names only the kind
             _cron_job_name = None
         if _cron_job_name is not None:
             with contextlib.suppress(Exception):
@@ -547,8 +547,9 @@ def force_gateway_restart() -> None:
         raise core.TokenError(501, "Conduit can force a restart only for a gateway systemd runs. "
                                    "Run hermes gateway stop, then hermes gateway start, on the host.")
     global _forced_restart_at, _forced_for_job
-    running = _self_update_thread is not None and _self_update_thread.is_alive()
-    owner = str((_self_update_job or {}).get("id") or "") if running else None
+    with _self_update_lock:  # the thread and its job read together, as a job start sets them
+        running = _self_update_thread is not None and _self_update_thread.is_alive()
+        owner = str((_self_update_job or {}).get("id") or "") if running else None
     command = _systemctl_cmd(_select_systemd_scope(False)) + ["restart", "--no-block", get_service_name()]
     logger.warning("Conduit plugin: forcing a gateway restart (%s)", " ".join(command))
     try:
