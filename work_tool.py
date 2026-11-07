@@ -4179,7 +4179,7 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
                 logger.debug("conduit_push: couldn't mark a room's work line", exc_info=True)
         if error is None:
             return
-        line += (f" (It was started from a group room, where this couldn't be posted: {_cut(error, 120)}. Tell "
+        line += (f" (Its reports go to a group room, where this couldn't be posted: {_cut(error, 120)}. Tell "
                  "the user here.)")
     target = chat or work.coordinator or _bot_chat_of(home)
     if target:

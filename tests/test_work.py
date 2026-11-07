@@ -4622,7 +4622,7 @@ def test_a_room_post_tries_each_profile_then_falls_back_to_the_bot_chat(on, herm
     # Only one profile here: refused there, so the Bot Chat hears it.
     assert room["posted"] == []
     line, = batched()
-    assert "Done once." in line and "started from a group room" in line
+    assert "Done once." in line and "reports go to a group room" in line
 
 
 def test_a_room_with_other_peoples_agents_starts_no_work(on, hermes, room):
