@@ -171,6 +171,12 @@ notes:
     runs with `systemctl restart --no-block`, using hermes_cli.gateway's supports_systemd_services,
     _installed_service_kind_for, _systemctl_cmd, _select_systemd_scope and get_service_name: a
     drain under way can't be cut otherwise. Without them it answers 501.
+    The update's restart, and Linked Rooms setup's, fall back to the same `systemctl restart
+    --no-block` when Hermes' own restart dies on its root refusal ("Refusing to install the gateway
+    system service as root", a root system unit without User=): it reads the end of the
+    gateway-restart action log at hermes_cli.web_server_gateway's _ACTION_LOG_DIR and
+    _ACTION_LOG_FILES, and setup's spawned restart from its _ACTION_PROCS, all by importlib or
+    getattr. Without them the restart is reported failed, as before (notifier #605).
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
