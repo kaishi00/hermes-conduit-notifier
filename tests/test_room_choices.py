@@ -269,6 +269,16 @@ def test_the_last_room_with_the_same_people_is_the_one_set_most_recently(tmp_pat
     assert store.last_with(["link:abc"]) == RoomChoices(tools="look", share="nothing")
 
 
+def test_run_work_is_never_carried_to_a_new_room_nor_a_default(tmp_path):
+    # Eric 2026-11-07: off by default, turned on room by room.
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look", "run_work": True}, people=["link:abc"])
+    assert store.get(ROOM).run_work is True
+    assert store.last_with(["link:abc"]) == RoomChoices(tools="look")
+    assert store.set_defaults({"run_work": True}).run_work is False
+    assert store.defaults().run_work is False
+
+
 @pytest.mark.parametrize("people", ["link:abc", [1], ["x" * 300], [""], ["x"] * 17])
 def test_people_that_arent_a_list_of_names_are_refused(tmp_path, people):
     with pytest.raises(choices_module.ChoicesError):

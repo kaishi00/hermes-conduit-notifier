@@ -185,19 +185,21 @@ class ChoicesStore:
     def last_with(self, people: Any) -> Optional[RoomChoices]:
         """The choices of the room with exactly these other people that were
         set most recently, or None: a new room with the same people starts
-        from them (decision 9)."""
+        from them (decision 9), with Run work off: it's turned on room by
+        room (Eric 2026-11-07)."""
         wanted = _people(people)
         state = self._load()
         rooms = [(entry["at"], room_id) for room_id, entry in state["rooms"].items()
                  if entry.get("people") == wanted]
-        return self._choices(state, max(rooms)[1])[0] if rooms else None
+        return replace(self._choices(state, max(rooms)[1])[0], run_work=False) if rooms else None
 
     def defaults(self) -> RoomChoices:
         return self._defaults(self._load())
 
     def set_defaults(self, choices: Any) -> RoomChoices:
         with self._locked() as state:
-            updated = choices_from(choices, self._defaults(state))
+            # Run work is never a default: each room turns it on for itself.
+            updated = replace(choices_from(choices, self._defaults(state)), run_work=False)
             state["defaults"] = updated.as_dict()
             return updated
 

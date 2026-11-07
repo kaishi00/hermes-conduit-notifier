@@ -24,7 +24,8 @@ checks it). The format is fixed, because Conduit reads it:
   Run work for your bot. It can then start work for the room, and each
   start asks you on your phone first: Start, change the words, or Don't
   start. What the work finds reaches your bot privately, and it shares only
-  what your rules for that room allow.
+  what your rules for that room allow. You turn it on for each room: a
+  new room never starts with it on.
 
 ## 0.136.0 (2026-11-07)
 

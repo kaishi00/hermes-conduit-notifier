@@ -3657,8 +3657,9 @@ for rooms with none of their own:
   in the room.
 - **Search my past chats**: off by default; `session_search` is blocked
   unless it's on.
-- **Run work** (plugin 0.137+): off by default. When it's on, the agent can
-  start work for the room with `conduit_room_work` (in `conduit_rooms`, so
+- **Run work** (plugin 0.137+): off by default, and turned on room by room
+  (a new room with the same people, and your defaults, never carry it).
+  When it's on, the agent can start work for the room with `conduit_room_work` (in `conduit_rooms`, so
   a room hosted elsewhere has it too), and each start, and each message to
   that work, asks your phone first: Start, Change it (start with your words)
   or Don't start. Unanswered within 30 seconds, it waits for your answer,
