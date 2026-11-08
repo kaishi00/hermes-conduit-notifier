@@ -595,13 +595,16 @@ class Home:
 
     # --- The server --------------------------------------------------------------------
 
-    def serve(self) -> int:
+    def serve(self) -> Optional[int]:
         """Starts the server, if it isn't running: its port. That's the one
         bridge.json keeps while it's free, so rooms' routes outlive
-        restarts, otherwise the next free one, kept from then on."""
+        restarts, otherwise the next free one, kept from then on. None once
+        the lease has gone meanwhile: the process that takes it serves."""
         with self._serve_lock:
             if self._server is not None and self.port is not None:
                 return self.port
+            if not self.leased():
+                return None
             kept = self.store.read()["home"]["port"]
             order = ([kept] if kept in self.ports else []) + [port for port in self.ports if port != kept]
             server = None
@@ -628,12 +631,14 @@ class Home:
             return port
 
     def close(self) -> None:
-        """Stops the server, if it's running."""
+        """Stops the server, if it's running: once this returns, its port is
+        free, whichever caller stopped it (a watch and the lease's handoff
+        may both)."""
         with self._serve_lock:
             server, self._server, self.port = self._server, None, None
-        if server is not None:
-            server.shutdown()
-            server.server_close()
+            if server is not None:
+                server.shutdown()
+                server.server_close()
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):

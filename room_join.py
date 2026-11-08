@@ -104,14 +104,16 @@ class Joiner:
             raise
         return {"grant": grant, "catalog": catalog, "status_expires_at": int(claims["status_expires_at"])}
 
-    def renew(self, grant: str) -> dict[str, Any]:
+    def renew(self, grant: str, epoch: Optional[int] = None) -> dict[str, Any]:
         """A fresh grant for the place ``grant`` holds (N5b): the same place and policy, for 24 hours to start
         turns and 30 days to read and stop them from now, minted once this Hermes' API server still takes
         ``grant`` (live, not revoked, its reservation current) and still runs the policy it names, and
         reserved. Never revokes anything: Hermes revokes a grant's whole scope, ``grant`` with it. JoinError
         ``gone`` (410) for a grant past its last day, ``refused`` (409) when the API server refuses it,
         ``policy_changed`` (409) when it runs another policy for the profile now, ``api_server`` (503) when it
-        doesn't answer."""
+        doesn't answer. ``epoch``: the room's authority epoch now, when it's later than the grant's (Hermes moved
+        the room into its gateway's store, gateway/hosted_rooms_gateway_import.py): the fresh grant is for it,
+        since a turn the room sends carries it and a grant for an older one is refused."""
         try:
             claims = self.hermes.decode(grant, "status")
         except ValueError:  # Hermes' HostedRoomGrantError: past its horizon, or not this Hermes' any more
@@ -124,6 +126,8 @@ class Joiner:
         catalog = self._catalog(profile, grant, place["target_install_id"], expected, renewing=True)
         if catalog["execution_policy"]["policy_digest"] != digest:
             raise JoinError("policy_changed", f"Profile {profile}'s room policy changed since it joined", 409)
+        if type(epoch) is int and epoch > place["authority_epoch"]:
+            place = {**place, "authority_epoch": epoch}
         fresh, fresh_claims = self._mint([], place, digest, PERMISSIONS, int(self.clock()), DISPATCH_S, STATUS_S)
         return {"grant": fresh, "status_expires_at": int(fresh_claims["status_expires_at"]),
                 "issued_at": int(fresh_claims["issued_at"])}

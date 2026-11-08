@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.141.0 (2026-11-08)
+
+### Fixes
+- On a host whose dashboard runs on its own beside the gateway, a room with
+  linked people stopped working once the gateway restarted: Hermes moves
+  such rooms into the gateway, and the plugin kept using the old, frozen
+  copy. The other people's copies stopped getting new messages, and their
+  agents' turns were refused. Rooms now follow Hermes into the gateway, the
+  gateway takes the rooms' mail, and the other people's agents get grants
+  for the room as it goes on. New rooms start in the gateway whenever it
+  runs.
+
 ## 0.140.3 (2026-11-08)
 
 ### Fixes
