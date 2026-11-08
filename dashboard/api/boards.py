@@ -112,6 +112,9 @@ async def post_board_checklists(request: Request, response: Response,
 # UTF-8 (about 600 KB), so the cap leaves it room.
 TAP_MAX_BODY_BYTES = 1024 * 1024
 _tap_limiter = core._MintLimiter(60, 60.0, message="Too many taps; try again shortly")
+# Drops count on their own, so taps that used up the minute never keep their
+# own cancellations from landing.
+_drop_limiter = core._MintLimiter(60, 60.0, message="Too many drops; try again shortly")
 
 
 def save_tap(body: Any) -> Dict[str, Any]:
@@ -157,7 +160,7 @@ async def delete_board_tap(request: Request, response: Response, profile: Option
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
     try:
-        return await core._run_scoped(profile, core._limited(_tap_limiter, profile, lambda: drop_tap(id)))
+        return await core._run_scoped(profile, core._limited(_drop_limiter, profile, lambda: drop_tap(id)))
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
     except HTTPException as exc:

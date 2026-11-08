@@ -276,6 +276,7 @@ def route_home(tmp_path, monkeypatch):
     monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     api.boards._tap_limiter._mints.clear()
+    api.boards._drop_limiter._mints.clear()
     return tmp_path
 
 
@@ -537,6 +538,18 @@ def test_a_dropped_tap_is_never_heard(route_home):
     assert store.note("chat-1", "Send") is None and store.note("alias-1", "Send") is None
     assert http.delete(f"{BASE}/boards/taps", params={"id": tap["id"]}).json()["dropped"] is False
     assert http.delete(f"{BASE}/boards/taps").status_code == 400
+
+
+def test_a_drop_lands_after_taps_used_up_the_minute(route_home):
+    http = _http()
+    tap = http.post(f"{BASE}/boards/taps", json={"sessions": ["chat-1"], "card": EMAIL, "action": "send"}).json()
+    for _ in range(80):
+        if http.post(f"{BASE}/boards/taps", json={"sessions": ["chat-1"], "card": EMAIL,
+                                                  "action": "send"}).status_code == 429:
+            break
+    else:
+        pytest.fail("taps never ran out")
+    assert http.delete(f"{BASE}/boards/taps", params={"id": tap["id"]}).json()["dropped"] is True
 
 
 def test_a_heard_tap_is_not_dropped(tmp_path):
