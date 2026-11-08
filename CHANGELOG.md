@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.143.0 (2026-11-08)
+
+### New and improved
+- Files sent into a group room (PDFs, text, pasted text, audio, video)
+  open, preview and play in Conduit as they do in a chat, instead of
+  showing as a name you can't tap. In a room someone else hosts, they
+  still show by name.
+
 ## 0.142.0 (2026-11-08)
 
 ### New and improved
