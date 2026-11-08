@@ -174,6 +174,9 @@ ROUTE_CAPABILITIES = (
     # answers but only to the asking device (no "[btw …]" note in Desktop).
     "side-question",
     "room-files",
+    # GET /room-files/data-url: a picture sent into a room, read back so
+    # Conduit draws it instead of its file name.
+    "room-file-pictures",
     "room-images",
     "speech-server",
     "local-live-agent",

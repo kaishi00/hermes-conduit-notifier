@@ -129,6 +129,7 @@ def test_every_capability_names_a_served_route_family():
         "predict": "/predict",
         "side-question": "/side-question",
         "room-files": "/room-files",
+        "room-file-pictures": "/room-files/data-url",
         "room-images": "/room-images",
         "speech-server": "/speech-server/",
         "local-live": "/local-live/",

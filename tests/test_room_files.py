@@ -169,3 +169,81 @@ def test_a_name_that_is_not_text_falls_back_to_file():
 
 def test_a_lone_surrogate_in_a_name_is_dropped():
     assert api.rooms._room_file_name("\ud800photo.jpg") == "photo.jpg"
+
+
+_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+
+def test_a_stored_picture_reads_back_as_a_data_url(tmp_path):
+    stored = api.rooms.store_room_file(str(tmp_path), _body(_JPEG, "photo.jpg"))
+    read = api.rooms.read_room_file_picture(str(tmp_path), stored["path"])
+    assert read["dataUrl"] == "data:image/jpeg;base64," + base64.b64encode(_JPEG).decode()
+    assert read["size"] == len(_JPEG)
+
+
+def test_picture_types_come_from_the_bytes_not_the_name(tmp_path):
+    import pytest
+
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    webp = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 16
+    heic = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 16
+    for data, mime in ((png, "image/png"), (webp, "image/webp"), (heic, "image/heic"), (b"GIF89a....", "image/gif")):
+        stored = api.rooms.store_room_file(str(tmp_path), _body(data, "picture.txt"))
+        assert api.rooms.read_room_file_picture(str(tmp_path), stored["path"])["dataUrl"].startswith(f"data:{mime};base64,")
+    text = api.rooms.store_room_file(str(tmp_path), _body(b"<svg onload=x>", "photo.jpg"))
+    with pytest.raises(api.rooms.HTTPException) as refused:
+        api.rooms.read_room_file_picture(str(tmp_path), text["path"])
+    assert refused.value.status_code == 415
+
+
+def test_only_stored_room_files_are_read(tmp_path):
+    import pytest
+
+    root = tmp_path / "room-files"
+    stored = api.rooms.store_room_file(str(root), _body(_JPEG))
+    outside = tmp_path / "secret.jpg"
+    outside.write_bytes(_JPEG)
+    (root / "loose.jpg").write_bytes(_JPEG)
+    folder = pathlib.Path(stored["path"]).parent
+    (folder / "link.jpg").symlink_to(outside)
+    cases = {
+        str(outside): 404,
+        str(root / "loose.jpg"): 404,
+        str(folder / ".." / ".." / "secret.jpg"): 404,
+        str(folder / "link.jpg"): 404,
+        str(folder): 404,
+        str(folder / "gone.jpg"): 404,
+        "relative/photo.jpg": 400,
+        "": 400,
+        None: 400,
+    }
+    for path, status in cases.items():
+        with pytest.raises(api.rooms.HTTPException) as refused:
+            api.rooms.read_room_file_picture(str(root), path)
+        assert refused.value.status_code == status, path
+
+
+def test_a_picture_too_large_for_a_data_url_is_refused(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(api.rooms, "ROOM_FILE_PICTURE_MAX_BYTES", 32)
+    stored = api.rooms.store_room_file(str(tmp_path), _body(_JPEG))
+    with pytest.raises(api.rooms.HTTPException) as refused:
+        api.rooms.read_room_file_picture(str(tmp_path), stored["path"])
+    assert refused.value.status_code == 413
+
+
+def test_the_route_reads_from_the_hermes_home(tmp_path, monkeypatch):
+    root = tmp_path / "conduit" / "room-files"
+    monkeypatch.setattr(api.rooms, "_room_files_root", lambda: str(root))
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    path = client.post(f"{BASE}/room-files", json=_body(_JPEG)).json()["path"]
+    response = client.get(f"{BASE}/room-files/data-url", params={"path": path})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["dataUrl"].startswith("data:image/jpeg;base64,")
+    missing = client.get(f"{BASE}/room-files/data-url", params={"path": str(tmp_path / "x.jpg")})
+    assert missing.status_code == 404
+    assert missing.headers["cache-control"] == "no-store"

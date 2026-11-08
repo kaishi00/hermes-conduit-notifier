@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.142.0 (2026-11-08)
+
+### New and improved
+- A picture sent into a group room shows as the picture in Conduit, for
+  everyone in the room, instead of a file icon and its name.
+
 ## 0.141.4 (2026-11-08)
 
 ### Fixes
