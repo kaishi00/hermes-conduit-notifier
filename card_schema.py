@@ -516,9 +516,12 @@ _SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime",
                  "códigodeverificación", "codigodeverificacion", "códigodeverificação", "codedevérification",
                  "codedeverification", "codicediverifica", "kodeverifikasi", "doğrulamakodu", "kodweryfikacyjny",
                  "кодподтверждения", "clavedeacceso", "contrasena")
-_SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc"))
+_SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc", "mfa", "pincode", "mfacode"))
 # Letters of any script count, so a label in Japanese or Russian is read too.
 _NOT_ALNUM = re.compile(r"[\W_]+")
+# Where ASCII letters and digits meet another script's letters, a word splits,
+# so "PIN码" reads as pin and 码.
+_SCRIPT_SEAM = re.compile(r"(?<=[a-z0-9])(?=[^\x00-\x7f])|(?<=[^\x00-\x7f])(?=[a-z0-9])")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2})?$")
 _NUMBER = re.compile(r"^-?[0-9]+(\.[0-9]+)?$")
 # What an open button may open: web pages and the links iOS hands to Maps,
@@ -542,9 +545,26 @@ def _a(word: str) -> str:
 
 def names_secret(text: str) -> bool:
     """Whether a field's id, label or placeholder asks for a secret."""
-    words = _NOT_ALNUM.sub(" ", text.lower()).split()
+    # NFKC first, so full-width ＰＩＮ reads as pin.
+    words = _NOT_ALNUM.sub(" ", unicodedata.normalize("NFKC", text).lower()).split()
     joined = "".join(words)
-    return any(part in joined for part in _SECRET_PARTS) or bool(_SECRET_WORDS.intersection(words))
+    pieces = [piece for word in words for piece in _SCRIPT_SEAM.sub(" ", word).split()]
+    return any(part in joined for part in _SECRET_PARTS) or bool(_SECRET_WORDS.intersection(pieces))
+
+
+def _real_date(value: str) -> bool:
+    """Whether a date value that has the shape is a day on the calendar (and
+    its time a time), so the picker shows what a tap sends."""
+    if not _DATE.match(value):
+        return False
+    year, month, day = int(value[0:4]), int(value[5:7]), int(value[8:10])
+    if year < 1 or not 1 <= month <= 12:
+        return False
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    days = (31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[month - 1]
+    if not 1 <= day <= days:
+        return False
+    return len(value) == 10 or (int(value[11:13]) <= 23 and int(value[14:16]) <= 59)
 
 
 def _composed_rules(sections: list[dict[str, Any]], controls: _Controls, path: str,
@@ -639,7 +659,7 @@ def _field_value(field: dict[str, Any]) -> str | None:
     if kind == "toggle":
         return value.lower() if value.lower() in ("on", "off") else None
     if kind == "date":
-        return value if _DATE.match(value) else None
+        return value if _real_date(value) else None
     if kind == "number":
         if not _NUMBER.match(value):
             return None

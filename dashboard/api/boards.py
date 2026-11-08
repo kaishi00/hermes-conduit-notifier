@@ -107,8 +107,14 @@ async def post_board_checklists(request: Request, response: Response,
 # tap with the card the user saw (card_actions.note, from the pre_llm_call
 # hook).
 
-TAP_MAX_BODY_BYTES = 64 * 1024
+# A tap carries the card as the chat holds it, and a diff card keeps a whole
+# diff of up to 150 lines of 1,000 characters each, up to 4 bytes apiece in
+# UTF-8 (about 600 KB), so the cap leaves it room.
+TAP_MAX_BODY_BYTES = 1024 * 1024
 _tap_limiter = core._MintLimiter(60, 60.0, message="Too many taps; try again shortly")
+# Drops count on their own, so taps that used up the minute never keep their
+# own cancellations from landing.
+_drop_limiter = core._MintLimiter(60, 60.0, message="Too many drops; try again shortly")
 
 
 def save_tap(body: Any) -> Dict[str, Any]:
@@ -128,6 +134,33 @@ async def post_board_tap(request: Request, response: Response, profile: Optional
     body = await core._read_json_body(request, TAP_MAX_BODY_BYTES)
     try:
         return await core._run_scoped(profile, core._limited(_tap_limiter, profile, lambda: save_tap(body)))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+    except Exception as exc:
+        raise core._unexpected("card-taps", exc, feature="Card buttons")
+
+
+def drop_tap(tap_id: Optional[str]) -> Dict[str, Any]:
+    module = core._plugin_package_module("card_actions")
+    try:
+        return module.TapStore(core._calls_home()).drop(tap_id)
+    except module.TapError as exc:
+        raise core.TokenError(400, str(exc))
+    except OSError:
+        raise core.TokenError(503, "The tap can't be dropped right now")
+
+
+@router.delete("/boards/taps")
+async def delete_board_tap(request: Request, response: Response, profile: Optional[str] = None,
+                           id: Optional[str] = None) -> Dict[str, Any]:  # noqa: A002 — the query's name
+    """Forgets a tap whose message Conduit didn't send."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    try:
+        return await core._run_scoped(profile, core._limited(_drop_limiter, profile, lambda: drop_tap(id)))
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
     except HTTPException as exc:

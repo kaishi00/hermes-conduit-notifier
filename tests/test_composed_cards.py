@@ -110,13 +110,15 @@ def test_any_card_carries_buttons_and_its_markdown_shows_them():
                                   "비밀번호를 입력", "密码", "Access code", "Unlock code", "Security key", "Reset code",
                                   "Recovery code", "Activation code", "Auth key", "Verification key",
                                   "Bestätigungscode", "Código de verificación", "Code de vérification",
-                                  "Kode verifikasi", "Doğrulama kodu", "Код подтверждения"])
+                                  "Kode verifikasi", "Doğrulama kodu", "Код подтверждения",
+                                  "Pincode", "pin_code", "MFA code", "mfaCode", "PIN码", "输入PIN", "OTP認証", "ＰＩＮコード", "ＭＦＡ"])
 def test_a_field_never_asks_for_a_secret(name):
     assert card_schema.names_secret(name)
 
 
 @pytest.mark.parametrize("name", ["Spin class", "Subject", "Opinion", "Pinned note", "to", "Topic", "Key dates",
-                                  "Zip code", "メモ", "Betreff", "Тема"])
+                                  "Zip code", "メモ", "Betreff", "Тема", "Spinning クラス",
+                                  "Comfort level", "Spin code", "Hairpin code", "ＳＰＩＮ"])
 def test_ordinary_fields_are_not_secrets(name):
     assert not card_schema.names_secret(name)
 
@@ -274,6 +276,7 @@ def route_home(tmp_path, monkeypatch):
     monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     api.boards._tap_limiter._mints.clear()
+    api.boards._drop_limiter._mints.clear()
     return tmp_path
 
 
@@ -522,3 +525,74 @@ def test_an_empty_repeat_list_says_its_section_went():
     notes = []
     card = card_templates.expand_template(template, {"events": []}, notes, "t")
     assert len(card["sections"]) == 1 and "t.fill.events: empty, its section left out" in notes
+
+
+def test_a_dropped_tap_is_never_heard(route_home):
+    http = _http()
+    tap = http.post(f"{BASE}/boards/taps", json={"sessions": ["chat-1", "alias-1"], "card": EMAIL,
+                                                 "action": "send"}).json()
+    response = http.delete(f"{BASE}/boards/taps", params={"id": tap["id"]})
+    assert response.status_code == 200 and response.json() == {"ok": True, "dropped": True}
+    assert response.headers["cache-control"] == "no-store"
+    store = card_actions.TapStore(route_home)
+    assert store.note("chat-1", "Send") is None and store.note("alias-1", "Send") is None
+    assert http.delete(f"{BASE}/boards/taps", params={"id": tap["id"]}).json()["dropped"] is False
+    assert http.delete(f"{BASE}/boards/taps").status_code == 400
+
+
+def test_a_drop_lands_after_taps_used_up_the_minute(route_home):
+    http = _http()
+    tap = http.post(f"{BASE}/boards/taps", json={"sessions": ["chat-1"], "card": EMAIL, "action": "send"}).json()
+    for _ in range(80):
+        if http.post(f"{BASE}/boards/taps", json={"sessions": ["chat-1"], "card": EMAIL,
+                                                  "action": "send"}).status_code == 429:
+            break
+    else:
+        pytest.fail("taps never ran out")
+    assert http.delete(f"{BASE}/boards/taps", params={"id": tap["id"]}).json()["dropped"] is True
+
+
+def test_a_heard_tap_is_not_dropped(tmp_path):
+    store = card_actions.TapStore(tmp_path)
+    tap = store.save({"sessions": ["c"], "card": EMAIL, "action": "send"})
+    assert store.note("c", "Send")
+    assert store.drop(tap["id"]) == {"ok": True, "dropped": False}
+
+
+def test_a_tap_on_a_whole_diff_card_fits_the_route(route_home):
+    # Four-byte characters, the most a line's 1,000 can weigh.
+    patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,75 +1,75 @@\n" + "".join(f"-{n} {'😀' * 990}\n" for n in range(75)) \
+        + "".join(f"+{n} {'🙂' * 990}\n" for n in range(75))
+    [card] = card_schema.normalize_cards([{"type": "diff", "title": "Patch", "diff": {"patch": patch},
+                                           "actions": [{"label": "Apply", "action": "tap", "id": "apply"}]}], [])
+    body = json.dumps({"sessions": ["chat-1"], "card": card, "action": "apply"}, ensure_ascii=False).encode()
+    assert len(body) > 512 * 1024
+    response = _http().post(f"{BASE}/boards/taps", content=body, headers={"content-type": "application/json"})
+    assert response.status_code == 200, response.text
+
+
+def test_a_tap_over_the_cap_is_refused(route_home):
+    response = _http().post(f"{BASE}/boards/taps", content=b"x" * (api.boards.TAP_MAX_BODY_BYTES + 1),
+                            headers={"content-type": "application/json"})
+    assert response.status_code == 413
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("value, kept", [("2026-02-31", False), ("2026-02-29", False), ("2028-02-29", True),
+                                         ("2100-02-29", False), ("2000-02-29", True), ("2026-13-01", False),
+                                         ("0000-01-01", False), ("2026-11-08T24:00", False),
+                                         ("2026-11-08T23:59", True), ("2026-04-31T09:00", False)])
+def test_a_date_field_keeps_only_a_real_day(value, kept):
+    [card] = card_schema.normalize_cards([{"type": "composed", "sections": [{"items": [
+        {"kind": "field", "id": "day", "input": "date", "value": value}]}]}])
+    assert (card["sections"][0]["items"][0].get("value") == value) is kept
+
+
+def test_a_fill_of_the_wrong_shape_is_named_once(tool_home):
+    _exchange(tool_home)
+    _call({"title": "Agenda", "save_templates": [{"name": "agenda", "card": AGENDA}]})
+    answer = _call({"title": "Today", "cards": [{"type": "template", "template": {"name": "agenda",
+                                                                                  "fill": "Friday"}}]})
+    problems = answer.get("problems", [])
+    assert any("template.fill: text, which must be an object of slot values" in line for line in problems)
+    assert not any("not given" in line for line in problems), problems

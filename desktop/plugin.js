@@ -434,10 +434,12 @@ function Buttons({ buttons, card, sessionId, values }) {
       if (!sessionId) return
       setBusy(button.id)
       try {
-        await rest('/boards/taps', { method: 'POST', body: { sessions: [sessionId], card, action: button.id, values } })
+        const tap = await rest('/boards/taps', { method: 'POST', body: { sessions: [sessionId], card, action: button.id, values } })
         const titled = card.title ? `${button.label} · ${card.title}` : button.label
         const said = /`|@[\w/.~]/u.test(titled) ? button.label : titled
         if (host.composer?.submit?.(sessionId, said) === false) {
+          // No message went, so no later one that starts with the label hears it.
+          if (tap?.id) rest(`/boards/taps?id=${encodeURIComponent(tap.id)}`, { method: 'DELETE' }).catch(() => {})
           host.notify?.({ kind: 'warning', message: 'Open that chat to send it' })
         }
       } catch {

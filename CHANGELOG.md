@@ -21,6 +21,18 @@ checks it). The format is fixed, because Conduit reads it:
   now keeps one of each, and a choice left with fewer than two options is
   dropped.
 
+## 0.140.2 (2026-11-08)
+
+### Fixes
+- A card's date field holding a day that doesn't exist, like 31 February,
+  showed today but sent the impossible date; now it starts empty.
+- A card field asking for a PIN code or an MFA code, or a PIN written next
+  to Chinese or Japanese text or in full-width letters, wasn't refused as
+  a secret.
+- A tap on a card showing a long diff could be turned away as too large.
+- A tap whose message didn't go after all could be heard by a later message
+  starting with the same words; now it's forgotten.
+
 ## 0.140.1 (2026-11-08)
 
 ### Fixes

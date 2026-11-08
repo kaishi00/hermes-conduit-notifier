@@ -274,6 +274,9 @@ ROUTE_CAPABILITIES = (
     # POST /boards/taps: a tap on a card's tap button, heard by Hermes with
     # the user's message about it (Cards Hermes shows, issue 1946).
     "card-taps",
+    # DELETE /boards/taps?id=: forgets a tap whose message Conduit didn't
+    # send (Cards Hermes shows).
+    "card-tap-drop",
 )
 
 
