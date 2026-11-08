@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.144.0 (2026-11-08)
+## 0.146.0 (2026-11-08)
 
 ### New and improved
 - In a Linked Room, every bot sees the pictures and files sent into the
@@ -23,6 +23,25 @@ checks it). The format is fixed, because Conduit reads it:
   into the room, whatever else the room's rules allow them.
 - In a room someone else hosts, Conduit draws its pictures and opens its
   files from your own host's copy, instead of showing them by name.
+
+## 0.145.0 (2026-11-08)
+
+### New and improved
+- When your agent reads a room with other people for you, a message's
+  pictures and files are named in it, and a message of files alone is
+  read too, now that Conduit sends them as the room's own attachments.
+
+## 0.143.1 (2026-11-08)
+
+### Fixes
+- Pulse made two or three copies of the same card from one check, and the
+  morning brief came more than once: on a host with profiles, each profile's
+  copy of the plugin ran Pulse. Now only one does.
+- Pulse cards came back after you marked them Done: one oddly saved date
+  made every check skip looking at earlier cards. Dates saved like that no
+  longer stop any of Pulse's checks, and a card you marked Done or put away
+  keeps the same words from coming back for a month (one about a reminder,
+  a calendar entry or something Pulse remembers keeps that thing's rules).
 
 ## 0.143.0 (2026-11-08)
 

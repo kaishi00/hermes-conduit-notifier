@@ -1983,7 +1983,7 @@ other file's from its name, never a picture type the bytes don't back.
 Capabilities `room-file-pictures` (plugin 0.142+, pictures) and
 `room-file-reads` (0.143+, any file).
 
-In a Linked Room (plugin 0.144+), every participant sees the same files.
+In a Linked Room (plugin 0.146+), every participant sees the same files.
 The home sends each file a room message names, up to 16 MB, over the Link
 to every guest with an agent in the room, in 96 KB pieces, sending it again
 (up to five times) until the guest says it has the file. The guest's plugin checks its size and
