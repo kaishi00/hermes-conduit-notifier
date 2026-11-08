@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.146.1 (2026-11-08)
+
+### Fixes
+- With a memory provider such as Hindsight or Honcho, every Pulse report,
+  brief and delivery check was saved and recalled like your own messages,
+  and a provider that reprocesses the whole chat each time could cost
+  dollars a day. Pulse's turns now stay out of the memory provider; what
+  you write in the Pulse chat is saved as before.
+
 ## 0.146.0 (2026-11-08)
 
 ### New and improved
