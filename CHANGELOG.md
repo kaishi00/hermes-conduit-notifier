@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.144.0 (2026-11-08)
+## 0.146.0 (2026-11-08)
 
 ### New and improved
 - Hermes can show you options to choose between when they're easier to see
@@ -22,6 +22,13 @@ checks it). The format is fixed, because Conduit reads it:
   Change or Skip with notes, and Hermes comes back with the next round.
 - In Bot Mode, a workstream draws the options and your Bot Chat shows them:
   your marks go straight back to that workstream, every round.
+
+## 0.145.0 (2026-11-08)
+
+### New and improved
+- When your agent reads a room with other people for you, a message's
+  pictures and files are named in it, and a message of files alone is
+  read too, now that Conduit sends them as the room's own attachments.
 
 ## 0.143.1 (2026-11-08)
 

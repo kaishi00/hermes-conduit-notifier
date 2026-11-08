@@ -2692,7 +2692,7 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
   left out and buttons and fields are taken off other cards, and Hermes is
   told to offer them in its reply.
 
-### Review cards (plugin 0.144+)
+### Review cards (plugin 0.146+)
 
 A `review` card shows options to choose between when they're easier to see
 than to describe: layouts, colours, charts, posters, a before and after.
