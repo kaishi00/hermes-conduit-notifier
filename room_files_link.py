@@ -390,12 +390,17 @@ class Files:
                 logger.info("Linked Rooms dropped a piece of room file %s/%s from Link %s: no room for it here",
                             body["folder"], body["name"], link_id)
                 return None
-            folder.mkdir(exist_ok=True, mode=0o700)
-            (folder / f"{body['index']:05d}").write_bytes(body["data"])
-            parts = sorted(folder.iterdir())
-            if len(parts) < body["count"]:
+            try:
+                folder.mkdir(exist_ok=True, mode=0o700)
+                (folder / f"{body['index']:05d}").write_bytes(body["data"])
+                parts = sorted(folder.iterdir())
+                if len(parts) < body["count"]:
+                    return None
+                whole = b"".join(part.read_bytes() for part in parts[:body["count"]])
+            except OSError as exc:
+                logger.info("Linked Rooms dropped a piece of room file %s/%s from Link %s (%s)", body["folder"],
+                            body["name"], link_id, type(exc).__name__)
                 return None
-            whole = b"".join(part.read_bytes() for part in parts[:body["count"]])
             shutil.rmtree(folder, ignore_errors=True)
         if len(whole) != body["size"] or hashlib.sha256(whole).hexdigest() != body["sha"]:
             logger.info("Linked Rooms dropped room file %s/%s from Link %s: it didn't match its digest",
@@ -415,6 +420,11 @@ class Files:
                                 FREE_FLOOR_BYTES >> 30)
                     return False
                 target.parent.mkdir(exist_ok=True, mode=0o700)
+                if target.parent.is_symlink() or target.is_symlink():
+                    # Nothing Linked Rooms or an upload makes: a carried file is never written through one.
+                    logger.warning("Linked Rooms didn't keep room file %s/%s: its folder here is a symlink",
+                                   body["folder"], body["name"])
+                    return False
                 descriptor, name = tempfile.mkstemp(prefix=".carried.", dir=target.parent)
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(whole)

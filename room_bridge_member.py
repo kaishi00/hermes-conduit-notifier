@@ -330,12 +330,14 @@ class Member:
             return fields
         try:
             local = room_files_link.localized(prompt, self.root)
+            if local == prompt:
+                return fields
+            # A lone surrogate doesn't encode: the turn keeps the home's paths and digest.
+            digest = hashlib.sha256(local.encode("utf-8")).hexdigest()
         except Exception as exc:  # noqa: BLE001 - the turn goes with the home's paths
             logger.info("Linked Rooms couldn't swap in this host's room files (%s)", type(exc).__name__)
             return fields
-        if local == prompt:
-            return fields
-        return {**fields, "prompt": local, "prompt_digest": hashlib.sha256(local.encode("utf-8")).hexdigest()}
+        return {**fields, "prompt": local, "prompt_digest": digest}
 
     def _admitted(self, link_id: str, key: str, profile: str, grant: str, run_id: str,
                   answer: dict) -> tuple[dict, dict]:

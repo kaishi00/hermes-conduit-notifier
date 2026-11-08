@@ -332,6 +332,17 @@ def test_a_dispatch_is_replayed_with_its_grant_and_key_and_no_input(laifu, herme
     assert call["body"] == {"hosted_room_dispatch": body["hosted_room_dispatch"]}
 
 
+def test_a_prompt_that_cant_be_encoded_keeps_the_homes_paths(laifu):
+    # Beam on notifier #629: a lone surrogate made the digest raise out of _localized.
+    folder = "20261108-" + "c" * 32
+    kept = laifu.root / "conduit" / "room-files" / folder / "shot.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")
+    fields = {"prompt": f"@file:/root/.hermes/conduit/room-files/{folder}/shot.jpg \ud800", "prompt_digest": "d"}
+
+    assert laifu.member._localized(fields) == fields
+
+
 def test_a_dispatch_names_this_hosts_copy_of_a_room_file_and_its_digest_follows(laifu, hermes):
     folder = "20261108-" + "b" * 32
     kept = laifu.root / "conduit" / "room-files" / folder / "shot.jpg"

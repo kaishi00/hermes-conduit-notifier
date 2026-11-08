@@ -258,3 +258,30 @@ def test_a_file_isnt_sent_to_a_link_no_longer_in_its_room(copies):  # noqa: F811
 
     assert _sent(copies, "room.file") == []
     assert store.read()["out"].get("link1", {}) == {} and store.read()["out"].get("link9", {}) == {}
+
+
+def test_a_carried_file_isnt_written_through_a_symlinked_folder(tmp_path):
+    # Beam on notifier #629.
+    root = tmp_path / "laifu"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    folder = files_module.files_root(root) / FOLDER
+    folder.parent.mkdir(parents=True)
+    folder.symlink_to(elsewhere, target_is_directory=True)
+    files = files_module.Files(type("Rooms", (), {"root": root, "clock": staticmethod(lambda: 0.0)})())
+
+    assert files._keep(folder / "shot.jpg", b"data", {"folder": FOLDER, "name": "shot.jpg"}) is False
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_piece_that_cant_be_written_is_dropped(tmp_path, monkeypatch):
+    # Beam on notifier #629: an OSError escaped _take.
+    files = files_module.Files(type("Rooms", (), {"root": tmp_path, "clock": staticmethod(lambda: 0.0)})())
+
+    def full(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(files_module.Path, "write_bytes", full)
+    body = {"sha": "a" * 64, "folder": FOLDER, "name": "shot.jpg", "index": 0, "count": 2, "size": 10,
+            "data": b"x" * 5}
+    assert files._take("link1", body) is None
