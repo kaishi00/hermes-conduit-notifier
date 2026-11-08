@@ -20,6 +20,13 @@ checks it). The format is fixed, because Conduit reads it:
   instead of a file icon and its name. In a room someone else hosts, it
   still shows by name.
 
+## 0.141.6 (2026-11-08)
+
+### Fixes
+- Cards a workstream drew before you stopped it never reached its Bot
+  Chat, because a stopped turn sends no update. The bot's next update
+  from it now names them, so they're shown in the Bot Chat.
+
 ## 0.141.5 (2026-11-08)
 
 ### Fixes

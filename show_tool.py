@@ -531,9 +531,11 @@ def _diffs_answered(cards: list[dict[str, Any]], keep_diff: Callable[[dict[str, 
     for card in cards:
         # One the host already keeps (a workstream's card shown again with
         # from_work) carries its id as it is: its hunks were left out.
-        kept = card["type"] == "diff" and isinstance(card["diff"].get("id"), str) and card["diff"]["id"] \
-            and not any(file.get("hunks") for file in card["diff"]["files"])
-        if card["type"] == "diff" and not kept and not card_schema.carries_whole(card["diff"]):
+        diff = card.get("diff") if isinstance(card, dict) and card.get("type") == "diff" else None
+        files = diff.get("files") if isinstance(diff, dict) else None
+        kept = isinstance(files, list) and isinstance(diff.get("id"), str) and diff["id"] \
+            and not any(isinstance(file, dict) and file.get("hunks") for file in files)
+        if isinstance(files, list) and not kept and not card_schema.carries_whole(diff):
             try:
                 diff_id = keep_diff(card["diff"])
             except Exception:  # noqa: BLE001 — the card lists the files alone
