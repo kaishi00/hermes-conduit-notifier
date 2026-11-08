@@ -276,7 +276,7 @@ SCHEMAS: dict[str, dict] = {
                         "goes where you send from: sent from a group room, it's posted in that room; from your Bot "
                         "Chat, it comes back there. A workstream waiting on the user's answer to its question takes "
                         "what you send, from a turn the user's own message started, as that answer: pass on what "
-                        "they said."),
+                        "they said. An approval it waits on isn't answered this way."),
         "parameters": {"type": "object", "properties": {
             "ref": _REF_SCHEMA,
             "text": {"type": "string", "description": "What to tell it."},

@@ -765,6 +765,7 @@ def test_a_written_answer_answers_a_question_no_call_follows(tmp_path):
         {"qid": "q1", "question": "Which?", "choices": ["A", "B"], "multi_select": False},
         {"qid": "q2", "question": "Name?", "choices": [], "multi_select": False}])
     assert store.answer_in_writing("s1", "  B, and call it Den  ")
+    assert not store.answer_in_writing("s1", "A")  # answered already, not taken yet
     assert store.take_answers("conduit-push-a") == {"q1": "B, and call it Den", "q2": "B, and call it Den"}
 
 

@@ -702,10 +702,13 @@ class CallStore:
             if not found:
                 return False
             item = max(found, key=lambda entry: entry["at"])
+            filled = False
             for entry in item["questions"]:
                 if entry["answer"] is None:
                     entry["answer"] = text
-            return True
+                    filled = True
+            # Already answered, and not taken yet: these words aren't its answer.
+            return filled
 
     def answers_ready(self, request_id: Any) -> bool:
         """Whether a call has answered every question of the clarify loop's
