@@ -4550,7 +4550,7 @@ a room not set to Use my data or Custom with it picked. Capability
 ## Asks between linked agents (plugin 0.120+)
 
 In your private chats, your agent can ask someone you've linked with
-(Settings > People) whether they're free on a date, or a question, with the
+(Settings > Multiplayer) whether they're free on a date, or a question, with the
 `conduit_ask_linked` tool: `people` lists whom it can ask, `ask` asks one
 (`to`: their name, and `free_on` `{date, from, to}` in their time zone, or
 `question`: one line of at most 300 characters), and `answers` gives this

@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.139.3 (2026-11-08)
+
+### New and improved
+- Your agents now point you to Settings › Multiplayer (Conduit's new name
+  for People) when they mention the people you've linked with.
+
 ## 0.139.2 (2026-11-08)
 
 ### Fixes
