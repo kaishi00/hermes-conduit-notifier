@@ -631,12 +631,14 @@ class Home:
             return port
 
     def close(self) -> None:
-        """Stops the server, if it's running."""
+        """Stops the server, if it's running: once this returns, its port is
+        free, whichever caller stopped it (a watch and the lease's handoff
+        may both)."""
         with self._serve_lock:
             server, self._server, self.port = self._server, None, None
-        if server is not None:
-            server.shutdown()
-            server.server_close()
+            if server is not None:
+                server.shutdown()
+                server.server_close()
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):

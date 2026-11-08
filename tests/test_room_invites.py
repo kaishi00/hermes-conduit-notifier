@@ -2723,3 +2723,27 @@ def test_a_moved_room_started_before_the_plugin_kept_where_is_followed_too(rooms
     rooms.furina.pass_once()
 
     assert rooms.furina.store.read()["drafts"][room_id]["started_in"]["kind"] == "canonical"
+
+
+def test_a_route_change_made_in_the_frozen_copy_as_the_room_moved_leaves_the_move_s_own_to_do(rooms):
+    room_id = _started(rooms)
+    key = (room_id, slot("link1", 1))
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()  # a fresh grant for Laifu's agent, which the home swaps into its route
+    swap = rooms.furina.starter.swap
+
+    def moving_as_it_swaps(found, **kwargs):
+        made = swap(found, **kwargs)
+        if found.kind != "canonical":
+            _moved(rooms, room_id)
+            del rooms.home.canonical.peer_routes[key]  # the move copied the room without this route
+            rooms.furina._follow_gateway()
+        return made
+
+    rooms.furina.starter.swap = moving_as_it_swaps
+    rooms.furina.pass_once()
+
+    assert rooms.furina.store.read()["drafts"][room_id]["route_todo"][slot("link1", 1)]["unseen"] is True
+    rooms.furina.pass_once()
+    assert rooms.home.canonical.peer_routes[key].grant == rooms.home.legacy.peer_routes[key].grant
+    assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]

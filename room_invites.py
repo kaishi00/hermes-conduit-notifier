@@ -825,7 +825,7 @@ class Rooms:
             draft = state["drafts"].get(room_id)
             todos = draft.get("route_todo", {}) if draft is not None else {}
             current = todos.get(member_id)
-            if current is None or current["do"] != todo["do"] or (
+            if current is None or current["do"] != todo["do"] or current.get("unseen") != todo.get("unseen") or (
                     todo["do"] == "swap" and _joined(draft, member)["grant"] != agent["grant"]):
                 return  # another change came meanwhile: the next pass makes it
             if failed is None:
