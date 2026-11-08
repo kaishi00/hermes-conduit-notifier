@@ -135,6 +135,10 @@ def test_a_deadline_carded_other_and_done_keeps_its_words_out_of_a_deadline_row(
     live.store.mark_done(done, None, closed_by="user", now=now - 86000)
     assert decide(live, words, kind="deadline", now=now) == ["raised"]
     assert decide(live, words, kind="promise", now=now) == [""]
+    # Still open, the same.
+    passport = "Renew the passport at the post office by 20 November"
+    card(live, passport, created_at=now - 86400, topic="other")
+    assert decide(live, passport, kind="deadline", now=now) == ["raised"]
 
 
 def test_a_card_put_away_keeps_the_same_words_out(live):

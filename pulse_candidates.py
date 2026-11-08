@@ -572,13 +572,13 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     # is matched by what it says (Eric, 2026-10-31: Kwan's birthday again,
     # Tuesday's card still open, both from the model with nothing to key on).
     topics = [str(row.get("kind") or "") for row in rows]
+    # A deadline line a report didn't show the item for was carded "other".
+    topics += ["other"] if dates.DEADLINE in topics else []
     worded = pulse_store.open_cards_on(topics, now - SAID_WINDOW_S)
     # A card the user marked done or put away, word for word again: they
     # dealt with it (Eric, 2026-11-08: the audit cron card, Done on Friday,
     # back on Saturday). Not on its due day either.
-    # A deadline line a report didn't show the item for was carded "other".
-    closed = pulse_store.closed_cards_on(topics + (["other"] if dates.DEADLINE in topics else []),
-                                         now - SAID_WINDOW_S)
+    closed = pulse_store.closed_cards_on(topics, now - SAID_WINDOW_S)
     by_item: dict[int, list[dict]] = {}
     by_ref: dict[str, list[dict]] = {}
     for card in cards:
@@ -598,8 +598,10 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
             mine = lambda card: card["topic"] == row.get("kind") and not (keyed(card) and (item is not None or ref))
             found = [card for card in worded if mine(card) and (said_alike(card, text)
                                                                 or same_subject(card["news"], text))]
+            # The same words carded "other" (a deadline a report didn't show).
             was = lambda card: mine(card) or (row.get("kind") == dates.DEADLINE and card["topic"] == "other"
                                               and not (keyed(card) and (item is not None or ref)))
+            found = found or [card for card in worded if was(card) and said_alike(card, text)]
             if not found and any(was(card) and said_alike(card, text) for card in closed):
                 out.append(row)
                 continue
