@@ -5440,10 +5440,44 @@ def test_a_workstreams_cards_come_back_to_the_bot_chat(on, hermes):
     assert why == "" and board["cards"] == [MAP] and board["next"] == ["Navigate there"]
     assert board["title"] == "Dunkin' near you"
     assert work.shown_board("20261031_work_1", "W1")[0] is None  # its own chat has them
-    # The next turn's cards are its own.
+    # The next turn keeps them (its update may come later) until it draws its own,
+    # and its own update doesn't name the last turn's.
+    time.sleep(0.01)
     work.turn_started("20261031_work_1")
-    assert work.shown_board(BOT_CHAT, "W1")[0] is None
+    assert work.shown_board(BOT_CHAT, "W1")[0]["cards"] == [MAP]
+    assert work._shown_line(on, on.get("W1")) == ""
+    other = {**MAP, "title": "Coffee"}
+    work.card_shown("20261031_work_1", "conduit_show", {}, json.dumps({"ok": True, "cards": [other]}))
+    assert work.shown_board(BOT_CHAT, "W1")[0]["cards"] == [other]
+    assert "showed 1 card" in work._shown_line(on, on.get("W1"))
     assert work.shown_board(BOT_CHAT, "W9")[0] is None
+    # Resolved work takes its cards with it.
+    on.update("W1", status="done")
+    assert work.app_act(on.home, "W1", "resolve")["ok"]
+    assert work.shown_board(BOT_CHAT, "W1")[0] is None
+
+
+def test_kept_cards_are_the_newest_twelve_and_a_calls_job_keeps_none(on, hermes):
+    start()
+    work.turn_started("20261031_work_1")
+    cards = [{**MAP, "title": f"Map {index}"} for index in range(15)]
+    for card in cards:
+        work.card_shown("20261031_work_1", "conduit_show", {}, json.dumps({"ok": True, "cards": [card]}))
+    assert work.shown_board(BOT_CHAT, "W1")[0]["cards"] == cards[-work.SHOWN_CARDS:]
+    on.update("W1", requested_by={"by": "phone"})
+    work.card_shown("20261031_work_1", "conduit_show", {}, json.dumps({"ok": True, "cards": [MAP]}))
+    assert MAP not in work.shown_board(BOT_CHAT, "W1")[0]["cards"]
+
+
+def test_a_title_is_kept_only_when_every_bridged_show_drew_a_board(on, hermes):
+    start()
+    work.turn_started("20261031_work_1")
+    bridged = {"calls": [{"name": "conduit_show", "arguments": {"title": "Failed one"}},
+                         {"name": "conduit_show", "arguments": {"title": "Map"}}]}
+    result = json.dumps([{"ok": False, "error": "invalid_cards"}, {"ok": True, "cards": [MAP]}])
+    work.card_shown("20261031_work_1", "tool_call", bridged, result)
+    board = work.shown_board(BOT_CHAT, "W1")[0]
+    assert board["cards"] == [MAP] and "title" not in board
 
 
 def test_a_bridged_show_and_a_live_card_are_kept_once(on, hermes):
