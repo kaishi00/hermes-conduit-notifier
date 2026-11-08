@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.139.3 (2026-11-08)
+## 0.139.4 (2026-11-08)
 
 ### Fixes
 - When a send failed just as its "sent from your iPhone, spoken" note was
@@ -25,6 +25,12 @@ checks it). The format is fixed, because Conduit reads it:
 - A Linked Room's work ask that the owner left unanswered kept the host
   reading it every 5 seconds for up to a day; after two minutes it's read
   every 30 seconds, without locking the file.
+
+## 0.139.3 (2026-11-08)
+
+### New and improved
+- Your agents now point you to Settings › Multiplayer (Conduit's new name
+  for People) when they mention the people you've linked with.
 
 ## 0.139.2 (2026-11-08)
 

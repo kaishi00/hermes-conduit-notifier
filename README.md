@@ -1883,7 +1883,7 @@ a file path; a file the user asks for still goes (0.115.1+).
   same words sent from another app in that chat don't take its line. A send
   whose answer was only lost keeps its report, since Hermes may have taken
   it. A discard that arrives before its report (the report was slow) holds
-  that text for a minute, and the report is dropped when it lands (0.139.3+).
+  that text for a minute, and the report is dropped when it lands (0.139.4+).
   Conduit tries a discard that didn't go again after 1, 3 and 9 seconds.
   Capability `turn-surface-discard` (0.126.0+).
 - `prompt.submit` refuses keys Hermes doesn't know, so the value can't ride
@@ -4553,7 +4553,7 @@ a room not set to Use my data or Custom with it picked. Capability
 ## Asks between linked agents (plugin 0.120+)
 
 In your private chats, your agent can ask someone you've linked with
-(Settings > People) whether they're free on a date, or a question, with the
+(Settings > Multiplayer) whether they're free on a date, or a question, with the
 `conduit_ask_linked` tool: `people` lists whom it can ask, `ask` asks one
 (`to`: their name, and `free_on` `{date, from, to}` in their time zone, or
 `question`: one line of at most 300 characters), and `answers` gives this
