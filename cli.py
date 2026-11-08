@@ -9,6 +9,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,23 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
              "(pushes already on their way then show generic text). The current key keeps working until Conduit "
              "next connects to this dashboard; `hermes conduit-push unpair` cuts it off now",
     )
+    work = commands.add_parser("work", help="Bot workstreams: this bot's Bot Chat coordinates work sessions of its own "
+                                            "(on, off, status)")
+    work.add_argument("work_action", choices=["on", "off", "status"])
+    work.add_argument("--policy", choices=["strict", "lookups"], default=None,
+                      help="for on: what the coordinator may do itself (default lookups)")
+    work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 2)")
+    work.add_argument("--after-restart", choices=["continue", "ask"], default=None,
+                      help="for on: a workstream a restart cut off with nothing uncertain in flight is continued "
+                           "once (continue, the default) or left for the coordinator to ask about (ask)")
+    work.add_argument("--approvals", choices=["chats", "ask", "off"], default=None,
+                      help="for on: what the bot's workstreams ask approval for: as its chats do in Hermes (chats, "
+                           "the default), the user's own go-ahead before a step that can't be undone (ask), or "
+                           "nothing (off)")
+    work.add_argument("--model", default=None, metavar="[PROVIDER:]MODEL",
+                      help="for on: the model new workstreams start on, like anthropic:claude-sonnet-5-5; the "
+                           "first colon ends the provider, so a model with one of its own is ollama:qwen3:8b "
+                           "(\"bot\": the bot's own, the one its Bot Chat uses, the default)")
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
                                                  "dates, ahead, inbox, look, where, private, claims, spots")
@@ -149,6 +167,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     rooms.add_argument("--ceiling", metavar="TOOLSET,...",
                        help="for setup: the toolsets rooms may use on this profile, comma-separated (empty: none); "
                             "without it, the ones saved before, or web, vision, X search and past-chat search")
+    rooms.add_argument("--mcp", metavar="SERVER,...",
+                       help="for setup: MCP servers of this profile's that rooms may use, comma-separated (empty: "
+                            "none, the default); their tools run only in rooms whose --tools custom names them")
     rooms.add_argument("--no-restart", dest="no_restart", action="store_true",
                        help="for setup: don't restart the gateway; say how to")
     rooms.add_argument("--tools", choices=["talk", "look", "data", "custom"],
@@ -159,6 +180,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     rooms.add_argument("--share", choices=["helps", "ask", "nothing"],
                        help="what it may share about you: what helps, ask you first, or nothing personal")
     rooms.add_argument("--search", choices=["on", "off"], help="whether it may search your past chats")
+    rooms.add_argument("--work", choices=["on", "off"],
+                       help="whether it may start work for the room (it asks you before each start)")
     rooms.add_argument("--takes-part", dest="takes_part", choices=["joins", "asked", "listens"],
                        help="joins in, only when asked, or listens only")
     rooms.add_argument("--limit", type=int, help="its turns a day in the room")
@@ -292,9 +315,13 @@ def dispatch(args: argparse.Namespace) -> int:
             if "e2e" not in outgoing:
                 print("End-to-end encryption is off for this profile; nothing to corrupt.")
                 return 1
-            outgoing["e2e"]["ct"] = _flipped(outgoing["e2e"]["ct"])
+            def corrupted(paired: dict) -> dict:
+                broken = build_outgoing(event, paired)
+                broken["e2e"]["ct"] = _flipped(broken["e2e"]["ct"])
+                return broken
+
             try:
-                post_event(outgoing)
+                post_event(corrupted)
             except _RELAY_ERRORS as error:
                 if isinstance(error, RelayRejected) and error.status in (401, 403):
                     record_relay_refusal(state, error)
@@ -359,6 +386,8 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if action == "pulse":
         return _pulse(args)
+    if action == "work":
+        return _work(args)
     if action == "prefs":
         return _prefs(args)
     if action == "rooms":
@@ -389,6 +418,87 @@ def _pulse_model_line(pulse: Any, pulse_store: Any, home: Path, chat_id: str) ->
         return f"Model: {turns}, for its turns, memory, report lists and follow-up checks"
     return (f"Model: {turns}, for its turns; memory, report lists and follow-up checks run on {named(slot)}, "
             "Hermes's \"Pulse memory\" model")
+
+
+def _work(args: argparse.Namespace) -> int:
+    from hermes_constants import get_hermes_home
+
+    from . import work_store
+
+    home = Path(get_hermes_home())
+    action = args.work_action
+    try:
+        if action == "status" and not work_store.exists(home):
+            # On by default: said so without leaving a registry behind.
+            print(f"Bot workstreams: {work_store.DEFAULT_POLICY} (on by default; the coordinator "
+                  f"coordinates and may also look things up; up to {work_store.DEFAULT_MAX_RUNNING} running at once). No work yet. "
+                  "`hermes conduit-push work off` turns them off for this bot.")
+            code = 0
+        else:
+            code = _work_on_registry(work_store.Store(home), args, action)
+        # Flushed here, where a reader that left raises inside this guard
+        # rather than at the interpreter's exit.
+        sys.stdout.flush()
+        return code
+    except BrokenPipeError:
+        # Piped into head: the reader left, and nothing more is printed.
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, sys.stdout.fileno())
+        os.close(null)
+        return 0
+    except Exception as error:  # noqa: BLE001 — a registry that can't be read, said in a line
+        print(f"Bot workstreams: couldn't read this bot's registry ({type(error).__name__}: {error}).")
+        return 1
+
+
+OWN_MODEL = "the bot's own"
+
+
+def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
+    from . import work_store
+
+    picked = (getattr(args, "model", None) or "").strip()
+    # The first colon ends the provider, so a model whose own name has one
+    # (qwen3:8b) is named with its provider (ollama:qwen3:8b).
+    provider, _, model = picked.partition(":") if ":" in picked else ("", "", picked)
+    chosen = {"model": model.strip(), "provider": provider.strip()}
+    if picked and picked.lower() != "bot" and not work_store.model_pick_ok(chosen):
+        print("Bot workstreams: --model takes [provider:]model, like anthropic:claude-sonnet-5-5, "
+              "or bot for the bot's own. Nothing changed.")
+        return 2
+    if action == "on":
+        store.set_policy(args.policy or (store.policy() if store.policy() != "off" else work_store.DEFAULT_POLICY))
+        if args.max_running is not None:
+            store.set_max_running(args.max_running)
+        if getattr(args, "after_restart", None):
+            store.set_after_restart(args.after_restart)
+        if getattr(args, "approvals", None):
+            store.set_workstream_approvals(args.approvals)
+            # As Edit Bot > Work does: approvals back on reach the running
+            # workstreams now, not only with their next send.
+            try:
+                from . import work_tool
+                work_tool.end_bypasses(store.home)
+            except Exception:  # noqa: BLE001 — each workstream's next send turns it back first
+                pass
+        if picked:
+            store.set_workstream_model(None if picked.lower() == "bot" else chosen)
+    elif action == "off":
+        store.set_policy("off")
+    mode = store.policy()
+    print(f"Bot workstreams: {mode if mode != 'off' else 'off'}"
+          + (f" (the coordinator {'may also look things up' if mode == 'lookups' else 'only coordinates'}; "
+             f"up to {store.max_running()} running at once; after a restart, safe work is "
+             f"{'continued' if store.after_restart() == 'continue' else 'left to ask about'}; workstream "
+             f"approvals: {store.workstream_approvals()}; workstream model: "
+             f"{store.workstream_model().get('model') or OWN_MODEL})"
+             if mode != "off" else ""))
+    if action == "status":
+        for work in store.list(include_closed=False, limit=20):
+            print(f"  {work.ref}  {work.status:<11} {_printable(work.title)}")
+    if action in ("on", "off"):
+        print("Takes effect on the bot's next turn. Its Bot Chat is the coordinator.")
+    return 0
 
 
 def _pulse(args: argparse.Namespace) -> int:
@@ -487,7 +597,7 @@ def _pulse(args: argparse.Namespace) -> int:
     if action == "spots":
         return _pulse_spots(pulse_store, home, (args.value or "").strip())
     print(f"Pulse: {'on' if pulse_store.get('enabled') else 'off'}")
-    chat, problem = pulse.home_chat(pulse_store, home)
+    chat, problem = pulse.home_chat(pulse_store, home, looks_elsewhere=True)
     if chat is not None:
         print(f"Home chat: {_printable(chat.title)} ({_printable(chat.chat_id)})"
               f"{'' if chat.pinned else ', not pinned'}")
@@ -499,7 +609,8 @@ def _pulse(args: argparse.Namespace) -> int:
         ticked, now = pulse_store.get("last_tick_at"), time.time()
         if isinstance(ticked, bool) or not isinstance(ticked, (int, float)) or now - ticked > pulse.STALE_TICK_S:
             print(f"Warning: the dashboard hasn't run Pulse in the last {int(pulse.STALE_TICK_S // 60)} minutes. "
-                  "Check that it's running this build and was restarted after `plugins install`.")
+                  "Check that it's running this build and was restarted after `plugins install`; "
+                  "if it was, its log says when its Hermes can't run Pulse.")
         else:
             print(f"Dashboard last checked: {max(0, int(now - ticked))} s ago")
             lease = pulse_store.get(pulse_delivery.store.LEADER)
@@ -700,6 +811,8 @@ def _rooms(args: argparse.Namespace) -> int:
                 changes[field] = value
         if args.search is not None:
             changes["search_chats"] = args.search == "on"
+        if getattr(args, "work", None) is not None:
+            changes["run_work"] = args.work == "on"
         if not changes:
             print("Name a choice to set, for example: hermes conduit-push rooms set --room <id> --tools look")
             return 2
@@ -761,10 +874,13 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
     ceiling = None
     if args.ceiling is not None:
         ceiling = [name.strip() for name in str(args.ceiling).split(",") if name.strip()]
+    mcp_servers = None
+    if getattr(args, "mcp", None) is not None:
+        mcp_servers = [name.strip() for name in str(args.mcp).split(",") if name.strip()]
     restart = "hermes gateway restart" if profile == "default" else "hermes -p default gateway restart"
     try:
         hermes = room_setup.Hermes.load()
-        state = room_setup.state(hermes, home, profile, ceiling=ceiling)
+        state = room_setup.state(hermes, home, profile, ceiling=ceiling, mcp_servers=mcp_servers)
     except room_setup.SetupError as error:
         print(f"Couldn't set it up: {error}")
         return 1
@@ -775,11 +891,12 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
         return 1
     labels = {choice["id"]: choice["label"] for choice in state["choices"]}
     tools = ", ".join(_printable(labels.get(name, name)) for name in state["ceiling"]) or "none: agents only talk"
+    servers = ", ".join(_printable(name) for name in state["mcp_servers"]) or "none"
     server = state["api_server"]
     changes = state["changes"]
     if not state["needs"]:
         print(f"This Hermes is already set up for rooms (profile {profile}): its API server runs at "
-              f"{server['address']}, and rooms can use {tools}.")
+              f"{server['address']}, and rooms can use {tools}, with MCP servers: {servers}.")
         return 0
     print(f"Setting this Hermes up for rooms with other people's agents (profile {profile}):")
     if "api_server_key" in changes:
@@ -800,7 +917,13 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
     others = [_printable(choice["label"]) for choice in state["choices"] if choice["id"] not in state["ceiling"]]
     if others:
         print(f"  Others you can add with --ceiling: {', '.join(others)}.")
-    if ceiling is not None and "ceiling" in changes \
+    print(f"- MCP servers: {servers}." + (" Their tools run only in rooms whose Custom choice names them."
+                                          if state["mcp_servers"] else ""))
+    other_servers = [_printable(choice["id"]) for choice in state["mcp_choices"]
+                     if choice["id"] not in state["mcp_servers"]]
+    if other_servers:
+        print(f"  Others you can add with --mcp: {', '.join(other_servers)}.")
+    if (ceiling is not None or mcp_servers is not None) and "ceiling" in changes \
             and "ceiling" not in room_setup.state(hermes, home, profile)["changes"]:
         # A ceiling the setup saved before: each room pins its members'
         # tools when it starts (designs/cross-owner-agents, decision 13).
@@ -823,7 +946,7 @@ def _setup_rooms(args: argparse.Namespace, home: Path) -> int:
             print("Cancelled.")
             return 0
     try:
-        after = room_setup.apply(hermes, home, profile, ceiling=ceiling)
+        after = room_setup.apply(hermes, home, profile, ceiling=ceiling, mcp_servers=mcp_servers)
     except (room_setup.SetupError, OSError, ValueError, RuntimeError) as error:
         print(f"Couldn't set it up: {error}")
         return 1
@@ -1436,6 +1559,7 @@ def _print_room_choices(label: str, choices: Any, indent: str = "") -> None:
     print(f"{indent}  Can do: {_printable(tools)}")
     print(f"{indent}  Shares: {_ROOM_SHARE.get(choices.share, choices.share)}")
     print(f"{indent}  Searches your past chats: {'yes' if choices.search_chats else 'no'}")
+    print(f"{indent}  Runs work: {'yes, asking you before each start' if choices.run_work else 'no'}")
     print(f"{indent}  Takes part: {_ROOM_TAKES_PART.get(choices.takes_part, choices.takes_part)}")
     print(f"{indent}  Turns a day: {choices.daily_limit}")
     if choices.note:

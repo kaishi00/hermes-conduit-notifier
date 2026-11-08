@@ -60,8 +60,8 @@ def test_a_room_without_choices_gets_the_defaults(tmp_path):
     choices = ChoicesStore(tmp_path).get(ROOM)
     assert choices == RoomChoices()
     assert choices.as_dict() == {
-        "tools": "talk", "custom_tools": [], "share": "ask", "search_chats": False, "takes_part": "joins",
-        "daily_limit": 40, "note": ""}
+        "tools": "talk", "custom_tools": [], "share": "ask", "search_chats": False, "run_work": False,
+        "takes_part": "joins", "daily_limit": 40, "note": ""}
     # Reading writes nothing.
     assert not (tmp_path / choices_module.FILE_NAME).exists()
 
@@ -108,7 +108,7 @@ def test_view_lists_the_defaults_and_each_room(tmp_path):
     {"custom_tools": ["memory"]}, {"custom_tools": ["skill_manage"]}, {"custom_tools": ["delegate_task"]},
     {"custom_tools": ["execute_code"]}, {"custom_tools": ["message_agent"]}, {"custom_tools": ["react_to_message"]},
     {"custom_tools": ["kanban_create"]},
-    {"share": "everything"}, {"search_chats": "yes"}, {"search_chats": 1}, {"takes_part": "sometimes"},
+    {"share": "everything"}, {"search_chats": "yes"}, {"search_chats": 1}, {"run_work": "yes"}, {"run_work": 1}, {"takes_part": "sometimes"},
     {"daily_limit": 0}, {"daily_limit": 501}, {"daily_limit": True}, {"daily_limit": "5"}, {"daily_limit": 2.5},
     {"note": 3}, {"note": "x" * 1001}, {"approve": True}, [], "talk",
 ])
@@ -269,6 +269,16 @@ def test_the_last_room_with_the_same_people_is_the_one_set_most_recently(tmp_pat
     assert store.last_with(["link:abc"]) == RoomChoices(tools="look", share="nothing")
 
 
+def test_run_work_is_never_carried_to_a_new_room_nor_a_default(tmp_path):
+    # Eric 2026-11-07: off by default, turned on room by room.
+    store = ChoicesStore(tmp_path)
+    store.set(ROOM, {"tools": "look", "run_work": True}, people=["link:abc"])
+    assert store.get(ROOM).run_work is True
+    assert store.last_with(["link:abc"]) == RoomChoices(tools="look")
+    assert store.set_defaults({"run_work": True}).run_work is False
+    assert store.defaults().run_work is False
+
+
 @pytest.mark.parametrize("people", ["link:abc", [1], ["x" * 300], [""], ["x"] * 17])
 def test_people_that_arent_a_list_of_names_are_refused(tmp_path, people):
     with pytest.raises(choices_module.ChoicesError):
@@ -345,7 +355,7 @@ def test_room_rules_is_a_listed_capability(client):
 
 def _rooms_args(action, room="", **changes):
     values = {"tools": None, "tool": None, "share": None, "search": None, "takes_part": None, "limit": None,
-              "note": None, **changes}
+              "note": None, "work": None, **changes}
     return argparse.Namespace(conduit_push_action="rooms", rooms_action=action, room=room, **values)
 
 
@@ -366,6 +376,15 @@ def test_cli_shows_and_sets_room_choices(tmp_path, monkeypatch, capsys):
     assert "Defaults" in shown and f"Room {ROOM}" in shown and "terminal, read_file" in shown
     assert cli.dispatch(_rooms_args("show", OTHER)) == 0
     assert "the defaults" in capsys.readouterr().out
+
+
+def test_cli_turns_run_work_on_and_off_for_a_room(tmp_path, monkeypatch, capsys):
+    cli = _load("conduit_push.cli", ROOT / "cli.py")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    assert cli.dispatch(_rooms_args("set", ROOM, work="on")) == 0
+    assert ChoicesStore(tmp_path).get(ROOM).run_work is True
+    assert cli.dispatch(_rooms_args("set", ROOM, work="off")) == 0
+    assert ChoicesStore(tmp_path).get(ROOM).run_work is False
 
 
 def test_cli_refuses_choices_the_store_wont_keep(tmp_path, monkeypatch, capsys):

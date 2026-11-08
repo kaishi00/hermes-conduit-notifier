@@ -163,10 +163,12 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     # the user (#449); any answer, from anywhere, stops it.
     # A batch says how many wait, so a reason clipped to its length keeps it.
     reason = question if len(batch) == 1 else f"{len(batch)} questions, first: {question}"
-    # The whole batch, for a call answered with no chat open (the Watch) to
+    # The whole batch, for Conduit's "Needs you" list, and for a call
+    # answered with no chat open (the Watch) to
     # read out and answer; the answers come back through
     # ``calls.taken_answers``.
-    calls.note_waiting(session_id, "question", request_id=request_id, questions=batch)
+    calls.note_waiting(session_id, "question", request_id=request_id, questions=batch,
+                       title=chat_title(session_id))
     calls.alert(session_id, "question", reason, profile=profile)
     try:
         return _first_answer_wins(
@@ -333,6 +335,12 @@ def _first_answer_wins(
     if "original_error" in outcome:
         raise outcome["original_error"]
     while "original" not in outcome and "original_error" not in outcome:
+        # Answers given away from the device still count: a call's, or the
+        # user's written answer the Bot Chat passed on to a workstream
+        # (calls_store.answer_in_writing).
+        call_answers = calls.taken_answers(request_id)
+        if call_answers is not None:
+            return _call_answer_result(batch, batch_protocol, call_answers)
         time.sleep(POLL_INTERVAL_SECONDS)
     if "original_error" in outcome:
         raise outcome["original_error"]

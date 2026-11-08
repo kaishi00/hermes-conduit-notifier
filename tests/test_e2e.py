@@ -396,12 +396,14 @@ def test_sealed_batch_answers_open_per_question():
     assert opened["answers"] == {"q0": "Red", "q1": "Blue"}
 
 
+# A sealed answer is random each time it's made, so the ids are fixed:
+# pytest-xdist's workers must collect the same test ids.
 @pytest.mark.parametrize("answer", [
     "Yes",  # plaintext from a relay or an old client
     _answer("Yes", request_id="conduit-push-000000000000"),  # replayed from another request
     _answer("Yes", question_id="q1"),  # moved to another question
     _answer("Yes", keys=e2e.derive_keys("f" * 32, bytes(32))),  # another key
-])
+], ids=["plaintext", "other-request", "other-question", "other-key"])
 def test_answers_not_sealed_for_this_request_are_rejected(answer):
     status = {"status": "answered", "answer": answer}
     assert client.opened_answers(status, _state(), "conduit-push-abc123def456") == {"status": "rejected"}
@@ -1060,3 +1062,186 @@ def test_a_slot_that_cant_be_keyed_still_lets_the_push_go(monkeypatch):
     slot = sys.modules["conduit_push.events"].slot_token("cron:default:daily")
     client.send_now({"event_id": "response:4", "type": "response.ready", "session_id": "s", "slot": slot, "body": "Hi"})
     assert sent[0]["body"] == "Hi" and "slot" not in sent[0]
+
+
+# --- A host whose clock runs ahead (#524) -------------------------------------
+
+
+@pytest.fixture
+def relay_clock():
+    client._relay_clock_ahead.clear()
+    client._relay_clock_warned.clear()
+    yield
+    client._relay_clock_ahead.clear()
+    client._relay_clock_warned.clear()
+
+
+def _http_date(epoch):
+    from email.utils import formatdate
+
+    return formatdate(epoch, usegmt=True)
+
+
+def test_a_host_ahead_of_the_relay_seals_by_the_relays_clock(relay_clock, caplog):
+    state = _state()
+    now = 1_800_000_000.0
+    assert client.sealing_time(state, now=now) == now
+    # 90 minutes ahead: past the phone's hour, inside the old relay's two.
+    with caplog.at_level("WARNING", logger="hermes.plugins.conduit_push"):
+        client._note_relay_clock("https://relay/v1/events", {"Date": _http_date(now - 90 * 60)}, now=now)
+        client._note_relay_clock("https://relay/v1/events", {"Date": _http_date(now - 90 * 60)}, now=now)
+    assert client.sealing_time(state, now=now) == now - 90 * 60
+    assert [record.getMessage() for record in caplog.records if "90 minutes ahead" in record.getMessage()] != []
+    assert sum("ahead of the Conduit relay" in record.getMessage() for record in caplog.records) == 1
+    # Another relay's clock says nothing about this one.
+    assert client.sealing_time(_state(relay_url="https://other"), now=now) == now
+
+
+@pytest.mark.parametrize("ahead", [-3 * 60 * 60, -30, 0, 30])
+def test_a_host_on_time_or_behind_keeps_its_own_clock(relay_clock, ahead):
+    # Only ever earlier: a later iat would let an envelope open for longer.
+    now = 1_800_000_000.0
+    client._note_relay_clock("https://relay/v1/events", {"Date": _http_date(now - ahead)}, now=now)
+    assert client.sealing_time(_state(), now=now) == now
+
+
+def test_a_host_behind_the_relay_says_so_once(relay_clock, caplog):
+    now = 1_800_000_000.0
+    with caplog.at_level("WARNING", logger="hermes.plugins.conduit_push"):
+        for _ in range(2):
+            client._note_relay_clock("https://relay/v1/events", {"Date": _http_date(now + 20 * 60)}, now=now)
+    assert sum("20 minutes behind the Conduit relay" in record.getMessage() for record in caplog.records) == 1
+
+
+@pytest.mark.parametrize("headers", [
+    None, {}, {"Date": "not a date"}, {"Date": ""},
+    # Zone unknown: it would be read in this host's zone.
+    {"Date": "Thu, 15 Jan 2027 08:00:00 -0000"},
+    # A day or more off is a wrong header, not a clock that drifted.
+    {"Date": _http_date(time.time() - 3 * 24 * 60 * 60)},
+    {"Date": _http_date(time.time() + 3 * 24 * 60 * 60)},
+])
+def test_an_answer_without_a_usable_date_changes_nothing(relay_clock, headers):
+    client._note_relay_clock("https://relay/v1/events", headers)
+    assert client._relay_clock_ahead == {}
+
+
+def test_a_refusal_for_a_clock_ahead_is_sealed_again_by_the_relays_clock(relay_clock, monkeypatch):
+    ahead = 90 * 60
+    sent = []
+
+    def relay(url, **kwargs):
+        sent.append(kwargs["payload"])
+        iat = kwargs["payload"]["e2e"]["iat"]
+        if iat > time.time() - ahead + 60 * 60:
+            client._note_relay_clock(url, {"Date": _http_date(time.time() - ahead)})
+            raise client.RelayRejected(400, "e2e_clock_ahead")
+        return {}
+
+    monkeypatch.setattr(client, "request_json", relay)
+    monkeypatch.setattr(client, "load_state", lambda: _state())
+    client.send_now(_clarify_event())
+    assert len(sent) == 2
+    assert abs(sent[1]["e2e"]["iat"] - (time.time() - ahead)) <= 5
+    inner = e2e.open_event(sent[1], _keys(), installation_id=INSTALLATION, gateway_id=GATEWAY)
+    assert inner["body"] == "Deploy to prod?"
+
+
+def test_a_clock_refusal_is_sealed_again_after_the_hosts_clock_was_set_right(relay_clock, monkeypatch):
+    # Sealed while an hour and a half fast; by the refusal the clock is right.
+    sent = []
+
+    def relay(url, **kwargs):
+        sent.append(kwargs["payload"])
+        if len(sent) == 1:
+            client._note_relay_clock(url, {"Date": _http_date(time.time())})
+            raise client.RelayRejected(400, "e2e_clock_ahead")
+        return {}
+
+    monkeypatch.setattr(client, "request_json", relay)
+    monkeypatch.setattr(client, "load_state", lambda: _state())
+    client.send_now(_clarify_event())
+    assert len(sent) == 2
+    assert abs(sent[1]["e2e"]["iat"] - time.time()) <= 5
+
+
+def test_a_clock_refusal_without_a_date_is_not_retried(relay_clock, monkeypatch):
+    sent = []
+
+    def relay(url, **kwargs):
+        sent.append(kwargs["payload"])
+        raise client.RelayRejected(400, "e2e_clock_ahead")
+
+    monkeypatch.setattr(client, "request_json", relay)
+    monkeypatch.setattr(client, "load_state", lambda: _state())
+    with pytest.raises(client.RelayRejected):
+        client.send_now(_clarify_event())
+    assert len(sent) == 1
+    assert client.push_failure_reason(client.RelayRejected(400, "e2e_clock_ahead")).startswith("This host's clock")
+
+
+def test_the_corrupt_probe_is_sealed_again_too(relay_clock, monkeypatch):
+    ahead = 90 * 60
+    sent = []
+
+    def relay(url, **kwargs):
+        sent.append(kwargs["payload"])
+        if len(sent) == 1:
+            client._note_relay_clock(url, {"Date": _http_date(time.time() - ahead)})
+            raise client.RelayRejected(400, "e2e_clock_ahead")
+        return {}
+
+    monkeypatch.setattr(client, "request_json", relay)
+    monkeypatch.setattr(client, "load_state", lambda: _state())
+    client.post_event(lambda paired: client.build_outgoing(_clarify_event(), paired))
+    assert len(sent) == 2
+    assert abs(sent[1]["e2e"]["iat"] - (time.time() - ahead)) <= 5
+
+
+def test_the_relays_date_is_read_from_its_answers_and_refusals(relay_clock, monkeypatch):
+    import email.message
+    import io
+    import urllib.error
+
+    now = time.time()
+    headers = email.message.Message()
+    headers["Date"] = _http_date(now - 2 * 60 * 60)
+
+    class Response(io.BytesIO):
+        status = 200
+
+        def __init__(self):
+            super().__init__(b"{}")
+            self.headers = headers
+
+    class Opener:
+        def __init__(self, refuse):
+            self.refuse = refuse
+
+        def open(self, request, timeout):
+            if self.refuse:
+                raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", headers,
+                                             io.BytesIO(b'{"error":"e2e_clock_ahead"}'))
+            return Response()
+
+    monkeypatch.setattr(client, "_opener", Opener(False))
+    client.request_json("https://relay/v1/meta", method="GET")
+    assert abs(client._relay_clock_ahead["https://relay"] - 2 * 60 * 60) <= 5
+    client._relay_clock_ahead.clear()
+    monkeypatch.setattr(client, "_opener", Opener(True))
+    with pytest.raises(client.RelayRejected) as refused:
+        client.request_json("https://relay/v1/events", method="POST", payload={})
+    assert refused.value.detail == "e2e_clock_ahead"
+    assert abs(client._relay_clock_ahead["https://relay"] - 2 * 60 * 60) <= 5
+
+    # A bare refusal is something in front of the relay: its Date isn't the relay's.
+    client._relay_clock_ahead.clear()
+
+    class Edge:
+        def open(self, request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", headers, io.BytesIO(b""))
+
+    monkeypatch.setattr(client, "_opener", Edge())
+    with pytest.raises(client.RelayRejected):
+        client.request_json("https://relay/v1/events", method="POST", payload={})
+    assert client._relay_clock_ahead == {}

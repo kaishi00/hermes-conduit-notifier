@@ -718,8 +718,23 @@ class LinkLoop:
 
     def lease(self) -> bool:
         """Takes the installation's lease, or keeps it: False while another
-        loop, in this process or another, has it."""
+        loop, in this process or another, has it. A process whose dashboard
+        isn't the gateway's lets it go, and doesn't take it, while the
+        gateway's rooms loop runs: that's where the rooms are (Hermes moves a
+        separate dashboard's rooms into the gateway's store), so what comes
+        over the Links is taken there."""
         with self._lock:
+            if _gateway_runs_rooms(self.root):
+                if self._lease is not None:
+                    # The bridge goes first, so the gateway's takes the port the rooms' routes point at: this
+                    # process stops saying it holds the lease (holds_lease), so its watch won't serve again, and
+                    # lets the lock go once the port is free.
+                    handle, self._lease = self._lease, None
+                    _close_bridge(self.root)
+                    _unlock(handle)
+                    handle.close()
+                    logger.info("Linked Rooms' mailbox goes to the gateway, where the rooms are")
+                return False
             if self._lease is not None:
                 return True
             directory = self.root / DIRECTORY
@@ -1043,6 +1058,29 @@ def reading(root: Any) -> bool:
     process, or whichever holds the lease in another."""
     loop = _loops.get(str(Path(root)))
     return (loop is not None and loop.running) or lease_held(root)
+
+
+def _gateway_runs_rooms(root: Path) -> bool:
+    """Whether the gateway's rooms loop runs in another process (room_start's GATEWAY_LOCK)."""
+    from . import room_start
+
+    try:
+        return room_start._held_elsewhere(root)
+    except Exception:  # noqa: BLE001 - a lock that can't be looked at is no gateway's
+        return False
+
+
+def _close_bridge(root: Path) -> None:
+    """Stops this process's room bridge for the installation (room_bridge_home), which runs with the lease."""
+    from . import room_bridge_home
+
+    home = room_bridge_home._homes.get(str(Path(root)))
+    if home is None:
+        return
+    try:
+        home.close()
+    except Exception:  # noqa: BLE001 - its watch stops it once the lease is gone
+        logger.debug("Linked Rooms couldn't stop its bridge before letting the mailbox go", exc_info=True)
 
 
 def holds_lease(root: Any) -> bool:

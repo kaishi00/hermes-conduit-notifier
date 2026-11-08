@@ -73,6 +73,12 @@ MAX_FEATURES = 16
 # show it as a plain confirm, whose Edit opens the room's hidden session.
 ROOM_ASK_FEATURE = "room-asks"
 ROOM_ASK_TTL_MINUTES = 24 * 60
+# A room's work ask (work_tool, Linked Rooms' Run work): an agent asks its
+# owner before it starts work for a room with other people's agents, or sends
+# running work more. Only a Conduit that says it shows them gets one (Start,
+# Change it, Don't start), and only its answer counts: a room's-asks Conduit
+# would offer Share and Say instead.
+ROOM_WORK_FEATURE = "room-work"
 MAX_ROOM_ASKS_WAITING = 3
 ROOM_ASKS_PER_HOUR = 6
 ROOM_ASKS_ALL_PER_HOUR = 12
@@ -119,6 +125,10 @@ SHOW_DEVICE_RECENT_S = 6 * 3600
 # long to say it draws them.
 CHAT_CARDS_FEATURE = "chat-cards"
 CARD_DEVICE_RECENT_S = 30 * 24 * 3600
+# A feature every Conduit must say (board-cards, room-boards…) counts only the
+# Conduits used this recently, so an old install left on a drawer iPad doesn't
+# hold back boards on the phone in use (Eric, 2026-11-04: three days).
+FEATURE_DEVICE_RECENT_S = 3 * 24 * 3600
 # How often an unchanged phone's last-seen time is refreshed.
 SEEN_REFRESH_S = 60
 DEFAULT_TTL_MINUTES = 30
@@ -200,6 +210,7 @@ class PresentStore:
             shown = [prompt for prompt in state["prompts"] if prompt["status"] == "waiting"
                      and (not prompt.get("maps") or NAVIGATE_FEATURE in device["features"])
                      and (not prompt.get("room") or ROOM_ASK_FEATURE in device["features"])
+                     and (not prompt.get("room", {}).get("work") or ROOM_WORK_FEATURE in device["features"])
                      and (not prompt.get("link") or LINK_ASK_FEATURE in device["features"])]
             # Each the newest within its own cap: a room's or a Link's asks never push the owner's own prompts off
             # the phone.
@@ -235,12 +246,12 @@ class PresentStore:
 
     def has_feature_everywhere(self, feature: str) -> bool:
         """Whether every Conduit that draws cards (on a call or in chats) and
-        exchanged with this profile recently says it can do ``feature``;
-        False when there's none."""
+        exchanged with this profile in the last FEATURE_DEVICE_RECENT_S says
+        it can do ``feature``; False when there's none."""
         now = self.clock()
         drawing = [device["features"] for device in self._load()["devices"].values()
                    if {SHOW_FEATURE, CHAT_CARDS_FEATURE} & set(device["features"])
-                   and now - device["seen_at"] < CARD_DEVICE_RECENT_S]
+                   and now - device["seen_at"] < FEATURE_DEVICE_RECENT_S]
         return bool(drawing) and all(feature in features for features in drawing)
 
     def confirm(self, title: Any, preview: Any, action_label: Any = None, *, spoken_yes: Any = None,
@@ -287,10 +298,11 @@ class PresentStore:
         with self._locked() as state:
             now = self.clock()
             if room is not None:
-                same = _room_waiting(state, room["id"], clean_title, clean_preview)
+                same = _room_waiting(state, room["id"], clean_title, clean_preview, work=bool(room.get("work")))
                 if same is not None:
                     return _shown(same), False
-                if not any(ROOM_ASK_FEATURE in device.get("features", []) and now - device["seen_at"]
+                feature = ROOM_WORK_FEATURE if room.get("work") else ROOM_ASK_FEATURE
+                if not any(feature in device.get("features", []) and now - device["seen_at"]
                            < CARD_DEVICE_RECENT_S for device in state["devices"].values()):
                     raise PresentError("no_device", "No Conduit that shows a room's asks has connected to this "
                                                     "Hermes profile recently.")
@@ -363,6 +375,28 @@ class PresentStore:
         return self._keep(question, share, "Share", spoken_yes=["share it"], session_id=session_id,
                           ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
 
+    def ask_room_work(self, title: Any, instructions: Any, *, room_id: Any, room_name: Any, session_id: Any,
+                      send: bool = False) -> tuple[dict[str, Any], bool]:
+        """Keeps a room's work ask (work_tool) for a Conduit that shows them:
+        what would start (or, with send, what running work is sent) as its
+        title, the instructions as its preview. The same one still waiting in
+        the room is returned instead; the bool says whether it's new. Raises
+        PresentError when it won't."""
+        room = _room({"id": room_id, "name": room_name, "work": True})
+        if room is None or not _session_key(session_id):
+            raise PresentError("invalid", "A room's work ask needs the room and its session.")
+        label, spoken = ("Send", ["send it"]) if send else ("Start", ["start it"])
+        return self._keep(title, instructions, label, spoken_yes=spoken, session_id=session_id,
+                          ttl_minutes=ROOM_ASK_TTL_MINUTES, room=room)
+
+    def withdraw_room_work(self, prompt_id: Any) -> None:
+        """Takes back a room's work ask still waiting (work_tool couldn't keep
+        what a yes would do), so the phone never offers it."""
+        with self._locked() as state:
+            prompt = _find(state, prompt_id)
+            if prompt is not None and prompt.get("room", {}).get("work") and prompt["status"] == "waiting":
+                prompt.update(status="cancelled", finished_at=int(self.clock()), reported=True)
+
     def ask_link(self, title: Any, preview: Any, *, link: Any, ttl_minutes: Any = ROOM_ASK_TTL_MINUTES
                  ) -> dict[str, Any]:
         """Keeps a Link's ask (link_asks) for a Conduit that shows them: what's asked as its title, what would be
@@ -398,7 +432,7 @@ class PresentStore:
                 prompt["edit_text"] = _text(edit_text, MAX_EDIT_TEXT_CHARS)
             return True
 
-    def room_answers(self, room_id: Any) -> list[dict[str, Any]]:
+    def room_answers(self, room_id: Any, work: bool = False) -> list[dict[str, Any]]:
         """The answered (or expired) asks of a room its agent hasn't heard
         yet (``mark_heard``), oldest first, each with its question (``title``)
         and what it would share (``preview``). By room, not session: a
@@ -407,6 +441,7 @@ class PresentStore:
             return []
         with self._locked() as state:
             found = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
+                     and bool(prompt["room"].get("work")) == work
                      and prompt["status"] != "waiting" and not prompt["reported"]]
             return [{**_shown(prompt), "preview": prompt["preview"]} for prompt in found]
 
@@ -423,19 +458,21 @@ class PresentStore:
 
     def room_ask(self, prompt_id: Any) -> dict[str, Any] | None:
         """One of a room's asks as it stands. An answer stays unheard until
-        the turn the tool gave it to replies (``mark_heard``)."""
-        with self._locked() as state:
-            prompt = _find(state, prompt_id)
-            if prompt is None or not prompt.get("room"):
-                return None
-            return {**_shown(prompt), "preview": prompt["preview"]}
+        the turn the tool gave it to replies (``mark_heard``). Only reads:
+        no lock, since a save replaces the file whole (issue 608), and one
+        that can't be read raises rather than reading as no ask."""
+        prompt = _find(self._load(for_write=True), prompt_id)
+        if prompt is None or not prompt.get("room"):
+            return None
+        return {**_shown(prompt), "preview": prompt["preview"]}
 
     def show(self, title: Any, markdown: Any, *, session_id: Any = None, cards: Any = None,
-             markdown_is_fallback: bool = False) -> dict[str, Any]:
+             markdown_is_fallback: bool = False, layout: str | None = None) -> dict[str, Any]:
         """Keeps a card for the screen of the user's voice call. ``cards``
         are rich cards, already normalized; ``markdown`` is what shows where
         they can't be drawn (``markdown_is_fallback``: only there, it's the
-        cards' own text). Raises PresentError when it won't."""
+        cards' own text). ``layout`` "tabs" shows the cards one at a time.
+        Raises PresentError when it won't."""
         clean_title = _line(title, MAX_CARD_TITLE_CHARS + 1)
         if not clean_title:
             raise PresentError("no_title", "Give a short title, a few words.")
@@ -463,6 +500,8 @@ class PresentStore:
                 card["cards"] = rich
                 if markdown_is_fallback:
                     card["fallback"] = True
+                if layout == "tabs" and len(rich) > 1:
+                    card["layout"] = "tabs"
             # A card with a live name replaces the conversation's earlier
             # card of that name; the cards shown beside it stay.
             live = {item["live"] for item in rich if "live" in item}
@@ -642,15 +681,16 @@ def _public(prompt: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
-def _room_waiting(state: dict[str, Any], room_id: str, title: str | None = None, preview: str | None = None) -> Any:
-    """A room's waiting asks, or the one asking ``title`` (case-folded) to share exactly ``preview``, or None: a
-    yes covers only the share the owner saw."""
+def _room_waiting(state: dict[str, Any], room_id: str, title: str | None = None, preview: str | None = None,
+                  work: bool = False) -> Any:
+    """A room's waiting asks, or the one asking ``title`` (case-folded) to share exactly ``preview`` (to start
+    exactly ``preview``, for a ``work`` ask), or None: a yes covers only what the owner saw."""
     waiting = [prompt for prompt in state["prompts"] if prompt.get("room", {}).get("id") == room_id
                and prompt["status"] == "waiting"]
     if title is None:
         return waiting
     return next((prompt for prompt in waiting if prompt["title"].casefold() == title.casefold()
-                 and prompt["preview"] == preview), None)
+                 and prompt["preview"] == preview and bool(prompt["room"].get("work")) == work), None)
 
 
 def _room(value: Any) -> dict[str, str] | None:
@@ -660,7 +700,10 @@ def _room(value: Any) -> dict[str, str] | None:
     room_id = value["id"].strip()
     if not room_id or len(room_id) > MAX_ROOM_ID_CHARS or _SESSION_KEY_CONTROL.search(room_id):
         return None
-    return {"id": room_id, "name": _line(value.get("name"), MAX_ROOM_NAME_CHARS) or "a room"}
+    room = {"id": room_id, "name": _line(value.get("name"), MAX_ROOM_NAME_CHARS) or "a room"}
+    if value.get("work") is True:
+        room["work"] = True  # a work ask (ask_room_work), never a share
+    return room
 
 
 def _link(value: Any) -> dict[str, Any] | None:
@@ -725,6 +768,8 @@ def _take_result(state: dict[str, Any], installation: str, features: list[str], 
     if prompt.get("maps") and NAVIGATE_FEATURE not in features:
         return
     if prompt.get("room") and ROOM_ASK_FEATURE not in features:
+        return
+    if prompt.get("room", {}).get("work") and ROOM_WORK_FEATURE not in features:
         return
     if prompt.get("link") and LINK_ASK_FEATURE not in features:
         return
@@ -905,6 +950,10 @@ def _for_device(card: dict[str, Any], features: list[str]) -> dict[str, Any]:
         return card
     hidden = {kind for feature, kinds in schema.FEATURE_TYPES.items() if feature not in features for kind in kinds}
     kept = [rich for rich in card["cards"] if rich.get("type") not in hidden]
+    if schema.BOARD_FEATURE not in features:
+        # A phone from before boards draws a stack of four at most.
+        card.pop("layout", None)
+        kept = kept[:schema.LEGACY_MAX_CARDS]
     if len(kept) == len(card["cards"]):
         return card
     if kept:
@@ -915,12 +964,42 @@ def _for_device(card: dict[str, Any], features: list[str]) -> dict[str, Any]:
     return card
 
 
+def _open_fence(text: str) -> str | None:
+    """The fence a Markdown text leaves open at its end, if any; a composed
+    card's mono element (inline code fenced on its own line, opened and
+    closed there) is no fence. card_schema.open_fence reads the same (this
+    module can't count on card_schema loading); a test holds them together."""
+    fence = None
+    for line in text.split("\n"):
+        run = re.match(r"`{3,}", line)
+        if not run:
+            continue
+        rest = line[len(run.group()):]
+        if fence is None:
+            if not (rest.strip() and rest.rstrip().endswith(run.group())):
+                fence = run.group()
+        elif run.group() == fence and not rest.strip():
+            fence = None
+    return fence
+
+
 def clip_markdown(text: str) -> str:
-    """Markdown cut at a line to fit a card."""
+    """Markdown cut at a line to fit a card, closing a code block the cut
+    lands in."""
+    def at_line(limit: int) -> str:
+        cut = text[:limit]
+        return cut[:cut.rfind("\n")] if "\n" in cut else cut
+
     if len(text) <= MAX_CARD_MARKDOWN_CHARS:
         return text
-    cut = text[:MAX_CARD_MARKDOWN_CHARS]
-    return cut[:cut.rfind("\n")] if "\n" in cut else cut
+    cut = at_line(MAX_CARD_MARKDOWN_CHARS)
+    if _open_fence(cut) is None:
+        return cut
+    # Room for the longest fence the text could leave open.
+    longest = max((len(run) for run in re.findall(r"`{3,}", text)), default=3)
+    cut = at_line(MAX_CARD_MARKDOWN_CHARS - 1 - longest)
+    fence = _open_fence(cut)
+    return cut if fence is None else f"{cut}\n{fence}"
 
 
 def _without_live(old: dict[str, Any], live: set[str], session: str, schema: Any) -> dict[str, Any] | None:
@@ -968,6 +1047,8 @@ def _card(raw: Any, now: float) -> dict[str, Any] | None:
         card["cards"] = rich
         if raw.get("fallback") is True:
             card["fallback"] = True
+        if raw.get("layout") == "tabs" and len(rich) > 1:
+            card["layout"] = "tabs"
     return card
 
 

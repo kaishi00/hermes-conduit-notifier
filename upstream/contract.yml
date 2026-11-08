@@ -5,7 +5,8 @@
 
 # Upstream paths watched besides the modules the plugin imports (module_paths
 # below): the dashboard and plugin host that serve our routes, profiles and
-# auth, the state schema, and the docs that describe the plugin API. A
+# auth, the state schema, Tool Search (it shows our tools to the model), and
+# the docs that describe the plugin API. A
 # trailing / is a directory; * matches within one path segment.
 watch_paths:
   - hermes_cli/web_server*.py
@@ -14,18 +15,49 @@ watch_paths:
   - tools/plugin_guard*.py
   - tools/plugin_guard/
   - tools/skills_guard.py
+  - hermes_cli/plugin_validate_desktop*.py
+  - tools/tool_search*.py
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
   - hermes_cli/config*.py
   - hermes_state_schema.py
   - gateway/hosted_room*.py
+  # room_work posts a room workstream's report with deliver_to_room (loaded with importlib).
+  - cron/scheduler_delivery_room.py
   - website/docs/user-guide/features/plugins.md
   - website/docs/user-guide/features/extending-the-dashboard.md
+  - tui_gateway/server.py
+  - tui_gateway/transport.py
+  - tui_gateway/methods_session*.py
+  - tui_gateway/methods_prompt.py
   # bot_chat_adopt.py's child (imports inside a string, which the scanner can't see).
   - hermes_cli/gateway_client.py
   - hermes_cli/gateway_runtime*.py
   - gateway/session_local_migration.py
   - hermes_cli/active_sessions.py
+  # Conduit's chat socket on the gateway's own listener (test_gateway_listener.py).
+  - gateway/run_api.py
+  - gateway/webapp_listener.py
+  - gateway/session_controls.py
+  - gateway/session_contract.py
+  - gateway/session_mutations.py
+  - hermes_state_mutations.py
+  - tui_gateway/ws.py
+  - tui_gateway/contracts/
+  # gateway_chats.py reads all_authorities, owner_scope and each authority's sessions
+  # through sys.modules, which the scanner can't see; a rename there would fall back
+  # to the default profile's settings for Predictions.
+  - gateway/session_authorities.py
+  # Hermes' legacy fallback that serves Conduit's host verbs (projects, profiles, MCP)
+  # on the listener (test_conduits_host_verbs_answer_on_the_listener).
+  - tui_gateway/ws_legacy_fallback.py
+  # memory_scan.py guards plugins.memory._defines_memory_provider (loaded with importlib).
+  - plugins/memory/__init__.py
+  # room_start.py follows a room Hermes moves from a separate dashboard's store into the gateway's
+  # (handed_room_ids, the moved room's owner in state_meta) and names a CLI draft's owner
+  # (principal_subject), both loaded with importlib.
+  - gateway/hosted_rooms_gateway_import.py
+  - gateway/owner_identity.py
 
 # Words that make a changed hunk worth a closer look.
 keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,
@@ -50,6 +82,12 @@ notes:
     New drafts and the host setup (feature map: "Linked Rooms") take ?conduit_profile=: a draft
     starts in the dashboard's session authority, which a plugin host's app lacks (there it starts
     in the legacy service), and the setup restarts the gateway as the dashboard does.
+  Linked Rooms moved into the gateway: >-
+    Hermes moves the rooms a separate `hermes dashboard` keeps in shared-state.db into the root
+    gateway's state.db when the gateway starts, at a later authority epoch (feature map: "Linked
+    Rooms"). The plugin's draft follows the room there (handed_room_ids), the gateway's process takes
+    the Links' mailbox, and guests mint grants for the new epoch. A rename there leaves a moved room's
+    guests without its new messages and its turns.
   plugin host flag: >-
     HERMES_PLUGIN_HOST_PROCESS=1 marks a plugin host. The self-update refuses there, and the
     Linked Rooms setup saves without restarting the gateway: a restart from a plugin host brings
@@ -73,6 +111,12 @@ notes:
     event with gateway.hosted_rooms.user_event_id (loaded with importlib) and posts it with the
     running room service's HostedRoomService.send(room_id=, event_id=, payload={thread_id, text}),
     as the room's user. Without them, every post is answered unavailable.
+  room work reports: >-
+    A workstream a bot started from a group room reports back into it (feature map: "Bot
+    workstreams"). room_work posts the report with cron.scheduler_delivery_room.deliver_to_room
+    (job, content, "room@profile"), loaded with importlib, as an automated post whose @mention
+    gives the bot the next turn (upstream/test_room_work.py). Without it, the report goes to the
+    bot's Bot Chat instead.
   workspace files: >-
     The Folder tab in Conduit's Artifacts (feature map: "Workspace files"). /workspace/* reads a
     profile's SSH workspace through hermes_cli.web_routers.files._fs_backend (and the adapter's
@@ -80,11 +124,113 @@ notes:
     hermes_cli.web_server_files._agent_fs_path, keeps a locked or hosted install's roots inside
     the folder _managed_files_policy names, and keeps out what _is_sensitive_path keeps out of
     Hermes' own file routes.
+  bot workstreams: >-
+    A bot's Bot Chat coordinating work sessions of its own (designs/bot-mode-coordinator, branch
+    bot-workstreams). work_broker drives the dashboard's session API in process, read from
+    sys.modules (so module_paths doesn't list it): tui_gateway.server.dispatch with the broker's
+    own transport for session.create (hidden, idempotency_key, profile; model, provider and
+    reasoning_effort for Edit Bot > Work's Workstream Model, Hermes' per-session override that
+    a resume keeps) and prompt.submit, its
+    _methods with nothing bound for a session another client holds and for the hidden queued
+    work-update turn, and _sessions (session_key, profile_home, running, pending_title) to find
+    live sessions. upstream/test_bot_work.py runs it on the launch profile and a secondary one.
+    After a restart, tui_gateway.turn_marker (read_turn_marker, marker_writer_state,
+    clear_turn_marker) retires Hermes' own re-run of a crash-killed workstream turn, so recovery
+    decides from the journal instead; without it a cut-off step could run twice. The turn stopper
+    a clean shutdown runs, _stop_turns_before_exit (in tui_gateway.session_reaper, for the SIGTERM
+    handler, and in tui_gateway.server, for _shutdown_sessions), is wrapped to mark the shutdown:
+    without it a clean restart's stopped workstream is taken for a user's stop and never recovered.
+    Don't Ask approvals in workstreams (Edit Bot > Work) call config.set with key=yolo and
+    scope=session on the workstream's live session before each turn: Hermes' per-session /yolo,
+    kept on the session row, never process-wide (the call always names a live session). Turning
+    it on fails quietly (Hermes keeps asking); turning it off stops the send and is retried, except
+    on a Hermes without config.set, where nothing was ever turned on.
+    A coding workstream's worktree (work_start worktree=true, M4) is Hermes' own subagent
+    worktree: tools.subagent_worktree's resolve_repo_root, local_backend_active,
+    create_subagent_worktree and finalize_subagent_worktree (prune=False to look, prune=True only
+    for an empty one). Without them work_start refuses worktree=true and starts nothing.
+  bot screen hold: >-
+    screen_lock.py reads tools.bot_desktop.placement.resolve() and runtime.published_env() to tell a
+    bot's own Bot Screen from the host's real desktop (feature map: "Bot Screen"). Both optional: without
+    them the hold falls back to the host's DISPLAY, so a rename only widens or narrows who shares a hold.
+  cron reports in a Bot Chat: >-
+    A cron job delivered to a Bot Chat just shows its report there unless it lets the bot act
+    (cron_bot_chat; feature map "Cron jobs delivered to a bot", branch bot-workstreams). The plugin
+    replaces cron.scheduler_delivery._deliver_to_bot_chat in the process that runs the jobs (the
+    delivery loop calls it by module name); a job that acts calls Hermes' own. A report finds the
+    Bot Chat with tools.bot_live_delivery._bot_chat_tip and goes in through
+    gateway.session_cron.deliver_to_local_chat (owner_for_home first), as Hermes writes a cron
+    result into a local chat: a note, no turn. Where the owner refuses (a desktop-made Bot Chat its
+    door hasn't adopted) or runs in another process, hermes_state's SessionDB.append_completion_note
+    writes it, once per run. gateway.session_cron is newer than v0.22.5, so it's reached by name
+    and checked first, and without it every job keeps Hermes' turn (the route's shows_reports is
+    false). upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
+    report on the user's next turn.
+  plugin update around a running turn: >-
+    The host-run update (feature map: "Conduit plugin update") asks
+    gateway_lifecycle_guards.live_work (over _candidate_homes) what the gateway is running and
+    waits for it before the restart, and reads gateway.status' gateway_state.json for a restart
+    that is draining. Without them it restarts at once and gives up after 180 s, so an update
+    during a turn reports a failure while the gateway refuses new work (notifier #546).
+    GET /self/gateway-work names that work for Conduit (each chat's session row by its key in
+    hermes_state, a cron job's name by hermes_cli.update_cmd_drain_report._cron_job_name) with the
+    gateway's own cap (gateway.restart's parse of agent.restart_after_turn_timeout), so the update
+    says what it waits on and Restart now can stop it; without them it names only the kind. When
+    it restarts anyway starts from hermes_cli.web_server's _LAST_GATEWAY_RESTART (the restart this
+    dashboard spawned), read by getattr; without it, from when the dashboard first saw the drain.
+    Restart now's force (POST /self/gateway-work/restart-now?force=true) restarts a gateway systemd
+    runs with `systemctl restart --no-block`, using hermes_cli.gateway's supports_systemd_services,
+    _installed_service_kind_for, _systemctl_cmd, _select_systemd_scope and get_service_name: a
+    drain under way can't be cut otherwise. Without them it answers 501.
+    The update's restart, and Linked Rooms setup's, fall back to the same `systemctl restart
+    --no-block` when Hermes' own restart dies on its root refusal ("Refusing to install the gateway
+    system service as root", a root system unit without User=): it reads the end of the
+    gateway-restart action log at hermes_cli.web_server_gateway's _ACTION_LOG_DIR and
+    _ACTION_LOG_FILES, and setup's spawned restart from its _ACTION_PROCS, all by importlib or
+    getattr. Without them the restart is reported failed, as before (notifier #605).
   plugin install scan: >-
     Conduit's one-tap plugin update (feature map: "Conduit plugin update"). tools.plugin_guard scans
     every shipped file before an install or update; one high finding makes it caution, which the
     update can't confirm, so hosts stay on the old version (hermes-conduit#1500).
-
+  desktop half lint: >-
+    The boards Hermes Desktop draws (feature map: "Cards Hermes shows"). Hermes lints a package's
+    Desktop half (desktop/plugin.js) with hermes_cli.plugin_validate_desktop; a construct it flags
+    keeps the half from loading. upstream/test_desktop_half.py runs that lint over the shipped copy.
+  chats on the gateway's listener: >-
+    Conduit's chat socket, when its address is the gateway's own listener (the Webapp) instead of
+    hermes dashboard (feature map: "Two Hermes servers"). gateway.ready's session_authority tells
+    them apart; the authority takes its own shapes for the same verbs (submission_id,
+    execution_generation, session.mutate for renames, branches, compression and model picks) and
+    refuses the dashboard's before running anything, which Conduit's one resend relies on.
+    The plugin's capabilities route and its signed speech-server socket answer there (checked). The
+    plugin's chat features find the authority's chats there (gateway_chats.py): the gateway is
+    gateway.run_api._ACTIVE_RUNNER, a chat is authority.sessions[id] (all_authorities), its agent
+    the runner's resident one (Predictions, which answer only while the gateway holds that agent),
+    and turn-surface keeps Conduit's report by session id.
+    Watch jobs, a Watch call's Local Live chat and Pulse's turns drive their own chats through a
+    gateway.session_controls.AuthorityConnection of their own on the gateway's loop
+    (runner._gateway_loop), translating the TUI gateway's shapes both ways (approval.settled reads
+    as approval.cancelled). Each is checked with listener_driver/'s test-only routes.
+    Desktop views report not observing there: the authority has no Desktop selection to read.
+  hidden turns after a compaction: >-
+    Pulse's reports, briefs and follow-ups and a bot's wake are hidden turns (prompt.submit with
+    display_kind "hidden"; feature map "Pulse"). When Hermes compacts the chat during one,
+    agent.conversation_loop._should_skip_model_call_for_reference_handoff counts no display_kind
+    row as an ask and ends the turn on _HANDOFF_SKIP_FINAL_RESPONSE, which Pulse showed as its
+    report. compaction_skip wraps that check, reached by name through the module (the turn code
+    imports it at call time), to let the turn's own hidden ask through, and reads both final
+    responses so neither becomes a card or a push. upstream/test_compaction_skip.py checks
+    Hermes' own verdict (a known failure until Hermes counts the ask) and runs a hidden turn that
+    has to compact first on the canary.
+  memory provider discovery: >-
+    Hermes lists memory providers (plugins.memory.discover_memory_providers) on every dashboard
+    plugins hub build, and parses each top-level module of a plugin folder whose __init__.py
+    doesn't name the contract in its first 8 KB (_defines_memory_provider), with nothing kept
+    between builds. The plugin's 3.5 MB made each build seconds of CPU, minutes on a phone, which
+    stalled the dashboard's loop and dropped Conduit's sockets (hermes-conduit#1931, Termux).
+    memory_scan.py answers False for the plugin's own folders and leaves every other to Hermes.
+    upstream/test_memory_scan.py checks Hermes alone (a known failure while it parses the
+    plugin) and with the plugin loaded (none of its modules parsed).
 # Upstream behaviors we know are broken, keyed by test and failure signature.
 # A listed test xfails while it fails with this signature, and fails when it
 # passes (upstream fixed it: review the workaround) or fails differently.
@@ -95,6 +241,19 @@ known_failures:
     upstream: NousResearch/hermes-agent#140051
     since: v0.22.3 (da01ee9c3)
     workaround: ?conduit_profile= on the dashboard-process routes (notifier #412)
+  - test: test_hermes_counts_a_hidden_ask_after_a_handoff
+    signature: hidden ask skipped
+    issue: kaishi00/hermes-conduit-notifier (compaction_skip, 2026-11-06)
+    upstream: NousResearch/hermes-agent#80622's guard counts no display_kind row as an ask
+    since: v0.22.3
+    workaround: compaction_skip.py lets a hidden turn's own ask through Hermes' check
+
+  - test: test_hermes_lists_memory_providers_without_parsing_the_plugin
+    signature: plugin parsed
+    issue: kaishi00/hermes-conduit#1931
+    upstream: NousResearch/hermes-agent a114e7a344 parses a plugin's modules on every provider listing
+    since: v0.21.7
+    workaround: memory_scan.py answers for the plugin's own folder
 
 # --- generated by upstream/contract.py: do not edit below ---
 
@@ -132,6 +291,14 @@ imports:
     optional: ["BasePlatformAdapter"]
   gateway.response_filters:
     optional: ["is_autonomous_silence_response"]
+  gateway.restart:
+    optional: ["DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT", "parse_restart_after_turn_timeout"]
+  gateway.session_controls:
+    required: ["AuthorityConnection"]
+  gateway.status:
+    optional: ["read_runtime_status", "runtime_status_is_stale"]
+  gateway.warning_notifications:
+    required: ["warning_notifications_enabled"]
   hermes_cli:
     optional: ["active_sessions", "lifecycle"]
   hermes_cli._launchers:
@@ -153,15 +320,22 @@ imports:
     optional: ["registry", "token_auth"]
   hermes_cli.dashboard_auth.base:
     required: ["DashboardAuthProvider", "TokenPrincipal"]
+  hermes_cli.gateway:
+    optional: ["_installed_service_kind_for", "_select_systemd_scope", "_systemctl_cmd", "get_service_name", "supports_systemd_services"]
+  hermes_cli.gateway_lifecycle_guards:
+    optional: ["_candidate_homes", "live_work"]
   hermes_cli.gateway_runtime_start:
     optional: ["start_detached_replacement"]
   hermes_cli.plugins:
     required: ["invoke_hook"]
     optional: ["clear_thread_tool_whitelist", "set_thread_tool_whitelist"]
   hermes_cli.profiles:
-    optional: ["get_active_profile_name", "get_profile_dir", "list_profile_names"]
+    required: ["get_profile_dir"]
+    optional: ["get_active_profile_name", "list_profile_names"]
   hermes_cli.tools_config:
     optional: ["_get_platform_tools", "_get_plugin_toolset_keys"]
+  hermes_cli.update_cmd_drain_report:
+    optional: ["_cron_job_name"]
   hermes_cli.web_routers:
     optional: ["sessions"]
   hermes_cli.web_routers.files:
@@ -188,12 +362,16 @@ imports:
   plugins.memory:
     required: ["load_memory_provider"]
   tools:
-    optional: ["voice_live"]
+    optional: ["subagent_worktree", "voice_live"]
   tools.approval:
     required: ["list_gateway_approvals", "resolve_gateway_approval"]
     optional: ["_get_approval_timeout"]
   tools.approval_context:
     optional: ["_get_approval_timeout"]
+  tools.bot_desktop:
+    optional: ["placement", "runtime"]
+  tools.bot_live_delivery:
+    required: ["_bot_chat_tip"]
   tools.clarify_gateway:
     optional: ["get_clarify_timeout"]
   tools.clarify_tool:
@@ -214,6 +392,8 @@ imports:
     optional: ["resolve_xai_http_credentials"]
   tui_gateway:
     optional: ["turn_marker"]
+  tui_gateway.turn_marker:
+    optional: ["clear_turn_marker", "marker_writer_state", "read_turn_marker"]
 
 # Where those modules live upstream (a .py file or a package).
 module_paths:
@@ -233,6 +413,10 @@ module_paths:
   - gateway/config
   - gateway/platforms/base
   - gateway/response_filters
+  - gateway/restart
+  - gateway/session_controls
+  - gateway/status
+  - gateway/warning_notifications
   - hermes_cli
   - hermes_cli/_launchers
   - hermes_cli/active_sessions
@@ -243,10 +427,13 @@ module_paths:
   - hermes_cli/config_effective
   - hermes_cli/dashboard_auth
   - hermes_cli/dashboard_auth/base
+  - hermes_cli/gateway
+  - hermes_cli/gateway_lifecycle_guards
   - hermes_cli/gateway_runtime_start
   - hermes_cli/plugins
   - hermes_cli/profiles
   - hermes_cli/tools_config
+  - hermes_cli/update_cmd_drain_report
   - hermes_cli/web_routers
   - hermes_cli/web_routers/files
   - hermes_cli/web_server_chat
@@ -262,6 +449,8 @@ module_paths:
   - tools
   - tools/approval
   - tools/approval_context
+  - tools/bot_desktop
+  - tools/bot_live_delivery
   - tools/clarify_gateway
   - tools/clarify_tool
   - tools/cronjob_tools
@@ -271,10 +460,19 @@ module_paths:
   - tools/web_tools
   - tools/xai_http
   - tui_gateway
+  - tui_gateway/turn_marker
 
 # The plugin's routes under /api/plugins/conduit_push/, from dashboard/.
 routes:
   - GET /artifacts
+  - GET /boards/checklists
+  - POST /boards/checklists
+  - GET /boards/desktop
+  - POST /boards/desktop/seen
+  - GET /boards/diffs
+  - GET /boards/rooms
+  - DELETE /boards/taps
+  - POST /boards/taps
   - GET /calls
   - PUT /calls
   - POST /calls/outcomes
@@ -402,20 +600,26 @@ routes:
   - DELETE /rooms/links/invites
   - POST /rooms/links/invites
   - POST /rooms/links/preview
+  - GET /rooms/looks
+  - PUT /rooms/looks
   - GET /rooms/people
   - DELETE /rooms/sessions
   - GET /rooms/setup
   - POST /rooms/setup
+  - GET /self/gateway-work
+  - POST /self/gateway-work/restart-now
   - POST /self/restart
   - GET /self/update
   - POST /self/update
   - GET /sessions/desktop-views
   - POST /sessions/history-page
   - POST /sessions/takeover
+  - POST /side-question
   - WS /speech-server/socket
   - GET /speech-server/status
   - POST /speech-server/test
   - POST /turn-surface
+  - POST /turn-surface/discard
   - GET /voice-tools
   - POST /voice-tools/call
   - POST /voice/archive
@@ -425,6 +629,7 @@ routes:
   - POST /voice/summary
   - GET /voice/tags
   - POST /voice/tags
+  - GET /waiting
   - POST /watch-audio/prepare
   - GET /watch-audio/status
   - POST /watch-tools/grant
@@ -433,5 +638,12 @@ routes:
   - GET /web-search/status
   - GET /workspace/list
   - GET /workspace/recent
+  - GET /workspace/resolve
   - GET /workspace/search
   - POST /workspace/{action}
+  - GET /workstreams
+  - POST /workstreams/adopt
+  - POST /workstreams/call-ended
+  - GET /workstreams/settings
+  - POST /workstreams/settings
+  - POST /workstreams/{ref}/{action}

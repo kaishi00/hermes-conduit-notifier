@@ -238,6 +238,18 @@ def test_a_go_prompt_goes_only_to_a_conduit_that_can_open_maps(store, clock):
     assert not store.has_feature("maps-navigate")
 
 
+def test_an_install_not_used_for_days_doesnt_hold_back_a_feature(store, clock):
+    # .52, 2026-11-04: old iPads and an old iPhone, last used days ago, kept
+    # boards off for the phone in use.
+    store.exchange({"installation_id": IPAD, "features": ["chat-cards"], "results": []})
+    clock.now += store_module.FEATURE_DEVICE_RECENT_S - 1
+    store.exchange({"installation_id": PHONE, "features": ["chat-cards", "board-cards"], "results": []})
+    assert not store.has_feature_everywhere("board-cards"), "an old install used lately still counts"
+    clock.now += 2
+    store.exchange({"installation_id": PHONE, "features": ["chat-cards", "board-cards"], "results": []})
+    assert store.has_feature_everywhere("board-cards")
+
+
 def test_a_malformed_exchange_is_refused(store):
     for body in (None, {"installation_id": "x"}, {"installation_id": PHONE, "results": "no"},
                  {"installation_id": PHONE, "results": [{}] * (store_module.MAX_RESULTS + 1)}):

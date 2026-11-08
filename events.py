@@ -699,6 +699,10 @@ _RULE = re.compile(r"^\s{0,3}([-*_])(\s*\1){2,}\s*\Z")
 _TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*\Z")
 _IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+# Hermes Desktop's session reference the work tools put right after a work
+# link ("[Open W3](conduit://session/…) @session:<profile>/<id>"): Desktop's
+# chip, not words for a notification (work_tool._link).
+_WORK_LINK_DESKTOP_REF = re.compile(r"(\]\(conduit://session/[^)\s]*\))[ \t]*@session:[A-Za-z0-9_.:/-]*[A-Za-z0-9_]")
 _STRONG = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
 _EMPHASIS = re.compile(r"(?<![\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])")
 _UNDERSCORE_EMPHASIS = re.compile(r"(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])")
@@ -778,6 +782,9 @@ def _desktop_directive(match: re.Match) -> str:
     if name == "preview":
         path = (attributes.get("file") or "").strip()
         return f'MEDIA:"{path}"' if path and '"' not in path else match.group(0)
+    if name == "conduit-board":
+        # conduit_show's board in a Desktop chat (show_tool), one of ours.
+        return "🗂 Board"
     plugin = "hermes-rich-ui" if name == "richui" else name
     return f"🗂 {plugin} card"
 
@@ -840,7 +847,7 @@ def plain_text(value: Any) -> str:
         line = _BULLET.sub(r"\1• ", line)
         if line.lstrip().startswith("|"):
             line = " · ".join(cell.strip() for cell in line.strip().strip("|").split("|") if cell.strip())
-        line = _LINK.sub(r"\1", _IMAGE.sub(r"\1", line))
+        line = _LINK.sub(r"\1", _IMAGE.sub(r"\1", _WORK_LINK_DESKTOP_REF.sub(r"\1", line)))
         line = _STRONG.sub(r"\2", line)
         line = _STRIKE.sub(r"\1", _UNDERSCORE_EMPHASIS.sub(r"\1", _EMPHASIS.sub(r"\1", line)))
         lines.append(line.replace("`", ""))

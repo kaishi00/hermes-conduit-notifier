@@ -247,6 +247,16 @@ async def post_self_restart(response: Response) -> Dict[str, Any]:
 
 SELF_UPDATE_FILE = "conduit-self-update.json"
 SELF_UPDATE_GATEWAY_LIMIT_S = 180.0
+# A gateway still letting running work finish after the limit is waited on in
+# steps of the limit, up to this (its own cap, agent.restart_after_turn_timeout,
+# is 30 minutes by default).
+SELF_UPDATE_DRAIN_LIMIT_S = 7200.0
+# How long the update waits for the gateway's running work before it restarts
+# anyway (a wedged turn is left out, as the gateway leaves it out). Short: past
+# it the gateway's restart waits for the same work again, up to its own cap
+# (agent.restart_after_turn_timeout), so a long one here only adds to that.
+# Conduit names the work and can stop it (Restart now, /self/gateway-work).
+SELF_UPDATE_GATEWAY_WAIT_S = 600.0
 SELF_UPDATE_CHATS_RECHECK_S = 2.0
 # A turn marker left behind can't hold the update forever.
 SELF_UPDATE_CHATS_LIMIT_S = 7200.0
@@ -257,6 +267,12 @@ SELF_UPDATE_STALE_S = 3600.0
 # A gateway restart that fails this shortly before a new dashboard starts
 # took the dashboard down with it (a service manager restarting both).
 SELF_UPDATE_TAKEN_DOWN_S = 300.0
+# The pull in a fresh Hermes process (below): git, the install scan and any dependencies.
+SELF_UPDATE_FRESH_PULL_LIMIT_S = 900.0
+_FRESH_PULL_MARK = "conduit-self-update-result:"
+# A process's start time is only roughly the wall clock (Linux counts it from boot), so a
+# file written as the dashboard started could read as newer than it.
+_HERMES_CHANGED_MARGIN_S = 5.0
 SELF_UPDATE_RUNNING = ("downloading", "restarting_gateway", "waiting_for_chats", "restarting_dashboard")
 # Reentrant: a start reads the status under it too.
 _self_update_lock = threading.RLock()
@@ -265,6 +281,8 @@ _self_update_thread: Optional[threading.Thread] = None
 _self_update_job: Optional[Dict[str, Any]] = None
 # Each start pulls and restarts the gateway: a few per hour is plenty.
 _self_update_limiter = core._MintLimiter(3, 600.0, message="Too many plugin updates; try again in a few minutes")
+# Each forced restart cuts the gateway's work: a few in five minutes, not a loop of them.
+_forced_restart_limiter = core._MintLimiter(3, 300.0, message="Too many forced restarts; try again in a few minutes")
 
 
 def _self_update_path() -> Path:
@@ -292,7 +310,355 @@ def _write_self_update(path: Path, job: Dict[str, Any]) -> None:
         raise
 
 
-def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[[], int]]:
+# --- The gateway's running work (issue 546) ------------------------------------
+#
+# A restart sent while the gateway runs a turn makes it refuse new work at once
+# and wait for that turn (up to agent.restart_after_turn_timeout, 30 minutes by
+# default) before it stops; --interrupt only skips the CLI's question. Conduit
+# can't reach a gateway that refuses new work, so the update waits for the work
+# first, while the gateway still serves, and a restart that still meets some
+# (a turn started meanwhile) is waited on rather than reported as failed.
+
+
+def _gateway_homes() -> List[Path]:
+    """The homes whose gateway `hermes gateway restart` from here takes down, as Hermes' own
+    guard picks them (a host multiplexer's included), or the root on a Hermes that can't say;
+    none when even the root can't be found (the callers then read "no gateway")."""
+    try:
+        from hermes_cli.gateway_lifecycle_guards import _candidate_homes
+        homes = [Path(home) for home in _candidate_homes()]
+    except Exception:  # noqa: BLE001 — the root's gateway is the one to ask then
+        logger.debug("Conduit plugin: couldn't list the gateway's homes", exc_info=True)
+        homes = []
+    if homes:
+        return homes
+    try:
+        return _hermes_homes()[:1]
+    except Exception:  # noqa: BLE001
+        logger.debug("Conduit plugin: couldn't find the Hermes home", exc_info=True)
+        return []
+
+
+def _gateway_live_work() -> Tuple[List[Dict[str, Any]], int]:
+    """The work units the gateway's restart would wait on (wedged turns and restart-safe cron
+    runs left out, as the gateway leaves them out), and how many: an older gateway gives only
+    the count. ([], 0) when no gateway answers or this Hermes can't say."""
+    try:
+        from hermes_cli.gateway_lifecycle_guards import live_work
+    except Exception:  # noqa: BLE001 — a broken import reads as one that's missing
+        return [], 0
+    # Every home whose gateway the restart takes down: one that errors or is idle doesn't hide
+    # another's work. Not knowing is no reason to hold the update.
+    awaited: List[Dict[str, Any]] = []
+    unnamed = 0
+    for home in _gateway_homes():
+        try:
+            work = live_work(home)
+        except Exception:  # noqa: BLE001
+            logger.debug("Conduit plugin: couldn't read the gateway's running work", exc_info=True)
+            continue
+        if not isinstance(work, dict):
+            continue
+        units = [unit for unit in work.get("active_work") or [] if isinstance(unit, dict)]
+        if units:
+            # Each unit keeps the home it came from, to name it from there (a cron job's title).
+            awaited += [dict(unit, _home=home) for unit in units
+                        if not unit.get("wedged") and not unit.get("restart_safe")]
+            continue
+        count = work.get("active_agents")
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            unnamed += count  # an older gateway gives only the count
+    return awaited, len(awaited) + unnamed
+
+
+def _gateway_work() -> int:
+    """How many work units the gateway's restart would wait on (_gateway_live_work)."""
+    return _gateway_live_work()[1]
+
+
+def _profile_home(profile: str) -> Optional[Path]:
+    """A profile's Hermes home: the root for the default one, else profiles/<name>."""
+    try:
+        root = _hermes_homes()[0]
+    except Exception:  # noqa: BLE001 — no home: nothing to read the chat from
+        return None
+    return root if profile == "default" else root / "profiles" / profile
+
+
+def _chat_of(key: str) -> Tuple[str, Optional[str], Optional[str]]:
+    """``(profile, platform, chat id)`` from a gateway session key (``agent:<ns>:<platform>:
+    <chat type>[:<chat id>...]``, gateway/session.py build_session_key): ``agent:main`` is the
+    default profile and ``agent:main~`` one named main."""
+    parts = key.split(":")
+    if len(parts) < 4 or parts[0] != "agent":
+        return "default", None, None
+    profile = {"main": "default", "main~": "main"}.get(parts[1], parts[1])
+    return profile, parts[2], ":".join(parts[4:]) or None
+
+
+def _session_row(home: Optional[Path], key: str) -> Dict[str, Any]:
+    """The chat's latest session row for a gateway session key ({} when it can't be read)."""
+    if home is None:
+        return {}
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=home / "state.db")
+    except Exception:  # noqa: BLE001 — a name is never worth failing the answer
+        logger.debug("Conduit plugin: couldn't open a profile's sessions", exc_info=True)
+        return {}
+    try:
+        rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True)
+        return rows[0] if rows and isinstance(rows[0], dict) else {}
+    except Exception:  # noqa: BLE001
+        logger.debug("Conduit plugin: couldn't read a chat's session", exc_info=True)
+        return {}
+    finally:
+        with contextlib.suppress(Exception):
+            db.close()
+
+
+def _named_work_unit(unit: Dict[str, Any]) -> Dict[str, Any]:
+    """One unit the restart waits on, as Conduit names it: whose chat, its title and session
+    (to stop it), or the cron job; a kind Hermes names no further keeps only its kind."""
+    named: Dict[str, Any] = {"kind": str(unit.get("kind") or "work")}
+    elapsed = unit.get("elapsed_s")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+        named["elapsed_s"] = round(float(elapsed))
+    if named["kind"] == "chat" and isinstance(unit.get("session"), str):
+        key = unit["session"]
+        profile, platform, chat_id = _chat_of(key)
+        home = _profile_home(profile)
+        row = _session_row(home, key)
+        session_id = row.get("id") or (chat_id if platform == "local" else None)
+        title = row.get("title") or row.get("preview") or ""
+        named.update(profile=profile, platform=platform or "", session_id=session_id or None,
+                     title=" ".join(str(title).split())[:120])
+        if home is not None:
+            with contextlib.suppress(Exception):
+                titles = importlib.import_module(f"{_plugin_client().__package__}.session_titles")
+                named["bot"] = titles._bot_name(home)
+    elif named["kind"] == "cron":
+        job_id = str(unit.get("job_id") or "")
+        named["job_id"] = job_id
+        try:
+            from hermes_cli.update_cmd_drain_report import _cron_job_name
+        except Exception:  # noqa: BLE001 — a broken module names only the kind
+            _cron_job_name = None
+        if _cron_job_name is not None:
+            with contextlib.suppress(Exception):
+                home = unit.get("_home") or next(iter(_gateway_homes()), None)
+                if home is not None:
+                    named["title"] = _cron_job_name(job_id, home) or ""
+    return named
+
+
+def _restart_timeout_s() -> Optional[float]:
+    """The gateway's own cap on a restart's wait (agent.restart_after_turn_timeout), or None."""
+    try:
+        from gateway.restart import DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT, parse_restart_after_turn_timeout
+        from hermes_cli.config import load_config
+        raw = (load_config().get("agent") or {}).get("restart_after_turn_timeout")
+        return float(parse_restart_after_turn_timeout(raw) if raw is not None
+                     else DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT)
+    except Exception:  # noqa: BLE001 — Conduit then says no time
+        logger.debug("Conduit plugin: couldn't read the gateway's restart cap", exc_info=True)
+        return None
+
+
+# When this dashboard first saw the gateway draining, for a restart it didn't spawn itself.
+_draining_seen_at: Optional[float] = None
+
+
+def _restart_spawned_at() -> Optional[float]:
+    """When this dashboard spawned the gateway restart still running (Hermes' own
+    /api/gateway/restart and the host-run update alike), as wall-clock time, or None."""
+    try:
+        web_server = sys.modules.get("hermes_cli.web_server")
+        spawned_at, proc, _command = getattr(web_server, "_LAST_GATEWAY_RESTART")
+        if proc.poll() is not None:
+            return None
+        return time.time() - (time.monotonic() - float(spawned_at))
+    except Exception:  # noqa: BLE001 — none, or a Hermes that keeps it otherwise
+        return None
+
+
+def _draining_since(draining: bool) -> Optional[float]:
+    global _draining_seen_at
+    if not draining:
+        _draining_seen_at = None
+        return None
+    # A sighting older than the gateway's own cap is from a drain this dashboard stopped watching
+    # before it ended: no drain outlasts its cap, so it's no start of this one.
+    if _draining_seen_at is None or time.time() - _draining_seen_at > (_restart_timeout_s() or 1800.0):
+        _draining_seen_at = time.time()
+    # The restart this dashboard spawned, still running, is the current drain's start (a second
+    # restart joins it rather than spawning anew); a sighting is the fallback.
+    spawned = _restart_spawned_at()
+    return spawned if spawned is not None else _draining_seen_at
+
+
+def gateway_work_report() -> Dict[str, Any]:
+    """What a gateway restart waits on now (GET /self/gateway-work): each unit named, how many
+    (an older gateway names none), whether the gateway is already draining, its cap, and when
+    it restarts anyway (the drain's start, as near as this dashboard knows it, plus the cap)."""
+    units, count = _gateway_live_work()
+    draining = _gateway_draining()
+    timeout = _restart_timeout_s()
+    since = _draining_since(draining)
+    return {"units": [_named_work_unit(unit) for unit in units], "count": count, "draining": draining,
+            "restart_timeout_s": timeout,
+            "restarts_by": since + timeout if since is not None and timeout is not None else None}
+
+
+# Restart now: the update's wait for the gateway's work ends here; Conduit stops the chats
+# themselves (session.interrupt), which a draining gateway still takes.
+_restart_now = threading.Event()
+# When Restart now last forced a restart: the update's own restart child, cut short by it, may
+# exit non-zero although the gateway came back under systemd.
+_forced_restart_at: Optional[float] = None
+# The update the force was sent during (its job id), or None when none ran: only that update's
+# restart counts it.
+_forced_for_job: Optional[str] = None
+# A forced restart under way: the update's own restart, cut short by it, may return before the
+# force is stamped, so the update waits for it before it decides whether its restart failed.
+_forcing = threading.Event()
+
+
+def _forget_restart_now() -> None:
+    """A new update starts with no Restart now and no forced restart of its own."""
+    global _forced_restart_at, _forced_for_job
+    _restart_now.clear()
+    _forced_restart_at = None
+    _forced_for_job = None
+
+
+def _wait_for_force(limit_s: float = 35.0) -> None:
+    """Waits, up to the force's own 30 s timeout and a little, for a forced restart to finish."""
+    deadline = time.monotonic() + limit_s
+    while _forcing.is_set() and time.monotonic() < deadline:
+        time.sleep(0.25)
+
+
+def force_gateway_restart() -> None:
+    """Restarts the gateway through its service manager, which doesn't wait for running work:
+    the gateway's stop gives it agent.restart_drain_timeout (60 s by default), then ends it. A
+    drain already under way can't be cut any other way (a second `hermes gateway restart` joins
+    it). systemd only: queued with --no-block, so it lands even when the restart takes this
+    dashboard down with the gateway (a unit that Requires= it)."""
+    try:
+        from hermes_cli.gateway import (_installed_service_kind_for, _select_systemd_scope, _systemctl_cmd,
+                                        get_service_name, supports_systemd_services)
+        systemd = supports_systemd_services() and _installed_service_kind_for(lambda: False) == "systemd"
+    except Exception:  # noqa: BLE001 — a Hermes that can't say: no force
+        logger.debug("Conduit plugin: couldn't tell how the gateway is run", exc_info=True)
+        systemd = False
+    if not systemd:
+        raise core.TokenError(501, "Conduit can force a restart only for a gateway systemd runs. "
+                                   "Run hermes gateway stop, then hermes gateway start, on the host.")
+    global _forced_restart_at, _forced_for_job
+    with _self_update_lock:  # the thread and its job read together, as a job start sets them
+        running = _self_update_thread is not None and _self_update_thread.is_alive()
+        owner = str((_self_update_job or {}).get("id") or "") if running else None
+    command = _systemctl_cmd(_select_systemd_scope(False)) + ["restart", "--no-block", get_service_name()]
+    logger.warning("Conduit plugin: forcing a gateway restart (%s)", " ".join(command))
+    try:
+        done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                              timeout=30, start_new_session=True)
+    except subprocess.TimeoutExpired:
+        raise core.TokenError(502, "systemd didn't answer the restart in 30 seconds")
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or "").strip()[-300:]
+        raise core.TokenError(502, f"systemd didn't take the restart: {detail}" if detail
+                              else "systemd didn't take the restart")
+    _forced_restart_at, _forced_for_job = time.time(), owner
+
+
+# Hermes' `hermes gateway restart` checks the installed unit against the one it would write
+# first, and writing a system unit for root without a User= line raises (its "pass
+# --run-as-user root" refusal, meant for `gateway install`). On a gateway systemd runs as
+# root that way (an LXC host), every restart Hermes runs dies there, before stopping anything.
+_ROOT_UNIT_REFUSAL = "Refusing to install the gateway system service as root"
+_RESTART_LOG_TAIL_BYTES = 16384
+
+
+def _restart_log_says_root_refusal() -> bool:
+    """Whether the last `hermes gateway restart` the dashboard spawned died on Hermes' root
+    refusal: the end of its log, from its last header on."""
+    try:
+        gateway = importlib.import_module("hermes_cli.web_server_gateway")
+        path = Path(gateway._ACTION_LOG_DIR) / gateway._ACTION_LOG_FILES["gateway-restart"]
+        with open(path, "rb") as log:
+            log.seek(max(0, os.fstat(log.fileno()).st_size - _RESTART_LOG_TAIL_BYTES))
+            tail = log.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 — no log to read: not this failure
+        logger.debug("Conduit plugin: couldn't read the gateway restart's log", exc_info=True)
+        return False
+    section = tail.rsplit("=== gateway-restart started", 1)[-1]
+    return _ROOT_UNIT_REFUSAL in section
+
+
+def restart_after_root_refusal() -> bool:
+    """When Hermes' own gateway restart died on its root refusal (above) and systemd runs the
+    gateway as a system unit and this dashboard is root, restarts it with `systemctl restart
+    --no-block`, as Hermes would have once its check passed. Nothing was stopped, so the
+    gateway's stop still lets running work finish (TimeoutStopSec). Whether it was sent."""
+    if not _restart_log_says_root_refusal():
+        return False
+    try:
+        from hermes_cli.gateway import (_installed_service_kind_for, _select_systemd_scope, _systemctl_cmd,
+                                        get_service_name, supports_systemd_services)
+        system = (os.geteuid() == 0 and supports_systemd_services()
+                  and _installed_service_kind_for(lambda: False) == "systemd" and _select_systemd_scope(False))
+        command = _systemctl_cmd(True) + ["restart", "--no-block", get_service_name()] if system else None
+    except Exception:  # noqa: BLE001 — a Hermes that can't say: leave the failure as it is
+        logger.debug("Conduit plugin: couldn't tell how the gateway is run", exc_info=True)
+        return False
+    if command is None:
+        return False
+    logger.warning("Conduit plugin: Hermes' gateway restart refused a root system unit; restarting "
+                   "through systemd (%s)", " ".join(command))
+    try:
+        done = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                              timeout=30, start_new_session=True)
+    except (OSError, subprocess.TimeoutExpired):
+        logger.warning("Conduit plugin: systemd didn't take the gateway restart", exc_info=True)
+        return False
+    if done.returncode != 0:
+        logger.warning("Conduit plugin: systemd didn't take the gateway restart: %s",
+                       (done.stderr or done.stdout or "").strip()[-300:])
+        return False
+    return True
+
+
+def watch_restart_for_root_refusal(proc: Any) -> None:
+    """For a restart spawned and left to run (a settings save's): when it ends failed on the
+    root refusal, restarts through systemd in its place."""
+    def watch() -> None:
+        with contextlib.suppress(Exception):
+            if proc.wait() != 0:
+                restart_after_root_refusal()
+
+    threading.Thread(target=watch, name="conduit-gateway-restart-watch", daemon=True).start()
+
+
+def _gateway_draining() -> bool:
+    """Whether the gateway is letting running work finish before its restart stops it."""
+    try:
+        from gateway.status import read_runtime_status, runtime_status_is_stale
+    except Exception:  # noqa: BLE001 — a broken import reads as one that's missing
+        return False
+    for home in _gateway_homes():
+        try:
+            record = read_runtime_status(home / "gateway_state.json")
+            if record and not runtime_status_is_stale(record):
+                return record.get("gateway_state") == "draining"
+        except Exception:  # noqa: BLE001 — unknown reads as not draining: the old limit applies
+            logger.debug("Conduit plugin: couldn't read the gateway's state", exc_info=True)
+            return False
+    return False
+
+
+def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]:
     """Hermes' own plugin pull and gateway restart, or 501 when this Hermes lacks them."""
     try:
         plugins_cmd = importlib.import_module("hermes_cli.plugins_cmd")
@@ -316,34 +682,139 @@ def _hermes_update_steps() -> Tuple[Callable[[], Dict[str, Any]], Callable[[], i
         restart_kwargs = {"interrupt": True}
 
     def pull() -> Dict[str, Any]:
+        # A dashboard still running the Hermes it started with, after Hermes was updated
+        # under it, mixes the two in one process: what it loaded is old, what the pull
+        # imports now is new, and the new code calls into the old ("'PythonDeclaration'
+        # object has no attribute 'installs_packages'", a dashboard started on Hermes 0.22.3
+        # updated to 0.22.4). A fresh process runs the Hermes on disk, whole; the dashboard
+        # restart at the end of the update then loads it here too.
+        if _hermes_changed_on_disk(sys.modules.get("hermes_cli")):
+            return _pull_in_fresh_process()
         return dashboard_update_user_plugin(core.PLUGIN_NAME)
 
-    def restart_gateway() -> int:
+    def restart_gateway(draining: Callable[[], None] = lambda: None) -> int:
         proc, _reused = _spawn_gateway_restart(None, **restart_kwargs)
-        try:
-            return proc.wait(timeout=SELF_UPDATE_GATEWAY_LIMIT_S)
-        except subprocess.TimeoutExpired:
-            # Failed is failed: a restart finishing later mustn't contradict the job.
-            with contextlib.suppress(OSError):
-                proc.kill()
-            raise
+        waited = 0.0
+        while True:
+            try:
+                code = proc.wait(timeout=SELF_UPDATE_GATEWAY_LIMIT_S)
+            except subprocess.TimeoutExpired:
+                waited += SELF_UPDATE_GATEWAY_LIMIT_S
+                # Hermes' restart waits out the drain, then forces it: still going, not failed.
+                if waited < SELF_UPDATE_DRAIN_LIMIT_S and _gateway_draining():
+                    draining()
+                    continue
+                # Failed is failed: a restart finishing later mustn't contradict the job.
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                # Reaped, so it doesn't linger as a zombie of this dashboard.
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+                raise
+            # Hermes' restart dies on a root system unit without User= (its install check):
+            # systemd restarts it instead.
+            return 0 if code != 0 and restart_after_root_refusal() else code
 
     return pull, restart_gateway
+
+
+# When this module loaded: after a re-exec (_reexec keeps the pid, so its creation time) it
+# loads again, with the Hermes on disk then.
+_MODULE_LOADED_AT = time.time()
+
+
+def _process_start_time() -> Optional[float]:
+    """When this process loaded the Hermes it runs: its start, or its last re-exec."""
+    try:
+        import psutil  # a Hermes dependency
+        return max(float(psutil.Process(os.getpid()).create_time()), _MODULE_LOADED_AT)
+    except Exception:  # noqa: BLE001 — not knowing reads as unchanged: the pull runs here, as before
+        return None
+
+
+def _hermes_root(hermes_cli: Any) -> Optional[str]:
+    """The Hermes checkout this process runs: the folder holding hermes_cli."""
+    file = getattr(hermes_cli, "__file__", None)
+    return os.path.dirname(os.path.dirname(os.path.realpath(file))) if file else None
+
+
+def _hermes_changed_on_disk(hermes_cli: Any, started: Optional[float] = None) -> bool:
+    """Whether Hermes' code this process loaded changed on disk after it started (a
+    `hermes update` without a dashboard restart)."""
+    root = _hermes_root(hermes_cli)
+    started = _process_start_time() if started is None else started
+    if root is None or started is None:
+        return False
+    prefix = root + os.sep
+    plugin = os.path.realpath(core._plugin_root()) + os.sep
+    for module in list(sys.modules.values()):
+        file = getattr(module, "__file__", None)
+        if not isinstance(file, str):
+            continue
+        file = os.path.realpath(file)
+        if not file.startswith(prefix) or file.startswith(plugin):
+            continue
+        try:
+            if os.stat(file).st_mtime > started + _HERMES_CHANGED_MARGIN_S:
+                return True
+        except OSError:  # gone from disk: changed too
+            return True
+    return False
+
+
+def _pull_in_fresh_process() -> Dict[str, Any]:
+    """Hermes' plugin pull in a new process of the Hermes on disk, for this dashboard's home."""
+    env = dict(os.environ)
+    with contextlib.suppress(Exception):
+        from hermes_constants import get_hermes_home
+        env["HERMES_HOME"] = str(get_hermes_home())
+    script = ("import json, sys\n"
+              "from hermes_cli.plugins_cmd import dashboard_update_user_plugin\n"
+              "result = dashboard_update_user_plugin(sys.argv[1])\n"
+              f"print({_FRESH_PULL_MARK!r} + json.dumps(result, default=str), flush=True)\n")
+    restart = ("Hermes was updated on this host after the dashboard started. Restart the Hermes "
+               "dashboard, then update the plugin again.")
+    try:
+        done = subprocess.run([sys.executable, "-c", script, core.PLUGIN_NAME], env=env,
+                              cwd=_hermes_root(sys.modules.get("hermes_cli")) or None,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+                              timeout=SELF_UPDATE_FRESH_PULL_LIMIT_S,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        logger.warning("Conduit plugin: the update's pull in a fresh Hermes process timed out")
+        return {"ok": False, "error": f"The update didn't finish on the host within "
+                                      f"{int(SELF_UPDATE_FRESH_PULL_LIMIT_S // 60)} minutes. {restart}"}
+    except OSError:
+        logger.warning("Conduit plugin: couldn't start a fresh Hermes process for the update's pull", exc_info=True)
+        return {"ok": False, "error": restart}
+    for line in reversed(done.stdout.splitlines()):
+        if line.startswith(_FRESH_PULL_MARK):
+            with contextlib.suppress(ValueError):
+                result = json.loads(line[len(_FRESH_PULL_MARK):])
+                if isinstance(result, dict):
+                    return result
+    logger.warning("Conduit plugin: the update's pull in a fresh Hermes process failed (exit %s): %s",
+                   done.returncode, (done.stderr or "")[-2000:])
+    return {"ok": False, "error": restart}
 
 
 def _self_update_failed(job: Dict[str, Any], detail: str, code: Optional[str] = None) -> None:
     # failed_step says how far it got: Conduit runs the steps itself only
     # when the pull itself failed.
+    # The gateway's stage belonged to the step that ended.
+    for key in ("gateway_stage", "running_chats", "gateway_restart_at"):
+        job.pop(key, None)
     job.update(failed_step=job.get("step"), step="failed", detail=detail, finished_at=time.time())
     if code:
         job["code"] = code
 
 
 def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[str, Any]],
-                     restart_gateway: Callable[[], int], schedule: Callable[[float, Callable[[], None]], Any],
+                     restart_gateway: Callable[..., int], schedule: Callable[[float, Callable[[], None]], Any],
                      homes: Callable[[], List[Path]], notify: Callable[[Dict[str, Any]], None],
                      sleep: Callable[[float], None] = time.sleep,
-                     point_profiles: Callable[[], Any] = lambda: _point_profiles()) -> None:
+                     point_profiles: Callable[[], Any] = lambda: _point_profiles(),
+                     gateway_work: Callable[[], int] = lambda: _gateway_work()) -> None:
     global _self_restart_scheduled
     claimed_restart = False
     try:
@@ -361,11 +832,54 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
         # Before the restart, so the profiles it restarts load the new version with it. A profile
         # running its own gateway loads it when that gateway restarts.
         point_profiles()
+        # Until the restart is sent: a dashboard restarted before then (during the wait below)
+        # loads the new plugin, but the gateway still runs the old one.
+        job["gateway_pending"] = True
         _write_self_update(path, job)
+        # The gateway's running work first, while it still serves (issue 546). Past the limit
+        # the restart goes ahead: the gateway then waits for the work itself, up to its own cap.
+        waited = 0.0
+        while waited < SELF_UPDATE_GATEWAY_WAIT_S and not _restart_now.is_set() and (running := gateway_work()):
+            if job.get("gateway_stage") != "waiting" or job.get("running_chats") != running:
+                job.update(gateway_stage="waiting", running_chats=running)
+                _write_self_update(path, job)
+            sleep(SELF_UPDATE_CHATS_RECHECK_S)
+            waited += SELF_UPDATE_CHATS_RECHECK_S
+        # Restarting now, no longer waiting.
+        for key in ("gateway_pending", "gateway_stage", "running_chats"):
+            job.pop(key, None)
         try:
-            exit_code = restart_gateway()
+            _write_self_update(path, job)
+        except BaseException:
+            # The restart wasn't sent: a failure here must not read as taken down with it.
+            job["gateway_pending"] = True
+            raise
+
+        def draining() -> None:
+            if job.get("gateway_stage") != "draining":
+                job.update(gateway_stage="draining")
+                job.pop("running_chats", None)
+                # A status read misses the stage at worst; the restart goes on.
+                with contextlib.suppress(OSError):
+                    _write_self_update(path, job)
+
+        # When the gateway's own wait began, for Conduit's "restarts by".
+        job["gateway_restart_at"] = time.time()
+        try:
+            exit_code = restart_gateway(draining)
         except subprocess.TimeoutExpired:
             exit_code = None
+        if exit_code != 0 and _forcing.is_set():
+            _wait_for_force()
+        # A force sent during this job, whether while it waited for the gateway's work or while
+        # this restart drained (a force from before it started is no restart of its own).
+        if exit_code != 0 and _forced_restart_at is not None and _forced_for_job == job.get("id"):
+            # Restart now forced it through systemd: that restart is the one that happened, and
+            # the dashboard goes on as if this one had.
+            logger.info("Conduit plugin: the update's gateway restart was forced through systemd")
+            exit_code = 0
+        for key in ("gateway_stage", "running_chats", "gateway_restart_at"):
+            job.pop(key, None)
         if exit_code != 0:
             _self_update_failed(job, "The plugin is updated, but the gateway didn't restart. "
                                      "Run hermes gateway status on the host.")
@@ -415,7 +929,7 @@ def _run_self_update(job: Dict[str, Any], path: Path, pull: Callable[[], Dict[st
 
 def start_self_update(profile: Optional[str], schedule: Callable[[float, Callable[[], None]], Any], *,
                       path: Optional[Path] = None,
-                      steps: Optional[Tuple[Callable[[], Dict[str, Any]], Callable[[], int]]] = None,
+                      steps: Optional[Tuple[Callable[[], Dict[str, Any]], Callable[..., int]]] = None,
                       homes: Optional[Callable[[], List[Path]]] = None,
                       notify: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Starts the update on the host, or returns the one still under way."""
@@ -440,6 +954,8 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
         }
         try:
             _write_self_update(path, job)
+            # A Restart now from an earlier update isn't this one's.
+            _forget_restart_now()
             thread = threading.Thread(
                 target=_run_self_update, name="conduit-self-update", daemon=True,
                 args=(job, path, pull, restart_gateway, schedule, homes or _hermes_homes, notify or _notify_self_update))
@@ -544,7 +1060,7 @@ def _taken_down_by_gateway_restart(job: Dict[str, Any], now: Optional[float] = N
     The new plugin is what this process loaded: that update finished.
     """
     return (job.get("step") == "failed" and job.get("failed_step") == "restarting_gateway"
-            and not job.get("code")
+            and not job.get("code") and not job.get("gateway_pending")
             and (now or time.time()) - _job_time(job.get("finished_at")) <= SELF_UPDATE_TAKEN_DOWN_S)
 
 
@@ -565,8 +1081,15 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
         return None
     # Pulled (it has a version) and this process loaded it: done, whatever
     # restarted the dashboard (an update's own re-exec or a /self/restart).
+    if job.get("gateway_pending"):
+        if _self_restart_refusal() is not None:
+            # A plugin host (or another process that mustn't restart Hermes) leaves it to the
+            # dashboard: a gateway restarted from here would come back with this process's env.
+            return None
+        # It went down before it restarted the gateway, which still runs the old plugin.
+        return _resume_gateway_restart(path, job, notify or _notify_self_update)
     if job.get("version") is not None and capabilities.LOADED_VERSION == job["version"]:
-        for key in ("failed_step", "detail", "code"):
+        for key in ("failed_step", "detail", "code", "gateway_stage", "running_chats", "gateway_restart_at"):
             job.pop(key, None)
         job.update(step="done", loaded_version=capabilities.LOADED_VERSION, finished_at=time.time())
     else:
@@ -575,6 +1098,51 @@ def finish_self_update_after_restart(path: Optional[Path] = None,
     timer = threading.Timer(delay, notify or _notify_self_update, args=(dict(job),))
     timer.daemon = True
     timer.start()
+    return job
+
+
+def _resume_gateway_restart(path: Path, job: Dict[str, Any],
+                            notify: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    """Carries on a job whose dashboard restarted before the gateway did (during the wait for
+    its running work): this process waits and restarts it. It already runs the new plugin, so
+    the job ends there."""
+    global _self_update_thread, _self_update_job
+
+    def give_up() -> Dict[str, Any]:
+        # At import nobody hears a raise: the job says it at once, and the asking profile hears it.
+        logger.warning("Conduit plugin: couldn't carry on the update's gateway restart", exc_info=True)
+        _self_update_failed(job, "The dashboard restarted before the gateway did. Restart the gateway "
+                                 "on this host (hermes gateway restart) to finish the update")
+        with contextlib.suppress(OSError):
+            _write_self_update(path, job)
+        timer = threading.Timer(0, notify, args=(dict(job),))
+        timer.daemon = True
+        timer.start()
+        return job
+
+    try:
+        pull, restart_gateway = _hermes_update_steps()
+    except Exception:  # noqa: BLE001
+        return give_up()
+    # From the pull again (a no-op once pulled), so a failure there reads as the pull's.
+    job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid(), step="downloading")
+
+    def schedule(delay: float, fn: Callable[[], None]) -> None:
+        timer = threading.Timer(delay, fn)
+        timer.daemon = True
+        timer.start()
+
+    with _self_update_lock:
+        try:
+            _write_self_update(path, job)
+            # A Restart now from an earlier update isn't this one's.
+            _forget_restart_now()
+            thread = threading.Thread(target=_run_self_update, name="conduit-self-update", daemon=True,
+                                      args=(job, path, pull, restart_gateway, schedule, _hermes_homes, notify))
+            thread.start()
+        except Exception:  # noqa: BLE001 — a resume that can't begin ends the job, not an hour later
+            return give_up()
+        _self_update_job, _self_update_thread = job, thread
     return job
 
 
@@ -648,6 +1216,49 @@ async def post_self_update(response: Response, profile: Optional[str] = None) ->
         raise
     except Exception as exc:
         raise core._unexpected("update", exc, feature="Update")
+
+
+@router.get("/self/gateway-work")
+async def get_gateway_work(response: Response) -> Dict[str, Any]:
+    """What a gateway restart waits on now, named, for the update's "Letting running tasks
+    finish" (the host's update and one Conduit runs itself alike)."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **await asyncio.to_thread(gateway_work_report)}
+    except Exception as exc:
+        raise core._unexpected("running work", exc, feature="Update")
+
+
+@router.post("/self/gateway-work/restart-now")
+async def post_gateway_restart_now(response: Response, force: bool = False) -> Dict[str, Any]:
+    """Restart now: the update stops waiting for the gateway's work and restarts it. Conduit
+    stops the chats it names itself; ``force`` restarts the gateway through its service manager
+    for work it can't stop (force_gateway_restart)."""
+    response.headers["Cache-Control"] = "no-store"
+    if not force:
+        _restart_now.set()
+        return {"ok": True, "forced": False}
+    # Marked before the update stops waiting, so the restart it sends then, if the force cuts it
+    # short, waits for the force before it reports a failure.
+    _forcing.set()
+    _restart_now.set()
+    try:
+        mint = _forced_restart_limiter.acquire("")
+        try:
+            await asyncio.to_thread(force_gateway_restart)
+        except core.TokenError as refused:
+            # Off systemd nothing ran: no slot spent. A systemctl that ran and failed or hung
+            # keeps its slot, so a retry loop is capped too.
+            if refused.status == 501:
+                _forced_restart_limiter.release("", mint)
+            raise
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except Exception as exc:
+        raise core._unexpected("forced restart", exc, feature="Update")
+    finally:
+        _forcing.clear()
+    return {"ok": True, "forced": True}
 
 
 @router.get("/self/update")

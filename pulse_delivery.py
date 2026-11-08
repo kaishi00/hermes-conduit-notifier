@@ -10,8 +10,9 @@ what Hermes's own transcript shows:
   sent it (a queued turn lives in that process): ``not_admitted``;
 - taken behind a turn in progress: ``queued``; its row written: ``running``;
 - a reply after the tagged row: ``delivered``;
-- a failed turn, a turn that ended without a reply, or one stuck for hours:
-  ``failed``, with what was seen.
+- a failed turn, a turn that ended without a reply (Hermes' status line
+  when its compaction ended the turn before the model ran included), or one
+  stuck for hours: ``failed``, with what was seen.
 
 A new attempt for an item is only ever made once the last one is
 ``refused``, ``not_admitted`` or ``failed``: never on a guess.
@@ -65,6 +66,9 @@ def derive_state(turn: Optional[hermes.TurnRows], *, state: str, age_s: float, s
         return store.FAILED, "Hermes marked the turn failed"
     if turn.reply:
         return store.DELIVERED, turn.reply[:200]
+    if turn.skipped:
+        # Compaction ended it before the model ran: the next attempt goes.
+        return store.FAILED, turn.skipped
     if turn.closed:
         return store.FAILED, "ended without a reply"
     if prior_detail == ENDED and unchanged_s >= REPLY_GRACE_S:

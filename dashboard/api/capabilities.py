@@ -46,6 +46,8 @@ ROUTE_CAPABILITIES = (
     "local-live-read-back",
     "desktop-views",
     "turn-surface",
+    # POST /turn-surface/discard: forgets a report whose send failed.
+    "turn-surface-discard",
     # POST /sessions/history-page: Hermes' page of a chat's rows, the ones
     # Conduit holds sent as their fingerprints.
     "history-page",
@@ -156,12 +158,21 @@ ROUTE_CAPABILITIES = (
     "self-restart",
     # POST /self/update runs the whole update on the host and notifies.
     "self-update",
+    # GET /self/gateway-work names what a gateway restart waits on; POST
+    # /self/gateway-work/restart-now ends the update's wait for it.
+    "gateway-work",
     "cron-notifications",
+    # "act" on /cron/notifications: a job delivered to a Bot Chat just shows
+    # its report there unless it lets the bot act on it (cron_bot_chat).
+    "cron-bot-chat-reports",
     "reply-sources",
     "chat-on-screen",
     # POST /predict, GET /predict: Conduit's Predictive features, answered
     # by a no-tools fork of the chat for the asking device only.
     "predict",
+    # POST /side-question: Conduit's step summaries, answered as Hermes' /btw
+    # answers but only to the asking device (no "[btw …]" note in Desktop).
+    "side-question",
     "room-files",
     "room-images",
     "speech-server",
@@ -169,6 +180,10 @@ ROUTE_CAPABILITIES = (
     "artifacts",
     # /workspace/*: the Folder tab's listings, search, recent files and file actions.
     "workspace-files",
+    # GET /workspace/resolve: where a file a reply names by its name is, from
+    # the chat's folder, its repository's top, the terminal's folder and its
+    # own tool calls (hermes-conduit#1809).
+    "workspace-resolve",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).
@@ -203,6 +218,9 @@ ROUTE_CAPABILITIES = (
     # through this Hermes, and GET /rooms/people's posts on the home: who
     # wrote what (Linked Rooms).
     "room-posts",
+    # GET/PUT /rooms/looks: your bots' pictures and glow colors and yours,
+    # sent to the people in your rooms over Links, and theirs (Linked Rooms).
+    "room-looks",
     # GET/PUT /rooms/chats: a room's private chat with one of your agents,
     # told which room it's about, with notes on rooms it Listens in
     # (Linked Rooms).
@@ -214,10 +232,51 @@ ROUTE_CAPABILITIES = (
     # PUT /rooms/choices' Use my data lets a room's agent say when you're
     # busy (conduit_free_busy), times only (Linked Rooms).
     "room-free-busy",
+    # PUT /rooms/choices' run_work: Run work, a room's agent starting work
+    # for it, each start OKd on the owner's phone (a room's work ask, the
+    # present store's room-work feature; Linked Rooms).
+    "room-run-work",
     # /links/rules and /links/asks: asks between linked agents, answered by
     # each Link's rules or its owner (link_asks), and the present store's
     # prompts for them (Linked Rooms).
     "link-asks",
+    # /workstreams: a bot's work for the Work panel and the user's own actions
+    # on a workstream (Reply, Stop, Continue, Check first), ?conduit_profile=
+    # included (Bot workstreams).
+    "bot-workstreams",
+    # GET /waiting: every chat with an approval or a question waiting on the
+    # user, for the Needs you list, the profile strip's counts and the
+    # in-app banner (Hermes is waiting on you, issue 1705).
+    "waiting-list",
+    # GET/POST /workstreams/settings: the bot's work settings, which Edit Bot
+    # > Work shows and changes (on or off, lookups, running at once, after a
+    # restart, the workstreams' approvals).
+    "bot-work-settings",
+    # POST /workstreams/adopt: a voice call's job kept in its bot's registry,
+    # in the Work panel marked as a call's (Bot workstreams M5).
+    "work-adopt",
+    # POST /workstreams/call-ended: a call kept with the Bot Chat ended in
+    # any voice mode, so the updates its workstreams held go out.
+    "work-call-ended",
+    # GET/POST /boards/checklists: a checklist card's ticks, kept on the host
+    # for every Conduit, and heard by Hermes at the chat's next turn (Cards
+    # Hermes shows).
+    "board-checklists",
+    # GET /boards/rooms: the boards agents showed in a room this host runs,
+    # which Conduit draws under their messages (Cards Hermes shows).
+    "room-boards",
+    # GET /boards/desktop and POST /boards/desktop/seen: the boards the
+    # plugin's Desktop half draws in Hermes Desktop chats (Cards Hermes shows).
+    "desktop-boards",
+    # GET /boards/diffs: the whole of a diff card too long for conduit_show's
+    # answer, read when the user opens a file (Cards Hermes shows).
+    "diff-cards",
+    # POST /boards/taps: a tap on a card's tap button, heard by Hermes with
+    # the user's message about it (Cards Hermes shows, issue 1946).
+    "card-taps",
+    # DELETE /boards/taps?id=: forgets a tap whose message Conduit didn't
+    # send (Cards Hermes shows).
+    "card-tap-drop",
 )
 
 

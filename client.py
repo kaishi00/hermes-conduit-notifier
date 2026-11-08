@@ -16,8 +16,10 @@ import ssl
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -34,6 +36,7 @@ from hermes_constants import get_hermes_home
 
 from . import e2e, link_status
 from .events import PLUGIN_VERSION, redact_event
+from .keep_alive import KeepAliveHTTPSHandler
 from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url, replaced_pairing_query
 
 
@@ -338,13 +341,21 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
 
 
 def _send(event: dict[str, Any], state: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
-    return request_json(
-        f"{state['relay_url'].rstrip('/')}/v1/events",
-        method="POST",
-        credential=state["credential"],
-        payload=build_outgoing(event, state),
-        timeout=timeout,
-    )
+    return _post_outgoing(state, lambda: build_outgoing(event, state), timeout)
+
+
+def _post_outgoing(state: dict[str, Any], build: Callable[[], dict[str, Any]], timeout: float) -> dict[str, Any]:
+    url = f"{state['relay_url'].rstrip('/')}/v1/events"
+    try:
+        return request_json(url, method="POST", credential=state["credential"], payload=build(), timeout=timeout)
+    except RelayRejected as error:
+        # A sealed push dated ahead of the relay's clock: its refusal told
+        # us the relay's time, so the push is sealed again by it, once. The
+        # first sealed push of each process (a cron job's worker) gets here
+        # on a host whose clock runs fast (#524).
+        if error.status != 400 or error.detail != CLOCK_AHEAD or not _relay_clock_known(state):
+            raise
+        return request_json(url, method="POST", credential=state["credential"], payload=build(), timeout=timeout)
 
 
 def set_redact_content(enabled: bool) -> bool:
@@ -400,6 +411,7 @@ def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
             keys,
             installation_id=str(state.get("installation_id") or ""),
             gateway_id=str(state.get("gateway_id") or ""),
+            now=sealing_time(state),
         )
     except Exception as error:
         logger.warning("Conduit notification could not be encrypted; sending it without content: %s", error)
@@ -571,18 +583,13 @@ def request_key_rotation(*, without_overlap: bool = False) -> bool:
     return update_state(change)
 
 
-def post_event(payload: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
-    """POST an already-built outgoing event (diagnostics)."""
+def post_event(build: Callable[[dict[str, Any]], dict[str, Any]], timeout: float = 15.0) -> dict[str, Any]:
+    """POST an outgoing event ``build`` makes from the pairing (diagnostics),
+    built again if the relay's clock asks for it, as every push is."""
     state = load_state()
     if not state:
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
-    return request_json(
-        f"{state['relay_url'].rstrip('/')}/v1/events",
-        method="POST",
-        credential=state["credential"],
-        payload=payload,
-        timeout=timeout,
-    )
+    return _post_outgoing(state, lambda: build(state), timeout)
 
 
 def cancel_decision(request_id: str) -> bool:
@@ -666,7 +673,9 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_opener = urllib.request.build_opener(_RefuseRedirects)
+# HTTPS to the relay keeps its connection between requests (#562).
+_keep_alive = KeepAliveHTTPSHandler()
+_opener = urllib.request.build_opener(_RefuseRedirects, _keep_alive)
 # Plain HTTP (loopback, or a LAN/Tailscale pairing claim) never goes through
 # an HTTP(S)_PROXY, which would see the credential or pairing code in clear.
 _direct_opener = urllib.request.build_opener(_RefuseRedirects, urllib.request.ProxyHandler({}))
@@ -694,6 +703,7 @@ def _request(
     try:
         opener = _opener if is_https(url) else _direct_opener
         with opener.open(request, timeout=timeout) as response:
+            _note_relay_clock(url, response.headers)
             raw = response.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise RelayRejected(response.status, "response_too_large")
@@ -703,6 +713,9 @@ def _request(
             raw = error.read(4096)
         except Exception:
             raw = None
+        finally:
+            # Hands a kept connection back once read whole, else closes it.
+            error.close()
         try:
             body = json.loads(raw) if raw else None
         except Exception:
@@ -711,8 +724,91 @@ def _request(
         # body is something in front of it; one cut short or unreadable is
         # still counted as the relay's, so a misread never says "blocked".
         from_relay = raw is None or looks_like_json_object(raw)
+        if from_relay:
+            # Only the relay's own refusal tells its time, not whatever is in front of it.
+            _note_relay_clock(url, error.headers)
         detail = (body.get("error") if isinstance(body, dict) else None) or "request_rejected"
         raise RelayRejected(error.code, detail, from_relay=from_relay) from error
+
+
+# How far this host's clock runs ahead of each relay's (seconds, negative
+# when behind), from the Date header of the relay's last answer. A sealed
+# push's `iat` is what the phone checks against its own clock: more than an
+# hour ahead and it shows the generic banner with nothing to open (#524).
+# Relays keep good time, so a host that runs ahead seals by the relay's
+# clock. Only ever earlier: an earlier `iat` shortens how long an envelope
+# opens, so a relay that lies about its time can't lengthen it.
+CLOCK_AHEAD = "e2e_clock_ahead"
+# Below this the difference is the Date header's second and the trip.
+CLOCK_CORRECT_AFTER_S = 60.0
+# A Date further off than the phone's day is the header's fault, not drift.
+CLOCK_TRUST_UP_TO_S = 24 * 60 * 60.0
+# A host this far off is worth a line in the log, once per relay in each
+# process (a cron job's worker logs it again: the clock is still wrong).
+CLOCK_WARN_AFTER_S = 5 * 60.0
+_relay_clock_lock = threading.Lock()
+_relay_clock_ahead: dict[str, float] = {}
+_relay_clock_warned: set[str] = set()
+
+
+def _relay_origin(url: str) -> str:
+    parts = urllib.parse.urlsplit(str(url or ""))
+    return f"{parts.scheme}://{parts.netloc}".lower()
+
+
+def _note_relay_clock(url: str, headers: Any, *, now: float | None = None) -> None:
+    try:
+        date = headers.get("Date") if headers is not None else None
+        parsed = parsedate_to_datetime(date) if date else None
+    except (TypeError, ValueError, IndexError, OverflowError):
+        parsed = None
+    # "-0000" (zone unknown) parses naive, which .timestamp() would read in
+    # this host's zone.
+    if parsed is None or parsed.tzinfo is None:
+        return
+    ahead = (time.time() if now is None else now) - parsed.timestamp()
+    if abs(ahead) > CLOCK_TRUST_UP_TO_S:
+        # Not a clock that's drifted: a Date that's wrong, which would only
+        # date every push out of the relay's day.
+        return
+    origin = _relay_origin(url)
+    with _relay_clock_lock:
+        _relay_clock_ahead[origin] = ahead
+        warn = abs(ahead) >= CLOCK_WARN_AFTER_S and origin not in _relay_clock_warned
+        if warn:
+            _relay_clock_warned.add(origin)
+    if warn:
+        minutes = round(abs(ahead) / 60)
+        if ahead > 0:
+            logger.warning("This host's clock is about %d minutes ahead of the Conduit relay's. Conduit dates its "
+                           "encrypted notifications by the relay's clock meanwhile; set this host's time "
+                           "(turn on NTP) to fix it.", minutes)
+        else:
+            logger.warning("This host's clock is about %d minutes behind the Conduit relay's; set this host's "
+                           "time (turn on NTP). Encrypted notifications more than a day behind can't be opened "
+                           "on the phone.", minutes)
+
+
+def _relay_clock_known(state: dict[str, Any]) -> bool:
+    """Whether the pairing's relay has told its time. A refusal for a clock
+    ahead is sealed again then, even when this host's clock was set right
+    meanwhile: sealed again by it, the push goes through."""
+    with _relay_clock_lock:
+        return _relay_origin(state.get("relay_url") or "") in _relay_clock_ahead
+
+
+def _clock_ahead_by(state: dict[str, Any]) -> float | None:
+    """How far this host runs ahead of the pairing's relay, when it's enough to correct."""
+    with _relay_clock_lock:
+        ahead = _relay_clock_ahead.get(_relay_origin(state.get("relay_url") or ""))
+    return ahead if ahead is not None and ahead >= CLOCK_CORRECT_AFTER_S else None
+
+
+def sealing_time(state: dict[str, Any], *, now: float | None = None) -> float:
+    """The time a sealed push is dated with: this host's, or the relay's when this host runs ahead."""
+    now = time.time() if now is None else now
+    ahead = _clock_ahead_by(state)
+    return now - ahead if ahead is not None else now
 
 
 def _start_worker() -> None:
@@ -744,6 +840,7 @@ def stop(timeout: float = 1.0) -> None:
         _generation += 1
         # A reload (after pairing again, say) starts unpaused.
         _clear_refusal()
+        _keep_alive.close_idle()
         running, _worker, _worker_started = _worker, None, False
         dropped = 0
         while True:
@@ -759,6 +856,8 @@ def stop(timeout: float = 1.0) -> None:
         logger.info("Conduit dropped %d queued notification(s): the plugin was unloaded", dropped)
     if running is not None:
         running.join(timeout)
+        # The send that was in progress may have handed its connection back.
+        _keep_alive.close_idle()
 
 
 # A delivery that fails on the way (no connection, a timeout, the relay busy
@@ -969,6 +1068,8 @@ def push_failure_reason(error: Exception | None) -> str:
             return "The relay no longer knows this host. Pair Conduit again."
         if error.edge_blocked:
             return "Something in front of the relay is blocking this host (403)."
+        if error.status == 400 and error.detail == CLOCK_AHEAD:
+            return "This host's clock is ahead of the relay's. Set its time (turn on NTP)."
         return f"The relay answered {error.status}."
     if isinstance(error, urllib.error.URLError) and isinstance(error.reason, ssl.SSLCertVerificationError):
         return "The relay's certificate didn't verify."

@@ -730,11 +730,18 @@ def test_the_tool_never_raises(home, fake, paired, monkeypatch):
     assert _tool({"reason": "Done.", "asked_by_user": True})["error"] == "unavailable"
 
 
-def test_the_tool_shows_only_while_calls_it_can_ask_for_are_on(home, paired, monkeypatch):
-    assert call_tool.available() is False
+def test_the_tool_shows_whenever_paired_even_with_calls_off(home, paired, monkeypatch):
+    # Hidden while calls were off, "call me" found only the call watch tool
+    # and Hermes set up a watch to fake a call; shown, it answers calls_off.
+    _settings(home, enabled=False)
+    assert call_tool.available() is True
+    answer = _tool({"reason": "You asked me to call.", "asked_by_user": True})
+    assert answer["error"] == "calls_off"
+    assert "calls from Hermes off" in answer["note"] and "can't ring either" in answer["note"]
+    assert "Never a way to call now" in sys.modules["conduit_push.call_watches"].SETUP_SCHEMA["description"]
     _settings(home, when_asked=False)
-    assert call_tool.available() is False
-    _settings(home, decides=True)
+    assert "calls they ask for" in _tool({"reason": "Call me.", "asked_by_user": True}, session_id="st-2")["note"]
+    _settings(home, enabled=True, when_asked=False, decides=False)
     assert call_tool.available() is True
     monkeypatch.setattr(call_tool.client, "load_state", lambda: None)
     assert call_tool.available() is False
@@ -751,15 +758,20 @@ def test_register_adds_the_tool_and_its_skill():
                                                   "conduit_settings", "conduit_present", "conduit_show", "conduit_notify", "conduit_health",
                                                   "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar",
                                                   "conduit_phone", "conduit_contacts", "conduit_room",
-                                                  "conduit_ask_owner", "conduit_free_busy", "conduit_ask_linked"]
+                                                  "conduit_ask_owner", "conduit_free_busy", "conduit_ask_linked",
+                                                      "work_list", "work_start", "work_send", "work_stop", "work_read",
+                                                      "work_close", "work_ask", "work_reply", "work_note", "work_progress",
+                                                      "conduit_room_work"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
     assert tool["schema"]["parameters"]["required"] == ["reason", "asked_by_user"]
     # The room-turn tools (room_asks, room_free_busy) are in a toolset of their own.
-    rooms = ("conduit_ask_owner", "conduit_free_busy")
+    rooms = ("conduit_ask_owner", "conduit_free_busy", "conduit_room_work")
     assert all(other["toolset"] == ("conduit_rooms" if other["name"] in rooms else "conduit")
                and other["schema"]["name"] == other["name"] for other in tools)
-    [(name, path), (health_name, health_path), (location_name, location_path), (calendar_name, calendar_path)] = skills
+    [(name, path), (boards_name, boards_path), (health_name, health_path), (location_name, location_path),
+     (calendar_name, calendar_path)] = skills
+    assert boards_name == "drawing-boards" and boards_path.read_text().startswith("---\nname: drawing-boards\n")
     assert location_name == "using-location" and location_path.is_file()
     assert name == "calling-the-user" and path.is_file()
     assert health_name == "reading-health-data" and health_path.read_text().startswith("---\nname: reading-health-data\n")
@@ -786,12 +798,39 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
     assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report", "conduit_settings",
                                            "conduit_present", "conduit_show", "conduit_notify", "conduit_health", "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar", "conduit_phone",
                                            "conduit_contacts", "conduit_room", "conduit_ask_owner",
-                                           "conduit_free_busy", "conduit_ask_linked"]
+                                           "conduit_free_busy", "conduit_ask_linked", "work_list", "work_start",
+                                           "work_send", "work_stop", "work_read", "work_close", "work_ask",
+                                           "work_reply", "work_note", "work_progress", "conduit_room_work"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.
     assert json.loads(handler({"reason": "Done.", "asked_by_user": True}, session_id="st-1", parent_agent=object(),
                               task_id="t"))["ok"] is True
+
+
+def test_predictions_get_a_helper_model_slot(home, paired):
+    tasks = []
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: None,
+                                register_cli_command=lambda **kwargs: None, register_tool=lambda **kwargs: None,
+                                register_auxiliary_task=lambda key, **kwargs: tasks.append((key, kwargs)))
+    plugin.register(ctx)
+    predict = dict(tasks)["conduit_predict"]
+    # The dashboard's predictions read the same slot.
+    assert plugin.PREDICT_TASK == "conduit_predict"
+    assert predict["display_name"] == "Conduit predictions" and predict["description"]
+    # Pulse's own stays too.
+    assert "pulse_memory" in dict(tasks)
+
+
+def test_a_hermes_without_helper_model_slots_still_loads(home, paired):
+    def refuse(key, **kwargs):
+        raise AttributeError("no auxiliary tasks")
+    hooks = []
+    ctx = types.SimpleNamespace(profile_name="default", register_hook=lambda name, fn: hooks.append(name),
+                                register_cli_command=lambda **kwargs: None, register_tool=lambda **kwargs: None,
+                                register_auxiliary_task=refuse)
+    plugin.register(ctx)
+    assert "post_llm_call" in hooks
 
 
 def test_a_hermes_that_refuses_the_tool_keeps_the_hooks():
@@ -976,6 +1015,17 @@ def test_the_next_turn_of_a_declined_calls_chat_hears_it_once(home, clock):
         'matters, tell them.]'
     )}
     assert plugin._pre_llm_call(session_id="rt-1", conversation_history=[]) is None
+
+
+def test_the_next_turn_hears_a_changed_checklist_once(home, monkeypatch):
+    from conduit_push import checklist_store
+
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
+    checklist_store.ChecklistStore(home).save({"sessions": ["st-1", "rt-1"], "key": "packing", "title": "Packing",
+                                               "items": ["Hat", "Socks"], "ticked": ["Hat"]})
+    assert plugin._pre_llm_call(session_id="st-1", conversation_history=[]) == {"context": (
+        '[Conduit: the user changed the checklist "Packing" in this chat. Done: Hat; still to do: Socks.]')}
+    assert plugin._pre_llm_call(session_id="st-1", conversation_history=[]) is None
 
 
 @pytest.mark.parametrize("entry, ago, says", [
@@ -1334,6 +1384,29 @@ def test_an_approval_from_elsewhere_still_rings_after_a_minute(home, fake, clock
     _settings(home, alerts=True)
     _from(monkeypatch, platform, transport)
     assert _approval_due(home, monkeypatch, clock) == 60
+
+
+class FanoutTransport:
+    """Hermes' fanout of a chat's clients, as reply_sources reads it."""
+
+    def __init__(self, *peers):
+        self._peers = list(peers)
+
+    def transports(self):
+        return list(self._peers)
+
+
+@pytest.mark.parametrize("transport, due", [
+    # A chat open on several clients is never the terminal app (DeepSeek's review of #611).
+    (FanoutTransport(CONDUIT, CONDUIT), 60),
+    (FanoutTransport(CONDUIT, DESKTOP), 60),  # either could have sent it
+    (FanoutTransport(DESKTOP, DESKTOP), 600),
+])
+def test_a_chat_open_on_several_clients_waits_by_its_clients(home, fake, clock, monkeypatch, transport, due):
+    _settings(home, alerts=True)
+    _from(monkeypatch, "tui", transport)
+    monkeypatch.setattr(calls, "_approval_timeout", lambda: 3600.0)
+    assert _approval_due(home, monkeypatch, clock) == due
 
 
 def test_a_source_lookup_that_raises_still_rings_after_a_minute(home, fake, clock, monkeypatch):

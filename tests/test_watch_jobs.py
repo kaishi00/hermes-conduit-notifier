@@ -250,6 +250,35 @@ def test_a_job_is_an_ordinary_hermes_chat_on_the_grants_profile_filed_as_a_voice
     assert scoped == ["coder"]
 
 
+def test_a_job_is_kept_in_its_bots_work_registry_before_its_turn(monkeypatch, tmp_path):
+    kept = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None,
+                                 adopt=lambda home, sid, title, via, goal: kept.append((home, sid, title, via, goal)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    grant.jobs.server.on_create = lambda: kept.append("created")
+    start(grant, "Check the build logs")
+    assert kept[0] == "created"
+    assert kept[1] == (tmp_path / "profiles" / "coder", "st-1", "Check the build logs", "watch", "Check the build logs")
+    # Whatever happens there, the job runs.
+    tool.adopt = lambda *args, **kwargs: 1 / 0
+    assert start(grant, "And the tests")["status"] == "started"
+
+
+
+def test_a_kept_job_whose_prompt_failed_is_settled_in_its_registry(monkeypatch, tmp_path):
+    failed = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None, adopt=lambda *args, **kwargs: None,
+                                 call_start_failed=lambda home, sid, error: failed.append((home, sid, error)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    grant.jobs.server.fail["prompt.submit"] = "model not configured"
+    assert start(grant, "Check the build logs")["status"] == "not_started"
+    assert failed and failed[0][:2] == (tmp_path / "profiles" / "coder", "st-1")
+
+
 def test_a_job_title_mirrors_the_phones():
     assert api.watch_jobs.watch_job_title("  a   b ") == "a b"
     long = "word " * 20
@@ -1338,6 +1367,11 @@ def test_a_slow_start_that_fails_is_told_as_news(monkeypatch):
     release.set()
     [item] = news(grant, wait_s=5)["news"]
     assert (item["job_id"], item["status"], item["error"]) == ("watch-1", "failed", "model not configured")
+    # The job is failed (and its news out) a moment before the start's thread
+    # hands the call's job back, so wait for it as the test above waits.
+    deadline = time.monotonic() + 5
+    while grant.jobs.started and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert grant.jobs.started == 0
 
 
@@ -2115,3 +2149,40 @@ def test_an_approval_from_a_cancelled_turn_isnt_the_waiting_requests(monkeypatch
     assert len(server.methods("prompt.submit")) == 1
     assert grant.jobs.jobs["watch-2"].status == "starting"
     assert grant.jobs.jobs["watch-2"].approval is None
+
+
+def test_a_kept_job_cancelled_as_its_prompt_went_in_is_settled_in_its_registry(monkeypatch, tmp_path):
+    failed = []
+    tool = types.SimpleNamespace(copy_for=lambda home: None, adopt=lambda *args, **kwargs: None,
+                                 call_start_failed=lambda home, sid, error: failed.append((sid, error)))
+    monkeypatch.setattr(api.core, "_plugin_package_module", lambda name: tool)
+    monkeypatch.setattr(api.core, "_profile_dir", lambda name: tmp_path / "profiles" / name)
+    grant = make_jobs(profile="coder")
+    def cancel_on_submit(params):
+        api.watch_jobs.run_watch_job_call(grant, "cancel_job", {})
+        return {"status": "started"}
+    grant.jobs.server.results["prompt.submit"] = cancel_on_submit
+    assert start(grant, "Check the build logs")["status"] == "not_started"
+    assert failed == [("st-1", "cancelled before it started")]
+
+
+def test_under_the_gateway_watch_jobs_use_the_authority_not_the_tui_registry(monkeypatch):
+    # hermes-conduit#1618: the listener loads the TUI gateway, whose chats no client sees.
+    server = types.ModuleType("tui_gateway.server")
+    server.dispatch = lambda req, transport=None: None
+    server._sessions = {}
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.delitem(sys.modules, "gateway.run_api", raising=False)
+    assert api.watch_jobs._tui_session_api() is server
+    assert api.watch_jobs._hermes_session_api() is server
+
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    authority_api = object()
+    monkeypatch.setattr(api.core, "_authority_session_api", lambda: authority_api)
+    assert api.watch_jobs._tui_session_api() is None
+    assert api.watch_jobs._hermes_session_api() is authority_api
+    # No authority to reach: no chats, never the TUI registry.
+    monkeypatch.setattr(api.core, "_authority_session_api", lambda: None)
+    assert api.watch_jobs._hermes_session_api() is None

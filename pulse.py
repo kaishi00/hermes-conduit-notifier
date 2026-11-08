@@ -45,6 +45,7 @@ import sqlite3
 import sys
 import threading
 import time
+import types
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +53,7 @@ from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
 
+from . import compaction_skip
 from . import pulse_delivery as delivery
 from . import pulse_ahead as ahead
 from . import pulse_brief as brief
@@ -110,6 +112,8 @@ TICK_S = 30.0
 STALE_TICK_S = 10 * TICK_S
 # One process runs the loop; its lease outlives a few missed ticks.
 LEADER_TTL_S = 4 * TICK_S
+# Loaded only in the dashboard: how a Hermes before v0.22.0 tells it apart (_hosts_chats).
+DASHBOARD_MODULE = "hermes_cli.web_server"
 MAX_TURNS = 256
 PROBE_TEXT = "Pulse delivery check {tag}. Nothing to do: reply with one short line."
 PROBE_NOTE = ("This turn was started by Pulse, the plugin that lets Hermes speak up on its own, to check that "
@@ -147,6 +151,14 @@ LOOK_COUNTS = "look_counts"
 _last_problem = ""
 _last_ratings = 0.0
 _owner = f"{socket.gethostname()}:{os.getpid()}"
+# One Pulse loop per process: Hermes loads a plugin copy per profile scope
+# into one process (each as its own module), and every copy shares the
+# process's lease owner, so each would run the loop and send its own report
+# (Eric, 2026-11-08: three copies of every card from one run). The copy that
+# ticks holds this process-wide slot; another takes it once the holder stops
+# ticking (stopped, or a newer build installed over it).
+_SLOT = "conduit_push_pulse_slot"
+_me = str(Path(__file__).resolve().parent)
 _memory_thread: Optional[threading.Thread] = None
 _report_thread: Optional[threading.Thread] = None
 # Whether Hermes took the plugin's auxiliary task, so memory calls can name it.
@@ -169,6 +181,7 @@ def build_stamp() -> str:
 
 _build = build_stamp()
 _said_stale = False
+_said_no_host = False
 
 
 def _owner_gone(owner: Any) -> bool:
@@ -218,9 +231,35 @@ def register(ctx: Any) -> None:
     _thread.start()
 
 
+def _process_slot() -> bool:
+    """Whether this copy of the plugin runs the loop in this process
+    (``_SLOT``): the slot is free, its own, or its holder hasn't ticked for
+    LEADER_TTL_S. Taking it marks this copy as ticking now."""
+    slot = sys.modules.setdefault(_SLOT, types.ModuleType(_SLOT))
+    lock = slot.__dict__.setdefault("lock", threading.Lock())
+    now = time.monotonic()
+    with lock:
+        holder, at = getattr(slot, "holder", None), getattr(slot, "at", 0.0)
+        if holder not in (None, _me) and now - at < LEADER_TTL_S:
+            return False
+        slot.holder, slot.at = _me, now
+        return True
+
+
+def _leave_slot() -> None:
+    slot = sys.modules.get(_SLOT)
+    lock = getattr(slot, "lock", None)
+    if slot is None or lock is None:
+        return
+    with lock:
+        if getattr(slot, "holder", None) == _me:
+            slot.holder = None
+
+
 def stop(timeout: float = 1.0) -> None:
     _stop.set()
     _wake.set()
+    _leave_slot()
     thread = _thread
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout)
@@ -357,6 +396,8 @@ def pushes(session_id: str, turn_id: Any, response: Any = None) -> bool:
     for the user), and so does a report with something that came up as a
     push (``_pushed_lines``: a report whose picks all came up quieter lands
     as cards only); a probe doesn't."""
+    if compaction_skip.notice(response):
+        return False  # Hermes' status line: compaction ended the turn before the model ran
     attempt = _turn_attempt(session_id, turn_id)
     kind = attempt["kind"] if attempt else ""
     if kind == REPORT:
@@ -634,9 +675,49 @@ def _run(stopped: threading.Event) -> None:
 def _hosts_chats() -> bool:
     """Whether this process hosts Conduit's chats: the dashboard (or `hermes
     serve`) publishes a session host to plugins, and its method table is
-    loaded. The messaging gateway and the CLI have neither."""
+    loaded; a gateway serving its own listener (the Webapp) runs them on its
+    session authority (hermes-conduit#1618). The messaging gateway alone and
+    the CLI have neither. A Hermes from before the plugin manager knew of a
+    session host (before v0.22.0, notifier#513) has no such flag: there the
+    dashboard is the process with its web server loaded."""
+    if host.on_authority():
+        return True
     manager = getattr(_ctx, "_manager", None)
-    return bool(getattr(manager, "has_tui_message_injector", False)) and host.available()
+    if hasattr(manager, "has_tui_message_injector"):
+        return bool(manager.has_tui_message_injector) and host.available()
+    return _dashboard_here() and host.available()
+
+
+def _dashboard_here() -> bool:
+    return DASHBOARD_MODULE in sys.modules
+
+
+def host_problem() -> str:
+    """Why the dashboard answering a request can't run Pulse: "hermes_too_old"
+    when its Hermes has no session host Pulse can send turns through, else "".
+    A gateway's listener is left out: its chats wait on its session authority.
+    From the process alone, never _ctx: the dashboard's routes load their own
+    copy of this module (core._plugin_package_module), which never registers."""
+    if not _dashboard_here() or host.gateway_runs_here() or host.available():
+        return ""
+    return "hermes_too_old"
+
+
+def _say_no_host() -> None:
+    """Once, in a dashboard whose Hermes can't run Pulse while it's on, so a
+    silent loop has a line in the log (notifier#513)."""
+    global _said_no_host
+    if _said_no_host or not host_problem():
+        return
+    try:
+        if not (Path(get_hermes_home()) / store.DB_NAME).exists() or not open_store(get_hermes_home()).get("enabled"):
+            return
+    except Exception:  # noqa: BLE001 — an unreadable store is no reason to fail every tick
+        logger.debug("conduit_push: Pulse couldn't read whether it's on", exc_info=True)
+        return
+    logger.warning("conduit_push: Pulse is on, but this Hermes can't run it: its dashboard has no session host "
+                   "that takes a turn into a chat (session.resume and prompt.submit). Update Hermes.")
+    _said_no_host = True
 
 
 def tick(now: Optional[float] = None) -> None:
@@ -645,6 +726,7 @@ def tick(now: Optional[float] = None) -> None:
     before is still followed to its end, so the Pulse chat's hold
     (_held_home_turn) ends with it, and nothing else runs."""
     if _ctx is None or not turns_marked or not _hosts_chats():
+        _say_no_host()
         return
     home = get_hermes_home()
     if not (Path(home) / store.DB_NAME).exists():
@@ -663,6 +745,8 @@ def tick(now: Optional[float] = None) -> None:
                            "stopped running Pulse until it's restarted", _owner)
             _said_stale = True
         return
+    if not _process_slot():
+        return  # another copy of the plugin in this process runs the loop
     if not pulse_store.claim_leader(_owner, LEADER_TTL_S, now, build=_build):
         return  # another process on this Hermes home runs the loop
     changed = delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
@@ -691,7 +775,7 @@ def tick(now: Optional[float] = None) -> None:
     # Not now until a time that has come: the card comes back as new (one
     # about something still open after its chat is read, in _memory_run).
     followup.return_rested(pulse_store, now)
-    learning.drop_empty_reports(pulse_store)
+    learning.drop_empty_turns(pulse_store)
     pulse_store.prune_cards(CARDS_KEEP, held_before=now - HELD_DAYS * 86400.0)
     pulse_store.prune_candidates(now - candidates.JOURNAL_DAYS * 86400.0)
     pulse_store.prune_signals(now - prefs.KEEP_S)
@@ -781,6 +865,15 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                 continue
             lines = learning.report_lines(turn.reply) if turn is not None and row["kind"] == REPORT else []
             if lines:
+                # Written without a list: no card for a line an open or
+                # closed card says already, nor for one twice in it.
+                lines = [line for n, line in enumerate(lines)
+                         if not any(store.same_text(line[1]) == store.same_text(other[1]) for other in lines[:n])
+                         and not candidates.said_before(
+                             pulse_store, line[0] if line[0] in report.KINDS else "other", line[1], now)]
+                if not lines:
+                    _mark_turn_card(pulse_store, attempt)
+                    continue
                 # Each item its own card; a reply in some other shape stays one
                 # card. The cards and the marks that they landed are one write,
                 # so a retry never adds them twice.
@@ -1514,8 +1607,12 @@ def _probe_due(pulse_store: store.PulseStore, now: float) -> bool:
     return last is None or now - last >= max(interval, 600.0)
 
 
-def home_chat(pulse_store: store.PulseStore, home: Path) -> tuple[Optional[hermes.HomeChat], str]:
-    """The chat Pulse speaks in, and what's wrong when there's none."""
+def home_chat(pulse_store: store.PulseStore, home: Path,
+              looks_elsewhere: bool = False) -> tuple[Optional[hermes.HomeChat], str]:
+    """The chat Pulse speaks in, and what's wrong when there's none.
+    ``looks_elsewhere``: where the problem is shown (Settings > Pulse,
+    ``pulse status``), a chat with its title in another profile is named;
+    the loop's calls skip reading every profile's store."""
     try:
         chat_id = pulse_store.get("home_session_key")
         if chat_id:
@@ -1526,11 +1623,31 @@ def home_chat(pulse_store: store.PulseStore, home: Path) -> tuple[Optional[herme
     except hermes.HermesUnreadable as error:
         return None, f"can't read Hermes's state.db: {error}"
     if not chats:
-        return None, f'Pulse has no chat titled "{title}" yet; set it up in Settings > Pulse'
+        return None, _no_home_chat(home, title, looks_elsewhere)
     problem = ""
     if len(chats) > 1:
         problem = f'{len(chats)} chats are titled "{title}"; using the {"pinned" if chats[0].pinned else "latest"} one'
     elif not chats[0].pinned:
         problem = f'Pulse\'s chat "{title}" isn\'t pinned, so Hermes could prune it; pin it from Settings > Pulse'
     return chats[0], problem
+
+
+def _no_home_chat(home: Path, title: str, looks_elsewhere: bool) -> str:
+    """Why Pulse has no chat: none is titled ``title`` in its profile, and
+    any other profile's chat with that title, which Pulse never reads, is
+    named, so a chat made in the wrong profile is found (issue 1681)."""
+    there = []
+    for name, path in report.profile_homes(home) if looks_elsewhere else ():
+        try:
+            if hermes.find_home_chat(path, title):
+                there.append(name)
+        except hermes.HermesUnreadable as error:
+            logger.debug("Pulse: couldn't look for its chat in profile %s: %s", name, error)
+    if not there:
+        return f'Pulse has no chat titled "{title}" yet; set it up in Settings > Pulse'
+    profile = proposals.profile_name(home)
+    where = " and ".join(f'"{name}"' for name in there)
+    return (f'Pulse runs in profile "{profile}" and has no chat titled "{title}" there '
+            f'({"profile" if len(there) == 1 else "profiles"} {where} {"has" if len(there) == 1 else "have"} one, which this Pulse doesn\'t read); '
+            f'set it up in Settings > Pulse')
 

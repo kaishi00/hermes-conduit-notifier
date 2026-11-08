@@ -380,8 +380,9 @@ def cancel_alerts(session_id: str, kind: str | None = None) -> None:
 
 
 def note_waiting(session_id: str, kind: str, *, turn_session_id: str = "", **detail: Any) -> bool:
-    """Keeps what Hermes waits on (``CallStore.note_waiting``) for a call
-    to read and answer. Never raises: a hook calls this."""
+    """Keeps what Hermes waits on (``CallStore.note_waiting``) for Conduit's
+    "Needs you" list, and for a call to read and answer: True when a call
+    may (alert calls on). Never raises: a hook calls this."""
     ids = list(dict.fromkeys(value for value in (session_id, turn_session_id) if value))
     if not ids:
         return False
@@ -399,6 +400,17 @@ def taken_answers(request_id: str) -> dict[str, str] | None:
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not read a call's answers", exc_info=True)
         return None
+
+
+def answer_in_writing(home: Any, session_id: str, words: str, asked_before: float | None = None) -> bool:
+    """The user's written answer, passed on from outside the chat, to the
+    question Hermes waits on in ``session_id`` (``CallStore.answer_in_writing``):
+    True when it answered one. Never raises."""
+    try:
+        return _store(home).answer_in_writing(session_id, words, asked_before=asked_before)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not pass on an answer to a question", exc_info=True)
+        return False
 
 
 def has_call_answers(request_id: str) -> bool:
@@ -647,7 +659,9 @@ def _at_screen(home: Any, session_ids: list[str]) -> bool:
         if reply_sources.turn_source(platform, transport) in SCREEN_SOURCES:
             return True
         # Hermes' terminal app: no app socket, and not a messaging platform.
-        if (not reply_sources._is_app_socket(transport) and isinstance(platform, str)
+        # A fanout is app clients (a chat open on several), never a terminal.
+        if (not reply_sources._is_app_socket(transport) and reply_sources._fanout_peers(transport) is None
+                and isinstance(platform, str)
                 and platform.strip().lower() in TERMINAL_PLATFORMS):
             return True
     except Exception:  # noqa: BLE001

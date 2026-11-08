@@ -15,7 +15,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 STATE_DB = "state.db"
 # Hermes writes this display kind on the assistant row of a turn that failed
@@ -43,6 +43,9 @@ class TurnRows:
     closed: bool  # a later user row exists, so the turn is over
     prompt: str = ""  # the tagged user row's own text
     reply_id: Optional[int] = None  # the reply's messages.id
+    # What Hermes' status line in place of a reply said happened, when
+    # compaction ended the turn before the model ran (compaction_skip).
+    skipped: str = ""
 
 
 def _connect(home: Path) -> sqlite3.Connection:
@@ -53,8 +56,44 @@ def _connect(home: Path) -> sqlite3.Connection:
         conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2.0)
     except sqlite3.Error as error:
         raise HermesUnreadable(str(error)) from error
-    conn.row_factory = sqlite3.Row
+    conn.row_factory = _row
     return conn
+
+
+# Hermes gives the model a turn's recalled memory (fenced in
+# <memory-context>) and plugins' pre_llm_call notes, ours included, with the
+# user's message. On a text turn they ride in api_content and content stays
+# what was typed. On a turn with a picture they go in as one more text part
+# after the pictures, and the stored row keeps it (Hermes #71998): flattened,
+# the text after the pictures' [screenshot] lines. Conduit's bubble drops it
+# the same way (MessageNormalizer.removingTurnContext), and so does Pulse.
+_MEMORY_CONTEXT = re.compile(r"<\s*memory-context\s*>[\s\S]*?(?:<\s*/\s*memory-context\s*>|\Z)", re.IGNORECASE)
+# One line per picture the prompt held (agent/session_persistence.py _image_marker).
+_PICTURE_LINE = re.compile(r"[ \t]*\[screenshot(?: detail=(?:low|high|auto))?\][ \t]*")
+
+
+def typed(content: Any) -> Any:
+    """A stored prompt as the user typed it, without the turn's context;
+    anything but text as it is."""
+    if not isinstance(content, str) or ("[screenshot" not in content and "memory-context" not in content.lower()):
+        return content
+    lines = content.split("\n")
+    last = max((index for index, line in enumerate(lines) if _PICTURE_LINE.fullmatch(line)), default=None)
+    text = "\n".join(lines[:last + 1]) if last is not None else content
+    text = _MEMORY_CONTEXT.sub("", text)
+    return content if text == content else text.strip()
+
+
+def _row(cursor: sqlite3.Cursor, values: tuple) -> sqlite3.Row:
+    """A row, a user row's ``content`` as the user typed it (``typed``)."""
+    row = sqlite3.Row(cursor, values)
+    keys = row.keys()
+    if "content" in keys and "role" in keys and row["role"] == "user":
+        index = keys.index("content")
+        content = typed(values[index])
+        if content is not values[index]:
+            row = sqlite3.Row(cursor, values[:index] + (content,) + values[index + 1:])
+    return row
 
 
 def _run(home: Path, sql: str, params: tuple) -> list[sqlite3.Row]:
@@ -72,11 +111,13 @@ def find_home_chat(home: Path, title: str) -> list[HomeChat]:
     Mode finds "Bot Chat"), pinned and most recently active first. Only
     chats a person started count: a compression or branch child shares its
     parent's title, and reopening the parent follows it there. More than one
-    means the user has to pick (``pulse home``)."""
+    means the user has to pick (``pulse home``). A bot's workstream never
+    counts, though a resolved one is shown in Hermes (notifier #540)."""
     rows = _run(home, (
-        "SELECT id, title, pinned FROM sessions WHERE title = ? AND archived = 0 AND hidden = 0 "
-        "AND parent_session_id IS NULL ORDER BY pinned DESC, COALESCE(last_activity_at, started_at) DESC"
-    ), (title,))
+        "SELECT id, title, pinned FROM sessions s WHERE title = ? AND archived = 0 AND hidden = 0 "
+        "AND parent_session_id IS NULL AND " + _NOT_WORK + " "
+        "ORDER BY pinned DESC, COALESCE(last_activity_at, started_at) DESC"
+    ), (title, _workstreams(home)))
     return [HomeChat(row["id"], row["title"], bool(row["pinned"])) for row in rows]
 
 
@@ -118,7 +159,9 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
     into (compression, branches), written at or after ``since``, and the rows
     after it. Archived rows count too: compaction keeps them as inactive.
     The latest copy wins: compressing mid-turn carries the user row into the
-    new session, and the reply follows it there."""
+    new session, and the reply follows it there. Hermes' status line for a
+    turn its compaction ended before the model ran is never the reply: it
+    goes in ``skipped``."""
     users = _run(home, (
         "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
         "ON s.parent_session_id = c.id) "
@@ -132,7 +175,7 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
     rows = _run(home, (
         "SELECT id, role, content, display_kind FROM messages WHERE session_id = ? AND id > ? ORDER BY id"
     ), (session_id, user_id))
-    reply, reply_id, failed, closed = "", None, False, False
+    reply, reply_id, failed, closed, skipped = "", None, False, False, ""
     for row in rows:
         if row["role"] == "user":
             closed = True
@@ -143,14 +186,43 @@ def find_turn(home: Path, *, chat_id: str, tag: str, since: float) -> Optional[T
             failed = True
             continue
         text = row["content"].strip() if isinstance(row["content"], str) else ""
-        if text:
+        # Hermes' status line for a turn its compaction ended is no reply.
+        notice = _skip_notice(text)
+        if notice:
+            skipped = notice
+        elif text:
             reply, reply_id = text, row["id"]
-    return TurnRows(session_id, reply, failed, closed, prompt, reply_id)
+    return TurnRows(session_id, reply, failed, closed, prompt, reply_id, skipped)
 
+
+def _skip_notice(text: str) -> str:
+    try:
+        from . import compaction_skip  # this module is also read on its own
+    except ImportError:
+        return ""
+    return compaction_skip.notice(text)
+
+
+# A bot's workstreams, a json list for ``_NOT_WORK``: Hermes hides an open
+# one, but a resolved one is shown so Desktop's link opens it (notifier
+# #540), and its brief and replies are the bot's, not chats the person had.
+def _workstreams(home: Path) -> str:
+    try:
+        from . import work_store  # this module is also read on its own
+
+        return json.dumps(work_store.Store(Path(home)).session_ids())
+    except Exception:  # an unreadable registry leaves nothing out
+        return "[]"
+
+
+# Not a workstream's chat, nor any chat that continues it. Takes the json list.
+_NOT_WORK = ("s.id NOT IN (WITH RECURSIVE work(id) AS (SELECT value FROM json_each(?) "
+             "UNION SELECT c.id FROM sessions c JOIN work ON c.parent_session_id = work.id) SELECT id FROM work)")
 
 # The chats a person had: every session but ``excluded`` (the home chat's
-# whole compression chain), cron runs and hidden chats; only their visible
-# user and assistant rows. Takes the home chat's id twice.
+# whole compression chain), cron runs, hidden chats and a bot's workstreams;
+# only their visible user and assistant rows. Takes the home chat's id
+# twice, then the workstreams.
 _EXCLUDED = (
     "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_session_id FROM sessions WHERE id = ? "
     "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
@@ -158,21 +230,22 @@ _EXCLUDED = (
     "UNION SELECT s.id FROM sessions s JOIN excluded e ON s.parent_session_id = e.id) ")
 _PERSON_ROWS = (
     "m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
-    "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded)")
+    "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
+    "AND " + _NOT_WORK)
 
 
 def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: int = 2000,
                     limit: int = 3000) -> list[sqlite3.Row]:
     """User and assistant rows since ``since`` in the chats a person had:
     not any part of ``exclude_chat``'s compression chain, not cron runs, hidden
-    chats or hidden rows. The newest ``limit``, each cut to ``max_chars``,
+    chats, a bot's workstreams or hidden rows. The newest ``limit``, each cut to ``max_chars``,
     oldest first, with the chat's id and title."""
     return _run(home, (
         _EXCLUDED + "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(m.content, 1, ?) AS content, "
         "m.timestamp, m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
         "WHERE m.timestamp >= ? AND " + _PERSON_ROWS + " "
         "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?) ORDER BY timestamp, id"
-    ), (exclude_chat, exclude_chat, max_chars, since, limit))
+    ), (exclude_chat, exclude_chat, max_chars, since, _workstreams(home), limit))
 
 
 def chat_activity(home: Path, *, exclude_chat: str, since: float,
@@ -186,7 +259,8 @@ def chat_activity(home: Path, *, exclude_chat: str, since: float,
         "MAX(m.timestamp) AS last_at, SUM(MIN(LENGTH(m.content), ?)) AS chars FROM messages m "
         "JOIN sessions s ON s.id = m.session_id WHERE m.timestamp > ? AND m.timestamp <= ? AND "
         + _PERSON_ROWS + " GROUP BY s.id ORDER BY last_at"
-    ), (exclude_chat, exclude_chat, max_chars, since, float("inf") if until is None else until))
+    ), (exclude_chat, exclude_chat, max_chars, since, float("inf") if until is None else until,
+        _workstreams(home)))
 
 
 def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_chars: int,
@@ -200,6 +274,13 @@ def chat_messages(home: Path, *, chat_id: str, after_id: int, since: float, max_
         f"AND active = 1 AND display_kind IS NULL ORDER BY id {'DESC' if newest else ''} LIMIT ?"
     ), (max_chars, chat_id, after_id, since, float("inf") if until is None else until, limit))
     return rows[::-1] if newest else rows
+
+
+def row_time(home: Path, *, chat_id: str, row_id: int) -> Optional[float]:
+    """When row ``row_id`` of the chat was written, whether or not
+    compaction has since made it inactive; None when it isn't there."""
+    rows = _run(home, "SELECT timestamp FROM messages WHERE id = ? AND session_id = ?", (row_id, chat_id))
+    return float(rows[0]["timestamp"]) if rows else None
 
 
 def user_row_before(home: Path, *, chat_id: str, before_id: int, max_chars: int) -> Optional[sqlite3.Row]:
@@ -217,7 +298,7 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
     """What the user wrote after the user row carrying ``tag``, up to the
     next hidden (Pulse) row."""
     rows = _run(home, (
-        "SELECT content, display_kind FROM messages WHERE session_id = ? AND role = 'user' AND id > ("
+        "SELECT role, content, display_kind FROM messages WHERE session_id = ? AND role = 'user' AND id > ("
         "SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'user' AND instr(content, ?) > 0) "
         "ORDER BY id"
     ), (session_id, session_id, tag))
@@ -230,7 +311,7 @@ def user_text_after(home: Path, *, session_id: str, tag: str) -> list[str]:
 
 
 # Every session but the ones in the json list (each id's whole compression
-# chain, up and down), and no hidden chats or hidden rows. Cron runs count:
+# chain, up and down), and no hidden chats, workstreams or hidden rows. Cron runs count:
 # a job's output is often where the work got done.
 _LATER = (
     "WITH RECURSIVE seed(id) AS (SELECT value FROM json_each(?)), "
@@ -241,7 +322,7 @@ _LATER = (
     "SELECT s.id AS chat_id, s.title, s.source, m.role, substr(m.content, 1, ?) AS content, m.timestamp, m.id "
     "FROM messages m JOIN sessions s ON s.id = m.session_id "
     "WHERE m.timestamp > ? AND m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
-    "AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
+    "AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) AND " + _NOT_WORK + " "
     "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?")
 
 
@@ -252,7 +333,7 @@ def later_messages(home: Path, *, after: float, exclude: Iterable[str], max_char
     newest first, each cut to ``max_chars``, with the chat's id, title and
     source."""
     ids = json.dumps([chat for chat in exclude if chat])
-    return _run(home, _LATER, (ids, max_chars, after, limit))
+    return _run(home, _LATER, (ids, max_chars, after, _workstreams(home), limit))
 
 
 def chain_ids(home: Path, chat_id: str) -> set[str]:
@@ -323,16 +404,22 @@ def worker_tasks(home: Path, ids: Iterable[str]) -> dict[str, str]:
     return found
 
 
-def chain_messages(home: Path, *, chat_id: str, after_id: int, max_chars: int, limit: int) -> list[sqlite3.Row]:
+# A row with text: not a reply that only called tools.
+SAID = "AND trim(coalesce(content, '')) != '' "
+
+
+def chain_messages(home: Path, *, chat_id: str, after_id: int, max_chars: int, limit: int,
+                   said: bool = False) -> list[sqlite3.Row]:
     """``chat_messages`` with ``newest``, through the chat and the sessions
     it continued into (compression, branches): the last ``limit`` visible
-    user and assistant rows after row ``after_id``, oldest first."""
+    user and assistant rows after row ``after_id``, oldest first. With
+    ``said``, only rows with text (not a reply that only called tools)."""
     rows = _run(home, (
         "WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT s.id FROM sessions s JOIN chain c "
         "ON s.parent_session_id = c.id) "
         "SELECT id, role, substr(content, 1, ?) AS content, timestamp FROM messages "
         "WHERE session_id IN (SELECT id FROM chain) AND id > ? AND role IN ('user', 'assistant') "
-        "AND active = 1 AND display_kind IS NULL ORDER BY id DESC LIMIT ?"
+        "AND active = 1 AND display_kind IS NULL " + (SAID if said else "") + "ORDER BY id DESC LIMIT ?"
     ), (chat_id, max_chars, after_id, limit))
     return rows[::-1]
 

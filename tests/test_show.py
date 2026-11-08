@@ -197,7 +197,9 @@ def test_the_schema_matches_the_store():
     assert properties["markdown"]["maxLength"] == store_module.MAX_CARD_MARKDOWN_CHARS
     assert tool.SCHEMA["parameters"]["required"] == ["title"]
     assert "voice call" in tool.SCHEMA["description"]
-    assert properties["cards"]["items"] == tool.card_schema.CARD_SCHEMA, "the card schema comes from the one file"
+    assert properties["cards"] == tool.card_schema.tool_parameter(
+        properties["cards"]["description"], {"template": tool.card_templates.TEMPLATE_INPUT}), \
+        "the card schema comes from the one file"
 
 
 MAP = {"type": "map", "places": [{"name": "Kin Khao", "lat": 37.7853, "lon": -122.4089,
@@ -230,9 +232,58 @@ def test_cards_show_in_a_chat_without_a_call_screen(tool_home):
     _exchange(PresentStore(tool_home), features=("maps-navigate", "chat-cards"))
     assert tool.available() is True, "a Conduit that draws chat cards gets the tool"
     answer = _call({"title": "Dinner", "cards": [MAP]})
-    assert answer == {"ok": True, "cards": [CLEAN_MAP], "note": tool.IN_CHAT_NOTE}
+    assert answer["ok"] is True and answer["cards"] == [CLEAN_MAP]
+    assert answer["note"] == f"{tool.IN_CHAT_NOTE} {tool.PROBLEMS_NOTE}"
+    assert "cards[0].places[0].rating.source: missing" in answer["problems"], "Hermes hears what was dropped"
+    assert answer["markdown"].startswith("**Kin Khao**"), "Conduit shows it wherever a card can't be drawn"
     assert _call({"title": "Forecast", "markdown": TABLE})["error"] == "no_device", \
         "Markdown alone still needs a call screen"
+
+
+@pytest.fixture()
+def typed_turn():
+    """A turn whose message Conduit reported as typed (hermes-conduit#1808)."""
+    turn_surface = tool.turn_surface
+    turn_surface._keep_entry("s1", "typed")
+    yield
+    turn_surface.start_turn("s1")
+
+
+def test_markdown_alone_in_a_typed_chat_is_refused_and_kept_off_the_call_screen(tool_home, typed_turn):
+    # A phone that polled in the last hours counts as a call screen; the
+    # typed message says no call screen is open (hermes-conduit#1808).
+    _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards"))
+    answer = _call({"title": "Forecast", "markdown": TABLE})
+    assert answer == {"ok": False, "error": "typed_chat", "note": tool.TYPED_CHAT_NOTE}
+    assert "cards" not in _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards")), \
+        "nothing waits for a call screen that isn't open"
+
+
+def test_cards_in_a_typed_chat_are_drawn_there_and_not_kept_for_a_call(tool_home, typed_turn):
+    _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards"))
+    answer = _call({"title": "Dinner", "markdown": TABLE, "cards": [MAP]})
+    assert answer["ok"] is True and answer["cards"] == [CLEAN_MAP] and "id" not in answer
+    assert answer["note"].startswith(tool.IN_CHAT_NOTE), "Hermes hears its Markdown wasn't shown"
+    assert "cards" not in _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards"))
+
+
+def test_a_spoken_or_unreported_turn_still_reaches_the_call_screen(tool_home):
+    _exchange(PresentStore(tool_home))
+    turn_surface = tool.turn_surface
+    for entry in ("spoken", None):
+        turn_surface._keep_entry("s1", entry)
+        answer = _call({"title": "Forecast", "markdown": TABLE})
+        assert answer["ok"] is True and answer["note"] == tool.SHOWN_NOTE, entry
+    turn_surface.start_turn("s1")
+
+
+def test_a_typed_turn_counts_only_for_its_own_chat_until_the_next_turn(tool_home):
+    _exchange(PresentStore(tool_home))
+    turn_surface = tool.turn_surface
+    turn_surface._keep_entry("s1", "typed")
+    assert _call({"title": "Forecast", "markdown": TABLE}, session_id="s2")["ok"] is True, "another chat's turn"
+    turn_surface.start_turn("s1")
+    assert _call({"title": "Forecast", "markdown": TABLE})["ok"] is True, "the next turn starts unknown"
 
 
 def test_cards_that_are_all_invalid_are_refused(tool_home):
@@ -256,7 +307,8 @@ def test_information_cards_go_only_to_a_conduit_that_draws_them(tool_home):
     assert answer["error"] == "no_device", "Markdown Hermes wrote still goes to a call screen, without the cards"
     _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
     answer = _call({"title": "Today", "cards": [STATS]})
-    assert answer == {"ok": True, "cards": [STATS], "note": tool.IN_CHAT_NOTE}
+    assert answer == {"ok": True, "cards": [STATS], "markdown": "- **Steps:** 8,412\n\n_From Health_",
+                      "note": tool.IN_CHAT_NOTE}
 
 
 def test_a_phone_without_information_cards_gets_only_what_it_draws(store):
@@ -316,8 +368,73 @@ def test_cards_are_refused_where_conduit_isnt_drawing_them(tool_home, monkeypatc
     monkeypatch.setattr(tool, "_turn_source", lambda: "messaging")
     answer = _call({"title": "Dinner", "cards": [MAP]})
     assert answer["ok"] is False and answer["error"] == "not_conduit"
+    assert answer["markdown"].startswith("**Kin Khao**") and "markdown below" in answer["note"], \
+        "Hermes gets the board as Markdown to put in its reply"
     monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
     assert _call({"title": "Dinner", "cards": [MAP]})["ok"] is True
+
+
+def test_a_group_room_gets_its_board_as_markdown(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    answer = _call({"title": "Dinner", "cards": [MAP]}, session_id="room-1", is_room=lambda s: s == "room-1")
+    assert answer["ok"] is False and answer["error"] == "group_room"
+    assert answer["markdown"].startswith("**Kin Khao**") and "markdown below" in answer["note"]
+    assert _call({"title": "Dinner", "cards": [MAP]}, is_room=lambda s: s == "room-1")["ok"] is True, "a chat draws it"
+
+
+def test_markdown_alone_in_a_group_room_is_refused_and_kept_off_the_call_screen(tool_home):
+    _exchange(PresentStore(tool_home))
+    answer = _call({"title": "Forecast", "markdown": TABLE}, is_room=lambda s: s == "s1")
+    assert answer == {"ok": False, "error": "group_room", "note": tool.ROOM_MARKDOWN_NOTE}
+    assert "cards" not in _exchange(PresentStore(tool_home))
+
+
+def test_a_room_this_host_runs_keeps_its_board_for_conduit(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=(*BOARD_FEATURES, tool.ROOM_BOARDS_FEATURE))
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    kept = []
+    answer = _call({"title": "Caps", "cards": [TABLE_CARD, CALLOUT, TEXT], "layout": "tabs", "next": ["More"]},
+                   session_id="room-1", is_room=lambda s: s == "room-1",
+                   room_board=lambda session, board: kept.append((session, board)) or True)
+    assert answer["ok"] is True and answer["note"].startswith(tool.ROOM_SHOWN_NOTE)
+    assert [card["type"] for card in answer["cards"]] == ["table", "callout"], "no contact in a room"
+    assert answer["layout"] == "tabs" and "next" not in answer, "no follow-ups in a room"
+    assert kept == [("room-1", {"cards": answer["cards"], "markdown": answer["markdown"], "layout": "tabs"})]
+    assert tool.TEXT_NEXT_NOTE in answer["problems"] and tool.ROOM_CONTACTS_NOTE in answer["problems"]
+    elsewhere = _call({"title": "Caps", "cards": [TABLE_CARD]}, session_id="room-1",
+                      is_room=lambda s: s == "room-1", room_board=lambda *_: False)
+    assert elsewhere["error"] == "group_room" and elsewhere["markdown"], "a room run elsewhere gets text"
+
+
+def test_an_older_conduit_gets_a_rooms_board_as_text(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    kept = []
+    answer = _call({"title": "Caps", "cards": [TABLE_CARD]}, session_id="room-1", is_room=lambda s: s == "room-1",
+                   room_board=lambda session, board: kept.append(board) or True)
+    assert answer["error"] == "group_room" and not kept
+
+
+def test_a_group_room_never_gets_a_contact_or_a_drafted_text(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=("chat-cards",))
+    for source in ("conduit", "messaging"):
+        monkeypatch.setattr(tool, "_turn_source", lambda: source)
+        answer = _call({"title": "Mei", "cards": [MAP, TEXT]}, session_id="room-1", is_room=lambda s: s == "room-1")
+        assert answer["error"] == "group_room", source
+        assert "Landed safe" not in answer["markdown"] and "139" not in answer["markdown"], source
+        assert answer["markdown"].startswith("**Kin Khao**")
+        assert answer["problems"][0] == tool.ROOM_CONTACTS_NOTE, "first, so the cap never cuts it"
+        assert "leave it out of your reply" in answer["problems"][0]
+        assert "give them in your reply" not in answer["note"] and "never the contact" in answer["note"]
+    with_next = _call({"title": "Dinner", "cards": [MAP], "next": ["More"]}, session_id="room-1",
+                      is_room=lambda s: s == "room-1")
+    assert with_next["problems"][0] == tool.TEXT_NEXT_NOTE
+    only = _call({"title": "Mei", "cards": [TEXT]}, session_id="room-1", is_room=lambda s: s == "room-1")
+    assert "markdown" not in only and only["note"].startswith(tool.ROOM_NOTHING_NOTE)
+    tabs = _call({"title": "Dinner", "cards": [MAP, MAP], "layout": "tabs"}, session_id="room-1",
+                 is_room=lambda s: s == "room-1")
+    assert tabs["problems"][0] == tool.TEXT_LAYOUT_NOTE
 
 
 def test_long_fallback_markdown_is_cut_at_a_line(tool_home, monkeypatch):
@@ -405,7 +522,8 @@ def test_a_conduit_not_seen_for_weeks_no_longer_holds_cards_back(tool_home):
     store = PresentStore(tool_home)
     store.exchange({"installation_id": "ipad-installation-2", "results": [],
                     "features": ["chat-cards", "info-cards"]})
-    assert _call({"title": "Steps", "cards": [STATS]}) == {"ok": True, "cards": [STATS], "note": tool.IN_CHAT_NOTE}
+    assert _call({"title": "Steps", "cards": [STATS]}) == {"ok": True, "cards": [STATS], "note": tool.IN_CHAT_NOTE,
+                                                           "markdown": "- **Steps:** 8,412\n\n_From Health_"}
 
 
 TEXT = {"type": "contact", "people": [{"name": "Mei", "detail": "Wife", "phone": "+86 139 6261 8677",
@@ -421,7 +539,8 @@ def test_a_text_message_goes_only_to_a_conduit_that_offers_send_text(tool_home):
     assert tool.NO_TEXT_DRAFTS_NOTE in answer["note"], "Hermes hears to give the text in its reply"
     _exchange(PresentStore(tool_home), features=("chat-cards", "media-cards", tool.TEXT_DRAFTS_FEATURE))
     answer = _call({"title": "Text Mei", "cards": [TEXT]})
-    assert answer == {"ok": True, "cards": [TEXT], "note": tool.IN_CHAT_NOTE}
+    assert answer == {"ok": True, "cards": [TEXT], "note": tool.IN_CHAT_NOTE,
+                      "markdown": "**Mei** · Wife  \n+86 139 6261 8677  \nText to send: Landed safe, see you soon"}
 
 
 def test_the_tool_says_a_text_is_sent_only_by_the_users_tap():
@@ -439,3 +558,178 @@ def test_a_text_left_off_is_left_out_of_the_markdown_and_named_when_nothing_show
     answer = _call({"title": "Text Mei", "cards": [TEXT]})
     assert answer["error"] == "rate_limited" and tool.NO_TEXT_DRAFTS_NOTE in answer["note"], \
         "an answer that shows nothing still says the text was left off"
+
+
+STATS_CARD = {"type": "stats", "stats": [{"label": "N", "value": "1"}]}
+BOARD_FEATURES = ("chat-cards", "info-cards", "media-cards", "live-cards", "board-cards")
+TABLE_CARD = {"type": "table", "title": "Caps", "table": {"columns": ["Company", "Cap"], "rows": [["Apple", 3.1]]}}
+CALLOUT = {"type": "callout", "title": "Tip", "callout": {"text": "Book early", "tone": "tip"}}
+
+
+def test_a_board_carries_its_layout_follow_ups_and_markdown(tool_home):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    answer = _call({"title": "Trip", "cards": [TABLE_CARD, CALLOUT], "layout": "tabs",
+                    "next": ["Make it $1,500", "/new"]})
+    assert answer["ok"] is True and [card["type"] for card in answer["cards"]] == ["table", "callout"]
+    assert answer["cards"][0]["table"]["rows"] == [["Apple", "3.1"]], "a number cell becomes text"
+    assert answer["layout"] == "tabs" and answer["next"] == ["Make it $1,500"]
+    assert answer["markdown"] == tool.card_schema.fallback_markdown(answer["cards"])
+    assert answer["problems"] == ['next[1]: "/new" isn\'t a plain message, left out']
+    one = _call({"title": "Tip", "cards": [CALLOUT], "layout": "tabs"})
+    assert "layout" not in one and "next" not in one, "one card has no tabs"
+
+
+def test_a_board_says_exactly_what_it_dropped(tool_home):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    answer = _call({"title": "Caps", "cards": [{"type": "table", "table": {"columns": ["A", "B"],
+                                                                           "rows": [["1", "2"], ["3"]]}}]})
+    assert answer["problems"] == ['cards[0].table.rows: the row starting "3" has 1 cells for 2 columns, left out']
+    refused = _call({"title": "Caps", "cards": [{"type": "table", "table": {"columns": ["A"], "rows": []}}]})
+    assert refused["error"] == "invalid_cards"
+    assert "cards[0].table.rows: needs at least 1 valid items" in refused["problems"]
+
+
+def test_an_older_conduit_gets_four_cards_and_no_follow_ups(tool_home):
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards", "board-cards"))
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"), )
+    stats = [{"type": "stats", "title": str(index), "stats": [{"label": "N", "value": str(index)}]}
+             for index in range(6)]
+    answer = _call({"title": "Numbers", "cards": stats + [CALLOUT], "layout": "tabs", "next": ["More"]})
+    assert [card["title"] for card in answer["cards"]] == ["0", "1", "2", "3"]
+    assert "layout" not in answer and "next" not in answer
+    assert "can't draw callout cards" in answer["note"]
+    assert any("at most 4 cards" in problem for problem in answer["problems"]), "Hermes says the rest"
+
+
+def test_follow_ups_without_cards_are_said_to_be_left_out(tool_home):
+    _exchange(PresentStore(tool_home), features=("show-cards", *BOARD_FEATURES))
+    answer = _call({"title": "Plain", "markdown": "Hi", "next": ["More"]})
+    assert answer["ok"] is True and "next" not in answer
+    assert answer["problems"] == ["next: follow-ups go under cards, and none were shown, left out"]
+
+
+def test_an_older_conduit_hears_its_tabs_and_follow_ups_were_left_out(tool_home):
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    answer = _call({"title": "Two", "cards": [STATS_CARD] * 2, "layout": "tabs", "next": ["More"]})
+    assert len(answer["cards"]) == 2 and "layout" not in answer and "next" not in answer
+    assert answer["problems"] == [tool.OLD_BOARD_LAYOUT_NOTE, tool.OLD_BOARD_NEXT_NOTE]
+    tabs_only = _call({"title": "Two", "cards": [STATS_CARD] * 2, "layout": "tabs"})
+    assert tabs_only["problems"] == [tool.OLD_BOARD_LAYOUT_NOTE], "no follow-ups to offer when none were given"
+
+
+def test_tabs_for_a_single_card_are_said_to_be_left_out(tool_home):
+    _exchange(PresentStore(tool_home), features=("show-cards", *BOARD_FEATURES))
+    answer = _call({"title": "One", "cards": [STATS_CARD], "layout": "tabs"})
+    assert answer["ok"] is True and "layout" not in answer
+    assert answer["problems"] == ["layout: it lays out two or more cards, and fewer were shown, left out"]
+
+
+def test_an_older_conduit_hears_of_follow_ups_left_out_without_cards(tool_home):
+    _exchange(PresentStore(tool_home), features=("show-cards", "chat-cards", "info-cards"))
+    answer = _call({"title": "Plain", "markdown": "Hi", "next": ["More"]})
+    assert answer["ok"] is True and "next" not in answer
+    assert answer["problems"] == [tool.OLD_BOARD_NEXT_NOTE]
+
+
+def test_an_older_conduit_hears_of_a_cut_only_when_cards_were_cut(tool_home):
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    stats = [{"type": "stats", "title": str(index), "stats": [{"label": "N", "value": str(index)}]}
+             for index in range(2)]
+    answer = _call({"title": "Mixed", "cards": stats + [CALLOUT] * 3})
+    assert [card["type"] for card in answer["cards"]] == ["stats", "stats"]
+    assert not any("at most 4 cards" in problem for problem in answer.get("problems", [])), \
+        "the callouts weren't cut for the count, they can't be drawn"
+
+
+def test_what_is_left_out_is_said_wherever_the_board_goes(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    table = {"type": "table", "table": {"columns": ["A", "B"], "rows": [["1", "2"], ["3"]]}}
+    answer = _call({"title": "Caps", "cards": [table], "layout": "grid", "next": "More"})
+    assert "layout: not one of stack, tabs" in answer["problems"]
+    assert "next: not a list of messages, left out" in answer["problems"]
+    monkeypatch.setattr(tool, "_turn_source", lambda: "desktop")
+    away = _call({"title": "Caps", "cards": [table]})
+    assert away["error"] == "not_conduit" and len(away["problems"]) == 1 and "problems says" in away["note"]
+    monkeypatch.setattr(tool, "_turn_source", lambda: "conduit")
+    room = _call({"title": "Caps", "cards": [table]}, is_room=lambda _: True)
+    assert room["error"] == "group_room" and room["problems"] == away["problems"]
+
+
+def test_a_desktop_chat_with_the_half_gets_the_boards_line(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    monkeypatch.setattr(tool, "_turn_source", lambda: "desktop")
+    monkeypatch.setattr(tool, "_desktop_app", lambda: True)
+    kept = []
+    answer = _call({"title": "Caps", "cards": [TABLE_CARD, CALLOUT], "layout": "tabs", "next": ["More"]},
+                   desktop_board=lambda board: kept.append(board) or "cb-0123456789ab")
+    line = '::conduit-board{id="cb-0123456789ab"}'
+    assert answer["ok"] is True and answer["directive"] == line and line in answer["note"]
+    assert answer["layout"] == "tabs" and answer["next"] == ["More"], "Desktop's half draws tabs and follow-ups"
+    [board] = kept
+    assert board["cards"] == answer["cards"] and board["markdown"] == answer["markdown"]
+    assert board["card_markdown"] == [tool.card_schema.fallback_markdown([card]) for card in answer["cards"]]
+    assert board["layout"] == "tabs" and board["next"] == ["More"]
+    without = _call({"title": "Caps", "cards": [TABLE_CARD]}, desktop_board=lambda board: None)
+    assert without["error"] == "not_conduit" and without["markdown"], "no half: the board goes as Markdown"
+    monkeypatch.setattr(tool, "_desktop_app", lambda: False)
+    web = _call({"title": "Caps", "cards": [TABLE_CARD]}, desktop_board=lambda board: "cb-0123456789ab")
+    assert web["error"] == "not_conduit" and web["markdown"], "the web dashboard draws no line: Markdown"
+    monkeypatch.setattr(tool, "_desktop_app", lambda: True)
+    monkeypatch.setattr(tool, "_turn_source", lambda: "messaging")
+    assert _call({"title": "Caps", "cards": [TABLE_CARD]}, desktop_board=lambda board: "cb-0123456789ab")["error"] \
+        == "not_conduit", "only Desktop draws the line"
+
+
+def test_desktop_hears_the_board_rule_only_with_its_half(tool_home, monkeypatch):
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    monkeypatch.setattr(tool, "_desktop_app", lambda: True)
+    assert tool.board_rule("desktop", desktop_half=lambda: True) == tool.DESKTOP_BOARD_RULE
+    assert tool.DESKTOP_BOARD_RULE.startswith("[Hermes Desktop draws boards")
+    assert tool.board_rule("desktop", desktop_half=lambda: False) is None
+    assert tool.board_rule("desktop") is None
+    monkeypatch.setattr(tool, "_desktop_app", lambda: False)
+    assert tool.board_rule("desktop", desktop_half=lambda: True) is None, "the web dashboard hears no rule"
+
+
+def test_only_hermes_desktops_own_socket_counts_as_the_desktop_app():
+    class WSTransport:
+        def __init__(self, agent):
+            self._ws = type("WS", (), {"headers": {"User-Agent": agent}})()
+    electron = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/138.0 Electron/37.2.0 Safari/537.36"
+    chrome = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/138.0 Safari/537.36"
+    assert tool.reply_sources.is_desktop_app(WSTransport(electron)) is True
+    assert tool.reply_sources.is_desktop_app(WSTransport(chrome)) is False
+    assert tool.reply_sources.is_desktop_app(None) is False
+    assert tool.reply_sources.turn_source(None, WSTransport(chrome)) == "desktop", "both still Desktop for pushes"
+
+
+def test_a_call_screen_shows_a_board_as_its_phone_can(store):
+    store.exchange({"installation_id": PHONE, "device": "iPhone", "app_version": "2.3", "results": [],
+                    "features": ["show-cards", "info-cards", "board-cards"]})
+    stats = [{"type": "stats", "title": str(index), "stats": [{"label": "N", "value": str(index)}]}
+             for index in range(6)]
+    store.show("Numbers", "x", session_id="s1", cards=stats, markdown_is_fallback=True, layout="tabs")
+    [card] = store.exchange({"installation_id": PHONE, "device": "iPhone", "app_version": "2.3", "results": [],
+                             "features": ["show-cards", "info-cards", "board-cards"]})["cards"]
+    assert len(card["cards"]) == 6 and card["layout"] == "tabs" and card["fallback"] is True
+    [old] = store.exchange({"installation_id": PHONE.replace("1", "2"), "device": "iPhone", "app_version": "2.2", "results": [],
+                            "features": ["show-cards", "info-cards"]})["cards"]
+    assert len(old["cards"]) == 4 and "layout" not in old, "a phone from before boards draws a stack of four"
+    assert "fallback" not in old, "its Markdown shows what was left out"
+
+
+def test_the_board_rule_is_only_for_a_conduit_that_draws_boards(tool_home):
+    assert tool.board_rule("conduit") is None, "no Conduit yet"
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    assert tool.board_rule("conduit") is None, "a Conduit from before boards"
+    _exchange(PresentStore(tool_home), features=BOARD_FEATURES)
+    assert tool.board_rule("conduit") == tool.BOARD_RULE
+    assert tool.board_rule("messaging") is None and tool.board_rule(None) is None
+
+
+def test_the_tool_offers_the_boards_layout_and_follow_ups():
+    properties = tool.SCHEMA["parameters"]["properties"]
+    assert properties["layout"]["enum"] == ["stack", "tabs"] and properties["next"]["maxItems"] == 4
+    assert properties["cards"]["maxItems"] == 12
+    for phrase in ("timeline", "checklist", "layout tabs", "problems"):
+        assert phrase in tool.SCHEMA["description"]

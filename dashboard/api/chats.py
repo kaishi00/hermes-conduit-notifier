@@ -1,4 +1,5 @@
-"""Chat takeover, where in Conduit a message was sent, and predictions."""
+"""Chat takeover, where in Conduit a message was sent, predictions and side
+questions."""
 
 from __future__ import annotations
 
@@ -177,7 +178,7 @@ def _sweep_idle_claims(token: object) -> None:
             claims = core._plugin_package_module("conduit_claims")
             time.sleep(claims.SWEEP_S)
             if sys.__dict__.get(_CLAIMS_SWEEPER) is token:
-                claims.sweep(watch_jobs._hermes_session_api(), _claims_home)
+                claims.sweep(watch_jobs._tui_session_api(), _claims_home)
         except Exception:  # noqa: BLE001 — keep sweeping
             logger.debug("Conduit: idle claim sweep failed", exc_info=True)
             time.sleep(60.0)
@@ -255,7 +256,11 @@ def record_turn_surface(body: Any) -> bool:
     here. Raises ValueError for a body that isn't one."""
     module = _turn_surface()
     report = module.parse(body)
-    server = watch_jobs._hermes_session_api()
+    if core._authority_session(report.session_id) is not None:
+        # The gateway's listener: the authority runs the chat (turn_surface.py).
+        module.record_for_authority(report)
+        return True
+    server = watch_jobs._tui_session_api()
     session = server._sessions.get(report.session_id) if server is not None else None
     if not isinstance(session, dict):
         return False
@@ -275,6 +280,34 @@ async def post_turn_surface(request: Request, response: Response) -> Dict[str, A
     except Exception as exc:
         raise core._unexpected("turn-surface", exc, feature="Turn surface")
     return {"ok": True, "recorded": recorded}
+
+
+def discard_turn_surface(body: Any) -> bool:
+    """Forgets the report of a send Conduit says failed; False when none was
+    kept. Raises ValueError for a body that isn't one."""
+    module = _turn_surface()
+    session_id, digest = module.parse_discard(body)
+    if core._gateway_runner() is not None:
+        # The gateway's listener: its reports are the plugin's own, kept
+        # whether or not the chat is still live there.
+        return module.discard_digest_for_authority(session_id, digest)
+    server = watch_jobs._tui_session_api()
+    session = server._sessions.get(session_id) if server is not None else None
+    return module.discard(session, digest) if isinstance(session, dict) else False
+
+
+@router.post("/turn-surface/discard")
+async def post_turn_surface_discard(request: Request, response: Response) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    body = await core._read_json_body(request, TURN_SURFACE_MAX_BODY_BYTES)
+    try:
+        discarded = discard_turn_surface(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc), headers=no_store)
+    except Exception as exc:
+        raise core._unexpected("turn-surface", exc, feature="Turn surface")
+    return {"ok": True, "discarded": discarded}
 
 
 # --- Predictions (predict.py) -------------------------------------------------
@@ -393,7 +426,25 @@ def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:
         request = module.parse(body)
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
-    server = watch_jobs._hermes_session_api()
+    try:
+        authority = core._authority_agent(request.session_id)
+    except RuntimeError as exc:
+        # The lookup itself failed (a Hermes that changed how it keeps
+        # agents), not a chat whose agent was let go. Matched by name: the
+        # dashboard loads its own copy of gateway_chats, so the class
+        # isn't the plugin's; the name is the contract between the copies.
+        if type(exc).__name__ != "AgentLookupError":
+            raise
+        raise core.TokenError(502, str(exc))
+    if authority is None and core._authority_session(request.session_id) is not None:
+        # Open on the gateway's listener, but the gateway let its agent go (idle
+        # for its cache's hour): no turn to predict after, as a closed chat.
+        raise core.TokenError(404, "That chat's agent isn't loaded on the host")
+    if authority is not None:
+        # The gateway's listener: the chat's agent is the gateway's, and its
+        # profile is the authority's (hermes-conduit#1618).
+        return module, request, {"authority": authority[0]}, authority[1]
+    server = watch_jobs._tui_session_api()
     session = server._sessions.get(request.session_id) if server is not None else None
     agent = session.get("agent") if isinstance(session, dict) else None
     if agent is None:
@@ -403,7 +454,8 @@ def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:
 
 def _answer_prediction(module: Any, request: Any, session: dict, agent: Any) -> Dict[str, Any]:
     history = list(getattr(agent, "_session_messages", None) or session.get("history") or [])
-    with _predict_profile_scope(session):
+    scope = core._authority_scope(session["authority"]) if "authority" in session else _predict_profile_scope(session)
+    with scope:
         task_cfg = _predict_fast_model() if request.model == "fast" else {}
         text = _predict_fork_answer(agent, history, module.question(request), task_cfg)
     today = time.strftime("%Y-%m-%d")
@@ -503,3 +555,160 @@ async def post_predict(request: Request, response: Response, profile: Optional[s
     except Exception as exc:
         raise core._unexpected("predict", exc, feature="Predictions")
     return {"ok": True, **result}
+
+
+# --- Side questions (Conduit's step summaries) -------------------------------
+#
+# Conduit's step summaries (a finished run's look back, and a run's Explain
+# these steps) ask Hermes a side question about the chat. Asked with
+# prompt.btw, the question and its answer went to every client on the chat,
+# and Hermes Desktop showed both as a "[btw …]" note in its transcript. This
+# asks the same thing through Hermes' own /btw answer
+# (agent.side_question.answer_side_question: a fork of the live chat on its
+# warm cache, every tool refused, nothing saved; auxiliary.side_question
+# routes it elsewhere) and answers only the device that asked. A chat whose
+# agent isn't loaded is answered by Hermes' one-shot fallback from the
+# history the host still holds (the TUI gateway's), or from the question
+# alone on the gateway's listener (Explain these steps lists its calls).
+
+SIDE_QUESTION_LIMIT = 30
+SIDE_QUESTION_WINDOW_S = 60.0
+# An Explain lists up to 30 calls, each with 700 characters of arguments
+# and result: about 23,000 characters.
+SIDE_QUESTION_MAX_CHARS = 40000
+# Every character escaped (\uXXXX) at worst, and the rest of the body.
+SIDE_QUESTION_MAX_BODY_BYTES = 6 * SIDE_QUESTION_MAX_CHARS + 1024
+SIDE_QUESTION_MAX_RUNNING = 4
+# A summary and an Explain of the same chat may run together.
+SIDE_QUESTION_PER_CHAT = 2
+# Conduit forgets a question after two minutes.
+SIDE_QUESTION_MAX_WAIT_S, SIDE_QUESTION_DEFAULT_WAIT_S = 110.0, 90.0
+_side_question_limiter = core._MintLimiter(SIDE_QUESTION_LIMIT, SIDE_QUESTION_WINDOW_S,
+                                           message="Too many side questions; try again shortly")
+_side_question_lock = threading.Lock()
+# Side questions running, by runtime session id: how many each.
+_side_question_running: Dict[str, int] = {}
+_RUNTIME_KEYS = ("model", "provider", "base_url", "api_key", "api_mode", "session_id")
+
+
+def _side_question_body(body: Any) -> Tuple[str, str, float]:
+    """``(session id, question, wait)`` from the route's body; ValueError,
+    with what's wrong, for anything else."""
+    if not isinstance(body, dict):
+        raise ValueError("body must be an object")
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip() or len(session_id) > 200:
+        raise ValueError("session_id must be a chat's runtime session id")
+    question = body.get("question")
+    if not isinstance(question, str) or not question.strip() or len(question) > SIDE_QUESTION_MAX_CHARS:
+        raise ValueError(f"question must be text of at most {SIDE_QUESTION_MAX_CHARS} characters")
+    wait_s = body.get("wait_s", SIDE_QUESTION_DEFAULT_WAIT_S)
+    if (isinstance(wait_s, bool) or not isinstance(wait_s, (int, float))
+            or not 0 < wait_s <= SIDE_QUESTION_MAX_WAIT_S):
+        raise ValueError(f"wait_s must be a number of seconds up to {SIDE_QUESTION_MAX_WAIT_S:g}")
+    return session_id.strip(), question.strip(), float(wait_s)
+
+
+def _side_question_chat(session_id: str) -> Tuple[Any, Any, List[Dict[str, Any]]]:
+    """``(profile scope, agent or None, history)`` for a chat open on this host."""
+    try:
+        authority = core._authority_agent(session_id)
+    except RuntimeError as exc:
+        # As for a prediction: a lookup that failed isn't a let-go agent.
+        if type(exc).__name__ != "AgentLookupError":
+            raise
+        raise core.TokenError(502, str(exc))
+    if authority is not None:
+        owner, agent = authority
+        return core._authority_scope(owner), agent, list(getattr(agent, "_session_messages", None) or [])
+    found = core._authority_session(session_id)
+    if found is not None:
+        # The gateway let its agent go: Hermes' one-shot answers.
+        return core._authority_scope(found[1]), None, []
+    server = watch_jobs._tui_session_api()
+    session = server._sessions.get(session_id) if server is not None else None
+    if not isinstance(session, dict):
+        raise core.TokenError(404, "That chat isn't open on the host")
+    agent = session.get("agent")
+    history = list(getattr(agent, "_session_messages", None) or session.get("history") or [])
+    return _predict_profile_scope(session), agent, history
+
+
+def _answer_side_question(question: str, scope: Any, agent: Any, history: List[Dict[str, Any]]) -> str:
+    """Hermes' /btw answer, as prompt.btw gives it, without the broadcast."""
+    try:
+        from agent.side_question import answer_side_question
+    except ImportError:
+        raise core.TokenError(501, "This Hermes can't answer side questions; update Hermes")
+    runtime = {key: getattr(agent, key, None) for key in _RUNTIME_KEYS} if agent is not None else None
+    with scope:
+        return (answer_side_question(question, history, parent_agent=agent, main_runtime=runtime) or "").strip()
+
+
+def start_side_question(session_id: str, question: str) -> "concurrent.futures.Future":
+    """The answer, on a thread of its own, like a prediction's: its place
+    is freed when it ends, whether or not anyone still waits for it."""
+    scope, agent, history = _side_question_chat(session_id)
+    with _side_question_lock:
+        if _side_question_running.get(session_id, 0) >= SIDE_QUESTION_PER_CHAT:
+            raise core.TokenError(429, "This chat's side questions are still running")
+        if sum(_side_question_running.values()) >= SIDE_QUESTION_MAX_RUNNING:
+            raise core.TokenError(503, "The host is busy with other side questions; try again shortly")
+        _side_question_running[session_id] = _side_question_running.get(session_id, 0) + 1
+    future: concurrent.futures.Future = concurrent.futures.Future()
+    future.set_running_or_notify_cancel()
+
+    def release() -> None:
+        with _side_question_lock:
+            left = _side_question_running.get(session_id, 1) - 1
+            if left > 0:
+                _side_question_running[session_id] = left
+            else:
+                _side_question_running.pop(session_id, None)
+
+    def run() -> None:
+        try:
+            text = _answer_side_question(question, scope, agent, history)
+        except BaseException as exc:  # noqa: BLE001 — handed to the waiting route
+            release()
+            future.set_exception(exc)
+        else:
+            release()
+            future.set_result(text)
+
+    try:
+        threading.Thread(target=run, name="conduit-side-question", daemon=True).start()
+    except BaseException:
+        release()
+        raise
+    return future
+
+
+@router.post("/side-question")
+async def post_side_question(request: Request, response: Response,
+                             profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    no_store = {"Cache-Control": "no-store"}
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    # One bucket for the host, as for predictions: the answer runs under the
+    # chat's own profile whatever ?profile= names.
+    await core._scoped_acquire(_side_question_limiter, profile, key="")
+    body = await core._read_json_body(request, SIDE_QUESTION_MAX_BODY_BYTES)
+    try:
+        session_id, question, wait_s = _side_question_body(body)
+        future = start_side_question(session_id, question)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc), headers=no_store)
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except Exception as exc:
+        raise core._unexpected("side question", exc, feature="Side questions")
+    try:
+        text = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=wait_s + 1.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="The side question took too long", headers=no_store)
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
+    except Exception as exc:
+        raise core._unexpected("side question", exc, feature="Side questions")
+    return {"ok": True, "text": text}

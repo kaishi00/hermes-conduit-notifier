@@ -176,6 +176,14 @@ def _exclusive(handle: Any) -> Iterator[None]:
 
 def turn_source(platform: Any, transport: Any = None) -> str | None:
     """Where the message this turn answers was sent, or None when unknown."""
+    peers = _fanout_peers(transport)
+    if peers is not None:
+        # Hermes shows a chat open on several clients through one fanout, and
+        # binds it, not the sender, to the turn: its clients say where the
+        # turn came from when they all agree (Eric's Bot Chat on .52,
+        # 2026-11-07: no board rule while it was open on two screens).
+        found = {turn_source(None, peer) for peer in peers}
+        return found.pop() if len(found) == 1 else None
     if getattr(transport, "conduit_client", None) == "conduit":
         return "conduit"
     if _is_app_socket(transport):
@@ -191,6 +199,50 @@ def turn_source(platform: Any, transport: Any = None) -> str | None:
     if name == "cli":
         return "terminal"
     return "messaging" if _is_messaging(name) else None
+
+
+def is_desktop_app(transport: Any) -> bool:
+    """Whether the turn's socket is Hermes Desktop's own (an Electron
+    browser engine), not the web dashboard in a browser, which turn_source
+    also counts as "desktop"."""
+    peers = _fanout_peers(transport)
+    if peers is not None:
+        return bool(peers) and all(is_desktop_app(peer) for peer in peers)
+    if not _is_app_socket(transport):
+        return False
+    headers = _headers(transport) or {}
+    agent = str(headers.get("user-agent") or "")
+    return agent.startswith("Mozilla/") and "Electron/" in agent
+
+
+def _fanout_peers(transport: Any) -> list | None:
+    """The live clients behind Hermes' FanoutTransport (one chat shown on
+    several clients), or None for any other transport. A client whose socket
+    has closed (a failed write prunes it later) isn't counted, as in
+    conduit_claims.clients. A fanout inside a fanout, or one whose clients
+    can't be read, counts as no clients."""
+    peers = getattr(transport, "transports", None)
+    if transport is None or not callable(peers):
+        return None
+    try:
+        found = list(peers())
+    except Exception:  # noqa: BLE001 — unreadable: unknown
+        return []
+    if any(callable(getattr(peer, "transports", None)) for peer in found):
+        return []
+    return [peer for peer in found if not _socket_closed(peer)]
+
+
+def _socket_closed(transport: Any) -> bool:
+    try:
+        closed = getattr(transport, "closed", None)
+        if closed is None:
+            closed = getattr(transport, "_closed", None)
+        if callable(closed):
+            closed = closed()
+    except Exception:  # noqa: BLE001 — unreadable: not counted
+        return True
+    return bool(closed)
 
 
 def _is_app_socket(transport: Any) -> bool:

@@ -158,12 +158,23 @@ class WatchJobError(Exception):
 
 
 def _hermes_session_api() -> Any:
-    """Hermes' session API module when it serves this process's chats, else None.
+    """Hermes' session API when it serves this process's chats, else None: the
+    gateway's session authority on its own listener (core._AuthorityChats, in
+    the TUI gateway's shapes), else the dashboard's TUI gateway."""
+    authority = core._authority_session_api()
+    return authority if authority is not None else _tui_session_api()
+
+
+def _tui_session_api() -> Any:
+    """The dashboard's TUI gateway module when it serves this process's chats,
+    else None (a gateway's listener runs them on its authority).
 
     Only a module the dashboard itself loaded counts: importing it here (a
     plugin host process, an older Hermes) would make a second, private
     registry whose chats the app never sees.
     """
+    if core._gateway_runner() is not None:
+        return None
     server = sys.modules.get("tui_gateway.server")
     if server is None or not callable(getattr(server, "dispatch", None)):
         return None
@@ -278,6 +289,33 @@ def _clean_job_profiles(value: Any, *, own: Optional[str],
         # A ticket whose home this Hermes didn't say: nothing may be named.
         return ()
     return tuple(name for name in names if core._job_profile_on_home(name, ticket_home))
+
+
+def _keep_in_registry(profile: Optional[str], session_id: str, title: str, instructions: str) -> None:
+    """The job kept in its bot's work registry (Bot workstreams M5): the
+    Work panel lists it as a Watch call's, and a restart leaves it for the
+    user. Best effort: the job runs as before whatever happens here."""
+    try:
+        home = core._profile_dir(profile) if profile else core._calls_home()
+        tool = core._plugin_package_module("work_tool")
+        tool = tool.copy_for(home) or tool
+        tool.adopt(home, session_id, title, via="watch", goal=instructions[:2000])
+    except Exception:  # noqa: BLE001
+        logger.warning("Keeping a Watch job in its bot's work registry failed", exc_info=True)
+
+
+def _registry_start_failed(profile: Optional[str], session_id: str, error: str) -> None:
+    """A kept job whose prompt didn't go in: its registry row says it failed,
+    as the model was told, rather than staying a start. Best effort."""
+    if not session_id:
+        return
+    try:
+        home = core._profile_dir(profile) if profile else core._calls_home()
+        tool = core._plugin_package_module("work_tool")
+        tool = tool.copy_for(home) or tool
+        tool.call_start_failed(home, session_id, error)
+    except Exception:  # noqa: BLE001
+        logger.warning("Settling a Watch job's failed start in its bot's work registry failed", exc_info=True)
 
 
 class _WatchJob:
@@ -396,6 +434,7 @@ class _WatchJobTransport:
 
     def close(self) -> None:
         self._closed = True
+        core._release_authority_link(self)
 
 
 class _RpcWaiter:
@@ -441,8 +480,12 @@ class _WatchJobs:
             rid = f"conduit-watch-{self.grant.grant_id[:8]}-{self._rpc_ids}"
             waiter = self._waiters[rid] = _RpcWaiter()
         try:
-            response = self.server.dispatch({"jsonrpc": "2.0", "id": rid, "method": method, "params": params},
-                                            self.transport)
+            frame = {"jsonrpc": "2.0", "id": rid, "method": method, "params": params}
+            if getattr(self.server, "takes_timeout", False):
+                # The gateway's own listener answers in the call: hold it to this budget.
+                response = self.server.dispatch(frame, self.transport, timeout=timeout)
+            else:
+                response = self.server.dispatch(frame, self.transport)
             if response is None:
                 # A slow method answers from Hermes' worker pool.
                 if not waiter.done.wait(timeout):
@@ -775,6 +818,8 @@ class _WatchJobs:
 
     def _start_session(self, job: "_WatchJob", instructions: str) -> Dict[str, Any]:
         """Creates the job's Hermes chat and submits its task; the start's answer."""
+        kept = False  # in its bot's work registry, whose row a failure then settles
+        profile: Optional[str] = None
         try:
             # A job on another profile runs on that profile's own model, as
             # the phone's does: the voice-job model is this profile's.
@@ -801,6 +846,9 @@ class _WatchJobs:
                 job.stored_session_id = stored if isinstance(stored, str) else ""
                 cancelled = job.status == "cancelled"
             if not cancelled:
+                # Before its turn, so the turn's hooks find its row.
+                _keep_in_registry(profile, job.stored_session_id or sid, job.title, instructions)
+                kept = True
                 self.rpc("prompt.submit", {"session_id": sid, "text": WATCH_JOB_PROMPT.format(instructions=instructions)})
                 with self.lock:
                     job.turn_open = True
@@ -819,6 +867,9 @@ class _WatchJobs:
                 self.changed.notify_all()
             if not isinstance(exc, WatchJobError):
                 watch_tools._log_watch_failure("Starting a Watch job failed", exc)
+            if kept:
+                _registry_start_failed(profile, job.stored_session_id or job.session_id,
+                                       job.error or type(exc).__name__)
             self._close_session(job)
             if job.status == "cancelled":
                 return {"ok": True, "status": "not_started", "title": job.title,
@@ -827,6 +878,8 @@ class _WatchJobs:
                     "message": f"Hermes couldn't start the job: {job.error}"}
         if cancelled:
             # cancel_job got there while it started, and said so.
+            if kept:
+                _registry_start_failed(profile, job.stored_session_id or job.session_id, "cancelled before it started")
             self._close_session(job)
             return {"ok": True, "status": "not_started", "title": job.title,
                     "message": f"{job.title} was cancelled before it started."}

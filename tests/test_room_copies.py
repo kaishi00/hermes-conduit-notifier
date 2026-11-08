@@ -33,6 +33,7 @@ class Log:
     def __init__(self):
         self.rooms = {}
         self.reads = []
+        self.epoch = 1  # later once Hermes moves the room into its gateway's store
 
     def add(self, room_id, kind, payload, actor=None):
         events = self.rooms.setdefault(room_id, [])
@@ -52,7 +53,7 @@ class Log:
         page = events[since_seq:since_seq + limit]
         cursor = page[-1]["seq"] if page else since_seq
         return {"events": json.loads(json.dumps(page)), "cursor": cursor, "latest_seq": len(events),
-                "has_more": cursor < len(events), "authority": {"gateway_id": FURINA, "epoch": 1}}
+                "has_more": cursor < len(events), "authority": {"gateway_id": FURINA, "epoch": self.epoch}}
 
 
 class HermesError(Exception):
@@ -670,3 +671,36 @@ def test_a_copy_your_agents_left_stays_left_once_its_invite_is_forgotten(copies)
     shown = copy_of(copies, "laifu", room_id)
 
     assert (shown["status"], shown["reason"]) == ("left", "left")
+
+
+def test_a_page_at_a_later_epoch_gets_the_copys_agents_grants_for_it(copies):
+    room_id = started(copies, links=("link1",))
+    copies.furina.pass_once()
+    key = f"link1/{room_id}"
+    assert copies.laifu.store.read()["invites"][key]["authority_epoch"] == 1
+
+    # Hermes moved the room into its gateway's store: it goes on at epoch 3.
+    copies.log.epoch = 3
+    say(copies, room_id, "Still on?")
+    copies.clock.now += 60
+    copies.furina.pass_once()
+
+    assert copy_of(copies, "laifu", room_id)["last_seq"] == 2
+    assert copies.laifu.store.read()["invites"][key]["authority_epoch"] == 3
+    copies.laifu.pass_once()
+    [(_, body, _)] = _sent(copies, "room.grant")
+    assert copies.member["laifu"].decode(body["grant"], "dispatch")["authority_epoch"] == 3
+
+
+def test_a_room_moved_while_nothing_went_on_still_sends_its_later_epoch(copies):
+    room_id = started(copies, links=("link1",))
+    copies.furina.pass_once()
+    key = f"link1/{room_id}"
+    copies.clock.now += 60
+    copies.furina.pass_once()  # nothing new: no page
+
+    copies.log.epoch = 3  # Hermes moved the room, and nothing has been said in it since
+    copies.clock.now += 60
+    copies.furina.pass_once()
+
+    assert copies.laifu.store.read()["invites"][key]["authority_epoch"] == 3

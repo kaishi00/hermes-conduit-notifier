@@ -13,6 +13,600 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.141.2 (2026-11-08)
+
+### Fixes
+- Pulse made two or three copies of the same card from one check, and the
+  morning brief came more than once: on a host with profiles, each profile's
+  copy of the plugin ran Pulse. Now only one does.
+- Pulse cards came back after you marked them Done: one oddly saved date
+  made every check skip looking at earlier cards. That date no longer stops
+  it, and a card you marked Done or put away keeps the same words from
+  coming back for a month.
+
+## 0.141.1 (2026-11-08)
+
+### Fixes
+- A bot's work kept showing "Needs you" after you answered its question in
+  the Bot Chat or in the reply field on its card: the answer waited behind
+  the question instead of answering it. Your answer now answers the
+  question, and the work carries on. The bot passes on only what you said
+  in that chat, never an answer of its own.
+
+## 0.141.0 (2026-11-08)
+
+### Fixes
+- On a host whose dashboard runs on its own beside the gateway, a room with
+  linked people stopped working once the gateway restarted: Hermes moves
+  such rooms into the gateway, and the plugin kept using the old, frozen
+  copy. The other people's copies stopped getting new messages, and their
+  agents' turns were refused. Rooms now follow Hermes into the gateway, the
+  gateway takes the rooms' mail, and the other people's agents get grants
+  for the room as it goes on. New rooms start in the gateway whenever it
+  runs.
+
+## 0.140.3 (2026-11-08)
+
+### Fixes
+- A card's choice field that listed the same option twice (Yes and yes)
+  reached the phone with both, so its picker couldn't tell them apart. It
+  now keeps one of each, and a choice left with fewer than two options is
+  dropped.
+
+## 0.140.2 (2026-11-08)
+
+### Fixes
+- A card's date field holding a day that doesn't exist, like 31 February,
+  showed today but sent the impossible date; now it starts empty.
+- A card field asking for a PIN code or an MFA code, or a PIN written next
+  to Chinese or Japanese text or in full-width letters, wasn't refused as
+  a secret.
+- A tap on a card showing a long diff could be turned away as too large.
+- A tap whose message didn't go after all could be heard by a later message
+  starting with the same words; now it's forgotten.
+
+## 0.140.1 (2026-11-08)
+
+### Fixes
+- When a send failed just as its "sent from your iPhone, spoken" note was
+  still on its way, the note could land afterwards and label the next
+  message with the same words from another device. It's dropped now.
+- A bot driving its screen rewrote the screen's hold file on every click;
+  it now renews the hold every 30 seconds, and the wait for a free screen
+  reads it once a look.
+- A Linked Room's work ask that the owner left unanswered kept the host
+  reading it every 5 seconds for up to a day; after two minutes it's read
+  every 30 seconds, without locking the file.
+
+## 0.140.0 (2026-11-08)
+
+### New and improved
+- Hermes can build its own cards for anything the ready-made ones don't fit,
+  like an email ready to send, a day's agenda or an idea to act on: text,
+  numbers, tags, pictures, progress bars, fields to fill in and buttons.
+- Any card can carry buttons that open a link, Maps, Calendar or Reminders,
+  copy text, send a message, or ask Hermes to do something. A tap reaches
+  Hermes as your message, with what the card showed and what you filled in,
+  and the card then shows how it went. A button that sends, buys or deletes
+  asks you first.
+- Hermes can save a card it builds as a template and fill it by name later,
+  so cards it shows often come up faster.
+
+## 0.139.3 (2026-11-08)
+
+### New and improved
+- Your agents now point you to Settings › Multiplayer (Conduit's new name
+  for People) when they mention the people you've linked with.
+
+## 0.139.2 (2026-11-08)
+
+### Fixes
+- A bot with workstreams on couldn't show cards in its Bot Chat: asked for
+  a card, it started a workstream, whose card showed only in the
+  workstream's own chat. The Bot Chat now draws its own cards.
+- A Bot Chat looking something up couldn't read the rest of a long web page
+  it had just fetched, so it answered from the start of the page.
+- A chat open in Conduit on two devices at once didn't get Conduit's cards
+  (the weather, a plan, a chart) or know which device sent the message, so
+  answers came as plain text.
+
+## 0.139.1 (2026-11-07)
+
+### Fixes
+- On a gateway's own listener (the Webapp), a Watch job, Pulse or a Watch
+  call whose turn a gateway restart cut off held every later message in that
+  chat until someone discarded it. The plugin now lets go of its own cut-off
+  turn before its next message. A turn you sent yourself is left for you, and
+  Conduit shows it so you can resend or discard it. A turn cut off before
+  this update is left for you too.
+
+## 0.139.0 (2026-11-07)
+
+### New and improved
+- Linked Rooms: everyone in a room now sees the other people's agents with
+  their own pictures and glow colors, and each person's picture by their
+  messages, as their owner's Conduit shows them.
+
+## 0.137.5 (2026-11-07)
+
+### Fixes
+- Updating the plugin from Conduit, or setting up Linked Rooms, could leave
+  the gateway on the old plugin on a host where systemd runs it as root (an
+  LXC host, say): Hermes' own restart stopped with "Refusing to install the
+  gateway system service as root". The plugin now restarts the gateway
+  through systemd there.
+
+## 0.137.4 (2026-11-07)
+
+### Fixes
+- With step summaries on in Conduit, Hermes Desktop showed each summary's
+  long "Look back at the tool calls…" question and its answer as a btw note
+  in the chat. Conduit now asks the plugin, which answers only the phone
+  that asked.
+
+## 0.137.3 (2026-11-07)
+
+### Fixes
+- A bot that wrote a link to its work in its own words (Zhongli's "W7:
+  Provision the LXC") showed a plain link in its Bot Chat instead of the work
+  card. The plugin now puts the link back as Conduit and Hermes Desktop read
+  it.
+
+## 0.137.2 (2026-11-07)
+
+### Fixes
+- The Hermes dashboard no longer reads all of the plugin's code each time it
+  lists its plugins. That took seconds on a server and minutes on a phone,
+  enough to freeze the dashboard and drop Conduit's connection.
+
+## 0.137.1 (2026-11-07)
+
+### Fixes
+- Tapping a file link in a project chat now opens the file when the link
+  starts at the project's top folder and the chat worked in a subfolder.
+  Before, Conduit said the file wasn't on the server.
+- A file link in a chat with no folder of its own is also looked for in your
+  terminal's working folder, where Hermes wrote it.
+
+## 0.137.0 (2026-11-07)
+
+### Fixes
+- A work update a group room couldn't take now reaches your Bot Chat even if
+  Hermes restarts at just the wrong moment.
+
+### New and improved
+- In a Linked Room, a room with other people's agents, you can now turn on
+  Run work for your bot. It can then start work for the room, and each
+  start asks you on your phone first: Start, change the words, or Don't
+  start. In a call, say "start it": a plain yes doesn't start work. What the work finds reaches your bot privately, and it shares only
+  what your rules for that room allow. You turn it on for each room: a
+  new room never starts with it on.
+
+## 0.136.0 (2026-11-07)
+
+### New and improved
+- A bot in one of your group rooms can now start work from the room, like
+  making an image you asked for there, instead of asking you to repeat it in
+  its Bot Chat. The work shows in its Work panel as usual, and when it's
+  done the result is posted back in the room and the bot passes it on.
+
+## 0.135.0 (2026-11-07)
+
+### Fixes
+- A plugin update or gateway restart that met a running task said only
+  "Letting running tasks finish…", for up to half an hour, without naming
+  the task. Conduit now shows each one (which bot's chat, its title, how
+  long it has run) and when the gateway restarts anyway.
+- The update waited up to 30 minutes for running tasks before it even sent
+  the restart, and then the gateway could wait 30 more. Its own wait is now
+  10 minutes.
+
+### New and improved
+- Restart now, under that list, stops the chats it names and restarts the
+  gateway at once. Work Conduit can't stop, such as a scheduled job, is
+  ended by a forced restart through systemd.
+
+## 0.134.10 (2026-11-07)
+
+### Fixes
+- A call could open with "pick up and I'll tell you more", which makes no
+  sense once you've answered. The call now says the news itself in that
+  first sentence.
+
+## 0.134.9 (2026-11-06)
+
+### Fixes
+- Asking Hermes to call you while calls are off for that profile now gets a
+  clear answer and a link to turn them on. Before, Hermes said it couldn't
+  call and set up a call watch to ring instead, which checked every 5
+  minutes and couldn't ring either.
+
+## 0.134.8 (2026-11-06)
+
+### Fixes
+- On a Local Live call with a speech server that reads text aloud, a filler
+  the server says on its own while Hermes works ("let me look that
+  up") was dropped, so you heard silence instead. You now hear it, Hermes'
+  answer plays once it ends, and talking over it or tapping Stop stops it like
+  the rest of the reply.
+
+## 0.134.7 (2026-11-06)
+
+### Fixes
+- Maps lookups from or to a saved place, such as Home, no longer give
+  distances to the metre or turn-by-turn steps, which together could show
+  where the place is. Distances are rounded to 100 m (with Conduit's next
+  update), and the maps tool tells the agent so.
+
+## 0.134.6 (2026-11-06)
+
+### New and improved
+- When Local Live's fast model can't be reached, the call now says so as
+  itself ("this one will take me a little longer") instead of saying it's
+  passing your request to Hermes.
+
+## 0.134.5 (2026-11-06)
+
+### Fixes
+- Updating the plugin from Conduit works again on a host where Hermes was
+  updated while its dashboard kept running. Before, the update failed with
+  "'PythonDeclaration' object has no attribute 'installs_packages'" until the
+  dashboard was restarted by hand.
+
+## 0.134.4 (2026-11-06)
+
+### Fixes
+- A workstream that needs you on the bot's screen now always says so to its
+  Bot Chat, also when its chat was compacted during that turn. Before, the
+  Bot Chat could hear only that it finished.
+- A workstream's card keeps showing that it drives the screen after its
+  chat is compacted.
+- When many chats wait for the screen at once, a workstream is no longer
+  told it will hear when the screen is free unless it's on the list, and one
+  bot's waiters no longer push another bot's off a shared host's list.
+- A workstream that couldn't be told the screen is free (its bot was at its
+  limit of running work) is tried again after a growing pause, not every
+  few seconds.
+
+## 0.134.3 (2026-11-06)
+
+### Fixes
+- In a Linked Room whose Group Settings pick who answers (a lead bot, or
+  automatically), a post from someone linked now gets routed like your own
+  messages. Before, only their first post was, and every later one went to
+  everyone.
+
+## 0.134.2 (2026-11-06)
+
+### Fixes
+- Pulse no longer brings up apps you haven't connected in Hermes (a calendar,
+  reminders, mail or any other): leaving one unconnected is your choice, so it
+  stops sending a card about it every day, and briefs no longer say they may
+  be missing something because of it. Cards like that from the last three
+  days go away at their next daily check.
+
+## 0.134.1 (2026-11-06)
+
+### Security
+- A card no longer draws hidden characters that make text read in a
+  different order than it holds, like the Trojan Source trick in code. In a
+  diff line each one now shows as a � mark, so the review and Copy Changes
+  show it's there; in titles and other text they're dropped.
+
+## 0.134.0 (2026-11-06)
+
+### New and improved
+- One of a bot's chats drives its screen at a time: while a workstream, the
+  Bot Chat or another chat is clicking on it, the others wait their turn
+  instead of fighting over the mouse, and a workstream that waited hears
+  when the screen is free. Conduit shows who has the screen now.
+- A workstream that needs you on the bot's screen (a sign-in, a 2FA code, a
+  CAPTCHA) says so on its card in Conduit, with the screen one tap away.
+
+## 0.133.4 (2026-11-06)
+
+### Fixes
+- Pulse's reports and morning brief no longer come back as "Context was
+  compacted. The previous response is complete — awaiting your next
+  message." When Hermes compacts Pulse's chat as a report starts, the report
+  still gets written, and the cards and pushes that only said that are gone.
+  A bot woken in its Bot Chat as Hermes compacts it gets to work rather than
+  answering with that line.
+
+## 0.133.3 (2026-11-06)
+
+### Fixes
+- A tapped file name now opens the file when its folder or file name has an
+  apostrophe in it, like `John's Projects`. On an SSH profile, a tap on a file
+  in a folder with brackets in its name no longer opens a wrong file of the
+  same name.
+- A tapped file name opens the right file when a folder in its path ends in
+  a comma, semicolon, bar or space, rather than a file of the same name
+  elsewhere (not on an SSH profile, whose files aren't checked).
+
+## 0.133.2 (2026-11-05)
+
+### New and improved
+- Notifications, Live Activity updates and answers to Hermes' questions
+  reach the relay sooner: the connection to it stays open between them
+  instead of being set up again every time.
+
+## 0.133.1 (2026-11-05)
+
+### Fixes
+- A diff card names a file with accents or other non-English letters as
+  it's spelled, like `café.txt`, where it showed escape codes before.
+- When cards can't be drawn, their text version no longer ends inside an
+  unclosed code block when it's cut to fit, so a long diff or code sample
+  shows whole lines and the rest of the reply reads as text.
+
+## 0.133.0 (2026-11-05)
+
+### New and improved
+- Hermes can show changes as a diff card: a review, a commit, a config it
+  edited or two versions of a text, with each file's added and removed
+  lines, line numbers and colors. Long diffs stay on your host and open a
+  file at a time, so they don't slow the chat down.
+
+## 0.132.2 (2026-11-05)
+
+### Fixes
+- One reading the host can't keep, like a sleep or workout that ends
+  before it starts or runs past a week, no longer stops a whole health
+  sync, and with it every good reading in it. The host leaves that one out,
+  counts it and keeps the rest. Calendar events, reminders and arrivals at
+  a saved place work the same way.
+
+## 0.132.1 (2026-11-05)
+
+### Fixes
+- A tapped file name now opens the file when its folder or file name has
+  spaces or brackets in it, like `My Project` or `Report (final).pdf`, and
+  when the name ends in punctuation. Before, Conduit said it wasn't on the
+  server.
+
+## 0.132.0 (2026-11-05)
+
+### New and improved
+- Tapping a file a reply names by its name, like `AppState.swift`, opens the
+  file Hermes actually worked on, found from the chat's own steps, instead
+  of saying it can't be found.
+
+## 0.131.3 (2026-11-05)
+
+### Fixes
+- In a typed chat, Hermes could say something was on your screen when
+  nothing was shown: text it put up for a call's screen waited for a call
+  that wasn't open. Hermes now hears to write it in its reply, and cards it
+  shows in a typed chat stay in the chat.
+
+## 0.131.2 (2026-11-05)
+
+### Fixes
+- Updating the plugin from Conduit while a chat was running left Hermes
+  unreachable for up to 30 minutes, and the update said the gateway didn't
+  restart. The update now waits for running chats to finish while the
+  gateway keeps serving, then restarts it. A restart that still has to wait
+  shows as waiting rather than failing.
+
+## 0.131.1 (2026-11-05)
+
+### Fixes
+- Pulse could tell you work hadn't started when it had already finished in
+  a chat: after a first step got done, the rest of that chat was hidden from
+  its report, so it read the silence as "not started". Pulse now reads what
+  the chat said after each step got done, and never claims something hasn't
+  happened just because it can't see it.
+
+## 0.131.0 (2026-11-05)
+
+### New and improved
+- Conduit can show every chat waiting on your approval or answer, in every
+  profile: a count on the profile strip, a banner when another chat starts
+  waiting, and a Needs you list that opens each one at its card.
+
+## 0.130.5 (2026-11-05)
+
+### Fixes
+- Pulse could remember the same thing twice and bring it up twice: when you
+  said it in two profiles' chats, said it again in other words around it, or
+  it was noted once as something you want to do and once as something you're
+  considering. It now keeps one, and brings the one it has up to date.
+
+## 0.130.4 (2026-11-04)
+
+### Fixes
+- A GPT-Live call that should open with a greeting, or a call from Hermes,
+  started in silence: OpenAI's model no longer speaks first when told to, so
+  only Conduit's second ask a few seconds later got it talking, and on the
+  Apple Watch nothing did. Conduit now opens these calls itself, so the
+  greeting comes within a second.
+
+## 0.130.3 (2026-11-04)
+
+### Fixes
+- Pulse read a message you sent with a picture as if you had also written
+  your recalled memories and Conduit's notes for that turn, which Hermes
+  stores after the picture. It now reads only what you wrote.
+
+## 0.130.2 (2026-11-04)
+
+### Fixes
+- A Bot Chat handed its memory provider's tools, such as Hindsight's
+  retain and recall, to a workstream. It now calls them itself, as it does
+  Hermes' own memory.
+
+## 0.130.1 (2026-11-04)
+
+### Fixes
+- A resolved workstream's link didn't open in Hermes Desktop ("Session
+  owner could not be resolved"). Resolving it now shows its chat in
+  Desktop's Sessions list, and work resolved before is shown once.
+
+## 0.130.0 (2026-11-04)
+
+### Fixes
+- An old copy of Conduit you no longer open, on another iPhone or iPad,
+  kept Hermes from drawing boards and cut tables, timelines and tabs from
+  them. Now only the Conduits you've used in the last three days count.
+- With Tool Search on, Hermes often answered in text, the weather for one,
+  without looking for the board tool. It's now told where to find it.
+
+### New and improved
+- Hermes Desktop can draw the boards Hermes shows, as cards in the reply,
+  once you turn on "Conduit boards" in Desktop's Capabilities › Plugins.
+  Without it, Desktop keeps getting the board as text.
+
+## 0.129.1 (2026-11-04)
+
+### Fixes
+- A bot that passed on a workstream's link in its own words left out the
+  part Hermes Desktop opens, so the workstream couldn't be opened there.
+  Bots now give the link as written, outside any code block.
+
+## 0.129.0 (2026-11-04)
+
+### New and improved
+- Boards in group rooms: cards an agent shows in a room on your Hermes
+  appear under its message there, instead of as text.
+
+## 0.128.0 (2026-11-04)
+
+### New and improved
+- Boards: Hermes can show tables you can sort, day-by-day plans,
+  checklists, ranked lists, progress toward goals and tips or warnings as
+  cards in the chat, up to 12 at once, as tabs when there are many, with
+  follow-up buttons that ask the next question in a tap.
+- Checklist ticks are kept on your Hermes, so every one of your devices shows
+  the same ones, and Hermes hears what you ticked at your next message.
+- When part of a card can't be shown, Hermes is told exactly what and why,
+  so it can fix it and show it again; and every card set carries its text,
+  which Conduit shows in a card's place whenever it can't draw it.
+- Outside Conduit (Hermes Desktop, a messaging app) and in group rooms, Hermes gets the cards
+  as text to put in its reply instead of an error.
+
+## 0.127.6 (2026-11-03)
+
+### Fixes
+- Pulse: on a Hermes older than v0.22.0, Pulse could be on and never run,
+  and Settings asked for a restart that didn't help. It runs there now, and
+  a Hermes that can't run it says so in Settings and in its log.
+
+## 0.127.5 (2026-11-03)
+
+### Fixes
+- A host whose clock ran more than an hour fast sent every encrypted
+  notification as a plain "Hermes" banner that opened nothing, with no sign
+  why. It now dates them by the push relay's clock and says in its log how
+  far off the host's clock is.
+
+## 0.127.4 (2026-11-03)
+
+### Fixes
+- Bot Mode: on Hermes Desktop, which doesn't list workstreams, there was no
+  way to open one or answer its approval. The Bot Chat's links to its work
+  now open the workstream in Desktop too, and a workstream waiting on you
+  comes with its link.
+
+## 0.127.3 (2026-11-03)
+
+### Fixes
+- Hermes could say it can't call you, set an alarm or add a reminder, even
+  with Conduit set up for it: each Conduit tool now opens its description
+  with what it does, short enough for Hermes' tool list to show it whole.
+- Asked to call you when something happens later ("call me when the results
+  are certified"), Hermes could set up a job that only sends a message, or
+  call right away. It's now told to set up a call watch, checked every few
+  hours for something slow.
+
+## 0.127.2 (2026-11-03)
+
+### Fixes
+- Workspace files: an empty file (a .gitkeep, say) uploaded from Conduit's
+  Folder tab always failed. It now uploads as an empty file.
+
+## 0.127.1 (2026-11-03)
+
+### New and improved
+- Bot Mode: a Bot Chat now also looks things up itself by default, so a
+  quick question gets a quick answer instead of starting a workstream. A bot
+  you set to only coordinate in Edit Bot > Work keeps that.
+- Bot Mode: a Bot Chat that looks things up hands setting or removing a
+  place rule to a workstream, as it does anything else that changes
+  something.
+
+## 0.127.0 (2026-11-03)
+
+### New and improved
+- Bot Mode: a bot's Bot Chat can coordinate work of its own. It starts
+  workstreams (each a chat of its own, with an optional worktree for coding
+  work), follows them, and reports back in the Bot Chat. Conduit shows them
+  in the bot's Work panel and on Bots Home.
+- This is on for every bot after the update. A Bot Chat then only
+  coordinates: its terminal, file and web tools run in a workstream instead
+  of in the Bot Chat itself. Edit Bot > Work lets a bot look things up
+  itself as well, or turns workstreams off so its Bot Chat runs its own
+  tools as before.
+- Bots can ask each other for help and answer, and a workstream picks up
+  again after Hermes restarts.
+- Edit Bot > Work: whether a bot starts workstreams, asks before it does, or
+  never does, and the model its workstreams use.
+- A voice call's "call me when it's done" jobs show in the bot's Work panel,
+  and a Bot Chat call tells you what its coordinator reported.
+- Scheduled jobs delivered to a Bot Chat just show their report by default.
+  Turn on "Let the bot act on it" for a job to have the bot follow up on
+  each run.
+
+## 0.126.2 (2026-11-03)
+
+### Fixes
+- With the plugin in a named profile, Settings > Pulse's Set up Pulse made
+  Pulse's chat in the default profile, where Pulse never looks, so Pulse sent
+  nothing. Pulse now tells Conduit which profile it runs in, so the chat is
+  made there, and when a chat titled Pulse is in another profile, Settings >
+  Pulse says which one.
+
+## 0.126.1 (2026-11-02)
+
+### Fixes
+- Predictions could show one suggested reply fewer than you chose: a
+  suggestion between 201 and 280 characters took a place, then Conduit left
+  it out as too long for a chip. Those are now left out on the host, so a
+  shorter one takes the place.
+
+## 0.126.0 (2026-11-02)
+
+### Fixes
+- On a host where Conduit connects to Hermes' Webapp (`hermes webapp`)
+  instead of `hermes dashboard`, Predictions said the chat isn't open,
+  Watch jobs and a Watch call's Hermes chat ran where the phone couldn't
+  see them, Pulse sent nothing, and messages from CarPlay or the Watch lost
+  the note saying where they came from. Those work there now. Predictions
+  answer there only while Hermes still holds the chat, up to an hour after
+  its last reply; a chat opened after Hermes restarts gets none until it
+  replies again.
+- A message Hermes refused, or that Conduit never sent (Conduit takes its
+  note back when the send fails), no longer leaves its
+  "sent from CarPlay" (or iPhone, Watch...) note waiting, where the same words
+  sent from another app in that chat could pick it up. One whose answer was
+  lost on the way keeps it, since Hermes may have taken it, and on Hermes'
+  Webapp a note left behind still lapses after 15 minutes.
+
+## 0.125.0 (2026-11-02)
+
+### New and improved
+- Linked Rooms: you can let your agent use MCP servers you choose in rooms
+  with people you've linked. They stay off unless you pick them in the room
+  setup, a server added later stays out, and their tools work only in rooms
+  where Custom names them.
+
+## 0.124.0 (2026-11-01)
+
+### New and improved
+- Predictive's fast model is now one of Hermes' helper models, named
+  "Conduit predictions", so you can pick it in Conduit under Models &
+  providers > Helper models, or on Hermes' own Models page.
+
 ## 0.123.3 (2026-11-01)
 
 ### Fixes

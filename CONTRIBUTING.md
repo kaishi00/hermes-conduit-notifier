@@ -79,10 +79,14 @@ before merging. CI fails a PR whose version main already has.
 ## Tests
 
 CI (`.github/workflows/tests.yml`) runs all three suites on every PR and every
-push to main. To run them locally:
+push to main, the plugin's in parallel. The Pulse persona suite
+(`tests/test_pulse_personas.py`, about 8 minutes of simulations) runs in a job
+of its own, on a change to a `pulse*.py`, a Pulse test, `tests/conftest.py`,
+the test requirements or the workflow, and daily (Eric, 2026-11-02). To run
+them locally:
 
     pip install -r tests/requirements.txt
-    python -m pytest --rootdir=tests tests
+    python -m pytest --rootdir=tests tests -n auto --dist worksteal
     (cd relay && npm test)
     (cd mailbox && npm test)
 
@@ -112,6 +116,15 @@ To run them locally (Linux or macOS, about a minute):
 
     upstream/install-hermes.sh v0.22.5 /tmp/hermes
     HERMES_BIN=/tmp/hermes/.venv/bin/hermes /tmp/hermes/.venv/bin/python -m pytest --rootdir=upstream upstream
+
+## Fork PRs
+
+Open a PR from a fork as a draft, and mark it ready when you've finished
+pushing. The opencode reviews run on a trusted contributor's PR (the list in
+`.github/workflows/opencode-review.yml`) once it's ready and on every push
+after that, never while it's a draft. Anyone else's fork PR is reviewed after
+a maintainer adds the `run-review` label. CI builds every push, once GitHub
+no longer asks a maintainer to approve a first-time contributor's runs.
 
 ## Review labels
 

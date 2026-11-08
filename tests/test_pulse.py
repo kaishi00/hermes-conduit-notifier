@@ -78,6 +78,7 @@ host = _load("conduit_push.pulse_host", ROOT / "pulse_host.py")
 ledger = _load("conduit_push.pulse_ledger", ROOT / "pulse_ledger.py")
 report = _load("conduit_push.pulse_report", ROOT / "pulse_report.py")
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
+compaction_skip = _load("conduit_push.compaction_skip", ROOT / "compaction_skip.py")
 memory = _load("conduit_push.pulse_memory", ROOT / "pulse_memory.py")
 
 SID = "20261019_165824_560887"  # a Conduit chat's stored id, as Eric's host showed it
@@ -317,6 +318,18 @@ def test_a_failed_turn_is_seen(db, tmp_path):
     assert turn.failed and turn.reply == ""
 
 
+def test_hermes_status_line_after_a_compaction_is_no_reply(db, tmp_path):
+    # Hermes compacted the chat as the hidden turn began and wrote its status
+    # line instead of running the model (compaction_skip): no report there.
+    db.session()
+    db.message("user", "Pulse shadow report pBBBB-1.", display_kind="hidden")
+    db.message("assistant", "Context was compacted. The previous response is complete — awaiting your next message.")
+    turn = hermes.find_turn(tmp_path, chat_id=SID, tag="pBBBB-1", since=0)
+    assert (turn.reply, turn.reply_id, turn.skipped) == ("", None, compaction_skip.SKIPPED_DETAIL)
+    state, detail = delivery.derive_state(turn, state=store.RUNNING, age_s=9, sent_by_earlier_process=False)
+    assert (state, detail) == (store.FAILED, compaction_skip.SKIPPED_DETAIL)
+
+
 def test_missing_state_db_is_unreadable_not_empty(tmp_path):
     with pytest.raises(hermes.HermesUnreadable):
         hermes.find_home_chat(tmp_path, "Pulse")
@@ -344,6 +357,7 @@ S = store
     (TURN(SID, "", False, False), S.RUNNING, 9, False, delivery.ENDED, 10, S.RUNNING),
     (TURN(SID, "", False, False), S.RUNNING, 90, False, delivery.ENDED, delivery.REPLY_GRACE_S, S.FAILED),
     (TURN(SID, "", False, False), S.RUNNING, delivery.STUCK_S, False, "", 0, S.FAILED),
+    (TURN(SID, "", False, False, skipped=compaction_skip.TIMED_OUT_DETAIL), S.RUNNING, 9, False, "", 0, S.FAILED),
 ])
 def test_state_comes_from_hermes_rows(turn, state, age, earlier, prior, unchanged, expected):
     got, _detail = delivery.derive_state(turn, state=state, age_s=age, sent_by_earlier_process=earlier,
@@ -677,6 +691,43 @@ def test_nothing_is_sent_outside_the_chat_host(live, db, monkeypatch):
     assert live.sent() == []
 
 
+def test_a_hermes_before_the_host_flag_runs_pulse_in_its_dashboard(live, db, monkeypatch):
+    """notifier#513: a plugin manager with no has_tui_message_injector (Hermes
+    before v0.22.0) runs Pulse where the dashboard's web server is loaded."""
+    db.session()
+    live.store.set("enabled", True)
+    live.ctx._manager = types.SimpleNamespace()
+    monkeypatch.delitem(sys.modules, pulse.DASHBOARD_MODULE, raising=False)
+    pulse.tick()  # the CLI on that Hermes
+    assert live.sent() == []
+    assert pulse.host_problem() == ""
+    monkeypatch.setitem(sys.modules, pulse.DASHBOARD_MODULE, types.ModuleType(pulse.DASHBOARD_MODULE))
+    pulse.tick()
+    assert len(live.sent()) == 1
+    assert live.store.get("last_tick_at")
+
+
+def test_a_dashboard_that_cant_run_pulse_says_so(live, db, monkeypatch, caplog):
+    db.session()
+    live.store.set("enabled", True)
+    live.ctx._manager = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, pulse.DASHBOARD_MODULE, types.ModuleType(pulse.DASHBOARD_MODULE))
+    monkeypatch.delitem(sys.modules, "tui_gateway.server")  # no session host
+    monkeypatch.setattr(pulse, "_said_no_host", False)
+    with caplog.at_level("WARNING"):
+        pulse.tick()
+        pulse.tick()
+    assert live.sent() == []
+    assert sum("can't run it" in record.getMessage() for record in caplog.records) == 1
+    assert control.state(live.store, pulse.get_hermes_home())["host_problem"] == "hermes_too_old"
+    # The dashboard's routes run their own copy of the module, never registered.
+    monkeypatch.setattr(pulse, "_ctx", None)
+    assert pulse.host_problem() == "hermes_too_old"
+    # The messaging gateway's own listener waits on its session authority instead.
+    monkeypatch.setattr(pulse.host, "gateway_runs_here", lambda: True)
+    assert pulse.host_problem() == ""
+
+
 def test_nothing_is_sent_where_pulse_turns_cant_be_recognized(live, db, monkeypatch):
     db.session()
     live.store.set("enabled", True)
@@ -875,7 +926,8 @@ def test_pulse_command(live, db, capsys, monkeypatch):
     assert run("status") == 0
     out = capsys.readouterr().out
     assert f"Home chat: Pulse ({SID})" in out
-    assert "hasn't run Pulse" in out  # no tick yet
+    assert "hasn't run Pulse" in out
+    assert "its log says when its Hermes can't run Pulse" in out  # no tick yet
     pulse.tick()
     assert run("status") == 0 and "Dashboard last checked" in capsys.readouterr().out
     assert run("home", "other-chat") == 0 and live.store.get("home_session_key") == "other-chat"
@@ -1705,6 +1757,26 @@ def test_a_probe_and_a_report_due_together_go_on_separate_ticks(live, db):
     assert len(live.sent()) == 2 and live.sent()[1].startswith("Pulse report")
 
 
+def test_a_report_without_a_list_skips_lines_a_card_says_already(live, db):
+    # Eric, 2026-11-08: with every candidate list failing, reports went out
+    # as Hermes wrote them, and their lines came back as cards he'd marked done.
+    db.session()
+    _due_report(live)
+    [done] = live.store.add_cards([{"kind": "noticed", "level": "screen", "topic": "commitment",
+                                    "news": "Send the deck to Mara before Friday (you said so in Work)",
+                                    "created_at": time.time() - 86400}])
+    live.store.mark_done(done, None, closed_by="user", now=time.time() - 3600)
+    live.store.set("report_requested", True)
+    pulse.tick()
+    row = live.store.in_flight()[0]
+    db.message("user", row["text"], display_kind="hidden")
+    db.message("assistant", REPLY.replace("3. [weird] Something else", "3. [promise] I said I'd check the build; "
+                                          "it failed (tool calls)"))
+    pulse.tick(now=time.time() + 1)
+    made = [card["news"] for card in live.store.cards() if card["id"] != done]
+    assert made == ["I said I'd check the build; it failed (tool calls)"]
+
+
 def test_ratings_are_read_back_and_counted(live, db):
     db.session()
     _due_report(live)
@@ -1858,6 +1930,36 @@ def test_an_early_report_stands_in_for_the_scheduled_one(live, db):
     assert len(live.sent()) == 1
 
 
+@pytest.mark.parametrize("schema", SCHEMAS)
+def test_a_pulse_chat_in_another_profile_is_named_and_the_profile_reported(schema, tmp_path):
+    # Issue 1681: Pulse runs in a named profile, and its chat was made in the
+    # default one, which Pulse never reads.
+    root = tmp_path / "root"
+    home = root / "profiles" / "rei-ii"
+    home.mkdir(parents=True)
+    StateDB(home, schema).session(sid="mine", title="Notes")
+    stray = StateDB(root, schema)
+    store_ = store.open_store(home)
+    plain = 'Pulse has no chat titled "Pulse" yet; set it up in Settings > Pulse'
+    assert pulse.home_chat(store_, home, looks_elsewhere=True) == (None, plain)
+    stray.session(sid="stray")
+    assert pulse.home_chat(store_, home, looks_elsewhere=True) == (None, (
+        'Pulse runs in profile "rei-ii" and has no chat titled "Pulse" there (profile "default" has one, '
+        "which this Pulse doesn't read); set it up in Settings > Pulse"))
+    assert control.state(store_, home)["home_problem"].startswith('Pulse runs in profile "rei-ii"')
+    # The loop's own calls don't read every profile's store.
+    assert pulse.home_chat(store_, home) == (None, plain)
+    work = root / "profiles" / "work"
+    work.mkdir()
+    StateDB(work, schema).session(sid="work-pulse")
+    assert pulse.home_chat(store_, home, looks_elsewhere=True)[1].startswith(
+        'Pulse runs in profile "rei-ii" and has no chat titled "Pulse" there (profiles "default" and "work" have one,')
+    # Conduit makes, hides and opens the chat in the profile Pulse names.
+    assert control.state(store_, home)["profile"] == "rei-ii"
+    assert control.feed(store_, home)["profile"] == "rei-ii"
+    assert control.state(store_, root)["profile"] == "default"
+
+
 def test_the_whole_home_chain_is_left_out_of_the_report(db, tmp_path):
     db.session("root", title="Pulse")
     db.session(SID, title="Pulse", parent="root")  # the home chat set by id to a compression tip
@@ -1873,6 +1975,28 @@ def test_the_whole_home_chain_is_left_out_of_the_report(db, tmp_path):
     assert [row["content"] for row in rows] == ["from orphan", "from orphan-tip", "from w"]
     rows = hermes.recent_messages(tmp_path, exclude_chat="orphan-tip", since=0)
     assert "from orphan" not in [row["content"] for row in rows]
+
+
+def test_a_bots_workstreams_are_not_chats_the_person_had(db, tmp_path):
+    # Hermes shows a resolved workstream so Desktop's link opens it (notifier
+    # #540); its brief and replies are the bot's, so Pulse still reads past it.
+    work_store = _load("conduit_push.work_store", ROOT / "work_store.py")
+    work_store.Store(tmp_path).add("workstream", title="Disk", status="done", session_id="ws")
+    db.session()
+    db.session("w", title="Work", pinned=0)
+    db.session("ws", title="Disk", pinned=0)
+    db.session("ws-tip", title="Disk", pinned=0, parent="ws")
+    db.session("ws-tip2", title="Disk", pinned=0, parent="ws-tip")  # continued twice
+    now = time.time()
+    for sid in ("w", "ws", "ws-tip", "ws-tip2"):
+        db.message("user", f"from {sid}", sid=sid, at=now - 60)
+    assert [row["content"] for row in hermes.recent_messages(tmp_path, exclude_chat=SID, since=0)] == ["from w"]
+    work_store.Store(tmp_path).add("workstream", title="Pulse", status="done", session_id="ws-pulse")
+    db.session("ws-pulse", title="Pulse", pinned=1)  # a resolved workstream that took the home chat's name
+    assert [chat.chat_id for chat in hermes.find_home_chat(tmp_path, "Pulse")] == [SID]
+    assert [row["chat_id"] for row in hermes.chat_activity(tmp_path, exclude_chat=SID, since=0)] == ["w"]
+    assert [row["chat_id"] for row in hermes.later_messages(tmp_path, after=0, exclude=[SID], max_chars=50,
+                                                             limit=10)] == ["w"]
 
 
 def test_recent_messages_are_bounded(db, tmp_path):
@@ -2229,6 +2353,29 @@ def test_chat_reads_match_hermes(db, tmp_path):
     assert [(r["role"], r["content"]) for r in rows] == [("assistant", "h")]
 
 
+_RECALLED = ("<memory-context>\n[System note: The following is recalled memory context, NOT new user input. "
+             "Treat as authoritative reference data — this is the agent's persistent memory and should inform "
+             "all responses.]\n\nThe user speaks English.\n</memory-context>")
+
+
+def test_a_picture_turns_stored_context_is_not_the_users_words(db, tmp_path):
+    # Hermes stores a picture turn's recalled memory and plugin notes after
+    # its [screenshot] line (Hermes #71998); Pulse reads only what was typed.
+    db.session()
+    db.session("work", title="Work", pinned=0)
+    db.message("user", "Is this mould?\n[screenshot]\n" + _RECALLED + "\n\nConduit note for this turn.",
+               sid="work", at=DAY + 20)
+    db.message("assistant", "It looks like it. [screenshot] stays in a reply.", sid="work", at=DAY + 30)
+    db.message("user", "Hi\n\n" + _RECALLED, sid="work", at=DAY + 40)
+    rows = hermes.chat_messages(tmp_path, chat_id="work", after_id=0, since=0, max_chars=2000, limit=10)
+    assert [r["content"] for r in rows] == ["Is this mould?\n[screenshot]",
+                                           "It looks like it. [screenshot] stays in a reply.", "Hi"]
+    # Cut off before the fence closes, it goes to the end.
+    assert hermes.typed("Look [screenshot] <memory-context> [System note: cut") == "Look [screenshot]"
+    assert hermes.typed("hello\n[screenshot]") == "hello\n[screenshot]"
+    assert hermes.typed(None) is None
+
+
 @pytest.fixture
 def remembering(live, db, monkeypatch):
     live.store.set("memory_since", DAY)
@@ -2368,10 +2515,10 @@ def test_a_reminded_commitment_is_closable_for_two_weeks_and_said_again_is_new(r
         "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}])
     _reminded(store_, kept, DAY + 86400)
     shown = lambda now: [item["id"] for item in store_.remembered_items(
-        profile="", limit=10, reminded_since=now - memory.REMINDED_KEEP_S)]
+        limit=10, reminded_since=now - memory.REMINDED_KEEP_S)]
     assert shown(DAY + 86400 + memory.REMINDED_KEEP_S) == [kept]
     assert shown(DAY + 86400 + memory.REMINDED_KEEP_S + 1) == []
-    remembered = store_.remembered_items(profile="", limit=10, reminded_since=DAY)
+    remembered = store_.remembered_items(limit=10, reminded_since=DAY)
     chunk = [_row(1, "user", "I'll renew my passport this week", DAY + 3 * 86400)]
     items, _, _ = memory.extract(FakeModel({"items": [
         {"kind": "commitment", "text": "x", "evidence": "I'll renew my passport this week", "line": 1,
@@ -2596,6 +2743,141 @@ def test_other_profiles_are_remembered_with_their_name(remembering, db, tmp_path
     assert (item["profile"], item["chat_id"]) == ("nahida", "b1")
     assert len(model.shown) == 1 and report.their_home_chat(bot_home) == "bp"
     assert memory.describe(item, UTC).startswith("#1 [nahida] The user's mum's birthday is 3 March.\n")
+
+
+def test_a_thing_said_in_two_profiles_chats_is_one_item(remembering, db, tmp_path, request):
+    # Notifier #550: memory compared a chat with its own profile's items only,
+    # so the same thing said in a bot's chat and the main chat was kept twice.
+    bot_home = tmp_path / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, request.node.callspec.params["db"])
+    bot.session("b1", title="Bot Chat", pinned=0)
+    bot.message("user", "We're hosting Christmas dinner this year", sid="b1", at=DAY + 60)
+    bot.message("assistant", "Lovely.", sid="b1", at=DAY + 70)
+    sources = [("", tmp_path, SID), ("nahida", bot_home, "")]
+    fact = {"kind": "fact", "text": "The user is hosting Christmas dinner this year.", "line": 1, "explicit": True}
+    _remember(remembering, FakeModel({"items": [{**fact, "evidence": "We're hosting Christmas dinner this year"}]}),
+              DAY + 70 + memory.IDLE_S, sources)
+    [first] = remembering.store.open_items("fact")
+    assert first["profile"] == "nahida"
+    db.message("user", "Reminder to self: we host Christmas dinner, so plan the menu", sid="work", at=DAY + 4000)
+    db.message("assistant", "Noted.", sid="work", at=DAY + 4010)
+    # The model is shown the bot's item beside the main chat, and names it.
+    model = FakeModel({"items": [{**fact, "evidence": "we host Christmas dinner", "same_as": first["id"]}],
+                       "closed": []})
+    _remember(remembering, model, DAY + 4010 + memory.IDLE_S, sources)
+    assert f"#{first['id']} fact: The user is hosting Christmas dinner" in model.shown[0]
+    [item] = remembering.store.open_items("fact")
+    assert (item["id"], item["profile"], item["mentioned_at"]) == (first["id"], "nahida", DAY + 4000)
+
+
+def test_a_chat_closes_and_replaces_another_profiles_item(remembering):
+    store_ = remembering.store
+    [promise, plan] = store_.advance("nahida", "b1", message_id=1, at=DAY, items=[
+        {"kind": "promise", "text": "Hermes will send the report.", "evidence": "I'll send the report",
+         "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY},
+        {"kind": "interest", "text": "The user is considering a Voice Preview Edition.",
+         "evidence": "thinking about a Voice Preview Edition", "explicit": 1, "due": "", "due_at": None,
+         "message_id": 1, "mentioned_at": DAY}])
+    [new] = store_.advance("", "work", message_id=5, at=DAY + 60, items=[
+        {"kind": "intention", "text": "The user will buy a Voice Preview Edition.", "evidence": "I'll get the Voice PE",
+         "explicit": 1, "due": "", "due_at": None, "message_id": 5, "mentioned_at": DAY + 60, "replaces": plan}],
+        closed=[{"id": promise, "status": "done", "evidence": "Report's in my inbox", "message_id": 5}])
+    assert store_.item(promise)["status"] == "done"
+    assert store_.item(plan)["superseded_by"] == new and store_.item(new)["profile"] == ""
+
+
+def test_a_word_for_word_repeat_the_shortlist_missed_is_still_a_repeat():
+    # Notifier #550: "midterm elections dashboard" shared too few words with
+    # the stored "election dashboard" commitment to be shown to the model.
+    kept = {**_open(14, "commitment", "The user will check the election dashboard at 18:30 on 2026-11-03.",
+                    "I'll check the election dashboard at 6:30", chat="other"), "status": "open"}
+    reminded = {**_open(15, "commitment", "The user will water the plants.", "water the plants",
+                      chat="other"), "status": "reminded", "closed_at": DAY}
+    chunk = [_row(1, "user", "Midterms tonight! I'll look at it at 6:30", DAY + 60)]
+    said = {"items": [{"kind": "commitment", "text": "The user will check the election dashboard at 18:30 on "
+                       "2026-11-03.", "evidence": "I'll look at it at 6:30", "line": 1},
+                      {"kind": "commitment", "text": "The user will water the plants.",
+                       "evidence": "Midterms tonight", "line": 1},
+                      {"kind": "interest", "text": "The user will check the election dashboard at 18:30 on "
+                       "2026-11-03.", "evidence": "Midterms tonight!", "line": 1}]}
+    shortlist = memory.candidates([kept, reminded], chunk, "work")
+    assert shortlist == []
+    items, _, _ = memory.extract(FakeModel(said), chunk, UTC, remembered=shortlist, repeats=[kept, reminded])
+    # Another kind, or a commitment Pulse already reminded of, is not a repeat.
+    assert [item["same_as"] for item in items] == [14, None, None]
+    items, _, _ = memory.extract(FakeModel(said), chunk, UTC, remembered=shortlist)
+    assert [item["same_as"] for item in items] == [None, None, None]
+
+
+def test_one_plan_said_as_an_intention_and_an_interest_in_one_reply_is_kept_once():
+    chunk = [_row(1, "user", "I might set up a voice assistant for Home Assistant", DAY + 60)]
+    items, _, _ = memory.extract(FakeModel({"items": [
+        {"kind": "intention", "text": "x", "evidence": "set up a voice assistant for Home Assistant", "line": 1},
+        {"kind": "interest", "text": "y", "evidence": "set up a voice assistant for Home Assistant", "line": 1},
+        {"kind": "commitment", "text": "z", "evidence": "set up a voice assistant for Home Assistant", "line": 1}]}),
+        chunk, UTC)
+    assert [item["kind"] for item in items] == ["intention", "commitment"]
+
+
+def test_other_profiles_newer_items_never_hide_this_chats_own(remembering, db, monkeypatch):
+    monkeypatch.setattr(memory, "MAX_OPEN", 10)  # the report's window, not memory's
+    store_ = remembering.store
+    [mine] = store_.advance("", "work", message_id=1, at=DAY, items=[{
+        "kind": "intention", "text": "The user wants to learn the cello.", "evidence": "I want to learn the cello",
+        "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}])
+    store_.advance("nahida", "b1", message_id=1, at=DAY + 5, items=[
+        {"kind": "fact", "text": f"Fact {n}.", "evidence": f"fact number {n}", "explicit": 1, "due": "",
+         "due_at": None, "message_id": 1, "mentioned_at": DAY + 5 + n} for n in range(memory.MAX_CANDIDATES + 5)])
+    db.message("user", "Thinking of signing up for lessons", sid="work", at=DAY + 600)
+    db.message("assistant", "Nice.", sid="work", at=DAY + 610)
+    model = FakeModel({"items": []})
+    _remember(remembering, model, DAY + 610 + memory.IDLE_S)
+    assert f"#{mine} intention: The user wants to learn the cello." in model.shown[0]
+
+
+def test_an_old_item_still_meets_its_word_for_word_repeat(remembering, db, monkeypatch):
+    monkeypatch.setattr(memory, "MAX_OPEN", 10)  # the report's window, not memory's
+    store_ = remembering.store
+    old = {"kind": "commitment", "text": "The user will renew the passport.", "evidence": "I'll renew the passport",
+           "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}
+    [kept] = store_.advance("", "other", message_id=1, at=DAY, items=[old])
+    store_.advance("nahida", "b1", message_id=1, at=DAY + 5, items=[
+        {**old, "text": f"The user will do task {n}.", "evidence": f"I'll do task {n}", "mentioned_at": DAY + 5 + n}
+        for n in range(memory.MAX_CANDIDATES + 5)])
+    db.message("user", "Oh and I need to sort out that document", sid="work", at=DAY + 600)
+    db.message("assistant", "Noted.", sid="work", at=DAY + 610)
+    model = FakeModel({"items": [{"kind": "commitment", "text": "The user will renew the passport.",
+                                  "evidence": "I need to sort out that document", "line": 1}]})
+    _remember(remembering, model, DAY + 610 + memory.IDLE_S)
+    assert f"#{kept} " not in model.shown[0]  # not on the shortlist
+    assert store_.item(kept)["mentioned_at"] == DAY + 600
+    assert len(store_.open_items("commitment")) == memory.MAX_CANDIDATES + 6
+
+
+def test_this_chats_newest_are_its_own_profiles():
+    # Another profile's chat may share this chat's id: its items aren't this chat's.
+    mine = [{**_open(n, "fact", f"Fact {n}.", f"fact {n}", chat="c1"), "profile": ""} for n in range(1, 4)]
+    theirs = [{**_open(n, "fact", f"Fact {n}.", f"fact {n}", chat="c1", at=DAY + 9), "profile": "nahida"}
+              for n in range(10, 30)]
+    shown = memory.candidates(theirs + mine, [_row(1, "user", "hello there", DAY + 60)], "c1", "")
+    assert [item["id"] for item in shown] == [1, 2, 3]
+
+
+def test_an_intention_and_an_interest_about_one_plan_are_one_item():
+    # Notifier #550: one idea kept as both an intention and an interest made two cards.
+    remembered = [_open(3, "intention", "The user wants to set up a Home Assistant voice assistant.",
+                        "I want a voice assistant for Home Assistant"),
+                  _open(4, "fact", "The user's sister is Ana.", "my sister is Ana")]
+    chunk = [_row(1, "user", "I'm considering a Voice Preview Edition, and I'll call Ana", DAY + 60)]
+    items, _, _ = memory.extract(FakeModel({"items": [
+        {"kind": "interest", "text": "x", "evidence": "considering a Voice Preview Edition", "line": 1, "same_as": 3},
+        {"kind": "commitment", "text": "x", "evidence": "I'll call Ana", "line": 1, "same_as": 4}]}),
+        chunk, UTC, remembered=remembered)
+    # A commitment taken as a fact's repeat would lose its reminder: only the plan's two kinds cross.
+    assert [(item["kind"], item["same_as"]) for item in items] == [("interest", 3), ("commitment", None)]
+    assert "one plan is an intention or an interest, never both" in memory.INSTRUCTIONS
+    assert 'For "same_as" and "replaces", an intention and an interest' in memory.INSTRUCTIONS
 
 
 def test_model_calls_run_in_this_profiles_secret_scope(remembering, monkeypatch):
@@ -3322,3 +3604,37 @@ def test_do_it_checks_run_with_follow_ups_off(remembering, monkeypatch):
     assert ran == [("acts", float("inf")), "followups"]
     assert store_.get("followup_usage")["checks"] == 2  # each act check counted once
     assert store_.get("followup_today") == {"day": day, "tokens": 0}  # nor spent from follow-ups' day
+
+
+def test_an_app_the_user_never_connected_is_left_out(recording):
+    """An unconnected app is the user's choice (Eric, 2026-11-06: cards every
+    day that calendar and reminders connectors weren't set up). Hermes's own
+    wordings are dropped, recorded the way its hook sends them (str of the
+    result's "error"); an expired connection the user did set up stays."""
+    home = pulse.get_hermes_home()
+    unset = ["Hosted connectors are not set up for this user yet. Call manage_connections to connect the app first; "
+             "that sets them up.",
+             {"code": "CONNECTION_REQUIRED", "message": "The google_calendar connector is not connected for this "
+                                                        "account."},
+             "This app is not connected. Call manage_connections to open a connection card for it; there is no "
+             "link to show the user."]
+    for at, error in enumerate(unset):
+        ledger.record(home, tool_name=f"connector_{at}", args={"query": "calendar"}, status="error",
+                      error_message=str(error), result=json.dumps({"error": error}), now=DAY + at)
+    expired = {"code": "CONNECTION_EXPIRED",
+               "message": "The gmail connector connection for this account has expired and must be reconnected."}
+    ledger.record(home, tool_name="connector_x", args={"query": "mail"}, status="error", error_message=str(expired),
+                  result=json.dumps({"error": expired}), now=DAY + 10)
+    failed = _failed(recording)
+    assert "connector_x" in failed and failed.count("\n- ") == 1
+    for prompt in (candidates.INSTRUCTIONS, report.REPORT_TEXT, sys.modules["conduit_push.pulse_ahead"].INSTRUCTIONS,
+                   sys.modules["conduit_push.pulse_brief"].NOTE, sys.modules["conduit_push.pulse_brief"].LOOK_NOTE,
+                   sys.modules["conduit_push.pulse_followup"].NOTE, sys.modules["conduit_push.pulse_followup"].LOOK_NOTE):
+        assert ledger.UNSET_RULE in prompt
+    assert "isn't connected or set up is never an item" in sys.modules["conduit_push.pulse_memory"].INSTRUCTIONS
+    for stale in ("FOUND_INSTRUCTIONS", "HELD_INSTRUCTIONS", "RESTED_INSTRUCTIONS"):  # a card already made goes
+        assert "isn't connected or set up, which is the user's choice" in getattr(
+            sys.modules["conduit_push.pulse_followup"], stale)
+    followups = sys.modules["conduit_push.pulse_followup"]
+    for checks in (followups.INSTRUCTIONS, followups.COMMITMENT_INSTRUCTIONS, followups.WATCH_INSTRUCTIONS):
+        assert checks.endswith(ledger.UNSET_RULE)  # a check's news can be a card with no turn after it

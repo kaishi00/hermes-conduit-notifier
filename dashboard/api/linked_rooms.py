@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException, Request, Response
 
-from . import core, phone_data
+from . import core, phone_data, self_update
 
 logger = core.logger
 router = core.router
@@ -397,9 +397,10 @@ def room_invites(action: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
         logger.warning("Conduit plugin: couldn't start Linked Rooms' mailbox loop", exc_info=True)
         loop = None
     posts = core._plugin_package_module("room_posts")
+    looks = core._plugin_package_module("room_looks")
     try:
         answer = action(module.start(root))
-    except (module.RoomsError, posts.PostsError) as exc:
+    except (module.RoomsError, posts.PostsError, looks.LooksError) as exc:
         raise core.TokenError(exc.status, str(exc), exc.code)
     if loop is not None:
         loop.wake()
@@ -554,6 +555,36 @@ async def get_room_people(response: Response, room_id: Optional[str] = None) -> 
     it's yours), and each member with its owner's name (null for yours)."""
     response.headers["Cache-Control"] = "no-store"
     return await _room_invites_route(None, lambda rooms: _room_people(rooms, room_id), "people")
+
+
+# How your bots and you look in rooms over Links (room_looks.py): Conduit
+# gives its Hermes each bot's picture and glow color, and yours, and reads
+# how everyone else in a room looks, as their own Conduits gave it.
+ROOM_LOOKS_MAX_BODY_BYTES = 512 * 1024
+
+
+@router.put("/rooms/looks")
+async def put_room_looks(request: Request, response: Response) -> Any:
+    """How your agents and you look to the other people in rooms over
+    Links: ``agents``, profile to ``{picture, color}`` (a JPEG or PNG of at
+    most 8 KB, base64, and ``#RRGGBB``, each null when there's none), and
+    ``person``, yours. It takes the place of what was sent before, and goes
+    to each started room's people on the rooms loop's next pass."""
+    response.headers["Cache-Control"] = "no-store"
+    body = await core._read_json_body(request, ROOM_LOOKS_MAX_BODY_BYTES)
+    looks = core._plugin_package_module("room_looks")
+    return await _room_invites_route(None, lambda rooms: {"looks": looks.put_own(rooms.root, body)}, "looks")
+
+
+@router.get("/rooms/looks")
+async def get_room_looks(response: Response, room_id: Optional[str] = None) -> Any:
+    """How a room over Links looks: ``members``, member id to ``{picture,
+    color}`` for other people's agents; ``people``, each other person but
+    the host as ``{name, poster, look}``; and ``home``, the host's look
+    when it isn't you. Empty until their Hermes sends them."""
+    response.headers["Cache-Control"] = "no-store"
+    looks = core._plugin_package_module("room_looks")
+    return await _room_invites_route(None, lambda rooms: looks.shown(rooms.root, room_id), "room looks")
 
 
 # Your agents' approvals from rooms other people host (room_approvals.py):
@@ -770,6 +801,14 @@ def _optional_module(name: str) -> Any:
         return None
 
 
+def _watch_room_restart(gateway: Any) -> None:
+    """Watches the restart just spawned: on a root system unit Hermes' restart dies on its own
+    install check, and systemd restarts the gateway instead (self_update)."""
+    proc = (getattr(gateway, "_ACTION_PROCS", None) or {}).get("gateway-restart")
+    if proc is not None:
+        self_update.watch_restart_for_root_refusal(proc)
+
+
 def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
     """Restarts the host gateway (the default profile's), which starts the
     API server: Hermes' own restart after a settings save, which says so
@@ -784,6 +823,7 @@ def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
                 spawn("default", interrupt=True)
             else:
                 spawn("default")
+            _watch_room_restart(gateway)
             return {"started": True, "busy": False, "error": None}
         refusal_of = getattr(gateway, "live_session_refusal", None)
         refusal = refusal_of("default", "restart") if callable(refusal_of) else None
@@ -792,10 +832,13 @@ def _restart_room_gateway(interrupt: bool) -> Dict[str, Any]:
         after = getattr(gateway, "_restart_gateway_after", None)
         if callable(after):
             answer = after("default", what="Linked Rooms setup", label="Linked Rooms setup")
+            if answer.get("restart_started"):
+                _watch_room_restart(gateway)
             return {"started": bool(answer.get("restart_started")), "busy": bool(answer.get("restart_busy")),
                     "error": answer.get("restart_error") or None}
         if callable(spawn):
             spawn("default")
+            _watch_room_restart(gateway)
             return {"started": True, "busy": False, "error": None}
     except Exception as exc:  # noqa: BLE001 - the save stays; the answer says the restart didn't start
         # Its text stays in the log: it can name this host's paths.
@@ -818,14 +861,15 @@ def room_setup(profile: Optional[str], body: Any = _ROOM_SETUP_READ) -> Dict[str
     read = body is _ROOM_SETUP_READ
     if not read:
         if not isinstance(body, dict):
-            raise core.TokenError(400, 'Expected {"ceiling": [...], "interrupt": false}', "bad_request")
+            raise core.TokenError(400, 'Expected {"ceiling": [...], "mcp_servers": [...], "interrupt": false}',
+                                  "bad_request")
         if not isinstance(body.get("interrupt", False), bool):
             raise core.TokenError(400, "interrupt is true or false", "bad_request")
     try:
         hermes = _room_setup_hermes(module)
         if read:
             return module.state(hermes, home, name)
-        answer = module.apply(hermes, home, name, ceiling=body.get("ceiling"))
+        answer = module.apply(hermes, home, name, ceiling=body.get("ceiling"), mcp_servers=body.get("mcp_servers"))
     except module.SetupError as exc:
         raise core.TokenError(exc.status, str(exc), exc.code)
     if "restart" in answer["needs"]:
@@ -861,7 +905,8 @@ async def get_room_setup(request: Request, response: Response, profile: Optional
 @router.post("/rooms/setup")
 async def post_room_setup(request: Request, response: Response, profile: Optional[str] = None) -> Any:
     """Sets this Hermes up for rooms, with ``ceiling`` (the saved one, or
-    the default, without it), and restarts the gateway when the API server
+    the default, without it) and ``mcp_servers`` (the profile's MCP servers
+    it names; the saved ones without it), and restarts the gateway when the API server
     isn't running: ``restart.busy`` while chats run, which ``interrupt``
     overrides."""
     response.headers["Cache-Control"] = "no-store"

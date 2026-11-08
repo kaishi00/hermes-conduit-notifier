@@ -53,6 +53,15 @@ they run:
                           dashboard has open
     rooms                 Room files, room pictures and the room planner
     workspace             Artifacts and workspace files
+    workstreams           Bot workstreams: the Work panel, and Reply, Stop,
+                          Continue and Check first on a workstream, and
+                          the bot's work settings (Edit Bot > Work)
+    waiting               Hermes is waiting on you: every chat with an
+                          approval or a question waiting, for the Needs you
+                          list
+    boards                Boards: the ticks on conduit_show's checklist cards,
+                          the boards agents showed in group rooms, and the
+                          boards Hermes Desktop draws
     capabilities          Capabilities: the features this plugin serves, as
                           Conduit reads them
     self_update           Self restart and self update

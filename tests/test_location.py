@@ -185,6 +185,16 @@ def test_a_private_place_hides_everything_but_itself(store, phone):
     assert stored["lat"] is None and stored["area"] is None and stored["precision"] == "places"
 
 
+def test_an_arrival_the_store_cant_keep_is_left_out_not_the_batch(store, phone):
+    # Issue 555: an arrival at a place deleted in the meantime used to
+    # refuse the whole batch, the fix and the good arrival with it.
+    good = {"id": "e_home", "kind": "arrive", "place_id": "p_home", "at": "2026-10-13T06:50:00+01:00"}
+    gone = {"id": "e_gym", "kind": "arrive", "place_id": "p_gym", "at": "2026-10-13T06:52:00+01:00"}
+    result = store.ingest(phone.seal(phone.batch(fix=fix(place_id="p_home"), events=[good, gone])))
+    assert result["events"] == 1 and result["skipped_events"] == 1
+    assert store.snapshot()["fix"]["place_id"] == "p_home"
+
+
 def test_making_a_place_private_forgets_what_it_revealed(store, phone):
     arrive = {"id": "e_home", "kind": "arrive", "place_id": "p_home", "at": "2026-10-13T06:50:00+01:00"}
     store.ingest(phone.seal(phone.batch(fix=fix(place_id="p_home"), events=[arrive])))

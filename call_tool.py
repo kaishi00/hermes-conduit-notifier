@@ -33,15 +33,18 @@ SETTINGS_LINK = "[Calls from Hermes](conduit://settings/calls)"
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Phone the user through the Conduit app: their iPhone rings like a call, and when they answer, "
-        "a live voice conversation opens in this chat. The call goes out when this turn ends, so finish "
-        "the work first and end the turn with the result as your final reply; the call opens with your "
-        "reason and that reply. Use it when the user asked to be called, phoned or rung (\"call me when "
-        "it's done\"), with asked_by_user true. Without such a request, only for news the user would want "
-        "right away and can't wait for them to look (asked_by_user false; refused unless the user lets "
-        "Hermes decide). Never for routine updates. It doesn't ring while the user is in a voice call "
-        "with you. To call when something happens later (\"call me if the site goes down\"), use "
-        "conduit_call_watch instead. Before calling on your own judgment, load "
+        "Phone the user through Conduit: their iPhone rings when this turn ends. "
+        "When they answer, a live voice conversation opens in this chat. The call goes out when this turn "
+        "ends, so finish the work first and end the turn with the result as your final reply; the call opens "
+        "with your reason and that reply. Use it when the user asked to be called, phoned or rung about what "
+        "this turn does (\"call me when it's done\"), with asked_by_user true. Without such a request, only "
+        "for news the user would want right away and can't wait for them to look (asked_by_user false; "
+        "refused unless the user lets Hermes decide). Never for routine updates. To call when something "
+        "happens after this turn (\"call me if the site goes down\", \"call me when the results are "
+        "certified\"), set up a call watch with conduit_call_watch, not a job that only sends a message: this "
+        "tool rings only at the end of the turn that uses it (for arriving at or leaving a place, use a place "
+        "rule with a call). It doesn't ring while the user is in a voice call with you, "
+        "but a call watch set up during one still calls later. Before calling on your own judgment, load "
         f"skill_view(\"conduit_push:{SKILL_NAME}\")."
     ),
     "parameters": {
@@ -51,7 +54,8 @@ SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "One short spoken sentence: why you're calling and the news, said first when they "
-                    "answer (for example \"The deploy finished, and two tests failed.\"). Up to 200 characters."
+                    "answer, so never tell them to pick up or that you'll tell them more (for example \"The deploy "
+                    "finished, and two tests failed.\"). Up to 200 characters."
                 ),
             },
             "asked_by_user": {
@@ -95,13 +99,14 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool], skill_path: Any) -> N
 
 
 def available() -> bool:
-    """Shown to the model only while this profile is paired and some call
-    Hermes can ask for is on."""
+    """Shown to the model whenever this profile is paired, calls off
+    included: the handler then tells the user how to turn them on. Hidden
+    while they were off, a model asked "call me" found only the call watch
+    tool and set up a watch that "fires right away" instead. Hermes also
+    caches a tool's availability for the whole process, across profiles, so
+    it can't follow one profile's call settings (see call_watches)."""
     try:
-        if client.load_state() is None:
-            return False
-        settings = calls.settings()
-        return bool(settings["enabled"] and (settings["when_asked"] or settings["decides"]))
+        return client.load_state() is not None
     except Exception:  # noqa: BLE001
         return False
 
@@ -152,10 +157,14 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
         calls.tool_watch(session, reason, asked=asked)
     except ValueError as error:
         if str(error) == "calls_off":
-            note = ("The user hasn't turned on calls they ask for in Conduit. Tell them in your reply, and that "
-                    f"they turn them on in Conduit's Settings, under {SETTINGS_LINK} (a link that opens it; "
-                    "leave the link out of anything spoken).") if asked else (
-                    "The user hasn't let Hermes decide when to call. Don't call; put the news in your reply.")
+            # Off as a whole ("Hermes can call me") or only this kind of call.
+            off = (("The user has calls from Hermes off in Conduit" if not calls.settings()["enabled"] else
+                    "The user hasn't turned on calls they ask for in Conduit") if asked else
+                   "The user hasn't let Hermes decide when to call")
+            note = (f"{off}. Tell them in your reply, and that they turn them on in Conduit's Settings, under "
+                    f"{SETTINGS_LINK} (a link that opens it; leave the link out of anything spoken). Don't set up "
+                    "a call watch or anything else to call instead: it can't ring either.") if asked else (
+                    f"{off}. Don't call; put the news in your reply.")
             return {"ok": False, "error": "calls_off", "note": note}
         if str(error) == "too_many":
             return {"ok": False, "error": "too_many", "note": "Too many calls are already waiting. Put the news in your reply."}

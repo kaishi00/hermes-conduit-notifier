@@ -513,7 +513,9 @@ CHAT_SUMMARY_INSTRUCTIONS = (
     "Keep the facts, decisions, the user's preferences, open questions and anything promised for later. "
     "Plain prose, at most 200 words, in the conversation's language. Return only the summary.")
 _CHAT_MATCH_NUMBER = re.compile(r"^(?:(?:number|no\.?|#)\s*)?(\d{1,2})$", re.IGNORECASE)
-_CHAT_APP_LINK = re.compile(r"[ \t]*\[(?:\\.|[^\]\\\n])*\]\(conduit://[^)\s]*\)", re.IGNORECASE)
+# A work link's Desktop reference after it (work_tool._link) goes with it.
+_CHAT_APP_LINK = re.compile(r"[ \t]*\[(?:\\.|[^\]\\\n])*\]\(conduit://[^)\s]*\)"
+                            r"(?:[ \t]*@session:[A-Za-z0-9_.:/-]*[A-Za-z0-9_])?", re.IGNORECASE)
 
 # A read can take its whole budget (a summary included): enough workers that
 # a few Watch calls at once don't queue past the Watch's 35 s wait.

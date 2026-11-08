@@ -142,12 +142,25 @@ MAX_OUTCOMES = 20
 # Calls whose outcome a turn has taken, so a late retry of the report isn't
 # heard twice: kept as long as an outcome could still arrive.
 MAX_TOLD = 64
-# What Hermes waits on in a chat while an alert can call about it, so a call
-# answered on the Apple Watch, with no chat open, can read the choices or the
-# command and answer them (hermes-conduit designs/hermes-call-clarify.md).
-# Kept only while alert calls are on, and gone once answered elsewhere.
-WAITING_TTL_S = 2 * 3600
-MAX_WAITING = 10
+# What Hermes waits on in a chat: Conduit's "Needs you" list reads every
+# one (``waiting_list``, issue 1705), and while an alert can call about it,
+# a call answered on the Apple Watch, with no chat open, can read the
+# choices or the command and answer them (hermes-conduit
+# designs/hermes-call-clarify.md). Only a wait kept with alert calls on is
+# ``followed``, so only those are a call's to read or answer. Gone once
+# answered anywhere.
+# As long as Hermes' longest clarify wait (clarify_loop's day), so a question
+# still waiting stays listed; the list itself drops one Hermes gave up on
+# sooner (``waiting_list``'s ``max_age``).
+WAITING_TTL_S = 24 * 3600
+# A call reads and answers a followed wait for as long as it always could, so
+# an approval's follower still ends once its wait is that old.
+FOLLOWED_TTL_S = 2 * 3600
+# Every chat waiting at once, in one profile.
+MAX_WAITING = 32
+# The list's line for a wait: an approval's description, a question's text.
+MAX_WAITING_SUMMARY_CHARS = 240
+MAX_WAITING_TITLE_CHARS = 120
 MAX_WAITING_QUESTIONS = 8
 MAX_WAITING_CHOICES = 12
 MAX_WAITING_TEXT_CHARS = 600
@@ -280,6 +293,27 @@ _SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # The shape the call event carries (events.sanitize_call).
 _WATCH_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")
 _thread_lock = threading.Lock()
+
+# answers_ready's "not yet" per (file, batch), kept while the file is unchanged.
+_not_ready: dict[tuple[str, str], tuple[int, int, int, int]] = {}
+_not_ready_lock = threading.Lock()
+NOT_READY_KEPT = 64
+# A file written this recently could be written again within the same
+# timestamp tick, unseen by a stat (git's "racy" files): never trusted.
+SETTLED_NS = 2_000_000_000
+
+
+def _settled_signature(path: Path) -> tuple[int, int, int, int] | None:
+    """The file as a stat sees it, once it is old enough that any later write
+    shows up as a change; None while it is missing or just written. Every
+    writer replaces the file whole (_save), so a write always changes this."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    if time.time_ns() - stat.st_mtime_ns < SETTLED_NS:
+        return None
+    return (stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
 
 
 class CallStore:
@@ -483,14 +517,16 @@ class CallStore:
     # --- What Hermes waits on -----------------------------------------------
 
     def note_waiting(self, session_id: str | list[str], kind: str, *, request_id: str = "",
-                     questions: Any = None, description: Any = "", command: Any = "") -> bool:
+                     questions: Any = None, description: Any = "", command: Any = "",
+                     title: Any = "") -> bool:
         """Hermes waits on the user in ``session_id`` (or the ids its session
-        goes by): a question batch (``request_id``, the clarify loop's own
-        decision id, and ``questions``) or an approval (``description`` and
-        ``command``). Kept so a call about it can read and answer it with no
-        chat open. Only with alert calls on (False otherwise: nothing is
-        written). A newer wait of the same kind in the session replaces the
-        older one."""
+        goes by, the chat titled ``title``): a question batch (``request_id``,
+        the clarify loop's own decision id, and ``questions``) or an approval
+        (``description`` and ``command``). Kept for Conduit's "Needs you"
+        list always, and so a call about it can read and answer it with no
+        chat open while alert calls are on: True only then (the wait is
+        ``followed``). A newer wait of the same kind in the session replaces
+        the older one."""
         if kind not in ALERT_KINDS:
             raise ValueError(f"unknown wait {kind}")
         named = session_id if isinstance(session_id, list) else [session_id]
@@ -499,10 +535,10 @@ class CallStore:
         except ValueError:
             return False
         settings = self.settings()
-        if not settings["enabled"] or not settings["alerts"]:
-            return False
+        followed = bool(settings["enabled"] and settings["alerts"])
         entry = _waiting_entry({
             "id": secrets.token_hex(12), "session_ids": ids, "kind": kind, "at": self.clock(),
+            "followed": followed, "title": title,
             "request_id": request_id, "questions": questions, "description": description,
             "command": command if isinstance(command, str) else "",
             "command_sha": hashlib.sha256(command.encode("utf-8")).hexdigest() if isinstance(command, str) and command else "",
@@ -511,12 +547,14 @@ class CallStore:
         if entry is None:
             return False
         with self._locked() as state:
-            if not state["settings"]["enabled"] or not state["settings"]["alerts"]:
-                return False
+            entry["followed"] = bool(state["settings"]["enabled"] and state["settings"]["alerts"])
+            if not entry["followed"]:
+                # Only listed: no call ever reads its command, so none is kept.
+                entry.update(command="", command_sha="", cut=False)
             kept = [item for item in state["waiting"]
                     if not (item["kind"] == kind and set(item["session_ids"]) & set(ids))]
-            state["waiting"] = [*kept, entry][-MAX_WAITING:]
-            return True
+            state["waiting"] = _capped_waiting([*kept, entry])
+            return entry["followed"]
 
     def forget_waiting(self, session_id: Any, kind: str | None = None) -> int:
         """The wait ended (answered anywhere, or the turn moved on): how many
@@ -543,8 +581,32 @@ class CallStore:
         if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
             return None
         session_id = session_id.strip()
-        found = [item for item in self._load()["waiting"] if session_id in item["session_ids"]]
+        now = self.clock()
+        found = [item for item in self._load()["waiting"] if _calls_wait(item, now) and session_id in item["session_ids"]]
         return _public_waiting(max(found, key=lambda item: item["at"])) if found else None
+
+    def waiting_list(self, *, max_age: dict[str, float] | None = None,
+                     leave_out: Any = ()) -> list[dict[str, Any]]:
+        """Every chat Hermes waits on the user in, newest first, for
+        Conduit's "Needs you" list: each wait's kind, the ids its chat goes
+        by, the chat's title, a line saying what it waits on and when it
+        began. A wait older than ``max_age`` for its kind (Hermes gives up
+        on it then) and a chat in ``leave_out`` (a bot's workstreams, which
+        their Work panel shows) are left out. Never answers anything."""
+        if not self.path.exists():
+            return []
+        now = self.clock()
+        ages = max_age or {}
+        hidden = {value for value in leave_out if isinstance(value, str)}
+        out = []
+        for item in self._load()["waiting"]:
+            limit = ages.get(item["kind"])
+            if limit is not None and now - item["at"] >= limit:
+                continue
+            if hidden & set(item["session_ids"]):
+                continue
+            out.append(_listed_waiting(item))
+        return sorted(out, key=lambda entry: entry["at"], reverse=True)
 
     def answer_waiting(self, session_id: Any, *, answer: Any = None, choice: Any = None,
                        question: Any = None, reason: Any = None) -> dict[str, Any]:
@@ -563,7 +625,8 @@ class CallStore:
             raise ValueError("session_id must be a session id")
         session_id = session_id.strip()
         with self._locked() as state:
-            found = [item for item in state["waiting"] if session_id in item["session_ids"]]
+            now = self.clock()
+            found = [item for item in state["waiting"] if _calls_wait(item, now) and session_id in item["session_ids"]]
             if not found:
                 return {"status": "not_waiting", "message": "Hermes isn't waiting on the user in that chat any more."}
             item = max(found, key=lambda entry: entry["at"])
@@ -620,12 +683,72 @@ class CallStore:
                 result["next"] = _public_question(item["questions"][following], following, form)
             return result
 
+    def answer_in_writing(self, session_id: Any, words: Any, *, asked_before: float | None = None) -> bool:
+        """The user's written answer, from outside the chat (the Bot Chat
+        passing it on, a workstream's card in Conduit), to the question batch
+        Hermes waits on in ``session_id``: every question still open takes
+        the words as written, as a reply typed on the card would, whether
+        or not a call follows the wait. True when the batch is answered now,
+        for the clarify loop to take (``take_answers``); False when no
+        question waits there (an approval, or nothing), or only one asked
+        after ``asked_before`` (when the user wrote the words)."""
+        if not isinstance(session_id, str) or not session_id.strip() or not isinstance(words, str) \
+                or not words.strip() or not self.path.exists():
+            return False
+        session_id = session_id.strip()
+        text = words.strip()[:MAX_WAITING_ANSWER_CHARS]
+        with self._locked() as state:
+            found = [item for item in state["waiting"] if session_id in item["session_ids"]]
+            if not found:
+                return False
+            # The newest wait is what the chat waits on: a question left from
+            # before a restart doesn't take words meant for a newer approval.
+            item = max(found, key=lambda entry: entry["at"])
+            if item["kind"] != "question" or not item["questions"] \
+                    or (asked_before is not None and item["at"] >= asked_before):
+                return False
+            filled = False
+            for entry in item["questions"]:
+                if entry["answer"] is None:
+                    entry["answer"] = text
+                    filled = True
+            # Already answered, and not taken yet: these words aren't its answer.
+            return filled
+
     def answers_ready(self, request_id: Any) -> bool:
         """Whether a call has answered every question of the clarify loop's
-        batch ``request_id``. Reads only."""
-        if not isinstance(request_id, str) or not request_id or not self.path.exists():
+        batch ``request_id``. Reads only.
+
+        A parked question asks every second for up to an hour (#563), so a
+        "not yet" is remembered against the file as it was: until the file
+        changes, the answer can't have come (only expiry happens without a
+        write, and that can't complete a batch)."""
+        if not isinstance(request_id, str) or not request_id:
             return False
-        return any(_complete(item, request_id) for item in self._load()["waiting"])
+        signature = _settled_signature(self.path)
+        key = (str(self.path), request_id)
+        if signature is None and not self.path.exists():
+            return False
+        if signature is not None:
+            with _not_ready_lock:
+                if _not_ready.get(key) == signature:
+                    return False
+        try:
+            # Read as a write does: a read that failed (too many open files,
+            # a brief I/O error) says nothing about the file, so it isn't
+            # remembered, and the next ask reads again.
+            state = self._load(for_write=True)
+            read = True
+        except OSError:
+            state, read = self._load(), False
+        ready = any(_complete(item, request_id) for item in state["waiting"])
+        if not ready and read and signature is not None:
+            # Each parked question asks from its own thread.
+            with _not_ready_lock:
+                if len(_not_ready) >= NOT_READY_KEPT:
+                    _not_ready.pop(next(iter(_not_ready)), None)
+                _not_ready[key] = signature
+        return ready
 
     def take_answers(self, request_id: Any) -> dict[str, str] | None:
         """The clarify loop's question batch ``request_id``, once every
@@ -746,7 +869,10 @@ class CallStore:
     def has_waiting(self, session_id: Any, kind: str) -> bool:
         if not isinstance(session_id, str) or not session_id.strip() or not self.path.exists():
             return False
-        return any(item["kind"] == kind and session_id.strip() in item["session_ids"]
+        # Followed waits only: an approval's follower, started with alert
+        # calls on, ends once they're off even as unfollowed ones arrive.
+        now = self.clock()
+        return any(_calls_wait(item, now) and item["kind"] == kind and session_id.strip() in item["session_ids"]
                    for item in self._load()["waiting"])
 
     # --- Presence -----------------------------------------------------------
@@ -1124,8 +1250,25 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
             delivered.append({"id": entry["id"], "state": entry["state"], "at": float(entry["at"])})
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
             "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until,
-            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": waiting[-MAX_WAITING:],
+            "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": _capped_waiting(waiting),
             "delivered": delivered[-MAX_DELIVERED:]}
+
+
+def _calls_wait(item: dict[str, Any], now: float) -> bool:
+    """Whether a call may read or answer this wait: kept with alert calls on,
+    and no older than a call could ever answer one."""
+    return bool(item["followed"]) and now - item["at"] < FOLLOWED_TTL_S
+
+
+def _capped_waiting(waiting: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """At most MAX_WAITING, oldest out first, but a wait only listed goes
+    before one a call may be answering."""
+    over = len(waiting) - MAX_WAITING
+    if over <= 0:
+        return waiting
+    listed_only = [id(item) for item in waiting if not item["followed"]][:over]
+    kept = [item for item in waiting if id(item) not in set(listed_only)]
+    return kept[-MAX_WAITING:]
 
 
 def _waiting_text(value: Any, limit: int) -> str:
@@ -1145,7 +1288,10 @@ def _waiting_entry(raw: dict[str, Any], now: float) -> dict[str, Any] | None:
         if kind not in ALERT_KINDS or not _WATCH_ID.match(str(raw["id"])):
             return None
         entry: dict[str, Any] = {"id": str(raw["id"]), "session_ids": _session_ids(raw["session_ids"]),
-                                 "kind": kind, "at": float(at)}
+                                 "kind": kind, "at": float(at),
+                                 # A wait kept before the list was kept only with alerts on.
+                                 "followed": raw.get("followed", True) is not False,
+                                 "title": _waiting_text(raw.get("title"), MAX_WAITING_TITLE_CHARS).replace("\n", " ")}
     except (KeyError, TypeError, ValueError):
         return None
     if kind == "approval":
@@ -1207,6 +1353,18 @@ def _public_question(entry: dict[str, Any], index: int, form: bool) -> dict[str,
     return {"number": index + 1, "question": entry["question"], "choices": list(entry["choices"]),
             "multi_select": entry["multi_select"], "answered": entry["answer"] is not None,
             "may_leave_blank": form}
+
+
+def _listed_waiting(item: dict[str, Any]) -> dict[str, Any]:
+    """A wait as the "Needs you" list shows it: never a command, and only
+    the first question of a batch, with how many there are."""
+    if item["kind"] == "approval":
+        summary, count = item["description"], 1
+    else:
+        summary, count = item["questions"][0]["question"], len(item["questions"])
+    return {"id": item["id"], "kind": item["kind"], "session_ids": list(item["session_ids"]),
+            "title": item["title"], "summary": " ".join(summary.split())[:MAX_WAITING_SUMMARY_CHARS],
+            "questions": count if item["kind"] == "question" else 0, "at": item["at"]}
 
 
 def _public_waiting(item: dict[str, Any]) -> dict[str, Any]:

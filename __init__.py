@@ -14,13 +14,13 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, conduit_first, cron_runs,
+from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity,
-               location_tool, maps_tool, notify_tool, phone_tool, present_tool, profile_copies, pulse, reply_sources,
-               review_notices,
+               location_tool, maps_tool, memory_scan, notify_tool, phone_tool, present_tool, profile_copies, pulse,
+               reply_sources, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
                room_memory, room_planner, room_posts, room_rules, room_tool,
-               room_wakeups, settings_tool, show_tool, turn_surface, voice_archive)
+               room_wakeups, screen_lock, settings_tool, show_tool, turn_surface, voice_archive, work_tool)
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .present_store import PresentStore
@@ -54,6 +54,23 @@ _unnamed_ends: dict[str, tuple[object, Any]] = {}
 _parent_turns: dict[str, tuple[str, float]] = {}
 _parent_turns_lock = threading.Lock()
 PARENT_TURN_MAX_S = 6 * 3600.0
+# Predictive's fast model (dashboard/api/chats.py, PREDICT_TASK) as one of
+# Hermes' helper model slots, so Conduit's Models & providers and Hermes'
+# Models page can set it (hermes-conduit stage 2 of configuring Hermes).
+PREDICT_TASK = "conduit_predict"
+PREDICT_TASK_NAME = "Conduit predictions"
+PREDICT_TASK_DESCRIPTION = ("Suggested replies and draft guesses in Conduit, when Predictive uses the fast "
+                            "model. Unset, the chat's own model answers.")
+
+
+def _register_predict_task(ctx: Any) -> None:
+    """Lists Predictive's fast model among Hermes' helper models; an older
+    Hermes without them keeps reading it from config as before."""
+    try:
+        ctx.register_auxiliary_task(PREDICT_TASK, display_name=PREDICT_TASK_NAME,
+                                    description=PREDICT_TASK_DESCRIPTION)
+    except Exception:  # noqa: BLE001 — no helper slot; config still works
+        logger.debug("conduit_push: no auxiliary task for predictions", exc_info=True)
 
 
 def register(ctx: Any) -> None:
@@ -70,6 +87,7 @@ def register(ctx: Any) -> None:
     # Pulse (designs/proactivity.md): off unless turned on, and then only
     # the gateway process sends anything.
     pulse.register(ctx)
+    _register_predict_task(ctx)
     if hasattr(ctx, "on_unload"):
         ctx.on_unload(_unload)
     # A group room's turns aren't saved into the memory provider as the
@@ -87,10 +105,21 @@ def register(ctx: Any) -> None:
     # An open chat's self-improvement updates follow the setting as it is
     # now, not as it was when the chat opened (review_notices).
     review_notices.install()
+    # A cron job delivered to a Bot Chat just shows its report there, no
+    # turn, unless the user lets the bot act on it (cron_bot_chat).
+    cron_bot_chat.install()
+    # A hidden turn (Pulse's, a bot's wake) that Hermes' compaction catches
+    # still goes on to the model, rather than ending on Hermes' status line
+    # (compaction_skip).
+    compaction_skip.install()
     # A fork of a chat (the self-improvement review, /btw, Conduit's
     # predictions) shares the chat's session id: its turn is never the
     # chat's (forks).
     forks.install()
+    # Hermes' memory provider discovery never parses this plugin's code,
+    # which made each dashboard plugins hub build take seconds, minutes on a
+    # phone (memory_scan, hermes-conduit#1931).
+    memory_scan.install()
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
@@ -121,7 +150,9 @@ def register(ctx: Any) -> None:
     present_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
-    show_tool.register(ctx, is_child=_is_child)
+    show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn, room_board=_save_room_board,
+                       desktop_board=_save_desktop_board, keep_diff=_keep_diff,
+                       skill_path=Path(__file__).resolve().parent / "skills" / show_tool.SKILL_NAME / "SKILL.md")
     # Hermes writes the title and body of the push its turn sends when it
     # ends, for a result the user asked to be told about (#1415).
     notify_tool.register(ctx, is_child=_is_child)
@@ -149,6 +180,11 @@ def register(ctx: Any) -> None:
     room_asks.register(ctx, is_child=_is_child, profile=lambda: _profile)
     room_free_busy.register(ctx, is_child=_is_child)
     link_ask_tool.register(ctx, is_child=_is_child, profile=lambda: _profile)
+    # Bot workstreams (designs/bot-mode-coordinator): a bot's Bot Chat
+    # coordinates work sessions of its own; on for every bot unless turned off.
+    work_tool.register(ctx, is_child=_is_child)
+    # Run work in Linked Rooms: the room's own work tool, in the rooms toolset; only room turns.
+    work_tool.register_room_work(ctx)
     try:
         ctx.register_hook("post_approval_response", _post_approval_response)
     except Exception:  # noqa: BLE001
@@ -235,7 +271,8 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     child = _is_child(kwargs.get("session_id"))
     fork = forks.inside()
     if child and not fork:
-        return None
+        # A delegated child drives the bot's screen as its parent does.
+        return _screen_block(kwargs)
     # A Pulse turn may only look things up (pulse_tools). Fails closed:
     # Hermes blocks the call when this hook raises, so the check is outside
     # _quietly. A fork of the chat is held by it like any turn of the chat.
@@ -243,11 +280,27 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
                                 kwargs.get("args"))
     if block is not None:
         return block
+    # A coordinator Bot Chat, and a fork of it, runs only what its bot's
+    # policy allows (work_tool). Fails closed once the bot has a registry.
+    block = _work_tool_block(kwargs)
+    if block is not None:
+        return block
+    # One of the bot's chats drives its screen at a time (screen_lock), taken
+    # only by a call its other rules let run. Fails open.
+    block = _screen_block(kwargs)
+    if block is not None:
+        return block
     if child:
         return None  # a fork: nothing on the Lock Screen, and no question of the chat's
+    # A workstream's steps are journaled for restarts.
+    _quietly(functools.partial(work_tool.step_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"),
+                               kwargs.get("args"), turn_id=kwargs.get("turn_id"),
+                               tool_call_id=kwargs.get("tool_call_id")))
     _quietly(live_activity.reporter.tool_started, _text(kwargs.get("session_id")), kwargs.get("tool_name"))
     if kwargs.get("tool_name") != "clarify":
         return
+    # A workstream's question waits on the user too.
+    _quietly(functools.partial(work_tool.needs_you, question=True), _text(kwargs.get("session_id")), "a question")
     if _clarify_loop_active:
         # The middleware wraps the execution and pushes a richer, answerable
         # input.needed event itself; pushing here too would double-notify.
@@ -301,7 +354,26 @@ def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 _ledger_warned = False
 
 
+def _screen_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
+    return work_tool.screen_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"))
+
+
+def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
+    try:
+        return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"))
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
+        # Only a bot that has had work (on by default otherwise) is held when its check fails.
+        return {"action": "block", "message": work_tool.CHECK_FAILED} if work_tool.has_registry() else None
+
+
 def _post_tool_call(**kwargs: Any) -> None:
+    if not forks.inside():
+        if kwargs.get("tool_name") == "clarify":
+            _quietly(work_tool.answered, _text(kwargs.get("session_id")))
+        _quietly(functools.partial(work_tool.step_ended, _text(kwargs.get("session_id")), kwargs.get("tool_name"),
+                                   tool_call_id=kwargs.get("tool_call_id"), status=kwargs.get("status"),
+                                   error_type=kwargs.get("error_type")))
     # Every session counts, subagents and cron runs included (3.6).
     try:
         pulse.post_tool_call(**kwargs)
@@ -311,6 +383,64 @@ def _post_tool_call(**kwargs: Any) -> None:
         logger.log(logging.DEBUG if _ledger_warned else logging.WARNING, "conduit_push: Pulse outcome not recorded",
                    exc_info=True)
         _ledger_warned = True
+
+
+def _save_room_board(session_id: Any, board: dict) -> bool:
+    """Keeps a board an agent showed in a room this host runs, for Conduit to
+    draw under its message (room_boards); False where it can't: a room run
+    elsewhere, or one whose id isn't known."""
+    try:
+        home = get_hermes_home()
+        turn = room_rules.room_turn(session_id, home)
+        if turn is None or turn.side != "home" or not turn.room_id:
+            return False
+        from . import room_boards, room_identity, room_setup
+        room_boards.RoomBoards(room_identity.root_home(home)).add(turn.room_id, room_setup.profile_name(Path(home)),
+                                                                   board)
+        return True
+    except Exception:  # noqa: BLE001 — the board goes in the reply as text instead
+        room_rules.warn_often("room board", "conduit_push: couldn't keep a room's board; it goes in the reply as text")
+        return False
+
+
+def _save_desktop_board(board: dict) -> str | None:
+    """Keeps a board shown in a Hermes Desktop chat for the plugin's Desktop
+    half to draw (room_boards.DesktopBoards); its id, or None where no half
+    said it was loaded lately."""
+    try:
+        from . import room_boards, room_identity
+        store = room_boards.DesktopBoards(room_identity.root_home(get_hermes_home()))
+        return store.add(board) if store.half_live() else None
+    except Exception:  # noqa: BLE001 — the board goes in the reply as text instead
+        room_rules.warn_often("desktop board", "conduit_push: couldn't keep a Desktop board; it goes in the reply as "
+                              "text")
+        return None
+
+
+def _keep_diff(diff: dict) -> str | None:
+    """Keeps a diff too long for conduit_show's answer to carry whole
+    (room_boards.KeptDiffs); its id, or None when it can't be kept."""
+    try:
+        from . import room_boards, room_identity
+        return room_boards.KeptDiffs(room_identity.root_home(get_hermes_home())).add(diff)
+    except Exception:  # noqa: BLE001 — the card lists the diff's files alone
+        room_rules.warn_often("kept diff", "conduit_push: couldn't keep a diff; its card lists the files alone")
+        return None
+
+
+def _desktop_half_live() -> bool:
+    from . import room_boards, room_identity
+    return room_boards.DesktopBoards(room_identity.root_home(get_hermes_home())).half_live()
+
+
+def _is_room_turn(session_id: Any) -> bool:
+    """Whether this session's turns are in a group room, whoever hosts it."""
+    try:
+        return room_rules.room_turn(session_id, get_hermes_home()) is not None
+    except room_rules.RoomStoreError:
+        return True
+    except Exception:  # noqa: BLE001 — logged by room_rules; an unknown session draws as a chat does
+        return False
 
 
 def _member_room_turn(session_id: str) -> bool:
@@ -334,6 +464,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         return
     # A room turn that replied read its owner's answers (room_asks), heard once on_session_end says it didn't fail.
     _quietly(room_asks.replied, session_id, isinstance(response, str) and bool(response.strip()))
+    _quietly(work_tool.room_turn_replied, session_id, isinstance(response, str) and bool(response.strip()))
     _quietly(link_ask_tool.replied, session_id, isinstance(response, str) and bool(response.strip()))
     # The Lock Screen's end waits for on_session_end too: this hook also runs
     # for a failed turn, and the first end the phone gets is the one it keeps.
@@ -344,7 +475,13 @@ def _post_llm_call(**kwargs: Any) -> None:
     # nothing to tell the phone. A follow-up, a brief or a report's items are
     # news for the user, so they go like any reply.
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
-    quiet = (is_silent_response(response) or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
+    # A workstream's turn tells its coordinator (work_tool), whose reply is
+    # the one push.
+    workstream = _work_turn_ended(session_id, response)
+    # Hermes' line for a turn its compaction ended before the model ran
+    # (compaction_skip) is no news either.
+    quiet = (workstream or is_silent_response(response) or compaction_skip.notice(response) == compaction_skip.SKIPPED_DETAIL
+             or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
              or _member_room_turn(session_id))
     chat_title = "" if quiet or pulse_turn else _session_title(session_id)
@@ -392,13 +529,14 @@ def _post_llm_call(**kwargs: Any) -> None:
     turn_id = kwargs.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id:
         _finish_ready(session_id, ready, send)
-        if not pulse_turn:
+        if not pulse_turn and not workstream:
             _hold_unnamed_end(session_id)
         return
     key = (session_id, turn_id)
     # A Hermes that never reports the turn's end still gets its reply out,
     # and its Live Activity ended (a Pulse turn never started one).
-    timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id, live=not pulse_turn))
+    timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id,
+                                                           live=not pulse_turn and not workstream))
     with _pending_lock:
         earlier = _pending_ready.pop(key, None)
         _pending_ready[key] = (ready, send, timer)
@@ -412,6 +550,14 @@ def _post_llm_call(**kwargs: Any) -> None:
     for old_session, (old_ready, old_send, old_timer) in overflow:
         _cancel(old_timer)
         _finish_ready(old_session, old_ready, old_send)
+
+
+def _work_turn_ended(session_id: str, response: Any) -> bool:
+    try:
+        return work_tool.turn_ended(session_id, response)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.warning("conduit_push: couldn't record a workstream's turn", exc_info=True)
+        return False
 
 
 def _slot(session_id: str, task_id: Any = None, key: str = "", *, turn_id: Any = None, keep: bool = False) -> str:
@@ -559,7 +705,7 @@ def _unload() -> None:
     group room guards (memory, planner, cut-off, wakeups and disband
     cleanup, with a sweep that hasn't run yet) and the self-improvement
     setting's live read come off, the room turns it remembers are forgotten,
-    and the delivery and Live Activity threads end (waiting about a second
+    batched work updates are dropped (the Bot Chat's digest carries them), and the delivery and Live Activity threads end (waiting about a second
     for a send in progress). Nothing more goes to the relay from this load."""
     with _pending_lock:
         held = list(_pending_ready.values())
@@ -572,15 +718,19 @@ def _unload() -> None:
         _cancel(timer)
     calls.stop()
     pulse.stop()
+    work_tool.stop()
     bot_chat_adopt.stop()
     room_memory.uninstall()
     room_planner.uninstall()
     room_cutoff.uninstall()
     room_wakeups.uninstall()
     room_cleanup.uninstall()
+    cron_bot_chat.uninstall()
+    compaction_skip.uninstall()
     room_rules.forget()
     review_notices.uninstall()
     forks.uninstall()
+    memory_scan.uninstall()
     deadline = time.monotonic() + 1.0
     live_activity.reporter.stop(timeout=max(0.0, deadline - time.monotonic()))
     client.stop(timeout=max(0.0, deadline - time.monotonic()))
@@ -641,11 +791,17 @@ def _on_session_end(**kwargs: Any) -> None:
     if forks.inside():
         # Only when it started is forgotten, as for any turn's end (pre_llm_call).
         _quietly(pulse.turn_ended, session_id, kwargs.get("turn_id"))
+        _quietly(work_tool.fork_ended, session_id)
         return
     if _is_child(session_id):
         return
+    # Its turn is over: the screen is free for the bot's other chats.
+    _quietly(work_tool.screen_turn_ended, session_id)
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
+    # A workstream's turn is settled with its reply, or as failed, and its
+    # coordinator told (work_tool); a failed one sends no push of its own.
+    workstream = _work_turn_finished(session_id, kwargs)
     # The key the turn wrote with conduit_notify: a failure replaces that
     # notification too, so a "Report in progress" doesn't outlive it.
     pulse_turn = pulse.is_pulse_turn(session_id, kwargs.get("turn_id"))
@@ -662,9 +818,11 @@ def _on_session_end(**kwargs: Any) -> None:
     # A room turn's owner's answers are heard when it answered; a failed or stopped one, or one Hermes doesn't say
     # (its held reply is dropped too), is framed with them again.
     _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
+    _quietly(_room_work_ended, session_id, answered)
     _quietly(_link_asks_ended, session_id, answered)
-    if not pulse_turn:
-        # A Pulse turn never started a Live Activity, so there is none to end.
+    if not pulse_turn and (not workstream or _has_live_turn(session_id)):
+        # A Pulse turn or a workstream's never started a Live Activity, so there is none to end, unless
+        # its start couldn't tell it was one (the work registry unreadable, or its id not yet recorded).
         _quietly(live_activity.reporter.turn_ended, session_id,
                  "done" if answered else "stopped" if kwargs.get("interrupted") else "failed")
     if answered:
@@ -689,6 +847,11 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     if pulse_turn:
         # Pulse records its own failures (``pulse status``).
+        return
+    if workstream:
+        # The Bot Chat's reply to the work update is the one push, and a
+        # call the user asked for on it still rings.
+        calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
     if cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id):
         # A muted cron job's failed run, or an agent's in a room someone else
@@ -724,6 +887,7 @@ def _pre_approval_request(**kwargs: Any) -> None:
     description = _text(kwargs.get("description"))
     _quietly(live_activity.reporter.waiting,
              _text(kwargs.get("session_id")) or session_id, "approval")
+    _quietly(work_tool.needs_you, _text(kwargs.get("session_id")) or session_id, description)
     # The event id deliberately excludes `id(kwargs)`: CPython recycles ids, so
     # a later, distinct approval with the same session/pattern/command could
     # collide and be silently deduped by the relay for 24h. `turn_id` (forwarded
@@ -761,12 +925,13 @@ def _pre_approval_request(**kwargs: Any) -> None:
     # user too (#449), beside the answerable notification.
     calls.alert(session_id, "approval", description, profile=_profile,
                 turn_session_id=_text(kwargs.get("session_id")))
-    # The command and description, for a call answered with no chat open (the
-    # Watch) to read out; its spoken answer reaches Hermes from here.
+    # The command and description, for Conduit's "Needs you" list, and for a
+    # call answered with no chat open (the Watch) to read out; its spoken
+    # answer reaches Hermes from here (followed only with alert calls on).
     command = kwargs.get("command") if isinstance(kwargs.get("command"), str) else ""
     if session_id and description and calls.note_waiting(
             session_id, "approval", turn_session_id=_text(kwargs.get("session_id")),
-            description=description, command=command):
+            description=description, command=command, title=_session_title(session_id)):
         calls.follow_approval(session_id, command)
 
 
@@ -776,6 +941,7 @@ def _post_approval_response(**kwargs: Any) -> None:
     session_key = _text(kwargs.get("session_key"))
     calls.cancel_alerts(session_key or _text(kwargs.get("session_id")), "approval")
     _quietly(live_activity.reporter.thinking, _text(kwargs.get("session_id")) or session_key)
+    _quietly(work_tool.answered, _text(kwargs.get("session_id")) or session_key)
 
 
 def _pre_api_request(**kwargs: Any) -> None:
@@ -802,6 +968,30 @@ def _pulse_note(session_id: str, turn_id: Any, user_message: Any) -> str | None:
         return None
 
 
+def _work_turn_started(session_id: str) -> bool:
+    try:
+        return work_tool.turn_started(session_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't record a workstream's turn start", exc_info=True)
+        return False
+
+
+def _work_turn_finished(session_id: str, kwargs: dict[str, Any]) -> bool:
+    try:
+        return work_tool.turn_finished(session_id, failed=kwargs.get("failed") is True,
+                                       interrupted=bool(kwargs.get("interrupted")))
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't settle the workstream's turn", exc_info=True)
+        return False
+
+
+def _has_live_turn(session_id: Any) -> bool:
+    try:
+        return isinstance(session_id, str) and live_activity.reporter.has_running_turn(session_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _quietly(function: Any, *args: Any) -> None:
     """Lock Screen progress is an extra: it must never break a hook."""
     try:
@@ -812,6 +1002,8 @@ def _quietly(function: Any, *args: Any) -> None:
 
 def _subagent_start(**kwargs: Any) -> None:
     child = _text(kwargs.get("child_session_id"))
+    # A child's computer_use is its parent's turn on the screen.
+    _quietly(screen_lock.child_started, child, _text(kwargs.get("parent_session_id")))
     if child:
         with _children_lock:
             _child_sessions.add(child)
@@ -819,6 +1011,12 @@ def _subagent_start(**kwargs: Any) -> None:
 
 def _subagent_stop(**kwargs: Any) -> None:
     child = _text(kwargs.get("child_session_id"))
+    owner = screen_lock.owner_of(child) if child else ""
+    _quietly(screen_lock.child_stopped, child)
+    if owner and owner != child and not _turn_running(owner):
+        # A background child that outlived its parent's turn took the screen
+        # for it: nothing else would let it go.
+        _quietly(work_tool.screen_turn_ended, owner)
     if child:
         # Hermes reports the id the child ends under, which a compaction may
         # have moved from the one subagent_start reported.
@@ -914,6 +1112,10 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)
+    if not forks.inside():
+        # A fork takes its chat's id but isn't a turn of it: the running
+        # turn's entry stays for its tools.
+        turn_surface.start_turn(session_id)
     if forks.inside():
         # Pulse holds a fork of its home chat as it holds the chat's turns:
         # only one that started after its attempt (pulse._held_home_turn).
@@ -927,7 +1129,11 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _note_turn_start(kwargs.get("turn_id"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))
         _drop_unnamed_end(session_id)
-        _quietly(live_activity.reporter.turn_started, session_id)
+        # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
+        # doesn't; one that starts after its row settled (a follow-up queued
+        # behind the last turn) puts it back to running.
+        if not _work_turn_started(session_id):
+            _quietly(live_activity.reporter.turn_started, session_id)
         # A voice chat archived when its call ended is in use again (#1124).
         try:
             voice_archive.bring_back(get_hermes_home(), session_id)
@@ -940,7 +1146,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         return {"context": room_framing}
     notes = [
         None if child else calls.outcome_note(session_id),
-        None if child else _turn_surface_note(kwargs.get("platform"), kwargs.get("user_message")),
+        None if child else _turn_surface_note(kwargs.get("platform"), kwargs.get("user_message"), session_id),
         _voice_persona_note(kwargs.get("conversation_history")),
         # Subagents can't use the shared data (each tool refuses them).
         None if child else conduit_first.note(),
@@ -948,9 +1154,54 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else _room_chat_note(session_id),
         # What linked people answered this chat's asks since (link_ask_tool), once.
         None if child else _link_answers_note(session_id),
+        # A coordinator Bot Chat's open work (work_tool).
+        None if child else _work_digest(session_id),
+        # Checklist cards the user ticked in Conduit since (checklist_store), once.
+        None if child else _checklist_note(session_id),
+        # A card's tap button the user tapped, with their message about it (card_actions), once.
+        None if child else _tap_note(session_id, kwargs.get("user_message")),
+        # When to draw a board instead of writing it out (show_tool).
+        None if child else _board_rule(kwargs.get("platform")),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _checklist_note(session_id: str) -> str | None:
+    try:
+        from . import checklist_store
+
+        return checklist_store.ChecklistStore(get_hermes_home()).note(session_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: checklist note failed", exc_info=True)
+        return None
+
+
+def _tap_note(session_id: str, user_message: Any) -> str | None:
+    try:
+        from . import card_actions
+
+        return card_actions.TapStore(get_hermes_home()).note(session_id, user_message)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: card tap note failed", exc_info=True)
+        return None
+
+
+def _board_rule(platform: Any) -> str | None:
+    try:
+        return show_tool.board_rule(reply_sources.turn_source(platform, reply_sources.current_transport()),
+                                    desktop_half=_desktop_half_live)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: board rule failed", exc_info=True)
+        return None
+
+
+def _work_digest(session_id: str) -> str | None:
+    try:
+        return work_tool.digest(session_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: work digest failed", exc_info=True)
+        return None
 
 
 def _link_asks_ended(session_id: str, answered: bool) -> None:
@@ -989,7 +1240,15 @@ def _room_chat_note(session_id: str) -> str | None:
 
 def _transform_tool_result(**kwargs: Any) -> str | None:
     """session_search's result without the sessions of rooms with other
-    people's agents (room_rules); None leaves any other result as it is."""
+    people's agents (room_rules), and a cron job's with what Conduit does
+    with its Bot Chat reports (cron_bot_chat); None leaves any other result
+    as it is."""
+    if kwargs.get("tool_name") == cron_bot_chat.CRON_TOOL:
+        try:
+            return cron_bot_chat.annotate(kwargs.get("tool_name"), kwargs.get("result"))
+        except Exception:  # noqa: BLE001 — a hook must never break the turn
+            logger.debug("conduit_push: cron result note failed", exc_info=True)
+            return None
     if kwargs.get("tool_name") != room_rules.SEARCH_TOOL:
         return None
     result = kwargs.get("result")
@@ -1016,13 +1275,21 @@ def _transform_tool_result(**kwargs: Any) -> str | None:
 
 
 def _transform_llm_output(**kwargs: Any) -> str | None:
-    """A room reply with credential-shaped text replaced; None leaves the
-    reply as it is (every other turn, and a reply with none)."""
+    """A reply with its work links as the plugin writes them (work_tool.
+    mend_links), and a room reply with credential-shaped text replaced; None
+    leaves the reply as it is."""
     text = kwargs.get("response_text")
-    if not isinstance(text, str) or not text or not _in_room_with_others(
-            _text(kwargs.get("session_id")), kwargs.get("platform")):
+    if not isinstance(text, str) or not text:
         return None
-    scrubbed = room_rules.scrub(text)
+    try:
+        mended = work_tool.mend_links(text)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't check a reply's work links", exc_info=True)
+        mended = None
+    reply = mended or text
+    if not _in_room_with_others(_text(kwargs.get("session_id")), kwargs.get("platform")):
+        return mended
+    scrubbed = room_rules.scrub(reply)
     return scrubbed if scrubbed != text else None
 
 
@@ -1061,6 +1328,7 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
     child = _is_child(session_id)
     if not child:
         _quietly(room_asks.begin, lambda: PresentStore(get_hermes_home()), session_id)
+        _quietly(_room_work_ended, session_id, None)
     try:
         home = get_hermes_home()
     except Exception:  # noqa: BLE001
@@ -1115,7 +1383,16 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
                                                                             session_id))
         except Exception:  # noqa: BLE001 — the answers wait for the next turn
             _warn_room_once("asks", "conduit_push: couldn't read the answers to session %s's asks", session_id)
+        try:
+            # What the room's work reported since (Run work), once.
+            framing += "".join(f"\n- {line}" for line in work_tool.frame_room(home, turn.room_id, session_id))
+        except Exception:  # noqa: BLE001 — the lines wait for the next turn
+            _warn_room_once("work", "conduit_push: couldn't read what room %s's work reported", turn.room_id)
     return framing
+
+
+def _room_work_ended(session_id: str, answered: Any) -> None:
+    work_tool.room_turn_ended(get_hermes_home(), session_id, answered)
 
 
 _room_warned: set[tuple[str, str]] = set()
@@ -1133,14 +1410,14 @@ def _room_platform(platform: Any) -> bool:
     return str(platform or "").strip().lower() == room_rules.ROOM_SOURCE
 
 
-def _turn_surface_note(platform: Any, message: Any) -> str | None:
+def _turn_surface_note(platform: Any, message: Any, session_id: str = "") -> str | None:
     """Which Conduit surface sent this turn's message (turn_surface.py)."""
     transport = reply_sources.current_transport()
     try:
         from_conduit = reply_sources.turn_source(platform, transport) == "conduit"
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         from_conduit = False
-    return turn_surface.note(from_conduit, message, transport)
+    return turn_surface.note(from_conduit, message, transport, session_id=session_id)
 
 
 def _note_turn_start(turn_id: Any) -> None:
@@ -1170,6 +1447,13 @@ def _start_parent_turn(session_id: str, turn_id: Any) -> None:
 def _end_parent_turn(session_id: str) -> None:
     with _parent_turns_lock:
         _parent_turns.pop(session_id, None)
+
+
+def _turn_running(session_id: str) -> bool:
+    """Whether any turn of ``session_id`` runs now."""
+    with _parent_turns_lock:
+        running = _parent_turns.get(session_id)
+    return running is not None and time.monotonic() - running[1] < PARENT_TURN_MAX_S
 
 
 def _inside_parent_turn(session_id: str, turn_id: Any) -> bool:

@@ -1,5 +1,6 @@
 """Conduit's Predictive features: the question, the answer's checks and the
 /predict route that answers only the asking device."""
+import contextlib
 import importlib.util
 import pathlib
 import sys
@@ -94,6 +95,18 @@ def test_replies_are_ranked_checked_and_capped():
     assert [r["text"] for r in result["replies"]] == [
         "Raise the quota and rerun it", "Remind me tonight", "What uses the space?"]
     assert all(0.1 <= r["p"] <= 1 for r in result["replies"])
+
+
+def test_a_reply_conduit_would_drop_never_takes_a_place():
+    # Conduit drops a guess over 200 characters rather than cut it short
+    # (issue 1670): a 250-character one kept here would take one of the
+    # `count` places and leave the user a chip short.
+    text = '{"replies":[{"text":"%s","p":0.9},{"text":"%s","p":0.8},{"text":"Short","p":0.5}]}' % (
+        "y" * 250, "z" * 200)
+    result = predict.answer(_request(kind="replies", count=2), text)
+    assert [len(r["text"]) for r in result["replies"]] == [200, 5]
+    draft = predict.answer(_request(kind="draft", draft="Can you", count=2), text)
+    assert [len(r["text"]) for r in draft["replies"]] == [200, 5]
 
 
 def test_an_answer_that_isnt_json_suggests_nothing():
@@ -286,3 +299,55 @@ def test_request_text_cannot_start_lines_of_its_own():
     assert text.count("<<<") == 1 and text.count(">>>") == 1
     turn = _request(kind="turn", facts={**TURN_FACTS, "local_time": "Sunday\n09:14"})
     assert "The user's local time: Sunday 09:14." in predict.question(turn)
+
+
+# --- on the gateway's own listener (hermes-conduit#1618) ---------------------------
+
+def _listener(monkeypatch, gateway, agent):
+    """A gateway process whose session authority has chat ``auth-1`` open,
+    its agent ``agent`` (None: let go)."""
+    authority = types.SimpleNamespace(sessions={"auth-1": types.SimpleNamespace(source="src")})
+    runner = types.SimpleNamespace(session_authority=authority,
+                                   _session_key_for_source=lambda source: "key",
+                                   _resident_agent_for=lambda key: agent)
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = runner
+    authorities = types.ModuleType("gateway.session_authorities")
+    authorities.all_authorities = lambda gateway: [authority]
+    authorities.owner_scope = lambda owner: contextlib.nullcontext()
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    monkeypatch.setitem(sys.modules, "gateway.session_authorities", authorities)
+    # The dashboard's registry never has the authority's chats.
+    gateway._sessions.clear()
+    return authority
+
+
+def test_on_the_listener_a_prediction_forks_the_gateways_agent(gateway, client, monkeypatch):
+    agent = FakeAgent([{"role": "user", "content": "hi"}])
+    _listener(monkeypatch, gateway, agent)
+    response = client.post(f"{BASE}/predict", json={"session_id": "auth-1", "kind": "replies"})
+    assert response.status_code == 200, response.text
+    assert gateway.asked and gateway.asked[0][0] is agent
+
+
+def test_on_the_listener_a_chat_whose_agent_was_let_go_says_so(gateway, client, monkeypatch):
+    _listener(monkeypatch, gateway, None)
+    response = client.post(f"{BASE}/predict", json={"session_id": "auth-1", "kind": "replies"})
+    assert response.status_code == 404
+    assert "agent isn't loaded" in response.text
+    assert not gateway.asked
+
+
+def test_on_the_listener_a_failed_agent_lookup_isnt_read_as_a_let_go_agent(gateway, client, monkeypatch):
+    authority = _listener(monkeypatch, gateway, None)
+    runner = sys.modules["gateway.run_api"]._ACTIVE_RUNNER
+
+    def broken(key):
+        raise AttributeError("renamed")
+
+    runner._resident_agent_for = broken
+    response = client.post(f"{BASE}/predict", json={"session_id": "auth-1", "kind": "replies"})
+    assert response.status_code == 502
+    assert "couldn't read the chat's agent" in response.text
+    assert "isn't loaded" not in response.text
+    assert not gateway.asked and authority

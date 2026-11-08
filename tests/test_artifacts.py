@@ -202,6 +202,20 @@ def test_hidden_chats_are_left_out_and_older_stores_still_read(tmp_path, monkeyp
     assert [i["name"] for i in _list(old)["items"]] == ["a.png"]
 
 
+def test_a_bots_workstreams_are_left_out_hidden_or_not(tmp_path, monkeypatch):
+    # Hermes shows a resolved workstream so Desktop's link opens it (notifier
+    # #540); the profile's list still leaves it and what continues it out,
+    # and the workstream's own chat still lists its artifacts.
+    _no_gateway(monkeypatch)
+    conn = _db(tmp_path / "a", [("s1", "assistant", "MEDIA:/root/a.png"), ("ws", "assistant", "MEDIA:/root/b.png"),
+                                ("ws-tip", "assistant", "MEDIA:/root/c.png"), ("ws-tip2", "assistant", "MEDIA:/root/d.png")],
+               sessions=[("s1", "Shown", 0), ("ws", "Disk", 0), ("ws-tip", "Disk", 0, "ws"),
+                         ("ws-tip2", "Disk", 0, "ws-tip")])
+    assert [i["name"] for i in _list(conn, workstreams=["ws"])["items"]] == ["a.png"]
+    assert [i["name"] for i in _list(conn, session_id="ws", workstreams=["ws"])["items"]] == ["d.png", "c.png", "b.png"]
+    assert len(_list(conn)["items"]) == 4
+
+
 def test_a_bots_hidden_bot_chat_is_listed(tmp_path, monkeypatch):
     # Bot Mode keeps a bot's Bot Chat as a hidden session titled "Bot Chat";
     # other hidden chats (a group room member's turns) stay out of the
@@ -431,3 +445,447 @@ def test_the_route_hides_missing_files_on_request(tmp_path, monkeypatch):
     assert [i["name"] for i in client.get(f"{BASE}/artifacts?missing=show").json()["items"]] == ["gone.png"]
     assert client.get(f"{BASE}/artifacts?missing=hide").json()["items"] == []
     assert client.get(f"{BASE}/artifacts?missing=bogus").status_code == 400
+
+
+# --- A file a reply names (hermes-conduit#1809) -----------------------------
+
+
+def _read_call(path):
+    return json.dumps([{"function": {"name": "read_file", "arguments": json.dumps({"path": path})}}])
+
+
+def test_a_bare_name_resolves_to_the_path_the_chat_read_it_at(tmp_path):
+    real = tmp_path / "yelan-audits" / "hermes-conduit" / "Conduit" / "Services"
+    real.mkdir(parents=True)
+    (real / "AppState.swift").write_text("x")
+    (tmp_path / "MyAppState.swift").write_text("x")
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call(str(tmp_path / "MyAppState.swift"))),
+        ("s1", "assistant", "", _read_call(str(real / "AppState.swift"))),
+        ("s1", "assistant", "The fix is in `AppState.swift`."),
+    ])
+    found = index.resolve_name(conn, ["s1"], "AppState.swift", exists=lambda p: pathlib.Path(p).is_file())
+    assert found == {"path": str(real / "AppState.swift"), "via": "chat"}
+    rel = index.resolve_name(conn, ["s1"], "./Services/AppState.swift", exists=lambda p: pathlib.Path(p).is_file())
+    assert rel["path"] == str(real / "AppState.swift")
+    # A name that only ends the same way isn't the file.
+    assert index.resolve_name(conn, ["s1"], "pState.swift", exists=lambda p: True) == {"path": None}
+
+
+def test_the_newest_existing_mention_wins_and_tool_output_counts(tmp_path):
+    old = tmp_path / "old" / "report.json"
+    new = tmp_path / "new" / "report.json"
+    for path in (old, new):
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    gone = tmp_path / "gone" / "report.json"
+    conn = _db(tmp_path / "home", [
+        ("s1", "tool", f"{old}:12: match", None, "terminal"),
+        ("s1", "tool", json.dumps({"output": f"wrote {new}"}), None, "terminal"),
+        ("s1", "assistant", f"Also tried {gone}."),
+    ])
+    found = index.resolve_name(conn, ["s1"], "report.json", exists=lambda p: pathlib.Path(p).is_file())
+    assert found["path"] == str(new)
+
+
+def test_the_chats_folder_comes_first_and_lineage_is_read(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT, cwd TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('parent', 't', NULL, ?)", (str(tmp_path / "work"),))
+    conn.execute("INSERT INTO sessions VALUES ('child', 't', 'parent', NULL)")
+    conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('parent', 'assistant', ?)",
+                 (f"see {tmp_path}/elsewhere/notes.md",))
+    conn.commit()
+    conn.close()
+    (tmp_path / "work" / "docs").mkdir(parents=True)
+    (tmp_path / "work" / "docs" / "notes.md").write_text("x")
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "notes.md").write_text("x")
+    db = index.open_db(home)
+    check = lambda p: pathlib.Path(p).is_file()  # noqa: E731
+    assert index.resolve_name(db, ["child"], "docs/notes.md", exists=check) == {
+        "path": str(tmp_path / "work" / "docs" / "notes.md"), "via": "folder"}
+    assert index.resolve_name(db, ["child"], "notes.md", exists=check) == {
+        "path": str(tmp_path / "elsewhere" / "notes.md"), "via": "chat"}
+
+
+def _folders_db(home, rows):
+    home.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT, cwd TEXT,"
+                 " git_repo_root TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.executemany("INSERT INTO sessions VALUES (?, 't', NULL, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    return index.open_db(home)
+
+
+def test_a_project_chat_in_a_subfolder_finds_a_link_from_the_repos_top(tmp_path):
+    # hermes-conduit#1809: Hermes puts a chat in a project when its folder is
+    # anywhere inside it, and replies name files from the repository's top.
+    repo = tmp_path / "acme"
+    (repo / "docs" / "specs").mkdir(parents=True)
+    (repo / "docs" / "specs" / "plan.md").write_text("x")
+    (repo / "app").mkdir()
+    (repo / "app" / "README.md").write_text("x")
+    (repo / "README.md").write_text("x")
+    db = _folders_db(tmp_path / "home", [("s1", str(repo / "app"), str(repo))])
+    check = lambda p: pathlib.Path(p).is_file()  # noqa: E731
+    assert index.resolve_name(db, ["s1"], "docs/specs/plan.md", exists=check) == {
+        "path": str(repo / "docs" / "specs" / "plan.md"), "via": "folder"}
+    # The chat's own folder still comes first.
+    assert index.resolve_name(db, ["s1"], "README.md", exists=check)["path"] == str(repo / "app" / "README.md")
+
+
+def test_a_chat_with_no_folder_joins_the_terminal_folder(tmp_path):
+    work = tmp_path / "work"
+    (work / "notes").mkdir(parents=True)
+    (work / "notes" / "todo.md").write_text("x")
+    db = _folders_db(tmp_path / "home", [("s1", None, None), ("s2", str(tmp_path / "other"), None)])
+    check = lambda p: pathlib.Path(p).is_file()  # noqa: E731
+    assert index.resolve_name(db, ["s1"], "notes/todo.md", exists=check, default_folder=str(work)) == {
+        "path": str(work / "notes" / "todo.md"), "via": "folder"}
+    # A chat with a folder of its own doesn't fall back to the terminal's,
+    # as Hermes' file tools don't.
+    assert index.resolve_name(db, ["s2"], "notes/todo.md", exists=check, default_folder=str(work)) == {"path": None}
+    # Nor does a relative or blank one count.
+    assert index.resolve_name(db, ["s1"], "notes/todo.md", exists=check, default_folder="work") == {"path": None}
+    assert index.resolve_name(db, ["s1"], "notes/todo.md", exists=check, default_folder="") == {"path": None}
+
+
+def test_the_terminal_folder_is_read_from_a_local_terminals_config(tmp_path, monkeypatch):
+    config = types.ModuleType("hermes_cli.config")
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
+    work = tmp_path / "work"
+    config.load_config = lambda: {"terminal": {"backend": "local", "cwd": str(work)}}
+    assert api.workspace._terminal_folder() == str(work)
+    config.load_config = lambda: {"terminal": {"backend": "docker", "cwd": "/workspace"}}
+    assert api.workspace._terminal_folder() is None
+    config.load_config = lambda: {"terminal": {"cwd": "."}}
+    assert api.workspace._terminal_folder() is None
+    config.load_config = lambda: {}
+    assert api.workspace._terminal_folder() is None
+    # Without Hermes' config (an older Hermes), there's no folder to add.
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", None)
+    assert api.workspace._terminal_folder() is None
+
+
+def test_nothing_resolves_outside_the_chat_or_past_the_folder(tmp_path):
+    conn = _db(tmp_path / "home", [("s2", "assistant", "/root/secret/plan.md")],
+               sessions=[("s1", "a"), ("s2", "b")])
+    assert index.resolve_name(conn, ["s1"], "plan.md", exists=lambda p: True) == {"path": None}
+    assert index.resolve_name(conn, ["s2"], "../plan.md", exists=lambda p: True) == {"path": None}
+    assert index.resolve_name(conn, [], "plan.md", exists=lambda p: True) == {"path": None}
+    assert index.resolve_name(conn, ["s2"], "", exists=lambda p: True) == {"path": None}
+    # A file the chat named that is gone is reported as not found.
+    assert index.resolve_name(conn, ["s2"], "plan.md", exists=lambda p: False) == {"path": None}
+    # Without a check (an SSH profile), the newest mention is taken.
+    assert index.resolve_name(conn, ["s2"], "plan.md")["path"] == "/root/secret/plan.md"
+
+
+def test_an_absolute_path_is_only_checked(tmp_path):
+    conn = _db(tmp_path / "home", [])
+    (tmp_path / "a.md").write_text("x")
+    check = lambda p: pathlib.Path(p).is_file()  # noqa: E731
+    assert index.resolve_name(conn, ["s1"], str(tmp_path / "a.md"), exists=check)["path"] == str(tmp_path / "a.md")
+    assert index.resolve_name(conn, ["s1"], str(tmp_path / "b.md"), exists=check)["path"] is None
+
+
+def _hermes_file_routes(monkeypatch):
+    """Hermes' own file routing, as a local install has it."""
+    import types
+    files = types.ModuleType("hermes_cli.web_routers.files")
+    files._fs_backend = lambda profile: None
+    files._fs_profile_home = lambda profile: None
+    files._is_sensitive_path = lambda path: False
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", files)
+
+
+def test_the_resolve_route_reads_the_profile_store(tmp_path, monkeypatch):
+    _hermes_file_routes(monkeypatch)
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "report.xlsx").write_text("x")
+    _db(tmp_path, [("s1", "tool", json.dumps({"file_path": str(tmp_path / "out" / "report.xlsx")}), None,
+                    "execute_code")]).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "report.xlsx", "session_id": ["gone", "s1"]}).json()
+    assert body == {"ok": True, "path": str(tmp_path / "out" / "report.xlsx"), "via": "chat"}
+    missing = client.get(f"{BASE}/workspace/resolve", params={"path": "nope.xlsx", "session_id": "s1"}).json()
+    assert missing == {"ok": True, "path": None}
+
+
+def test_a_hidden_room_the_chat_came_from_is_not_read(tmp_path):
+    conn = _db(tmp_path / "home", [("room", "assistant", "/srv/room/plan.md"),
+                                   ("chat", "assistant", "See `plan.md`.")],
+               sessions=[("room", "Room", 1), ("chat", "Chat", 0, "room")])
+    assert index.resolve_name(conn, ["chat"], "plan.md", exists=lambda p: True) == {"path": None}
+    # Asked for by its own id, the hidden session is read.
+    assert index.resolve_name(conn, ["room"], "plan.md", exists=lambda p: True)["path"] == "/srv/room/plan.md"
+
+
+def test_a_windows_path_in_a_tool_call_resolves(tmp_path):
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call("C:\\proj\\Conduit\\AppState.swift")),
+        ("s1", "tool", "C:\\proj\\Conduit\\AppStateTests.swift:12: ok", None, "terminal"),
+    ])
+    assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=lambda p: True) == {
+        "path": "C:/proj/Conduit/AppState.swift", "via": "chat"}
+    assert index.resolve_name(conn, ["s1"], "Conduit\\AppState.swift", exists=lambda p: True)["path"] == (
+        "C:/proj/Conduit/AppState.swift")
+
+
+def test_the_resolve_route_never_answers_with_a_secret_file(tmp_path, monkeypatch):
+    _hermes_file_routes(monkeypatch)
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh" / "id_rsa").write_text("x")
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / ".env").write_text("x")
+    _db(tmp_path, [("s1", "tool", f"cat {tmp_path / 'out' / '.env'}", None, "terminal")]).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    for params in ({"path": str(tmp_path / ".ssh" / "id_rsa")}, {"path": ".env", "session_id": "s1"}):
+        assert client.get(f"{BASE}/workspace/resolve", params=params).json() == {"ok": True, "path": None}
+
+
+def test_the_chats_own_folder_wins_over_a_continuations(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT, cwd TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('sub', 't', 'main', '/tree')")
+    conn.execute("INSERT INTO sessions VALUES ('main', 't', NULL, 'C:\\proj')")
+    conn.commit()
+    conn.close()
+    db = index.open_db(home)
+    assert index.resolve_name(db, ["main"], "README.md", exists=lambda p: True) == {
+        "path": "C:/proj/README.md", "via": "folder"}
+
+
+def test_without_hermes_routing_the_resolve_route_refuses(tmp_path, monkeypatch):
+    _db(tmp_path, []).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", None)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    assert client.get(f"{BASE}/workspace/resolve", params={"path": "a.md", "session_id": "s1"}).status_code == 501
+
+
+def test_a_chat_without_a_folder_skips_the_join(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, parent_session_id TEXT, cwd TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('s1', 't', NULL, NULL)")
+    conn.execute("INSERT INTO sessions VALUES ('s2', 't', NULL, '/')")
+    conn.execute("INSERT INTO sessions VALUES ('s3', 't', NULL, 'C:\\')")
+    conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('s1', 'tool', '/srv/app/README.md')")
+    conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('s2', 'tool', '/srv/app/README.md')")
+    conn.execute("INSERT INTO messages (session_id, role, content) VALUES ('s3', 'tool', '/srv/app/README.md')")
+    conn.commit()
+    conn.close()
+    db = index.open_db(home)
+    # Unchecked (an SSH profile): the chat's own path, never /README.md.
+    for sid in ("s1", "s2", "s3"):
+        assert index.resolve_name(db, [sid], "README.md") == {"path": "/srv/app/README.md", "via": "chat"}
+
+
+def test_a_url_ending_in_the_name_is_not_a_file(tmp_path):
+    conn = _db(tmp_path / "home", [("s1", "assistant", "Mirror: https://mirror.example/AppState.swift")])
+    assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=lambda p: True) == {"path": None}
+    assert index.resolve_name(conn, ["s1"], "//mirror.example/AppState.swift", exists=lambda p: True) == {"path": None}
+
+
+def test_a_quoted_path_with_spaces_or_brackets_is_read_whole(tmp_path):
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call("/Users/me/My Project/AppState.swift")),
+        ("s1", "tool", 'saved "/Users/me/Reports (2026)/Report (final).pdf"', None, "terminal"),
+        ("s1", "assistant", "Wrote `/Users/me/My Project/notes v2.md`."),
+    ])
+    check = lambda p: True  # noqa: E731
+    # Never a piece of it (/Project/AppState.swift).
+    assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=check) == {
+        "path": "/Users/me/My Project/AppState.swift", "via": "chat"}
+    # A quote that only starts with a path still names it.
+    said = _db(tmp_path / "home2", [("s1", "assistant", '"/srv/app/plan.md has been updated"')])
+    assert index.resolve_name(said, ["s1"], "plan.md", exists=check)["path"] == "/srv/app/plan.md"
+    # A quote holding two paths is two paths, even unchecked (an SSH profile).
+    moved = _db(tmp_path / "home3", [("s1", "tool", json.dumps({"message": "/srv/old.md moved to /srv/new.md"}),
+                                      None, "terminal")])
+    assert index.resolve_name(moved, ["s1"], "new.md")["path"] == "/srv/new.md"
+    assert index.resolve_name(moved, ["s1"], "old.md")["path"] == "/srv/old.md"
+    joined = _db(tmp_path / "home5", [("s1", "tool", json.dumps({"detail": "/srv/other.md,/b/plan.md"}), None,
+                                       "terminal")])
+    assert index.resolve_name(joined, ["s1"], "plan.md")["path"] == "/b/plan.md"
+    # Unchecked (an SSH profile), quoted prose is never taken for a path.
+    prose = _db(tmp_path / "home6", [("s1", "tool", json.dumps({"detail": "/srv/app moved to backup/old.md"}),
+                                      None, "terminal")])
+    assert index.resolve_name(prose, ["s1"], "old.md") == {"path": None}
+    # Checked, a quoted run the host doesn't have falls back to its pieces,
+    # and a piece of a folder's name (/Project/AppState.swift) isn't one.
+    spaced = _db(tmp_path / "home7", [("s1", "tool", '"/srv/app moved to /w/AppState.swift"', None, "terminal"),
+                                      ("s1", "tool", '"/Users/me/My Project/AppState.swift"', None, "terminal")])
+    assert index.resolve_name(spaced, ["s1"], "AppState.swift",
+                              exists=lambda p: p == "/w/AppState.swift")["path"] == "/w/AppState.swift"
+    renamed = _db(tmp_path / "home4", [("s1", "tool", json.dumps({"detail": "/srv/old.md renamed to backup/old.md"}),
+                                        None, "terminal")])
+    assert index.resolve_name(renamed, ["s1"], "old.md")["path"] == "/srv/old.md"
+    assert index.resolve_name(conn, ["s1"], "Report (final).pdf", exists=check)["path"] == (
+        "/Users/me/Reports (2026)/Report (final).pdf")
+    assert index.resolve_name(conn, ["s1"], "notes v2.md", exists=check)["path"] == "/Users/me/My Project/notes v2.md"
+
+
+def test_a_name_ending_in_punctuation_still_matches(tmp_path):
+    conn = _db(tmp_path / "home", [
+        ("s1", "tool", "wrote /notes/report_ and /notes/why?", None, "terminal"),
+        ("s1", "tool", "then /logs/build_. And /q/wow!.", None, "terminal"),
+        ("s1", "assistant", "See /srv/app/plan.md."),
+    ])
+    check = lambda p: True  # noqa: E731
+    assert index.resolve_name(conn, ["s1"], "report_", exists=check)["path"] == "/notes/report_"
+    assert index.resolve_name(conn, ["s1"], "why?", exists=check)["path"] == "/notes/why?"
+    assert index.resolve_name(conn, ["s1"], "build_", exists=check)["path"] == "/logs/build_"
+    assert index.resolve_name(conn, ["s1"], "wow!", exists=check)["path"] == "/q/wow!"
+    # A sentence's full stop is still not the name's.
+    assert index.resolve_name(conn, ["s1"], "plan.md", exists=check)["path"] == "/srv/app/plan.md"
+
+
+def _resolve_client(tmp_path, monkeypatch, rows):
+    _hermes_file_routes(monkeypatch)
+    _db(tmp_path / "home", rows).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path / "home")
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    return TestClient(app)
+
+
+def test_a_hosted_install_never_answers_outside_its_locked_root(tmp_path, monkeypatch):
+    import types
+    root = tmp_path / "root"
+    (root / "out").mkdir(parents=True)
+    (root / "out" / "a.md").write_text("x")
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "b.md").write_text("x")
+    (root / "link.md").symlink_to(tmp_path / "outside" / "b.md")
+    server_files = types.ModuleType("hermes_cli.web_server_files")
+    server_files._managed_files_policy = lambda *a, **k: types.SimpleNamespace(locked_root=root)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_files", server_files)
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", f"{root / 'out' / 'a.md'} {tmp_path / 'outside' / 'b.md'} {root / 'link.md'}", None,
+         "terminal")])
+
+    def resolve(name):
+        return client.get(f"{BASE}/workspace/resolve", params={"path": name, "session_id": "s1"}).json()["path"]
+
+    assert resolve("a.md") == str(root / "out" / "a.md")
+    assert resolve("b.md") is None
+    assert resolve(str(tmp_path / "outside" / "b.md")) is None
+    # A link inside the root to a file outside it is outside.
+    assert resolve("link.md") is None
+
+
+def test_a_docker_profiles_paths_are_checked_where_the_host_keeps_them(tmp_path, monkeypatch):
+    import types
+    host = tmp_path / "sandbox"
+    (host / "workspace").mkdir(parents=True)
+    (host / "workspace" / "out.csv").write_text("x")
+    server_files = types.ModuleType("hermes_cli.web_server_files")
+
+    def agent_fs_path(path, profile_home=None):
+        text = str(path)
+        return pathlib.Path(str(host) + text) if text.startswith("/workspace/") else pathlib.Path(text)
+
+    server_files._agent_fs_path = agent_fs_path
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_files", server_files)
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", "wrote /workspace/out.csv and /workspace/gone.csv", None, "terminal")])
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "out.csv", "session_id": "s1"}).json()
+    # Answered in the agent's own path, which the Folder maps again.
+    assert body["path"] == "/workspace/out.csv"
+    gone = client.get(f"{BASE}/workspace/resolve", params={"path": "gone.csv", "session_id": "s1"}).json()
+    assert gone["path"] is None
+
+
+def test_an_ssh_profile_never_takes_quoted_prose_for_a_path(tmp_path, monkeypatch):
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", json.dumps({"message": "/srv/app moved to backup/old.md"}), None, "terminal"),
+        ("s1", "tool", '"/srv/My Project/notes.md"', None, "terminal")])
+    # The profile's files are on its SSH machine: nothing here checks them.
+    monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: object())
+
+    def resolve(name):
+        return client.get(f"{BASE}/workspace/resolve", params={"path": name, "session_id": "s1"}).json()["path"]
+
+    assert resolve("old.md") is None
+    # Unchecked, a quoted path with a space is left out too.
+    assert resolve("notes.md") is None
+
+
+def test_a_quoted_path_with_an_apostrophe_is_read_whole(tmp_path):
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call("/Users/me/John's Projects/AppState.swift")),
+        ("s1", "assistant", "Saved `/Users/me/Ann's/notes.md`."),
+    ])
+    check = lambda p: True  # noqa: E731
+    assert index.resolve_name(conn, ["s1"], "AppState.swift", exists=check)["path"] == (
+        "/Users/me/John's Projects/AppState.swift")
+    assert index.resolve_name(conn, ["s1"], "notes.md", exists=check)["path"] == "/Users/me/Ann's/notes.md"
+
+
+def test_an_ssh_profile_never_opens_a_piece_of_a_quoted_bracket_path(tmp_path, monkeypatch):
+    client = _resolve_client(tmp_path, monkeypatch, [
+        ("s1", "tool", '"/Users/me/Reports (2026)/AppState.swift"', None, "terminal")])
+    monkeypatch.setattr(sys.modules["hermes_cli.web_routers.files"], "_fs_backend", lambda profile: object())
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "AppState.swift", "session_id": "s1"}).json()
+    assert body["path"] is None, "never /AppState.swift"
+
+
+def test_a_quoted_run_with_a_path_in_brackets_still_names_it(tmp_path):
+    conn = _db(tmp_path / "home", [("s1", "tool", '"/a/b.md (/c/d.md)"', None, "terminal")])
+    assert index.resolve_name(conn, ["s1"], "d.md", exists=lambda p: True)["path"] == "/c/d.md"
+
+
+def test_a_quoted_path_whose_folder_ends_in_a_separator_is_tried_whole(tmp_path):
+    real = {"/data/a;/b/old.md", "/b/old.md", "/x/old.md"}
+    conn = _db(tmp_path / "home", [
+        ("s1", "tool", '"/data/a;/b/old.md"', None, "terminal"),
+        ("s3", "assistant", 'Moved it to "/data/a;/b/old.md."'),
+        ("s2", "tool", '"/x/old.md, /y/old.md"', None, "terminal"),
+    ])
+    assert index.resolve_name(conn, ["s1"], "old.md", exists=real.__contains__)["path"] == "/data/a;/b/old.md"
+    assert index.resolve_name(conn, ["s3"], "old.md", exists=real.__contains__)["path"] == "/data/a;/b/old.md"
+    # Two paths: the whole run isn't a file, so its pieces still answer.
+    assert index.resolve_name(conn, ["s2"], "old.md", exists=real.__contains__)["path"] == "/x/old.md"
+
+
+def test_the_resolve_route_finds_a_link_in_the_terminal_folder(tmp_path, monkeypatch):
+    # The route hands resolve_name the profile's terminal folder; the helper's
+    # store keeps no cwd column, so no chat has a folder of its own.
+    work = tmp_path / "work"
+    (work / "notes").mkdir(parents=True)
+    (work / "notes" / "todo.md").write_text("x")
+    config = types.ModuleType("hermes_cli.config")
+    config.load_config = lambda: {"terminal": {"backend": "local", "cwd": str(work)}}
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
+    client = _resolve_client(tmp_path, monkeypatch, [("s1", "assistant", "Wrote `notes/todo.md`.")])
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "notes/todo.md", "session_id": "s1"}).json()
+    assert body == {"ok": True, "path": str(work / "notes" / "todo.md"), "via": "folder"}

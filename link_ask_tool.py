@@ -34,8 +34,8 @@ POLL_MAX_S = 2.0
 MAX_ANSWERS_SHOWN = 10
 
 DESCRIPTION = (
-    "Ask someone the user has linked their Hermes with (Settings > People) whether they're free on a date, or a "
-    "question, on the user's behalf. Their Hermes answers by the rules they set, or they answer themselves; no agent "
+    "Ask a person the user linked with whether they're free on a date, or a question. "
+    "That's someone the user has linked their Hermes with (Settings > Multiplayer), asked on the user's behalf. Their Hermes answers by the rules they set, or they answer themselves; no agent "
     "reads it there. action: \"people\" lists whom you can ask; \"ask\" asks one (to: their name, and free_on "
     "{date: YYYY-MM-DD, from and to: HH:MM, optional, in their time zone} or question: one line); \"answers\" lists "
     "this chat's asks and how they went. It waits a little for the answer; when it isn't back yet, it reaches this "
@@ -142,7 +142,7 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
     if action == "people":
         people = [{"name": link["name"]} for link in asks.links() if link.get("status") == "linked"]
         return {"ok": True, "people": people,
-                "note": "Ask one by name." if people else "The user hasn't linked with anyone (Settings > People)."}
+                "note": "Ask one by name." if people else "The user hasn't linked with anyone (Settings > Multiplayer)."}
     if action == "answers":
         found = asks.recent(profile, lineage(session))[:MAX_ANSWERS_SHOWN]
         given(session, [ask["id"] for ask in found if ask["status"] in link_asks.OUTCOMES])
@@ -175,7 +175,7 @@ def _whom(asks: Any, to: Any) -> tuple[Optional[dict[str, Any]], Optional[dict[s
     if not found:
         return None, {"ok": False, "error": "not_found", "note": f"to is one of the people linked: {names}."}
     return None, {"ok": False, "error": "ambiguous", "note": f"More than one Link is called that ({names}); ask the "
-                                                             "user which, and rename one in Settings > People."}
+                                                             "user which, and rename one in Settings > Multiplayer."}
 
 
 def _asked(args: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:

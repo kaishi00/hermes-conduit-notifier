@@ -27,9 +27,12 @@ import dataclasses
 import importlib
 import logging
 import os
+import sqlite3
 import sys
 import threading
 import time
+import urllib.parse
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -49,6 +52,12 @@ CLI_OWNER = {"user_id": "legacy-token-owner", "provider": "session-token"}
 # Held by the rooms loop of a process whose dashboard runs in the gateway (Starter.claim), so a draft from the CLI
 # starts in the gateway's room service and never in that of a dashboard process beside it (Desktop's own, say).
 GATEWAY_LOCK = ".gateway-rooms.lock"
+
+# The standalone backend's room store, the gateway's, and the key under which Hermes records who owns a room it
+# moved from the one into the other (gateway/hosted_rooms_gateway_import.py).
+LEGACY_STORE = "shared-state.db"
+GATEWAY_STORE = "state.db"
+MOVED_OWNER = "gateway.hosted.owner.v1:"
 
 _gateway_locks: dict[str, Any] = {}
 _gateway_locks_lock = threading.Lock()
@@ -101,6 +110,20 @@ class Starter:
         if where["kind"] == "any" and not self.hermes.in_gateway() and _held_elsewhere(self.root):
             raise StartError("elsewhere", "The gateway, whose dashboard runs too, starts the rooms from the CLI")
         return self.hermes.find(where)
+
+    def gateway_runs_rooms(self) -> bool:
+        """Whether the gateway's rooms loop runs, here or in another process: where rooms start then, since Hermes
+        moves the rooms a separate dashboard keeps into the gateway's store when the gateway starts
+        (gateway/hosted_rooms_gateway_import.py)."""
+        return self.hermes.in_gateway() or _held_elsewhere(self.root)
+
+    def moved(self, room_id: str) -> Optional[dict[str, Any]]:
+        """Where a room that started in the legacy service is now, once Hermes has moved it into the root
+        gateway's store (canonical, owned by the host owner, as the move claims it), or None while it hasn't."""
+        if room_id not in self.hermes.handed_rooms():
+            return None
+        owner = self.hermes.room_owner(room_id)
+        return {"kind": "canonical", "home": str(self.root), "subject": owner} if owner else None
 
     def probe(self, found: Found, *, room_id: str, home_install_id: str, link_id: str,
               agent: Mapping[str, Any]) -> str:
@@ -248,6 +271,9 @@ class Hermes:
     _LEGACY = (("tui_gateway.methods_groups", ("get_hosted_room_service",)),)
     _CANONICAL = (("gateway.session_authorities", ("authority_for_home",)),
                   ("gateway.session_identity", ("authenticated_subject",)))
+    # Who a request with the dashboard's own token acts as, where Hermes says (0.23 and later): the host's
+    # owner, as the rooms Hermes moves into the gateway are owned.
+    _OWNER = (("gateway.owner_identity", ("principal_subject",)),)
 
     def __init__(self, root: Any) -> None:
         self.root = Path(root)
@@ -281,7 +307,8 @@ class Hermes:
             service = getattr(authority, "hosted_room_service", None) if authority is not None else None
             if not _running(service):
                 raise StartError("no_room_service", "The gateway's room service for that profile isn't running")
-            subject = where["subject"] if kind == "canonical" else calls["authenticated_subject"](dict(CLI_OWNER))
+            subject = where["subject"] if kind == "canonical" else \
+                (calls["principal_subject"] or calls["authenticated_subject"])(dict(CLI_OWNER))
             return Found("canonical", service, subject, str(home))
         if calls["get_hosted_room_service"] is None:
             raise StartError("unsupported", "This Hermes has no tui_gateway.methods_groups.get_hosted_room_service",
@@ -290,6 +317,38 @@ class Hermes:
         if service is None:
             raise StartError("no_room_service", "Hermes' room service isn't running in this process")
         return Found("legacy", service, None)
+
+    def handed_rooms(self) -> set[str]:
+        """The rooms Hermes moved from the root's standalone store (shared-state.db) into the gateway's, fenced
+        there: none on a Hermes that doesn't move them, or without that store."""
+        source = self.root / LEGACY_STORE
+        if not source.is_file():
+            return set()
+        try:
+            module = importlib.import_module("gateway.hosted_rooms_gateway_import")
+            return set(module.handed_room_ids(source))
+        except (ImportError, AttributeError):
+            return set()
+        except Exception:  # noqa: BLE001 - a store that can't be read now is looked at again on the next pass
+            logger.debug("Linked Rooms couldn't read which rooms Hermes moved into the gateway", exc_info=True)
+            return set()
+
+    def room_owner(self, room_id: str) -> Optional[str]:
+        """Who owns a room Hermes moved into the root gateway's store: the owner the move recorded, else the
+        host's owner, whom the move makes every moved room's."""
+        try:
+            with closing(sqlite3.connect(f"file:{urllib.parse.quote(str(self.root / GATEWAY_STORE))}?mode=ro", uri=True,
+                                         timeout=5)) as conn:
+                row = conn.execute("SELECT value FROM state_meta WHERE key=?", (MOVED_OWNER + room_id,)).fetchone()
+            if row is not None and isinstance(row[0], str) and row[0]:
+                return row[0]
+        except sqlite3.Error:
+            pass
+        try:
+            owner = importlib.import_module("gateway.owner_identity").host_owner_subject()
+            return owner if isinstance(owner, str) and owner else None
+        except Exception:  # noqa: BLE001 - a Hermes that can't say: the draft stays as it is
+            return None
 
     def catalog(self, value: Any) -> Any:
         return self._call("GatewayRoomCatalog").from_mapping(value)
@@ -335,7 +394,7 @@ class Hermes:
     def _load(self) -> dict[str, Any]:
         if self._calls is None:
             calls: dict[str, Any] = {}
-            for module_name, names in (*self._ROOMLINK, *self._LEGACY, *self._CANONICAL):
+            for module_name, names in (*self._ROOMLINK, *self._LEGACY, *self._CANONICAL, *self._OWNER):
                 try:
                     module = importlib.import_module(module_name)
                 except ImportError:

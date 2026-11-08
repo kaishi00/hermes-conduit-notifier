@@ -13,8 +13,9 @@ open again:
 - ``attached``: a file the user sent, as its ``@file:`` reference;
 - ``link``: a web link in one of Hermes' replies.
 
-Hidden chats (a group room member's turns, say) are left out of the
-profile's list, but a bot's Bot Chat, a hidden session titled "Bot Chat", is
+Hidden chats (a group room member's turns, say) and a bot's workstreams
+(``workstreams``, the caller's list: Hermes shows a resolved one so
+Desktop's link opens it) are left out of the profile's list, but a bot's Bot Chat, a hidden session titled "Bot Chat", is
 listed, and a chat asked for by id is read whether hidden or not.
 
 The list is read from the profile's ``state.db`` (read only), newest message
@@ -34,7 +35,7 @@ import os
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, List, Optional
 from urllib.parse import urlparse
 
 # Rows scanned per window, and the most one request reads before it hands back
@@ -456,6 +457,7 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
                    group: Optional[str] = None,
                    query: str = "", limit: int = DEFAULT_LIMIT,
                    include_missing: bool = True,
+                   workstreams: Iterable[str] = (),
                    stat: Callable[[str], Optional[int]] = _file_size,
                    window_rows: int = WINDOW_ROWS, max_scan_rows: int = MAX_SCAN_ROWS) -> dict:
     """One page of artifacts, newest first, and where the next page starts
@@ -464,7 +466,8 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
     ``max_scan_rows`` of them, and ignores ``window_rows``. Without
     ``include_missing``, a file no longer on disk is left out, so a history
     of deleted files doesn't leave Conduit's pages mostly empty; links have
-    no file and always stay."""
+    no file and always stay. The profile's list leaves out ``workstreams``
+    and the chats that continue them."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     max_scan_rows = max(1, int(max_scan_rows))
     kinds = GROUPS.get(group) if group else None
@@ -522,6 +525,15 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
         shown = list(dict.fromkeys([*(str(sid) for sid in wanted if sid), *bot_chat_lineage(conn, session_columns)]))
         listed = f" OR m.session_id IN ({','.join('?' * len(shown))})" if shown else ""
         hidden = f" AND (COALESCE(s.hidden, 0) = 0{listed})"
+    work = [str(sid) for sid in workstreams if sid]
+    if work and not wanted:
+        # Hidden while open, shown once resolved; the bot's, either way.
+        # With every chat that continues it, however many times.
+        hidden += (" AND m.session_id NOT IN (WITH RECURSIVE work(id) AS (SELECT value FROM json_each(?)"
+                   " UNION SELECT c.id FROM sessions c JOIN work ON c.parent_session_id = work.id) SELECT id FROM work)"
+                   if "parent_session_id" in session_columns else
+                   " AND m.session_id NOT IN (SELECT value FROM json_each(?))")
+        shown = [*shown, json.dumps(work)]
     if wanted:
         # One chat reads its own rows through Hermes' session index, not
         # the profile's history window by window: on a profile full of cron
@@ -560,3 +572,245 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
             next_before = top
             break
     return {"items": items, "next_before": next_before}
+
+
+# --- A file a reply names ------------------------------------------------------
+#
+# A reply often names a file by its name or a path inside a project
+# (`AppState.swift`, `Conduit/Views/X.swift`), not where it lives: the chat's
+# working folder is often unset, and the agent worked somewhere else. The
+# chat's own history says where: the tool calls and results that read or
+# wrote the file carry its full path (hermes-conduit#1809). ``resolve_name``
+# looks there, newest first, after the chat's folder.
+
+# Rows of one chat read for a name, newest first.
+RESOLVE_MAX_ROWS = 20_000
+MAX_RESOLVE_NAME_CHARS = 512
+# Paths a row offers, and how many a request checks on disk at most.
+MAX_RESOLVE_CANDIDATES = 400
+# A path starts at a / or ~/ of its own, never inside a relative one
+# (backup/old.md isn't /old.md).
+_ABS_PATH_RE = re.compile(r"""(?:(?<![A-Za-z0-9_.~-])~/|(?<![A-Za-z0-9_.~-])/)[^\s'"`<>()\[\]{},;|\\]+"""
+                          r"""|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/][^\s'"`<>()\[\]{},;|]+""")
+
+
+def _clean_name(name: str) -> str:
+    text = str(name or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.rstrip("/")
+
+
+# A path between quotes or backticks, where it may hold spaces or brackets
+# (`/Users/me/My Project/Report (final).pdf`, a tool call's JSON string).
+# Only its own quote ends it, so `/Users/me/John's Projects/a.md` is whole.
+_QUOTED_PATH_RE = re.compile(r"""(["'`])((?:~/|/|(?<![A-Za-z0-9+.-])[A-Za-z]:[\\/])(?:(?!\1)[^\n]){1,%d})\1""" % MAX_PATH_CHARS)
+# A sentence's own end after a path, which a name ending in `_` or `*` keeps.
+_SENTENCE_END = ".,;:!?"
+# What the bare-path pattern stops at, so a quoted path holding one is read whole.
+_PATH_BREAK_RE = re.compile(r"""[\s<>()\[\]{},;|]""")
+
+
+def _path_candidate(path: str, suffix: str, *, strip: str) -> Optional[str]:
+    """``path`` as a file path ending in ``suffix``, or None."""
+    path = path.rstrip(strip)
+    if not path.startswith(("/", "~")):
+        # The escape before a JSON string's closing quote isn't the path's.
+        path = path.rstrip(strip + "\\")
+        # A Windows path, compared and opened with forward slashes.
+        path = re.sub(r"/+", "/", path.replace("\\", "/"))
+    # grep's `path:12:` and a compiler's `path:12:5:`.
+    path = re.sub(r":\d+(?::\d+)?:?$", "", path).rstrip(":")
+    # A URL's //host/... (and a UNC share) is never a file here.
+    if path.startswith("//"):
+        return None
+    if path.endswith("/" + suffix) and len(path) <= MAX_PATH_CHARS:
+        return path
+    return None
+
+
+# Inside a quoted run, a second path after a space or a , ; |: the run holds several
+# paths ("/a/old.md moved to /b/new.md"), not one with spaces in it.
+_ANOTHER_PATH_RE = re.compile(r"""[\s,;|](?:~/|/|[A-Za-z]:[\\/])""")
+
+
+def _name_end(raw: str, suffix: str, strip: str) -> Optional[str]:
+    """``raw`` up to where ``suffix`` ends it, when only ``strip``
+    characters follow (``/notes/why?.`` for ``why?``)."""
+    end = raw.replace("\\", "/").rfind("/" + suffix)
+    if end < 0:
+        return None
+    end += 1 + len(suffix)
+    tail = raw[end:]
+    return raw[:end] if all(char in strip for char in tail) else None
+
+
+def _bare_candidate(raw: str, suffix: str) -> Optional[str]:
+    """A bare-pattern match as a path ending in ``suffix``, or None.
+    Trailing punctuation is the sentence's, unless the name ends in it."""
+    return (_path_candidate(raw, suffix, strip=_TRAILING + "'\"")
+            or _path_candidate(_name_end(raw, suffix, _TRAILING + "'\"\\") or "", suffix, strip=""))
+
+
+def _path_tokens(text: str, suffix: str, *, quoted_whole: bool = True) -> Iterable[str]:
+    """Absolute paths in ``text`` that end in ``suffix`` (a whole name or
+    whole trailing folders: ``/a/b/AppState.swift`` for
+    ``AppState.swift``, never ``/a/MyAppState.swift``), in the order they
+    appear. A quoted run that is one path with spaces, brackets or an
+    apostrophe in it is never read in pieces; with ``quoted_whole`` it is
+    read whole. Only a host that checks each candidate can tell a quoted
+    path from quoted prose that ends in one, so an SSH profile, which
+    can't, reads neither."""
+    if suffix.rsplit("/", 1)[-1] not in text:
+        return
+    found: list = []
+    whole_runs: list = []
+    for match in _QUOTED_PATH_RE.finditer(text):
+        run = match.group(2)
+        if not _PATH_BREAK_RE.search(run.replace("'", " ")):
+            continue  # the bare-path pattern reads it whole
+        # A nested JSON string's quote comes escaped: \" ends the path.
+        strip = " \t\\" + _SENTENCE_END
+        if _ANOTHER_PATH_RE.search(run):
+            # Most likely several paths, read piece by piece. A folder can
+            # end in a separator, though (/data/a;/b/old.md), so a host that
+            # checks tries the whole run too, before its pieces.
+            path = quoted_whole and (
+                _path_candidate(run, suffix, strip=" \t\\")
+                or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
+            if path:
+                found.append((match.end(2), path))
+            continue
+        head = _ABS_PATH_RE.match(run)
+        if head and _bare_candidate(head.group(0), suffix):
+            # It opens with the whole path ("/srv/old.md renamed to
+            # backup/old.md"): what follows is prose, read as such.
+            continue
+        path = (_path_candidate(run, suffix, strip=" \t\\")
+                or _path_candidate(_name_end(run, suffix, strip) or "", suffix, strip=""))
+        if not path:
+            continue  # not a path ending in the name: its pieces may be ("/a/b.md (/c/d.md)")
+        # One path: a piece of it (/AppState.swift after `Reports (2026)`)
+        # isn't a file the chat named.
+        whole_runs.append(match.span(2))
+        if quoted_whole:
+            found.append((match.start(2), path))
+    for match in _ABS_PATH_RE.finditer(text):
+        if any(lo <= match.start() < hi for lo, hi in whole_runs):
+            continue
+        path = _bare_candidate(match.group(0), suffix)
+        if path:
+            found.append((match.start(), path))
+    for _, path in sorted(found, key=lambda item: item[0]):
+        yield path
+
+
+def _join_folder(folder: str) -> str:
+    """A recorded folder a relative name can be joined to, or "" for none
+    (nothing recorded, the disk's top, a bare ``~``)."""
+    folder = (folder or "").strip()
+    if re.match(r"^[A-Za-z]:[\\/]", folder):
+        folder = re.sub(r"/+", "/", folder.replace("\\", "/"))
+    folder = folder.rstrip("/")
+    if folder and folder != "~" and not re.fullmatch(r"[A-Za-z]:", folder) and _is_local_path(folder + "/"):
+        return folder
+    return ""
+
+
+def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str, *,
+                 exists: Optional[Callable[[str], bool]] = None,
+                 default_folder: Optional[str] = None,
+                 max_rows: int = RESOLVE_MAX_ROWS) -> dict:
+    """Where the file a chat's reply names as ``name`` (a bare name or a
+    relative path) is: joined to the chat's working folder, then to its git
+    repository's top (a project chat often works in a subfolder while its
+    replies name files from the top, hermes-conduit#1809), then, for a chat
+    with no folder recorded, to ``default_folder`` (the profile's configured
+    terminal folder, which Hermes' file tools resolve such a chat's relative
+    paths against); else the newest absolute path ending in it that the
+    chat's own messages (tool calls, tool results, replies) carry. Hidden sessions in the lineage (a room
+    the chat was branched from) are left out, as the Artifacts list leaves
+    them out, except the ids asked for and the Bot Chat's. ``exists`` checks
+    a candidate on the host (and refuses one it won't show); without it (a
+    profile whose files are on another machine) the folder's join, else the
+    newest candidate, is taken unchecked. ``{"path": None}`` when nothing
+    names it."""
+    suffix = _clean_name(name)
+    if not suffix or len(suffix) > MAX_RESOLVE_NAME_CHARS or "\n" in suffix:
+        return {"path": None}
+    if _is_local_path(suffix):
+        if suffix.startswith("//"):
+            return {"path": None}
+        if exists is None or exists(os.path.expanduser(suffix)):
+            return {"path": suffix, "via": "absolute"}
+        return {"path": None}
+    if any(part == ".." for part in suffix.split("/")):
+        return {"path": None}
+    wanted = [sid for sid in session_ids if sid]
+    chat = lineage(conn, wanted)
+    session_columns = _columns(conn, "sessions")
+    if chat and "hidden" in session_columns:
+        shown = {*wanted, *bot_chat_lineage(conn, session_columns)}
+        hidden = {str(row[0]) for row in conn.execute(
+            f"SELECT id FROM sessions WHERE COALESCE(hidden, 0) != 0 AND id IN ({','.join('?' * len(chat))})", chat)}
+        chat = [sid for sid in chat if sid in shown or sid not in hidden]
+    if not chat:
+        return {"path": None}
+    marks = ",".join("?" * len(chat))
+    checked: set = set()
+
+    def found(path: str) -> bool:
+        if path in checked or len(checked) >= MAX_RESOLVE_CANDIDATES:
+            return False
+        checked.add(path)
+        return exists is None or exists(os.path.expanduser(path))
+
+    # The chat's own folder first, then those of the sessions it continues
+    # or that continue it, the most recently active first; after them, the
+    # tops of their git repositories; with no folder recorded at all (or a
+    # store that keeps none), the terminal's.
+    cwds: List[str] = []
+    roots: List[str] = []
+    if "cwd" in session_columns:
+        repo = "s.git_repo_root" if "git_repo_root" in session_columns else "NULL"
+        rows = conn.execute(
+            f"SELECT s.id, s.cwd, {repo} FROM sessions s WHERE s.id IN ({marks}) ORDER BY "
+            f"(SELECT MAX(m.id) FROM messages m WHERE m.session_id = s.id) DESC, s.id", chat).fetchall()
+        folders = {str(row[0]): (str(row[1] or ""), str(row[2] or "")) for row in rows}
+        order = [sid for sid in wanted if sid in folders] + [str(row[0]) for row in rows if str(row[0]) not in wanted]
+        cwds = [_join_folder(folders[sid][0]) for sid in order]
+        roots = [_join_folder(folders[sid][1]) for sid in order]
+    tried = [*cwds, *roots]
+    if not any(cwds) and default_folder:
+        tried.append(_join_folder(default_folder))
+    for folder in dict.fromkeys(f for f in tried if f):
+        candidate = f"{folder}/{suffix}"
+        if found(candidate):
+            return {"path": candidate, "via": "folder"}
+
+    # Only a host that checks each candidate can tell a quoted path from
+    # quoted prose that ends in one.
+    host_checks = exists is not None and getattr(exists, "checks_host", True)
+    message_columns = _columns(conn, "messages")
+    tool_calls = "tool_calls" if "tool_calls" in message_columns else "NULL"
+    # The name's last part narrows the rows sqlite hands back (after a / or,
+    # on Windows, a \\).
+    leaf = suffix.rsplit("/", 1)[-1].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    sql = (f"SELECT content, {tool_calls} AS tool_calls FROM messages WHERE session_id IN ({marks}) "
+           f"AND (content LIKE ? ESCAPE '\\' OR {tool_calls} LIKE ? ESCAPE '\\') ORDER BY id DESC LIMIT ?")
+    pattern = f"%{leaf}%"
+    for row in conn.execute(sql, [*chat, pattern, pattern, max(1, int(max_rows))]):
+        for column in ("content", "tool_calls"):
+            text = row[column]
+            if not isinstance(text, str):
+                continue
+            # A JSON-encoded tool call escapes nothing in a POSIX path, but
+            # a result can hold one as an escaped string.
+            text = text[:MAX_SCAN_CHARS].replace("\\/", "/").replace("\\\\", "\\")
+            # Newest mention in the row first, as rows are.
+            for path in reversed(list(_path_tokens(text, suffix, quoted_whole=host_checks))):
+                if found(path):
+                    return {"path": path, "via": "chat"}
+        if len(checked) >= MAX_RESOLVE_CANDIDATES:
+            break
+    return {"path": None}

@@ -206,6 +206,7 @@ test('registration flood stays bounded without consuming authenticated event cap
   const pairing = fixture.createPairing(created.installation.id);
   const claim = fixture.claimPairing(pairing.code, 'control target');
   fixture.savePendingDecision({ id: 'conduit-push-globalbudget', installationId: created.installation.id, gatewayId: claim.gatewayId, question: 'answer?' });
+  fixture.flush();
   const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1' });
   children.push(child);
   const base = `http://127.0.0.1:${aPort}`;
@@ -343,6 +344,7 @@ test('revocation budget leaves decision answer and release actions available', a
   const releaseGateway = Object.keys(installations['00000000-0000-4000-8000-000000000008'].gateways)[1];
   fixture.savePendingDecision({ id: 'conduit-push-control1', installationId: '00000000-0000-4000-8000-000000000008', gatewayId: answerGateway, question: 'answer?' });
   fixture.savePendingDecision({ id: 'conduit-push-control2', installationId: '00000000-0000-4000-8000-000000000008', gatewayId: releaseGateway, question: 'release?' });
+  fixture.flush();
   const child = await startRelay(aPort, 'accept', isolatedPath);
   children.push(child);
   try {
@@ -465,6 +467,7 @@ test('non-mutating decision responses do not consume the shared decision budget'
   const releaseId = 'conduit-push-release-after-noops';
   fixture.savePendingDecision({ id: releaseId, installationId: targets[6].created.installation.id, gatewayId: targets[6].claim.gatewayId, question: 'Still releasable?' });
 
+  fixture.flush();
   const child = await startRelay(aPort, 'accept', isolatedPath, { TRUST_PROXY: '1' });
   children.push(child);
   const base = `http://127.0.0.1:${aPort}`;
@@ -1548,6 +1551,7 @@ test('full decision capacity rejects before event persistence and leaves another
     }
   }
   assert.equal(Object.keys(seed.data.pendingDecisions).length, 256);
+  seed.flush();
   children.push(await startRelay(capacityPort, 'accept', capacityDataPath, { RELAY_MAX_ACTIVE_DECISIONS: '256' }));
   const rejected = await api(`http://127.0.0.1:${capacityPort}`, '/v1/events', {
     method: 'POST',
@@ -1588,6 +1592,7 @@ test('per-installation active capacity returns 429 and retry succeeds after an a
       gatewayId: gateway.gatewayId, question: 'Seed?',
     });
   }
+  seed.flush();
   children.push(await startRelay(installationCapacityPort, 'accept', installationCapacityDataPath));
   const base = `http://127.0.0.1:${installationCapacityPort}`;
   const event = {

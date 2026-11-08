@@ -39,10 +39,97 @@ def store(tmp_path):
     return calls
 
 
-def test_nothing_is_kept_with_alert_calls_off(tmp_path):
+def test_no_wait_is_a_calls_with_alert_calls_off(tmp_path):
     calls = CallStore(tmp_path)
     assert calls.note_waiting("s1", "question", request_id="conduit-push-a", questions=BATCH) is False
     assert calls.waiting_for("s1") is None
+
+
+def test_an_approval_follower_ends_once_alert_calls_are_off(tmp_path):
+    calls = CallStore(tmp_path)
+    calls.update_settings({"enabled": True, "alerts": True})
+    assert calls.note_waiting("s1", "approval", description="Run it?", command="make") is True
+    assert calls.has_waiting("s1", "approval")
+    calls.update_settings({"alerts": False})
+    calls.forget_waiting("s1", "approval")
+    assert calls.note_waiting("s1", "approval", description="Run it again?", command="make") is False
+    assert not calls.has_waiting("s1", "approval"), "an unfollowed wait keeps no follower going"
+    assert len(calls.waiting_list()) == 1, "it is still listed"
+
+
+def test_a_full_list_drops_a_listed_wait_before_one_a_call_may_answer(tmp_path):
+    from calls_store import MAX_WAITING
+    calls = CallStore(tmp_path)
+    calls.update_settings({"enabled": True, "alerts": True})
+    calls.note_waiting("followed", "approval", description="Run it?", command="make")
+    calls.update_settings({"alerts": False})
+    for index in range(MAX_WAITING):
+        calls.note_waiting(f"s{index}", "approval", description="Run it?", command="make")
+    listed = calls.waiting_list()
+    assert len(listed) == MAX_WAITING
+    assert listed[-1]["session_ids"] == ["followed"], "the followed wait stays"
+    assert calls.waiting_for("followed") is not None
+
+
+def test_a_call_reads_a_followed_wait_for_two_hours_the_list_longer(tmp_path):
+    clock = {"now": 1000.0}
+    calls = CallStore(tmp_path, clock=lambda: clock["now"])
+    calls.update_settings({"enabled": True, "alerts": True})
+    calls.note_waiting("s1", "approval", description="Run it?", command="make")
+    clock["now"] += 2 * 3600
+    assert calls.waiting_for("s1") is None and not calls.has_waiting("s1", "approval")
+    assert calls.answer_waiting("s1", choice="once")["status"] == "not_waiting"
+    assert len(calls.waiting_list()) == 1, "still listed while Hermes may wait"
+
+
+def test_the_needs_you_list_keeps_every_wait_even_with_alert_calls_off(tmp_path):
+    clock = {"now": 1000.0}
+    calls = CallStore(tmp_path, clock=lambda: clock["now"])
+    assert calls.note_waiting(["s1", "rt-1"], "approval", description="Run the migration?",
+                              command="rm -rf build", title="Release prep") is False
+    clock["now"] = 1005.0
+    calls.note_waiting("s2", "question", request_id="conduit-push-a", questions=BATCH, title="Deploy\nplan")
+    listed = calls.waiting_list()
+    assert [item["kind"] for item in listed] == ["question", "approval"], "newest first"
+    question, approval = listed
+    assert question["title"] == "Deploy plan" and question["summary"] == "Which environment?"
+    assert question["questions"] == 2 and question["session_ids"] == ["s2"]
+    assert approval["summary"] == "Run the migration?" and approval["title"] == "Release prep"
+    assert approval["session_ids"] == ["s1", "rt-1"] and approval["at"] == 1000.0
+    assert "command" not in approval, "the list never shows a command"
+    stored = json.loads((tmp_path / "conduit-calls.json").read_text())["waiting"]
+    assert all(not item["command"] and not item["command_sha"] for item in stored), "nor keeps one"
+    # Without alert calls, a call can neither read nor answer them.
+    assert calls.waiting_for("s1") is None
+    assert calls.answer_waiting("s1", choice="once")["status"] == "not_waiting"
+    # Answered anywhere: it leaves the list.
+    assert calls.forget_waiting("rt-1", "approval") == 1
+    assert [item["kind"] for item in calls.waiting_list()] == ["question"]
+
+
+def test_the_needs_you_list_drops_waits_hermes_gave_up_on_and_workstreams(store):
+    store.note_waiting("s1", "approval", description="Run it?", command="make")
+    store.note_waiting("w1", "approval", description="Push it?", command="git push")
+    store.clock_state["now"] = 1400.0
+    store.note_waiting("s2", "question", request_id="conduit-push-a", questions=BATCH)
+    listed = store.waiting_list(max_age={"approval": 330.0}, leave_out=["w1"])
+    assert [item["session_ids"] for item in listed] == [["s2"]]
+    assert [item["session_ids"] for item in store.waiting_list(leave_out=["w1"])] == [["s2"], ["s1"]]
+    # With alert calls on they stay a call's to read too.
+    assert store.waiting_for("s1")["kind"] == "approval"
+
+
+def test_a_wait_kept_before_the_list_still_reads_as_a_calls(tmp_path):
+    clock = {"now": 1000.0}
+    calls = CallStore(tmp_path, clock=lambda: clock["now"])
+    calls.update_settings({"enabled": True, "alerts": True})
+    calls.note_waiting("s1", "approval", description="Run it?", command="make")
+    raw = json.loads(calls.path.read_text())
+    for item in raw["waiting"]:
+        item.pop("followed"), item.pop("title")
+    calls.path.write_text(json.dumps(raw))
+    assert calls.waiting_for("s1")["kind"] == "approval"
+    assert calls.waiting_list()[0]["title"] == ""
 
 
 def test_a_call_reads_the_batch_and_answers_it_one_question_at_a_time(store):
@@ -253,3 +340,59 @@ def test_an_answer_whose_delivery_record_is_gone_is_still_taken_back(store):
     store.path.write_text(json.dumps(state))
     assert store.approval_delivery(answer_id, wait_s=0) == "withdrawn"
     assert store.waiting_for("s1")["answered"] is False
+
+
+def test_a_parked_question_rereads_only_when_the_file_changes(store, monkeypatch):
+    # The clarify loop asks every second for up to an hour (#563).
+    store.note_waiting("s1", "question", request_id="conduit-push-m", questions=BATCH)
+    monkeypatch.setattr(store_module, "SETTLED_NS", 0)
+    loads = []
+    real_load = CallStore._load
+
+    def counting_load(self, **kwargs):
+        loads.append(kwargs)
+        return real_load(self, **kwargs)
+
+    monkeypatch.setattr(CallStore, "_load", counting_load)
+    for _ in range(5):
+        assert store.answers_ready("conduit-push-m") is False
+    assert len(loads) == 1, "an unchanged file is read once"
+
+    store.answer_waiting("s1", answer="prod")
+    store.answer_waiting("s1", answer="unit")
+    assert store.answers_ready("conduit-push-m") is True, "a write is seen at once"
+
+
+def test_a_just_written_file_is_never_trusted_unchanged(store, monkeypatch):
+    store.note_waiting("s1", "question", request_id="conduit-push-r", questions=BATCH)
+    loads = []
+    real_load = CallStore._load
+    monkeypatch.setattr(CallStore, "_load", lambda self, **kw: loads.append(kw) or real_load(self, **kw))
+    # Written within the settle window (made wide, so a slow worker can't
+    # step past it): a second write in the same timestamp tick could look
+    # the same to a stat.
+    monkeypatch.setattr(store_module, "SETTLED_NS", 3_600_000_000_000)
+    assert store.answers_ready("conduit-push-r") is False
+    assert store.answers_ready("conduit-push-r") is False
+    assert len(loads) == 2
+
+
+def test_a_read_that_failed_is_not_remembered_as_not_yet(store, monkeypatch):
+    store.note_waiting("s1", "question", request_id="conduit-push-f", questions=BATCH)
+    monkeypatch.setattr(store_module, "SETTLED_NS", 0)
+    real_read = pathlib.Path.read_text
+    failing = [True]
+
+    def read_text(self, *args, **kwargs):
+        if failing and self == store.path:
+            failing.clear()
+            raise OSError(24, "Too many open files")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", read_text)
+    assert store.answers_ready("conduit-push-f") is False
+    loads = []
+    real_load = CallStore._load
+    monkeypatch.setattr(CallStore, "_load", lambda self, **kw: loads.append(kw) or real_load(self, **kw))
+    assert store.answers_ready("conduit-push-f") is False
+    assert loads, "the failed read wasn't remembered: the file is read again"

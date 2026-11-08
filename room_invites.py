@@ -35,8 +35,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_posts,
-               room_start, session_titles)
+from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_looks,
+               room_posts, room_start, session_titles)
 from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
 GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
-KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS)
+KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS, *room_looks.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -148,6 +148,7 @@ class Rooms:
         self._api_waits: dict[str, int] = {}
         self.copies = room_copies.Copies(self, hermes=copier)
         self.posts = room_posts.Posts(self, hermes=poster)
+        self.looks = room_looks.Looks(self)
         self._notes: Any = None
 
     # --- The home's drafts ---------------------------------------------------------
@@ -421,7 +422,7 @@ class Rooms:
         handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
                    LEAVE: self.on_leave, ENDED: self.on_ended, room_copies.PAGE: self.copies.on_page,
                    room_copies.COPIED: self.copies.on_copied, room_posts.POST: self.posts.on_post,
-                   room_posts.POSTED: self.posts.on_posted}.get(received.kind)
+                   room_posts.POSTED: self.posts.on_posted, room_looks.LOOKS: self.looks.on_looks}.get(received.kind)
         if handler is not None:
             handler(received)
 
@@ -611,6 +612,50 @@ class Rooms:
         finally:
             _start_lock.release()
 
+    def _follow_gateway(self) -> None:
+        """Rooms go where the gateway keeps them. A room a separate dashboard started in the legacy service is
+        moved into the root gateway's store when the gateway starts, and frozen where it was
+        (gateway/hosted_rooms_gateway_import.py): its draft follows it, so its copies, posts and route changes
+        reach the room that goes on. A draft still waiting to start there starts in the gateway's service
+        instead, while the gateway's rooms loop runs."""
+        drafts = self.store.read()["drafts"]
+        started = [room_id for room_id, draft in drafts.items() if _in_legacy(draft)]
+        waiting = [room_id for room_id, draft in drafts.items()
+                   if draft["status"] == "waiting" and draft["where"].get("kind") == "legacy"]
+        moved: dict[str, dict[str, Any]] = {}
+        for room_id in started:
+            try:
+                where = self.starter.moved(room_id)
+            except Exception:  # noqa: BLE001 - looked at again on the next pass
+                where = None
+            if where is not None:
+                moved[room_id] = where
+        if waiting:
+            try:
+                to_gateway = self.starter.gateway_runs_rooms()
+            except Exception:  # noqa: BLE001 - looked at again on the next pass
+                to_gateway = False
+            if not to_gateway:
+                waiting = []
+        if not moved and not waiting:
+            return
+        with self.store.update() as state:
+            for room_id, where in moved.items():
+                draft = state["drafts"].get(room_id)
+                if draft is not None and _in_legacy(draft):
+                    draft["started_in"] = where
+                    # A route given as Hermes moved the room went to the frozen copy only: each live one is
+                    # made again where the room goes on, unless the move took it along.
+                    for member_id, route in sorted(draft["routes"].items()):
+                        if route == "live":
+                            _todo(draft, member_id, "swap", unseen=True)
+                    logger.info("Linked Rooms follows room %s into the gateway's store, where Hermes moved it",
+                                room_id)
+            for room_id in waiting:
+                draft = state["drafts"].get(room_id)
+                if draft is not None and draft["status"] == "waiting" and draft["where"].get("kind") == "legacy":
+                    draft["where"] = {"kind": "any"}
+
     def _start(self, room_id: str) -> None:
         draft = self.store.read()["drafts"][room_id]
         try:
@@ -746,22 +791,23 @@ class Rooms:
         for room_id, draft in sorted(self.store.read()["drafts"].items()):
             if draft["status"] != "started" or not draft.get("route_todo"):
                 continue
+            where = draft.get("started_in") or draft["where"]
             try:
-                found = self.starter.find(draft.get("started_in") or draft["where"])
+                found = self.starter.find(where)
             except room_start.StartError:
                 continue  # its service runs in another process, or isn't running yet
             for member_id in sorted(draft["route_todo"]):
-                self._route(room_id, member_id, found)
+                self._route(room_id, member_id, found, where)
 
-    def _route(self, room_id: str, member_id: str, found: room_start.Found) -> None:
+    def _route(self, room_id: str, member_id: str, found: room_start.Found, where: dict[str, Any]) -> None:
         """The change waiting for a member's route as it is when its turn comes, not as the pass read it (R23): a
         leave, a take-out or the end since stops a fresh grant, and one that comes while it's made has its own
         change made after it."""
         draft = self.store.read()["drafts"].get(room_id)
         todo = draft.get("route_todo", {}).get(member_id) if draft is not None and draft["status"] == "started" \
             else None
-        if todo is None:
-            return  # made meanwhile, or the room ended
+        if todo is None or (draft.get("started_in") or draft["where"]) != where:
+            return  # made meanwhile, the room ended, or it moved: the next pass finds where it is
         member = next(each for each in draft["members"] if each["member_id"] == member_id)
         agent = _joined(draft, member)
         failed = None
@@ -769,7 +815,7 @@ class Rooms:
             if todo["do"] == "swap":
                 self.starter.swap(found, room_id=room_id, home_install_id=draft["home_install_id"],
                                   link_id=member["link"], agent=agent,
-                                  registered=draft["routes"].get(member_id) == "live")
+                                  registered=draft["routes"].get(member_id) == "live" and not todo.get("unseen"))
             elif todo["do"] == "revoke":
                 self.starter.revoke(found, room_id=room_id, member_id=member_id)
             else:
@@ -780,8 +826,10 @@ class Rooms:
             draft = state["drafts"].get(room_id)
             todos = draft.get("route_todo", {}) if draft is not None else {}
             current = todos.get(member_id)
-            if current is None or current["do"] != todo["do"] or (
-                    todo["do"] == "swap" and _joined(draft, member)["grant"] != agent["grant"]):
+            moved = draft is not None and (draft.get("started_in") or draft["where"]) != where
+            if current is None or moved or current["do"] != todo["do"] \
+                    or current.get("unseen") != todo.get("unseen") \
+                    or (todo["do"] == "swap" and _joined(draft, member)["grant"] != agent["grant"]):
                 return  # another change came meanwhile: the next pass makes it
             if failed is None:
                 draft["routes"][member_id] = "live" if todo["do"] == "swap" else "cut_off"
@@ -790,7 +838,14 @@ class Rooms:
                 current["tries"] += 1
                 if current["tries"] >= START_TRIES:
                     del todos[member_id]
-                    if todo["do"] == "swap":
+                    if todo.get("unseen"):
+                        # The room's service may not have its route at all: it's shown cut off, and the
+                        # member's next fresh grant gives it there as at a start.
+                        draft["routes"][member_id] = "cut_off"
+                        logger.warning("Linked Rooms couldn't give member %s its route in room %s where Hermes "
+                                       "moved it (%s); it's cut off until its next grant", member_id, room_id,
+                                       failed)
+                    elif todo["do"] == "swap":
                         logger.warning("Linked Rooms couldn't give member %s in room %s its fresh grant (%s); its "
                                        "route keeps the one it has", member_id, room_id, failed)
                     else:
@@ -827,7 +882,7 @@ class Rooms:
         agent = _agent_in(invite, member_id)
         if agent is None or not _due(agent, now) or self._api_waits.get(agent["profile"], 0) > now:
             return
-        link_id, room_id = invite["link"], invite["room_id"]
+        link_id, room_id, epoch = invite["link"], invite["room_id"], invite["authority_epoch"]
         shown = self.link(link_id)
         if shown is None or shown.get("status") != "linked":
             self._tell_once(f"unlinked:{key}", "Linked Rooms couldn't renew an agent's grant in room %s: this Hermes "
@@ -835,7 +890,7 @@ class Rooms:
             self._renew_at(key, member_id, None)
             return
         try:
-            fresh = self.joiner.renew(agent["grant"])
+            fresh = self.joiner.renew(agent["grant"], epoch=epoch)
         except room_join.JoinError as exc:
             wait, then = _RENEW_LATER.get(exc.code, (None, "it isn't renewed again"))
             if exc.code == "api_server":
@@ -851,6 +906,11 @@ class Rooms:
             return
         with self.store.update() as state:
             current = _agent_in(state["invites"].get(key), member_id)
+            if current is not None and state["invites"][key]["authority_epoch"] != epoch:
+                # The room went on at a later epoch while this grant was made (follow_epoch): it's for the
+                # one before, which the room's turns no longer carry. The agent stays due, for the new one.
+                current["renew_at"] = now
+                return
             if current is not None:
                 current.update(grant=fresh["grant"], status_expires_at=fresh["status_expires_at"],
                                renew_at=now + RENEW_S)
@@ -864,6 +924,23 @@ class Rooms:
         if current is None:
             # It left the room, or was taken out, while its grant was made: the fresh one goes too.
             self._leave(link_id, {"grant": fresh["grant"]})
+
+    def follow_epoch(self, key: str, epoch: int) -> None:
+        """The room at the other end of an invite goes on at a later authority epoch: Hermes moved it into its
+        gateway's store (gateway/hosted_rooms_gateway_import.py), and a turn it sends now carries that epoch. The
+        invite takes it, and its agents get fresh grants for it on the rooms loop's next pass, which go to the
+        home in a room.grant as a renewal's do."""
+        now = int(self.clock())
+        with self.store.update() as state:
+            invite = state["invites"].get(key)
+            if invite is None or type(epoch) is not int or epoch <= invite["authority_epoch"]:
+                return
+            invite["authority_epoch"] = epoch
+            for agent in invite["joined"]:
+                if agent.get("renew_at") is not None or agent.get("grant"):
+                    agent["renew_at"] = now
+        logger.info("Linked Rooms' room %s goes on at authority epoch %d: its agents get grants for it",
+                    key.split("/", 1)[-1], epoch)
 
     def _renew_at(self, key: str, member_id: str, when: Optional[int]) -> None:
         with self.store.update() as state:
@@ -923,8 +1000,13 @@ class Rooms:
         if self.joiner is not None:
             self._renew()
         if self.starter is not None:
+            self._follow_gateway()
             self._start_ready()
             self.copies.send_pages()
+        # How the started rooms' agents and people look, to the others in them (room_looks): after the starts
+        # have gone, so a member's Hermes knows the room before its first looks arrive.
+        self.flush()
+        self.looks.send_looks()
         self.flush()
         # Notes in the private chats of the rooms elsewhere your agents only listen in (room_chats).
         self.notes.pass_once()
@@ -1421,12 +1503,22 @@ def _member(draft: dict[str, Any], member: Any) -> Optional[dict[str, Any]]:
         (each for each in members if each["handle"].casefold() == handle), None)
 
 
-def _todo(draft: dict[str, Any], member_id: str, do: str) -> None:
+def _todo(draft: dict[str, Any], member_id: str, do: str, *, unseen: bool = False) -> None:
     """A change to a member's route for the rooms loop to make: it takes the place of one waiting that does no
-    more (R15), with tries of its own."""
+    more (R15), with tries of its own. An ``unseen`` swap is for a route the room's service may not have got
+    (its room moved), which it gives again rather than taking as dropped; a swap in its place keeps that."""
     todos = draft.setdefault("route_todo", {})
-    if member_id not in todos or _TODO_RANK[do] >= _TODO_RANK[todos[member_id]["do"]]:
+    waiting = todos.get(member_id)
+    if waiting is None or _TODO_RANK[do] >= _TODO_RANK[waiting["do"]]:
         todos[member_id] = {"do": do, "tries": 0}
+        if do == "swap" and (unseen or waiting is not None and waiting.get("unseen")):
+            todos[member_id]["unseen"] = True
+
+
+def _in_legacy(draft: dict[str, Any]) -> bool:
+    """Whether a started room is in the legacy service: where it started, or, for one started before the
+    plugin kept that, where its draft said."""
+    return draft["status"] == "started" and (draft.get("started_in") or draft["where"]).get("kind") == "legacy"
 
 
 def _started_in(found: room_start.Found) -> Optional[dict[str, Any]]:
