@@ -260,15 +260,30 @@ class KeptReviews:
             meta = _read_json(folder / META)
             if not _well_formed(meta) or not 1 <= number <= len(meta["rounds"]):
                 raise ReviewError("that round of the review is gone")
+            if meta["rounds"][number - 1].get("marks"):
+                raise ReviewError("the marks on that round were already sent")
             now = self.clock()
             meta["rounds"][number - 1]["marks"] = {**marks, "at": now}
             meta["updated"] = now
             entries = marks.get("decisions", [])
-            meta["done"] = number == len(meta["rounds"]) and not marks.get("note") and all(
+            # Every decision marked, each approved or skipped, and no note.
+            meta["done"] = number == len(meta["rounds"]) and not marks.get("note") and \
+                len(entries) == len(meta["rounds"][number - 1]["decisions"]) and all(
                 entry.get("mark") in ("approve", "skip") and not entry.get("note") for entry in entries)
             for session in sessions:
                 if session and session not in meta["sessions"]:
                     meta["sessions"] = [*meta["sessions"], session][-MAX_SESSIONS:]
+            _write_json(folder / META, meta)
+
+    def drop_marks(self, review_id: str, number: int) -> None:
+        """Forgets a round's marks whose message Conduit didn't send, so the
+        user can send them again."""
+        with self._locked(review_id) as folder:
+            meta = _read_json(folder / META)
+            if not _well_formed(meta) or not 1 <= number <= len(meta["rounds"]):
+                return
+            meta["rounds"][number - 1]["marks"] = None
+            meta["done"] = False
             _write_json(folder / META, meta)
 
     def pages(self, review_id: str, number: int) -> dict[str, str]:

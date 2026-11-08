@@ -387,3 +387,33 @@ def test_the_route_reads_a_round_with_its_pages(route_home):
     assert http.get(f"{BASE}/boards/reviews", params={"id": review_id, "round": "7"}).status_code == 400
     assert http.get(f"{BASE}/boards/reviews", params={"id": "nope"}).status_code == 400
     assert http.get(f"{BASE}/boards/reviews", params={"id": "rv-0000000000000000"}).status_code == 404
+
+
+def test_marks_on_one_decision_of_two_leave_the_review_open(tool_home):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    card_actions.TapStore(tool_home, reviews=host.store()).save(
+        {"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d1", "skip"))})
+    assert host.store().get(card["review"]["id"])["done"] is False
+    assert [meta["id"] for meta in host.store().open_reviews("s1")] == [card["review"]["id"]]
+
+
+def test_a_rounds_marks_go_once(tool_home):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    taps = card_actions.TapStore(tool_home, reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d1", "skip"))})
+    with pytest.raises(card_actions.TapError, match="already sent"):
+        taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d2", "skip"))})
+    assert host.store().get(card["review"]["id"])["rounds"][0]["marks"]["decisions"][0]["decision"] == "d1"
+
+
+def test_marks_whose_message_didnt_go_can_be_sent_again(tool_home):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    taps = card_actions.TapStore(tool_home, reviews=host.store())
+    first = taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d1", "skip"))})
+    assert taps.drop(first["id"])["dropped"] is True
+    assert host.store().get(card["review"]["id"])["rounds"][0]["marks"] is None
+    taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d2", "skip"))})
+    assert "Save button colour: skipped" in taps.note("s1", "Sent review · Recipe app home")
