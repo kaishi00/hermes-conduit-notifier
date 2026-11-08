@@ -5403,3 +5403,78 @@ def test_reading_a_room_ask_takes_no_lock_and_writes_nothing(on, tmp_path):
     assert present.room_ask("nope") is None
     assert not present.path.with_name(f".{present.path.name}.lock").exists()
     assert not present.path.exists()
+
+
+# A workstream's cards reach the Bot Chat ---------------------------------------------
+
+MAP = {"type": "map", "title": "Nearest Dunkin'", "places": [{"name": "Dunkin'", "address": "632 Grassfield Pkwy"}]}
+
+
+def test_lookups_answers_maps_in_the_bot_chat(on, home, hermes):
+    # Eric 2026-11-08: "nearest Dunkin'" went to W14, its map stayed there.
+    work.app_set_settings(home, {"policy": "lookups"})
+    for action in ("search", "travel_times", "navigate"):
+        assert work.tool_block(BOT_CHAT, "conduit_maps", {"action": action}) is None
+        assert work.tool_block(BOT_CHAT, "tool_call", {"name": "conduit_maps", "arguments": {"action": action}}) is None
+    assert "conduit_maps" in work.digest(BOT_CHAT)
+    work.app_set_settings(home, {"policy": "strict"})
+    assert work.tool_block(BOT_CHAT, "conduit_maps", {"action": "search"})["action"] == "block"
+
+
+def test_a_workstreams_cards_come_back_to_the_bot_chat(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_started("20261031_work_1")
+    answer = {"ok": True, "cards": [MAP], "next": ["Navigate there"], "note": "shown"}
+    # Through the plugin's post_tool_call hook, as Hermes calls it.
+    plugin._post_tool_call(session_id="20261031_work_1", tool_name="conduit_show", args={"title": "Dunkin' near you"},
+                           result=json.dumps(answer), tool_call_id="c1", status="ok")
+    work.card_shown("20261031_work_1", "web_search", {}, json.dumps(answer))  # not a card
+    hermes.calls.clear()
+    work.turn_ended("20261031_work_1", "Found 4 Dunkin' locations.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "showed 1 card" in params["text"] and '"from_work": "W1"' in params["text"]
+    board, why = work.shown_board(BOT_CHAT, "w1")
+    assert why == "" and board["cards"] == [MAP] and board["next"] == ["Navigate there"]
+    assert board["title"] == "Dunkin' near you"
+    assert work.shown_board("20261031_work_1", "W1")[0] is None  # its own chat has them
+    # The next turn's cards are its own.
+    work.turn_started("20261031_work_1")
+    assert work.shown_board(BOT_CHAT, "W1")[0] is None
+    assert work.shown_board(BOT_CHAT, "W9")[0] is None
+
+
+def test_a_bridged_show_and_a_live_card_are_kept_once(on, hermes):
+    start()
+    work.turn_started("20261031_work_1")
+    first = {**MAP, "live": "dunkin"}
+    second = {**MAP, "live": "dunkin", "title": "Updated"}
+    for card in (first, second):
+        bridged = {"name": "conduit_show", "arguments": {"title": "Map", "cards": [card]}}
+        work.card_shown("20261031_work_1", "tool_call", bridged, json.dumps({"result": json.dumps(
+            {"ok": True, "cards": [card]})}))
+    assert work.shown_board(BOT_CHAT, "W1")[0]["cards"] == [second]
+    # A failed show keeps nothing; nor does another chat's.
+    work.card_shown("20261031_work_1", "conduit_show", {}, json.dumps({"ok": False, "cards": [MAP]}))
+    work.card_shown(OTHER_CHAT, "conduit_show", {}, json.dumps({"ok": True, "cards": [MAP]}))
+    assert work.shown_board(BOT_CHAT, "W1")[0]["cards"] == [second]
+
+
+def test_conduit_show_from_work_draws_the_workstreams_cards(on, home, hermes, monkeypatch):
+    show = _load("conduit_push.show_tool", ROOT / "show_tool.py")
+    start()
+    work.turn_started("20261031_work_1")
+    work.card_shown("20261031_work_1", "conduit_show", {"title": "Dunkin'"}, json.dumps({"ok": True, "cards": [MAP]}))
+    seen = {}
+
+    def cards(args, session, cards, problems, *rest):
+        seen.update(args=args, cards=cards)
+        return {"ok": True, "cards": cards}
+
+    monkeypatch.setattr(show, "_handle_cards", cards)
+    answer = show._handle({"from_work": "W1"}, BOT_CHAT, lambda _: False)
+    assert answer["ok"] and seen["args"]["title"] == "Dunkin'" and seen["cards"][0]["places"][0]["name"] == "Dunkin'"
+    missing = show._handle({"from_work": "W2", "title": "x"}, BOT_CHAT, lambda _: False)
+    assert missing["error"] == "no_cards" and "W2" in missing["note"]
