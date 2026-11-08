@@ -13,6 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.140.0 (2026-11-08)
+
+### New and improved
+- Hermes can build its own cards for anything the ready-made ones don't fit,
+  like an email ready to send, a day's agenda or an idea to act on: text,
+  numbers, tags, pictures, progress bars, fields to fill in and buttons.
+- Any card can carry buttons that open a link, Maps, Calendar or Reminders,
+  copy text, send a message, or ask Hermes to do something. A tap reaches
+  Hermes as your message, with what the card showed and what you filled in,
+  and the card then shows how it went. A button that sends, buys or deletes
+  asks you first.
+- Hermes can save a card it builds as a template and fill it by name later,
+  so cards it shows often come up faster.
+
 ## 0.139.3 (2026-11-08)
 
 ### New and improved

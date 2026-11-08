@@ -38,7 +38,7 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import card_schema, client, reply_sources, turn_surface
+from . import card_schema, card_templates, client, reply_sources, turn_surface
 from .present_store import (CHAT_CARDS_FEATURE, MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, PresentError,
                             PresentStore, clip_markdown)
 
@@ -66,7 +66,14 @@ SCHEMA: dict[str, Any] = {
         "to call, message or email, the status of something in progress (a delivery, a flight, a match, a job), "
         "a table to sort, a day-by-day plan (timeline), a checklist whose ticks are kept, a ranked list, progress "
         "toward goals, a tip or warning (callout), or a diff of changes to code, a config or any text (give a patch, "
-        "a patch_file for a long one, or before and after; put the pull request or commit in source). Up to 12 "
+        "a patch_file for a long one, or before and after; put the pull request or commit in source), or a composed "
+        "card you build from text, metrics, badges, icons, images, progress bars, fields and buttons for anything "
+        "else (an email ready to send, a day's agenda, an idea to act on). Any card can carry up to three buttons "
+        "(actions): open a link, copy, send a message as the user, or tap, which reaches you at once as the user's "
+        "message with the card's field values: do it with your tools, then show the card again under its live name "
+        "with the result. A tap is the user's OK for exactly what the card showed, so put what will happen on the "
+        "card and give a send, buy or delete button a confirm. Save a composed card you'll show again with "
+        "save_templates and show it by name (type template). Up to 12 "
         "cards make a board: put a short title on each, use "
         "layout tabs for one card at a time, and give next: the follow-ups the user would likely send, which a tap "
         "sends. "
@@ -95,7 +102,9 @@ SCHEMA: dict[str, Any] = {
             "markdown": {"type": "string", "maxLength": MAX_CARD_MARKDOWN_CHARS,
                          "description": f"What to show, as Markdown (up to {MAX_CARD_MARKDOWN_CHARS} characters). "
                                         "Leave it out when cards say it all."},
-            "cards": card_schema.tool_parameter("Cards for Conduit to draw, shown above the Markdown."),
+            "cards": card_schema.tool_parameter("Cards for Conduit to draw, shown above the Markdown.",
+                                                {"template": card_templates.TEMPLATE_INPUT}),
+            "save_templates": card_templates.SAVE_SCHEMA,
             "layout": card_schema.LAYOUT_SCHEMA,
             "next": card_schema.NEXT_SCHEMA,
         },
@@ -149,6 +158,11 @@ TEXT_LAYOUT_NOTE = "layout: these messages show no tabs, left out"
 DIFF_NOT_KEPT_NOTE = ("cards: a diff was too long to send whole and couldn't be kept on the host, so its card lists "
                       "the files without their lines: give the changes that matter in your reply")
 TEXT_NEXT_NOTE = "next: these messages show no follow-ups, left out: offer them in your reply if they matter"
+OLD_ACTIONS_NOTE = ("cards: this version of Conduit draws no buttons or fields, so they were left out: offer what they "
+                    "did in your reply")
+ROOM_ACTIONS_NOTE = ("cards: a tap in a room would speak for the user to everyone in it, so fields and send and tap "
+                     "buttons were left out; open and copy buttons stay")
+SAVED_NOTE = "Saved. Show a template with a card of type template, its name and the values for its slots."
 
 
 BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (the weather or a forecast, a "
@@ -156,6 +170,7 @@ BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read
               "config as a diff), show it with "
               "conduit_show as cards (through tool_search and tool_call when it's deferred), with next for the "
               "obvious follow-ups, and keep your reply to the gist. Never draw data as an HTML ::preview page.]")
+TEMPLATES_RULE = "[Your saved card templates (conduit_show type template): {names}.]"
 
 
 DESKTOP_BOARD_RULE = BOARD_RULE.replace("[Conduit draws boards", "[Hermes Desktop draws boards")
@@ -167,7 +182,7 @@ def board_rule(turn_source: str | None, desktop_half: Callable[[], bool] = lambd
     elsewhere, where boards would only be Markdown."""
     if turn_source == "desktop" and available():
         try:
-            return DESKTOP_BOARD_RULE if _desktop_app() and desktop_half() else None
+            return _with_templates(DESKTOP_BOARD_RULE) if _desktop_app() and desktop_half() else None
         except Exception:  # noqa: BLE001
             return None
     if turn_source != "conduit" or not available():
@@ -177,7 +192,17 @@ def board_rule(turn_source: str | None, desktop_half: Callable[[], bool] = lambd
             return None
     except Exception:  # noqa: BLE001
         return None
-    return BOARD_RULE
+    return _with_templates(BOARD_RULE)
+
+
+def _with_templates(rule: str) -> str:
+    """The drawing rule, and the names of the templates saved here, so the
+    model knows what it can fill."""
+    try:
+        names = card_templates.TemplateStore(get_hermes_home()).names()
+    except Exception:  # noqa: BLE001 — the rule goes without them
+        names = []
+    return f"{rule}\n{TEMPLATES_RULE.format(names=', '.join(names))}" if names else rule
 
 
 def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
@@ -266,11 +291,43 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if is_child(session):
         return {"ok": False, "error": "subagent",
                 "note": "Only the main conversation can show things on the user's screen. Report back instead."}
-    given = args.get("cards")
     problems: list[str] = []
+    saved: list[str] = []
+    templates = card_templates.TemplateStore(get_hermes_home())
+    if args.get("save_templates") is not None:
+        saved = templates.save(args["save_templates"], problems)
+    given = _filled_templates(args.get("cards"), templates, problems)
     cards = card_schema.normalize_cards(given, problems)
-    if given not in (None, []) and not cards:
-        return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20]}
+    if args.get("cards") not in (None, []) and not cards:
+        return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20],
+                **({"saved": saved} if saved else {})}
+    if saved and not cards and not (isinstance(args.get("markdown"), str) and args["markdown"].strip()):
+        return _with_problems({"ok": True, "saved": saved, "note": SAVED_NOTE}, problems)
+    answer = _handle_cards(args, session, cards, problems, is_room, room_board, desktop_board, keep_diff)
+    if saved:
+        answer["saved"] = saved
+    return answer
+
+
+def _filled_templates(given: Any, templates: card_templates.TemplateStore, problems: list[str]) -> Any:
+    """The cards with each of type template filled into its composed card."""
+    if not isinstance(given, list):
+        return given
+    cards = []
+    for index, raw in enumerate(given):
+        if isinstance(raw, dict) and isinstance(raw.get("type"), str) and \
+                card_schema.clean_text(raw["type"]).lower() == "template":
+            raw = templates.fill(raw, problems, f"cards[{index}]")
+            if raw is None:
+                continue
+        cards.append(raw)
+    return cards
+
+
+def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]], problems: list[str],
+                  is_room: Callable[[Any], bool], room_board: Callable[[Any, dict[str, Any]], bool],
+                  desktop_board: Callable[[dict[str, Any]], str | None],
+                  keep_diff: Callable[[dict[str, Any]], str | None]) -> dict[str, Any]:
     cards = _diffs_answered(cards, keep_diff, problems)
     layout = card_schema.normalize_layout(args.get("layout"), problems)
     follow_ups = card_schema.normalize_next(args.get("next"), problems)
@@ -291,6 +348,15 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
             cards = [card for card in cards if card["type"] != "contact"]
             if not cards:
                 return _with_problems({"ok": False, "error": "group_room", "note": ROOM_NOTHING_NOTE}, problems)
+        if any(card_schema.has_actions(card) for card in cards):
+            # A tap or a message from a card in a room would speak for the
+            # user to everyone in it, as a follow-up would.
+            kept = [card_schema.without_actions(card, keep=("open", "copy")) for card in cards]
+            if kept != cards:
+                problems.insert(0, ROOM_ACTIONS_NOTE)
+            cards = [card for card in kept if card is not None]
+            if not cards:
+                return _with_problems({"ok": False, "error": "group_room", "note": ROOM_NOTHING_NOTE}, problems)
         store = _store()
         if any(card["type"] in card_schema.DIFF_TYPES for card in cards) and \
                 store.has_feature_everywhere(ROOM_BOARDS_FEATURE) and \
@@ -299,6 +365,14 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
             # nothing for one; as text, its Markdown goes in the reply.
             problems.insert(0, LEFT_OUT_NOTE.format(kinds="diff"))
             cards = [card for card in cards if card["type"] not in card_schema.DIFF_TYPES]
+            if not cards:
+                return {"ok": False, "error": "unsupported_cards", "note": problems.pop(0), "problems": problems[:20]}
+        if any(card["type"] in card_schema.COMPOSED_TYPES for card in cards) and \
+                store.has_feature_everywhere(ROOM_BOARDS_FEATURE) and \
+                not store.has_feature_everywhere(card_schema.COMPOSED_FEATURE):
+            # The same for a Conduit that draws a room's boards but not cards built of blocks.
+            problems.insert(0, LEFT_OUT_NOTE.format(kinds="composed"))
+            cards = [card for card in cards if card["type"] not in card_schema.COMPOSED_TYPES]
             if not cards:
                 return {"ok": False, "error": "unsupported_cards", "note": problems.pop(0), "problems": problems[:20]}
         board = {"cards": cards, "markdown": _fallback(cards)}
@@ -357,6 +431,12 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         if not cards and not given_markdown:
             return _with_problems({"ok": False, "error": "unsupported_cards", "note": UNSUPPORTED_CARDS_NOTE},
                                   problems)
+    if any(card_schema.has_actions(card) for card in cards) and \
+            not store.has_feature_everywhere(card_schema.COMPOSED_FEATURE):
+        # An older Conduit would draw the card without its buttons, and
+        # Hermes would wait for a tap that can't come.
+        problems.insert(0, OLD_ACTIONS_NOTE)
+        cards = [card_schema.without_actions(card) or card for card in cards]
     if old_board and len(cards) > card_schema.LEGACY_MAX_CARDS:
         # A Conduit from before boards keeps the first four it can draw;
         # Hermes hears to say the rest.

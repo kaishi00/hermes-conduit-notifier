@@ -8,6 +8,9 @@
  * line only where it will be drawn; without the half, Desktop gets the board
  * as Markdown in the reply. A diff card too long to carry its lines names the
  * whole diff the host keeps (GET /boards/diffs), read when a file is opened.
+ * A card's buttons open, copy or send as the user; a tap button posts the tap
+ * (POST /boards/taps) and then sends the user's message about it, which the
+ * plugin hands the tap to.
  *
  * Plain ESM, loaded uncompiled: jsx() calls, not JSX. Only @hermes/plugin-sdk
  * and react resolve.
@@ -23,7 +26,7 @@ const SEEN_EVERY_MS = 10 * 60 * 1000
 // Kinds drawn here; every other card shows its own Markdown.
 const NATIVE = new Set([
   'stats', 'chart', 'comparison', 'steps', 'status', 'table', 'timeline', 'checklist', 'list', 'progress', 'callout',
-  'diff'
+  'diff', 'composed'
 ])
 const DIFF_ID = /^cd-[0-9a-f]{16}$/
 
@@ -160,7 +163,10 @@ function CardFrame({ card, markdown, sessionId, showTitle }) {
     className: frame,
     children: [
       showTitle && card.title ? jsx('div', { className: 'mb-2 text-sm font-medium', children: card.title }) : null,
-      jsx(CardBody, { card, sessionId }),
+      card.type === 'composed' ? jsx(Composed, { card, sessionId }) : jsx(CardBody, { card, sessionId }),
+      card.type !== 'composed' && Array.isArray(card.actions) && card.actions.length
+        ? jsx(Buttons, { buttons: card.actions, card, sessionId, values: {} })
+        : null,
       card.source ? jsx(Source, { source: card.source }) : null
     ]
   })
@@ -198,7 +204,10 @@ function CardBody({ card, sessionId }) {
 }
 
 function kindName(type) {
-  return { comparison: 'Compare', timeline: 'Plan', checklist: 'Checklist', diff: 'Changes' }[type] ?? (type || 'Card')
+  return (
+    { comparison: 'Compare', timeline: 'Plan', checklist: 'Checklist', diff: 'Changes', composed: 'Card' }[type] ??
+    (type || 'Card')
+  )
 }
 
 function Source({ source }) {
@@ -235,6 +244,228 @@ function FollowUps({ next, sessionId }) {
             if (sent === false) host.notify?.({ kind: 'warning', message: 'Open that chat to send it' })
           },
           children: text
+        },
+        index
+      )
+    )
+  })
+}
+
+// --- composed cards and buttons --------------------------------------------------
+
+const toneText = {
+  accent: 'text-(--ui-accent)',
+  good: 'text-emerald-600 dark:text-emerald-400',
+  warning: 'text-amber-600 dark:text-amber-400',
+  bad: 'text-red-600 dark:text-red-400'
+}
+
+function startingValues(card) {
+  const values = {}
+  for (const section of card.sections ?? []) {
+    for (const element of section.items ?? []) {
+      if (element.kind === 'field') values[element.id] = element.value ?? (element.input === 'toggle' ? 'off' : '')
+    }
+  }
+  return values
+}
+
+function Composed({ card, sessionId }) {
+  const [values, setValues] = useState(() => startingValues(card))
+  const [open, setOpen] = useState(false)
+  const sections = card.sections ?? []
+  const folded = sections.some(section => section.more)
+  const set = (id, value) => setValues(current => ({ ...current, [id]: value }))
+  return jsxs('div', {
+    className: 'flex flex-col gap-2',
+    children: [
+      ...sections
+        .filter(section => open || !section.more)
+        .map((section, index) => {
+          const items = section.items ?? []
+          const buttons = items.filter(element => element.kind === 'button')
+          return jsxs(
+            'div',
+            {
+              className: section.layout === 'row' ? 'flex flex-wrap items-center gap-3' : 'flex flex-col gap-1.5',
+              children: [
+                ...items
+                  .filter(element => element.kind !== 'button')
+                  .map((element, number) => jsx(Element, { element, values, set }, number)),
+                buttons.length ? jsx(Buttons, { buttons, card, sessionId, values }) : null
+              ]
+            },
+            index
+          )
+        }),
+      folded
+        ? jsx('button', {
+            className: cn('self-start text-xs underline', muted),
+            type: 'button',
+            onClick: () => setOpen(!open),
+            children: open ? 'Show less' : 'Show more'
+          })
+        : null,
+      Array.isArray(card.actions) && card.actions.length
+        ? jsx(Buttons, { buttons: card.actions, card, sessionId, values })
+        : null
+    ]
+  })
+}
+
+function Element({ element, values, set }) {
+  const tone = toneText[element.tone] ?? ''
+  switch (element.kind) {
+    case 'text': {
+      const role = {
+        heading: 'text-base font-semibold',
+        caption: cn('text-xs', muted),
+        mono: 'font-mono text-xs whitespace-pre-wrap',
+        body: 'text-sm'
+      }[element.role ?? 'body']
+      return jsx('div', { className: cn(role, tone), children: element.text })
+    }
+    case 'metric':
+      return jsxs('div', {
+        children: [
+          element.label ? jsx('div', { className: cn('text-xs', muted), children: element.label }) : null,
+          jsx('div', { className: cn('text-xl font-semibold tabular-nums', tone), children: element.value }),
+          element.change ? jsx('div', { className: cn('text-xs tabular-nums', muted), children: element.change }) : null
+        ]
+      })
+    case 'badge':
+      return jsx('span', {
+        className: cn('self-start rounded-full border border-(--ui-border) px-2 py-0.5 text-xs', tone),
+        children: element.text
+      })
+    case 'icon':
+      // Desktop has no SF Symbols: the symbol's name says what it was.
+      return null
+    case 'image':
+      return jsx('img', { alt: element.label ?? '', className: 'max-h-64 rounded-md', src: element.url })
+    case 'progress':
+      return jsxs('div', {
+        className: 'text-xs',
+        children: [
+          element.label ? jsx('div', { className: muted, children: element.label }) : null,
+          jsx('div', {
+            className: 'mt-1 h-1.5 w-full rounded-full bg-(--ui-surface-active)',
+            children: jsx('div', {
+              className: cn('h-1.5 rounded-full bg-current', tone || 'text-(--ui-accent)'),
+              style: { width: `${Math.round(element.progress * 100)}%` }
+            })
+          })
+        ]
+      })
+    case 'divider':
+      return jsx('hr', { className: 'border-(--ui-border)' })
+    case 'field':
+      return jsx(Field, { field: element, value: values[element.id] ?? '', set })
+    default:
+      return null
+  }
+}
+
+function Field({ field, value, set }) {
+  const input = 'w-full rounded-md border border-(--ui-border) bg-transparent px-2 py-1 text-sm'
+  let control
+  if (field.input === 'choice') {
+    control = jsx('select', {
+      className: input,
+      value,
+      onChange: event => set(field.id, event.target.value),
+      children: [
+        value ? null : jsx('option', { value: '', children: '' }, ''),
+        ...field.options.map(option => jsx('option', { value: option, children: option }, option))
+      ]
+    })
+  } else if (field.input === 'toggle') {
+    control = jsx('input', {
+      checked: value === 'on',
+      type: 'checkbox',
+      onChange: event => set(field.id, event.target.checked ? 'on' : 'off')
+    })
+  } else if (field.input === 'text' && (field.lines ?? 1) > 1) {
+    control = jsx('textarea', {
+      className: input,
+      placeholder: field.placeholder ?? '',
+      rows: field.lines,
+      value,
+      onChange: event => set(field.id, event.target.value)
+    })
+  } else {
+    const type = { date: value.includes('T') ? 'datetime-local' : 'date', number: 'number' }[field.input] ?? 'text'
+    control = jsx('input', {
+      className: input,
+      max: field.max,
+      min: field.min,
+      placeholder: field.placeholder ?? '',
+      type,
+      value,
+      onChange: event => set(field.id, event.target.value)
+    })
+  }
+  return jsxs('label', {
+    className: 'flex flex-1 flex-col gap-1 text-xs',
+    children: [field.label ? jsx('span', { className: muted, children: field.label }) : null, control]
+  })
+}
+
+function Buttons({ buttons, card, sessionId, values }) {
+  const [busy, setBusy] = useState(null)
+  const press = async button => {
+    if (button.confirm && !window.confirm(button.confirm)) return
+    if (button.action === 'open') {
+      if (os?.openExternal) os.openExternal(button.target)
+      else window.open(button.target, '_blank', 'noreferrer')
+    } else if (button.action === 'copy') {
+      try {
+        if (!navigator.clipboard) throw new Error('no clipboard')
+        await navigator.clipboard.writeText(button.target)
+        host.notify?.({ kind: 'success', message: 'Copied' })
+      } catch {
+        host.notify?.({ kind: 'warning', message: "Couldn't copy" })
+      }
+    } else if (button.action === 'send') {
+      if (host.composer?.submit?.(sessionId ?? null, button.target) === false) {
+        host.notify?.({ kind: 'warning', message: 'Open that chat to send it' })
+      }
+    } else if (button.action === 'tap') {
+      if (!sessionId) return
+      setBusy(button.id)
+      try {
+        await rest('/boards/taps', { method: 'POST', body: { sessions: [sessionId], card, action: button.id, values } })
+        const titled = card.title ? `${button.label} · ${card.title}` : button.label
+        const said = /`|@[\w/.~]/u.test(titled) ? button.label : titled
+        if (host.composer?.submit?.(sessionId, said) === false) {
+          host.notify?.({ kind: 'warning', message: 'Open that chat to send it' })
+        }
+      } catch {
+        host.notify?.({ kind: 'warning', message: 'That tap didn’t reach Hermes' })
+      } finally {
+        setBusy(null)
+      }
+    }
+  }
+  const style = {
+    primary: 'bg-(--ui-accent) text-white border-transparent',
+    destructive: 'text-red-600 dark:text-red-400',
+    plain: ''
+  }
+  return jsx('div', {
+    className: 'flex flex-wrap gap-1.5',
+    children: buttons.map((button, index) =>
+      jsx(
+        'button',
+        {
+          className: cn(
+            'rounded-md border border-(--ui-border) px-2.5 py-1 text-xs hover:opacity-90',
+            style[button.style ?? 'plain']
+          ),
+          disabled: busy !== null || (button.action === 'tap' && !sessionId),
+          type: 'button',
+          onClick: () => press(button),
+          children: busy === button.id ? '…' : button.label
         },
         index
       )
