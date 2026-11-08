@@ -654,3 +654,16 @@ def test_a_review_tap_trimmed_unheard_gives_its_marks_back(tool_home, monkeypatc
     taps.save({"sessions": ["s1"], "card": first, "action": "review", "review": _marks(("d1", "approve", "B"))})
     taps.save({"sessions": ["s1"], "card": other, "action": "review", "review": _marks(("d1", "approve", "A"))})
     assert host.store().get(first["review"]["id"])["rounds"][0]["marks"] is None
+
+
+def test_marks_given_back_on_an_older_round_leave_a_settled_review_settled(tmp_path):
+    store = review_store.KeptReviews(tmp_path)
+    review_id = store.start("T", "s1")
+    decisions = [{"id": "d1", "title": "X", "options": [{"id": "A", "label": "a", "kind": "page"},
+                                                         {"id": "B", "label": "b", "kind": "page"}]}]
+    store.add_round(review_id, "T", decisions, {"d1/A": PAGE, "d1/B": PAGE})
+    store.save_marks(review_id, 1, {"decisions": [{"decision": "d1", "mark": "change", "option": "A"}]}, ["s1"])
+    store.add_round(review_id, "T", decisions, {"d1/A": PAGE, "d1/B": PAGE})
+    store.save_marks(review_id, 2, {"decisions": [{"decision": "d1", "mark": "approve", "option": "B"}]}, ["s1"])
+    store.drop_marks(review_id, 1)
+    assert store.get(review_id)["done"] is True

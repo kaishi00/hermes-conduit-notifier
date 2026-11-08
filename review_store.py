@@ -328,7 +328,7 @@ class KeptReviews:
             if not _well_formed(meta) or not 1 <= number <= len(meta["rounds"]):
                 return
             meta["rounds"][number - 1]["marks"] = None
-            meta["done"] = False
+            meta["done"] = _settled_round(meta["rounds"][-1])
             _write_json(folder / META, meta)
 
     def pages(self, review_id: str, number: int) -> dict[str, str]:
@@ -409,12 +409,17 @@ class KeptReviews:
         except OSError:
             return
         now = self.clock()
-        for index, (_, folder) in enumerate(kept):
+        for index, (seen, folder) in enumerate(kept):
             if not REVIEW_ID.fullmatch(folder.name):
                 continue
             # Under the review's lock, as every writer: one saving marks or a
             # round meanwhile finishes first, and is looked at again after.
             with self._locked(folder.name):
+                try:
+                    if folder.stat().st_mtime != seen:
+                        continue  # saved since the order above was taken: newer than it ranked
+                except OSError:
+                    continue
                 meta = _read_json(folder / META)
                 updated = meta.get("updated") if isinstance(meta, dict) else None
                 if not isinstance(updated, (int, float)) or isinstance(updated, bool):
