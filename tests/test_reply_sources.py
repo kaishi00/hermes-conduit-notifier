@@ -122,6 +122,54 @@ def test_turn_source(platform, transport, expected):
     assert sources.turn_source(platform, transport) == expected
 
 
+class FanoutTransport:
+    """Named like Hermes' tui_gateway.transport.FanoutTransport: one chat open on several clients."""
+
+    def __init__(self, *peers):
+        self._peers = list(peers)
+
+    def transports(self):
+        return list(self._peers)
+
+
+def _closed(transport):
+    transport._closed = True
+    return transport
+
+
+PHONE = WSTransport({"x-conduit-client": "conduit"})
+IPAD = WSTransport({"x-conduit-client": "conduit", "user-agent": "Conduit/1 CFNetwork"})
+DESKTOP = WSTransport({"user-agent": ELECTRON})
+
+
+@pytest.mark.parametrize("transport, expected, desktop", [
+    # Eric's .52 (2026-11-07): his Bot Chat open on two Conduits got no board rule.
+    (FanoutTransport(PHONE, IPAD), "conduit", False),
+    (FanoutTransport(PHONE, types.SimpleNamespace(conduit_client="conduit")), "conduit", False),
+    (FanoutTransport(DESKTOP, WSTransport({"user-agent": ELECTRON})), "desktop", True),
+    (FanoutTransport(PHONE, DESKTOP), None, False),  # either could have sent it
+    (FanoutTransport(DESKTOP, WSTransport({"user-agent": SAFARI})), "desktop", False),  # the web dashboard isn't Desktop
+    (FanoutTransport(PHONE, object()), None, False),
+    (FanoutTransport(), None, False),
+    (FanoutTransport(FanoutTransport(PHONE)), None, False),
+    # A client whose socket closed isn't counted (DeepSeek's review of #611).
+    (FanoutTransport(PHONE, _closed(WSTransport({"user-agent": ELECTRON}))), "conduit", False),
+    (FanoutTransport(_closed(WSTransport({"x-conduit-client": "conduit"})), DESKTOP), "desktop", True),
+    (FanoutTransport(_closed(WSTransport({"x-conduit-client": "conduit"}))), None, False),
+])
+def test_a_chat_open_on_several_clients_is_theirs_when_they_agree(transport, expected, desktop):
+    assert sources.turn_source("tui", transport) == expected
+    assert sources.is_desktop_app(transport) is desktop
+
+
+def test_unreadable_fanout_clients_are_unknown():
+    class Broken:
+        def transports(self):
+            raise RuntimeError("closed")
+
+    assert sources.turn_source("tui", Broken()) is None and sources.is_desktop_app(Broken()) is False
+
+
 def test_unreadable_socket_headers_are_unknown():
     class WSTransport:
         _ws = types.SimpleNamespace(headers=None)

@@ -1386,6 +1386,29 @@ def test_an_approval_from_elsewhere_still_rings_after_a_minute(home, fake, clock
     assert _approval_due(home, monkeypatch, clock) == 60
 
 
+class FanoutTransport:
+    """Hermes' fanout of a chat's clients, as reply_sources reads it."""
+
+    def __init__(self, *peers):
+        self._peers = list(peers)
+
+    def transports(self):
+        return list(self._peers)
+
+
+@pytest.mark.parametrize("transport, due", [
+    # A chat open on several clients is never the terminal app (DeepSeek's review of #611).
+    (FanoutTransport(CONDUIT, CONDUIT), 60),
+    (FanoutTransport(CONDUIT, DESKTOP), 60),  # either could have sent it
+    (FanoutTransport(DESKTOP, DESKTOP), 600),
+])
+def test_a_chat_open_on_several_clients_waits_by_its_clients(home, fake, clock, monkeypatch, transport, due):
+    _settings(home, alerts=True)
+    _from(monkeypatch, "tui", transport)
+    monkeypatch.setattr(calls, "_approval_timeout", lambda: 3600.0)
+    assert _approval_due(home, monkeypatch, clock) == due
+
+
 def test_a_source_lookup_that_raises_still_rings_after_a_minute(home, fake, clock, monkeypatch):
     _settings(home, alerts=True)
 
