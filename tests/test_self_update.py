@@ -352,6 +352,25 @@ def test_a_plugin_host_leaves_a_pending_gateway_restart_to_the_dashboard(monkeyp
     assert json.loads(path.read_text()) == pending
 
 
+def test_a_managed_host_resumes_a_pending_gateway_restart_without_pulling(monkeypatch, tmp_path):
+    # Review on #632: a job left waiting on the gateway when the host turned on
+    # CONDUIT_PUSH_MANAGED restarts the gateway, but pulls nothing.
+    monkeypatch.setenv("CONDUIT_PUSH_MANAGED", "The Farm")
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,
+                                "version": api.capabilities.LOADED_VERSION}))
+    restarts = []
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: api.capabilities.LOADED_VERSION)
+    monkeypatch.setattr(api.self_update, "_hermes_update_steps",
+                        lambda: (lambda: pytest.fail("a managed host pulled"), lambda draining: restarts.append(1) or 0))
+    monkeypatch.setattr(api.self_update, "_gateway_work", lambda: 0)
+    monkeypatch.setattr(api.self_update, "_point_profiles", lambda: [])
+    api.self_update.finish_self_update_after_restart(path, lambda job: None, delay=0)
+    api.self_update._self_update_thread.join(5)
+    job = json.loads(path.read_text())
+    assert restarts == [1] and job["step"] == "done"
+
+
 def test_a_resumed_job_whose_pull_fails_reads_as_a_pull_failure(monkeypatch, tmp_path):
     path = tmp_path / api.self_update.SELF_UPDATE_FILE
     path.write_text(json.dumps({"id": "j1", "step": "restarting_gateway", "boot_id": "old", "gateway_pending": True,

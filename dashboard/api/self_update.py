@@ -1126,6 +1126,11 @@ def _resume_gateway_restart(path: Path, job: Dict[str, Any],
         pull, restart_gateway = _hermes_update_steps()
     except Exception:  # noqa: BLE001
         return give_up()
+    if capabilities.managed_by() is not None:
+        # A host that manages the plugin pulls nothing from here, not even a resumed
+        # job's no-op pull, which would take a newer version than the one it pinned.
+        def pull() -> Dict[str, Any]:
+            return {"ok": True}
     # From the pull again (a no-op once pulled), so a failure there reads as the pull's.
     job.update(boot_id=capabilities.BOOT_ID, pid=os.getpid(), step="downloading")
 
