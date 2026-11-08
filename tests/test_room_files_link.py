@@ -241,3 +241,20 @@ def test_a_guest_sweeps_its_room_files_without_more_arriving(tmp_path):
     clock[0] += 2
     files.sweep()
     assert not old.exists()
+
+
+def test_a_file_isnt_sent_to_a_link_no_longer_in_its_room(copies):  # noqa: F811
+    # GLM on notifier #629: the home kept sending to a Link whose agents had left, which the guest refuses.
+    room_id = started(copies)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    store = files_module.Store(copies.tmp_path / "furina")
+    entry = {"size": path.stat().st_size, "base": str(path.parent.parent), "at": None, "tries": 0, "done": False,
+             "noted": 0}
+    with store.update() as state:
+        state["out"]["link1"] = {f"{FOLDER}/shot.jpg": {**entry, "room": "room-gone"}}
+        state["out"]["link9"] = {f"{FOLDER}/shot.jpg": {**entry, "room": room_id}}
+
+    copies.furina.pass_once()
+
+    assert _sent(copies, "room.file") == []
+    assert store.read()["out"].get("link1", {}) == {} and store.read()["out"].get("link9", {}) == {}

@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from . import room_identity, room_links
+from . import room_copies, room_identity, room_links
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +171,14 @@ class Files:
         self.rooms = rooms
         self.store = Store(rooms.root)
         self._swept = float("-inf")
+        self._told: set[str] = set()
+
+    def _tell_once(self, key: str, message: str, *args: Any) -> None:
+        # note runs again on each retry of an unanswered page.
+        if key in self._told or len(self._told) >= MAX_KEPT:
+            return
+        self._told.add(key)
+        logger.info(message, *args)
 
     def sweep(self) -> None:
         """What the rooms loop does each pass, at most every SWEEP_S: the room files kept here age out and
@@ -217,8 +225,8 @@ class Files:
             real = os.path.realpath(path)
             if os.path.dirname(os.path.dirname(real)) not in local_roots or os.path.basename(real) != name \
                     or os.path.basename(os.path.dirname(real)) != folder:
-                logger.info("Linked Rooms doesn't carry %s/%s to Link %s: it isn't one of this host's uploads",
-                            folder, name, link_id)
+                self._tell_once(f"{link_id}/{folder}/{name}", "Linked Rooms doesn't carry %s/%s to Link %s: it "
+                                "isn't one of this host's uploads", folder, name, link_id)
                 continue
             try:
                 size = os.stat(real).st_size
@@ -226,8 +234,8 @@ class Files:
                 continue
             if not os.path.isfile(real) or size > MAX_FILE_BYTES:
                 if size > MAX_FILE_BYTES:
-                    logger.info("Linked Rooms doesn't carry %s/%s to Link %s: it's over %d MB", folder, name,
-                                link_id, MAX_FILE_BYTES // (1024 * 1024))
+                    self._tell_once(f"{link_id}/{folder}/{name}", "Linked Rooms doesn't carry %s/%s to Link %s: "
+                                    "it's over %d MB", folder, name, link_id, MAX_FILE_BYTES // (1024 * 1024))
                 continue
             wanted[f"{folder}/{name}"] = {"room": room_id, "size": size,
                                           "base": os.path.dirname(os.path.dirname(real))}
@@ -248,13 +256,20 @@ class Files:
         has them on their way within a guest's ARRIVAL_WAIT_S."""
         now = self.rooms.clock()
         state = self.store.read()
+        drafts = self.rooms.store.read()["drafts"]
         for link_id, out in sorted(state["out"].items()):
             for key, entry in sorted(out.items()):
+                draft = drafts.get(entry["room"])
+                if draft is None or link_id not in room_copies._receiving(draft):
+                    # Nobody of that Link's is in the room any more, so its host wouldn't keep the file.
+                    self._drop(link_id, key)
+                    continue
                 if not entry["done"] and entry["tries"] >= MAX_TRIES and entry["at"] is not None \
                         and now - entry["at"] >= WAIT_S:
                     logger.info("Linked Rooms gave up carrying %s to Link %s: no answer after %d tries", key,
                                 link_id, MAX_TRIES)
                     self._drop(link_id, key)
+            out = self.store.read()["out"].get(link_id, {})
             due = [key for key, entry in sorted(out.items(), key=lambda item: item[1]["noted"])
                    if not entry["done"] and entry["tries"] < MAX_TRIES
                    and (entry["at"] is None or now - entry["at"] >= WAIT_S)]
