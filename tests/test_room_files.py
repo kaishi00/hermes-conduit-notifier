@@ -194,10 +194,23 @@ def test_picture_types_come_from_the_bytes_not_the_name(tmp_path):
                        (avif, "image/avif"), (avif_in_mif1, "image/avif"), (b"GIF89a....", "image/gif")):
         stored = api.rooms.store_room_file(str(tmp_path), _body(data, "picture.txt"))
         assert api.rooms.read_room_file_picture(str(tmp_path), stored["path"])["dataUrl"].startswith(f"data:{mime};base64,")
+    # A name claiming a picture its bytes aren't is no picture type.
     text = api.rooms.store_room_file(str(tmp_path), _body(b"<svg onload=x>", "photo.jpg"))
-    with pytest.raises(api.rooms.HTTPException) as refused:
-        api.rooms.read_room_file_picture(str(tmp_path), text["path"])
-    assert refused.value.status_code == 415
+    assert api.rooms.read_room_file_picture(str(tmp_path), text["path"])["dataUrl"].startswith(
+        "data:application/octet-stream;base64,")
+
+
+def test_any_other_file_reads_back_typed_by_its_name(tmp_path):
+    for name, data, mime in (
+        ("report.pdf", b"%PDF-1.7 ...", "application/pdf"),
+        ("pasted_content_1.txt", "Hé, long paste".encode(), "text/plain"),
+        # The host's own table can name audio differently; it's still audio.
+        ("clip.m4a", b"\x00\x00\x00\x20ftypM4A ", __import__("mimetypes").guess_type("clip.m4a")[0]),
+        ("notes", b"no extension", "application/octet-stream"),
+    ):
+        stored = api.rooms.store_room_file(str(tmp_path), _body(data, name))
+        read = api.rooms.read_room_file_picture(str(tmp_path), stored["path"])
+        assert read["dataUrl"] == f"data:{mime};base64," + base64.b64encode(data).decode(), name
 
 
 def test_only_stored_room_files_are_read(tmp_path):

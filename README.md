@@ -1972,13 +1972,16 @@ sooner, oldest first, once they pass 2 GB together (checked hourly). An
 upload that would leave under 1 GB free on the host is refused (507).
 Capability `room-files`.
 
-Conduit draws a picture sent into a room as the picture.
-`GET /api/plugins/conduit_push/room-files/data-url?path=…` (plugin 0.142+,
-capability `room-file-pictures`) returns one as `{"dataUrl": "data:image/…"}`,
-as Hermes' `/api/fs/read-data-url` does, which hosted and locked installs
-refuse outside their files folder. It reads only files `/room-files` stored
-(404 otherwise), only JPEG, PNG, GIF, WebP, HEIC and AVIF pictures, told by
-their bytes (415 otherwise), and up to 16 MB (413).
+Conduit draws a picture sent into a room as the picture, and opens or plays
+any other file sent there, as in a chat.
+`GET /api/plugins/conduit_push/room-files/data-url?path=…` returns one as
+`{"dataUrl": "data:…;base64,…"}`, as Hermes' `/api/fs/read-data-url` does,
+which hosted and locked installs refuse outside their files folder. It reads
+only files `/room-files` stored (404 otherwise), up to 16 MB (413). A
+picture's type comes from its bytes (JPEG, PNG, GIF, WebP, HEIC, AVIF); any
+other file's from its name, never a picture type the bytes don't back.
+Capabilities `room-file-pictures` (plugin 0.142+, pictures) and
+`room-file-reads` (0.143+, any file).
 
 ## Group pictures (plugin 0.41+)
 
