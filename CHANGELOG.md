@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.143.1 (2026-11-08)
+
+### Fixes
+- Pulse made two or three copies of the same card from one check, and the
+  morning brief came more than once: on a host with profiles, each profile's
+  copy of the plugin ran Pulse. Now only one does.
+- Pulse cards came back after you marked them Done: one oddly saved date
+  made every check skip looking at earlier cards. Dates saved like that no
+  longer stop any of Pulse's checks, and a card you marked Done or put away
+  keeps the same words from coming back for a month (one about a reminder,
+  a calendar entry or something Pulse remembers keeps that thing's rules).
+
 ## 0.143.0 (2026-11-08)
 
 ### New and improved
