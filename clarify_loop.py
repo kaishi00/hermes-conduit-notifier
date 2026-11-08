@@ -335,6 +335,12 @@ def _first_answer_wins(
     if "original_error" in outcome:
         raise outcome["original_error"]
     while "original" not in outcome and "original_error" not in outcome:
+        # Answers given away from the device still count: a call's, or the
+        # user's written answer the Bot Chat passed on to a workstream
+        # (calls_store.answer_in_writing).
+        call_answers = calls.taken_answers(request_id)
+        if call_answers is not None:
+            return _call_answer_result(batch, batch_protocol, call_answers)
         time.sleep(POLL_INTERVAL_SECONDS)
     if "original_error" in outcome:
         raise outcome["original_error"]

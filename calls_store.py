@@ -683,6 +683,38 @@ class CallStore:
                 result["next"] = _public_question(item["questions"][following], following, form)
             return result
 
+    def answer_in_writing(self, session_id: Any, words: Any, *, asked_before: float | None = None) -> bool:
+        """The user's written answer, from outside the chat (the Bot Chat
+        passing it on, a workstream's card in Conduit), to the question batch
+        Hermes waits on in ``session_id``: every question still open takes
+        the words as written, as a reply typed on the card would, whether
+        or not a call follows the wait. True when the batch is answered now,
+        for the clarify loop to take (``take_answers``); False when no
+        question waits there (an approval, or nothing), or only one asked
+        after ``asked_before`` (when the user wrote the words)."""
+        if not isinstance(session_id, str) or not session_id.strip() or not isinstance(words, str) \
+                or not words.strip() or not self.path.exists():
+            return False
+        session_id = session_id.strip()
+        text = words.strip()[:MAX_WAITING_ANSWER_CHARS]
+        with self._locked() as state:
+            found = [item for item in state["waiting"] if session_id in item["session_ids"]]
+            if not found:
+                return False
+            # The newest wait is what the chat waits on: a question left from
+            # before a restart doesn't take words meant for a newer approval.
+            item = max(found, key=lambda entry: entry["at"])
+            if item["kind"] != "question" or not item["questions"] \
+                    or (asked_before is not None and item["at"] >= asked_before):
+                return False
+            filled = False
+            for entry in item["questions"]:
+                if entry["answer"] is None:
+                    entry["answer"] = text
+                    filled = True
+            # Already answered, and not taken yet: these words aren't its answer.
+            return filled
+
     def answers_ready(self, request_id: Any) -> bool:
         """Whether a call has answered every question of the clarify loop's
         batch ``request_id``. Reads only.

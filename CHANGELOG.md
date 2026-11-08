@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.141.1 (2026-11-08)
+
+### Fixes
+- A bot's work kept showing "Needs you" after you answered its question in
+  the Bot Chat or in the reply field on its card: the answer waited behind
+  the question instead of answering it. Your answer now answers the
+  question, and the work carries on. The bot passes on only what you said
+  in that chat, never an answer of its own.
+
 ## 0.141.0 (2026-11-08)
 
 ### Fixes

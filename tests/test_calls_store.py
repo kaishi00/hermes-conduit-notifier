@@ -757,3 +757,32 @@ def test_an_unreadable_store_is_not_overwritten(tmp_path, monkeypatch):
 def test_a_watch_id_with_a_trailing_newline_is_refused():
     assert calls_store._WATCH_ID.match("a" * 8)
     assert calls_store._WATCH_ID.match("a" * 8 + "\n") is None
+
+
+def test_a_written_answer_answers_a_question_no_call_follows(tmp_path):
+    store = _store(tmp_path)  # alert calls off: the wait is only listed
+    store.note_waiting("s1", "question", request_id="conduit-push-a", questions=[
+        {"qid": "q1", "question": "Which?", "choices": ["A", "B"], "multi_select": False},
+        {"qid": "q2", "question": "Name?", "choices": [], "multi_select": False}])
+    assert store.answer_in_writing("s1", "  B, and call it Den  ")
+    assert not store.answer_in_writing("s1", "A")  # answered already, not taken yet
+    assert store.take_answers("conduit-push-a") == {"q1": "B, and call it Den", "q2": "B, and call it Den"}
+
+
+def test_a_written_answer_leaves_approvals_and_other_chats_alone(tmp_path):
+    store = _store(tmp_path)
+    store.note_waiting("s1", "approval", description="Delete the backups", command="rm -rf /backups")
+    assert not store.answer_in_writing("s1", "yes")
+    assert not store.answer_in_writing("s2", "yes")
+    assert not store.answer_in_writing("s1", "  ")
+
+
+def test_a_written_answer_leaves_a_question_older_than_the_approval_waited_on(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock)
+    store.note_waiting("s1", "question", request_id="conduit-push-old", questions=[
+        {"qid": "q1", "question": "Which?", "choices": [], "multi_select": False}])
+    clock.now += 60  # left from before a restart; the chat now waits on an approval
+    store.note_waiting("s1", "approval", description="Delete the backups", command="rm -rf /backups")
+    assert not store.answer_in_writing("s1", "yes")
+    assert store.take_answers("conduit-push-old") is None

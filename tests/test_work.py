@@ -704,6 +704,23 @@ def test_an_approval_marks_it_needs_you(on, hermes, monkeypatch):
                          + work.LINK_RULE)
 
 
+def test_a_question_tells_the_bot_it_may_pass_the_users_answer_on(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    work.needs_you("20261031_work_1", "a question", question=True)
+    assert on.get("W1").status == "needs_you"
+    line, = [line for line in batched() if "is waiting on the user" in line]
+    assert "(a question)" in line and "pass their answer on with work_send" in line and "you can't" not in line
+
+
+def _waits_on_a_question(home, session_id="20261031_work_1", request_id="conduit-push-q1"):
+    calls_store = sys.modules["conduit_push.calls_store"]
+    calls_store.CallStore(home).note_waiting(session_id, "question", request_id=request_id, questions=[
+        {"qid": "q1", "question": "Which temperature source?", "choices": ["Netatmo", "Shelly"],
+         "multi_select": False}])
+    return calls_store.CallStore(home)
+
+
 def test_the_digest_lists_open_work_once_as_new(on, hermes):
     start()
     on.update("W1", status="done", last_result="Found it")
@@ -2102,6 +2119,66 @@ def test_a_send_carries_the_users_words_as_theirs(on, hermes, home, monkeypatch)
     assert "More." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
 
 
+def _timed_chat_db(home, rows):
+    """state.db with Hermes' timestamp column: rows of (session, role, content, kind, timestamp)."""
+    import sqlite3
+
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+                    "content TEXT, display_kind TEXT, timestamp REAL, active INTEGER NOT NULL DEFAULT 1)")
+        con.executemany("INSERT INTO messages (session_id, role, content, display_kind, timestamp) "
+                        "VALUES (?, ?, ?, ?, ?)", rows)
+
+
+def test_a_send_answers_the_question_a_workstream_waits_on(on, hermes, home, monkeypatch):
+    # A tester answered W5's question in the Bot Chat: the bot passed it on,
+    # and it waited behind the question while W5 kept needing them.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    work.needs_you(WORKER, "a question", question=True)
+    calls = _waits_on_a_question(home)
+    _timed_chat_db(home, [(BOT_CHAT, "user", "Nimm Shelly", None, time.time() + 5)])
+    hermes.calls.clear()
+    answer = call("work_send", {"ref": "W1", "text": "The user picks Shelly."})
+    assert answer["ok"] and answer["outcome"] == "answered"
+    assert hermes.named("prompt.submit") == [] and hermes.named("session.redirect") == []
+    assert calls.take_answers("conduit-push-q1") == {"q1": "The user picks Shelly."}
+
+
+def test_a_follow_up_from_a_turn_older_than_the_question_doesnt_answer_it(on, hermes, home, monkeypatch):
+    # The user wrote before W1 asked: what the bot sends on in that turn is
+    # a follow-up, not their answer.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    _timed_chat_db(home, [(BOT_CHAT, "user", "Also check the logs", None, time.time() - 60)])
+    work.needs_you(WORKER, "a question", question=True)
+    calls = _waits_on_a_question(home)
+    answer = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert answer["ok"] and answer["outcome"] != "answered"
+    assert calls.take_answers("conduit-push-q1") is None
+
+
+def test_the_bot_never_answers_a_workstreams_question_alone(on, hermes, home, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    work.needs_you(WORKER, "a question", question=True)
+    calls = _waits_on_a_question(home)
+    # A work update's turn: the user didn't start it, so nothing answers.
+    _chat_db(home, [(BOT_CHAT, "user", "Work update from your workstreams. W1 asks.", "hidden")])
+    answer = call("work_send", {"ref": "W1", "text": "Shelly, probably."})
+    assert answer["ok"] and answer["outcome"] != "answered"
+    assert calls.take_answers("conduit-push-q1") is None
+
+
+def test_a_send_to_a_workstream_waiting_on_an_approval_goes_in_as_before(on, hermes, home, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    work.needs_you(WORKER, "rm -rf build")
+    _chat_db(home, [(BOT_CHAT, "user", "yes", None)])
+    answer = call("work_send", {"ref": "W1", "text": "The user says yes."})
+    assert answer["ok"] and answer["outcome"] != "answered"
+
+
 def test_a_send_quotes_the_bot_chat_it_came_from(on, hermes, home, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # W1's update stays batched, out of the calls checked
     start()
@@ -3114,6 +3191,17 @@ def test_reply_in_a_workstream_sends_the_users_own_words_with_no_bot_chat_turn(o
     assert sent["text"] == "Try the second fix."  # as if typed in its chat, not passed on by the bot
     assert submitted_to(hermes, BOT_CHAT) == []
     assert [row["kind"] for row in on.outbox_rows("W1", "user_send")] == ["user_send"]
+
+
+def test_a_reply_on_the_card_answers_the_question_it_waits_on(on, hermes):
+    start()
+    work.needs_you(WORKER_1, "a question", question=True)
+    calls = _waits_on_a_question(on.home)
+    hermes.calls.clear()
+    answer = work.app_act(on.home, "w1", "send", {"text": "Shelly"})
+    assert answer["ok"] and answer["outcome"] == "answered"
+    assert submitted_to(hermes, WORKER_1) == []
+    assert calls.take_answers("conduit-push-q1") == {"q1": "Shelly"}
 
 
 def test_the_user_can_stop_running_work_from_the_panel(on, hermes):
@@ -4809,10 +4897,10 @@ def test_a_send_points_its_reports_at_the_sender_before_it_goes_and_back_if_it_d
     seen = []
     real = work._deliver
 
-    def deliver(store, broker, w, words, how, kind="send"):
+    def deliver(store, broker, w, words, how, kind="send", answer="", since=None):
         # A restart's lost-send notice, or a turn ending first, reads this.
         seen.append(store.get(w.ref).reply_to)
-        return real(store, broker, w, words, how, kind)
+        return real(store, broker, w, words, how, kind, answer, since)
 
     monkeypatch.setattr(work, "_deliver", deliver)
     assert call("work_send", {"ref": "W1", "text": "Now the dark one."}, session_id=ROOM_CHAT)["ok"]
