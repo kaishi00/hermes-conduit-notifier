@@ -210,6 +210,7 @@ def test_any_other_file_reads_back_typed_by_its_name(tmp_path):
         # A page or script opens as a file, never runs in a viewer.
         ("page.html", b"<script>alert(1)</script>", "application/octet-stream"),
         ("feed.xml", b"<?xml version='1.0'?><a/>", "application/octet-stream"),
+        ("backup.tar.gz", b"\x1f\x8b\x08\x00", "application/octet-stream"),
     ):
         stored = api.rooms.store_room_file(str(tmp_path), _body(data, name))
         read = api.rooms.read_room_file_picture(str(tmp_path), stored["path"])

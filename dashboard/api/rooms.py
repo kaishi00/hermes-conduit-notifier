@@ -274,12 +274,13 @@ def _room_file_picture_type(head: bytes) -> Optional[str]:
 
 def _room_file_type(name: str, head: bytes) -> str:
     """A stored file's media type: a picture's from its bytes, anything
-    else's from its name, and never a picture type the bytes don't back."""
+    else's from its name, and never a picture type the bytes don't back. A
+    compressed name (backup.tar.gz) is a plain file, not what it unpacks to."""
     picture = _room_file_picture_type(head)
     if picture:
         return picture
-    guessed, _ = mimetypes.guess_type(name)
-    if not guessed or guessed.startswith("image/") or guessed in _ROOM_FILE_SCRIPTABLE_TYPES:
+    guessed, encoding = mimetypes.guess_type(name)
+    if not guessed or encoding or guessed.startswith("image/") or guessed in _ROOM_FILE_SCRIPTABLE_TYPES:
         return "application/octet-stream"
     return guessed
 
