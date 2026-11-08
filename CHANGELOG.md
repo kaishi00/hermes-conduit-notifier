@@ -16,8 +16,9 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.142.0 (2026-11-08)
 
 ### New and improved
-- A picture sent into a group room shows as the picture in Conduit, for
-  everyone in the room, instead of a file icon and its name.
+- A picture sent into a group room shows as the picture in Conduit,
+  instead of a file icon and its name. In a room someone else hosts, it
+  still shows by name.
 
 ## 0.141.4 (2026-11-08)
 

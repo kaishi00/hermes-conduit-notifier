@@ -258,10 +258,14 @@ def _room_file_picture_type(head: bytes) -> Optional[str]:
     # ISO media (HEIC/HEIF/AVIF): `ftyp` then the brand.
     if head[4:8] == b"ftyp":
         brand = head[8:12]
+        # A generic HEIF brand (mif1/msf1) can carry AVIF; the compatible
+        # brands after the minor version say which.
+        end = min(int.from_bytes(head[:4], "big"), len(head))
+        compatible = {head[i:i + 4] for i in range(16, end - 3, 4)}
+        if brand in (b"avif", b"avis") or (brand in (b"mif1", b"msf1") and compatible & {b"avif", b"avis"}):
+            return "image/avif"
         if brand in (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1"):
             return "image/heic"
-        if brand in (b"avif", b"avis"):
-            return "image/avif"
     return None
 
 
@@ -292,7 +296,7 @@ def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
         data = handle.read(ROOM_FILE_PICTURE_MAX_BYTES + 1)
     if len(data) > ROOM_FILE_PICTURE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="The picture is too large to show", headers=headers)
-    mime = _room_file_picture_type(data[:32])
+    mime = _room_file_picture_type(data[:64])
     if mime is None:
         raise HTTPException(status_code=415, detail="Not a picture", headers=headers)
     return {"dataUrl": f"data:{mime};base64," + base64.b64encode(data).decode("ascii"), "size": len(data)}
