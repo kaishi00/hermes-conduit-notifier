@@ -508,3 +508,14 @@ def test_a_review_taken_back_leaves_no_lock_file(tool_home):
     _exchange(tool_home, features=[f for f in FEATURES if f != "review-cards"])
     _call({"cards": [_review(), {"type": "callout", "callout": {"text": "Hi"}}]}, reviews=Host(tool_home))
     assert not list((tool_home / review_store.DIRECTORY).glob(".rv-*"))
+
+
+def test_two_quick_picks_marked_otherwise_are_told_apart_too(tool_home):
+    host = Host(tool_home)
+    older, newer = _quick(tool_home, host, ["Bars", "Line"]), _quick(tool_home, host, ["Red", "Blue"])
+    clock = iter([100.0, 200.0])
+    taps = card_actions.TapStore(tool_home, clock=lambda: next(clock, 300.0), reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": older, "action": "review",
+               "review": _marks(("d1", "change", "A", "Thinner"))})
+    taps.save({"sessions": ["s1"], "card": newer, "action": "review", "review": _marks(("d1", "change", "B", "Darker"))})
+    assert older["review"]["id"] in taps.note("s1", "Picked A · Bars")

@@ -313,9 +313,10 @@ class TapStore:
         # ("Picked", "Sent review" by default).
         label = _clean(value.get("label"), 40) or _review_label(decisions)
         # A quick pick's message names the option ("Picked B · Line"), so two
-        # quick picks open in one chat are told apart by it.
+        # quick picks open in one chat are told apart by it; one skipped (the
+        # app doesn't offer it) by the card's title, as any tap is.
         picked = ""
-        if len(decisions) == 1 and marks["decisions"] and marks["decisions"][0]["mark"] == "approve":
+        if len(decisions) == 1 and marks["decisions"] and marks["decisions"][0]["mark"] in ("approve", "change"):
             option = next((option for option in decisions[0]["options"]
                            if option["id"] == marks["decisions"][0].get("option")), None)
             if option is not None:
