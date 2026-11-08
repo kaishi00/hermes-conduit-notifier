@@ -328,7 +328,11 @@ class TapStore:
                "markdown": _review_lines(decisions, marks), "values": {},
                "review": {"id": shown["id"], "round": shown["round"], "for": meta["for"],
                           "quick": len(decisions) == 1, "settles": _settles(marks, decisions),
-                          "approved": any(entry["mark"] == "approve" for entry in marks["decisions"]),
+                          # An approval this round or an earlier one (later rounds leave it out).
+                          "approved": any(entry.get("mark") == "approve" for entry in marks["decisions"] + [
+                              entry for kept in meta["rounds"][:shown["round"] - 1]
+                              for entry in ((kept.get("marks") or {}).get("decisions") or [])
+                              if isinstance(entry, dict)]),
                           **({"picked": picked} if picked else {})}}
         try:
             with self._locked() as state:

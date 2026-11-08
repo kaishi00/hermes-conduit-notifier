@@ -597,3 +597,20 @@ def test_two_unshown_rounds_of_one_review_are_both_taken_back(tool_home):
     _call({"cards": [_review(id=first["id"]), _review(id=first["id"]),
                      {"type": "callout", "callout": {"text": "Hi"}}]}, reviews=host)
     assert len(host.store().get(first["id"])["rounds"]) == 1
+
+
+def test_skipping_the_rest_after_an_earlier_approval_carries_on(tool_home):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    taps = card_actions.TapStore(tool_home, reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": card, "action": "review",
+               "review": _marks(("d1", "approve", "A"), ("d2", "change", "A", "Brighter"))})
+    taps.note("s1", "Sent review · Recipe app home")
+    second = _call({"cards": [_review([{"title": "Save button colour", "options": [
+        {"label": "Amber", "html": PAGE}, {"label": "Gold", "html": PAGE}]}], id=card["review"]["id"])]},
+        reviews=host)["cards"][0]
+    body = _marks(("d1", "skip"))
+    body["round"] = 2
+    taps.save({"sessions": ["s1"], "card": second, "action": "review", "review": body})
+    note = taps.note("s1", "Picked")
+    assert "go ahead with what they approved" in note and "skipped every decision" not in note
