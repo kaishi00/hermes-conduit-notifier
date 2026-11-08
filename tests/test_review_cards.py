@@ -502,3 +502,9 @@ def test_a_new_review_whose_first_round_didnt_save_leaves_nothing(tool_home, mon
     answer = _call({"cards": [_review()]}, reviews=host)
     assert not answer["ok"]
     assert not list((tool_home / review_store.DIRECTORY).glob("rv-*"))
+
+
+def test_a_review_taken_back_leaves_no_lock_file(tool_home):
+    _exchange(tool_home, features=[f for f in FEATURES if f != "review-cards"])
+    _call({"cards": [_review(), {"type": "callout", "callout": {"text": "Hi"}}]}, reviews=Host(tool_home))
+    assert not list((tool_home / review_store.DIRECTORY).glob(".rv-*"))

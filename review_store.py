@@ -58,7 +58,6 @@ MAX_HTML_CHARS = 300_000
 MAX_HTML_FILE_BYTES = 1_000_000
 MAX_IMAGE_FILE_BYTES = 2_000_000
 MAX_ROUND_BYTES = 6_000_000
-MAX_NOTE_CHARS = 2000
 MARKS = ("approve", "change", "skip")
 _IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
                 ".webp": "image/webp", ".svg": "image/svg+xml"}
@@ -290,7 +289,7 @@ class KeptReviews:
             if meta["rounds"]:
                 _write_json(folder / META, meta)
                 return
-        shutil.rmtree(self._folder(review_id), ignore_errors=True)
+        self._remove(review_id)
 
     def drop_empty(self, review_id: str) -> None:
         """Removes a review whose first round never saved."""
@@ -298,7 +297,15 @@ class KeptReviews:
             meta = _read_json(folder / META)
             if _well_formed(meta) and meta["rounds"]:
                 return
+        self._remove(review_id)
+
+    def _remove(self, review_id: str) -> None:
+        """A review's folder and its lock file."""
         shutil.rmtree(self._folder(review_id), ignore_errors=True)
+        try:
+            (self.directory / f".{review_id}.lock").unlink()
+        except OSError:
+            pass
 
     def drop_marks(self, review_id: str, number: int) -> None:
         """Forgets a round's marks whose message Conduit didn't send, so the

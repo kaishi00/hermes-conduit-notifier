@@ -38,7 +38,6 @@ MAX_VALUE_CHARS = 2000
 MAX_CARD_MARKDOWN_CHARS = 3000
 # A review's marks: the button-less tap a review card sends (plugin 0.143+).
 REVIEW_ACTION = "review"
-MAX_REVIEW_NOTE_CHARS = review_store.MAX_NOTE_CHARS
 # A tap Hermes hasn't heard in this long went with a message that never
 # reached it: it's forgotten rather than handed to a later turn.
 KEEP_S = 15 * 60
