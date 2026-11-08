@@ -29,6 +29,7 @@ Pulse store sent.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 import re
@@ -177,21 +178,43 @@ def pulse_asks(home: Any, texts: list[Any]) -> list[bool]:
             return flags
         conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
         try:
-            sent: dict[str, str] = {}
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(attempts)")}
+            digest = "text_sha" if "text_sha" in columns else "''"
+            sent: dict[str, tuple[str, str]] = {}
             wanted = sorted(set().union(*tags.values()))
             for start in range(0, len(wanted), 500):
                 chunk = wanted[start:start + 500]
-                sent.update(conn.execute(
-                    f"SELECT tag, text FROM attempts WHERE tag IN ({','.join('?' * len(chunk))})", chunk).fetchall())
+                sent.update((tag, (text, sha)) for tag, text, sha in conn.execute(
+                    f"SELECT tag, text, {digest} FROM attempts WHERE tag IN ({','.join('?' * len(chunk))})",
+                    chunk).fetchall())
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - the turn then goes to the provider, as Hermes sends it
         logger.debug("conduit_push: couldn't read Pulse's store to tell its turns from the user's", exc_info=True)
         return flags
     for index, found in tags.items():
-        flags[index] = any(isinstance(sent.get(tag), str) and sent[tag] and sent[tag] in texts[index]
-                           for tag in found)
+        flags[index] = any(_sent_as(sent[tag], texts[index]) for tag in found if tag in sent)
     return flags
+
+
+def _sent_as(sent: tuple[Any, Any], text: str) -> bool:
+    """Whether ``text`` is the attempt's ask. While Pulse keeps the attempt's
+    whole text, the ask holds it. Once Pulse has cut a finished attempt to its
+    first line (pulse_store.trim_finished), only the digest kept of the whole
+    text can say, so a user quoting that first line isn't taken for Pulse. An
+    attempt from before digests were kept is matched by its text, as before."""
+    whole, digest = sent
+    if not isinstance(whole, str) or not whole:
+        return False
+    if not isinstance(digest, str) or not digest:
+        return whole in text
+    if _digest(whole) == digest:
+        return whole in text
+    return _digest(text) == digest or _digest(text.strip()) == digest
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _pulse_ask(manager: Any, text: Any) -> bool:

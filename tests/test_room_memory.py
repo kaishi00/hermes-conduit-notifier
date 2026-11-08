@@ -524,3 +524,20 @@ def test_an_unreadable_pulse_store_leaves_turns_to_hermes(guard, hermes, tmp_pat
     ask = "Pulse report p0123abcd-1. Context."
     manager.sync_all(ask, "Cards.", session_id="sess_pulse")
     assert manager.saved == [("sync_all", ask, "sess_pulse")]
+
+
+def test_a_finished_report_cut_to_its_first_line_is_still_told_from_a_user_quoting_it(guard, hermes, tmp_path):
+    store, _ = _pulse_modules()
+    ask = _pulse_sent(tmp_path, REPORT)
+    pulse_store = store.PulseStore(tmp_path / store.DB_NAME)
+    attempt = pulse_store.attempt_by_tag(guard.PULSE_TAG.search(ask).group(0))
+    pulse_store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse_store.trim_finished("report")
+    heading = ask.splitlines()[0]
+    assert pulse_store.attempt_by_tag(attempt["tag"])["text"] == heading
+
+    quoted = f"{heading}\nWhat did the second card mean?"
+    assert guard.pulse_asks(tmp_path, [ask, quoted, heading]) == [True, False, False]
+    chat = [{"role": "user", "content": ask}, {"role": "assistant", "content": "Three cards."},
+            {"role": "user", "content": quoted}, {"role": "assistant", "content": "The dentist."}]
+    assert guard.without_pulse(tmp_path, chat) == chat[2:]
