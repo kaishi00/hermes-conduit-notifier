@@ -1882,7 +1882,10 @@ a file path; a file the user asks for still goes (0.115.1+).
   sends it after a send Hermes refused or that never left the phone, so the
   same words sent from another app in that chat don't take its line. A send
   whose answer was only lost keeps its report, since Hermes may have taken
-  it. Capability `turn-surface-discard` (0.126.0+).
+  it. A discard that arrives before its report (the report was slow) holds
+  that text for a minute, and the report is dropped when it lands (0.140.1+).
+  Conduit tries a discard that didn't go again after 1, 3 and 9 seconds.
+  Capability `turn-surface-discard` (0.126.0+).
 - `prompt.submit` refuses keys Hermes doesn't know, so the value can't ride
   there. With the gateway out of this process (`plugins.isolation: host`, a
   compute host) the route answers `"recorded": false`, and a turn on a chat
