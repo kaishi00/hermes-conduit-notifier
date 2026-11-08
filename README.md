@@ -1992,7 +1992,7 @@ SHA-256 and keeps it in its root home under the same
 the guest's agent names that copy instead of the home's path (waiting up to
 8 seconds for one still on its way), and `/room-files/data-url` reads a
 home's path from it, so the guest's Conduit draws the room's pictures too.
-Capability `room-files-linked`. A file over 16 MB stays on the home's host.
+Carried files count toward the guest's 2 GB of room files and go with its uploads' sweep; none is kept with under 1 GB free. Capability `room-files-linked`. A file over 16 MB stays on the home's host.
 In a room with other people's agents, every rule tier may call
 `vision_analyze` on a picture sent into the room, by its room-files path.
 

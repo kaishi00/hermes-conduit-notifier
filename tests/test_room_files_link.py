@@ -111,3 +111,37 @@ def test_a_chunk_that_isnt_one_is_dropped(copies):  # noqa: F811
                 {**good, "data": base64.b64encode(b"abcd").decode()}, {**good, "v": 2},
                 {**good, "size": files_module.MAX_FILE_BYTES + 1}):
         assert files_module._chunk_from(bad) is None, bad
+
+
+def test_a_windows_homes_path_is_one_too(tmp_path):
+    # DeepSeek on notifier #629: a Windows home names its uploads with backslashes.
+    root = tmp_path / "laifu"
+    kept = root / "conduit" / "room-files" / FOLDER / "shot.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")
+    home = f"C:\\Users\\furina\\.hermes\\conduit\\room-files\\{FOLDER}\\shot.jpg"
+
+    assert files_module.references(f"@file:{home} look") == [(home, FOLDER, "shot.jpg")]
+    assert files_module.localized(f"@file:{home} look", root, wait_s=0) == f"@file:{kept} look"
+
+
+def test_a_carried_file_that_cant_be_kept_leaves_nothing_behind(tmp_path, monkeypatch):
+    root = tmp_path / "laifu"
+    target = files_module.files_root(root) / FOLDER / "shot.jpg"
+    files = files_module.Files(type("Rooms", (), {"root": root})())
+    body = {"folder": FOLDER, "name": "shot.jpg"}
+
+    def full(*_args):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(files_module.os, "replace", full)
+    assert files._keep(target, b"data", body) is False
+    assert list(target.parent.iterdir()) == []
+
+    monkeypatch.undo()
+    monkeypatch.setattr(files_module, "TOTAL_BYTES", 3)
+    assert files._keep(target, b"data", body) is False, "over the room files' total"
+    assert not target.exists()
+    monkeypatch.setattr(files_module, "TOTAL_BYTES", 2 * 1024 ** 3)
+    assert files._keep(target, b"data", body) is True
+    assert target.read_bytes() == b"data"

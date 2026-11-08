@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import errno
 import hashlib
 import json
@@ -49,6 +50,9 @@ INCOMING = "incoming"
 # Raw bytes in one envelope: base64 in a JSON body under a room page's (room_copies.PAGE_BYTES), sealed.
 CHUNK_BYTES = 96 * 1024
 # Hermes' own data URL cap; a larger file stays on the home (Conduit names it).
+# As uploads (dashboard/api/rooms.py ROOM_FILE_TOTAL_BYTES and ROOM_FILE_FREE_FLOOR_BYTES).
+TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+FREE_FLOOR_BYTES = 1024 * 1024 * 1024
 MAX_FILE_BYTES = 16 * 1024 * 1024
 WAIT_S = 120
 MAX_TRIES = 5
@@ -67,7 +71,8 @@ _UNSAFE_NAME = re.compile(r"[\\/\x00-\x1f\x7f]")
 _DIGEST = re.compile(r"^[0-9a-f]{64}\Z")
 # An `@file:` reference, quoted as Hermes quotes one (format_reference_value) or bare.
 _REFERENCE = re.compile(r"@file:(?:`([^`\r\n]+)`|\"([^\"\r\n]+)\"|'([^'\r\n]+)'|([^\s`\"'<>]+))")
-_TAIL = re.compile(r"/conduit/room-files/(\d{8}-[0-9a-f]{32})/([^/]+)\Z")
+# Either separator: a Windows home names its uploads with backslashes.
+_TAIL = re.compile(r"[/\\]conduit[/\\]room-files[/\\](\d{8}-[0-9a-f]{32})[/\\]([^/\\]+)\Z")
 _thread_lock = threading.Lock()
 
 
@@ -313,21 +318,43 @@ class Files:
         return whole
 
     def _keep(self, target: Path, whole: bytes, body: dict[str, Any]) -> bool:
+        name = None
         try:
             root = target.parent.parent
             root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not _room_for(root, len(whole)):
+                logger.info("Linked Rooms didn't keep room file %s/%s: room files are full here (%d GB, or under "
+                            "%d GB free)", body["folder"], body["name"], TOTAL_BYTES >> 30, FREE_FLOOR_BYTES >> 30)
+                return False
             target.parent.mkdir(exist_ok=True, mode=0o700)
             descriptor, name = tempfile.mkstemp(prefix=".carried.", dir=target.parent)
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(whole)
             os.chmod(name, 0o600)
             os.replace(name, target)
+            name = None
             return True
         except OSError as exc:
+            if name is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(name)
             level = logging.WARNING if exc.errno not in (errno.ENOSPC, errno.EDQUOT) else logging.INFO
             logger.log(level, "Linked Rooms couldn't keep room file %s/%s (%s)", body["folder"], body["name"],
                        type(exc).__name__)
             return False
+
+
+def _room_for(root: Path, size: int) -> bool:
+    """Whether a carried file of ``size`` fits: room files stay under TOTAL_BYTES together, as uploads do
+    (dashboard/api/rooms.py ROOM_FILE_TOTAL_BYTES, whose sweep goes through carried files too), and the disk
+    keeps FREE_FLOOR_BYTES free."""
+    if shutil.disk_usage(root).free - size < FREE_FLOOR_BYTES:
+        return False
+    total = 0
+    for path in root.glob("*/*"):
+        with contextlib.suppress(OSError):
+            total += path.lstat().st_size
+    return total + size <= TOTAL_BYTES
 
 
 def _sweep(incoming: Path, now: float) -> None:

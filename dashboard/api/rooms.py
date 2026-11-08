@@ -294,7 +294,9 @@ _ROOM_FILE_SCRIPTABLE_TYPES = frozenset((
 
 # A room file's path ends in its upload's folder and its name, on whichever
 # host stored it.
-_ROOM_FILE_TAIL = re.compile(r"/conduit/room-files/(\d{8}-[0-9a-f]{32})/([^/\x00]+)\Z")
+_ROOM_FILE_TAIL = re.compile(r"[/\\]conduit[/\\]room-files[/\\](\d{8}-[0-9a-f]{32})[/\\]([^/\\\x00]+)\Z")
+# A Windows home's path, which isn't absolute on another host's system.
+_WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[/\\]")
 
 
 def _room_file_here(path: str, roots: Sequence[str]) -> Optional[str]:
@@ -302,11 +304,12 @@ def _room_file_here(path: str, roots: Sequence[str]) -> Optional[str]:
     copy of a room file another host stored: a room someone else hosts names
     the home's path, and Linked Rooms carry each file to its guests' hosts
     under the same folder and name (room_files_link). None when neither."""
-    real = os.path.realpath(path)
     bases = [os.path.realpath(root) for root in roots]
-    # Only a file inside an upload's own folder, never a root itself.
-    if os.path.dirname(os.path.dirname(real)) in bases:
-        return real
+    if os.path.isabs(path):
+        real = os.path.realpath(path)
+        # Only a file inside an upload's own folder, never a root itself.
+        if os.path.dirname(os.path.dirname(real)) in bases:
+            return real
     tail = _ROOM_FILE_TAIL.search(path)
     if tail is None or tail.group(2) in (".", ".."):
         return None
@@ -324,7 +327,8 @@ def read_room_file_picture(root: str, path: Any, carried: Sequence[str] = ()) ->
     Another host's path reads this host's copy, under ``root`` or a
     ``carried`` root (the root home's, where Linked Rooms keep them)."""
     headers = {"Cache-Control": "no-store"}
-    if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
+    if not isinstance(path, str) or not path or "\x00" in path \
+            or not (os.path.isabs(path) or _WINDOWS_ABSOLUTE.match(path)):
         raise HTTPException(status_code=400, detail="path must be a stored room file", headers=headers)
     real = _room_file_here(path, [root, *carried])
     if real is None:
