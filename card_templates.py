@@ -187,8 +187,17 @@ class TemplateStore:
             notes.append(f"{path}.template.name: no saved template is called that "
                          f"({'saved: ' + ', '.join(saved) if saved else 'none is saved yet'}), dropped")
             return None
-        fill = given.get("fill") if isinstance(given.get("fill"), dict) else {}
-        card = expand_template(template["card"], fill, notes, f"{path}.template")
+        fill = given.get("fill")
+        if fill is None:
+            fill = {}
+        if not isinstance(fill, dict):
+            # Named once, rather than as every slot not given, so the model
+            # doesn't send the same wrong fill again.
+            notes.append(f"{path}.template.fill: {_a_kind(fill)}, which must be an object of slot values, "
+                         f"filled as empty")
+            card = expand_template(template["card"], {}, [], f"{path}.template")
+        else:
+            card = expand_template(template["card"], fill, notes, f"{path}.template")
         if card is None:
             return None
         for key in ("title", "live", "source", "actions"):

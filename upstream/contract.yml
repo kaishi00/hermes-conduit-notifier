@@ -460,6 +460,7 @@ routes:
   - POST /boards/desktop/seen
   - GET /boards/diffs
   - GET /boards/rooms
+  - DELETE /boards/taps
   - POST /boards/taps
   - GET /calls
   - PUT /calls
