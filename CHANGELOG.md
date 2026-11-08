@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.145.0 (2026-11-08)
+
+### New and improved
+- When your agent reads a room with other people for you, a message's
+  pictures and files are named in it, and a message of files alone is
+  read too, now that Conduit sends them as the room's own attachments.
+
 ## 0.143.1 (2026-11-08)
 
 ### Fixes
