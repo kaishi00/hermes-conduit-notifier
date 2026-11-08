@@ -244,6 +244,39 @@ def test_only_stored_room_files_are_read(tmp_path):
         assert refused.value.status_code == status, path
 
 
+def test_a_room_file_another_host_stored_reads_this_hosts_copy(tmp_path):
+    import pytest
+
+    # A guest's phone names the home's path; Linked Rooms keep the copy in
+    # the guest's root home under the same folder and name.
+    profile = tmp_path / "profile" / "conduit" / "room-files"
+    carried = tmp_path / "root" / "conduit" / "room-files"
+    folder = "20261108-" + "c" * 32
+    (carried / folder).mkdir(parents=True)
+    (carried / folder / "shot one.jpg").write_bytes(_JPEG)
+    outside = tmp_path / "secret.jpg"
+    outside.write_bytes(_JPEG)
+    (carried / folder / "link.jpg").symlink_to(outside)
+    home = f"/home/furina/.hermes/conduit/room-files/{folder}"
+
+    read = api.rooms.read_room_file_picture(str(profile), f"{home}/shot one.jpg", [str(carried)])
+    assert read["dataUrl"].startswith("data:image/jpeg;base64,")
+    refused = {
+        f"{home}/link.jpg": 404,  # a copy that leads out isn't one
+        f"{home}/gone.jpg": 404,
+        f"/home/furina/.hermes/conduit/room-files/not-a-folder/shot one.jpg": 404,
+        f"/home/furina/.hermes/other/{folder}/shot one.jpg": 404,
+        f"{home}/..": 404,
+    }
+    for path, status in refused.items():
+        with pytest.raises(api.rooms.HTTPException) as error:
+            api.rooms.read_room_file_picture(str(profile), path, [str(carried)])
+        assert error.value.status_code == status, path
+    # Without the carried root, another host's path is no file here.
+    with pytest.raises(api.rooms.HTTPException):
+        api.rooms.read_room_file_picture(str(profile), f"{home}/shot one.jpg")
+
+
 def test_a_picture_too_large_for_a_data_url_is_refused(tmp_path, monkeypatch):
     import pytest
 

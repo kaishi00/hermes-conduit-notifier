@@ -19,7 +19,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import HTTPException, Request, Response
 
@@ -292,17 +292,42 @@ _ROOM_FILE_SCRIPTABLE_TYPES = frozenset((
 ))
 
 
-def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
+# A room file's path ends in its upload's folder and its name, on whichever
+# host stored it.
+_ROOM_FILE_TAIL = re.compile(r"/conduit/room-files/(\d{8}-[0-9a-f]{32})/([^/\x00]+)\Z")
+
+
+def _room_file_here(path: str, roots: Sequence[str]) -> Optional[str]:
+    """``path`` resolved inside one of ``roots``' uploads, or this host's
+    copy of a room file another host stored: a room someone else hosts names
+    the home's path, and Linked Rooms carry each file to its guests' hosts
+    under the same folder and name (room_files_link). None when neither."""
+    real = os.path.realpath(path)
+    bases = [os.path.realpath(root) for root in roots]
+    # Only a file inside an upload's own folder, never a root itself.
+    if os.path.dirname(os.path.dirname(real)) in bases:
+        return real
+    tail = _ROOM_FILE_TAIL.search(path)
+    if tail is None or tail.group(2) in (".", ".."):
+        return None
+    for base in bases:
+        copy = os.path.realpath(os.path.join(base, tail.group(1), tail.group(2)))
+        if os.path.dirname(os.path.dirname(copy)) == base and os.path.lexists(copy):
+            return copy
+    return None
+
+
+def read_room_file_picture(root: str, path: Any, carried: Sequence[str] = ()) -> Dict[str, Any]:
     """The file /room-files stored at ``path``, as a data URL: 404 when it
     isn't one of them (or is gone), 413 past ``ROOM_FILE_PICTURE_MAX_BYTES``.
-    Named for pictures, which came first (0.142); any file reads since 0.143."""
+    Named for pictures, which came first (0.142); any file reads since 0.143.
+    Another host's path reads this host's copy, under ``root`` or a
+    ``carried`` root (the root home's, where Linked Rooms keep them)."""
     headers = {"Cache-Control": "no-store"}
     if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="path must be a stored room file", headers=headers)
-    base = os.path.realpath(root)
-    real = os.path.realpath(path)
-    # Only a file inside an upload's own folder, never the root itself.
-    if os.path.dirname(os.path.dirname(real)) != base:
+    real = _room_file_here(path, [root, *carried])
+    if real is None:
         raise HTTPException(status_code=404, detail="Not a room file", headers=headers)
     try:
         # Non-blocking, so a FIFO in its place can't hang the read; the
@@ -323,12 +348,21 @@ def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
     return {"dataUrl": f"data:{mime};base64," + base64.b64encode(data).decode("ascii"), "size": len(data)}
 
 
+def _carried_room_files() -> List[str]:
+    """Where Linked Rooms keep the room files other hosts send this one: its root home's."""
+    try:
+        root = core._plugin_package_module("room_identity").root_home(core._calls_home())
+    except Exception:  # noqa: BLE001 - the profile's own uploads still read
+        return []
+    return [os.path.join(str(root), "conduit", "room-files")]
+
+
 @router.get("/room-files/data-url")
 async def get_room_file_picture(response: Response, path: str = "", profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
         return await core._run_scoped(profile, core._limited(
-            _room_file_picture_limiter, profile, lambda: read_room_file_picture(_room_files_root(), path)))
+            _room_file_picture_limiter, profile, lambda: read_room_file_picture(_room_files_root(), path, _carried_room_files())))
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
