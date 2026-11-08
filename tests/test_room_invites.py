@@ -2662,3 +2662,27 @@ def test_a_draft_waiting_in_a_separate_dashboard_starts_in_the_gateway_once_its_
         held.close()
 
     assert rooms.furina.store.read()["drafts"][room_id]["where"] == {"kind": "any"}
+
+
+def test_a_grant_made_as_the_room_moved_on_to_a_later_epoch_waits_for_one_for_it(rooms):
+    room_id = _started(rooms)
+    invite_key = f"link1/{room_id}"
+    rooms.clock.now += 12 * HOUR
+    renew = rooms.laifu.joiner.renew
+    seen = []
+
+    def renewing_as_a_page_comes(grant, epoch=None):
+        seen.append(epoch)
+        fresh = renew(grant, epoch=epoch)
+        if len(seen) == 1:
+            rooms.laifu.follow_epoch(invite_key, 3)  # a page at epoch 3 while this one was made
+        return fresh
+
+    rooms.laifu.joiner.renew = renewing_as_a_page_comes
+    rooms.laifu.pass_once()
+
+    assert seen == [1] and _sent(rooms, "room.grant") == []  # the epoch-1 grant doesn't go
+    rooms.laifu.pass_once()
+    assert seen == [1, 3]
+    [(_, body, _)] = _sent(rooms, "room.grant")
+    assert rooms.member["laifu"].decode(body["grant"], "dispatch")["authority_epoch"] == 3

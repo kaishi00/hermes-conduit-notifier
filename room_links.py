@@ -726,6 +726,8 @@ class LinkLoop:
         with self._lock:
             if _gateway_runs_rooms(self.root):
                 if self._lease is not None:
+                    # The bridge goes first, so the gateway's takes the port the rooms' routes point at.
+                    _close_bridge(self.root)
                     _unlock(self._lease)
                     self._lease.close()
                     self._lease = None
@@ -1064,6 +1066,19 @@ def _gateway_runs_rooms(root: Path) -> bool:
         return room_start._held_elsewhere(root)
     except Exception:  # noqa: BLE001 - a lock that can't be looked at is no gateway's
         return False
+
+
+def _close_bridge(root: Path) -> None:
+    """Stops this process's room bridge for the installation (room_bridge_home), which runs with the lease."""
+    from . import room_bridge_home
+
+    home = room_bridge_home._homes.get(str(Path(root)))
+    if home is None:
+        return
+    try:
+        home.close()
+    except Exception:  # noqa: BLE001 - its watch stops it once the lease is gone
+        logger.debug("Linked Rooms couldn't stop its bridge before letting the mailbox go", exc_info=True)
 
 
 def holds_lease(root: Any) -> bool:

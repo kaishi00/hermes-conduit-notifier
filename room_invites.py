@@ -868,7 +868,7 @@ class Rooms:
         agent = _agent_in(invite, member_id)
         if agent is None or not _due(agent, now) or self._api_waits.get(agent["profile"], 0) > now:
             return
-        link_id, room_id = invite["link"], invite["room_id"]
+        link_id, room_id, epoch = invite["link"], invite["room_id"], invite["authority_epoch"]
         shown = self.link(link_id)
         if shown is None or shown.get("status") != "linked":
             self._tell_once(f"unlinked:{key}", "Linked Rooms couldn't renew an agent's grant in room %s: this Hermes "
@@ -876,7 +876,7 @@ class Rooms:
             self._renew_at(key, member_id, None)
             return
         try:
-            fresh = self.joiner.renew(agent["grant"], epoch=invite["authority_epoch"])
+            fresh = self.joiner.renew(agent["grant"], epoch=epoch)
         except room_join.JoinError as exc:
             wait, then = _RENEW_LATER.get(exc.code, (None, "it isn't renewed again"))
             if exc.code == "api_server":
@@ -892,6 +892,11 @@ class Rooms:
             return
         with self.store.update() as state:
             current = _agent_in(state["invites"].get(key), member_id)
+            if current is not None and state["invites"][key]["authority_epoch"] != epoch:
+                # The room went on at a later epoch while this grant was made (follow_epoch): it's for the
+                # one before, which the room's turns no longer carry. The agent stays due, for the new one.
+                current["renew_at"] = now
+                return
             if current is not None:
                 current.update(grant=fresh["grant"], status_expires_at=fresh["status_expires_at"],
                                renew_at=now + RENEW_S)
