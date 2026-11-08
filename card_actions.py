@@ -177,6 +177,20 @@ def _review_lines(decisions: list[dict[str, Any]], marks: dict[str, Any]) -> str
     return "\n".join(lines)
 
 
+def _any_approved(earlier: list[dict[str, Any]], marks: dict[str, Any]) -> bool:
+    """Whether an approval stands: each decision's latest mark, this round's
+    over earlier ones (a later round leaves out what was settled, and a skip
+    there takes an earlier approval back)."""
+    latest: dict[str, str] = {}
+    for kept in earlier:
+        for entry in (kept.get("marks") or {}).get("decisions") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("decision"), str):
+                latest[entry["decision"]] = entry.get("mark", "")
+    for entry in marks["decisions"]:
+        latest[entry["decision"]] = entry["mark"]
+    return "approve" in latest.values()
+
+
 def _settles(marks: dict[str, Any], decisions: list[dict[str, Any]]) -> bool:
     """Whether the marks leave nothing to change: every decision approved
     or skipped, and no note."""
@@ -231,9 +245,13 @@ class TapStore:
                 pass
             self._expired, self._unheard_reviews = False, set()
             state = self._load()
-            expired, unheard = self._expired, self._unheard_reviews
+            expired, unheard = self._expired, set(self._unheard_reviews)
+            waiting = _waiting_reviews(state["taps"])
             before = json.dumps(state, sort_keys=True)
             yield state
+            # A review tap gone unheard (trimmed past MAX_TAPS) gives its marks back too.
+            left = {tap["id"] for tap in state["taps"]}
+            unheard |= {review for tap_id, review in waiting.items() if tap_id not in left}
             if expired or json.dumps(state, sort_keys=True) != before:
                 self._save(state)
         # Once the expired taps are gone from the file, so it happens once.
@@ -328,11 +346,7 @@ class TapStore:
                "markdown": _review_lines(decisions, marks), "values": {},
                "review": {"id": shown["id"], "round": shown["round"], "for": meta["for"],
                           "quick": len(decisions) == 1, "settles": _settles(marks, decisions),
-                          # An approval this round or an earlier one (later rounds leave it out).
-                          "approved": any(entry.get("mark") == "approve" for entry in marks["decisions"] + [
-                              entry for kept in meta["rounds"][:shown["round"] - 1]
-                              for entry in ((kept.get("marks") or {}).get("decisions") or [])
-                              if isinstance(entry, dict)]),
+                          "approved": _any_approved(meta["rounds"][:shown["round"] - 1], marks),
                           **({"picked": picked} if picked else {})}}
         try:
             with self._locked() as state:
@@ -497,6 +511,13 @@ def _review_line(tap: dict[str, Any], forward: Callable[[str, str], dict[str, An
     return head + ("Build the next round for what they marked to change (and what their notes ask), keeping what "
                    "they approved; decisions they approved or skipped needn't be shown again. Then show it with "
                    f"conduit_show, review id {review['id']}, so it stays the same review.]")
+
+
+def _waiting_reviews(taps: list[dict[str, Any]]) -> dict[str, tuple[str, int]]:
+    """The unheard review taps, by tap id: the review and round each holds marks on."""
+    return {tap["id"]: (tap["review"]["id"], tap["review"]["round"]) for tap in taps
+            if not tap["heard"] and isinstance(tap.get("review"), dict)
+            and isinstance(tap["review"].get("id"), str) and isinstance(tap["review"].get("round"), int)}
 
 
 def _well_formed(tap: Any) -> bool:

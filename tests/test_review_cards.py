@@ -606,10 +606,10 @@ def test_skipping_the_rest_after_an_earlier_approval_carries_on(tool_home):
     taps.save({"sessions": ["s1"], "card": card, "action": "review",
                "review": _marks(("d1", "approve", "A"), ("d2", "change", "A", "Brighter"))})
     taps.note("s1", "Sent review · Recipe app home")
-    second = _call({"cards": [_review([{"title": "Save button colour", "options": [
+    second = _call({"cards": [_review([{"id": "d2", "title": "Save button colour", "options": [
         {"label": "Amber", "html": PAGE}, {"label": "Gold", "html": PAGE}]}], id=card["review"]["id"])]},
         reviews=host)["cards"][0]
-    body = _marks(("d1", "skip"))
+    body = _marks(("d2", "skip"))
     body["round"] = 2
     taps.save({"sessions": ["s1"], "card": second, "action": "review", "review": body})
     note = taps.note("s1", "Picked")
@@ -622,3 +622,35 @@ def test_a_review_being_started_isnt_pruned(tmp_path):
     fresh.mkdir(parents=True)
     store.start("T", "s1")
     assert fresh.exists()
+
+
+def test_an_approval_skipped_later_no_longer_counts(tool_home):
+    host = Host(tool_home)
+    card = _call({"cards": [_review([{"title": "Chart", "options": [{"label": "Bars", "html": PAGE},
+                                                                    {"label": "Line", "html": PAGE}]},
+                                     {"title": "Colour", "options": [{"label": "Red", "html": PAGE},
+                                                                     {"label": "Blue", "html": PAGE}]}])]},
+                 reviews=host)["cards"][0]
+    taps = card_actions.TapStore(tool_home, reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": card, "action": "review",
+               "review": _marks(("d1", "approve", "A"), ("d2", "change", "A", "Softer"))})
+    taps.note("s1", "Sent review · Recipe app home")
+    second = _call({"cards": [_review([{"title": "Chart", "options": [{"label": "Bars", "html": PAGE},
+                                                                      {"label": "Line", "html": PAGE}]},
+                                       {"title": "Colour", "options": [{"label": "Pink", "html": PAGE},
+                                                                       {"label": "Teal", "html": PAGE}]}],
+                                      id=card["review"]["id"])]}, reviews=host)["cards"][0]
+    body = _marks(("d1", "skip"), ("d2", "skip"))
+    body["round"] = 2
+    taps.save({"sessions": ["s1"], "card": second, "action": "review", "review": body})
+    assert "skipped every decision" in taps.note("s1", "Sent review · Recipe app home")
+
+
+def test_a_review_tap_trimmed_unheard_gives_its_marks_back(tool_home, monkeypatch):
+    monkeypatch.setattr(card_actions, "MAX_TAPS", 1)
+    host = Host(tool_home)
+    first, other = _quick(tool_home, host, ["Bars", "Line"]), _quick(tool_home, host, ["Red", "Blue"])
+    taps = card_actions.TapStore(tool_home, reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": first, "action": "review", "review": _marks(("d1", "approve", "B"))})
+    taps.save({"sessions": ["s1"], "card": other, "action": "review", "review": _marks(("d1", "approve", "A"))})
+    assert host.store().get(first["review"]["id"])["rounds"][0]["marks"] is None

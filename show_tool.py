@@ -176,7 +176,8 @@ REVIEW_SHOWN_NOTE = ("The review {id} is round {round}: the user marks it in the
                      "their message. Don't ask them to reply in words, and don't post your own got-it.")
 REVIEW_FOR_NOTE = (" Their marks go to {ref}, which builds the next round; show it with this review's id and for "
                    "{ref}.")
-REVIEW_NEXT_NOTE = " Show the next round with this review's id, so it stays the same review."
+REVIEW_NEXT_NOTE = (" Show the next round with this review's id, so it stays the same review, and each decision's "
+                    "id (d1, d2…) as this round has it.")
 ROOM_REVIEW_NOTE = ("cards: a review in a group room comes later (everyone votes), so it was left out: describe the "
                     "options in your reply")
 WORKSTREAM_REVIEW_NOTE = ("cards: only the Bot Chat shows a review, so it was left out: write the options' pages to "

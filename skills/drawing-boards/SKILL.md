@@ -128,8 +128,9 @@ colour?" or any choice that's easier to see than describe.
    notes, and sends.
 4. Their marks come back as their message. Keep what they approved, rework
    what they marked Change as their notes say, and show the next round with
-   the same `review.id` (the earlier card's answer gives it); leave out the
-   decisions they settled. When everything is approved, go ahead and build it.
+   the same `review.id` (the earlier card's answer gives it), each decision
+   keeping its `id` (d1, d2…); leave out the decisions they settled. When
+   everything is approved, go ahead and build it.
 
 In a Bot Chat, have a workstream make the options (it writes the pages to
 files and reports them), then show the review with `for` set to its ref,
