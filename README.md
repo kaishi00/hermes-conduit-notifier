@@ -1522,11 +1522,15 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   `conduit_show` (its cards are its own: a workstream's would show in the
   workstream's chat, not the Bot Chat);
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
-  health, location and inbox). `message_agent` is refused there in favour of
-  `work_ask`.
+  health, location and inbox, and Apple Maps through `conduit_maps`, its
+  navigate's Go button included, which shows in the chat that asked).
+  `message_agent` is refused there in favour of `work_ask`.
 - A workstream writes its report for you, in its own chat, which you can open
   and answer. The Bot Chat's update carries a short line of it and the chat's
   link (`work_read` gives the coordinator up to 2,000 characters of it).
+  When the workstream's turn showed cards in its chat (a map, a forecast),
+  the update says so, and the coordinator shows the same cards in the Bot
+  Chat with `conduit_show {"from_work": "W3"}`.
   A workstream keeps a checklist with `work_progress` (its only work
   tool), which the Bot Chat's digest shows, Conduit's Work panel lists, and
   Conduit shows as the Tasks line in the workstream's own chat. The
