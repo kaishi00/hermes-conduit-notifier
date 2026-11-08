@@ -1229,12 +1229,15 @@ class PulseStore:
     def done_items(self, since: float, limit: int = 50, *, skip_kinds: Sequence[str] = (),
                    skip_closer: str = "") -> list[dict]:
         """Items closed as done at ``since`` or later and still current,
-        latest closed first: none of ``skip_kinds``, nor one ``skip_closer``
+        latest closed first (a close time stored as text, which SQLite
+        sorts after every number, isn't counted: it would be "since" for
+        ever): none of ``skip_kinds``, nor one ``skip_closer``
         closed (it alone, or with a note after it: "told (…)")."""
         kinds = ",".join("?" * len(skip_kinds))
         with self._connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT * FROM items WHERE status='done' AND closed_at>=? AND superseded_at IS NULL "
+                "SELECT * FROM items WHERE status='done' AND typeof(closed_at) IN ('integer', 'real') "
+                "AND closed_at>=? AND superseded_at IS NULL "
                 f"AND kind NOT IN ({kinds}) AND (?='' OR (closed_by IS NOT ? AND substr(closed_by, 1, ?) IS NOT ?)) "
                 "ORDER BY closed_at DESC, id DESC LIMIT ?",
                 (since, *skip_kinds, skip_closer, skip_closer, len(skip_closer) + 2, f"{skip_closer} (", limit))]
@@ -2219,6 +2222,24 @@ class PulseStore:
                 "AND cards.id NOT IN (SELECT card_id FROM card_done) "
                 "AND (cards.dismissed_at IS NULL OR cards.rest_until IS NOT NULL) "
                 "AND NOT (coalesce(cards.rating, '')='down' AND coalesce(cards.reason, '')!='wrong_time')",
+                (NOTICED, since, *topics)).fetchall()
+        return [dict(row) for row in rows]
+
+    def closed_cards_on(self, topics: Sequence[str], since: float) -> list[dict]:
+        """The "noticed" cards on any of ``topics`` made since ``since`` that
+        the user closed: marked done, put away for good, or rated not useful
+        ("wrong time" only puts it off); each with its candidate's ``ref``."""
+        topics = [topic for topic in dict.fromkeys(topics) if topic]
+        if not topics:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT cards.*, candidates.ref AS ref FROM cards LEFT JOIN candidates ON candidates.card_id=cards.id "
+                "WHERE cards.kind=? AND cards.created_at>=? "
+                f"AND cards.topic IN ({','.join('?' * len(topics))}) "
+                "AND (cards.id IN (SELECT card_id FROM card_done) "
+                "OR (cards.dismissed_at IS NOT NULL AND cards.rest_until IS NULL) "
+                "OR (coalesce(cards.rating, '')='down' AND coalesce(cards.reason, '')!='wrong_time'))",
                 (NOTICED, since, *topics)).fetchall()
         return [dict(row) for row in rows]
 

@@ -570,7 +570,12 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     # A card with no item or ref (the model found it, or it came before refs)
     # is matched by what it says (Eric, 2026-10-31: Kwan's birthday again,
     # Tuesday's card still open, both from the model with nothing to key on).
-    worded = pulse_store.open_cards_on([str(row.get("kind") or "") for row in rows], now - SAID_WINDOW_S)
+    topics = [str(row.get("kind") or "") for row in rows]
+    worded = pulse_store.open_cards_on(topics, now - SAID_WINDOW_S)
+    # A card the user marked done or put away, word for word again: they
+    # dealt with it (Eric, 2026-11-08: the audit cron card, Done on Friday,
+    # back on Saturday). Not on its due day either.
+    closed = pulse_store.closed_cards_on(topics, now - SAID_WINDOW_S)
     by_item: dict[int, list[dict]] = {}
     by_ref: dict[str, list[dict]] = {}
     for card in cards:
@@ -586,15 +591,37 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
         if not found and row.get("text") and (not own or own.startswith((REMINDER, EVENT))):
             # A remembered item or reminder of its own isn't another's: it
             # only counts a card that has nothing to key on.
-            found = [card for card in worded
-                     if card["topic"] == row.get("kind") and not (keyed(card) and (item is not None or ref))
-                     and same_subject(card["news"], str(row["text"]))]
+            text = str(row["text"])
+            mine = lambda card: card["topic"] == row.get("kind") and not (keyed(card) and (item is not None or ref))
+            found = [card for card in worded if mine(card) and (said_alike(card, text)
+                                                                or same_subject(card["news"], text))]
+            if not found and any(mine(card) and said_alike(card, text) for card in closed):
+                out.append(row)
+                continue
         if not found:
             continue
         if due_again(row, max(card["created_at"] for card in found), now, due=_due_point(pulse_store, row)):
             continue  # its day: once more
         out.append(row)
     return out
+
+
+def said_alike(card: dict, text: str) -> bool:
+    """Whether ``text`` is what ``card`` says, word for word (spacing and
+    case aside): its news, or the longer title it was clipped from."""
+    said = store.same_text(text)
+    return bool(said) and said in (store.same_text(str(card.get("news") or "")),
+                                   store.same_text(str(card.get("title") or "")))
+
+
+def said_before(pulse_store: store.PulseStore, topic: str, text: str, now: float) -> bool:
+    """Whether a "noticed" card on ``topic`` from the last SAID_WINDOW_S says
+    ``text`` word for word and is still open or was closed by the user: a
+    report written without a candidate list (its list failed) gets no card
+    for it again."""
+    since = now - SAID_WINDOW_S
+    return any(said_alike(card, text) for card in [*pulse_store.open_cards_on([topic], since),
+                                                   *pulse_store.closed_cards_on([topic], since)])
 
 
 # How far back an open card is matched by its words (still_open).
@@ -749,14 +776,20 @@ def due_again(row: dict, last: float, now: float, *, due: Optional[float] = None
 
 
 def once_each(rows: Sequence[dict]) -> None:
-    """One candidate per phone reminder or calendar entry in a run: two the
-    model found about the same one (a birthday, a gift for it) leave the one
-    it picked, then the one it valued most, the rest skipped as raised."""
-    best: dict[str, dict] = {}
+    """One candidate per phone reminder or calendar entry in a run, and one
+    per wording of a kind: two the model found about the same one (a
+    birthday, a gift for it), or the same line twice for the same time,
+    leave the one it
+    picked, then the one it valued most, the rest skipped as raised."""
+    best: dict[Any, dict] = {}
     for row in rows:
         ref = str(row.get("ref") or "")
-        if row.get("skip") or not ref.startswith((REMINDER, EVENT)):
+        key: Any = ref if ref.startswith((REMINDER, EVENT)) else None
+        if key is None and row.get("text") and store.same_text(str(row["text"])):
+            key = ("said", str(row.get("kind") or ""), store.same_text(str(row["text"])), row.get("due_at"))
+        if row.get("skip") or key is None:
             continue
+        ref = key
         kept = best.get(ref)
         rank = lambda candidate: (candidate.get("bring_up") is True, candidate.get("value") or 0)
         if kept is None or rank(row) > rank(kept):

@@ -1757,6 +1757,26 @@ def test_a_probe_and_a_report_due_together_go_on_separate_ticks(live, db):
     assert len(live.sent()) == 2 and live.sent()[1].startswith("Pulse report")
 
 
+def test_a_report_without_a_list_skips_lines_a_card_says_already(live, db):
+    # Eric, 2026-11-08: with every candidate list failing, reports went out
+    # as Hermes wrote them, and their lines came back as cards he'd marked done.
+    db.session()
+    _due_report(live)
+    [done] = live.store.add_cards([{"kind": "noticed", "level": "screen", "topic": "commitment",
+                                    "news": "Send the deck to Mara before Friday (you said so in Work)",
+                                    "created_at": time.time() - 86400}])
+    live.store.mark_done(done, None, closed_by="user", now=time.time() - 3600)
+    live.store.set("report_requested", True)
+    pulse.tick()
+    row = live.store.in_flight()[0]
+    db.message("user", row["text"], display_kind="hidden")
+    db.message("assistant", REPLY.replace("3. [weird] Something else", "3. [promise] I said I'd check the build; "
+                                          "it failed (tool calls)"))
+    pulse.tick(now=time.time() + 1)
+    made = [card["news"] for card in live.store.cards() if card["id"] != done]
+    assert made == ["I said I'd check the build; it failed (tool calls)"]
+
+
 def test_ratings_are_read_back_and_counted(live, db):
     db.session()
     _due_report(live)
