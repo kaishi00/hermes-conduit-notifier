@@ -283,6 +283,9 @@ ROUTE_CAPABILITIES = (
     # DELETE /boards/taps?id=: forgets a tap whose message Conduit didn't
     # send (Cards Hermes shows).
     "card-tap-drop",
+    # GET /boards/reviews: a review card's round with the pages its options
+    # open; its marks go as a tap with action review (Cards Hermes shows).
+    "review-cards",
 )
 
 
