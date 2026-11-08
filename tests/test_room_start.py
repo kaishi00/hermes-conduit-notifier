@@ -314,6 +314,9 @@ def test_a_moved_room_without_a_recorded_owner_is_the_host_owners(hermes, root):
 
     assert starter.moved("room-moved") == {"kind": "canonical", "home": str(root), "subject": "owner:host"}
 
+    hermes.module("gateway.owner_identity", host_owner_subject=lambda: None)  # a Hermes with no owner set up
+    assert start_module.Starter(root, hermes=start_module.Hermes(root)).moved("room-moved") is None
+
 
 def test_nothing_is_moved_on_a_hermes_that_doesnt_move_rooms_or_without_the_standalone_store(hermes, root):
     root.mkdir(parents=True)

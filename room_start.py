@@ -345,7 +345,8 @@ class Hermes:
         except sqlite3.Error:
             pass
         try:
-            return str(importlib.import_module("gateway.owner_identity").host_owner_subject()) or None
+            owner = importlib.import_module("gateway.owner_identity").host_owner_subject()
+            return owner if isinstance(owner, str) and owner else None
         except Exception:  # noqa: BLE001 - a Hermes that can't say: the draft stays as it is
             return None
 
