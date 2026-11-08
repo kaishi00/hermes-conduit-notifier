@@ -4873,10 +4873,10 @@ def test_a_send_points_its_reports_at_the_sender_before_it_goes_and_back_if_it_d
     seen = []
     real = work._deliver
 
-    def deliver(store, broker, w, words, how, kind="send"):
+    def deliver(store, broker, w, words, how, kind="send", answer=""):
         # A restart's lost-send notice, or a turn ending first, reads this.
         seen.append(store.get(w.ref).reply_to)
-        return real(store, broker, w, words, how, kind)
+        return real(store, broker, w, words, how, kind, answer)
 
     monkeypatch.setattr(work, "_deliver", deliver)
     assert call("work_send", {"ref": "W1", "text": "Now the dark one."}, session_id=ROOM_CHAT)["ok"]
