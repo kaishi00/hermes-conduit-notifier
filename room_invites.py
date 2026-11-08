@@ -791,22 +791,23 @@ class Rooms:
         for room_id, draft in sorted(self.store.read()["drafts"].items()):
             if draft["status"] != "started" or not draft.get("route_todo"):
                 continue
+            where = draft.get("started_in") or draft["where"]
             try:
-                found = self.starter.find(draft.get("started_in") or draft["where"])
+                found = self.starter.find(where)
             except room_start.StartError:
                 continue  # its service runs in another process, or isn't running yet
             for member_id in sorted(draft["route_todo"]):
-                self._route(room_id, member_id, found)
+                self._route(room_id, member_id, found, where)
 
-    def _route(self, room_id: str, member_id: str, found: room_start.Found) -> None:
+    def _route(self, room_id: str, member_id: str, found: room_start.Found, where: dict[str, Any]) -> None:
         """The change waiting for a member's route as it is when its turn comes, not as the pass read it (R23): a
         leave, a take-out or the end since stops a fresh grant, and one that comes while it's made has its own
         change made after it."""
         draft = self.store.read()["drafts"].get(room_id)
         todo = draft.get("route_todo", {}).get(member_id) if draft is not None and draft["status"] == "started" \
             else None
-        if todo is None:
-            return  # made meanwhile, or the room ended
+        if todo is None or (draft.get("started_in") or draft["where"]) != where:
+            return  # made meanwhile, the room ended, or it moved: the next pass finds where it is
         member = next(each for each in draft["members"] if each["member_id"] == member_id)
         agent = _joined(draft, member)
         failed = None
@@ -825,8 +826,10 @@ class Rooms:
             draft = state["drafts"].get(room_id)
             todos = draft.get("route_todo", {}) if draft is not None else {}
             current = todos.get(member_id)
-            if current is None or current["do"] != todo["do"] or current.get("unseen") != todo.get("unseen") or (
-                    todo["do"] == "swap" and _joined(draft, member)["grant"] != agent["grant"]):
+            moved = draft is not None and (draft.get("started_in") or draft["where"]) != where
+            if current is None or moved or current["do"] != todo["do"] \
+                    or current.get("unseen") != todo.get("unseen") \
+                    or (todo["do"] == "swap" and _joined(draft, member)["grant"] != agent["grant"]):
                 return  # another change came meanwhile: the next pass makes it
             if failed is None:
                 draft["routes"][member_id] = "live" if todo["do"] == "swap" else "cut_off"

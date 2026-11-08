@@ -2777,3 +2777,26 @@ def test_a_route_the_gateway_wont_take_after_the_move_is_shown_cut_off_and_given
 
     assert key in rooms.home.canonical.peer_routes
     assert rooms.furina.store.read()["drafts"][room_id]["routes"][member_id] == "live"
+
+
+def test_a_route_change_read_before_the_room_moved_isnt_made_in_the_frozen_copy(rooms):
+    room_id = _started(rooms)
+    key = (room_id, slot("link1", 1))
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()  # a fresh grant for Laifu's agent, waiting as a swap
+    find = rooms.furina.starter.find
+
+    def moving_once_found(where):
+        found = find(where)
+        if found.kind != "canonical" and room_id not in rooms.home.handed:
+            _moved(rooms, room_id)
+            del rooms.home.canonical.peer_routes[key]  # the move copied the room without this route
+            rooms.furina._follow_gateway()
+        return found
+
+    rooms.furina.starter.find = moving_once_found
+    rooms.furina.pass_once()
+    rooms.furina.pass_once()
+
+    assert key in rooms.home.canonical.peer_routes
+    assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
