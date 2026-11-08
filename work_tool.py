@@ -3429,8 +3429,7 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         fields = {"status": "ready" if ready else "done", "last_result": "", "error": ""}
         said = "has something for the user to look at, with no report" if ready else "finished without a report"
         line = f"- {work.ref} “{work.title}” {said} (work_read shows what it did).{tail}"
-    if not failed:
-        line += _shown_line(store, work)
+    line += _shown_line(store, work)  # a failed turn's cards too: they're in its chat
     # Only while it's still active: a stop that came meanwhile wins, and an
     # end reported twice settles (and tells the coordinator) once.
     if store.update(work.ref, only_if=_SETTLES, **fields) is None:
