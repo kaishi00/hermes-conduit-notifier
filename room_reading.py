@@ -29,6 +29,7 @@ MESSAGES = ("message.user", "message.member")
 WINDOW = 500
 MAX_LIMIT, DEFAULT_LIMIT = 200, 100
 MAX_TEXT_CHARS = 4000
+MAX_ATTACHMENTS = 8  # Hermes' own cap on a room message's attachments
 # What the tool answers at most, so a long room never fills the model's context.
 MAX_ANSWER_BYTES = 64 * 1024
 PASS = "(pass)"
@@ -362,11 +363,30 @@ def _message(event: Any) -> bool:
 
 
 def _text(event: dict[str, Any]) -> Optional[str]:
+    """A message's text, with a line naming the files it carries as Hermes' room attachments (Conduit sends
+    pictures and files that way since issue 2035): the files themselves aren't read here. A message of files
+    alone is read too."""
     payload = event.get("payload")
-    text = payload.get("text") if isinstance(payload, dict) else None
-    if not isinstance(text, str) or not text.strip() or text.strip() == PASS:
+    if not isinstance(payload, dict):
         return None
-    return text
+    text = payload.get("text")
+    text = text if isinstance(text, str) else ""
+    if text.strip() == PASS:
+        return None
+    names = _attached(payload)
+    if names:
+        line = f"[attached: {', '.join(names)}]"
+        text = f"{text}\n{line}" if text.strip() else line
+    return text if text.strip() else None
+
+
+def _attached(payload: dict[str, Any]) -> list[str]:
+    """The names of a message's room attachments, as the agent reads them (Hermes takes up to 8)."""
+    attachments = payload.get("attachments")
+    if not isinstance(attachments, list):
+        return []
+    names = (plain(item.get("name")) for item in attachments[:MAX_ATTACHMENTS] if isinstance(item, dict))
+    return [name or "a file" for name in names]
 
 
 def _agent_name(member: dict[str, Any]) -> str:

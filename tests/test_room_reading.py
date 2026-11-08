@@ -147,6 +147,23 @@ def test_read_names_who_said_what_in_a_room_you_host(side):
     assert answer["room"]["host"] == "you"
 
 
+def test_a_messages_attachments_are_named_and_files_alone_are_read(side):
+    room_id = started(side)
+    picture = {"attachment_id": "a1", "kind": "image", "name": "zoo-map.png", "size": 12, "mime": "image/png"}
+    plan = {"attachment_id": "a2", "kind": "pdf", "name": 'plan "v2".pdf', "size": 9, "mime": "application/pdf"}
+    side.log.add(room_id, "message.user", {"thread_id": "main", "text": "The map", "attachments": [picture]},
+                 actor={"kind": "user", "id": "desktop"})
+    side.log.add(room_id, "message.user", {"thread_id": "main", "text": "", "attachments": [plan, {"kind": "file"}]},
+                 actor={"kind": "user", "id": "desktop"})
+    side.log.add(room_id, "message.user", {"thread_id": "main", "text": "  ", "attachments": "nonsense"},
+                 actor={"kind": "user", "id": "desktop"})
+
+    answer = reader(side, "furina").read(room_id)
+
+    assert froms(answer) == [("you", "The map\n[attached: zoo-map.png]"),
+                             ("you", "[attached: plan 'v2'.pdf, a file]")]
+
+
 def test_each_message_has_its_seq_and_time(side):
     room_id = started(side)
     seq = say(side, room_id, "Hello")
