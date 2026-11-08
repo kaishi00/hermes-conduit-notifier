@@ -348,6 +348,9 @@ def test_a_dispatch_names_this_hosts_copy_of_a_room_file_and_its_digest_follows(
     kept = laifu.root / "conduit" / "room-files" / folder / "shot.jpg"
     kept.parent.mkdir(parents=True)
     kept.write_bytes(b"x")
+    files = sys.modules["conduit_push.room_files_link"]
+    with files.Store(laifu.root).update() as state:
+        state.setdefault("kept", {})[f"{folder}/shot.jpg"] = "link1"
     body, key = dispatch(text=prompt(f"User (user): @file:/root/.hermes/conduit/room-files/{folder}/shot.jpg look"))
 
     ask(laifu, body=body, key=key)
@@ -1117,3 +1120,21 @@ def test_two_loads_handle_each_request_once(tmp_path, monkeypatch, mailbox_url, 
     assert len(hermes.calls_to("POST", "/v1/runs")) == 1
     assert [item.kind for item in got] == [bridge.RESPONSE, bridge.STATUS]
     assert got[1].body["status"] == "completed"
+
+
+def test_a_dispatch_doesnt_name_a_copy_another_home_sent(laifu, hermes):
+    # Greptile on notifier #629: a home linked here could send its own bytes under another home's upload name.
+    folder = "20261108-" + "d" * 32
+    kept = laifu.root / "conduit" / "room-files" / folder / "shot.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")
+    files = sys.modules["conduit_push.room_files_link"]
+    with files.Store(laifu.root).update() as state:
+        state.setdefault("kept", {})[f"{folder}/shot.jpg"] = "link7"
+    home = f"/root/.hermes/conduit/room-files/{folder}/shot.jpg"
+    body, key = dispatch(text=prompt(f"User (user): @file:{home} look"))
+
+    ask(laifu, body=body, key=key)
+
+    [call] = hermes.calls
+    assert f"@file:{home} look" in call["body"]["hosted_room_dispatch"]["prompt"]

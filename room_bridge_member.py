@@ -310,7 +310,7 @@ class Member:
                 return reply(202, {"run_id": run_id, "status": "completed", "replayed": False},
                              run={"run_id": run_id, "status": "completed", "output": output})
         status, answer = self._call(profile, "POST", "/v1/runs", request.grant, key=key,
-                                    body={"hosted_room_dispatch": self._localized(fields)})
+                                    body={"hosted_room_dispatch": self._localized(fields, link_id)})
         if status is not None and 200 <= status < 300:
             run_id = answer.get("run_id")
             if isinstance(run_id, str) and room_bridge.RUN_ID.fullmatch(run_id):
@@ -322,14 +322,14 @@ class Member:
                     today["keys"].remove(key)
         return _refused(reply, status, answer)
 
-    def _localized(self, fields: dict[str, Any]) -> dict[str, Any]:
+    def _localized(self, fields: dict[str, Any], link_id: Optional[str] = None) -> dict[str, Any]:
         """The dispatch with the room files its prompt names swapped for this host's copies of them
         (room_files_link), so the agent reads them here; its digest follows the prompt, as Hermes checks it."""
         prompt = fields.get("prompt")
         if not isinstance(prompt, str):
             return fields
         try:
-            local = room_files_link.localized(prompt, self.root)
+            local = room_files_link.localized(prompt, self.root, origin=link_id)
             if local == prompt:
                 return fields
             # A lone surrogate doesn't encode: the turn keeps the home's paths and digest.

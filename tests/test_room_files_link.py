@@ -285,3 +285,49 @@ def test_a_piece_that_cant_be_written_is_dropped(tmp_path, monkeypatch):
     body = {"sha": "a" * 64, "folder": FOLDER, "name": "shot.jpg", "index": 0, "count": 2, "size": 10,
             "data": b"x" * 5}
     assert files._take("link1", body) is None
+
+
+def test_another_homes_file_under_the_same_name_isnt_replaced_or_answered(copies):  # noqa: F811
+    # Greptile on notifier #629: a home linked here could send its own bytes first under another's upload name.
+    room_id = started(copies)
+    planted = carried(copies, "laifu", "shot.jpg")
+    planted.parent.mkdir(parents=True)
+    planted.write_bytes(b"not it")
+    with files_module.Store(copies.tmp_path / "laifu").update() as state:
+        state.setdefault("kept", {})[f"{FOLDER}/shot.jpg"] = "link9"
+    path = upload(copies, "shot.jpg", b"\xff\xd8 the real one")
+    post(copies, room_id, f"@file:{path}\n\nWhat's this?")
+
+    copies.furina.pass_once()
+
+    assert planted.read_bytes() == b"not it"
+    assert carried(copies, "mona", "shot.jpg").read_bytes() == b"\xff\xd8 the real one"
+    assert len(_sent(copies, "room.file_got")) == 1
+    assert files_module.origin_of(copies.tmp_path / "mona", FOLDER, "shot.jpg") is not None
+
+
+def test_a_file_shared_in_two_rooms_goes_while_either_has_the_link(copies):  # noqa: F811
+    # Greptile on notifier #629: only the first room that shared a file was kept with it.
+    room_id = started(copies)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    store = files_module.Store(copies.tmp_path / "furina")
+    with store.update() as state:
+        state["out"]["link1"] = {f"{FOLDER}/shot.jpg": {
+            "room": "room-gone", "rooms": ["room-gone", room_id], "size": path.stat().st_size,
+            "base": str(path.parent.parent), "at": None, "tries": 0, "done": False, "noted": 0}}
+
+    copies.furina.pass_once()
+
+    assert carried(copies, "laifu", "shot.jpg").read_bytes() == b"\xff\xd8 shot"
+    assert {body["room_id"] for _, body, _ in _sent(copies, "room.file")} == {room_id}
+
+
+def test_a_file_shared_again_in_another_room_is_kept_with_both(copies):  # noqa: F811
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    events = [{"kind": "message.user", "payload": {"text": f"@file:{path}\nhi"}}]
+    copies.furina.files.note("room-one", "link1", events)
+    copies.furina.files.note("room-two", "link1", events)
+    copies.furina.files.note("room-two", "link1", events)
+
+    entry = files_module.Store(copies.tmp_path / "furina").read()["out"]["link1"][f"{FOLDER}/shot.jpg"]
+    assert entry["rooms"] == ["room-one", "room-two"]

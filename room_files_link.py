@@ -70,6 +70,8 @@ MAX_TRIES = 5
 # How long a member's turn waits for a file its prompt names that's still on its way: well inside the home's
 # wait for its answer (room_bridge_home.WAIT_S), which Hermes' client asks again after anyway.
 ARRIVAL_WAIT_S = 8.0
+# Which Link sent each file kept here, at most this many (older ones go first).
+MAX_ORIGINS = 20000
 # Kept per Link: older entries go first.
 MAX_KEPT = 2000
 # Chunks of a file that never finished go after this long.
@@ -138,9 +140,10 @@ def _quoted(path: str) -> str:
 
 
 def localized(text: str, root: Any, *, wait_s: float = ARRIVAL_WAIT_S, clock: Callable[[], float] = time.monotonic,
-              sleep: Callable[[float], None] = time.sleep) -> str:
+              sleep: Callable[[float], None] = time.sleep, origin: Optional[str] = None) -> str:
     """``text`` with each reference to another host's room file swapped for this host's copy of it, waiting up
-    to ``wait_s`` for copies still on their way. One that never came keeps the home's path."""
+    to ``wait_s`` for copies still on their way. One that never came keeps the home's path. ``origin``: the Link
+    the turn came over; only a copy that Link's home sent is swapped in."""
     found = references(text)
     if not found:
         return text
@@ -158,7 +161,11 @@ def localized(text: str, root: Any, *, wait_s: float = ARRIVAL_WAIT_S, clock: Ca
         if tail is None or (tail.group(1), tail.group(2)) in missing or (tail.group(1), tail.group(2)) not in wanted:
             return match.group(0)
         local = str(wanted[(tail.group(1), tail.group(2))])
-        return match.group(0) if local == path else "@file:" + _quoted(local)
+        if local == path:
+            return match.group(0)
+        if origin is not None and origin_of(root, tail.group(1), tail.group(2)) != origin:
+            return match.group(0)
+        return "@file:" + _quoted(local)
 
     return _REFERENCE.sub(swap, text)
 
@@ -245,7 +252,11 @@ class Files:
             out = state["out"].setdefault(link_id, {})
             for key, entry in wanted.items():
                 if key not in out:
-                    out[key] = {**entry, "at": None, "tries": 0, "done": False, "noted": self.rooms.clock()}
+                    out[key] = {**entry, "rooms": [room_id], "at": None, "tries": 0, "done": False,
+                                "noted": self.rooms.clock()}
+                elif room_id not in _rooms_of(out[key]):
+                    # Shared in another room too: it still goes while either has that Link's people in it.
+                    out[key]["rooms"] = [*_rooms_of(out[key]), room_id]
             if len(out) > MAX_KEPT:
                 for key in sorted(out, key=lambda each: out[each]["noted"])[:len(out) - MAX_KEPT]:
                     del out[key]
@@ -258,12 +269,15 @@ class Files:
         state = self.store.read()
         drafts = self.rooms.store.read()["drafts"]
         for link_id, out in sorted(state["out"].items()):
+            rooms_for: dict[str, str] = {}
             for key, entry in sorted(out.items()):
-                draft = drafts.get(entry["room"])
-                if draft is None or link_id not in room_copies._receiving(draft):
-                    # Nobody of that Link's is in the room any more, so its host wouldn't keep the file.
+                receiving = [room_id for room_id in _rooms_of(entry) if room_id in drafts
+                             and link_id in room_copies._receiving(drafts[room_id])]
+                if not receiving:
+                    # Nobody of that Link's is in its rooms any more, so its host wouldn't keep the file.
                     self._drop(link_id, key)
                     continue
+                rooms_for[key] = receiving[0]
                 if not entry["done"] and entry["tries"] >= MAX_TRIES and entry["at"] is not None \
                         and now - entry["at"] >= WAIT_S:
                     logger.info("Linked Rooms gave up carrying %s to Link %s: no answer after %d tries", key,
@@ -277,7 +291,9 @@ class Files:
             for key in due:
                 if sent and sent + out[key].get("size", 0) > PASS_BYTES:
                     break
-                size = self._send_file(link_id, key, out[key], now)
+                if key not in rooms_for:
+                    continue
+                size = self._send_file(link_id, key, {**out[key], "room": rooms_for[key]}, now)
                 if size is None:
                     break
                 sent += size
@@ -359,14 +375,26 @@ class Files:
             logger.info("Linked Rooms dropped a room.file from Link %s for a room it isn't in", received.link_id)
             return
         target = files_root(self.rooms.root) / body["folder"] / body["name"]
+        key = f"{body['folder']}/{body['name']}"
         if target.is_file():
-            # Kept already (sent again before its answer came): answered once, on its last piece.
+            # Kept already (sent again before its answer came): answered once, on its last piece, when it's
+            # this home's and these bytes. Another home's file under the same folder and name stays as it is.
             if body["index"] != body["count"] - 1:
+                return
+            if self.store.read().get("kept", {}).get(key) != received.link_id or _digest(target) != body["sha"]:
+                logger.warning("Linked Rooms refused room file %s from Link %s: another file has its folder and "
+                               "name here", key, received.link_id)
                 return
         else:
             whole = self._take(received.link_id, body)
             if whole is None or not self._keep(target, whole, body):
                 return
+            with self.store.update() as kept:
+                origins = kept.setdefault("kept", {})
+                origins.pop(key, None)
+                origins[key] = received.link_id
+                for old in list(origins)[:max(0, len(origins) - MAX_ORIGINS)]:
+                    del origins[old]
         try:
             self.rooms.send(received.link_id, GOT, {"v": VERSION, "room_id": body["room_id"],
                                                     "folder": body["folder"], "name": body["name"],
@@ -440,6 +468,24 @@ class Files:
             logger.log(level, "Linked Rooms couldn't keep room file %s/%s (%s)", body["folder"], body["name"],
                        type(exc).__name__)
             return False
+
+
+def _rooms_of(entry: dict[str, Any]) -> list[str]:
+    rooms = entry.get("rooms")
+    return list(rooms) if isinstance(rooms, list) and rooms else [entry["room"]]
+
+
+def _digest(path: Path) -> Optional[str]:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def origin_of(root: Any, folder: str, name: str) -> Optional[str]:
+    """The Link whose home sent the room file kept here under ``folder``/``name``."""
+    origin = Store(root).read().get("kept", {}).get(f"{folder}/{name}")
+    return origin if isinstance(origin, str) else None
 
 
 def _held(directory: Path) -> int:
