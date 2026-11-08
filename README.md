@@ -59,6 +59,18 @@ create --clone` copies the plugins folder) is moved to the profile's
 install, which leaves the profile alone. Where the host can't make a link,
 the main install is copied in instead and replaced at the next update.
 
+### A host that manages the plugin (plugin 0.146.0+)
+
+When something other than Conduit installs and upgrades the plugin (an image
+that bakes a pinned version, a configuration manager), set
+`CONDUIT_PUSH_MANAGED` in the dashboard's environment: `1` (or `true`, `yes`, `on`)
+for a plain "managed", or a short text naming who manages it, such as
+`CONDUIT_PUSH_MANAGED="Family farm"`. The capabilities route then reports
+`"managed": true` (and `"managed_by"` for a text), Conduit asks nobody to
+update the plugin on that host and says who keeps it up to date, and
+`POST /self/update` answers 409. A restart already waiting on the host is
+still offered. Leave it unset (or `0`) for a plugin you update from Conduit.
+
 Pairing codes expire after ten minutes and can only be claimed once.
 
 With plugin 0.24+ Conduit pairs the active dashboard's profile by itself: it
@@ -1983,7 +1995,7 @@ other file's from its name, never a picture type the bytes don't back.
 Capabilities `room-file-pictures` (plugin 0.142+, pictures) and
 `room-file-reads` (0.143+, any file).
 
-In a Linked Room (plugin 0.146+), every participant sees the same files.
+In a Linked Room (plugin 0.147+), every participant sees the same files.
 The home sends each file a room message names, up to 16 MB, over the Link
 to every guest with an agent in the room, in 96 KB pieces, sending it again
 (up to five times) until the guest says it has the file. The guest's plugin checks its size and
