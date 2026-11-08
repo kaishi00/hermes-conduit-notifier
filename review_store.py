@@ -301,7 +301,8 @@ class KeptReviews:
                 meta["done"] = _settled_round(meta["rounds"][-1])
                 _write_json(folder / META, meta)
                 return
-        self._remove(review_id)
+            shutil.rmtree(folder, ignore_errors=True)  # under the lock: nothing was added meanwhile
+        self._unlink_lock(review_id)
 
     def drop_empty(self, review_id: str) -> None:
         """Removes a review whose first round never saved."""
@@ -309,11 +310,11 @@ class KeptReviews:
             meta = _read_json(folder / META)
             if _well_formed(meta) and meta["rounds"]:
                 return
-        self._remove(review_id)
+            shutil.rmtree(folder, ignore_errors=True)
+        self._unlink_lock(review_id)
 
-    def _remove(self, review_id: str) -> None:
-        """A review's folder and its lock file."""
-        shutil.rmtree(self._folder(review_id), ignore_errors=True)
+    def _unlink_lock(self, review_id: str) -> None:
+        """A removed review's lock file, once its lock is let go."""
         try:
             (self.directory / f".{review_id}.lock").unlink()
         except OSError:
@@ -423,4 +424,5 @@ class KeptReviews:
                         continue
                 if index < MAX_REVIEWS and now - updated < KEEP_S:
                     continue
-            self._remove(folder.name)
+                shutil.rmtree(folder, ignore_errors=True)
+            self._unlink_lock(folder.name)

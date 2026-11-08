@@ -614,3 +614,11 @@ def test_skipping_the_rest_after_an_earlier_approval_carries_on(tool_home):
     taps.save({"sessions": ["s1"], "card": second, "action": "review", "review": body})
     note = taps.note("s1", "Picked")
     assert "go ahead with what they approved" in note and "skipped every decision" not in note
+
+
+def test_a_review_being_started_isnt_pruned(tmp_path):
+    store = review_store.KeptReviews(tmp_path)
+    fresh = store.directory / "rv-00000000000000aa"
+    fresh.mkdir(parents=True)
+    store.start("T", "s1")
+    assert fresh.exists()
