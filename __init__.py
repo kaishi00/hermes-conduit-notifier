@@ -300,7 +300,7 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     if kwargs.get("tool_name") != "clarify":
         return
     # A workstream's question waits on the user too.
-    _quietly(work_tool.needs_you, _text(kwargs.get("session_id")), "a question")
+    _quietly(functools.partial(work_tool.needs_you, question=True), _text(kwargs.get("session_id")), "a question")
     if _clarify_loop_active:
         # The middleware wraps the execution and pushes a richer, answerable
         # input.needed event itself; pushing here too would double-notify.

@@ -1553,6 +1553,12 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   screen one tap away.
 - A workstream's turn sends no push of its own: the Bot Chat's reply about it
   is the one push. Its approvals and questions still come from the workstream.
+  You answer an approval in the workstream's chat or on its card. A question
+  you can also answer from the reply field on its card, or in the Bot Chat:
+  the bot passes your answer on with `work_send`, and that answers the
+  question rather than waiting behind it. Only a Bot Chat turn your own
+  message started passes one on, so the bot never answers it alone, and
+  what a group room says never does.
 - Up to 2 run at once per bot (`--max-running`). The registry is
   `<profile>/conduit/workstreams.db`, with a journal of each workstream's
   tool steps and an outbox of every turn sent into a chat.

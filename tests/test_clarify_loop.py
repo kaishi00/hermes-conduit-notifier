@@ -1108,3 +1108,21 @@ def test_a_calls_pick_of_a_choice_longer_than_the_store_keeps_answers_with_the_f
     offered = [long_choice, "prod"]
     assert loop._full_choice(long_choice[:200], offered) == long_choice
     assert loop._full_choice("Deploy", offered) == "Deploy", "a short prefix names no choice"
+
+
+def test_a_written_answer_still_answers_once_polling_stopped(monkeypatch):
+    # No card was shown (or the relay is gone), so the loop stopped polling;
+    # the user's answer passed on from the Bot Chat to a workstream
+    # (calls_store.answer_in_writing) still answers the question.
+    fake = _FakeState([{"status": "pending", "deliverable": False}])
+    _install(fake)
+    taken = iter([None, None, {"q0": "Shelly"}])
+    monkeypatch.setattr(loop.calls, "taken_answers", lambda request_id: next(taken, None))
+    monkeypatch.setattr(loop, "POLL_INTERVAL_SECONDS", 0.01)
+    original, release = _blocking_original("never used")
+    try:
+        result = loop.middleware(**_kwargs(original, {"questions": [
+            {"qid": "q0", "question": "Which source?", "choices": ["Netatmo", "Shelly"]}]}))
+    finally:
+        release.set()
+    assert [row["user_response"] for row in json.loads(result)["responses"]] == ["Shelly"]

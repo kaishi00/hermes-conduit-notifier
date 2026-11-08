@@ -274,7 +274,9 @@ SCHEMAS: dict[str, dict] = {
                         "(default: a new turn when it's idle, redirects it when it's working), add (adds to the turn "
                         "it's working on without changing direction) or after (queued until it's done). Its next report "
                         "goes where you send from: sent from a group room, it's posted in that room; from your Bot "
-                        "Chat, it comes back there."),
+                        "Chat, it comes back there. A workstream waiting on the user's answer to its question takes "
+                        "what you send, from a turn the user's own message started, as that answer: pass on what "
+                        "they said."),
         "parameters": {"type": "object", "properties": {
             "ref": _REF_SCHEMA,
             "text": {"type": "string", "description": "What to tell it."},
@@ -1667,7 +1669,10 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     # work started from holds only older messages.
     quoted = "" if in_room else _quoted_words(home, bot, coordinator)  # a room's words are every member's
     words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + quoted)
-    return _deliver(store, broker, work, words, how)
+    # A workstream waiting on its question takes what the coordinator passes
+    # on as the answer, but only from a turn the user's own message started:
+    # the bot never answers it alone (a work update's turn, a room's words).
+    return _deliver(store, broker, work, words, how, answer=text if quoted else "")
 
 
 def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: str) -> str:
@@ -1689,10 +1694,17 @@ def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: st
 
 
 def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, words: str, how: str,
-             kind: str = "send") -> dict:
+             kind: str = "send", answer: str = "") -> dict:
     """Words into a workstream, through the outbox: running work takes them
-    as ``how`` says, idle work starts a turn with them (a slot allowing)."""
+    as ``how`` says, idle work starts a turn with them (a slot allowing).
+    ``answer``: the user's own answer, when the words carry one; a
+    workstream waiting on a question takes it as the question's answer,
+    since words sent into the turn would only wait behind the question."""
     home = store.home
+    if answer and work.status == "needs_you" and _answered_question(home, work, answer):
+        return {"ok": True, "ref": work.ref, "title": work.title, "outcome": "answered",
+                "note": f"{work.ref} was waiting on the user's answer to its question: this answered it, "
+                        "and it carries on."}
     store.set_meta(_STOPPED_START + work.ref, "")  # sent words start it again
     item = store.outbox_add(work.ref, kind, work.session_id, words)
     # Marked running first: a turn that ends before the send returns then
@@ -1740,6 +1752,16 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
             "queued": "It's queued: it runs when the current turn ends."}[outcome]
     return {"ok": True, "ref": work.ref, "title": work.title, "outcome": outcome,
             "note": f"Sent to {work.ref}: {work.title}. {said}"}
+
+
+def _answered_question(home: Path, work: work_store.Work, answer: str) -> bool:
+    """The question the workstream waits on (its clarify), answered with
+    the user's words as they'd type them on its card. False when it waits
+    on an approval instead, which only the user answers, in its chat or on
+    its card."""
+    from . import calls
+
+    return bool(work.session_id) and calls.answer_in_writing(home, work.session_id, answer)
 
 
 def _from_call(work: work_store.Work) -> str:
@@ -3307,7 +3329,20 @@ def turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     return _turn_finished(session_id, failed=failed, interrupted=interrupted) and not _call_job(session_id)
 
 
-def needs_you(session_id: Any, description: Any = None) -> None:
+# Who answers what a workstream waits on, as its coordinator is told: an
+# approval only in the workstream (its chat or card); a question there too,
+# or in the Bot Chat, whose work_send passes the user's answer on (a
+# tester's answer in the Bot Chat left W5 waiting, 2026-11-08).
+WAITS_ON_APPROVAL = ("Only they can answer it, in that workstream's chat (give them its link) or on its card in "
+                     "Conduit; you can't.")
+WAITS_ON_QUESTION = ("Only they can answer it: in that workstream's chat (give them its link), on its card in "
+                     "Conduit, or by telling you here, and then you pass their answer on with work_send, which "
+                     "answers its question. Never answer it for them.")
+ROOM_WAITS_ON_QUESTION = ("Only they can answer it, in that workstream's chat (give them its link) or on its card in "
+                          "Conduit; you can't, and what the room says doesn't answer it.")
+
+
+def needs_you(session_id: Any, description: Any = None, *, question: bool = False) -> None:
     home, work = _workstream(session_id)
     if work is None or home is None or work.status not in ("starting", "running"):
         return
@@ -3317,10 +3352,10 @@ def needs_you(session_id: Any, description: Any = None) -> None:
         # Its link, so a user on Hermes Desktop, where workstreams aren't
         # listed, can open it and answer there (Eric 2026-11-03).
         link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
-        _report(home, work, f"- {work.ref} “{work.title}” is waiting on the user ({what}). Only they "
-                                            "can answer it, in that workstream's chat (give them its link) or on its "
-                                            "card in Conduit; you can't." + (f" {link} {LINK_RULE}" if link else ""),
-                    kind="call" if _call_of(work) else "work")
+        who = (ROOM_WAITS_ON_QUESTION if _in_room(work) else WAITS_ON_QUESTION) if question else WAITS_ON_APPROVAL
+        _report(home, work, f"- {work.ref} “{work.title}” is waiting on the user ({what}). {who}"
+                            + (f" {link} {LINK_RULE}" if link else ""),
+                kind="call" if _call_of(work) else "work")
 
 
 def answered(session_id: Any) -> None:
@@ -3746,7 +3781,8 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
                     if work.error else "")
             words = APP_CONTINUE_UNCERTAIN.format(step=step or "a step") if uncertain else APP_CONTINUE
             how = "after"
-        answer = _deliver(store, broker, work, words, how, kind="user_send")
+        answer = _deliver(store, broker, work, words, how, kind="user_send",
+                          answer=words if action == "send" else "")
         if answer.get("ok") and action in ("check", "continue"):
             store.set_meta(_CHECK + work.ref, "")
     now = store.get(work.ref)

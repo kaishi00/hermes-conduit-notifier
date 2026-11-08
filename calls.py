@@ -402,6 +402,17 @@ def taken_answers(request_id: str) -> dict[str, str] | None:
         return None
 
 
+def answer_in_writing(home: Any, session_id: str, words: str) -> bool:
+    """The user's written answer, passed on from outside the chat, to the
+    question Hermes waits on in ``session_id`` (``CallStore.answer_in_writing``):
+    True when it answered one. Never raises."""
+    try:
+        return _store(home).answer_in_writing(session_id, words)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not pass on an answer to a question", exc_info=True)
+        return False
+
+
 def has_call_answers(request_id: str) -> bool:
     """Whether a call has answered every question of ``request_id``,
     without taking them. Never raises."""
