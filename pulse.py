@@ -877,16 +877,18 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                 # closed card says already, nor for one twice in it.
                 shown = report.shown_kinds(turn.prompt)
 
-                def topic(line: tuple[str, str, Optional[int]]) -> str:
-                    # Its card's topic, as add_noticed_cards gives it.
+                def topics(line: tuple[str, str, Optional[int]]) -> list[str]:
+                    # Its card's topic, as add_noticed_cards gives it. A
+                    # deadline this report doesn't show is "other" here, but
+                    # an earlier report that showed it carded it "deadline".
                     kind, _, ref = line
-                    if kind not in report.KINDS or (kind == dates.DEADLINE and shown.get(ref) != dates.DEADLINE):
-                        return "other"
-                    return kind
+                    if kind == dates.DEADLINE and shown.get(ref) != dates.DEADLINE:
+                        return ["other", dates.DEADLINE]
+                    return [kind] if kind in report.KINDS else ["other"]
 
                 lines = [line for n, line in enumerate(lines)
                          if not any(store.same_text(line[1]) == store.same_text(other[1]) for other in lines[:n])
-                         and not candidates.said_before(pulse_store, topic(line), line[1], now)]
+                         and not candidates.said_before(pulse_store, topics(line), line[1], now)]
                 if not lines:
                     _mark_turn_card(pulse_store, attempt)
                     continue

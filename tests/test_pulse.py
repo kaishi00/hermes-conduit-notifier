@@ -1796,6 +1796,26 @@ def test_a_deadline_line_without_a_shown_deadline_matches_the_card_it_made(live,
     assert made == ["I said I'd check the build; it failed (tool calls)"]
 
 
+def test_a_deadline_line_matches_a_deadline_card_an_earlier_report_made(live, db):
+    # An earlier report showed the item and carded it "deadline"; this one
+    # doesn't show it, and still knows the card.
+    db.session()
+    _due_report(live)
+    words = "Renew the passport by 20 November"
+    [done] = live.store.add_cards([{"kind": "noticed", "level": "screen", "topic": "deadline", "news": words,
+                                    "created_at": time.time() - 86400}])
+    live.store.mark_done(done, None, closed_by="user", now=time.time() - 3600)
+    live.store.set("report_requested", True)
+    pulse.tick()
+    row = live.store.in_flight()[0]
+    db.message("user", row["text"], display_kind="hidden")
+    db.message("assistant", f"Here's what I would have told you today:\n1. [deadline] {words}\n"
+                            "2. [promise] I said I'd check the build; it failed (tool calls)")
+    pulse.tick(now=time.time() + 1)
+    made = [card["news"] for card in live.store.cards() if card["id"] != done]
+    assert made == ["I said I'd check the build; it failed (tool calls)"]
+
+
 def test_ratings_are_read_back_and_counted(live, db):
     db.session()
     _due_report(live)
