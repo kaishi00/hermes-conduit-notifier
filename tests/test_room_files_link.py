@@ -71,6 +71,19 @@ def test_a_file_uploaded_under_a_profile_goes_too(copies):  # noqa: F811
         assert carried(copies, name, "plan.pdf").read_bytes() == b"%PDF-1.7 plan"
 
 
+def test_every_file_a_message_names_goes_in_one_pass(copies):  # noqa: F811
+    # GLM on notifier #629: one file a pass outran a guest's 8 s wait for a message with several.
+    room_id = started(copies)
+    names = [f"shot{index}.jpg" for index in range(5)]
+    paths = [upload(copies, name, bytes([index]) * 1000) for index, name in enumerate(names)]
+    post(copies, room_id, "\n".join(f"@file:{path}" for path in paths) + "\n\nThese")
+
+    copies.furina.pass_once()
+
+    for name in names:
+        assert carried(copies, "laifu", name).exists()
+
+
 def test_only_room_files_under_the_homes_root_go(copies, tmp_path):  # noqa: F811
     room_id = started(copies)
     secret = tmp_path / "secret.txt"

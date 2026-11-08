@@ -49,11 +49,13 @@ FILE_NAME = "files.json"
 INCOMING = "incoming"
 # Raw bytes in one envelope: base64 in a JSON body under a room page's (room_copies.PAGE_BYTES), sealed.
 CHUNK_BYTES = 96 * 1024
-# Hermes' own data URL cap; a larger file stays on the home (Conduit names it).
 # As uploads (dashboard/api/rooms.py ROOM_FILE_TOTAL_BYTES and ROOM_FILE_FREE_FLOOR_BYTES).
 TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 FREE_FLOOR_BYTES = 1024 * 1024 * 1024
+# Hermes' own data URL cap; a larger file stays on the home (Conduit names it).
 MAX_FILE_BYTES = 16 * 1024 * 1024
+# Sent to one Link in a rooms pass: well under its mailbox's 64 MB pending.
+PASS_BYTES = 24 * 1024 * 1024
 WAIT_S = 120
 MAX_TRIES = 5
 # How long a member's turn waits for a file its prompt names that's still on its way: well inside the home's
@@ -197,59 +199,73 @@ class Files:
                     del out[key]
 
     def send_files(self) -> None:
-        """What the rooms loop does each pass on the home: the next file each Link is owed, all its chunks."""
+        """What the rooms loop does each pass on the home: the files each Link is owed, oldest first, all
+        their chunks, up to PASS_BYTES a Link (always at least one file), so a message naming several files
+        has them on their way within a guest's ARRIVAL_WAIT_S."""
         now = self.rooms.clock()
         state = self.store.read()
         for link_id, out in sorted(state["out"].items()):
-            due = next((key for key, entry in sorted(out.items(), key=lambda item: item[1]["noted"])
-                        if not entry["done"] and entry["tries"] < MAX_TRIES
-                        and (entry["at"] is None or now - entry["at"] >= WAIT_S)), None)
-            if due is None:
-                continue
-            folder, name = due.split("/", 1)
-            entry = out[due]
-            # Where it was uploaded (an entry from before 0.144's profiles: the root home's), checked again.
-            base = entry.get("base") if isinstance(entry.get("base"), str) else os.path.realpath(
-                files_root(self.rooms.root))
-            path = Path(base) / folder / name
-            if base not in self._upload_roots() or os.path.dirname(os.path.dirname(os.path.realpath(path))) != base:
+            due = [key for key, entry in sorted(out.items(), key=lambda item: item[1]["noted"])
+                   if not entry["done"] and entry["tries"] < MAX_TRIES
+                   and (entry["at"] is None or now - entry["at"] >= WAIT_S)]
+            sent = 0
+            for key in due:
+                if sent and sent + out[key].get("size", 0) > PASS_BYTES:
+                    break
+                size = self._send_file(link_id, key, out[key], now)
+                if size is None:
+                    break
+                sent += size
+
+    def _send_file(self, link_id: str, due: str, entry: dict[str, Any], now: float) -> Optional[int]:
+        """Sends one file's chunks to ``link_id``: the bytes sent (0 when it went no further), or None when
+        nothing more goes to that Link this pass."""
+        folder, name = due.split("/", 1)
+        # Where it was uploaded (an entry from before 0.144's profiles: the root home's), checked again.
+        base = entry.get("base") if isinstance(entry.get("base"), str) else os.path.realpath(
+            files_root(self.rooms.root))
+        path = Path(base) / folder / name
+        if base not in self._upload_roots() or os.path.dirname(os.path.dirname(os.path.realpath(path))) != base:
+            self._drop(link_id, due)
+            return 0
+        try:
+            data = path.read_bytes()
+        except OSError:
+            # Swept on the home (a month after its upload): nothing left to carry.
+            self._drop(link_id, due)
+            return 0
+        if len(data) > MAX_FILE_BYTES:
+            self._drop(link_id, due)
+            return 0
+        digest = hashlib.sha256(data).hexdigest()
+        count = max(1, math.ceil(len(data) / CHUNK_BYTES))
+        tries = entry["tries"] + 1
+        with self.store.update() as kept:
+            kept_entry = kept["out"].get(link_id, {}).get(due)
+            if kept_entry is None or kept_entry["done"]:
+                return 0
+            kept_entry.update({"at": now, "tries": tries, "sha": digest})
+        try:
+            for index in range(count):
+                body = {"v": VERSION, "room_id": entry["room"], "folder": folder, "name": name, "sha": digest,
+                        "size": len(data), "index": index, "count": count,
+                        "data": base64.b64encode(data[index * CHUNK_BYTES:(index + 1) * CHUNK_BYTES]).decode()}
+                message_id = f"{CHUNK}:" + hashlib.sha256(
+                    json.dumps([digest, folder, name, index, tries]).encode()).hexdigest()[:32]
+                self.rooms.send(link_id, CHUNK, body, message_id=message_id)
+        except room_links.LinkError as exc:
+            if exc.code == "not_linked":
+                logger.info("Linked Rooms stopped carrying room files to Link %s: it ended", link_id)
                 with self.store.update() as kept:
-                    kept["out"].get(link_id, {}).pop(due, None)
-                continue
-            try:
-                data = path.read_bytes()
-            except OSError:
-                # Swept on the home (a month after its upload): nothing left to carry.
-                with self.store.update() as kept:
-                    kept["out"].get(link_id, {}).pop(due, None)
-                continue
-            if len(data) > MAX_FILE_BYTES:
-                with self.store.update() as kept:
-                    kept["out"].get(link_id, {}).pop(due, None)
-                continue
-            digest = hashlib.sha256(data).hexdigest()
-            count = max(1, math.ceil(len(data) / CHUNK_BYTES))
-            tries = entry["tries"] + 1
-            with self.store.update() as kept:
-                kept_entry = kept["out"].get(link_id, {}).get(due)
-                if kept_entry is None or kept_entry["done"]:
-                    continue
-                kept_entry.update({"at": now, "tries": tries, "sha": digest})
-            try:
-                for index in range(count):
-                    body = {"v": VERSION, "room_id": entry["room"], "folder": folder, "name": name, "sha": digest,
-                            "size": len(data), "index": index, "count": count,
-                            "data": base64.b64encode(data[index * CHUNK_BYTES:(index + 1) * CHUNK_BYTES]).decode()}
-                    message_id = f"{CHUNK}:" + hashlib.sha256(
-                        json.dumps([digest, folder, name, index, tries]).encode()).hexdigest()[:32]
-                    self.rooms.send(link_id, CHUNK, body, message_id=message_id)
-            except room_links.LinkError as exc:
-                if exc.code == "not_linked":
-                    logger.info("Linked Rooms stopped carrying room files to Link %s: it ended", link_id)
-                    with self.store.update() as kept:
-                        kept["out"].pop(link_id, None)
-                else:
-                    logger.info("Linked Rooms will carry %s to Link %s later (%s)", due, link_id, exc.code)
+                    kept["out"].pop(link_id, None)
+            else:
+                logger.info("Linked Rooms will carry %s to Link %s later (%s)", due, link_id, exc.code)
+            return None
+        return len(data)
+
+    def _drop(self, link_id: str, key: str) -> None:
+        with self.store.update() as kept:
+            kept["out"].get(link_id, {}).pop(key, None)
 
     def on_got(self, received: room_links.Received) -> None:
         """A member has a whole file: it isn't sent to that Link again."""
