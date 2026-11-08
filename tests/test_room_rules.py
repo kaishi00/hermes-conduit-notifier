@@ -508,6 +508,11 @@ def test_every_tier_may_look_at_a_picture_sent_into_the_room(host, session_id, r
     bridged = plugin._pre_tool_call(session_id=session_id, tool_name="tool_call", turn_id="t1", args={
         "name": "vision_analyze", "arguments": json.dumps({"image_url": str(picture), "question": "?"})})
     assert bridged is None
+    # One uploaded under another profile too, as Linked Rooms carries it (GLM on notifier #629).
+    other = host / "profiles" / "work" / "conduit" / "room-files" / "20261108-abc" / "plan.png"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"\x89PNG")
+    assert look(str(other)) is None
     assert "vision_analyze, by the path its message names" in _context(session_id)
     _choose(host, room_id, tools="look")
     assert rules.ROOM_PICTURES_LINE not in _context(session_id)

@@ -214,6 +214,12 @@ class Files:
         now = self.rooms.clock()
         state = self.store.read()
         for link_id, out in sorted(state["out"].items()):
+            for key, entry in sorted(out.items()):
+                if not entry["done"] and entry["tries"] >= MAX_TRIES and entry["at"] is not None \
+                        and now - entry["at"] >= WAIT_S:
+                    logger.info("Linked Rooms gave up carrying %s to Link %s: no answer after %d tries", key,
+                                link_id, MAX_TRIES)
+                    self._drop(link_id, key)
             due = [key for key, entry in sorted(out.items(), key=lambda item: item[1]["noted"])
                    if not entry["done"] and entry["tries"] < MAX_TRIES
                    and (entry["at"] is None or now - entry["at"] >= WAIT_S)]

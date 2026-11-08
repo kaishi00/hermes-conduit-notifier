@@ -198,3 +198,19 @@ def test_a_linked_persons_post_naming_a_room_file_carries_nothing(copies, monkey
     copies.furina.pass_once()
 
     assert _sent(copies, "room.file") == []
+
+
+def test_a_file_no_member_answered_after_every_try_is_given_up(copies):  # noqa: F811
+    # GLM on notifier #629: an entry past MAX_TRIES was neither sent nor dropped.
+    room_id = started(copies)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    store = files_module.Store(copies.tmp_path / "furina")
+    with store.update() as state:
+        state["out"]["link1"] = {f"{FOLDER}/shot.jpg": {
+            "room": room_id, "size": path.stat().st_size, "base": str(path.parent.parent), "at": -10.0 ** 9,
+            "tries": files_module.MAX_TRIES, "done": False, "noted": 0}}
+
+    copies.furina.pass_once()
+
+    assert _sent(copies, "room.file") == []
+    assert store.read()["out"].get("link1", {}) == {}

@@ -303,14 +303,20 @@ def looks_at_room_file(tool_name: Any, args: Any, home: Any) -> bool:
     if not os.path.isfile(real):
         return False
     # Conduit uploads without a profile, so the files are the root home's;
-    # a profile's own are read too.
+    # every profile's are read too, as Linked Rooms carries them (a room
+    # names a file the same whichever profile it was uploaded under).
     homes = [Path(home)]
     try:
         from . import room_identity
 
-        homes.append(room_identity.root_home(home))
+        homes.append(Path(room_identity.root_home(home)))
     except Exception:  # noqa: BLE001 - no Hermes runtime: the home given is all there is
         pass
+    for each in list(homes):
+        try:
+            homes.extend(child for child in (each / "profiles").iterdir() if child.is_dir())
+        except OSError:
+            pass
     roots = {os.path.realpath(os.path.join(str(each), *ROOM_FILES)) for each in homes}
     return any(real.startswith(root + os.sep) for root in roots)
 
