@@ -292,6 +292,14 @@ class KeptReviews:
                 return
         shutil.rmtree(self._folder(review_id), ignore_errors=True)
 
+    def drop_empty(self, review_id: str) -> None:
+        """Removes a review whose first round never saved."""
+        with self._locked(review_id) as folder:
+            meta = _read_json(folder / META)
+            if _well_formed(meta) and meta["rounds"]:
+                return
+        shutil.rmtree(self._folder(review_id), ignore_errors=True)
+
     def drop_marks(self, review_id: str, number: int) -> None:
         """Forgets a round's marks whose message Conduit didn't send, so the
         user can send them again."""

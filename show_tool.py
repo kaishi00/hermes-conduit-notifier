@@ -352,7 +352,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         saved = templates.save(args["save_templates"], problems)
     given = _filled_templates(args.get("cards"), templates, problems)
     given = _reviews_kept(given, session, problems, reviews, is_room)
-    kept = [card["review"] for card in given if isinstance(card, dict) and card.get("type") == "review"] \
+    # Every round kept above, however the card spelled its type.
+    kept = [card["review"] for card in given if isinstance(card, dict) and _is_review(card)] \
         if isinstance(given, list) and reviews is not None else []
     cards = card_schema.normalize_cards(given, problems)
     if args.get("cards") not in (None, []) and not cards:
@@ -418,6 +419,10 @@ def _text(value: Any, limit: int) -> str:
     return card_schema.clean_text(value).strip()[:limit].rstrip() if isinstance(value, str) else ""
 
 
+def _is_review(card: dict[str, Any]) -> bool:
+    return isinstance(card.get("type"), str) and card_schema.clean_text(card["type"]).strip().lower() == "review"
+
+
 def _reviews_kept(given: Any, session: str, problems: list[str], reviews: ReviewHost | None,
                   is_room: Callable[[Any], bool]) -> Any:
     """The cards with each review's options kept on the host, round by
@@ -427,8 +432,7 @@ def _reviews_kept(given: Any, session: str, problems: list[str], reviews: Review
         return given
     cards = []
     for index, raw in enumerate(given):
-        if isinstance(raw, dict) and isinstance(raw.get("type"), str) and \
-                card_schema.clean_text(raw["type"]).strip().lower() == "review":
+        if isinstance(raw, dict) and _is_review(raw):
             raw = _kept_review(raw, index, session, problems, reviews, is_room)
             if raw is None:
                 continue
@@ -498,15 +502,21 @@ def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[s
     if not decisions:
         problems.append(f"{path}.review: no decision has two options that could be shown")
         return None
+    started = ""
     try:
         review_id = wanted or store.start(title, session, for_ref)
+        started = "" if wanted else review_id
         number = store.add_round(review_id, title, decisions, pages, session)
+        started = ""
         settled = store.settled(review_id, {decision["id"] for decision in decisions}) if existing else []
-    except review_store.ReviewError as error:
-        problems.append(f"{path}.review: {error}")
-        return None
-    except OSError:
-        problems.append(NO_REVIEWS_NOTE)
+    except (review_store.ReviewError, OSError) as error:
+        if started:
+            # A new review whose first round didn't save leaves nothing behind.
+            try:
+                store.drop_empty(started)
+            except (review_store.ReviewError, OSError):
+                pass
+        problems.append(f"{path}.review: {error}" if isinstance(error, review_store.ReviewError) else NO_REVIEWS_NOTE)
         return None
     review = {"id": review_id, "round": number, **({"for": for_ref} if for_ref else {}), "decisions": decisions,
               **({"settled": settled} if settled else {})}

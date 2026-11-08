@@ -206,7 +206,16 @@ class TapStore:
         if not isinstance(state, dict) or not isinstance(state.get("taps"), list):
             return {"taps": []}
         now = self.clock()
-        return {"taps": [tap for tap in state["taps"] if _well_formed(tap) and now - tap["at"] < KEEP_S]}
+        kept = [tap for tap in state["taps"] if _well_formed(tap) and now - tap["at"] < KEEP_S]
+        # A review tap no turn heard in time: its marks go too (after the
+        # save, in _locked), so the user can send them again.
+        self._expired = len(kept) != len(state["taps"])
+        self._unheard_reviews = {(tap["review"]["id"], tap["review"]["round"]) for tap in state["taps"]
+                                 if _well_formed(tap) and now - tap["at"] >= KEEP_S and not tap["heard"]
+                                 and isinstance(tap.get("review"), dict)
+                                 and isinstance(tap["review"].get("id"), str)
+                                 and isinstance(tap["review"].get("round"), int)}
+        return {"taps": kept}
 
     @contextmanager
     def _locked(self) -> Iterator[dict[str, Any]]:
@@ -219,11 +228,19 @@ class TapStore:
                 os.chmod(lock_path, 0o600)
             except OSError:
                 pass
+            self._expired, self._unheard_reviews = False, set()
             state = self._load()
+            expired, unheard = self._expired, self._unheard_reviews
             before = json.dumps(state, sort_keys=True)
             yield state
-            if json.dumps(state, sort_keys=True) != before:
+            if expired or json.dumps(state, sort_keys=True) != before:
                 self._save(state)
+        # Once the expired taps are gone from the file, so it happens once.
+        for review_id, number in unheard:
+            try:
+                self.reviews().drop_marks(review_id, number)
+            except (review_store.ReviewError, OSError):
+                pass
 
     def _save(self, state: dict[str, Any]) -> None:
         handle, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".conduit-card-taps-")
@@ -276,6 +293,8 @@ class TapStore:
         by the message about them."""
         shown = card["review"]
         store = self.reviews()
+        with self._locked():
+            pass  # marks an expired tap left are given back first
         try:
             meta = store.get(shown["id"])
         except review_store.ReviewError as error:
@@ -294,11 +313,20 @@ class TapStore:
         # The words the app's message starts with, in the user's language
         # ("Picked", "Sent review" by default).
         label = _clean(value.get("label"), 40) or _review_label(decisions)
+        # A quick pick's message names the option ("Picked B · Line"), so two
+        # quick picks open in one chat are told apart by it.
+        picked = ""
+        if len(decisions) == 1 and marks["decisions"] and marks["decisions"][0]["mark"] == "approve":
+            option = next((option for option in decisions[0]["options"]
+                           if option["id"] == marks["decisions"][0].get("option")), None)
+            if option is not None:
+                picked = f'{option["id"]} · {option["label"]}'
         tap = {"id": uuid.uuid4().hex, "at": self.clock(), "heard": False, "action": REVIEW_ACTION,
                "label": label, "title": title, "live": card.get("live", ""),
                "markdown": _review_lines(decisions, marks), "values": {},
                "review": {"id": shown["id"], "round": shown["round"], "for": meta["for"],
-                          "quick": len(decisions) == 1, "settles": _settles(marks, decisions)}}
+                          "quick": len(decisions) == 1, "settles": _settles(marks, decisions),
+                          **({"picked": picked} if picked else {})}}
         try:
             with self._locked() as state:
                 for session in sessions:
@@ -358,6 +386,9 @@ class TapStore:
                 # the longest label it starts with, so "Send to all" never hears a
                 # waiting "Send" too, then the latest.
                 def named(tap: dict[str, Any]) -> bool:
+                    picked = tap.get("review", {}).get("picked") if isinstance(tap.get("review"), dict) else None
+                    if isinstance(picked, str) and picked and said.startswith(f'{tap["label"]} {picked}'):
+                        return True
                     return bool(tap["title"]) and said.startswith(f'{tap["label"]} · {tap["title"]}')
                 taps = [max(taps, key=lambda tap: (named(tap), len(tap["label"]), tap["at"]))]
             heard = {tap["id"] for tap in taps}

@@ -440,3 +440,65 @@ def test_a_picture_link_the_card_couldnt_keep_is_refused():
     for url in ["https://a.test/x(1).png", "https://a.test/" + "x" * 500]:
         with pytest.raises(review_store.ReviewError):
             review_store.read_page({"image": url})
+
+
+def _quick(tool_home, host, labels):
+    return _call({"cards": [_review([{"title": "Chart", "options": [{"label": label, "html": PAGE}
+                                                                   for label in labels]}])]},
+                 reviews=host)["cards"][0]
+
+
+def test_two_quick_picks_are_told_apart_by_the_option_named(tool_home):
+    host = Host(tool_home)
+    older, newer = _quick(tool_home, host, ["Bars", "Line"]), _quick(tool_home, host, ["Red", "Blue"])
+    clock = iter([100.0, 200.0])
+    taps = card_actions.TapStore(tool_home, clock=lambda: next(clock, 300.0), reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": older, "action": "review", "review": _marks(("d1", "approve", "B"))})
+    taps.save({"sessions": ["s1"], "card": newer, "action": "review", "review": _marks(("d1", "approve", "A"))})
+    note = taps.note("s1", "Picked B · Line")
+    assert "approved B · Line" in note and older["review"]["id"] in note
+    assert "approved A · Red" in taps.note("s1", "Picked A · Red")
+
+
+def test_marks_no_turn_heard_in_time_can_be_sent_again(tool_home):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    now = [1000.0]
+    taps = card_actions.TapStore(tool_home, clock=lambda: now[0], reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d1", "skip"))})
+    now[0] += card_actions.KEEP_S + 1
+    taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d2", "skip"))})
+    assert host.store().get(card["review"]["id"])["rounds"][0]["marks"]["decisions"][0]["decision"] == "d2"
+    assert "Save button colour: skipped" in taps.note("s1", "Sent review · Recipe app home")
+
+
+def test_heard_marks_stay_once_their_tap_is_gone(tool_home):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    now = [1000.0]
+    taps = card_actions.TapStore(tool_home, clock=lambda: now[0], reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d1", "skip"))})
+    assert taps.note("s1", "Sent review · Recipe app home")
+    now[0] += card_actions.KEEP_S + 1
+    with pytest.raises(card_actions.TapError, match="already sent"):
+        taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d2", "skip"))})
+
+
+def test_a_review_card_typed_another_way_isnt_left_behind(tool_home):
+    _exchange(tool_home, features=[f for f in FEATURES if f != "review-cards"])
+    host = Host(tool_home)
+    _call({"cards": [{**_review(), "type": " Review "}, {"type": "callout", "callout": {"text": "Hi"}}]},
+          reviews=host)
+    assert not list((tool_home / review_store.DIRECTORY).glob("rv-*"))
+
+
+def test_a_new_review_whose_first_round_didnt_save_leaves_nothing(tool_home, monkeypatch):
+    host = Host(tool_home)
+
+    def fail(*args, **kwargs):
+        raise review_store.ReviewError("too big")
+
+    monkeypatch.setattr(review_store.KeptReviews, "add_round", fail)
+    answer = _call({"cards": [_review()]}, reviews=host)
+    assert not answer["ok"]
+    assert not list((tool_home / review_store.DIRECTORY).glob("rv-*"))
