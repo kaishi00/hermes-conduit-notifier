@@ -590,13 +590,12 @@ def test_a_settled_review_stays_settled_when_an_unshown_round_is_taken_back(tmp_
     assert store.get(review_id)["done"] is True
 
 
-def test_two_unshown_rounds_of_one_review_are_both_taken_back(tool_home):
+def test_one_answer_shows_one_round_of_a_review(tool_home):
     host = Host(tool_home)
     first = _shown(tool_home, host)["review"]
-    _exchange(tool_home, features=[f for f in FEATURES if f != "review-cards"])
-    _call({"cards": [_review(id=first["id"]), _review(id=first["id"]),
-                     {"type": "callout", "callout": {"text": "Hi"}}]}, reviews=host)
-    assert len(host.store().get(first["id"])["rounds"]) == 1
+    answer = _call({"cards": [_review(id=first["id"]), _review(id=first["id"])]}, reviews=host)
+    assert len(answer["cards"]) == 1 and any("another card here" in p for p in answer.get("problems", []))
+    assert len(host.store().get(first["id"])["rounds"]) == 2
 
 
 def test_skipping_the_rest_after_an_earlier_approval_carries_on(tool_home):

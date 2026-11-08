@@ -438,11 +438,18 @@ def _reviews_kept(given: Any, session: str, problems: list[str], reviews: Review
     if not isinstance(given, list):
         return given
     cards = []
+    shown: set[str] = set()
     for index, raw in enumerate(given):
         if isinstance(raw, dict) and _is_review(raw):
+            wanted = raw.get("review", {}).get("id") if isinstance(raw.get("review"), dict) else None
+            if isinstance(wanted, str) and wanted in shown:
+                # One round of a review per answer: a second card's round could never be marked.
+                problems.append(f"cards[{index}].review.id: another card here shows that review; left out")
+                continue
             raw = _kept_review(raw, index, session, problems, reviews, is_room)
             if raw is None:
                 continue
+            shown.add(raw["review"]["id"])
         cards.append(raw)
     return cards
 
