@@ -3839,6 +3839,10 @@ def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, wo
                     "note": f"Hermes didn't answer: {_cut(str(error), 200)}"}
         asked = next((entry for entry in pending if entry.get("request_id") == request_id), None)
         if asked is None:
+            # Logged so a tap that answered nothing can be traced afterwards
+            # (an overview Approve that looked taken, 2026-11-08).
+            logger.info("conduit_push: %s approve for %s found no such request; Hermes waits on %s",
+                        work.ref, request_id, [entry.get("request_id") for entry in pending])
             return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
                     "note": f"{work.ref} isn't waiting on that any more."}
         if not _app_approvable(str(asked.get("command") or "")):
@@ -3848,6 +3852,8 @@ def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, wo
         answered = broker.answer_approval(work.session_id, request_id, APP_APPROVAL[action])
     except Exception as error:  # noqa: BLE001 — Hermes' own method runs here, as in _app_approval
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes didn't take it: {_cut(str(error), 200)}"}
+    logger.info("conduit_push: %s %s for %s in %s: Hermes %s it",
+                work.ref, action, request_id, work.session_id, "took" if answered else "didn't take")
     if not answered:
         return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
                 "note": f"{work.ref} isn't waiting on that any more."}
