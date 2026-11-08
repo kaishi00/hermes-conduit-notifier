@@ -366,7 +366,7 @@ class TapStore:
         if review is not None:
             try:
                 self.reviews().drop_marks(review["id"], review["round"])
-            except review_store.ReviewError:
+            except (review_store.ReviewError, OSError):
                 pass
         return {"ok": True, "dropped": dropped > 0}
 

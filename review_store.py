@@ -409,11 +409,18 @@ class KeptReviews:
             return
         now = self.clock()
         for index, (_, folder) in enumerate(kept):
-            meta = _read_json(folder / META)
-            updated = meta.get("updated", 0) if isinstance(meta, dict) else 0
-            if index >= MAX_REVIEWS or not isinstance(updated, (int, float)) or now - updated >= KEEP_S:
-                shutil.rmtree(folder, ignore_errors=True)
-                try:
-                    (self.directory / f".{folder.name}.lock").unlink()
-                except OSError:
-                    pass
+            if not REVIEW_ID.fullmatch(folder.name):
+                continue
+            # Under the review's lock, as every writer: one saving marks or a
+            # round meanwhile finishes first, and is looked at again after.
+            with self._locked(folder.name):
+                meta = _read_json(folder / META)
+                updated = meta.get("updated") if isinstance(meta, dict) else None
+                if not isinstance(updated, (int, float)) or isinstance(updated, bool):
+                    try:
+                        updated = folder.stat().st_mtime  # a review being started has no record yet
+                    except OSError:
+                        continue
+                if index < MAX_REVIEWS and now - updated < KEEP_S:
+                    continue
+            self._remove(folder.name)
