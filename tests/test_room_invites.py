@@ -312,6 +312,9 @@ class HomeHermes:
         self.marked = []
         self.missing = False
         self.gateway = False
+        # The rooms Hermes moved from the standalone store into the gateway's (hosted_rooms_gateway_import).
+        self.handed = set()
+        self.gateway_elsewhere = False
 
     def installation(self):
         return FURINA
@@ -321,6 +324,12 @@ class HomeHermes:
 
     def supported(self):
         return "unsupported" if self.missing else None
+
+    def handed_rooms(self):
+        return set(self.handed)
+
+    def room_owner(self, room_id):
+        return "owner:host"
 
     def find(self, where):
         if self.missing:
@@ -2587,3 +2596,69 @@ def test_the_rooms_command_parses_a_room_with_people_youve_linked():
         assert parser.parse_args(["rooms", action, "--room", "r1"]).rooms_action == action
     args = parser.parse_args(["rooms", "remove", "--room", "r1", "--member", "@mona"])
     assert (args.rooms_action, args.member) == ("remove", "@mona")
+
+
+# --- Rooms Hermes moves into the gateway (gateway/hosted_rooms_gateway_import.py) -----------------------
+
+
+def _moved(side, room_id):
+    """Hermes' gateway took the room from the standalone store, with its routes, at a later authority epoch."""
+    side.home.canonical = CanonicalService(side.tmp_path / "furina" / "state.db")
+    side.home.canonical.rooms = dict(side.home.legacy.rooms)
+    side.home.canonical.routes = dict(side.home.legacy.routes)
+    side.home.canonical.peer_routes = dict(side.home.legacy.peer_routes)
+    side.home.handed.add(room_id)
+
+
+def test_a_room_hermes_moved_into_the_gateway_is_followed_there(rooms):
+    room_id = _started(rooms)
+    assert rooms.furina.store.read()["drafts"][room_id]["started_in"] == {"kind": "legacy"}
+    rooms.furina.pass_once()
+    assert rooms.furina.store.read()["drafts"][room_id]["started_in"] == {"kind": "legacy"}  # not moved yet
+
+    _moved(rooms, room_id)
+    rooms.furina.pass_once()
+
+    assert rooms.furina.store.read()["drafts"][room_id]["started_in"] == {
+        "kind": "canonical", "home": str(rooms.tmp_path / "furina"), "subject": "owner:host"}
+
+
+def test_a_moved_rooms_guests_get_grants_for_its_new_epoch_which_reach_its_route_in_the_gateway(rooms):
+    room_id = _started(rooms)
+    member, key = rooms.member["laifu"], (room_id, slot("link1", 1))
+    _moved(rooms, room_id)
+    rooms.furina.pass_once()
+    invite_key = f"link1/{room_id}"
+    rooms.clock.now += 60
+
+    rooms.laifu.follow_epoch(invite_key, 3)
+    rooms.laifu.follow_epoch(invite_key, 2)  # an older one changes nothing
+    rooms.laifu.pass_once()
+
+    assert rooms.laifu.store.read()["invites"][invite_key]["authority_epoch"] == 3
+    [(_, body, _)] = _sent(rooms, "room.grant")
+    joined, fresh = member.issued[1:]
+    assert fresh["authority_epoch"] == 3 and joined["authority_epoch"] == 1
+    assert {name: fresh[name] for name in PLACE if name != "authority_epoch"} == {
+        name: joined[name] for name in PLACE if name != "authority_epoch"}
+
+    rooms.furina.pass_once()
+
+    assert rooms.home.canonical.peer_routes[key].grant == body["grant"]
+    assert rooms.home.legacy.peer_routes[key].grant != body["grant"]  # the frozen copy is left as it was
+
+
+def test_a_draft_waiting_in_a_separate_dashboard_starts_in_the_gateway_once_its_rooms_loop_runs(rooms):
+    room_id = draft(rooms)["room_id"]
+    rooms.furina.pass_once()
+    assert rooms.furina.store.read()["drafts"][room_id]["where"] == LEGACY
+
+    directory = rooms.tmp_path / "furina" / "conduit-rooms"
+    held = open(directory / ".gateway-rooms.lock", "a+b")
+    fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # the gateway's rooms loop, in its process
+    try:
+        rooms.furina.pass_once()
+    finally:
+        held.close()
+
+    assert rooms.furina.store.read()["drafts"][room_id]["where"] == {"kind": "any"}

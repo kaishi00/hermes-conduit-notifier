@@ -53,6 +53,11 @@ watch_paths:
   - tui_gateway/ws_legacy_fallback.py
   # memory_scan.py guards plugins.memory._defines_memory_provider (loaded with importlib).
   - plugins/memory/__init__.py
+  # room_start.py follows a room Hermes moves from a separate dashboard's store into the gateway's
+  # (handed_room_ids, the moved room's owner in state_meta) and names a CLI draft's owner
+  # (principal_subject), both loaded with importlib.
+  - gateway/hosted_rooms_gateway_import.py
+  - gateway/owner_identity.py
 
 # Words that make a changed hunk worth a closer look.
 keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, session_token, x-hermes,
@@ -77,6 +82,12 @@ notes:
     New drafts and the host setup (feature map: "Linked Rooms") take ?conduit_profile=: a draft
     starts in the dashboard's session authority, which a plugin host's app lacks (there it starts
     in the legacy service), and the setup restarts the gateway as the dashboard does.
+  Linked Rooms moved into the gateway: >-
+    Hermes moves the rooms a separate `hermes dashboard` keeps in shared-state.db into the root
+    gateway's state.db when the gateway starts, at a later authority epoch (feature map: "Linked
+    Rooms"). The plugin's draft follows the room there (handed_room_ids), the gateway's process takes
+    the Links' mailbox, and guests mint grants for the new epoch. A rename there leaves a moved room's
+    guests without its new messages and its turns.
   plugin host flag: >-
     HERMES_PLUGIN_HOST_PROCESS=1 marks a plugin host. The self-update refuses there, and the
     Linked Rooms setup saves without restarting the gateway: a restart from a plugin host brings

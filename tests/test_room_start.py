@@ -275,3 +275,92 @@ def test_a_dashboard_in_a_gateway_without_its_request_context_cant_make_drafts(h
     with pytest.raises(start_module.StartError) as unsupported:
         start_module.where_from(Request(authority=hermes.authorities[root]), None)
     assert (unsupported.value.code, unsupported.value.status) == ("unsupported", 501)
+
+
+# --- Rooms Hermes moves into the gateway (gateway/hosted_rooms_gateway_import.py) ----------------------
+
+
+def _moved_store(root, owners):
+    """The root gateway's state.db with the owners Hermes' move recorded."""
+    import sqlite3
+
+    root.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(root / "state.db") as conn:
+        conn.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.executemany("INSERT INTO state_meta VALUES (?, ?)",
+                         [("gateway.hosted.owner.v1:" + room_id, owner) for room_id, owner in owners.items()])
+
+
+def test_a_room_hermes_moved_into_the_gateway_is_found_there_owned_as_the_move_recorded(hermes, root):
+    root.mkdir(parents=True)
+    (root / "shared-state.db").write_bytes(b"")
+    sources = []
+    hermes.module("gateway.hosted_rooms_gateway_import",
+                  handed_room_ids=lambda source: sources.append(source) or {"room-moved"})
+    _moved_store(root, {"room-moved": "owner:eric"})
+    starter = start_module.Starter(root, hermes=start_module.Hermes(root))
+
+    assert starter.moved("room-moved") == {"kind": "canonical", "home": str(root), "subject": "owner:eric"}
+    assert starter.moved("room-kept") is None
+    assert sources == [root / "shared-state.db", root / "shared-state.db"]
+
+
+def test_a_moved_room_without_a_recorded_owner_is_the_host_owners(hermes, root):
+    root.mkdir(parents=True)
+    (root / "shared-state.db").write_bytes(b"")
+    hermes.module("gateway.hosted_rooms_gateway_import", handed_room_ids=lambda source: {"room-moved"})
+    hermes.module("gateway.owner_identity", host_owner_subject=lambda: "owner:host")
+    starter = start_module.Starter(root, hermes=start_module.Hermes(root))
+
+    assert starter.moved("room-moved") == {"kind": "canonical", "home": str(root), "subject": "owner:host"}
+
+
+def test_nothing_is_moved_on_a_hermes_that_doesnt_move_rooms_or_without_the_standalone_store(hermes, root):
+    root.mkdir(parents=True)
+    starter = start_module.Starter(root, hermes=start_module.Hermes(root))
+    hermes.module("gateway.hosted_rooms_gateway_import", handed_room_ids=lambda source: {"room-moved"})
+    assert starter.moved("room-moved") is None  # no shared-state.db
+
+    (root / "shared-state.db").write_bytes(b"")
+    hermes.missing("gateway.hosted_rooms_gateway_import")
+    assert start_module.Hermes(root).handed_rooms() == set()
+
+    def broken(source):
+        raise OSError("locked")
+
+    hermes.module("gateway.hosted_rooms_gateway_import", handed_room_ids=broken)
+    assert start_module.Hermes(root).handed_rooms() == set()
+
+
+def test_rooms_go_to_the_gateway_when_its_rooms_loop_runs_here_or_in_another_process(hermes, root):
+    starter = start_module.Starter(root, hermes=start_module.Hermes(root))
+    assert not starter.gateway_runs_rooms()
+
+    held = _hold_elsewhere(root)
+    try:
+        assert starter.gateway_runs_rooms()
+    finally:
+        held.close()
+
+    hermes.gateway(root)
+    assert starter.gateway_runs_rooms()
+
+
+def test_a_draft_from_the_cli_is_the_host_owners_where_hermes_names_one(hermes, root):
+    hermes.gateway(root)
+    hermes.module("gateway.owner_identity",
+                  principal_subject=lambda identity: "owner:host" if identity.get("provider") == "session-token"
+                  else "other")
+
+    found = start_module.Hermes(root).find({"kind": "any"})
+
+    assert found.subject == "owner:host"
+
+
+def _hold_elsewhere(root):
+    """The gateway's rooms loop holding the installation's drafts, as from its own process."""
+    directory = root / "conduit-rooms"
+    directory.mkdir(parents=True, exist_ok=True)
+    handle = open(directory / ".gateway-rooms.lock", "a+b")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return handle

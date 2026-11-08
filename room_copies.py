@@ -339,6 +339,11 @@ class Copies:
             except Exception as exc:  # noqa: BLE001 - the home sends it again
                 logger.warning("Linked Rooms couldn't keep a page of room %s (%s)", room_id, type(exc).__name__)
                 return
+        epoch = body["page"]["authority"].get("epoch")
+        if type(epoch) is int and epoch > invite["authority_epoch"]:
+            # Hermes moved the room into its gateway's store (a page at a later epoch is one Hermes took above,
+            # which refuses an older one): the turns it sends carry the new epoch now.
+            self.rooms.follow_epoch(key, epoch)
         try:
             self.rooms.send(received.link_id, COPIED, {"v": VERSION, "room_id": room_id, "seq": seq},
                             message_id=f"{COPIED}:" + hashlib.sha256(

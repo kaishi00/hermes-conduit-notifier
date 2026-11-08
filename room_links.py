@@ -718,8 +718,19 @@ class LinkLoop:
 
     def lease(self) -> bool:
         """Takes the installation's lease, or keeps it: False while another
-        loop, in this process or another, has it."""
+        loop, in this process or another, has it. A process whose dashboard
+        isn't the gateway's lets it go, and doesn't take it, while the
+        gateway's rooms loop runs: that's where the rooms are (Hermes moves a
+        separate dashboard's rooms into the gateway's store), so what comes
+        over the Links is taken there."""
         with self._lock:
+            if _gateway_runs_rooms(self.root):
+                if self._lease is not None:
+                    _unlock(self._lease)
+                    self._lease.close()
+                    self._lease = None
+                    logger.info("Linked Rooms' mailbox goes to the gateway, where the rooms are")
+                return False
             if self._lease is not None:
                 return True
             directory = self.root / DIRECTORY
@@ -1043,6 +1054,16 @@ def reading(root: Any) -> bool:
     process, or whichever holds the lease in another."""
     loop = _loops.get(str(Path(root)))
     return (loop is not None and loop.running) or lease_held(root)
+
+
+def _gateway_runs_rooms(root: Path) -> bool:
+    """Whether the gateway's rooms loop runs in another process (room_start's GATEWAY_LOCK)."""
+    from . import room_start
+
+    try:
+        return room_start._held_elsewhere(root)
+    except Exception:  # noqa: BLE001 - a lock that can't be looked at is no gateway's
+        return False
 
 
 def holds_lease(root: Any) -> bool:

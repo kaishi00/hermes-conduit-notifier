@@ -612,6 +612,46 @@ class Rooms:
         finally:
             _start_lock.release()
 
+    def _follow_gateway(self) -> None:
+        """Rooms go where the gateway keeps them. A room a separate dashboard started in the legacy service is
+        moved into the root gateway's store when the gateway starts, and frozen where it was
+        (gateway/hosted_rooms_gateway_import.py): its draft follows it, so its copies, posts and route changes
+        reach the room that goes on. A draft still waiting to start there starts in the gateway's service
+        instead, while the gateway's rooms loop runs."""
+        drafts = self.store.read()["drafts"]
+        started = [room_id for room_id, draft in drafts.items()
+                   if (draft.get("started_in") or {}).get("kind") == "legacy"]
+        waiting = [room_id for room_id, draft in drafts.items()
+                   if draft["status"] == "waiting" and draft["where"].get("kind") == "legacy"]
+        moved: dict[str, dict[str, Any]] = {}
+        for room_id in started:
+            try:
+                where = self.starter.moved(room_id)
+            except Exception:  # noqa: BLE001 - looked at again on the next pass
+                where = None
+            if where is not None:
+                moved[room_id] = where
+        if waiting:
+            try:
+                to_gateway = self.starter.gateway_runs_rooms()
+            except Exception:  # noqa: BLE001 - looked at again on the next pass
+                to_gateway = False
+            if not to_gateway:
+                waiting = []
+        if not moved and not waiting:
+            return
+        with self.store.update() as state:
+            for room_id, where in moved.items():
+                draft = state["drafts"].get(room_id)
+                if draft is not None and (draft.get("started_in") or {}).get("kind") == "legacy":
+                    draft["started_in"] = where
+                    logger.info("Linked Rooms follows room %s into the gateway's store, where Hermes moved it",
+                                room_id)
+            for room_id in waiting:
+                draft = state["drafts"].get(room_id)
+                if draft is not None and draft["status"] == "waiting" and draft["where"].get("kind") == "legacy":
+                    draft["where"] = {"kind": "any"}
+
     def _start(self, room_id: str) -> None:
         draft = self.store.read()["drafts"][room_id]
         try:
@@ -836,7 +876,7 @@ class Rooms:
             self._renew_at(key, member_id, None)
             return
         try:
-            fresh = self.joiner.renew(agent["grant"])
+            fresh = self.joiner.renew(agent["grant"], epoch=invite["authority_epoch"])
         except room_join.JoinError as exc:
             wait, then = _RENEW_LATER.get(exc.code, (None, "it isn't renewed again"))
             if exc.code == "api_server":
@@ -865,6 +905,23 @@ class Rooms:
         if current is None:
             # It left the room, or was taken out, while its grant was made: the fresh one goes too.
             self._leave(link_id, {"grant": fresh["grant"]})
+
+    def follow_epoch(self, key: str, epoch: int) -> None:
+        """The room at the other end of an invite goes on at a later authority epoch: Hermes moved it into its
+        gateway's store (gateway/hosted_rooms_gateway_import.py), and a turn it sends now carries that epoch. The
+        invite takes it, and its agents get fresh grants for it on the rooms loop's next pass, which go to the
+        home in a room.grant as a renewal's do."""
+        now = int(self.clock())
+        with self.store.update() as state:
+            invite = state["invites"].get(key)
+            if invite is None or type(epoch) is not int or epoch <= invite["authority_epoch"]:
+                return
+            invite["authority_epoch"] = epoch
+            for agent in invite["joined"]:
+                if agent.get("renew_at") is not None or agent.get("grant"):
+                    agent["renew_at"] = now
+        logger.info("Linked Rooms' room %s goes on at authority epoch %d: its agents get grants for it",
+                    key.split("/", 1)[-1], epoch)
 
     def _renew_at(self, key: str, member_id: str, when: Optional[int]) -> None:
         with self.store.update() as state:
@@ -924,6 +981,7 @@ class Rooms:
         if self.joiner is not None:
             self._renew()
         if self.starter is not None:
+            self._follow_gateway()
             self._start_ready()
             self.copies.send_pages()
         # How the started rooms' agents and people look, to the others in them (room_looks): after the starts

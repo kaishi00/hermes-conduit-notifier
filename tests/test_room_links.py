@@ -472,6 +472,27 @@ def test_only_the_loop_holding_the_lease_reads_here(tmp_path, monkeypatch):
     assert links_module.holds_lease(tmp_path / "mona") is False
 
 
+def test_a_separate_dashboards_loop_gives_the_lease_to_the_gateways_where_the_rooms_are(tmp_path, monkeypatch):
+    import fcntl
+
+    root = tmp_path / "eric"
+    loop = links_module.LinkLoop(root)
+    monkeypatch.setitem(links_module._loops, str(root), loop)
+    try:
+        assert loop.lease() is True
+        # The gateway's rooms loop, in its own process, holds the installation's rooms (room_start.GATEWAY_LOCK).
+        with open(root / "conduit-rooms" / ".gateway-rooms.lock", "a+b") as gateway:
+            fcntl.flock(gateway.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert loop.lease() is False
+            assert links_module.holds_lease(root) is False
+            assert links_module.lease_held(root) is False  # let go, for the gateway's loop to take
+            assert loop.lease() is False
+            fcntl.flock(gateway.fileno(), fcntl.LOCK_UN)
+        assert loop.lease() is True  # the gateway stopped: this one reads again
+    finally:
+        loop.stop()
+
+
 def test_two_loops_hold_one_lease(tmp_path):
     first, second = links_module.LinkLoop(tmp_path), links_module.LinkLoop(tmp_path)
     try:
