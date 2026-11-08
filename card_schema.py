@@ -625,6 +625,18 @@ def _field_rules(field: dict[str, Any], controls: _Controls, path: str,
     if kind == "choice" and "options" not in field:
         _note(notes, f"{path}.options: a choice field needs them, dropped")
         return None
+    if kind == "choice":
+        # One of each: the phone's picker names its rows by their text.
+        options: list[str] = []
+        for option in field["options"]:
+            if option.lower() in (kept.lower() for kept in options):
+                _note(notes, f"{path}.options: \"{option}\" is there twice, kept once")
+                continue
+            options.append(option)
+        if len(options) < 2:
+            _note(notes, f"{path}.options: a choice field needs two different ones, dropped")
+            return None
+        field["options"] = options
     if "min" in field and "max" in field and field["min"] > field["max"]:
         del field["min"]
         _note(notes, f"{path}.min: above max, left out")

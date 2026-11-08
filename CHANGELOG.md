@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.140.3 (2026-11-08)
+
+### Fixes
+- A card's choice field that listed the same option twice (Yes and yes)
+  reached the phone with both, so its picker couldn't tell them apart. It
+  now keeps one of each, and a choice left with fewer than two options is
+  dropped.
+
 ## 0.140.2 (2026-11-08)
 
 ### Fixes
