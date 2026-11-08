@@ -1790,7 +1790,7 @@ def _review_markdown(card: dict[str, Any]) -> list[str]:
     for entry in review.get("settled", []):
         choice = f": {_escape(entry['choice'])}" if entry.get("choice") else ""
         parts.append(f"_{_escape(entry['title'])}{choice}, {_MARK_WORDS[entry['mark']]} earlier_")
-    parts.append("_Open it in Conduit to look at the options and mark them._")
+    parts.append("_Marking these takes a Conduit chat: ask there to see the options._")
     return parts
 
 

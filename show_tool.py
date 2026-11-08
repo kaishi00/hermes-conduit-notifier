@@ -384,7 +384,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
 
 def _drop_unshown(reviews: ReviewHost | None, kept: list[dict[str, Any]], shown: list[dict[str, Any]]) -> None:
     showing = {(review["id"], review["round"]) for review in shown}
-    for review in kept:
+    # Newest first: only a review's newest round can be taken back.
+    for review in reversed(kept):
         if (review["id"], review["round"]) in showing:
             continue
         try:

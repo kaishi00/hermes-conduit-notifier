@@ -539,3 +539,61 @@ def test_a_show_that_fails_keeps_no_round(tool_home, monkeypatch):
     answer = _call({"cards": [_review()]}, reviews=host)
     assert not answer["ok"]
     assert not list((tool_home / review_store.DIRECTORY).glob("rv-*"))
+
+
+def test_a_round_skipped_whole_isnt_taken_as_approved(tool_home):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    taps = card_actions.TapStore(tool_home, reviews=host.store())
+    taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d1", "skip"), ("d2", "skip"))})
+    note = taps.note("s1", "Sent review · Recipe app home")
+    assert "skipped every decision" in note and "go ahead" not in note
+
+    bound = Host(tool_home, workstreams={"W3"}, bot_chats={"bot"})
+    card = _call({"cards": [_review(**{"for": "W3"})]}, session_id="bot", reviews=bound)["cards"][0]
+    taps.save({"sessions": ["bot"], "card": card, "action": "review", "review": _marks(("d1", "skip"), ("d2", "skip"))})
+    sent = []
+    taps.note("bot", "Sent review · Recipe app home", forward=lambda ref, text: sent.append(text) or {"ok": True})
+    assert "Don't build any of them" in sent[0] and "carry on" not in sent[0]
+
+
+def test_more_marks_than_decisions_are_refused(tool_home):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    with pytest.raises(card_actions.TapError, match="more marks"):
+        card_actions.TapStore(tool_home, reviews=host.store()).save(
+            {"sessions": ["s1"], "card": card, "action": "review",
+             "review": _marks(("d1", "skip"), ("d2", "skip"), ("d1", "skip"))})
+
+
+def test_marks_on_a_round_no_longer_the_newest_are_refused_in_the_store(tmp_path):
+    store = review_store.KeptReviews(tmp_path)
+    review_id = store.start("T", "s1")
+    decisions = [{"id": "d1", "title": "X", "options": [{"id": "A", "label": "a", "kind": "page"},
+                                                         {"id": "B", "label": "b", "kind": "page"}]}]
+    store.add_round(review_id, "T", decisions, {"d1/A": PAGE, "d1/B": PAGE})
+    store.add_round(review_id, "T", decisions, {"d1/A": PAGE, "d1/B": PAGE})
+    with pytest.raises(review_store.ReviewError, match="newer round"):
+        store.save_marks(review_id, 1, {"decisions": [{"decision": "d1", "mark": "skip"}]}, ["s1"])
+
+
+def test_a_settled_review_stays_settled_when_an_unshown_round_is_taken_back(tmp_path):
+    store = review_store.KeptReviews(tmp_path)
+    review_id = store.start("T", "s1")
+    decisions = [{"id": "d1", "title": "X", "options": [{"id": "A", "label": "a", "kind": "page"},
+                                                         {"id": "B", "label": "b", "kind": "page"}]}]
+    store.add_round(review_id, "T", decisions, {"d1/A": PAGE, "d1/B": PAGE})
+    store.save_marks(review_id, 1, {"decisions": [{"decision": "d1", "mark": "approve", "option": "A"}]}, ["s1"])
+    assert store.get(review_id)["done"] is True
+    store.add_round(review_id, "T", decisions, {"d1/A": PAGE, "d1/B": PAGE})
+    store.drop_round(review_id, 2)
+    assert store.get(review_id)["done"] is True
+
+
+def test_two_unshown_rounds_of_one_review_are_both_taken_back(tool_home):
+    host = Host(tool_home)
+    first = _shown(tool_home, host)["review"]
+    _exchange(tool_home, features=[f for f in FEATURES if f != "review-cards"])
+    _call({"cards": [_review(id=first["id"]), _review(id=first["id"]),
+                     {"type": "callout", "callout": {"text": "Hi"}}]}, reviews=host)
+    assert len(host.store().get(first["id"])["rounds"]) == 1

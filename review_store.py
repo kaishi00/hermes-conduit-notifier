@@ -181,6 +181,17 @@ def _well_formed(meta: Any) -> bool:
             and isinstance(meta.get("updated"), (int, float)) and not isinstance(meta.get("updated"), bool))
 
 
+def _settled_round(kept: dict[str, Any]) -> bool:
+    """Whether a round's marks leave nothing to change: every decision
+    marked, each approved or skipped, and no note."""
+    marks = kept.get("marks")
+    if not isinstance(marks, dict) or marks.get("note"):
+        return False
+    entries = marks.get("decisions", [])
+    return len(entries) == len(kept.get("decisions", [])) and all(
+        entry.get("mark") in ("approve", "skip") and not entry.get("note") for entry in entries)
+
+
 class KeptReviews:
     def __init__(self, root: Any, clock: Callable[[], float] = time.time,
                  new_id: Callable[[], str] = lambda: "rv-" + secrets.token_hex(8)) -> None:
@@ -259,16 +270,15 @@ class KeptReviews:
             meta = _read_json(folder / META)
             if not _well_formed(meta) or not 1 <= number <= len(meta["rounds"]):
                 raise ReviewError("that round of the review is gone")
+            if number != len(meta["rounds"]):
+                # Checked under the lock: a round shown meanwhile is the one to mark.
+                raise ReviewError("a newer round of that review is in the chat; mark that one")
             if meta["rounds"][number - 1].get("marks"):
                 raise ReviewError("the marks on that round were already sent")
             now = self.clock()
             meta["rounds"][number - 1]["marks"] = {**marks, "at": now}
             meta["updated"] = now
-            entries = marks.get("decisions", [])
-            # Every decision marked, each approved or skipped, and no note.
-            meta["done"] = number == len(meta["rounds"]) and not marks.get("note") and \
-                len(entries) == len(meta["rounds"][number - 1]["decisions"]) and all(
-                entry.get("mark") in ("approve", "skip") and not entry.get("note") for entry in entries)
+            meta["done"] = _settled_round(meta["rounds"][-1])
             for session in sessions:
                 if session and session not in meta["sessions"]:
                     meta["sessions"] = [*meta["sessions"], session][-MAX_SESSIONS:]
@@ -287,6 +297,8 @@ class KeptReviews:
             except OSError:
                 pass
             if meta["rounds"]:
+                # A settled review the unshown round reopened is settled again.
+                meta["done"] = _settled_round(meta["rounds"][-1])
                 _write_json(folder / META, meta)
                 return
         self._remove(review_id)

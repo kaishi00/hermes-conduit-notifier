@@ -128,7 +128,9 @@ def _review_marks(value: Any, decisions: list[dict[str, Any]]) -> dict[str, Any]
     by_id = {decision["id"]: decision for decision in decisions}
     marks: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for raw in given[:len(decisions)]:
+    if len(given) > len(decisions):
+        raise TapError("review.marks has more marks than the round has decisions")
+    for raw in given:
         if not isinstance(raw, dict):
             raise TapError("each mark is an object")
         decision = by_id.get(_clean(raw.get("decision"), 40))
@@ -326,6 +328,7 @@ class TapStore:
                "markdown": _review_lines(decisions, marks), "values": {},
                "review": {"id": shown["id"], "round": shown["round"], "for": meta["for"],
                           "quick": len(decisions) == 1, "settles": _settles(marks, decisions),
+                          "approved": any(entry["mark"] == "approve" for entry in marks["decisions"]),
                           **({"picked": picked} if picked else {})}}
         try:
             with self._locked() as state:
@@ -448,7 +451,10 @@ def _line(tap: dict[str, Any]) -> str:
 def _forwarded_text(tap: dict[str, Any]) -> str:
     """What a review's workstream gets: the marks, and what to do next."""
     review = tap["review"]
-    then = ("Every decision is settled: carry on with what they approved, and report when it's done."
+    then = ("They skipped every decision: none of these options works for them. Don't build any of them; "
+            "report that back, so the Bot Chat can ask what they'd like instead."
+            if review["settles"] and not review.get("approved", True) else
+            "Every decision is settled: carry on with what they approved, and report when it's done."
             if review["settles"] else
             "Build the next round for what they marked to change (and what their notes ask), keeping what they "
             "approved and leaving out what they skipped. Write each option's page to a file and report the files: "
@@ -478,6 +484,9 @@ def _review_line(tap: dict[str, Any], forward: Callable[[str, str], dict[str, An
         return head + (f"They belong to {ref}, which made the options, and couldn't be passed on to it for you{why}. "
                        f"Send them to {ref} with work_send now, then show its next round with review id "
                        f"{review['id']} and for {ref}.]")
+    if review["settles"] and not review.get("approved", True):
+        return head + ("They skipped every decision: none of these options works for them. Don't build any of "
+                       "them; ask what they'd like instead.]")
     if review["settles"]:
         what = "They picked" if review["quick"] else "Every decision is settled"
         return head + f"{what}: go ahead with what they approved now, with your tools.]"
