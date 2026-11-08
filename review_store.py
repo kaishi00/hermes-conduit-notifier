@@ -95,7 +95,7 @@ def read_page(option: dict[str, Any]) -> tuple[str, str]:
         return "page", html
     if key == "image":
         url = option["image"].strip()
-        if not url.lower().startswith("https://") or re.search(r"[\s\"'`<>\\]", url):
+        if not url.lower().startswith("https://") or len(url) > 500 or re.search(r"[\s\"'`<>\\()\[\]{}]", url):
             raise ReviewError("image is a direct https link to a picture")
         return "image", url
     path = os.path.expanduser(option["file"].strip())
@@ -274,6 +274,23 @@ class KeptReviews:
                 if session and session not in meta["sessions"]:
                     meta["sessions"] = [*meta["sessions"], session][-MAX_SESSIONS:]
             _write_json(folder / META, meta)
+
+    def drop_round(self, review_id: str, number: int) -> None:
+        """Takes back the newest round when no card showed it; a review left
+        with no round goes."""
+        with self._locked(review_id) as folder:
+            meta = _read_json(folder / META)
+            if not _well_formed(meta) or number != len(meta["rounds"]) or meta["rounds"][-1].get("marks"):
+                return
+            meta["rounds"].pop()
+            try:
+                (folder / f"round-{number}.json").unlink()
+            except OSError:
+                pass
+            if meta["rounds"]:
+                _write_json(folder / META, meta)
+                return
+        shutil.rmtree(self._folder(review_id), ignore_errors=True)
 
     def drop_marks(self, review_id: str, number: int) -> None:
         """Forgets a round's marks whose message Conduit didn't send, so the

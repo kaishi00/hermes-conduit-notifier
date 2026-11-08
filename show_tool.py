@@ -337,8 +337,11 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         saved = templates.save(args["save_templates"], problems)
     given = _filled_templates(args.get("cards"), templates, problems)
     given = _reviews_kept(given, session, problems, reviews, is_room)
+    kept = [card["review"] for card in given if isinstance(card, dict) and card.get("type") == "review"] \
+        if isinstance(given, list) and reviews is not None else []
     cards = card_schema.normalize_cards(given, problems)
     if args.get("cards") not in (None, []) and not cards:
+        _drop_unshown(reviews, kept, [])
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20],
                 **({"saved": saved} if saved else {})}
     if saved and not cards and not (isinstance(args.get("markdown"), str) and args["markdown"].strip()):
@@ -346,12 +349,27 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     answer = _handle_cards(args, session, cards, problems, is_room, room_board, desktop_board, keep_diff)
     if saved:
         answer["saved"] = saved
-    shown = [card["review"] for card in answer.get("cards", []) if card.get("type") == "review"]
+    shown = [card["review"] for card in answer.get("cards", []) if card.get("type") == "review"] \
+        if answer.get("ok") else []
+    # A round no card shows (this Conduit draws no reviews, the turn went to
+    # Desktop as Markdown, the card was dropped) isn't kept as one to mark.
+    _drop_unshown(reviews, kept, shown)
     if shown and answer.get("ok"):
         review = shown[0]
         answer["note"] += " " + REVIEW_SHOWN_NOTE.format(id=review["id"], round=review["round"]) + (
             REVIEW_FOR_NOTE.format(ref=review["for"]) if review.get("for") else REVIEW_NEXT_NOTE)
     return answer
+
+
+def _drop_unshown(reviews: ReviewHost | None, kept: list[dict[str, Any]], shown: list[dict[str, Any]]) -> None:
+    showing = {(review["id"], review["round"]) for review in shown}
+    for review in kept:
+        if (review["id"], review["round"]) in showing:
+            continue
+        try:
+            reviews.store().drop_round(review["id"], review["round"])
+        except (review_store.ReviewError, OSError):
+            logger.debug("conduit_show: couldn't drop an unshown review round", exc_info=True)
 
 
 def open_reviews_note(reviews: list[dict[str, Any]]) -> str | None:
@@ -444,6 +462,10 @@ def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[s
     elif for_ref and not reviews.workstream(for_ref):
         problems.append(f"{path}.review.for: {for_ref} isn't one of this bot's workstreams; show the review for "
                         "the one that made the options")
+        return None
+    if existing is not None and existing["for"] and not reviews.is_bot_chat(session):
+        # Its marks go to its workstream from the Bot Chat alone.
+        problems.append(f"{path}.review: {wanted} belongs to {existing['for']}, so only the Bot Chat shows its rounds")
         return None
     if existing is not None:
         bound = existing["for"]

@@ -417,3 +417,26 @@ def test_marks_whose_message_didnt_go_can_be_sent_again(tool_home):
     assert host.store().get(card["review"]["id"])["rounds"][0]["marks"] is None
     taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d2", "skip"))})
     assert "Save button colour: skipped" in taps.note("s1", "Sent review · Recipe app home")
+
+
+def test_a_review_no_conduit_draws_isnt_kept(tool_home):
+    _exchange(tool_home, features=[f for f in FEATURES if f != "review-cards"])
+    host = Host(tool_home)
+    answer = _call({"cards": [_review(), {"type": "callout", "callout": {"text": "Hi"}}]}, reviews=host)
+    assert not any(card.get("type") == "review" for card in answer.get("cards", []))
+    assert host.store().open_reviews("s1") == []
+    assert not list((tool_home / review_store.DIRECTORY).glob("rv-*"))
+
+
+def test_a_bound_reviews_rounds_show_only_in_the_bot_chat(tool_home):
+    host = Host(tool_home, workstreams={"W3"}, bot_chats={"bot"})
+    first = _call({"cards": [_review(**{"for": "W3"})]}, session_id="bot", reviews=host)["cards"][0]["review"]
+    elsewhere = _call({"cards": [_review(id=first["id"])]}, session_id="s1", reviews=host)
+    assert not elsewhere["ok"] and any("only the Bot Chat" in p for p in elsewhere["problems"])
+    assert len(host.store().get(first["id"])["rounds"]) == 1
+
+
+def test_a_picture_link_the_card_couldnt_keep_is_refused():
+    for url in ["https://a.test/x(1).png", "https://a.test/" + "x" * 500]:
+        with pytest.raises(review_store.ReviewError):
+            review_store.read_page({"image": url})
