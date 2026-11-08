@@ -1,0 +1,99 @@
+"""Room files carried over Links (Eric 2026-11-08: every participant in a room sees the same thing): the home sends
+each file a room message names to every Link with an agent in the room, the member's Hermes keeps it under its own
+room-files root, and a turn for its agent names that copy instead of the home's path.
+
+Furina hosts; Laifu and Mona join over link1 and link2 (test_room_invites' installations, test_room_copies' log).
+"""
+import base64
+import hashlib
+import stat
+
+from test_room_bridge_member import ROOT, _load
+from test_room_copies import copies, started  # noqa: F401 - the fixture
+from test_room_invites import _sent, rooms  # noqa: F401 - the fixture
+
+files_module = _load("conduit_push.room_files_link", ROOT / "room_files_link.py")
+
+FOLDER = "20261108-" + "a" * 32
+
+
+def upload(side, name, data, folder=FOLDER):
+    path = side.tmp_path / "furina" / "conduit" / "room-files" / folder / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def post(side, room_id, text):
+    return side.log.add(room_id, "message.user", {"text": text}, actor={"kind": "user", "id": "user"})
+
+
+def carried(side, name, file_name, folder=FOLDER):
+    return side.tmp_path / name / "conduit" / "room-files" / folder / file_name
+
+
+def test_a_file_a_room_message_names_reaches_every_member_and_is_answered(copies):  # noqa: F811
+    room_id = started(copies)
+    data = bytes(range(256)) * 900  # three chunks
+    path = upload(copies, "shot.jpg", data)
+    post(copies, room_id, f"@file:{path}\n\nWhat's this?")
+
+    copies.furina.pass_once()
+
+    chunks = [(link, body) for link, body, _ in _sent(copies, "room.file")]
+    assert sorted({link for link, _ in chunks}) == ["link1", "link2"]
+    assert {body["count"] for _, body in chunks} == {3}
+    assert all(base64.b64decode(body["data"]) for _, body in chunks)
+    for name in ("laifu", "mona"):
+        kept = carried(copies, name, "shot.jpg")
+        assert kept.read_bytes() == data
+        assert stat.S_IMODE(kept.stat().st_mode) == 0o600
+    got = [body for _, body, _ in _sent(copies, "room.file_got")]
+    assert len(got) == 2 and {body["sha"] for body in got} == {hashlib.sha256(data).hexdigest()}
+    state = files_module.Store(copies.tmp_path / "furina").read()
+    assert all(entry["done"] for out in state["out"].values() for entry in out.values())
+    # Answered: it doesn't go again.
+    copies.furina.pass_once()
+    assert len(_sent(copies, "room.file")) == len(chunks)
+
+
+def test_only_room_files_under_the_homes_root_go(copies, tmp_path):  # noqa: F811
+    room_id = started(copies)
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"no")
+    outside = copies.tmp_path / "furina" / "elsewhere" / FOLDER / "x.txt"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"no")
+    post(copies, room_id, f"@file:{secret}\n@file:{outside}\n@file:/conduit/room-files/{FOLDER}/gone.txt\nhi")
+
+    copies.furina.pass_once()
+
+    assert _sent(copies, "room.file") == []
+
+
+def test_a_turn_names_this_hosts_copy_of_a_room_file(tmp_path):
+    root = tmp_path / "laifu"
+    kept = root / "conduit" / "room-files" / FOLDER / "my photo.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")
+    home = f"/root/.hermes/conduit/room-files/{FOLDER}"
+    prompt = (f"  User (user): @file:`{home}/my photo.jpg`\nand @file:{home}/missing.pdf\n"
+              f"@file:/etc/passwd")
+    waits = []
+    local = files_module.localized(prompt, root, wait_s=1.0, clock=lambda: len(waits), sleep=waits.append)
+
+    assert local == (f"  User (user): @file:`{kept}`\nand @file:{home}/missing.pdf\n@file:/etc/passwd")
+    # It waited for the one still on its way, then went with the home's path.
+    assert waits
+    assert files_module.localized("no files here", root) == "no files here"
+
+
+def test_a_chunk_that_isnt_one_is_dropped(copies):  # noqa: F811
+    good = {"v": 1, "room_id": "r", "folder": FOLDER, "name": "a.txt", "sha": "0" * 64, "size": 3, "index": 0,
+            "count": 1, "data": base64.b64encode(b"abc").decode()}
+    assert files_module._chunk_from(good) is not None
+    for bad in ({**good, "folder": "../x"}, {**good, "name": "../a"}, {**good, "name": "a/b"},
+                {**good, "count": 2}, {**good, "index": 1}, {**good, "data": "!!"}, {**good, "size": -1},
+                {**good, "data": base64.b64encode(b"abcd").decode()}, {**good, "v": 2},
+                {**good, "size": files_module.MAX_FILE_BYTES + 1}):
+        assert files_module._chunk_from(bad) is None, bad

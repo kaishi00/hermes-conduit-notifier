@@ -332,6 +332,23 @@ def test_a_dispatch_is_replayed_with_its_grant_and_key_and_no_input(laifu, herme
     assert call["body"] == {"hosted_room_dispatch": body["hosted_room_dispatch"]}
 
 
+def test_a_dispatch_names_this_hosts_copy_of_a_room_file_and_its_digest_follows(laifu, hermes):
+    folder = "20261108-" + "b" * 32
+    kept = laifu.root / "conduit" / "room-files" / folder / "shot.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")
+    body, key = dispatch(text=prompt(f"User (user): @file:/root/.hermes/conduit/room-files/{folder}/shot.jpg look"))
+
+    ask(laifu, body=body, key=key)
+
+    [call] = hermes.calls
+    sent = call["body"]["hosted_room_dispatch"]
+    assert f"@file:{kept} look" in sent["prompt"]
+    assert sent["prompt_digest"] == hashlib.sha256(sent["prompt"].encode()).hexdigest()
+    assert {k: v for k, v in sent.items() if not k.startswith("prompt")} == {
+        k: v for k, v in body["hosted_room_dispatch"].items() if not k.startswith("prompt")}
+
+
 def test_a_named_profiles_agent_is_reached_at_its_own_path(laifu, hermes):
     scope = dict(SCOPE, target_profile="work")
     member_module.bind(laifu.root, "link1", scope)

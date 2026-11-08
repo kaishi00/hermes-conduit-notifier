@@ -35,8 +35,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from . import (client, room_bridge, room_choices, room_copies, room_identity, room_join, room_links, room_looks,
-               room_posts, room_start, session_titles)
+from . import (client, room_bridge, room_choices, room_copies, room_files_link, room_identity, room_join, room_links,
+               room_looks, room_posts, room_start, session_titles)
 from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,8 @@ logger = logging.getLogger(__name__)
 VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
 GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
-KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS, *room_looks.KINDS)
+KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS, *room_looks.KINDS,
+         *room_files_link.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -149,6 +150,7 @@ class Rooms:
         self.copies = room_copies.Copies(self, hermes=copier)
         self.posts = room_posts.Posts(self, hermes=poster)
         self.looks = room_looks.Looks(self)
+        self.files = room_files_link.Files(self)
         self._notes: Any = None
 
     # --- The home's drafts ---------------------------------------------------------
@@ -422,7 +424,9 @@ class Rooms:
         handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
                    LEAVE: self.on_leave, ENDED: self.on_ended, room_copies.PAGE: self.copies.on_page,
                    room_copies.COPIED: self.copies.on_copied, room_posts.POST: self.posts.on_post,
-                   room_posts.POSTED: self.posts.on_posted, room_looks.LOOKS: self.looks.on_looks}.get(received.kind)
+                   room_posts.POSTED: self.posts.on_posted, room_looks.LOOKS: self.looks.on_looks,
+                   room_files_link.CHUNK: self.files.on_chunk,
+                   room_files_link.GOT: self.files.on_got}.get(received.kind)
         if handler is not None:
             handler(received)
 
@@ -1003,6 +1007,8 @@ class Rooms:
             self._follow_gateway()
             self._start_ready()
             self.copies.send_pages()
+            # The files the pages' messages name, to the Links that got them (room_files_link).
+            self.files.send_files()
         # How the started rooms' agents and people look, to the others in them (room_looks): after the starts
         # have gone, so a member's Hermes knows the room before its first looks arrive.
         self.flush()

@@ -220,6 +220,14 @@ class Copies:
             if kept is None or _copy_of(kept, link_id)["sent"] != sent:
                 return  # gone, or its answer came while this page was read
             _copy_of(kept, link_id, keep=True)["sent"] = waiting
+        # The room files its messages name go after it (room_files_link).
+        files = getattr(self.rooms, "files", None)
+        if files is not None:
+            try:
+                files.note(room_id, link_id, events)
+            except Exception as exc:  # noqa: BLE001 - the page goes either way
+                self._tell_once(f"files:{room_id}", "Linked Rooms couldn't note room %s's files (%s)", room_id,
+                                type(exc).__name__)
         try:
             self.rooms.send(link_id, PAGE, body, message_id=message_id)
         except room_links.LinkError as exc:
