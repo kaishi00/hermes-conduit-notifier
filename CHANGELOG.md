@@ -13,13 +13,63 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.141.5 (2026-11-08)
+## 0.146.0 (2026-11-08)
 
 ### New and improved
 - A host that installs and upgrades the plugin itself can say so with
   CONDUIT_PUSH_MANAGED. Conduit then stops asking to update the plugin on
   that host, and an update started from Conduit is refused, so the host
   keeps the version it was tested with.
+
+## 0.145.0 (2026-11-08)
+
+### New and improved
+- When your agent reads a room with other people for you, a message's
+  pictures and files are named in it, and a message of files alone is
+  read too, now that Conduit sends them as the room's own attachments.
+
+## 0.143.1 (2026-11-08)
+
+### Fixes
+- Pulse made two or three copies of the same card from one check, and the
+  morning brief came more than once: on a host with profiles, each profile's
+  copy of the plugin ran Pulse. Now only one does.
+- Pulse cards came back after you marked them Done: one oddly saved date
+  made every check skip looking at earlier cards. Dates saved like that no
+  longer stop any of Pulse's checks, and a card you marked Done or put away
+  keeps the same words from coming back for a month (one about a reminder,
+  a calendar entry or something Pulse remembers keeps that thing's rules).
+
+## 0.143.0 (2026-11-08)
+
+### New and improved
+- Files sent into a group room (PDFs, text, pasted text, audio, video)
+  open, preview and play in Conduit as they do in a chat, instead of
+  showing as a name you can't tap. In a room someone else hosts, they
+  still show by name.
+
+## 0.142.0 (2026-11-08)
+
+### New and improved
+- A picture sent into a group room shows as the picture in Conduit,
+  instead of a file icon and its name. In a room someone else hosts, it
+  still shows by name.
+
+## 0.141.6 (2026-11-08)
+
+### Fixes
+- Cards a workstream drew before you stopped it never reached its Bot
+  Chat, because a stopped turn sends no update. The bot's next update
+  from it now names them, so they're shown in the Bot Chat.
+
+## 0.141.5 (2026-11-08)
+
+### Fixes
+- A bot asked for a map or the nearest shop in its Bot Chat handed it to a
+  workstream, and the map it drew stayed in that workstream's chat. With
+  "Also Looks Things Up" on, the bot now looks places, directions and
+  travel times up itself, and cards a workstream draws (maps, forecasts
+  and the rest) are shown again in the Bot Chat.
 
 ## 0.141.4 (2026-11-08)
 

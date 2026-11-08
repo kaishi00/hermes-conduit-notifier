@@ -6,6 +6,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _no_host_managed_plugin(monkeypatch):
+    # A host that manages the plugin (CONDUIT_PUSH_MANAGED) changes what
+    # /capabilities answers and refuses /self/update. Tests run unmanaged
+    # unless one sets it, even on a host that exports it.
+    monkeypatch.delenv("CONDUIT_PUSH_MANAGED", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _pulse_loop_stops_with_the_test():
     yield
     # plugin.register(ctx) starts Pulse's loop (pulse.register). A test that

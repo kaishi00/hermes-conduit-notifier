@@ -8,6 +8,7 @@ import errno
 import hashlib
 import importlib.util
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -226,6 +227,115 @@ async def post_room_file(request: Request, response: Response, profile: Optional
         _room_file_limiter.release(key, mint)
         raise core._unexpected("upload", exc, feature="Room files")
     return {"ok": True, **stored}
+
+
+# --- Room file pictures --------------------------------------------------------
+#
+# Conduit draws a picture sent into a room as the picture, and opens or
+# plays any other file sent there, as a chat does. Hermes'
+# /api/fs/read-data-url can't be relied on for it: hosted and locked installs
+# refuse paths outside the files folder. This reads back only what
+# /room-files stored, up to the size a data URL takes, as Hermes' route does.
+# A picture's type comes from its bytes; any other file's from its name,
+# never a picture type its bytes don't back.
+
+ROOM_FILE_PICTURE_MAX_BYTES = 16 * 1024 * 1024
+# A room's pictures load once each and are kept on the phone; this only
+# stops a client looping 16 MB reads.
+_room_file_picture_limiter = core._MintLimiter(240, 60.0, message="Too many file reads; try again shortly")
+# Leading bytes of each picture type Conduit can show, with the type.
+_ROOM_FILE_PICTURE_TYPES = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def _room_file_picture_type(head: bytes) -> Optional[str]:
+    for magic, mime in _ROOM_FILE_PICTURE_TYPES:
+        if head.startswith(magic):
+            return mime
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    # ISO media (HEIC/HEIF/AVIF): `ftyp` then the brand.
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        # A generic HEIF brand (mif1/msf1) can carry AVIF; the compatible
+        # brands after the minor version say which.
+        end = min(int.from_bytes(head[:4], "big"), len(head))
+        compatible = {head[i:i + 4] for i in range(16, end - 3, 4)}
+        if brand in (b"avif", b"avis") or (brand in (b"mif1", b"msf1") and compatible & {b"avif", b"avis"}):
+            return "image/avif"
+        if brand in (b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1"):
+            return "image/heic"
+    return None
+
+
+def _room_file_type(name: str, head: bytes) -> str:
+    """A stored file's media type: a picture's from its bytes, anything
+    else's from its name, and never a picture type the bytes don't back. A
+    compressed name (backup.tar.gz) is a plain file, not what it unpacks to."""
+    picture = _room_file_picture_type(head)
+    if picture:
+        return picture
+    guessed, encoding = mimetypes.guess_type(name)
+    if not guessed or encoding or guessed.startswith("image/") or guessed in _ROOM_FILE_SCRIPTABLE_TYPES:
+        return "application/octet-stream"
+    return guessed
+
+
+# Types a viewer would run rather than show; they open as plain files.
+_ROOM_FILE_SCRIPTABLE_TYPES = frozenset((
+    "text/html", "application/xhtml+xml", "text/javascript", "application/javascript",
+    "image/svg+xml", "text/xml", "application/xml",
+))
+
+
+def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
+    """The file /room-files stored at ``path``, as a data URL: 404 when it
+    isn't one of them (or is gone), 413 past ``ROOM_FILE_PICTURE_MAX_BYTES``.
+    Named for pictures, which came first (0.142); any file reads since 0.143."""
+    headers = {"Cache-Control": "no-store"}
+    if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
+        raise HTTPException(status_code=400, detail="path must be a stored room file", headers=headers)
+    base = os.path.realpath(root)
+    real = os.path.realpath(path)
+    # Only a file inside an upload's own folder, never the root itself.
+    if os.path.dirname(os.path.dirname(real)) != base:
+        raise HTTPException(status_code=404, detail="Not a room file", headers=headers)
+    try:
+        # Non-blocking, so a FIFO in its place can't hang the read; the
+        # regular-file check below turns it away.
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        raise HTTPException(status_code=404, detail="The file is gone", headers=headers)
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise HTTPException(status_code=404, detail="Not a room file", headers=headers)
+        if info.st_size > ROOM_FILE_PICTURE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="The file is too large to read here", headers=headers)
+        data = handle.read(ROOM_FILE_PICTURE_MAX_BYTES + 1)
+    if len(data) > ROOM_FILE_PICTURE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="The file is too large to read here", headers=headers)
+    mime = _room_file_type(os.path.basename(real), data[:64])
+    return {"dataUrl": f"data:{mime};base64," + base64.b64encode(data).decode("ascii"), "size": len(data)}
+
+
+@router.get("/room-files/data-url")
+async def get_room_file_picture(response: Response, path: str = "", profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await core._run_scoped(profile, core._limited(
+            _room_file_picture_limiter, profile, lambda: read_room_file_picture(_room_files_root(), path)))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise core._unexpected("read", exc, feature="Room files")
 
 
 # --- Room pictures -------------------------------------------------------------

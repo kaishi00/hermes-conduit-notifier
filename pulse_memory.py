@@ -1138,7 +1138,7 @@ def forget_inbox(pulse_store: store.PulseStore, home: Path, now: float) -> int:
         """When the item, or what replaced it, stopped standing; None while it stands."""
         for _ in range(store.MAX_CHAIN):
             if row["status"] not in ("open", "reminded"):
-                return float(row["closed_at"] or 0.0)
+                return store.close_time(row["closed_at"])
             if row["superseded_by"] is None:
                 return None
             following = by_id.get(row["superseded_by"])

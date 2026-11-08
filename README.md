@@ -59,11 +59,11 @@ create --clone` copies the plugins folder) is moved to the profile's
 install, which leaves the profile alone. Where the host can't make a link,
 the main install is copied in instead and replaced at the next update.
 
-### A host that manages the plugin (plugin 0.141.5+)
+### A host that manages the plugin (plugin 0.146.0+)
 
 When something other than Conduit installs and upgrades the plugin (an image
 that bakes a pinned version, a configuration manager), set
-`CONDUIT_PUSH_MANAGED` in the dashboard's environment: `1` (or `true`, `yes`)
+`CONDUIT_PUSH_MANAGED` in the dashboard's environment: `1` (or `true`, `yes`, `on`)
 for a plain "managed", or a short text naming who manages it, such as
 `CONDUIT_PUSH_MANAGED="Family farm"`. The capabilities route then reports
 `"managed": true` (and `"managed_by"` for a text), Conduit asks nobody to
@@ -1534,11 +1534,15 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   `conduit_show` (its cards are its own: a workstream's would show in the
   workstream's chat, not the Bot Chat);
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
-  health, location and inbox). `message_agent` is refused there in favour of
-  `work_ask`.
+  health, location and inbox, and Apple Maps through `conduit_maps`, its
+  navigate's Go button included, which shows in the chat that asked).
+  `message_agent` is refused there in favour of `work_ask`.
 - A workstream writes its report for you, in its own chat, which you can open
   and answer. The Bot Chat's update carries a short line of it and the chat's
   link (`work_read` gives the coordinator up to 2,000 characters of it).
+  When the workstream's turn showed cards in its chat (a map, a forecast),
+  the update says so, and the coordinator shows the same cards in the Bot
+  Chat with `conduit_show {"from_work": "W3"}`.
   A workstream keeps a checklist with `work_progress` (its only work
   tool), which the Bot Chat's digest shows, Conduit's Work panel lists, and
   Conduit shows as the Tasks line in the workstream's own chat. The
@@ -1979,6 +1983,17 @@ on this host and read the file from there. Uploads go to
 sooner, oldest first, once they pass 2 GB together (checked hourly). An
 upload that would leave under 1 GB free on the host is refused (507).
 Capability `room-files`.
+
+Conduit draws a picture sent into a room as the picture, and opens or plays
+any other file sent there, as in a chat.
+`GET /api/plugins/conduit_push/room-files/data-url?path=…` returns one as
+`{"dataUrl": "data:…;base64,…"}`, as Hermes' `/api/fs/read-data-url` does,
+which hosted and locked installs refuse outside their files folder. It reads
+only files `/room-files` stored (404 otherwise), up to 16 MB (413). A
+picture's type comes from its bytes (JPEG, PNG, GIF, WebP, HEIC, AVIF); any
+other file's from its name, never a picture type the bytes don't back.
+Capabilities `room-file-pictures` (plugin 0.142+, pictures) and
+`room-file-reads` (0.143+, any file).
 
 ## Group pictures (plugin 0.41+)
 

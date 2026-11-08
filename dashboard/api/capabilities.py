@@ -174,6 +174,12 @@ ROUTE_CAPABILITIES = (
     # answers but only to the asking device (no "[btw …]" note in Desktop).
     "side-question",
     "room-files",
+    # GET /room-files/data-url: a picture sent into a room, read back so
+    # Conduit draws it instead of its file name.
+    "room-file-pictures",
+    # The same route reads any file sent into a room (up to 16 MB), so
+    # Conduit opens and plays them as a chat does.
+    "room-file-reads",
     "room-images",
     "speech-server",
     "local-live-agent",
@@ -304,7 +310,7 @@ BOOT_ID = os.urandom(8).hex()
 
 # A host that installs and upgrades the plugin itself (an image that bakes a
 # pinned version, a config manager) sets CONDUIT_PUSH_MANAGED: "1" (or
-# true/yes) for a plain "managed", or a short text naming who manages it.
+# true/yes/on) for a plain "managed", or a short text naming who manages it.
 # Conduit then asks nobody to update it, and /self/update refuses.
 MANAGED_ENV = "CONDUIT_PUSH_MANAGED"
 MANAGED_BY_MAX = 80
