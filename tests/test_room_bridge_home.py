@@ -941,3 +941,24 @@ def test_two_loads_run_one_server(tmp_path, monkeypatch, mailbox_url):
         second_loop.stop()
 
     assert serving == [None, ports[0]]
+
+
+def test_a_watch_that_saw_the_lease_doesnt_serve_once_it_has_gone(room):
+    room.home.close()
+    leased = [True]
+    home = _home(room, ports=_free_ports(2), leased=lambda: leased[0], linked=lambda: True)
+    seen = home.leased
+
+    def going_as_it_looks():
+        held = seen()
+        leased[0] = False  # the loop lets the lease go to the gateway's just after this watch looked
+        return held
+
+    home.leased = going_as_it_looks
+    try:
+        home.watch_pass()
+        served = (home.port, home._server)
+    finally:
+        home.close()
+
+    assert served == (None, None)

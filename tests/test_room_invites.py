@@ -2712,3 +2712,14 @@ def test_a_route_the_move_took_along_is_left_as_it_is(rooms):
 
     assert rooms.home.canonical.peer_routes[key] is kept
     assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
+
+
+def test_a_moved_room_started_before_the_plugin_kept_where_is_followed_too(rooms):
+    room_id = _started(rooms)
+    with rooms.furina.store.update() as state:
+        del state["drafts"][room_id]["started_in"]  # started by a plugin that didn't keep it: its draft's where
+    _moved(rooms, room_id)
+
+    rooms.furina.pass_once()
+
+    assert rooms.furina.store.read()["drafts"][room_id]["started_in"]["kind"] == "canonical"

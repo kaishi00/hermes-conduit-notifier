@@ -595,13 +595,16 @@ class Home:
 
     # --- The server --------------------------------------------------------------------
 
-    def serve(self) -> int:
+    def serve(self) -> Optional[int]:
         """Starts the server, if it isn't running: its port. That's the one
         bridge.json keeps while it's free, so rooms' routes outlive
-        restarts, otherwise the next free one, kept from then on."""
+        restarts, otherwise the next free one, kept from then on. None once
+        the lease has gone meanwhile: the process that takes it serves."""
         with self._serve_lock:
             if self._server is not None and self.port is not None:
                 return self.port
+            if not self.leased():
+                return None
             kept = self.store.read()["home"]["port"]
             order = ([kept] if kept in self.ports else []) + [port for port in self.ports if port != kept]
             server = None

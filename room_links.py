@@ -726,11 +726,13 @@ class LinkLoop:
         with self._lock:
             if _gateway_runs_rooms(self.root):
                 if self._lease is not None:
-                    # The bridge goes first, so the gateway's takes the port the rooms' routes point at.
+                    # The bridge goes first, so the gateway's takes the port the rooms' routes point at: this
+                    # process stops saying it holds the lease (holds_lease), so its watch won't serve again, and
+                    # lets the lock go once the port is free.
+                    handle, self._lease = self._lease, None
                     _close_bridge(self.root)
-                    _unlock(self._lease)
-                    self._lease.close()
-                    self._lease = None
+                    _unlock(handle)
+                    handle.close()
                     logger.info("Linked Rooms' mailbox goes to the gateway, where the rooms are")
                 return False
             if self._lease is not None:

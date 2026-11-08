@@ -619,8 +619,7 @@ class Rooms:
         reach the room that goes on. A draft still waiting to start there starts in the gateway's service
         instead, while the gateway's rooms loop runs."""
         drafts = self.store.read()["drafts"]
-        started = [room_id for room_id, draft in drafts.items()
-                   if (draft.get("started_in") or {}).get("kind") == "legacy"]
+        started = [room_id for room_id, draft in drafts.items() if _in_legacy(draft)]
         waiting = [room_id for room_id, draft in drafts.items()
                    if draft["status"] == "waiting" and draft["where"].get("kind") == "legacy"]
         moved: dict[str, dict[str, Any]] = {}
@@ -643,7 +642,7 @@ class Rooms:
         with self.store.update() as state:
             for room_id, where in moved.items():
                 draft = state["drafts"].get(room_id)
-                if draft is not None and (draft.get("started_in") or {}).get("kind") == "legacy":
+                if draft is not None and _in_legacy(draft):
                     draft["started_in"] = where
                     # A route given as Hermes moved the room went to the frozen copy only: each live one is
                     # made again where the room goes on, unless the move took it along.
@@ -1504,6 +1503,12 @@ def _todo(draft: dict[str, Any], member_id: str, do: str, *, unseen: bool = Fals
         todos[member_id] = {"do": do, "tries": 0}
         if do == "swap" and (unseen or waiting is not None and waiting.get("unseen")):
             todos[member_id]["unseen"] = True
+
+
+def _in_legacy(draft: dict[str, Any]) -> bool:
+    """Whether a started room is in the legacy service: where it started, or, for one started before the
+    plugin kept that, where its draft said."""
+    return draft["status"] == "started" and (draft.get("started_in") or draft["where"]).get("kind") == "legacy"
 
 
 def _started_in(found: room_start.Found) -> Optional[dict[str, Any]]:
