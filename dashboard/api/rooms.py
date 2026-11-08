@@ -92,6 +92,33 @@ _room_file_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cond
 _room_file_lock = threading.Lock()
 
 
+def _room_files_lock_path() -> Optional[str]:
+    """The disk lock uploads share with the room files Linked Rooms carry
+    here (room_files_link.LOCK_NAME, in the root home's conduit folder), or
+    None without a Hermes home to put it in."""
+    try:
+        root = core._plugin_package_module("room_identity").root_home(core._calls_home())
+    except Exception:  # noqa: BLE001 - the upload still has this process's lock
+        return None
+    return os.path.join(str(root), "conduit", "room-files.lock")
+
+
+@contextlib.contextmanager
+def _room_files_disk(lock_path: Optional[str]):
+    """This process's lock, and the one carried files take too where
+    ``lock_path`` names it."""
+    with _room_file_lock, contextlib.ExitStack() as stack:
+        if lock_path is not None:
+            try:
+                os.makedirs(os.path.dirname(lock_path), mode=0o700, exist_ok=True)
+                handle = stack.enter_context(open(lock_path, "a+b"))
+            except OSError:
+                handle = None
+            if handle is not None:
+                stack.enter_context(core._plugin_package_module("room_identity")._exclusive(handle))
+        yield
+
+
 def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
     """Deletes uploads past retention, then the oldest until the rest and
     ``incoming`` fit the total cap. Runs at most hourly per root, and again
@@ -133,9 +160,11 @@ def _room_file_free(root: str) -> int:
         return 0
 
 
-def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[str, Any]:
+def store_room_file(root: str, body: Any, now: Optional[float] = None,
+                    lock_path: Optional[str] = None) -> Dict[str, Any]:
     """Writes one uploaded file under ``root``; returns where it went and the
-    `@file:` reference Hermes reads."""
+    `@file:` reference Hermes reads. ``lock_path``: the disk lock it shares
+    with carried room files (_room_files_lock_path)."""
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
     encoded = body.get("data_base64")
@@ -149,7 +178,7 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
         raise HTTPException(status_code=413, detail="The file is too large", headers={"Cache-Control": "no-store"})
     now = time.time() if now is None else now
     name = _room_file_name(body.get("name"))
-    with _room_file_lock:
+    with _room_files_disk(lock_path):
         if now - _room_file_last_sweep.get(root, float("-inf")) >= ROOM_FILE_SWEEP_INTERVAL_S:
             _sweep_room_files(root, now, len(data))
         try:
@@ -211,7 +240,9 @@ async def post_room_file(request: Request, response: Response, profile: Optional
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     try:
         body = await core._read_json_body(request, ROOM_FILE_MAX_BODY_BYTES)
-        stored = await core._run_scoped(profile, lambda: store_room_file(_room_files_root(), body), _room_file_executor)
+        lock_path = _room_files_lock_path()
+        stored = await core._run_scoped(profile, lambda: store_room_file(_room_files_root(), body, lock_path=lock_path),
+                                        _room_file_executor)
     except core.TokenError as exc:
         # The profile couldn't be scoped; nothing was stored.
         _room_file_limiter.release(key, mint)

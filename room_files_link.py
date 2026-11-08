@@ -54,6 +54,11 @@ TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 FREE_FLOOR_BYTES = 1024 * 1024 * 1024
 # As uploads (dashboard/api/rooms.py ROOM_FILE_RETENTION_S).
 RETENTION_S = 30 * 24 * 3600
+# How often a guest sweeps the room files it keeps, whether or not more arrive.
+SWEEP_S = 3600
+# Uploads (dashboard/api/rooms.py) and carried files check the disk and write under this one lock, in
+# the root home's conduit folder, so they can't both pass the free floor and then fill it together.
+LOCK_NAME = "room-files.lock"
 # Pieces of files not yet whole, together.
 INCOMING_BYTES = 64 * 1024 * 1024
 # Hermes' own data URL cap; a larger file stays on the home (Conduit names it).
@@ -80,6 +85,18 @@ _REFERENCE = re.compile(r"@file:(?:`([^`\r\n]+)`|\"([^\"\r\n]+)\"|'([^'\r\n]+)'|
 # Either separator: a Windows home names its uploads with backslashes.
 _TAIL = re.compile(r"[/\\]conduit[/\\]room-files[/\\](\d{8}-[0-9a-f]{32})[/\\]([^/\\]+)\Z")
 _thread_lock = threading.Lock()
+_disk_thread_lock = threading.Lock()
+
+
+@contextmanager
+def disk_lock(root: Any) -> Iterator[None]:
+    """The room files' disk lock of the installation whose root home is ``root``: this process's threads and
+    the dashboard's uploads wait on it (LOCK_NAME)."""
+    with _disk_thread_lock:
+        lock = Path(root) / "conduit" / LOCK_NAME
+        lock.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(lock, "a+b") as handle, room_identity._exclusive(handle):
+            yield
 
 
 def files_root(root: Any) -> Path:
@@ -153,6 +170,24 @@ class Files:
     def __init__(self, rooms: Any) -> None:
         self.rooms = rooms
         self.store = Store(rooms.root)
+        self._swept = float("-inf")
+
+    def sweep(self) -> None:
+        """What the rooms loop does each pass, at most every SWEEP_S: the room files kept here age out and
+        come under TOTAL_BYTES as uploads do, on a guest no more files reach or whose Conduit uploads under a
+        profile (whose sweep runs on that profile's folder)."""
+        now = self.rooms.clock()
+        if now - self._swept < SWEEP_S:
+            return
+        self._swept = now
+        root = files_root(self.rooms.root)
+        if not root.is_dir():
+            return
+        try:
+            with disk_lock(self.rooms.root):
+                _room_for(root, 0, now)
+        except OSError as exc:
+            logger.info("Linked Rooms couldn't sweep the room files here (%s)", type(exc).__name__)
 
     # --- The home ------------------------------------------------------------------------
 
@@ -358,18 +393,20 @@ class Files:
         try:
             root = target.parent.parent
             root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if not _room_for(root, len(whole), self.rooms.clock()):
-                logger.info("Linked Rooms didn't keep room file %s/%s: room files are full here (%d GB, or under "
-                            "%d GB free)", body["folder"], body["name"], TOTAL_BYTES >> 30, FREE_FLOOR_BYTES >> 30)
-                return False
-            target.parent.mkdir(exist_ok=True, mode=0o700)
-            descriptor, name = tempfile.mkstemp(prefix=".carried.", dir=target.parent)
-            with os.fdopen(descriptor, "wb") as handle:
-                handle.write(whole)
-            os.chmod(name, 0o600)
-            os.replace(name, target)
-            name = None
-            return True
+            with disk_lock(self.rooms.root):
+                if not _room_for(root, len(whole), self.rooms.clock()):
+                    logger.info("Linked Rooms didn't keep room file %s/%s: room files are full here (%d GB, or "
+                                "under %d GB free)", body["folder"], body["name"], TOTAL_BYTES >> 30,
+                                FREE_FLOOR_BYTES >> 30)
+                    return False
+                target.parent.mkdir(exist_ok=True, mode=0o700)
+                descriptor, name = tempfile.mkstemp(prefix=".carried.", dir=target.parent)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(whole)
+                os.chmod(name, 0o600)
+                os.replace(name, target)
+                name = None
+                return True
         except OSError as exc:
             if name is not None:
                 with contextlib.suppress(OSError):

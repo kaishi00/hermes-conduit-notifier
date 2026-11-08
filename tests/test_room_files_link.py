@@ -214,3 +214,30 @@ def test_a_file_no_member_answered_after_every_try_is_given_up(copies):  # noqa:
 
     assert _sent(copies, "room.file") == []
     assert store.read()["out"].get("link1", {}) == {}
+
+
+def test_a_guest_sweeps_its_room_files_without_more_arriving(tmp_path):
+    # DeepSeek on notifier #629: carried files aged out only when another arrived.
+    import os
+    import types
+
+    root = files_module.files_root(tmp_path)
+    old = root / ("20261001-" + "1" * 32)
+    old.mkdir(parents=True)
+    (old / "a.bin").write_bytes(b"x")
+    clock = [old.stat().st_mtime + files_module.RETENTION_S + 60]
+    files = files_module.Files(types.SimpleNamespace(root=tmp_path, clock=lambda: clock[0]))
+
+    files.sweep()
+
+    assert not old.exists()
+    assert (tmp_path / "conduit" / files_module.LOCK_NAME).exists()
+    # Not again within SWEEP_S.
+    old.mkdir()
+    os.utime(old, (0, 0))
+    clock[0] += files_module.SWEEP_S - 1
+    files.sweep()
+    assert old.exists()
+    clock[0] += 2
+    files.sweep()
+    assert not old.exists()

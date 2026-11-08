@@ -1016,6 +1016,8 @@ class Rooms:
         self.flush()
         # Notes in the private chats of the rooms elsewhere your agents only listen in (room_chats).
         self.notes.pass_once()
+        # The room files other homes carried here age out (room_files_link).
+        self.files.sweep()
 
     @property
     def notes(self) -> Any:

@@ -336,3 +336,23 @@ def test_picture_reads_are_rate_limited(tmp_path, monkeypatch):
     limited = client.get(f"{BASE}/room-files/data-url", params={"path": path})
     assert limited.status_code == 429
     assert limited.headers["cache-control"] == "no-store"
+
+
+def test_an_upload_waits_on_the_disk_lock_carried_room_files_take(tmp_path):
+    # DeepSeek on notifier #629: uploads and carried files checked the free floor under different locks.
+    import threading
+
+    files_link = api.core._plugin_package_module("room_files_link")
+    lock_path = str(tmp_path / "conduit" / files_link.LOCK_NAME)
+    done = threading.Event()
+
+    def upload():
+        api.rooms.store_room_file(str(tmp_path / "conduit" / "room-files"), _body(b"x"), lock_path=lock_path)
+        done.set()
+
+    with files_link.disk_lock(tmp_path):
+        worker = threading.Thread(target=upload)
+        worker.start()
+        assert not done.wait(0.3), "the upload went on while the carried file held the lock"
+    worker.join(5)
+    assert done.is_set()
