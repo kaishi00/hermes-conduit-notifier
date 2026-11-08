@@ -94,6 +94,22 @@ def _session_api_turn() -> Dict[str, Any]:
     return out
 
 
+def _session_api_start() -> Dict[str, Any]:
+    """A Watch job's chat with its turn running, left running (a restart cuts it off)."""
+    watch_jobs = _conduit(".watch_jobs", "WATCH_JOB_TOOLS")
+    server = watch_jobs._hermes_session_api()
+    transport = _Transport()
+
+    def rpc(rid: str, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        return server.dispatch({"jsonrpc": "2.0", "id": rid, "method": method, "params": params}, transport)
+
+    created = rpc("a", "session.create", {"cols": 96, "source": "desktop", "title": "Watch job"})
+    sid = (created.get("result") or {}).get("session_id")
+    submitted = rpc("b", "prompt.submit", {"session_id": sid, "text": "a long job"})
+    transport.event("message.start")
+    return {"session_id": sid, "submit": submitted}
+
+
 def _watch_call_turn() -> Dict[str, Any]:
     watch_local_live = _conduit(".watch_local_live", "_WatchCallChat")
     watch_jobs = _conduit(".watch_jobs", "WATCH_JOB_TOOLS")
@@ -124,6 +140,11 @@ def _pulse_send(chat_id: str) -> Dict[str, Any]:
 @router.get("/session-api-turn")
 async def session_api_turn() -> Dict[str, Any]:
     return await asyncio.to_thread(_session_api_turn)
+
+
+@router.get("/session-api-start")
+async def session_api_start() -> Dict[str, Any]:
+    return await asyncio.to_thread(_session_api_start)
 
 
 @router.get("/watch-call-turn")

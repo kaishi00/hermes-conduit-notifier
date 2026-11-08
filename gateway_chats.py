@@ -118,6 +118,12 @@ def authority_agent(session_id: Any) -> Optional[tuple]:
 
 
 _TURN_CONTROLS = ("session.steer", "session.redirect", "session.interrupt")
+# What every submission id the plugin's own chats send starts with: a turn of
+# theirs a gateway restart lost is theirs to discard (``_settle_lost``), a
+# person's (a different id) never.
+OWN_SUBMISSION_PREFIX = "conduit-plugin-"
+# A discard refused for these reasons finds the lost turn already gone.
+_SETTLED_LOST_REASONS = frozenset({"stale_generation", "not_found", "admission_terminal", "already_resolved"})
 
 
 def _reason(response: Any) -> Optional[str]:
@@ -162,6 +168,10 @@ class _AuthorityLink:
         self.prompts: Dict[str, tuple] = {}
         # session id -> this connection's subscription to it (session.detach names it).
         self.subscriptions: Dict[str, str] = {}
+        # session id -> the plugin's own turns a gateway restart lost there, as the
+        # chat's ``pending`` last listed them: admission id -> the generation it ran as.
+        # A chat this link has read (a snapshot or a ``session.info``) is a key.
+        self.lost: Dict[str, Dict[str, int]] = {}
         self._closed = False
 
     @property
@@ -195,6 +205,8 @@ class _AuthorityLink:
         with self.lock:
             if sid and type(generation) is int:
                 self.generations[sid] = generation
+            if sid and kind == "session.info":
+                self._note_pending(sid, payload)
             if kind == "approval.request" and isinstance(payload.get("prompt_id"), str):
                 asked = payload.get("execution_generation", generation)
                 self.prompts[payload["prompt_id"]] = (sid, asked if type(asked) is int else self.generations.get(sid, 0))
@@ -338,6 +350,71 @@ class _AuthorityLink:
         self._note_snapshot(result)
         return not (isinstance(result, dict) and result.get("running") is False)
 
+    def _note_pending(self, sid: str, snapshot: Dict[str, Any]) -> None:
+        """The chat's lost turns from a snapshot or ``session.info`` that lists its
+        ``pending`` admissions (call with the lock held). One without the key says
+        nothing about them."""
+        pending = snapshot.get("pending")
+        if not isinstance(pending, list):
+            return
+        self.lost[sid] = {row["admission_id"]: row["execution_generation"] for row in pending
+                          if isinstance(row, dict) and row.get("status") == "unknown"
+                          and isinstance(row.get("admission_id"), str)
+                          and type(row.get("execution_generation")) is int
+                          and str(row.get("input_id") or "").startswith(OWN_SUBMISSION_PREFIX)}
+
+    def _settle_lost(self, sid: str, left: Any = None) -> None:
+        """Discards the plugin's own turns a gateway restart left ``unknown`` in a
+        chat before the plugin sends into it again. Hermes holds every later
+        message behind one until someone discards it (Desktop's Discard, Conduit's
+        card), and settles only automation's by itself; the plugin's chats (Watch
+        jobs, a Watch call's Local Live chat, Pulse) have nobody on a screen to ask,
+        and their next turn supersedes the lost one. Never resent. A person's lost
+        turn (not the plugin's submission id) stays for them to decide in Conduit.
+        A chat this link hasn't read is read first."""
+        if not sid:
+            return
+        with self.lock:
+            known = sid in self.lost
+        if not known:
+            try:
+                snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
+                                                          "id": f"conduit-pending-{uuid.uuid4().hex}",
+                                                          "method": "session.resume",
+                                                          "params": {"session_id": sid, "omit_messages": True}}),
+                                         left() if left else AUTHORITY_RPC_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 — the send goes on; a refused read is the send's to report
+                logger.debug("Conduit: reading a chat's queue before a send failed", exc_info=True)
+                return
+            result = snapshot.get("result") if isinstance(snapshot, dict) else None
+            if not isinstance(result, dict) or result.get("session_id") != sid:
+                return  # Not read: the next send reads it again.
+            self._note_snapshot(result)
+            with self.lock:
+                # Read: a Hermes whose snapshot lists no queue isn't read again.
+                self.lost.setdefault(sid, {})
+        with self.lock:
+            lost = dict(self.lost.get(sid) or {})
+        for admission_id, generation in lost.items():
+            try:
+                answer = self.chats.run(self._dispatch({"jsonrpc": "2.0",
+                                                        "id": f"conduit-discard-{uuid.uuid4().hex}",
+                                                        "method": "prompt.resolve_unknown",
+                                                        "params": {"session_id": sid, "admission_id": admission_id,
+                                                                   "execution_generation": generation}}),
+                                       left() if left else AUTHORITY_RPC_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 — the send still goes; Hermes keeps it queued behind the lost turn
+                logger.debug("Conduit: discarding a chat's lost turn failed", exc_info=True)
+                continue
+            if isinstance(answer, dict) and answer.get("error"):
+                reason = _reason(answer)
+                if reason not in _SETTLED_LOST_REASONS:
+                    # Still holding the chat: the next send tries again.
+                    logger.info("Conduit: Hermes kept a lost turn in %s: %s", sid, reason)
+                    continue
+            with self.lock:
+                (self.lost.get(sid) or {}).pop(admission_id, None)
+
     def _note_snapshot(self, result: Any) -> None:
         if not isinstance(result, dict) or not isinstance(result.get("session_id"), str):
             return
@@ -345,6 +422,7 @@ class _AuthorityLink:
         with self.lock:
             if type(result.get("execution_generation")) is int:
                 self.generations[sid] = result["execution_generation"]
+            self._note_pending(sid, result)
             replaced = None
             if isinstance(result.get("subscription_id"), str):
                 replaced = self.subscriptions.get(sid)
@@ -383,8 +461,9 @@ class _AuthorityLink:
                 params["service_tier"] = "fast"
             return method, params
         if method == "prompt.submit":
+            self._settle_lost(sid, left)
             # One admission per call: the authority keeps a retried submission_id to one turn.
-            params["submission_id"] = uuid.uuid4().hex
+            params["submission_id"] = OWN_SUBMISSION_PREFIX + uuid.uuid4().hex
             self.chats.note_surface(self.transport, sid, params.get("text"))
             return method, params
         if method in ("session.interrupt", "session.steer", "session.redirect"):

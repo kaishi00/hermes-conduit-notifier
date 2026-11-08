@@ -218,6 +218,9 @@ ROUTE_CAPABILITIES = (
     # through this Hermes, and GET /rooms/people's posts on the home: who
     # wrote what (Linked Rooms).
     "room-posts",
+    # GET/PUT /rooms/looks: your bots' pictures and glow colors and yours,
+    # sent to the people in your rooms over Links, and theirs (Linked Rooms).
+    "room-looks",
     # GET/PUT /rooms/chats: a room's private chat with one of your agents,
     # told which room it's about, with notes on rooms it Listens in
     # (Linked Rooms).

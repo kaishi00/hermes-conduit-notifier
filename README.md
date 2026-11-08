@@ -4339,6 +4339,22 @@ installation's):
   your Link calls them, and a member's Hermes adds `you`, the name the home
   gives you (the one your posts carry there).
 
+How everyone in a room over Links looks goes through these, behind the
+`room-looks` capability (plugin 0.139+). Conduit gives its Hermes its bots'
+pictures and glow colors and its person's; each installation sends the others
+in a started room how its own look, and the home passes on everyone else's:
+
+- `PUT /rooms/looks` with `{"agents": {"<profile>": {"picture", "color"}},
+  "person": {"picture", "color"} | null}`: `{"looks": {"agents": [...],
+  "person": true|false}}`. A `picture` is a base64 JPEG or PNG of at most
+  8 KB, a `color` `#RRGGBB`, each null when there's none. It takes the place
+  of what was sent before (`bad_looks`, 400, for one that isn't).
+- `GET /rooms/looks?room_id=`: `{"room_id", "members": {"<member_id>": look},
+  "people": [{"name", "poster", "look"}], "home": look | null}`: other
+  people's agents by member id, each other person but the host (`name` as
+  your Link calls them, `poster` the name their posts carry), and the host's
+  look when it isn't you. Empty until their Hermes sends them.
+
 Taking agents out goes through these, behind the `room-leave` capability
 (plugin 0.94+):
 
