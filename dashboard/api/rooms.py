@@ -279,9 +279,16 @@ def _room_file_type(name: str, head: bytes) -> str:
     if picture:
         return picture
     guessed, _ = mimetypes.guess_type(name)
-    if not guessed or guessed.startswith("image/"):
+    if not guessed or guessed.startswith("image/") or guessed in _ROOM_FILE_SCRIPTABLE_TYPES:
         return "application/octet-stream"
     return guessed
+
+
+# Types a viewer would run rather than show; they open as plain files.
+_ROOM_FILE_SCRIPTABLE_TYPES = frozenset((
+    "text/html", "application/xhtml+xml", "text/javascript", "application/javascript",
+    "image/svg+xml", "text/xml", "application/xml",
+))
 
 
 def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:

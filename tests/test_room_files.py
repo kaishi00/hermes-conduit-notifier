@@ -205,8 +205,11 @@ def test_any_other_file_reads_back_typed_by_its_name(tmp_path):
         ("report.pdf", b"%PDF-1.7 ...", "application/pdf"),
         ("pasted_content_1.txt", "Hé, long paste".encode(), "text/plain"),
         # The host's own table can name audio differently; it's still audio.
-        ("clip.m4a", b"\x00\x00\x00\x20ftypM4A ", __import__("mimetypes").guess_type("clip.m4a")[0]),
+        ("clip.m4a", b"\x00\x00\x00\x20ftypM4A ", __import__("mimetypes").guess_type("clip.m4a")[0] or "application/octet-stream"),
         ("notes", b"no extension", "application/octet-stream"),
+        # A page or script opens as a file, never runs in a viewer.
+        ("page.html", b"<script>alert(1)</script>", "application/octet-stream"),
+        ("feed.xml", b"<?xml version='1.0'?><a/>", "application/octet-stream"),
     ):
         stored = api.rooms.store_room_file(str(tmp_path), _body(data, name))
         read = api.rooms.read_room_file_picture(str(tmp_path), stored["path"])
