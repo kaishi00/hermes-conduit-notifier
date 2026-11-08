@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.141.2 (2026-11-08)
+## 0.141.5 (2026-11-08)
 
 ### Fixes
 - Pulse made two or three copies of the same card from one check, and the
@@ -21,8 +21,16 @@ checks it). The format is fixed, because Conduit reads it:
   copy of the plugin ran Pulse. Now only one does.
 - Pulse cards came back after you marked them Done: one oddly saved date
   made every check skip looking at earlier cards. Dates saved like that no
-  longer stop any of Pulse's checks, and a card you marked Done or put away keeps the same words from
-  coming back for a month.
+  longer stop any of Pulse's checks, and a card you marked Done or put away
+  keeps the same words from coming back for a month.
+
+## 0.141.4 (2026-11-08)
+
+### Fixes
+- In a room with linked people, @mentioning one bot got you an answer from
+  it, but its reply often tagged another bot, and Hermes gives a turn to
+  any bot that's tagged, so both answered anyway. A bot you @mention now
+  answers you itself and tags another only when you asked for them.
 
 ## 0.141.1 (2026-11-08)
 
