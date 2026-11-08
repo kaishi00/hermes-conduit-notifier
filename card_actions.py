@@ -181,6 +181,20 @@ class TapStore:
             state["taps"] = state["taps"][-MAX_TAPS:]
         return {"ok": True, "id": tap["id"]}
 
+    def drop(self, tap_id: Any) -> dict[str, Any]:
+        """Forgets a tap Hermes hasn't heard: Conduit posted it, then didn't
+        send the message about it (the chat changed, or the user typed in the
+        composer meanwhile), so no later message that happens to start with
+        its label hears it."""
+        tap_id = _clean(tap_id, 64)
+        if not tap_id:
+            raise TapError("id is the tap's id, as posting it answered")
+        with self._locked() as state:
+            before = len(state["taps"])
+            state["taps"] = [tap for tap in state["taps"] if tap["id"] != tap_id or tap["heard"]]
+            dropped = before - len(state["taps"])
+        return {"ok": True, "dropped": dropped > 0}
+
     def note(self, session_id: Any, message: Any) -> str | None:
         """The taps in this chat Hermes hasn't heard yet, once, for the turn
         of the user's message about them (it starts with the button's label):

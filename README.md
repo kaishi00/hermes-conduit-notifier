@@ -2631,20 +2631,23 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
   be), or `tap`. A `confirm` question is asked before it goes; one primary
   button per card.
 - **Fields**: `text` (with `lines` and a `placeholder`), `choice` (2 to 6
-  `options`), `toggle` (on or off), `date` (YYYY-MM-DD, or with THH:MM) and
+  `options`), `toggle` (on or off), `date` (a real day as YYYY-MM-DD, or with THH:MM) and
   `number` (within `min` and `max`), each with an `id`, a `label` and a
   starting `value`; six per card. A field whose id, label or placeholder
-  names a password, passcode, PIN, one-time, 2FA, login, access, unlock, reset,
+  names a password, passcode, PIN, one-time, 2FA, MFA, login, access, unlock, reset,
   recovery, activation or verification code, token, API, auth, private, master,
   security, backup, verification or recovery key, passphrase, seed
   phrase, credentials or other secret is refused, in the languages Conduit
-  ships as well as English.
+  ships as well as English, full-width letters included.
 - **Taps.** Conduit posts a tap to `POST /boards/taps` (capability
   `card-taps`; `sessions`, the `card` as the chat holds it, the button's
   `action` id and the fields' `values`), then sends the user's message about
   it ("Send · Email to Mei"). That message's turn hears the tap once, with
   the card's Markdown and the field values, kept in the profile's
-  `conduit-card-taps.json` for 15 minutes. A tap is the user's OK for
+  `conduit-card-taps.json` for 15 minutes. When Conduit doesn't send that
+  message after all (the chat changed, or the user typed meanwhile), it
+  drops the tap with `DELETE /boards/taps?id=` (capability `card-tap-drop`),
+  so a later message starting with the same label doesn't hear it. A tap is the user's OK for
   exactly what the card showed (Eric, 2026-11-07, issue 1946): the agent
   does it with its own tools and shows the card again under its `live`
   name with the result.
