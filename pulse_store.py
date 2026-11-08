@@ -619,6 +619,15 @@ _learned: dict[str, tuple[tuple, float, prefs.Learned]] = {}
 LEARNED_FOR_S = 600.0
 
 
+def close_time(value: Any) -> float:
+    """An item's ``closed_at`` as a number: 0.0 for none, or for one stored
+    as text (something outside Pulse wrote one on a host; Eric, 2026-11-08),
+    which counts as long ago rather than failing whatever reads it."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value)
+
+
 def _same_host(a: Any, b: Any) -> bool:
     """Whether two lease owners (``host:pid``) name the same host."""
     return str(a).rpartition(":")[0] == str(b).rpartition(":")[0]
@@ -1313,7 +1322,8 @@ class PulseStore:
         (notifier #550). ``limit`` None reads them all."""
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM items WHERE superseded_at IS NULL AND (status='open' "
-                                "OR (status='reminded' AND closed_at >= ?)) ORDER BY mentioned_at DESC, id DESC LIMIT ?",
+                                "OR (status='reminded' AND typeof(closed_at) IN ('integer', 'real') AND closed_at >= ?)) "
+                                "ORDER BY mentioned_at DESC, id DESC LIMIT ?",
                                 (reminded_since, -1 if limit is None else limit)).fetchall()
         return [dict(row) for row in rows]
 
@@ -1355,7 +1365,7 @@ class PulseStore:
                 if row is None:
                     return False
                 if row["status"] not in ("open", "reminded"):
-                    return float(row["closed_at"] or 0.0) >= since
+                    return close_time(row["closed_at"]) >= since
                 if row["superseded_by"] is None:
                     return False
                 item_id = row["superseded_by"]

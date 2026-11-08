@@ -157,8 +157,11 @@ _owner = f"{socket.gethostname()}:{os.getpid()}"
 # (Eric, 2026-11-08: three copies of every card from one run). The copy that
 # ticks holds this process-wide slot; another takes it once the holder stops
 # ticking (stopped, or a newer build installed over it).
-_SLOT = "conduit_push_pulse_slot"
-_me = str(Path(__file__).resolve().parent)
+_SLOT = "_conduit_push_pulse_slot_registry"
+# Each loaded copy by its module name (Hermes names each scope's its own,
+# "…conduit_push" and "…conduit_push__home_<digest>"): a profile whose plugin
+# folder is a link to the main install still loads a copy of its own.
+_me = __name__
 _memory_thread: Optional[threading.Thread] = None
 _report_thread: Optional[threading.Thread] = None
 # Whether Hermes took the plugin's auxiliary task, so memory calls can name it.
@@ -670,6 +673,7 @@ def _run(stopped: threading.Event) -> None:
         except Exception:  # noqa: BLE001 — the loop must outlive a bad tick
             logger.warning("conduit_push: Pulse tick failed", exc_info=True)
         _wake.wait(TICK_S)
+    _leave_slot()  # a tick that ran as stop() came may have taken it again
 
 
 def _hosts_chats() -> bool:

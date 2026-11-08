@@ -38,7 +38,7 @@ def test_only_one_plugin_copy_in_a_process_runs_the_loop(monkeypatch):
     monkeypatch.setitem(sys.modules, pulse._SLOT, slot)
     assert pulse._process_slot()
     # Another profile's copy, loaded into the same process, waits.
-    monkeypatch.setattr(pulse, "_me", "/root/.hermes/profiles/nahida/plugins/conduit_push")
+    monkeypatch.setattr(pulse, "_me", "hermes_plugins.conduit_push__home_7ecc6991116a.pulse")
     assert not pulse._process_slot()
     pulse._leave_slot()  # not its slot: nothing changes
     assert slot.holder != pulse._me
@@ -51,7 +51,7 @@ def test_only_one_plugin_copy_in_a_process_runs_the_loop(monkeypatch):
 
 def test_a_copy_without_the_slot_sends_nothing(live, monkeypatch):
     slot = type(sys)("slot")
-    slot.holder, slot.at = "/elsewhere/conduit_push", time.monotonic()
+    slot.holder, slot.at = "hermes_plugins.conduit_push__home_bd60a4de7372.pulse", time.monotonic()
     monkeypatch.setitem(sys.modules, pulse._SLOT, slot)
     live.store.set("report_requested", True)
     pulse.tick()
@@ -113,3 +113,29 @@ def test_a_report_without_a_list_gets_no_card_for_a_line_already_carded(live):
     assert candidates.said_before(live.store, "watch", AUDIT, now)
     assert not candidates.said_before(live.store, "fact", AUDIT, now)
     assert not candidates.said_before(live.store, "watch", SEABAG, now)
+
+
+def test_other_readers_of_a_text_close_time_count_it_as_long_ago(live):
+    flights = commitment(live, "The user will book the flights to Lisbon.", words="I need to book flights to Lisbon")
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE items SET status='done', closed_at='2026-11-03 15:43:11' WHERE id=?", (flights,))
+    assert live.store.closed_since(flights, 1.0) is False  # used to raise ValueError
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE items SET status='reminded' WHERE id=?", (flights,))
+    assert live.store.remembered_items(limit=None, reminded_since=time.time()) == []
+    assert pulse.store.close_time("2026-11-03 15:43:11") == 0.0 and pulse.store.close_time(5) == 5.0
+
+
+def test_a_loop_that_ends_lets_go_of_the_slot(monkeypatch):
+    slot = type(sys)("slot")
+    monkeypatch.setitem(sys.modules, pulse._SLOT, slot)
+    stopped = pulse.threading.Event()
+    monkeypatch.setattr(pulse, "tick", lambda: (pulse._process_slot(), stopped.set()))
+    pulse._run(stopped)
+    assert slot.holder is None
+
+
+def test_copies_from_one_folder_are_still_told_apart():
+    # A profile's plugin folder can be a link to the main install: the same
+    # files, loaded again under the scope's own module name.
+    assert pulse._me == pulse.__name__
