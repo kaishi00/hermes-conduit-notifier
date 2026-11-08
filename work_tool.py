@@ -3682,6 +3682,12 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
     body = body if isinstance(body, dict) else {}
     if action not in APP_ACTIONS:
         return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for work."}
+    if action in APP_APPROVAL:
+        # Every approval tap is logged as it arrives, refused or not, so one
+        # that answered nothing can be traced afterwards (an overview Approve
+        # that looked taken, 2026-11-08).
+        logger.info("conduit_push: %s %s for %r arrived", _cut(" ".join(str(ref).split()), 40), action,
+                    _app_request_id(body))
     if policy(home) == "off":
         return {"ok": False, "error": "off", "note": "Bot workstreams are off for this bot."}
     if action in APP_MANAGE:
@@ -3820,15 +3826,18 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
     return answer
 
 
+def _app_request_id(body: dict) -> str:
+    """An approval tap's request id as logged: one line, cut short."""
+    request_id = body.get("request_id") if isinstance(body.get("request_id"), str) else ""
+    return _cut(" ".join(request_id.split()), 120)
+
+
 def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work,
                          action: str, body: dict) -> dict:
     """Approve once or deny the approval the workstream waits on, by its
     request id: the one the card showed, never another."""
     request_id = body.get("request_id") if isinstance(body.get("request_id"), str) else ""
-    # Every tap is logged as it arrives, so one that answered nothing can be
-    # traced afterwards (an overview Approve that looked taken, 2026-11-08).
-    shown_id = _cut(" ".join(request_id.split()), 120)
-    logger.info("conduit_push: %s %s for %r while %s", work.ref, action, shown_id, work.status)
+    shown_id = _app_request_id(body)
     if not request_id:
         return {"ok": False, "ref": work.ref, "error": "missing", "note": "Which approval? Open its chat to answer it."}
     if work.status != "needs_you":
