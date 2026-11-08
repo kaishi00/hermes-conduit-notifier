@@ -2935,7 +2935,7 @@ def test_the_work_panel_lists_work_with_its_counts_and_actions(on, hermes):
     assert rows["W2"]["result"] == "The NAS has 12% free." and rows["W2"]["actions"] == ["send"]
 
 
-def test_a_needs_you_card_answers_its_approval_by_its_request(on, hermes):
+def test_a_needs_you_card_answers_its_approval_by_its_request(on, hermes, caplog):
     start()
     work.needs_you(WORKER_1, "delete a file")
     hermes.pending[WORKER_1] = [
@@ -2949,9 +2949,14 @@ def test_a_needs_you_card_answers_its_approval_by_its_request(on, hermes):
     _, params, transport = hermes.named("approval.pending")[-1]
     assert params == {"session_id": "rt-20261031_work_1"} and transport is None
     assert work.app_act(on.home, "W1", "approve")["error"] == "missing"
+    caplog.set_level("INFO", logger="hermes.plugins.conduit_push")
     assert work.app_act(on.home, "W1", "approve", {"request_id": "appr-9"})["error"] == "not_now"
+    # Each tap is logged with what Hermes waited on, so one that answered nothing can be traced.
+    assert "W1 approve for 'appr-9' arrived" in caplog.text
+    assert "W1 approve for 'appr-9' found no such request; Hermes waits on [None, 'appr-2']" in caplog.text
     answer = work.app_act(on.home, "W1", "approve", {"request_id": "appr-2"})
     assert answer["ok"] and answer["work"]["approval"] is None  # answered, though the hook hasn't run
+    assert "W1 approve for 'appr-2' in " in caplog.text and ": Hermes took it" in caplog.text
     _, params, _ = hermes.named("approval.respond")[-1]
     assert params == {"session_id": "rt-20261031_work_1", "choice": "once", "request_id": "appr-2"}
     assert len(hermes.pending[WORKER_1]) == 1  # the chat's own one is untouched
@@ -2959,6 +2964,20 @@ def test_a_needs_you_card_answers_its_approval_by_its_request(on, hermes):
     plugin._post_approval_response(session_id=WORKER_1, session_key=WORKER_1, choice="once")
     assert on.get("W1").status == "running" and work.app_list(on.home)["work"][0]["approval"] is None
     assert work.app_act(on.home, "W1", "deny", {"request_id": "appr-2"})["error"] == "not_now"
+
+
+def test_an_approval_tap_is_logged_when_refused_early_or_when_hermes_errors(on, hermes, caplog):
+    caplog.set_level("INFO", logger="hermes.plugins.conduit_push")
+    assert work.app_act(on.home, "W7", "deny", {"request_id": "appr-1\nforged"})["error"] == "no_such_work"
+    assert "W7 deny for 'appr-1 forged' arrived" in caplog.text
+    start()
+    work.needs_you(WORKER_1, "delete a file")
+    hermes.pending[WORKER_1] = [{"request_id": "appr-2", "command": "rm -f /tmp/x", "description": "delete a file"}]
+    hermes.refuse["approval.respond"] = {"code": -32000, "message": "session gone"}
+    answer = work.app_act(on.home, "W1", "approve", {"request_id": "appr-2"})
+    assert answer["error"] == "hermes"
+    assert "W1 approve for 'appr-2' in " in caplog.text and " failed" in caplog.text
+    assert any(record.levelname == "WARNING" and record.exc_info for record in caplog.records)
 
 
 @pytest.mark.parametrize("command", ["", "  ", "x" * (work.APP_APPROVAL_COMMAND_CHARS + 1)])
