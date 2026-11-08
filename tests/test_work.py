@@ -5283,3 +5283,35 @@ def test_a_room_work_ask_goes_only_to_a_conduit_that_shows_them(home):
     # A room's asks and its work asks are apart: a share ask's answers never include it.
     store.exchange({**PHONE, "results": [{"id": prompt["id"], "outcome": "confirmed"}]})
     assert store.room_answers("room-1") == [] and len(store.room_answers("room-1", work=True)) == 1
+
+
+def test_a_waiting_room_ask_is_looked_at_less_often_once_it_has_waited(on, monkeypatch):
+    # Issue 608: an ask the owner leaves unanswered keeps no 5 s loop for a day.
+    sleeps = []
+    clock = [1000.0]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+        if len(sleeps) >= 40:
+            work._ask_generation[0] += 1  # ends the watch
+
+    monkeypatch.setattr(work.time, "sleep", sleep)
+    monkeypatch.setattr(work, "check_asks", lambda home: True)
+    work._watch_asks(on.home)
+    thread = work._ask_watchers[str(on.home)]
+    thread.join(5)
+    assert not thread.is_alive()
+    fast = int(work.ROOM_ASK_FAST_S / work.ROOM_ASK_POLL_S)
+    assert sleeps[:fast] == [work.ROOM_ASK_POLL_S] * fast
+    assert set(sleeps[fast:]) == {work.ROOM_ASK_SLOW_POLL_S}
+
+
+def test_reading_a_room_ask_takes_no_lock_and_writes_nothing(on, tmp_path):
+    from conduit_push.present_store import PresentStore
+
+    present = PresentStore(on.home)
+    assert present.room_ask("nope") is None
+    assert not present.path.with_name(f".{present.path.name}.lock").exists()
+    assert not present.path.exists()

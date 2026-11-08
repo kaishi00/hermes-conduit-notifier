@@ -31,6 +31,7 @@ can't be read or written lets the call through (and logs it).
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -52,6 +53,10 @@ DESKTOP_TOOLS = frozenset({"computer_use"})
 # A hold not renewed for this long is over (a turn that stalled or died
 # without Hermes reporting its end).
 HOLD_IDLE_S = 600.0
+# The holder's own calls renew its hold at most this often: a screen-driving
+# turn calls computer_use several times a minute, and a renewal far inside
+# HOLD_IDLE_S tells nobody anything (issue 607).
+RENEW_S = 30.0
 # Sessions told to wait, kept this long at most.
 WAIT_KEEP_S = 2 * 3600.0
 MAX_WAITING = 20
@@ -165,9 +170,9 @@ def _locked(path: Path) -> Iterator[dict]:
             state = {}
         if not isinstance(state, dict):
             state = {}
-        before = json.dumps(state, sort_keys=True)
+        before = copy.deepcopy(state)
         yield state
-        if json.dumps(state, sort_keys=True) != before:
+        if state != before:
             handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".conduit-screen-")
             try:
                 with os.fdopen(handle, "w", encoding="utf-8") as file:
@@ -228,6 +233,8 @@ def claim(home: Path, session_id: str, who: dict, where: Optional[str] = None,
     where = where or scope()
     path = _path(home, where)
     now = time.time() if now is None else now
+    if _held_fresh(path, session_id, who, now):
+        return None
     with _locked(path) as state:
         holder = state.get("holder")
         if live(holder, now) and holder.get("session_id") != session_id:
@@ -242,6 +249,38 @@ def claim(home: Path, session_id: str, who: dict, where: Optional[str] = None,
                    and not _same_entry(item, session_id, who)]
         state["waiting"] = waiting
     return None
+
+
+_HOLD_KEYS = frozenset({"session_id", "since", "renewed", "pid", "host"})
+
+
+def _held_fresh(path: Path, session_id: str, who: dict, now: float) -> bool:
+    """Whether this process already holds the screen for ``session_id`` as
+    ``who``, renewed within ``RENEW_S``, with nothing of its own left on the
+    waiting list: then the call needs no write. Read without the lock (the
+    file is only ever replaced whole); anything unexpected takes the locked
+    path."""
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(state, dict):
+        return False
+    holder = state.get("holder")
+    if not isinstance(holder, dict) or holder.get("session_id") != session_id \
+            or holder.get("pid") != os.getpid() or holder.get("host") != _HOST_NAME:
+        return False
+    renewed = holder.get("renewed")
+    if not isinstance(renewed, (int, float)) or not 0 <= now - renewed < RENEW_S:
+        return False
+    # Named as it would be now (a renamed chat, a workstream's new title).
+    if {key: value for key, value in holder.items() if key not in _HOLD_KEYS} != who:
+        return False
+    last = state.get("last")
+    if not isinstance(last, dict) or last.get("session_id") != session_id:
+        return False
+    return not any(isinstance(item, dict) and _same_entry(item, session_id, who)
+                   for item in state.get("waiting") or [])
 
 
 def _same_entry(item: dict, session_id: str, who: dict) -> bool:

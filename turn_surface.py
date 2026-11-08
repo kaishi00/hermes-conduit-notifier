@@ -36,7 +36,9 @@ and the turn whose session and text match it takes it: only Conduit reports,
 for the exact text it is about to send in that chat. A send of the
 plugin's own (Watch jobs, a Watch call's chat) that the authority refused
 drops its report, and Conduit drops the report of a send of its own that
-failed (``POST /turn-surface/discard``, on either server). One that seemed
+failed (``POST /turn-surface/discard``, on either server). A discard that
+comes before its report (the report was slow and the send failed fast) holds
+the text's hash for ``DISCARD_HOLD_S``, and the report is dropped as it lands. One that seemed
 to go but never reached Hermes still waits: the same words sent from
 another client in that chat within ``AUTHORITY_FRESH_S`` would take its line.
 
@@ -62,6 +64,12 @@ FRESH_S = 900.0
 AUTHORITY_FRESH_S = FRESH_S
 # Reports kept per chat; the oldest goes first.
 MAX_KEPT = 8
+# A discard that found no report keeps its text's hash this long, and a
+# report of that text landing meanwhile is dropped: the report was still on
+# its way when its send failed (issue 610). A send of the same words again
+# within it just has no line, as before the feature.
+DISCARDED_KEY = "conduit_turn_surface_discarded"
+DISCARD_HOLD_S = 60.0
 MAX_SESSION_ID_CHARS = 200
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
@@ -133,8 +141,11 @@ def text_sha256(text: str) -> str:
 
 
 def record(session: dict, report: Report, clock: Callable[[], float] = time.monotonic) -> None:
-    """Keeps ``report`` on ``session`` (Hermes' record) for the turn of its text."""
+    """Keeps ``report`` on ``session`` (Hermes' record) for the turn of its
+    text, unless its send already failed (``discard``)."""
     now = clock()
+    if report.text_sha256 in _discarded(session, now):
+        return
     kept = session.get(KEY)
     kept = {digest: value for digest, value in kept.items() if _fresh(value, now)} if isinstance(kept, dict) else {}
     # A repeated text moves to the end, so eviction takes the oldest report.
@@ -227,20 +238,41 @@ def discard_digest_for_authority(session_id: str, digest: str) -> bool:
     ``digest`` in ``session_id``; True when there was one."""
     lock, chats = _authority_store()
     with lock:
-        session = chats.get(session_id)
-        if not isinstance(session, dict) or not discard(session, digest):
-            return False
-        if not session.get(KEY):
-            chats.pop(session_id, None)
-        return True
+        session = chats.pop(session_id, None)
+        if not isinstance(session, dict):
+            session = {}
+        discarded = discard(session, digest)
+        if session.get(KEY) or session.get(DISCARDED_KEY):
+            chats[session_id] = session
+            while len(chats) > MAX_AUTHORITY_CHATS:
+                chats.pop(next(iter(chats)))
+        return discarded
 
 
-def discard(session: dict, digest: str) -> bool:
+def _discarded(session: Any, now: float) -> dict:
+    """The hashes discarded on ``session`` within ``DISCARD_HOLD_S``."""
+    held = session.get(DISCARDED_KEY) if isinstance(session, dict) else None
+    if not isinstance(held, dict):
+        return {}
+    return {digest: at for digest, at in held.items()
+            if isinstance(at, float) and 0 <= now - at <= DISCARD_HOLD_S}
+
+
+def discard(session: dict, digest: str, clock: Callable[[], float] = time.monotonic) -> bool:
     """Forgets the report on ``session`` (Hermes' record) for the text hashing
     to ``digest``; True when there was one. Conduit's send that failed: no
-    turn of that text is coming, so the report would wait for another."""
+    turn of that text is coming, so the report would wait for another. With
+    none kept yet, a report of it still on its way is dropped when it lands."""
     kept = session.get(KEY)
     if not isinstance(kept, dict) or digest not in kept:
+        now = clock()
+        held = _discarded(session, now)
+        held.pop(digest, None)
+        held[digest] = now
+        while len(held) > MAX_KEPT:
+            held.pop(next(iter(held)))
+        # One assignment, as ``record`` writes it.
+        session[DISCARDED_KEY] = held
         return False
     kept = dict(kept)
     kept.pop(digest)
@@ -271,7 +303,7 @@ def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float
     with lock:
         session = chats.get(session_id)
         kept = take(session, message, clock, AUTHORITY_FRESH_S) if session is not None else None
-        if session is not None and not session.get(KEY):
+        if session is not None and not session.get(KEY) and not _discarded(session, clock()):
             chats.pop(session_id, None)
     return kept
 
