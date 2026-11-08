@@ -111,14 +111,14 @@ def test_any_card_carries_buttons_and_its_markdown_shows_them():
                                   "Recovery code", "Activation code", "Auth key", "Verification key",
                                   "Bestätigungscode", "Código de verificación", "Code de vérification",
                                   "Kode verifikasi", "Doğrulama kodu", "Код подтверждения",
-                                  "Pincode", "pin_code", "MFA code", "mfaCode", "PIN码", "输入PIN", "OTP認証"])
+                                  "Pincode", "pin_code", "MFA code", "mfaCode", "PIN码", "输入PIN", "OTP認証", "ＰＩＮコード", "ＭＦＡ"])
 def test_a_field_never_asks_for_a_secret(name):
     assert card_schema.names_secret(name)
 
 
 @pytest.mark.parametrize("name", ["Spin class", "Subject", "Opinion", "Pinned note", "to", "Topic", "Key dates",
                                   "Zip code", "メモ", "Betreff", "Тема", "Spinning クラス",
-                                  "Comfort level"])
+                                  "Comfort level", "Spin code", "Hairpin code", "ＳＰＩＮ"])
 def test_ordinary_fields_are_not_secrets(name):
     assert not card_schema.names_secret(name)
 
@@ -556,6 +556,13 @@ def test_a_tap_on_a_whole_diff_card_fits_the_route(route_home):
     assert len(body) > 512 * 1024
     response = _http().post(f"{BASE}/boards/taps", content=body, headers={"content-type": "application/json"})
     assert response.status_code == 200, response.text
+
+
+def test_a_tap_over_the_cap_is_refused(route_home):
+    response = _http().post(f"{BASE}/boards/taps", content=b"x" * (api.boards.TAP_MAX_BODY_BYTES + 1),
+                            headers={"content-type": "application/json"})
+    assert response.status_code == 413
+    assert response.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.parametrize("value, kept", [("2026-02-31", False), ("2026-02-29", False), ("2028-02-29", True),

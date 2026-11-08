@@ -508,7 +508,7 @@ _SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime",
                  "licensekey", "seedphrase", "verificationcode", "securitycode", "authcode", "backupcode",
                  "passphrase", "totp", "masterkey", "credential", "2fa", "twofactor", "logincode",
                  "accesscode", "unlockcode", "securitykey", "resetcode", "recoverycode",
-                 "activationcode", "authkey", "verificationkey", "backupkey", "pincode", "mfacode",
+                 "activationcode", "authkey", "verificationkey", "backupkey",
                  # The same in the languages Conduit ships, as a model writes labels in the user's.
                  "passwort", "kennwort", "contraseña", "motdepasse", "senha", "пароль", "hasło", "şifre",
                  "katasandi", "パスワード", "暗証番号", "認証コード", "密码", "密碼", "验证码", "驗證碼",
@@ -516,7 +516,7 @@ _SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime",
                  "códigodeverificación", "codigodeverificacion", "códigodeverificação", "codedevérification",
                  "codedeverification", "codicediverifica", "kodeverifikasi", "doğrulamakodu", "kodweryfikacyjny",
                  "кодподтверждения", "clavedeacceso", "contrasena")
-_SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc", "mfa"))
+_SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc", "mfa", "pincode", "mfacode"))
 # Letters of any script count, so a label in Japanese or Russian is read too.
 _NOT_ALNUM = re.compile(r"[\W_]+")
 # Where ASCII letters and digits meet another script's letters, a word splits,
@@ -545,7 +545,8 @@ def _a(word: str) -> str:
 
 def names_secret(text: str) -> bool:
     """Whether a field's id, label or placeholder asks for a secret."""
-    words = _NOT_ALNUM.sub(" ", text.lower()).split()
+    # NFKC first, so full-width ＰＩＮ reads as pin.
+    words = _NOT_ALNUM.sub(" ", unicodedata.normalize("NFKC", text).lower()).split()
     joined = "".join(words)
     pieces = [piece for word in words for piece in _SCRIPT_SEAM.sub(" ", word).split()]
     return any(part in joined for part in _SECRET_PARTS) or bool(_SECRET_WORDS.intersection(pieces))

@@ -152,7 +152,7 @@ def drop_tap(tap_id: Optional[str]) -> Dict[str, Any]:
 
 @router.delete("/boards/taps")
 async def delete_board_tap(request: Request, response: Response, profile: Optional[str] = None,
-                           id: Optional[str] = None) -> Dict[str, Any]:
+                           id: Optional[str] = None) -> Dict[str, Any]:  # noqa: A002 — the query's name
     """Forgets a tap whose message Conduit didn't send."""
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)

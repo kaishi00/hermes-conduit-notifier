@@ -2638,7 +2638,7 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
   recovery, activation or verification code, token, API, auth, private, master,
   security, backup, verification or recovery key, passphrase, seed
   phrase, credentials or other secret is refused, in the languages Conduit
-  ships as well as English.
+  ships as well as English, full-width letters included.
 - **Taps.** Conduit posts a tap to `POST /boards/taps` (capability
   `card-taps`; `sessions`, the `card` as the chat holds it, the button's
   `action` id and the fields' `values`), then sends the user's message about
