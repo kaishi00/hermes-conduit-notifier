@@ -253,6 +253,10 @@ def test_the_route_reads_from_the_hermes_home(tmp_path, monkeypatch):
     assert missing.headers["cache-control"] == "no-store"
 
 
+import pytest as _pytest
+
+
+@_pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
 def test_a_fifo_in_an_upload_folder_is_turned_away_without_hanging(tmp_path):
     import pytest
 

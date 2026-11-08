@@ -310,7 +310,8 @@ async def get_room_file_picture(response: Response, path: str = "", profile: Opt
             _room_file_picture_limiter, profile, lambda: read_room_file_picture(_room_files_root(), path)))
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    except HTTPException:
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     except Exception as exc:
         raise core._unexpected("read", exc, feature="Room files")
