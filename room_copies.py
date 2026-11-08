@@ -224,7 +224,9 @@ class Copies:
         files = getattr(self.rooms, "files", None)
         if files is not None:
             try:
-                files.note(room_id, link_id, events)
+                # Only what the home's own people sent: a linked person's post naming a path carries nothing.
+                files.note(room_id, link_id, [event for event in events
+                                              if not (isinstance(event, dict) and event.get("event_id") in posts)])
             except Exception as exc:  # noqa: BLE001 - the page goes either way
                 self._tell_once(f"files:{room_id}", "Linked Rooms couldn't note room %s's files (%s)", room_id,
                                 type(exc).__name__)

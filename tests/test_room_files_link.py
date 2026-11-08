@@ -141,7 +141,7 @@ def test_a_windows_homes_path_is_one_too(tmp_path):
 def test_a_carried_file_that_cant_be_kept_leaves_nothing_behind(tmp_path, monkeypatch):
     root = tmp_path / "laifu"
     target = files_module.files_root(root) / FOLDER / "shot.jpg"
-    files = files_module.Files(type("Rooms", (), {"root": root})())
+    files = files_module.Files(type("Rooms", (), {"root": root, "clock": staticmethod(lambda: 0.0)})())
     body = {"folder": FOLDER, "name": "shot.jpg"}
 
     def full(*_args):
@@ -158,3 +158,43 @@ def test_a_carried_file_that_cant_be_kept_leaves_nothing_behind(tmp_path, monkey
     monkeypatch.setattr(files_module, "TOTAL_BYTES", 2 * 1024 ** 3)
     assert files._keep(target, b"data", body) is True
     assert target.read_bytes() == b"data"
+
+
+def test_room_files_age_out_and_make_room_on_a_guest_that_never_uploads(tmp_path, monkeypatch):
+    # DeepSeek on notifier #629: the uploads' sweep runs only on an upload.
+    import os
+
+    root = files_module.files_root(tmp_path / "laifu")
+    old, recent = root / ("20261001-" + "1" * 32), root / ("20261107-" + "2" * 32)
+    for folder in (old, recent):
+        folder.mkdir(parents=True)
+        (folder / "a.bin").write_bytes(b"x" * 10)
+    now = recent.stat().st_mtime + 60
+    os.utime(old, (now - files_module.RETENTION_S - 1,) * 2)
+
+    assert files_module._room_for(root, 5, now)
+    assert not old.exists() and recent.exists()
+    monkeypatch.setattr(files_module, "TOTAL_BYTES", 12)
+    assert files_module._room_for(root, 5, now), "the oldest goes to make room"
+    assert not recent.exists()
+    assert not files_module._room_for(root, 13, now), "a file over the total never fits"
+
+
+def test_a_name_with_a_lone_surrogate_isnt_one():
+    assert files_module._name_ok("shot\ud800.jpg") is False
+    assert files_module._name_ok("shot.jpg") is True
+
+
+def test_a_linked_persons_post_naming_a_room_file_carries_nothing(copies, monkeypatch):  # noqa: F811
+    # DeepSeek on notifier #629: only what the home's own people sent goes.
+    from test_room_copies import copies_module
+
+    room_id = started(copies)
+    path = upload(copies, "theirs.jpg", b"x" * 100)
+    post(copies, room_id, f"@file:{path}\nlook")
+    monkeypatch.setattr(copies_module.room_posts, "by_event",
+                        lambda root, room, ids: {each: "link2" for each in ids})
+
+    copies.furina.pass_once()
+
+    assert _sent(copies, "room.file") == []

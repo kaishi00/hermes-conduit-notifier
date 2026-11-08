@@ -52,6 +52,10 @@ CHUNK_BYTES = 96 * 1024
 # As uploads (dashboard/api/rooms.py ROOM_FILE_TOTAL_BYTES and ROOM_FILE_FREE_FLOOR_BYTES).
 TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 FREE_FLOOR_BYTES = 1024 * 1024 * 1024
+# As uploads (dashboard/api/rooms.py ROOM_FILE_RETENTION_S).
+RETENTION_S = 30 * 24 * 3600
+# Pieces of files not yet whole, together.
+INCOMING_BYTES = 64 * 1024 * 1024
 # Hermes' own data URL cap; a larger file stays on the home (Conduit names it).
 MAX_FILE_BYTES = 16 * 1024 * 1024
 # Sent to one Link in a rooms pass: well under its mailbox's 64 MB pending.
@@ -84,8 +88,13 @@ def files_root(root: Any) -> Path:
 
 
 def _name_ok(name: Any) -> bool:
-    return isinstance(name, str) and 0 < len(name.encode("utf-8")) <= 255 and name not in (".", "..") \
-        and not _UNSAFE_NAME.search(name)
+    if not isinstance(name, str):
+        return False
+    try:
+        size = len(name.encode("utf-8"))
+    except UnicodeEncodeError:  # a lone surrogate JSON let through
+        return False
+    return 0 < size <= 255 and name not in (".", "..") and not _UNSAFE_NAME.search(name)
 
 
 def references(text: Any) -> list[tuple[str, str, str]]:
@@ -290,7 +299,7 @@ class Files:
             return
         state = self.rooms.store.read()
         if not any(invite["link"] == received.link_id and invite["room_id"] == body["room_id"]
-                   and invite.get("started_at") is not None for invite in state["invites"].values()):
+                   and invite.get("status") == "started" for invite in state["invites"].values()):
             logger.info("Linked Rooms dropped a room.file from Link %s for a room it isn't in", received.link_id)
             return
         target = files_root(self.rooms.root) / body["folder"] / body["name"]
@@ -320,6 +329,11 @@ class Files:
         with _thread_lock:
             incoming.mkdir(parents=True, exist_ok=True, mode=0o700)
             _sweep(incoming, self.rooms.clock())
+            if _held(incoming) + len(body["data"]) > INCOMING_BYTES \
+                    or shutil.disk_usage(incoming).free - len(body["data"]) < FREE_FLOOR_BYTES:
+                logger.info("Linked Rooms dropped a piece of room file %s/%s from Link %s: no room for it here",
+                            body["folder"], body["name"], link_id)
+                return None
             folder.mkdir(exist_ok=True, mode=0o700)
             (folder / f"{body['index']:05d}").write_bytes(body["data"])
             parts = sorted(folder.iterdir())
@@ -338,7 +352,7 @@ class Files:
         try:
             root = target.parent.parent
             root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if not _room_for(root, len(whole)):
+            if not _room_for(root, len(whole), self.rooms.clock()):
                 logger.info("Linked Rooms didn't keep room file %s/%s: room files are full here (%d GB, or under "
                             "%d GB free)", body["folder"], body["name"], TOTAL_BYTES >> 30, FREE_FLOOR_BYTES >> 30)
                 return False
@@ -360,17 +374,44 @@ class Files:
             return False
 
 
-def _room_for(root: Path, size: int) -> bool:
-    """Whether a carried file of ``size`` fits: room files stay under TOTAL_BYTES together, as uploads do
-    (dashboard/api/rooms.py ROOM_FILE_TOTAL_BYTES, whose sweep goes through carried files too), and the disk
-    keeps FREE_FLOOR_BYTES free."""
-    if shutil.disk_usage(root).free - size < FREE_FLOOR_BYTES:
-        return False
+def _held(directory: Path) -> int:
     total = 0
-    for path in root.glob("*/*"):
+    for path in directory.glob("*/*"):
         with contextlib.suppress(OSError):
             total += path.lstat().st_size
-    return total + size <= TOTAL_BYTES
+    return total
+
+
+def _room_for(root: Path, size: int, now: float) -> bool:
+    """Whether a carried file of ``size`` fits, sweeping the room files as uploads do
+    (dashboard/api/rooms.py _sweep_room_files), so a guest that never uploads ages them out too: folders past
+    RETENTION_S go, then the oldest until the rest and this file fit TOTAL_BYTES. The disk keeps
+    FREE_FLOOR_BYTES free."""
+    folders = []
+    for folder in root.iterdir():
+        if folder.is_dir() and not folder.is_symlink() and _FOLDER.match(folder.name):
+            with contextlib.suppress(OSError):
+                folders.append((folder.stat().st_mtime, folder))
+    kept = []
+    for mtime, folder in sorted(folders):
+        if now - mtime > RETENTION_S:
+            shutil.rmtree(folder, ignore_errors=True)
+        else:
+            kept.append(folder)
+    total = _held(root)
+    while kept and total + size > TOTAL_BYTES:
+        folder = kept.pop(0)
+        total -= _held_folder(folder)
+        shutil.rmtree(folder, ignore_errors=True)
+    return total + size <= TOTAL_BYTES and shutil.disk_usage(root).free - size >= FREE_FLOOR_BYTES
+
+
+def _held_folder(folder: Path) -> int:
+    total = 0
+    for path in folder.iterdir():
+        with contextlib.suppress(OSError):
+            total += path.lstat().st_size
+    return total
 
 
 def _sweep(incoming: Path, now: float) -> None:
