@@ -5478,3 +5478,6 @@ def test_conduit_show_from_work_draws_the_workstreams_cards(on, home, hermes, mo
     assert answer["ok"] and seen["args"]["title"] == "Dunkin'" and seen["cards"][0]["places"][0]["name"] == "Dunkin'"
     missing = show._handle({"from_work": "W2", "title": "x"}, BOT_CHAT, lambda _: False)
     assert missing["error"] == "no_cards" and "W2" in missing["note"]
+    on.add("ask_out", title="Ask Nahida", status="waiting")
+    asked = show._handle({"from_work": "A1", "title": "x"}, BOT_CHAT, lambda _: False)
+    assert asked["error"] == "no_cards" and "an ask between bots" in asked["note"]

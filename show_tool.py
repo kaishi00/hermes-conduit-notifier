@@ -529,7 +529,10 @@ def _diffs_answered(cards: list[dict[str, Any]], keep_diff: Callable[[dict[str, 
     context) never holds a long diff."""
     answered = []
     for card in cards:
-        if card["type"] == "diff" and not card_schema.carries_whole(card["diff"]):
+        # One the host already keeps (a workstream's card shown again with
+        # from_work) carries its id as it is: its hunks were left out.
+        kept = card["type"] == "diff" and isinstance(card["diff"].get("id"), str) and card["diff"]["id"]
+        if card["type"] == "diff" and not kept and not card_schema.carries_whole(card["diff"]):
             try:
                 diff_id = keep_diff(card["diff"])
             except Exception:  # noqa: BLE001 — the card lists the files alone

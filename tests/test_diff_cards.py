@@ -323,3 +323,16 @@ def test_the_route_reads_a_kept_diff(tmp_path, monkeypatch):
     assert http.get(f"{BASE}/boards/diffs", params={"id": "../../etc/passwd"}).status_code == 400
     assert "diff-cards" in api.capabilities.ROUTE_CAPABILITIES
     assert json.loads(json.dumps(response.json())) == {"diff": diff}
+
+
+def test_a_kept_diff_shown_again_keeps_its_id(tool_home):
+    # notifier #621's review: a workstream's wide diff shown again in the Bot
+    # Chat (from_work) carried its files without hunks; kept again, its new id
+    # would read back no lines.
+    _exchange(PresentStore(tool_home), features=DIFF_FEATURES)
+    kept = []
+    files = [{"path": f"f{index}.py", "status": "modified", "added": 1, "removed": 0} for index in range(25)]
+    diff = {"files": files, "added": 25, "removed": 0, "id": "cd-0123456789abcdef"}
+    answer = _call({"title": "Wide", "cards": [{"type": "diff", "diff": diff}]},
+                   keep_diff=lambda given: kept.append(given) or "cd-fedcba9876543210")
+    assert not kept and answer["cards"][0]["diff"]["id"] == "cd-0123456789abcdef"

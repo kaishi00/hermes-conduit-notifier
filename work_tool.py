@@ -3229,8 +3229,10 @@ def shown_board(session_id: Any, ref: Any) -> tuple[Optional[dict], str]:
         return None, NO_SUCH.format(ref=ref or "such work")
     store = work_store.Store(home)
     work = store.get(ref)
-    if work is None or work.kind != "workstream":
+    if work is None:
         return None, NO_SUCH.format(ref=ref)
+    if work.kind != "workstream":
+        return None, f"{ref} is an ask between bots, not a workstream, so it has no cards to show."
     if isinstance(session_id, str) and session_id and work.session_id == session_id:
         return None, "Those cards are already in this chat."
     kept = _shown(store, ref)
