@@ -6,7 +6,8 @@ issue 1946).
 
 A template is a composed card whose text holds ``{{slot}}`` placeholders. A
 section with ``repeat`` names a list slot and is drawn once per item, its
-placeholders written ``{{slot.key}}``. Filling happens here, before the card
+placeholders written ``{{slot.key}}``; each item is one of the card's eight
+sections, so the items that don't fit are left out with a note. Filling happens here, before the card
 is normalized, so Conduit and the Desktop half only ever see a composed
 card. Templates are kept per profile.
 """
@@ -33,6 +34,7 @@ MAX_SAVES_PER_CALL = 4
 MAX_TEMPLATE_BYTES = 16 * 1024
 MAX_ABOUT_CHARS = 160
 MAX_REPEAT_ITEMS = 20
+MAX_SECTIONS = 8  # a card's sections, as cards/card-schema.json caps them
 MAX_FILL_CHARS = 2000
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _SLOT = re.compile(r"\{\{\s*([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)?)\s*\}\}")
@@ -54,7 +56,8 @@ SAVE_SCHEMA: dict[str, Any] = {
                      "description": ("A composed card as in cards, with {{slot}} wherever a value goes, like "
                                      "{\"type\":\"composed\",\"sections\":[{\"items\":[{\"kind\":\"text\","
                                      "\"text\":\"{{subject}}\"}]}]}. A section with \"repeat\": \"events\" is "
-                                     "drawn once per item of the list slot events, written {{events.time}}. "
+                                     "drawn once per item of the list slot events, written {{events.time}}; each item is one "
+                                     "of the card's 8 sections, so fill only as many as fit. "
                                      "Leave card out to delete the template.")},
         },
         "required": ["name"],
@@ -250,17 +253,27 @@ def expand_template(card: dict[str, Any], fill: dict[str, Any], notes: list[str]
     sections = card.get("sections")
     if isinstance(sections, list):
         drawn = []
-        for section in sections:
+        for index, section in enumerate(sections):
             if isinstance(section, dict) and isinstance(section.get("repeat"), str):
                 slot = section.pop("repeat")
                 items = fill.get(slot)
                 if not isinstance(items, list):
                     notes.append(f"{path}.fill.{slot}: not given, its section left out")
                     continue
-                if len(items) > MAX_REPEAT_ITEMS:
-                    notes.append(f"{path}.fill.{slot}: at most {MAX_REPEAT_ITEMS} items, the rest were left out")
-                for item in items[:MAX_REPEAT_ITEMS]:
-                    scope = {f"{slot}.{key}": value for key, value in item.items()} if isinstance(item, dict) else {}
+                # Each item draws a section, and the card keeps to MAX_SECTIONS:
+                # the template's other sections keep their place.
+                after = sum(1 for later in sections[index + 1:]
+                            if not (isinstance(later, dict) and isinstance(later.get("repeat"), str)))
+                room = max(0, min(MAX_REPEAT_ITEMS, MAX_SECTIONS - len(drawn) - after))
+                if len(items) > room:
+                    notes.append(f"{path}.fill.{slot}: {room} of its {len(items)} items fit (each item is one of the "
+                                 f"card's {MAX_SECTIONS} sections), the rest were left out; split them over more cards")
+                for number, item in enumerate(items[:room], start=1):
+                    if not isinstance(item, dict):
+                        notes.append(f"{path}.fill.{slot}: item {number} is {_a_kind(item)}, not an object of "
+                                     "its section's slots, so it was left out")
+                        continue
+                    scope = {f"{slot}.{key}": value for key, value in item.items()}
                     drawn.append(_filled(section, scope, missing, prefix=f"{slot}."))
             else:
                 drawn.append(section)
@@ -272,7 +285,11 @@ def expand_template(card: dict[str, Any], fill: dict[str, Any], notes: list[str]
 
 
 def _a_kind(value: Any) -> str:
-    return "a list" if isinstance(value, list) else "an object" if isinstance(value, dict) else "a value"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, dict):
+        return "an object"
+    return "text" if isinstance(value, str) else "a value"
 
 
 def _filled(value: Any, fill: dict[str, Any], missing: dict[str, str], prefix: str = "", key: str = "") -> Any:

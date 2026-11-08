@@ -199,9 +199,13 @@ class TapStore:
             taps = [tap for tap in state["taps"] if tap["session"] == session and not tap["heard"]
                     and said.startswith(tap["label"])]
             if taps:
-                # One message is one tap: the longest label it starts with, the latest
-                # of those, so "Send to all" never hears a waiting "Send" too.
-                taps = [max(taps, key=lambda tap: (len(tap["label"]), tap["at"]))]
+                # One message is one tap: first one on the card the message names
+                # ("Go · Card A" hears Card A's Go, not a later Go on Card B), then
+                # the longest label it starts with, so "Send to all" never hears a
+                # waiting "Send" too, then the latest.
+                def named(tap: dict[str, Any]) -> bool:
+                    return bool(tap["title"]) and said.startswith(f'{tap["label"]} · {tap["title"]}')
+                taps = [max(taps, key=lambda tap: (named(tap), len(tap["label"]), tap["at"]))]
             heard = {tap["id"] for tap in taps}
             # A tap kept under each of the chat's ids is heard under them all.
             for tap in state["taps"]:
@@ -245,7 +249,9 @@ def _line(tap: dict[str, Any]) -> str:
         filled = "; ".join(f"{key}: {json.dumps(value, ensure_ascii=False) if chr(10) in value else value}"
                            if value else f"{key}: (empty)" for key, value in tap["values"].items())
         line += f", with the fields as they left them ({filled})"
-    line += (". Do it now with your tools, then show the card again with the same live name, saying how it went "
+    again = ("show the card again with the same live name" if tap["live"]
+             else "show the card again (it had no live name, so give the new one a live name from now on)")
+    line += (f". Do it now with your tools, then {again}, saying how it went "
              "(done, or what went wrong). The card they saw:\n" + tap["markdown"] + "]")
     return line
 

@@ -2608,7 +2608,7 @@ the schema's `board` section.
   and tells Hermes to give the rest in its reply; a call screen's phone
   without it gets four cards and the Markdown.
 
-### Composed cards, buttons and templates (plugin 0.138+)
+### Composed cards, buttons and templates (plugin 0.140+)
 
 For anything the other kinds don't fit (an email ready to send, a day's
 agenda, an idea to act on), a `composed` card is built from `sections`: up
@@ -2646,7 +2646,8 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
 - **Templates.** `save_templates` saves up to four composed cards per call
   under a name (lowercase letters, digits and dashes), with `{{slot}}`
   wherever a value goes and `repeat` on a section drawn once per item of a
-  list slot (`{{events.time}}`); leaving `card` out deletes one. A card
+  list slot (`{{events.time}}`), each item one of the card's 8 sections
+  (items past that are left out with a note); leaving `card` out deletes one. A card
   `{"type": "template", "template": {"name": …, "fill": {…}}}` is filled on
   the host before it's checked, so Conduit only ever sees composed cards.
   Templates are kept per profile in `conduit-card-templates.json` (50 at

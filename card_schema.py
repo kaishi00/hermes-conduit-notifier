@@ -333,7 +333,7 @@ BOARD_FEATURE = "board-cards"
 # Diffs (plugin 0.133+).
 DIFF_TYPES = ("diff",)
 DIFF_FEATURE = "diff-cards"
-# Composed cards, and buttons on any card (plugin 0.138+, issue 1946).
+# Composed cards, and buttons on any card (plugin 0.140+, issue 1946).
 COMPOSED_TYPES = ("composed",)
 COMPOSED_FEATURE = "composed-cards"
 FEATURE_TYPES = {"info-cards": INFO_TYPES, "media-cards": MEDIA_TYPES, "live-cards": LIVE_TYPES,
@@ -512,7 +512,7 @@ _SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime",
                  # The same in the languages Conduit ships, as a model writes labels in the user's.
                  "passwort", "kennwort", "contraseña", "motdepasse", "senha", "пароль", "hasło", "şifre",
                  "katasandi", "パスワード", "暗証番号", "認証コード", "密码", "密碼", "验证码", "驗證碼",
-                 "비밀번호", "인증번호", "bestätigungscode", "verifizierungscode", "zugangscode",
+                 "비밀번호", "인증번호", "인증코드", "bestätigungscode", "verifizierungscode", "zugangscode",
                  "códigodeverificación", "codigodeverificacion", "códigodeverificação", "codedevérification",
                  "codedeverification", "codicediverifica", "kodeverifikasi", "doğrulamakodu", "kodweryfikacyjny",
                  "кодподтверждения", "clavedeacceso", "contrasena")

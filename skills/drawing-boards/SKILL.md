@@ -168,7 +168,8 @@ When the user will want the same kind of card again, save it once with
 `save_templates`: a `name` like `email-draft`, a line of `about`, and the
 composed card with `{{slot}}` wherever a value goes. A section with
 `repeat: "events"` is drawn once per item of the list slot `events`, its
-values written `{{events.time}}`. Then show it with
+values written `{{events.time}}`; each item is one of the card's 8
+sections, so split a longer list over more cards. Then show it with
 `{"type": "template", "template": {"name": "email-draft", "fill": {"to":
 "mei@example.com", "subject": "Friday"}}, "live": "email-mei"}`: give the
 card's title, live name, source and actions beside it as usual. The drawing

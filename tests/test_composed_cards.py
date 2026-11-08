@@ -465,3 +465,51 @@ def test_a_text_fields_lines_reach_hermes_as_written(tmp_path):
                                   "````\n```\n````", "plain", "``` x ```\n```"])
 def test_the_answers_and_the_tap_notes_fence_reading_agree(text):
     assert store_module._open_fence(text) == card_schema.open_fence(text)
+
+
+def test_a_message_hears_the_tap_on_the_card_it_names(tmp_path):
+    clock = iter([100.0, 200.0])
+    store = card_actions.TapStore(tmp_path, clock=lambda: next(clock, 300.0))
+    for title, ident in (("Card A", "a"), ("Card B", "b")):
+        store.save({"sessions": ["s1"], "card": {"type": "callout", "title": title, "callout": {"text": "x"},
+                    "actions": [{"label": "Go", "action": "tap", "id": ident}]}, "action": ident})
+    note = store.note("s1", "Go · Card A")
+    assert '"Card A"' in note and '"Card B"' not in note, "the newer Go on Card B isn't this message's"
+    assert '"Card B"' in store.note("s1", "Go · Card B")
+
+
+def test_a_tap_note_on_a_card_with_no_live_name_says_so(tmp_path):
+    store = card_actions.TapStore(tmp_path)
+    store.save({"sessions": ["s1"], "card": {"type": "callout", "title": "Vet", "callout": {"text": "x"},
+                "actions": [{"label": "Go", "action": "tap", "id": "go"}]}, "action": "go"})
+    note = store.note("s1", "Go · Vet")
+    assert "same live name" not in note and "it had no live name" in note
+
+
+def test_a_repeat_section_keeps_to_the_cards_eight_sections():
+    template = {"type": "composed", "title": "Day", "sections": [
+        {"items": [{"kind": "text", "text": "Today"}]},
+        {"repeat": "events", "items": [{"kind": "text", "text": "{{events.time}}"}]},
+        {"items": [{"kind": "text", "text": "End"}]}]}
+    notes = []
+    events = [{"time": str(hour)} for hour in range(12)]
+    card = card_templates.expand_template(template, {"events": events}, notes, "t")
+    assert len(card["sections"]) == card_templates.MAX_SECTIONS
+    assert card["sections"][-1]["items"][0]["text"] == "End", "the template's own last section keeps its place"
+    assert any("6 of its 12 items fit" in note for note in notes)
+    schema = json.loads((ROOT / "cards" / "card-schema.json").read_text())
+    assert json.dumps(schema).count('"maxItems": 8') >= 1
+
+
+def test_a_repeat_item_that_isnt_an_object_is_named():
+    template = {"type": "composed", "title": "Day", "sections": [
+        {"repeat": "events", "items": [{"kind": "text", "text": "{{events.time}}"}]}]}
+    notes = []
+    card_templates.expand_template(template, {"events": ["9:00", {"time": "13:00"}]}, notes, "t")
+    assert "t.fill.events: item 1 is text, not an object of its section's slots, so it was left out" in notes
+    assert not any("not given" in note for note in notes)
+
+
+@pytest.mark.parametrize("label", ["인증코드", "인증 코드", "인증번호"])
+def test_a_korean_verification_code_field_is_dropped(label):
+    assert card_schema.names_secret(label)
