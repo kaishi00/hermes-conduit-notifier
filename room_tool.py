@@ -128,7 +128,7 @@ def _handle(args: dict[str, Any], session_id: str, is_child: Callable[[Any], boo
         answer: dict[str, Any] = {"ok": True, "rooms": rooms}
         if not rooms:
             answer["note"] = ("There are no rooms with other people here yet. The user starts one in Conduit, with "
-                              "someone they've linked with in Settings › People.")
+                              "someone they've linked with in Settings › Multiplayer.")
         return answer
     read = reader.read(args.get("room_id"), after_seq=args.get("after_seq"), before_seq=args.get("before_seq"),
                        limit=args.get("limit", room_reading.DEFAULT_LIMIT))

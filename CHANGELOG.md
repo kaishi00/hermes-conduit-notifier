@@ -27,6 +27,12 @@ checks it). The format is fixed, because Conduit reads it:
 - Hermes can save a card it builds as a template and fill it by name later,
   so cards it shows often come up faster.
 
+## 0.139.3 (2026-11-08)
+
+### New and improved
+- Your agents now point you to Settings › Multiplayer (Conduit's new name
+  for People) when they mention the people you've linked with.
+
 ## 0.139.2 (2026-11-08)
 
 ### Fixes
