@@ -247,3 +247,27 @@ def test_the_route_reads_from_the_hermes_home(tmp_path, monkeypatch):
     missing = client.get(f"{BASE}/room-files/data-url", params={"path": str(tmp_path / "x.jpg")})
     assert missing.status_code == 404
     assert missing.headers["cache-control"] == "no-store"
+
+
+def test_a_fifo_in_an_upload_folder_is_turned_away_without_hanging(tmp_path):
+    import pytest
+
+    stored = api.rooms.store_room_file(str(tmp_path), _body(_JPEG))
+    fifo = pathlib.Path(stored["path"]).parent / "pipe.jpg"
+    os.mkfifo(fifo)
+    with pytest.raises(api.rooms.HTTPException) as refused:
+        api.rooms.read_room_file_picture(str(tmp_path), str(fifo))
+    assert refused.value.status_code == 404
+
+
+def test_picture_reads_are_rate_limited(tmp_path, monkeypatch):
+    monkeypatch.setattr(api.rooms, "_room_files_root", lambda: str(tmp_path))
+    monkeypatch.setattr(api.rooms, "_room_file_picture_limiter", api.core._MintLimiter(1, 60.0))
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    path = api.rooms.store_room_file(str(tmp_path), _body(_JPEG))["path"]
+    assert client.get(f"{BASE}/room-files/data-url", params={"path": path}).status_code == 200
+    limited = client.get(f"{BASE}/room-files/data-url", params={"path": path})
+    assert limited.status_code == 429
+    assert limited.headers["cache-control"] == "no-store"

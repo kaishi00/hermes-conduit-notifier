@@ -237,6 +237,9 @@ async def post_room_file(request: Request, response: Response, profile: Optional
 # only up to the size a data URL takes, as Hermes' route does.
 
 ROOM_FILE_PICTURE_MAX_BYTES = 16 * 1024 * 1024
+# A room's pictures load once each and are kept on the phone; this only
+# stops a client looping 16 MB reads.
+_room_file_picture_limiter = core._MintLimiter(240, 60.0, message="Too many picture reads; try again shortly")
 # Leading bytes of each picture type Conduit can show, with the type.
 _ROOM_FILE_PICTURE_TYPES = (
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -275,7 +278,9 @@ def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
     if os.path.dirname(os.path.dirname(real)) != base:
         raise HTTPException(status_code=404, detail="Not a room file", headers=headers)
     try:
-        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # Non-blocking, so a FIFO in its place can't hang the read; the
+        # regular-file check below turns it away.
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         raise HTTPException(status_code=404, detail="The file is gone", headers=headers)
     with os.fdopen(fd, "rb") as handle:
@@ -297,7 +302,8 @@ def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
 async def get_room_file_picture(response: Response, path: str = "", profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return await core._run_scoped(profile, lambda: read_room_file_picture(_room_files_root(), path))
+        return await core._run_scoped(profile, core._limited(
+            _room_file_picture_limiter, profile, lambda: read_room_file_picture(_room_files_root(), path)))
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException:
