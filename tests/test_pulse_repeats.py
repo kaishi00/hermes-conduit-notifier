@@ -126,6 +126,17 @@ def test_a_card_marked_done_keeps_the_same_words_out(live):
     assert decide(live, AUDIT, now=now + candidates.SAID_WINDOW_S) == ["raised"]
 
 
+def test_a_deadline_carded_other_and_done_keeps_its_words_out_of_a_deadline_row(live):
+    # A report without a list carded a deadline it didn't show as "other";
+    # a later list has the same words as a deadline.
+    now = time.time()
+    words = "Renew the passport by 20 November"
+    done = card(live, words, created_at=now - 86400, topic="other")
+    live.store.mark_done(done, None, closed_by="user", now=now - 86000)
+    assert decide(live, words, kind="deadline", now=now) == ["raised"]
+    assert decide(live, words, kind="promise", now=now) == [""]
+
+
 def test_a_card_put_away_keeps_the_same_words_out(live):
     now = time.time()
     card_id = card(live, AUDIT, created_at=now - 86400)

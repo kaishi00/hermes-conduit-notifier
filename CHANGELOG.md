@@ -22,7 +22,8 @@ checks it). The format is fixed, because Conduit reads it:
 - Pulse cards came back after you marked them Done: one oddly saved date
   made every check skip looking at earlier cards. Dates saved like that no
   longer stop any of Pulse's checks, and a card you marked Done or put away
-  keeps the same words from coming back for a month.
+  keeps the same words from coming back for a month (one about a reminder,
+  a calendar entry or something Pulse remembers keeps that thing's rules).
 
 ## 0.141.5 (2026-11-08)
 
