@@ -690,3 +690,17 @@ def test_a_page_at_a_later_epoch_gets_the_copys_agents_grants_for_it(copies):
     copies.laifu.pass_once()
     [(_, body, _)] = _sent(copies, "room.grant")
     assert copies.member["laifu"].decode(body["grant"], "dispatch")["authority_epoch"] == 3
+
+
+def test_a_room_moved_while_nothing_went_on_still_sends_its_later_epoch(copies):
+    room_id = started(copies, links=("link1",))
+    copies.furina.pass_once()
+    key = f"link1/{room_id}"
+    copies.clock.now += 60
+    copies.furina.pass_once()  # nothing new: no page
+
+    copies.log.epoch = 3  # Hermes moved the room, and nothing has been said in it since
+    copies.clock.now += 60
+    copies.furina.pass_once()
+
+    assert copies.laifu.store.read()["invites"][key]["authority_epoch"] == 3

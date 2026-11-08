@@ -171,7 +171,6 @@ class Copies:
         sent = copy["sent"]
         if sent is not None and now - sent["at"] < WAIT_S:
             return
-        digest = _digest(state)
         try:
             page = self.hermes.read_events(found.service.db_path, room_id=room_id, since_seq=copy["acked"],
                                            limit=PAGE_EVENTS, include_disbanded=True)
@@ -179,6 +178,10 @@ class Copies:
             self._tell_once(f"read:{room_id}", "Linked Rooms couldn't read room %s's log for its copies (%s)",
                             room_id, type(exc).__name__)
             return
+        # The room's authority counts as its state: a room Hermes moved while nothing went on in it still sends
+        # a page, from which guests take its later epoch before their agents' next turn (on_page).
+        authority = page.get("authority") if isinstance(page.get("authority"), dict) else {}
+        digest = _digest({**state, "authority": [authority.get("gateway_id"), authority.get("epoch")]})
         if not page.get("events") and digest == copy["state"]:
             if draft["status"] == "ended" and not copy.get("done"):
                 with self.rooms.store.update() as stored:
