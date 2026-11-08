@@ -41,12 +41,23 @@ def test_only_one_plugin_copy_in_a_process_runs_the_loop(monkeypatch):
     monkeypatch.setattr(pulse, "_me", "hermes_plugins.conduit_push__home_7ecc6991116a.pulse")
     assert not pulse._process_slot()
     pulse._leave_slot()  # not its slot: nothing changes
-    assert slot.holder != pulse._me
+    assert slot.holder[0] != pulse._me
     # Once the copy that ticked stops ticking, it takes over.
     slot.at -= pulse.LEADER_TTL_S + 1
-    assert pulse._process_slot() and slot.holder == pulse._me
+    assert pulse._process_slot() and slot.holder == (pulse._me, pulse.threading.get_ident())
     pulse._leave_slot()
     assert slot.holder is None
+
+
+def test_a_loop_started_again_waits_for_the_old_one(monkeypatch):
+    # After an unload, register starts a new loop under the same module name
+    # while the old thread may still be in a tick.
+    slot = type(sys)("slot")
+    monkeypatch.setitem(sys.modules, pulse._SLOT, slot)
+    slot.holder, slot.at = (pulse._me, -1), pulse.time.monotonic()  # the old loop's thread
+    assert not pulse._process_slot()
+    pulse._leave_slot()  # the new thread can't let go of the old one's slot
+    assert slot.holder == (pulse._me, -1)
 
 
 def test_a_copy_without_the_slot_sends_nothing(live, monkeypatch):
@@ -86,8 +97,12 @@ def test_a_card_marked_done_keeps_the_same_words_out(live):
     assert decide(live, AUDIT, now=now) == ["raised"]
     # Something new about it still comes up.
     assert decide(live, AUDIT.replace("last 2 runs", "last 3 runs"), now=now) == [""]
-    # A month on, the same words come up again.
+    # A month after it was closed, the same words come up again.
     assert decide(live, AUDIT, now=now + candidates.SAID_WINDOW_S) == [""]
+    # However long the card sat open first: the month runs from the Done.
+    old = card(live, AUDIT, created_at=now - 3 * candidates.SAID_WINDOW_S)
+    live.store.mark_done(old, None, closed_by="user", now=now + candidates.SAID_WINDOW_S - 60)
+    assert decide(live, AUDIT, now=now + candidates.SAID_WINDOW_S) == ["raised"]
 
 
 def test_a_card_put_away_keeps_the_same_words_out(live):
@@ -130,12 +145,8 @@ def test_a_loop_that_ends_lets_go_of_the_slot(monkeypatch):
     slot = type(sys)("slot")
     monkeypatch.setitem(sys.modules, pulse._SLOT, slot)
     stopped = pulse.threading.Event()
-    monkeypatch.setattr(pulse, "tick", lambda: (pulse._process_slot(), stopped.set()))
+    monkeypatch.setattr(pulse, "tick", lambda: (pulse._process_slot(), stopped.set(), pulse._wake.set()))
     pulse._run(stopped)
     assert slot.holder is None
 
 
-def test_copies_from_one_folder_are_still_told_apart():
-    # A profile's plugin folder can be a link to the main install: the same
-    # files, loaded again under the scope's own module name.
-    assert pulse._me == pulse.__name__

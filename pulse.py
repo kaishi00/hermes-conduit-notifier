@@ -59,6 +59,7 @@ from . import pulse_ahead as ahead
 from . import pulse_brief as brief
 from . import pulse_candidates as candidates
 from . import pulse_claims as claims
+from . import pulse_dates as dates
 from . import pulse_followup as followup
 from . import pulse_hermes as hermes
 from . import pulse_host as host
@@ -237,32 +238,35 @@ def register(ctx: Any) -> None:
 def _process_slot() -> bool:
     """Whether this copy of the plugin runs the loop in this process
     (``_SLOT``): the slot is free, its own, or its holder hasn't ticked for
-    LEADER_TTL_S. Taking it marks this copy as ticking now."""
+    LEADER_TTL_S. Taking it marks this copy as ticking now. It's held by
+    this copy's loop thread, so a loop started again after an unload waits
+    for the old one to finish rather than ticking beside it."""
     slot = sys.modules.setdefault(_SLOT, types.ModuleType(_SLOT))
     lock = slot.__dict__.setdefault("lock", threading.Lock())
-    now = time.monotonic()
+    me, now = (_me, threading.get_ident()), time.monotonic()
     with lock:
         holder, at = getattr(slot, "holder", None), getattr(slot, "at", 0.0)
-        if holder not in (None, _me) and now - at < LEADER_TTL_S:
+        if holder not in (None, me) and now - at < LEADER_TTL_S:
             return False
-        slot.holder, slot.at = _me, now
+        slot.holder, slot.at = me, now
         return True
 
 
 def _leave_slot() -> None:
+    """Lets go of the slot, if this thread of this copy holds it (_run, as
+    its loop ends: after its last tick, so none can take it again)."""
     slot = sys.modules.get(_SLOT)
     lock = getattr(slot, "lock", None)
     if slot is None or lock is None:
         return
     with lock:
-        if getattr(slot, "holder", None) == _me:
+        if getattr(slot, "holder", None) == (_me, threading.get_ident()):
             slot.holder = None
 
 
 def stop(timeout: float = 1.0) -> None:
     _stop.set()
     _wake.set()
-    _leave_slot()
     thread = _thread
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout)
@@ -673,7 +677,7 @@ def _run(stopped: threading.Event) -> None:
         except Exception:  # noqa: BLE001 — the loop must outlive a bad tick
             logger.warning("conduit_push: Pulse tick failed", exc_info=True)
         _wake.wait(TICK_S)
-    _leave_slot()  # a tick that ran as stop() came may have taken it again
+    _leave_slot()
 
 
 def _hosts_chats() -> bool:
@@ -871,10 +875,18 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
             if lines:
                 # Written without a list: no card for a line an open or
                 # closed card says already, nor for one twice in it.
+                shown = report.shown_kinds(turn.prompt)
+
+                def topic(line: tuple[str, str, Optional[int]]) -> str:
+                    # Its card's topic, as add_noticed_cards gives it.
+                    kind, _, ref = line
+                    if kind not in report.KINDS or (kind == dates.DEADLINE and shown.get(ref) != dates.DEADLINE):
+                        return "other"
+                    return kind
+
                 lines = [line for n, line in enumerate(lines)
                          if not any(store.same_text(line[1]) == store.same_text(other[1]) for other in lines[:n])
-                         and not candidates.said_before(
-                             pulse_store, line[0] if line[0] in report.KINDS else "other", line[1], now)]
+                         and not candidates.said_before(pulse_store, topic(line), line[1], now)]
                 if not lines:
                     _mark_turn_card(pulse_store, attempt)
                     continue

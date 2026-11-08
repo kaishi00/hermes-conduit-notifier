@@ -2236,21 +2236,23 @@ class PulseStore:
         return [dict(row) for row in rows]
 
     def closed_cards_on(self, topics: Sequence[str], since: float) -> list[dict]:
-        """The "noticed" cards on any of ``topics`` made since ``since`` that
-        the user closed: marked done, put away for good, or rated not useful
-        ("wrong time" only puts it off); each with its candidate's ``ref``."""
+        """The "noticed" cards on any of ``topics`` the user closed since
+        ``since`` (however old the card): marked done, put away for good, or
+        rated not useful ("wrong time" only puts it off); each with its
+        candidate's ``ref``."""
         topics = [topic for topic in dict.fromkeys(topics) if topic]
         if not topics:
             return []
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT cards.*, candidates.ref AS ref FROM cards LEFT JOIN candidates ON candidates.card_id=cards.id "
-                "WHERE cards.kind=? AND cards.created_at>=? "
+                "WHERE cards.kind=? "
                 f"AND cards.topic IN ({','.join('?' * len(topics))}) "
-                "AND (cards.id IN (SELECT card_id FROM card_done) "
-                "OR (cards.dismissed_at IS NOT NULL AND cards.rest_until IS NULL) "
-                "OR (coalesce(cards.rating, '')='down' AND coalesce(cards.reason, '')!='wrong_time'))",
-                (NOTICED, since, *topics)).fetchall()
+                "AND (cards.id IN (SELECT card_id FROM card_done WHERE done_at>=?) "
+                "OR (cards.dismissed_at IS NOT NULL AND cards.rest_until IS NULL AND cards.dismissed_at>=?) "
+                "OR (coalesce(cards.rating, '')='down' AND coalesce(cards.reason, '')!='wrong_time' "
+                "AND coalesce(cards.rated_at, cards.created_at)>=?))",
+                (NOTICED, *topics, since, since, since)).fetchall()
         return [dict(row) for row in rows]
 
     def away_refs(self, prefix: str) -> set[str]:
