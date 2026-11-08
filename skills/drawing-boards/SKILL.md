@@ -1,6 +1,6 @@
 ---
 name: drawing-boards
-description: Recipes for boards in Conduit (conduit_show cards) - a trip plan, comparing options, a dashboard from the user's own data, a tracker, and showing changes (a review, a commit, a config) as a diff - with which cards to use, in what order, and what to leave to the reply.
+description: Recipes for boards in Conduit (conduit_show cards) - a trip plan, comparing options, a dashboard from the user's own data, a tracker, showing changes as a diff, and composed cards with buttons and fields (an email ready to send, a day's agenda, watches, an idea to act on) saved as templates - with which cards to use, in what order, and what to leave to the reply.
 ---
 
 # Drawing boards in Conduit
@@ -107,3 +107,71 @@ Your reply says what changed and why in a sentence or two; never paste the
 diff again. `next`: "Explain the change in Login.swift", "Fix the warning",
 "Show only the tests". If your terminal runs in a container or on another
 machine, `patch_file` can't see its files: pass `patch` instead.
+
+## Composed cards: build your own, with buttons
+
+When no card type fits, build one: `type: "composed"` with `sections`, each
+a `column` (the default) or a `row` of up to six elements: `text` (role
+heading, body, caption or mono), `metric`, `badge`, `icon` (an SF Symbol
+name), `image`, `progress`, `divider`, `field` and `button`. Pick roles and
+tones (neutral, accent, good, warning, bad); Conduit owns the fonts and
+colors. Mark a section `more: true` to fold detail until the card is opened.
+
+Any card can carry up to three `actions` at its foot. A button can:
+
+- `open` a link: https, or `maps:`, `tel:`, `sms:`, `mailto:`, `calshow:`
+  (Calendar), `x-apple-reminderkit:` (Reminders);
+- `copy` text, or `send` a message as the user (their words, never a
+  command);
+- `tap`: you hear it at once as the user's message, with the card as they
+  saw it and its field values. Do it with your tools, then show the card
+  again with the same `live` name, saying how it went: "Sent 20:41" with a
+  good badge, or what went wrong. Never show it done before your tool says
+  so.
+
+A tap is the user's OK for exactly what the card showed, nothing more. So
+put on the card what will happen (the recipient, the text, the amount) and
+give a button that sends, buys or deletes a `confirm` question. Fields never
+ask for passwords, PINs, one-time or verification codes, tokens or keys
+(a field named so is dropped). Every composed card needs a `live` name
+when it has a tap button, so you can show the result in its place.
+
+### An email ready to send
+
+`badge` "Not sent" (warning); a row of `field`s `to` and `subject`; a
+`field` `body` with `lines: 6`; actions `Send` (tap, primary, confirm "Send
+to Mei?") and `Discard` (tap, destructive). On the tap, send it with the
+user's mail tool using the field values, then show the card again with a
+"Sent" badge (good) and no buttons.
+
+### A day's agenda
+
+A `timeline` card does a plain agenda. For free time and actions: a section
+per block, `text` heading with the time, `caption` with the place, a `badge`
+"Free" (good) for gaps; actions `Open in Calendar` (open `calshow:`) and
+`Find a slot` (tap). Read the calendar with `conduit_calendar` first.
+
+### Watches and follow-ups
+
+A section per watch: `text` heading (what's watched), `caption` with the
+last check, a `badge` with its state, a `progress` for a delivery; actions
+`New watch` (send "Set up a new watch"), and a tap `Pause`.
+
+### An idea to act on
+
+`text` heading ("Book the vet"), `body` with why now, `caption` with the
+source; actions `Do it` (tap, primary), `Done` (tap), `Dismiss` (tap).
+
+### Saving it as a template
+
+When the user will want the same kind of card again, save it once with
+`save_templates`: a `name` like `email-draft`, a line of `about`, and the
+composed card with `{{slot}}` wherever a value goes. A section with
+`repeat: "events"` is drawn once per item of the list slot `events`, its
+values written `{{events.time}}`; each item is one of the card's 8
+sections, so split a longer list over more cards. Then show it with
+`{"type": "template", "template": {"name": "email-draft", "fill": {"to":
+"mei@example.com", "subject": "Friday"}}, "live": "email-mei"}`: give the
+card's title, live name, source and actions beside it as usual. The drawing
+rule lists your saved templates; save one again with the same name to change
+it, or without `card` to delete it.

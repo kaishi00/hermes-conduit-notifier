@@ -1883,7 +1883,7 @@ a file path; a file the user asks for still goes (0.115.1+).
   same words sent from another app in that chat don't take its line. A send
   whose answer was only lost keeps its report, since Hermes may have taken
   it. A discard that arrives before its report (the report was slow) holds
-  that text for a minute, and the report is dropped when it lands (0.139.4+).
+  that text for a minute, and the report is dropped when it lands (0.140.1+).
   Conduit tries a discard that didn't go again after 1, 3 and 9 seconds.
   Capability `turn-surface-discard` (0.126.0+).
 - `prompt.submit` refuses keys Hermes doesn't know, so the value can't ride
@@ -2612,6 +2612,60 @@ the schema's `board` section.
   the new kinds out, keeps the first four cards, drops `layout` and `next`,
   and tells Hermes to give the rest in its reply; a call screen's phone
   without it gets four cards and the Markdown.
+
+### Composed cards, buttons and templates (plugin 0.140+)
+
+For anything the other kinds don't fit (an email ready to send, a day's
+agenda, an idea to act on), a `composed` card is built from `sections`: up
+to 8, each a `column` or a `row` of up to six elements, a section marked
+`more` folded until the card is opened. Elements: `text` (role heading,
+body, caption or mono), `metric`, `badge`, `icon` (an SF Symbol name),
+`image` (https), `progress` (0 to 1), `divider`, `field` and `button`, each
+with a `tone` where it has one (neutral, accent, good, warning, bad).
+Conduit owns the fonts, colors and spacing. There is no HTML or script.
+
+- **Buttons.** A `button` element, or any card's `actions` (up to three at
+  its foot): `open` a link (https, or `maps:`, `tel:`, `sms:`, `mailto:`,
+  `calshow:`, `x-apple-reminderkit:`, with no spaces or quotes), `copy`
+  text, `send` a message as the user (a plain message, as a follow-up must
+  be), or `tap`. A `confirm` question is asked before it goes; one primary
+  button per card.
+- **Fields**: `text` (with `lines` and a `placeholder`), `choice` (2 to 6
+  `options`), `toggle` (on or off), `date` (YYYY-MM-DD, or with THH:MM) and
+  `number` (within `min` and `max`), each with an `id`, a `label` and a
+  starting `value`; six per card. A field whose id, label or placeholder
+  names a password, passcode, PIN, one-time, 2FA, login, access, unlock, reset,
+  recovery, activation or verification code, token, API, auth, private, master,
+  security, backup, verification or recovery key, passphrase, seed
+  phrase, credentials or other secret is refused, in the languages Conduit
+  ships as well as English.
+- **Taps.** Conduit posts a tap to `POST /boards/taps` (capability
+  `card-taps`; `sessions`, the `card` as the chat holds it, the button's
+  `action` id and the fields' `values`), then sends the user's message about
+  it ("Send · Email to Mei"). That message's turn hears the tap once, with
+  the card's Markdown and the field values, kept in the profile's
+  `conduit-card-taps.json` for 15 minutes. A tap is the user's OK for
+  exactly what the card showed (Eric, 2026-11-07, issue 1946): the agent
+  does it with its own tools and shows the card again under its `live`
+  name with the result.
+- **Templates.** `save_templates` saves up to four composed cards per call
+  under a name (lowercase letters, digits and dashes), with `{{slot}}`
+  wherever a value goes and `repeat` on a section drawn once per item of a
+  list slot (`{{events.time}}`), each item one of the card's 8 sections
+  (items past that are left out with a note); leaving `card` out deletes one. A card
+  `{"type": "template", "template": {"name": …, "fill": {…}}}` is filled on
+  the host before it's checked, so Conduit only ever sees composed cards.
+  Templates are kept per profile in `conduit-card-templates.json` (50 at
+  most, 16 KB each), checked with sample text when saved, and named in the
+  drawing rule.
+- **Where.** Group rooms keep only `open` and `copy` buttons, and no fields,
+  since a tap there would speak for the user to everyone in it. The Desktop
+  half draws composed cards and buttons; Markdown shows buttons as links and
+  as replies the user can type.
+- **Older Conduits.** A Conduit says `composed-cards` in its exchange when it
+  draws them. Until every Conduit that draws cards does, composed cards are
+  left out and buttons and fields are taken off other cards, and Hermes is
+  told to offer them in its reply.
 
 ### Diff cards (plugin 0.133+)
 

@@ -82,11 +82,16 @@ MAX_CARDS: int = DEFINITION["max_cards"]
 VERSION: int = DEFINITION["version"]
 
 
-def tool_parameter(description: str) -> dict[str, Any]:
+def tool_parameter(description: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The ``cards`` parameter of a tool: a short list of cards. A diff card
     takes its changes as ``inputs.diff`` (a patch, a patch file or two
-    texts), which normalizing reads into the card's diff."""
-    properties = {**CARD_SCHEMA["properties"], "diff": DEFINITION["inputs"]["diff"]}
+    texts), which normalizing reads into the card's diff. ``extra`` adds
+    card types the tool fills in itself before normalizing (conduit_show's
+    saved templates), each named by its field."""
+    properties = {**CARD_SCHEMA["properties"], "diff": DEFINITION["inputs"]["diff"], **(extra or {})}
+    if extra:
+        kind = properties["type"]
+        properties["type"] = {**kind, "enum": [*kind["enum"], *extra]}
     return {"type": "array", "maxItems": MAX_CARDS, "description": description,
             "items": {**CARD_SCHEMA, "properties": properties}}
 
@@ -314,7 +319,7 @@ _TYPE_FIELDS = {"map": ("places", "route"), "place": ("places",), "places": ("pl
                 "chart": ("chart",), "weather": ("weather",), "comparison": ("options",), "steps": ("steps", "needs"),
                 "media": ("media",), "contact": ("people",), "status": ("status",), "table": ("table",),
                 "timeline": ("timeline",), "checklist": ("checklist",), "list": ("list", "ranked"),
-                "progress": ("progress",), "callout": ("callout",), "diff": ("diff",)}
+                "progress": ("progress",), "callout": ("callout",), "diff": ("diff",), "composed": ("sections",)}
 PLACE_TYPES = ("map", "place", "places")
 # The information cards (plugin 0.46+), media and contacts, and statuses
 # (0.47+): a Conduit draws each group only when its exchange names it.
@@ -328,8 +333,11 @@ BOARD_FEATURE = "board-cards"
 # Diffs (plugin 0.133+).
 DIFF_TYPES = ("diff",)
 DIFF_FEATURE = "diff-cards"
+# Composed cards, and buttons on any card (plugin 0.140+, issue 1946).
+COMPOSED_TYPES = ("composed",)
+COMPOSED_FEATURE = "composed-cards"
 FEATURE_TYPES = {"info-cards": INFO_TYPES, "media-cards": MEDIA_TYPES, "live-cards": LIVE_TYPES,
-                 BOARD_FEATURE: BOARD_TYPES, DIFF_FEATURE: DIFF_TYPES}
+                 BOARD_FEATURE: BOARD_TYPES, DIFF_FEATURE: DIFF_TYPES, COMPOSED_FEATURE: COMPOSED_TYPES}
 # How many cards a Conduit without boards draws from a set.
 LEGACY_MAX_CARDS = 4
 # A phone number's characters, and an address with nothing that could end a
@@ -343,7 +351,7 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
     kind = card["type"]
     if kind not in _TYPE_FIELDS:
         return None
-    keep = {"type", "title", "live", *_TYPE_FIELDS[kind]}
+    keep = {"type", "title", "live", "actions", *_TYPE_FIELDS[kind]}
     if kind not in PLACE_TYPES:
         keep.add("source")
     for key in card:
@@ -354,6 +362,22 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
     if field not in card:
         _note(notes, f"{path}.{field}: a {kind} card needs it")
         return None
+    # Buttons and fields are checked over the whole card (ids, the one
+    # primary), sections first, then the foot's actions.
+    controls = _Controls()
+    if kind == "composed":
+        sections = _composed_rules(card["sections"], controls, f"{path}.sections", notes)
+        if not sections:
+            _note(notes, f"{path}.sections: no element is left")
+            return None
+        card["sections"] = sections
+    if "actions" in card:
+        actions = [button for index, button in enumerate(card["actions"])
+                   if _button_rules(button, controls, f"{path}.actions[{index}]", notes)]
+        if actions:
+            card["actions"] = actions
+        else:
+            del card["actions"]
     if kind in PLACE_TYPES:
         return _place_rules(card, raw, path, notes)
     if kind == "chart":
@@ -465,6 +489,227 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
     return card
 
 
+# --- Composed cards: sections of elements, and buttons on any card ------------
+
+# Each element kind's own fields, and those it needs.
+_ELEMENT_FIELDS = {"text": ("text", "role", "tone"), "metric": ("value", "label", "change", "tone"),
+                   "badge": ("text", "tone"), "icon": ("symbol", "tone"), "image": ("url", "label"),
+                   "progress": ("progress", "label", "tone"), "divider": (),
+                   "field": ("id", "input", "label", "value", "lines", "options", "min", "max", "placeholder"),
+                   "button": ("label", "action", "id", "target", "symbol", "style", "confirm")}
+_ELEMENT_NEEDS = {"text": ("text",), "metric": ("value",), "badge": ("text",), "icon": ("symbol",), "image": ("url",),
+                  "progress": ("progress",), "divider": (), "field": ("id", "input"), "button": ("label", "action")}
+# Which field fits which input.
+_FIELD_EXTRAS = {"lines": "text", "placeholder": "text", "options": "choice", "min": "number", "max": "number"}
+MAX_FIELDS = 6
+# What a field may never ask for: the user's secrets go through their own
+# apps, never a card in a chat the model reads.
+_SECRET_PARTS = ("password", "passcode", "secret", "token", "apikey", "onetime", "privatekey", "recoverykey",
+                 "licensekey", "seedphrase", "verificationcode", "securitycode", "authcode", "backupcode",
+                 "passphrase", "totp", "masterkey", "credential", "2fa", "twofactor", "logincode",
+                 "accesscode", "unlockcode", "securitykey", "resetcode", "recoverycode",
+                 "activationcode", "authkey", "verificationkey", "backupkey",
+                 # The same in the languages Conduit ships, as a model writes labels in the user's.
+                 "passwort", "kennwort", "contraseña", "motdepasse", "senha", "пароль", "hasło", "şifre",
+                 "katasandi", "パスワード", "暗証番号", "認証コード", "密码", "密碼", "验证码", "驗證碼",
+                 "비밀번호", "인증번호", "인증코드", "bestätigungscode", "verifizierungscode", "zugangscode",
+                 "códigodeverificación", "codigodeverificacion", "códigodeverificação", "codedevérification",
+                 "codedeverification", "codicediverifica", "kodeverifikasi", "doğrulamakodu", "kodweryfikacyjny",
+                 "кодподтверждения", "clavedeacceso", "contrasena")
+_SECRET_WORDS = frozenset(("pin", "otp", "cvv", "cvc"))
+# Letters of any script count, so a label in Japanese or Russian is read too.
+_NOT_ALNUM = re.compile(r"[\W_]+")
+_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2})?$")
+_NUMBER = re.compile(r"^-?[0-9]+(\.[0-9]+)?$")
+# What an open button may open: web pages and the links iOS hands to Maps,
+# Phone, Messages, Mail, Calendar and Reminders.
+OPEN_SCHEMES = ("https://", "maps:", "tel:", "sms:", "mailto:", "calshow:", "x-apple-reminderkit:")
+_OPEN_BANNED = re.compile(r"[\s\"'`\\<>]")
+
+
+class _Controls:
+    """What a card's buttons and fields have used so far."""
+
+    def __init__(self) -> None:
+        self.fields: set[str] = set()
+        self.taps: set[str] = set()
+        self.primary = False
+
+
+def _a(word: str) -> str:
+    return f"an {word}" if word[:1] in "aeiou" else f"a {word}"
+
+
+def names_secret(text: str) -> bool:
+    """Whether a field's id, label or placeholder asks for a secret."""
+    words = _NOT_ALNUM.sub(" ", text.lower()).split()
+    joined = "".join(words)
+    return any(part in joined for part in _SECRET_PARTS) or bool(_SECRET_WORDS.intersection(words))
+
+
+def _composed_rules(sections: list[dict[str, Any]], controls: _Controls, path: str,
+                    notes: list[str] | None) -> list[dict[str, Any]]:
+    kept = []
+    for index, section in enumerate(sections):
+        items = []
+        for number, element in enumerate(section["items"]):
+            element = _element_rules(element, controls, f"{path}[{index}].items[{number}]", notes)
+            if element is not None:
+                items.append(element)
+        if items:
+            section["items"] = items
+            kept.append(section)
+        else:
+            _note(notes, f"{path}[{index}]: no element is left, left out")
+    return kept
+
+
+def _element_rules(element: dict[str, Any], controls: _Controls, path: str,
+                   notes: list[str] | None) -> dict[str, Any] | None:
+    kind = element["kind"]
+    fields = _ELEMENT_FIELDS[kind]
+    for key in element:
+        if key != "kind" and key not in fields:
+            _note(notes, f"{path}.{key}: not used on {_a(kind)}, left out")
+    element = {key: value for key, value in element.items() if key == "kind" or key in fields}
+    for key in _ELEMENT_NEEDS[kind]:
+        if key not in element:
+            _note(notes, f"{path}.{key}: {_a(kind)} needs it, dropped")
+            return None
+    if kind == "image" and not _is_https(element["url"]):
+        _note(notes, f"{path}.url: not https, dropped")
+        return None
+    if kind == "field":
+        return _field_rules(element, controls, path, notes)
+    if kind == "button":
+        return element if _button_rules(element, controls, path, notes) else None
+    return element
+
+
+def _field_rules(field: dict[str, Any], controls: _Controls, path: str,
+                 notes: list[str] | None) -> dict[str, Any] | None:
+    if any(isinstance(field.get(key), str) and names_secret(field[key]) for key in ("id", "label", "placeholder")):
+        _note(notes, f"{path}: a card never asks for a password, code or key, dropped")
+        return None
+    if field["id"] in controls.fields:
+        _note(notes, f"{path}.id: another field has it, dropped")
+        return None
+    if len(controls.fields) == MAX_FIELDS:
+        _note(notes, f"{path}: a card has at most {MAX_FIELDS} fields, dropped")
+        return None
+    kind = field["input"]
+    for key, fits in _FIELD_EXTRAS.items():
+        if key in field and fits != kind:
+            del field[key]
+            _note(notes, f"{path}.{key}: goes with a {fits} field, left out")
+    if kind == "choice" and "options" not in field:
+        _note(notes, f"{path}.options: a choice field needs them, dropped")
+        return None
+    if "min" in field and "max" in field and field["min"] > field["max"]:
+        del field["min"]
+        _note(notes, f"{path}.min: above max, left out")
+    if "value" in field:
+        value = _field_value(field)
+        if value is None:
+            del field["value"]
+            _note(notes, f"{path}.value: not a {kind} value it can hold, left out")
+        else:
+            field["value"] = value
+    controls.fields.add(field["id"])
+    return field
+
+
+def _field_value(field: dict[str, Any]) -> str | None:
+    value = field["value"]
+    kind = field["input"]
+    if kind == "choice":
+        return next((option for option in field["options"] if option.lower() == value.lower()), None)
+    if kind == "toggle":
+        return value.lower() if value.lower() in ("on", "off") else None
+    if kind == "date":
+        return value if _DATE.match(value) else None
+    if kind == "number":
+        if not _NUMBER.match(value):
+            return None
+        number = float(value)
+        if ("min" in field and number < field["min"]) or ("max" in field and number > field["max"]):
+            return None
+    return value
+
+
+def _button_rules(button: dict[str, Any], controls: _Controls, path: str, notes: list[str] | None) -> bool:
+    """Whether a button stays; it's tidied in place."""
+    action = button["action"]
+    if action == "tap":
+        if "id" not in button:
+            _note(notes, f"{path}.id: a tap button needs it, dropped")
+            return False
+        if button.pop("target", None) is not None:
+            _note(notes, f"{path}.target: a tap button has none, left out")
+        if not plain_message(button["label"]):
+            _note(notes, f"{path}.label: \"{button['label']}\" isn't a plain message, and a tap sends it, dropped")
+            return False
+        if button["id"] in controls.taps:
+            _note(notes, f"{path}.id: another tap button has it, dropped")
+            return False
+        controls.taps.add(button["id"])
+    else:
+        if "target" not in button:
+            _note(notes, f"{path}.target: {_a(action)} button needs it, dropped")
+            return False
+        if button.pop("id", None) is not None:
+            _note(notes, f"{path}.id: only a tap button has one, left out")
+        target = button["target"]
+        if action == "open" and (not target.lower().startswith(OPEN_SCHEMES) or _OPEN_BANNED.search(target)):
+            _note(notes, f"{path}.target: not a link it can open (https, maps, tel, sms, mailto, calshow or "
+                         "x-apple-reminderkit, with no spaces or quotes), dropped")
+            return False
+        if action == "send" and not plain_message(target):
+            _note(notes, f"{path}.target: \"{target}\" isn't a plain message, dropped")
+            return False
+    if button.get("style") == "primary":
+        if controls.primary:
+            button["style"] = "plain"
+            _note(notes, f"{path}.style: one primary button per card, made plain")
+        controls.primary = True
+    return True
+
+
+def plain_message(text: str) -> bool:
+    """A message a tap may send as the user's: never a command, a file
+    reference or a shell line, so a tap can only ever ask."""
+    return not (text[:1] in ("/", "!") or _NEXT_MENTION.search(text) or "`" in text)
+
+
+def has_actions(card: dict[str, Any]) -> bool:
+    """Whether a card holds buttons or fields (composed elements or actions)."""
+    return "actions" in card or any(element["kind"] in ("field", "button") for section in card.get("sections", [])
+                                    for element in section["items"])
+
+
+def without_actions(card: dict[str, Any], keep: tuple[str, ...] = ()) -> dict[str, Any] | None:
+    """The card with no buttons but those whose action is in ``keep``, and no
+    fields; a composed card with nothing else left is None."""
+    card = dict(card)
+    if "actions" in card:
+        actions = [button for button in card["actions"] if button["action"] in keep]
+        if actions:
+            card["actions"] = actions
+        else:
+            del card["actions"]
+    if "sections" in card:
+        sections = []
+        for section in card["sections"]:
+            items = [element for element in section["items"] if element["kind"] != "field"
+                     and (element["kind"] != "button" or element["action"] in keep)]
+            if items:
+                sections.append({**section, "items": items})
+        if not sections:
+            return None
+        card["sections"] = sections
+    return card
+
+
 def _diff_rules(diff: dict[str, Any], path: str, notes: list[str] | None = None) -> None:
     """A hunk keeps the lines a patch can hold (+, - or a space first) and
     goes when none is left; a binary file has no lines; an id is the host's."""
@@ -509,7 +754,7 @@ def normalize_next(value: Any, notes: list[str] | None = None) -> list[str]:
         text = _normalize(NEXT_SCHEMA["items"], raw, f"next[{index}]", notes)
         if text is _INVALID:
             continue
-        if text[:1] in ("/", "!") or _NEXT_MENTION.search(text) or "`" in text:
+        if not plain_message(text):
             _note(notes, f"next[{index}]: \"{text}\" isn't a plain message, left out")
             continue
         if text.lower() in (other.lower() for other in kept):
@@ -960,6 +1205,7 @@ def _card_markdown(card: dict[str, Any]) -> str:
     kind = card.get("type")
     if kind in _INFO_MARKDOWN:
         lines.extend(_INFO_MARKDOWN[kind](card))
+        lines.extend(_actions_markdown(card.get("actions", [])))
         if card.get("source"):
             lines.append(f"_From {_sourced_name(card['source'])}_")
         return "\n\n".join(line for line in lines if line)
@@ -985,7 +1231,8 @@ def _card_markdown(card: dict[str, Any]) -> str:
             label += f" ({mode})"
         link = "https://maps.apple.com/?" + "&".join(f"{key}={quote(value, safe=',')}" for key, value in query)
         lines.append(f"[{label}]({link})")
-    return "\n\n".join(lines)
+    lines.extend(_actions_markdown(card.get("actions", [])))
+    return "\n\n".join(line for line in lines if line)
 
 
 def _place_markdown(place: dict[str, Any]) -> str:
@@ -1343,7 +1590,81 @@ def _diff_markdown(card: dict[str, Any]) -> list[str]:
     return parts
 
 
-_INFO_MARKDOWN = {"diff": _diff_markdown, "stats": _stats_markdown, "chart": _chart_markdown, "weather": _weather_markdown,
+def _composed_markdown(card: dict[str, Any]) -> list[str]:
+    parts = []
+    for section in card["sections"]:
+        rows = [row for row in (_element_markdown(element) for element in section["items"]
+                                if element["kind"] != "button") if row]
+        if rows:
+            parts.append(("  \n" if section.get("layout") != "row" else " · ").join(rows))
+    buttons = [element for section in card["sections"] for element in section["items"] if element["kind"] == "button"]
+    return parts + _actions_markdown(buttons)
+
+
+def _element_markdown(element: dict[str, Any]) -> str:
+    kind = element["kind"]
+    if kind == "text":
+        text = _escape(element["text"])
+        role = element.get("role", "body")
+        if role == "heading":
+            return f"**{text}**"
+        if role == "caption":
+            return f"_{text}_"
+        if role == "mono":
+            fence = "`" * (1 + max((len(run) for run in re.findall(r"`+", element["text"])), default=0))
+            return f"{fence} {element['text']} {fence}"
+        return text
+    if kind == "metric":
+        row = f"**{_escape(element['value'])}**"
+        if element.get("label"):
+            row = f"{_escape(element['label'])}: {row}"
+        if element.get("change"):
+            row += f" ({_escape(element['change'])})"
+        return row
+    if kind == "badge":
+        return f"[{_escape(element['text'])}]"
+    if kind == "image":
+        return f"![{_escape(element.get('label', ''))}]({element['url']})"
+    if kind == "progress":
+        share = f"{round(element['progress'] * 100)}%"
+        return f"{_escape(element['label'])}: {share}" if element.get("label") else share
+    if kind == "divider":
+        return "\u2014"
+    if kind == "field":
+        name = _escape(element.get("label") or element["id"])
+        value = element.get("value")
+        if element["input"] == "choice":
+            options = " / ".join(_escape(option) for option in element["options"])
+            return f"**{name}:** {_escape(value)} ({options})" if value else f"**{name}:** {options}"
+        return f"**{name}:** {_escape(value)}" if value else f"**{name}:**"
+    return ""
+
+
+def _actions_markdown(buttons: list[dict[str, Any]]) -> list[str]:
+    """Buttons as Markdown: a link opens, text to copy shows, and what a tap
+    or a message would say is a reply the user can type instead."""
+    rows = []
+    replies = []
+    for button in buttons:
+        label = _escape(button["label"])
+        action = button["action"]
+        if action == "open":
+            if _is_https(button["target"]):
+                rows.append(f"[{label}]({button['target']})")
+            else:
+                rows.append(f"{label}: {_escape(button['target'])}")
+        elif action == "copy":
+            rows.append(f"{label}: {_escape(button['target'])}")
+        elif action == "send":
+            replies.append(_escape(button["target"]))
+        else:
+            replies.append(label)
+    if replies:
+        rows.append("Reply " + " or ".join(f"_{reply}_" for reply in replies))
+    return ["  \n".join(rows)] if rows else []
+
+
+_INFO_MARKDOWN = {"composed": _composed_markdown, "diff": _diff_markdown, "stats": _stats_markdown, "chart": _chart_markdown, "weather": _weather_markdown,
                   "comparison": _comparison_markdown, "steps": _steps_markdown, "media": _media_markdown,
                   "contact": _contact_markdown, "status": _status_markdown, "table": _table_markdown,
                   "timeline": _timeline_markdown, "checklist": _checklist_markdown, "list": _list_markdown,
@@ -1377,3 +1698,22 @@ def _maps_params(place: dict[str, Any]) -> str:
 
 def _escape(text: str) -> str:
     return re.sub(r"([\\`*_\[\]<>|])", r"\\\1", text)
+
+
+def open_fence(text: str) -> str | None:
+    """The code fence a Markdown text leaves open at its end, if any; a
+    composed card's mono element (inline code fenced on its own line, opened
+    and closed there) is no fence. The tap note's clip and the answer's
+    (present_store.clip_markdown) both read it."""
+    fence = None
+    for line in text.split("\n"):
+        run = re.match(r"`{3,}", line)
+        if not run:
+            continue
+        rest = line[len(run.group()):]
+        if fence is None:
+            if not (rest.strip() and rest.rstrip().endswith(run.group())):
+                fence = run.group()
+        elif run.group() == fence and not rest.strip():
+            fence = None
+    return fence
