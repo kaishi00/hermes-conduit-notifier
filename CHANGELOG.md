@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.141.4 (2026-11-08)
+
+### Fixes
+- In a room with linked people, @mentioning one bot got you an answer from
+  it, but its reply often tagged another bot, and Hermes gives a turn to
+  any bot that's tagged, so both answered anyway. A bot you @mention now
+  answers you itself and tags another only when you asked for them.
+
 ## 0.141.1 (2026-11-08)
 
 ### Fixes

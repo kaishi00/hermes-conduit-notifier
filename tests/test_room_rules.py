@@ -778,6 +778,9 @@ def test_room_turn_framing_says_who_is_asking_and_not_to_answer_for_others(host,
     home = _context("s-home")
     assert "@laifu" in home and "the user in this room is your owner" in home.lower()
     assert "Answer only for yourself" in home
+    # A bot the user @mentioned answers alone: it doesn't tag another in (Eric 2026-11-08).
+    for told in (member, home):
+        assert "don't @mention another participant in your reply unless the user asked for them" in told
     # Talk only, Ask me first and no past-chat search, said so the agent doesn't try.
     assert rules.TALK_ASK_LINE in home and "check with your owner" in home and "nothing is saved" in home.lower()
 
