@@ -59,6 +59,18 @@ create --clone` copies the plugins folder) is moved to the profile's
 install, which leaves the profile alone. Where the host can't make a link,
 the main install is copied in instead and replaced at the next update.
 
+### A host that manages the plugin (plugin 0.146.0+)
+
+When something other than Conduit installs and upgrades the plugin (an image
+that bakes a pinned version, a configuration manager), set
+`CONDUIT_PUSH_MANAGED` in the dashboard's environment: `1` (or `true`, `yes`, `on`)
+for a plain "managed", or a short text naming who manages it, such as
+`CONDUIT_PUSH_MANAGED="Family farm"`. The capabilities route then reports
+`"managed": true` (and `"managed_by"` for a text), Conduit asks nobody to
+update the plugin on that host and says who keeps it up to date, and
+`POST /self/update` answers 409. A restart already waiting on the host is
+still offered. Leave it unset (or `0`) for a plugin you update from Conduit.
+
 Pairing codes expire after ten minutes and can only be claimed once.
 
 With plugin 0.24+ Conduit pairs the active dashboard's profile by itself: it
@@ -2692,7 +2704,7 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
   left out and buttons and fields are taken off other cards, and Hermes is
   told to offer them in its reply.
 
-### Review cards (plugin 0.146+)
+### Review cards (plugin 0.147+)
 
 A `review` card shows options to choose between when they're easier to see
 than to describe: layouts, colours, charts, posters, a before and after.

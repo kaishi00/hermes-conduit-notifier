@@ -311,10 +311,36 @@ LOADED_VERSION = _plugin_version()
 BOOT_ID = os.urandom(8).hex()
 
 
+# A host that installs and upgrades the plugin itself (an image that bakes a
+# pinned version, a config manager) sets CONDUIT_PUSH_MANAGED: "1" (or
+# true/yes/on) for a plain "managed", or a short text naming who manages it.
+# Conduit then asks nobody to update it, and /self/update refuses.
+MANAGED_ENV = "CONDUIT_PUSH_MANAGED"
+MANAGED_BY_MAX = 80
+
+
+def managed_by() -> Optional[str]:
+    """None when the plugin isn't managed; "" for a plain managed host, or the
+    host's own name for whoever manages it (printable, at most 80 chars)."""
+    raw = (os.environ.get(MANAGED_ENV) or "").strip()
+    if not raw or raw.lower() in {"0", "false", "no", "off"}:
+        return None
+    if raw.lower() in {"1", "true", "yes", "on"}:
+        return ""
+    text = "".join(ch for ch in raw if ch.isprintable()).strip()
+    return text[:MANAGED_BY_MAX].strip()
+
+
 @router.get("/capabilities")
 async def get_capabilities(response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     installed = _plugin_version()
-    return {"ok": True, "version": installed, "loaded_version": LOADED_VERSION,
+    body = {"ok": True, "version": installed, "loaded_version": LOADED_VERSION,
             "restart_needed": installed != LOADED_VERSION, "boot_id": BOOT_ID,
             "capabilities": list(ROUTE_CAPABILITIES)}
+    managed = managed_by()
+    if managed is not None:
+        body["managed"] = True
+        if managed:
+            body["managed_by"] = managed
+    return body

@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.146.0 (2026-11-08)
+## 0.147.0 (2026-11-08)
 
 ### New and improved
 - Hermes can show you options to choose between when they're easier to see
@@ -22,6 +22,14 @@ checks it). The format is fixed, because Conduit reads it:
   Change or Skip with notes, and Hermes comes back with the next round.
 - In Bot Mode, a workstream draws the options and your Bot Chat shows them:
   your marks go straight back to that workstream, every round.
+
+## 0.146.0 (2026-11-08)
+
+### New and improved
+- A host that installs and upgrades the plugin itself can say so with
+  CONDUIT_PUSH_MANAGED. Conduit then stops asking to update the plugin on
+  that host, and an update started from Conduit is refused, so the host
+  keeps the version it was tested with.
 
 ## 0.145.0 (2026-11-08)
 
