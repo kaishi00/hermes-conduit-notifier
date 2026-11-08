@@ -146,12 +146,12 @@ def _review_marks(value: Any, decisions: list[dict[str, Any]]) -> dict[str, Any]
             entry["option"] = option
         elif mark == "approve":
             raise TapError("an approval names the option approved")
-        note = _field_text(raw.get("note"))[:MAX_REVIEW_NOTE_CHARS]
+        note = _field_text(raw.get("note"))
         if note:
             entry["note"] = note
         seen.add(decision["id"])
         marks.append(entry)
-    note = _field_text(value.get("note"))[:MAX_REVIEW_NOTE_CHARS]
+    note = _field_text(value.get("note"))
     return {"decisions": marks, **({"note": note} if note else {})}
 
 
@@ -299,10 +299,15 @@ class TapStore:
                "markdown": _review_lines(decisions, marks), "values": {},
                "review": {"id": shown["id"], "round": shown["round"], "for": meta["for"],
                           "quick": len(decisions) == 1, "settles": _settles(marks, decisions)}}
-        with self._locked() as state:
-            for session in sessions:
-                state["taps"].append({**tap, "session": session})
-            state["taps"] = state["taps"][-MAX_TAPS:]
+        try:
+            with self._locked() as state:
+                for session in sessions:
+                    state["taps"].append({**tap, "session": session})
+                state["taps"] = state["taps"][-MAX_TAPS:]
+        except BaseException:
+            # No tap, no marks: the app's retry can send them again.
+            store.drop_marks(shown["id"], shown["round"])
+            raise
         return {"ok": True, "id": tap["id"]}
 
     def drop(self, tap_id: Any) -> dict[str, Any]:
