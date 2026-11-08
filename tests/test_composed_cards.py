@@ -513,3 +513,12 @@ def test_a_repeat_item_that_isnt_an_object_is_named():
 @pytest.mark.parametrize("label", ["인증코드", "인증 코드", "인증번호"])
 def test_a_korean_verification_code_field_is_dropped(label):
     assert card_schema.names_secret(label)
+
+
+def test_an_empty_repeat_list_says_its_section_went():
+    template = {"type": "composed", "title": "Day", "sections": [
+        {"items": [{"kind": "text", "text": "Today"}]},
+        {"repeat": "events", "items": [{"kind": "text", "text": "{{events.time}}"}]}]}
+    notes = []
+    card = card_templates.expand_template(template, {"events": []}, notes, "t")
+    assert len(card["sections"]) == 1 and "t.fill.events: empty, its section left out" in notes

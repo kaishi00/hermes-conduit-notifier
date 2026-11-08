@@ -260,6 +260,9 @@ def expand_template(card: dict[str, Any], fill: dict[str, Any], notes: list[str]
                 if not isinstance(items, list):
                     notes.append(f"{path}.fill.{slot}: not given, its section left out")
                     continue
+                if not items:
+                    notes.append(f"{path}.fill.{slot}: empty, its section left out")
+                    continue
                 # Each item draws a section, and the card keeps to MAX_SECTIONS:
                 # the template's other sections keep their place.
                 after = sum(1 for later in sections[index + 1:]
