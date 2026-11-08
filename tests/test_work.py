@@ -800,8 +800,44 @@ def test_lookups_tells_the_coordinator_to_answer_lookups_itself(on, home, hermes
     rules = work.digest(BOT_CHAT)
     assert "Hand anything that needs tools" not in rules
     assert rules.index("the weather") < rules.index("work_start")
+    assert "the rest of a page web_extract kept" in rules and "reading or changing the user's files" in rules
     for tool in ("web_search", "web_extract", "session_search", "conduit_location"):
         assert tool in rules and work.tool_block(BOT_CHAT, tool, {"action": "now"}) is None
+
+
+def test_the_coordinator_draws_its_own_cards(on, home, hermes):
+    # Eric 2026-11-07: Furina answered the weather in text, then handed the card he asked for
+    # to a workstream, whose cards show in its own chat. Cards are the Bot Chat's own.
+    for policy in ("strict", "lookups"):
+        work.app_set_settings(home, {"policy": policy})
+        assert work.tool_block(BOT_CHAT, "conduit_show", {"cards": []}) is None
+        assert work.tool_block(BOT_CHAT, "tool_call", {"name": "conduit_show", "arguments": {}}) is None
+        rules = work.digest(BOT_CHAT)
+        assert work.SHOW_RULE in rules and rules.index("conduit_show") < rules.index("If the work tools aren't listed")
+    assert work.tool_block(BOT_CHAT, "conduit_present", {})["action"] == "block"  # only drawing, nothing more
+
+
+def test_lookups_reads_the_page_web_extract_kept(on, home, hermes):
+    # Eric's .52 (2026-11-07): web_extract cut the weather page and kept it whole under
+    # cache/web, as Hermes does, telling the model to read_file it; the read was refused.
+    kept = home / "cache" / "web"
+    kept.mkdir(parents=True)
+    (kept / "www.accuweather.com-f8dff445e7.md").write_text("Sunny, 62")
+    (home / "config.yaml").write_text("secret: 1")
+    page = {"path": str(kept / "www.accuweather.com-f8dff445e7.md")}
+    work.app_set_settings(home, {"policy": "lookups"})
+    assert work.tool_block(BOT_CHAT, "read_file", page) is None
+    assert work.tool_block(BOT_CHAT, "tool_call", {"name": "read_file", "arguments": page}) is None
+    for elsewhere in (str(home / "config.yaml"), str(kept / ".." / ".." / "config.yaml"), str(kept),
+                      "cache/web/www.accuweather.com-f8dff445e7.md", ""):
+        assert work.tool_block(BOT_CHAT, "read_file", {"path": elsewhere})["action"] == "block"
+    legacy = home / "web_cache"  # an install from before cache/web keeps using it
+    legacy.mkdir()
+    (legacy / "example.com-0123456789.md").write_text("Rain")
+    assert work.tool_block(BOT_CHAT, "read_file", {"path": str(legacy / "example.com-0123456789.md")}) is None
+    assert work.tool_block(BOT_CHAT, "read_file", {"path": str(legacy) + "-other/x.md"})["action"] == "block"
+    work.app_set_settings(home, {"policy": "strict"})
+    assert work.tool_block(BOT_CHAT, "read_file", page)["action"] == "block"  # strict looks nothing up
 
 
 def test_a_bridged_call_is_checked_by_what_it_calls(on, hermes):

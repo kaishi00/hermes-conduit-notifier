@@ -69,7 +69,11 @@ TOOLS = ("work_list", "work_start", "work_send", "work_stop", "work_read", "work
 WORKER_TOOLS = ("work_progress",)
 BRIDGE = frozenset({"tool_search", "tool_describe", "tool_call"})
 # What a coordinator may call itself (C.4). Everything else becomes a workstream.
-STRICT = frozenset({*TOOLS, *WORKER_TOOLS, "clarify", "memory", "conduit_notify", *BRIDGE})
+# conduit_show draws the coordinator's own answer in its own chat: a
+# workstream's cards land in the workstream's chat, where the user isn't
+# (Eric 2026-11-07: Furina handed a weather card to a workstream).
+SHOW = "conduit_show"
+STRICT = frozenset({*TOOLS, *WORKER_TOOLS, "clarify", "memory", "conduit_notify", SHOW, *BRIDGE})
 LOOKUPS = STRICT | frozenset({"session_search", "web_search", "web_extract", "skills_list", "skill_view",
                               "conduit_health", "conduit_location", "conduit_inbox"})
 # The lookup tools' actions that change something: a coordinator on lookups
@@ -129,6 +133,10 @@ OFF = ("Bot workstreams are off for this bot, so nothing was started. The user c
        "(Edit Bot > Work) or with `hermes conduit-push work on`.")
 NO_SUCH = ("There's no {ref} in this bot's work. Name work by its ref from work_list (W1, A1); session ids and "
            "other bots' work can't be named here.")
+# Cards are the coordinator's own: under either policy it draws them itself.
+SHOW_RULE = ("Draw cards yourself with conduit_show, never through a workstream: a workstream's cards show in its "
+             "own chat, not here. When the user asks for a card, or a workstream reports something that reads "
+             "better seen, show it in this turn.")
 POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. Start a workstream for it with "
                 "work_start, or send it to one that's already on it with work_send.")
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get questions and work through work_ask, which "
@@ -2737,7 +2745,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     held = _workstream_block(session_id, home, names, {MEMORY})
     if held is not None:
         return held
-    if all(_allowed(called, called_args, allowed) for called, called_args in calls):
+    if all(_allowed(called, called_args, allowed, home) for called, called_args in calls):
         return None  # allowed in any chat: which one this is doesn't matter
     has_id = isinstance(session_id, str) and session_id.strip()
     # A call that names no chat might be the coordinator's: held like one
@@ -2755,7 +2763,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
                 return {"action": "block", "message": CHECK_FAILED}
         return None
     for called, called_args in calls:
-        if _allowed(called, called_args, allowed):
+        if _allowed(called, called_args, allowed, home):
             continue
         if titled is None:
             # Which chat this is couldn't be read: it might be the
@@ -2835,9 +2843,12 @@ def _memory_provider(home: Path) -> tuple[str, frozenset]:
     return cached[1], cached[2]
 
 
-def _allowed(called: str, called_args: Any, allowed: frozenset) -> bool:
+def _allowed(called: str, called_args: Any, allowed: frozenset, home: Optional[Path] = None) -> bool:
     """Whether the coordinator runs this call itself: a tool its policy
-    allows, unless the call is one of a lookup tool's writes."""
+    allows, unless the call is one of a lookup tool's writes, or on lookups
+    a read of a page web_extract kept."""
+    if called == "read_file" and "web_extract" in allowed:
+        return _web_page(called_args, home)
     if called not in allowed:
         return False
     writes = LOOKUP_WRITES.get(called)
@@ -2845,6 +2856,27 @@ def _allowed(called: str, called_args: Any, allowed: frozenset) -> bool:
         return True
     action = called_args.get("action") if isinstance(called_args, dict) else None
     return isinstance(action, str) and action not in writes
+
+
+def _web_page(called_args: Any, home: Optional[Path]) -> bool:
+    """Whether a read_file reads a page Hermes' web_extract kept whole under
+    the profile's cache/web (web_cache before it), which its truncated result
+    tells the model to read_file: the rest of a lookup, not a file of the
+    user's (Eric's .52, 2026-11-07: Furina's weather page was refused)."""
+    path = called_args.get("path") if isinstance(called_args, dict) else None
+    if home is None or not isinstance(path, str) or not path.strip():
+        return False
+    try:
+        target = Path(path.strip()).expanduser()
+        if not target.is_absolute():
+            return False
+        target = target.resolve()
+        for kept in (home / "cache" / "web", home / "web_cache"):
+            if target.is_relative_to(kept.resolve()) and target != kept.resolve():
+                return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return False
 
 
 def _linked_worker_block(session_id: Any, home: Path, name: str, names: list[str]) -> Optional[dict[str, str]]:
@@ -3837,14 +3869,16 @@ def digest(session_id: Any) -> Optional[str]:
                    "yourself, in this turn, without a workstream: the weather, news and other current facts "
                    "(web_search, web_extract), what was said in past chats (session_search), the bot's skills "
                    "(skills_list, skill_view), and the user's health, location and inbox (conduit_health, "
-                   "conduit_location, conduit_inbox). Call them through tool_call when they aren't listed. Hand "
+                   "conduit_location, conduit_inbox), and the rest of a page web_extract kept for you (read_file "
+                   "on the path it gives). Call them through tool_call when they aren't listed. Hand "
                    "a workstream (work_start) anything else that needs tools: running commands, reading or "
-                   "changing files, or work of several steps; send follow-ups to the one that's on it "
+                   "changing the user's files, or work of several steps; send follow-ups to the one that's on it "
                    "(work_send with its ref); answer from what you know otherwise. ")
     else:
         routing = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), "
                    "and send follow-ups to the one that's on it (work_send with its ref); answer from what you "
                    "know otherwise. ")
+    routing += SHOW_RULE + " "
     provider, declared = _memory_provider(home)
     if provider:
         tools = ", ".join(sorted(declared)[:4]) or f"{provider}_..."
