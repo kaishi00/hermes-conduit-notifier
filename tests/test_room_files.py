@@ -272,6 +272,10 @@ def test_a_room_file_another_host_stored_reads_this_hosts_copy(tmp_path):
         with pytest.raises(api.rooms.HTTPException) as error:
             api.rooms.read_room_file_picture(str(profile), path, [str(carried)])
         assert error.value.status_code == status, path
+    # The home's path naming a profile's root here, where the file isn't, reads the copy (Greptile on #629).
+    (profile / folder).mkdir(parents=True)
+    same = str(profile / folder / "shot one.jpg")
+    assert api.rooms.read_room_file_picture(str(profile), same, [str(carried)])["dataUrl"]
     # A Windows home's path reads the copy too (DeepSeek on notifier #629).
     windows = f"C:\\Users\\furina\\.hermes\\conduit\\room-files\\{folder}\\shot one.jpg"
     assert api.rooms.read_room_file_picture(str(profile), windows, [str(carried)])["dataUrl"]

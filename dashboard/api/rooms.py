@@ -308,7 +308,9 @@ def _room_file_here(path: str, roots: Sequence[str]) -> Optional[str]:
     if os.path.isabs(path):
         real = os.path.realpath(path)
         # Only a file inside an upload's own folder, never a root itself.
-        if os.path.dirname(os.path.dirname(real)) in bases:
+        # Only when it's there: the same path on two hosts may name a profile's root here and the copy
+        # Linked Rooms keep in the root home.
+        if os.path.dirname(os.path.dirname(real)) in bases and os.path.lexists(real):
             return real
     tail = _ROOM_FILE_TAIL.search(path)
     if tail is None or tail.group(2) in (".", ".."):
