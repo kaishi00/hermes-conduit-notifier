@@ -85,10 +85,13 @@ VERSION: int = DEFINITION["version"]
 def tool_parameter(description: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """The ``cards`` parameter of a tool: a short list of cards. A diff card
     takes its changes as ``inputs.diff`` (a patch, a patch file or two
-    texts), which normalizing reads into the card's diff. ``extra`` adds
+    texts), which normalizing reads into the card's diff, and a review card
+    its options as ``inputs.review`` (pages and pictures), which the tool
+    keeps on the host before normalizing (show_tool). ``extra`` adds
     card types the tool fills in itself before normalizing (conduit_show's
     saved templates), each named by its field."""
-    properties = {**CARD_SCHEMA["properties"], "diff": DEFINITION["inputs"]["diff"], **(extra or {})}
+    properties = {**CARD_SCHEMA["properties"], "diff": DEFINITION["inputs"]["diff"],
+                  "review": DEFINITION["inputs"]["review"], **(extra or {})}
     if extra:
         kind = properties["type"]
         properties["type"] = {**kind, "enum": [*kind["enum"], *extra]}
@@ -319,7 +322,8 @@ _TYPE_FIELDS = {"map": ("places", "route"), "place": ("places",), "places": ("pl
                 "chart": ("chart",), "weather": ("weather",), "comparison": ("options",), "steps": ("steps", "needs"),
                 "media": ("media",), "contact": ("people",), "status": ("status",), "table": ("table",),
                 "timeline": ("timeline",), "checklist": ("checklist",), "list": ("list", "ranked"),
-                "progress": ("progress",), "callout": ("callout",), "diff": ("diff",), "composed": ("sections",)}
+                "progress": ("progress",), "callout": ("callout",), "diff": ("diff",), "review": ("review",),
+                "composed": ("sections",)}
 PLACE_TYPES = ("map", "place", "places")
 # The information cards (plugin 0.46+), media and contacts, and statuses
 # (0.47+): a Conduit draws each group only when its exchange names it.
@@ -336,8 +340,12 @@ DIFF_FEATURE = "diff-cards"
 # Composed cards, and buttons on any card (plugin 0.140+, issue 1946).
 COMPOSED_TYPES = ("composed",)
 COMPOSED_FEATURE = "composed-cards"
+# Options to look at and mark: a quick pick or a design review (plugin 0.142+).
+REVIEW_TYPES = ("review",)
+REVIEW_FEATURE = "review-cards"
 FEATURE_TYPES = {"info-cards": INFO_TYPES, "media-cards": MEDIA_TYPES, "live-cards": LIVE_TYPES,
-                 BOARD_FEATURE: BOARD_TYPES, DIFF_FEATURE: DIFF_TYPES, COMPOSED_FEATURE: COMPOSED_TYPES}
+                 BOARD_FEATURE: BOARD_TYPES, DIFF_FEATURE: DIFF_TYPES, COMPOSED_FEATURE: COMPOSED_TYPES,
+                 REVIEW_FEATURE: REVIEW_TYPES}
 # How many cards a Conduit without boards draws from a set.
 LEGACY_MAX_CARDS = 4
 # A phone number's characters, and an address with nothing that could end a
@@ -486,6 +494,11 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
         card["progress"] = items
     elif kind == "diff":
         _diff_rules(card["diff"], f"{path}.diff", notes)
+    elif kind == "review":
+        review = _review_rules(card["review"], f"{path}.review", notes)
+        if review is None:
+            return None
+        card["review"] = review
     return card
 
 
@@ -763,6 +776,60 @@ def _diff_rules(diff: dict[str, Any], path: str, notes: list[str] | None = None)
             file["hunks"] = hunks
         else:
             file.pop("hunks", None)
+
+
+REVIEW_ID = re.compile(r"rv-[0-9a-f]{16}")
+WORK_REF = re.compile(r"W[0-9]{1,6}")
+
+
+def _review_rules(review: dict[str, Any], path: str, notes: list[str] | None = None) -> dict[str, Any] | None:
+    """A review the host keeps (its id), what it's for, and decisions each
+    with two or more options of their own ids, an image's url https."""
+    if not REVIEW_ID.fullmatch(review["id"]):
+        _note(notes, f"{path}.id: not an id the host gave")
+        return None
+    if "for" in review and not WORK_REF.fullmatch(review["for"]):
+        del review["for"]
+        _note(notes, f"{path}.for: not a workstream ref like W3, left out")
+    decisions = []
+    seen_decisions: set[str] = set()
+    for decision in review["decisions"]:
+        where = f'{path}.decisions "{decision["id"]}"'
+        if decision["id"] in seen_decisions:
+            _note(notes, f"{where}: another decision has that id, left out")
+            continue
+        seen_decisions.add(decision["id"])
+        options = []
+        seen_options: set[str] = set()
+        recommended = False
+        for option in decision["options"]:
+            named = f'{where}.options "{option["id"]}"'
+            if option["id"] in seen_options:
+                _note(notes, f"{named}: another option has that id, left out")
+                continue
+            if option["kind"] == "image":
+                if not _is_https(option.get("url", "")):
+                    _note(notes, f"{named}: a picture needs an https url, left out")
+                    continue
+            elif option.pop("url", None) is not None:
+                _note(notes, f"{named}.url: a page has no url, left out")
+            if option.get("recommended"):
+                if recommended:
+                    del option["recommended"]
+                    _note(notes, f"{named}.recommended: one option at most, left out")
+                recommended = True
+            seen_options.add(option["id"])
+            options.append(option)
+        if len(options) < 2:
+            _note(notes, f"{where}: needs two options, left out")
+            continue
+        decision["options"] = options
+        decisions.append(decision)
+    if not decisions:
+        _note(notes, f"{path}.decisions: none is left")
+        return None
+    review["decisions"] = decisions
+    return review
 
 
 # Follow-ups a tap sends as the user's message: never a command, a file
@@ -1696,7 +1763,37 @@ def _actions_markdown(buttons: list[dict[str, Any]]) -> list[str]:
     return ["  \n".join(rows)] if rows else []
 
 
-_INFO_MARKDOWN = {"composed": _composed_markdown, "diff": _diff_markdown, "stats": _stats_markdown, "chart": _chart_markdown, "weather": _weather_markdown,
+_MARK_WORDS = {"approve": "approved", "skip": "skipped"}
+
+
+def _review_markdown(card: dict[str, Any]) -> list[str]:
+    """The decisions and their options, for where the review can't be drawn:
+    marking happens in Conduit."""
+    review = card["review"]
+    parts = [f"_Round {review['round']}_" if review["round"] > 1 else ""]
+    for decision in review["decisions"]:
+        head = f"**{_escape(decision['title'])}**"
+        if decision.get("text"):
+            head += f": {_escape(decision['text'])}"
+        options = []
+        for option in decision["options"]:
+            line = f"{_escape(option['id'])} · {_escape(option['label'])}"
+            if option["kind"] == "image":
+                line = f"[{line}]({option['url']})"
+            if option.get("recommended"):
+                line += " (recommended)"
+            if option.get("text"):
+                line += f": {_escape(option['text'])}"
+            options.append(f"- {line}")
+        parts.append(head + "\n" + "\n".join(options))
+    for entry in review.get("settled", []):
+        choice = f": {_escape(entry['choice'])}" if entry.get("choice") else ""
+        parts.append(f"_{_escape(entry['title'])}{choice}, {_MARK_WORDS[entry['mark']]} earlier_")
+    parts.append("_Open it in Conduit to look at the options and mark them._")
+    return parts
+
+
+_INFO_MARKDOWN = {"review": _review_markdown, "composed": _composed_markdown, "diff": _diff_markdown, "stats": _stats_markdown, "chart": _chart_markdown, "weather": _weather_markdown,
                   "comparison": _comparison_markdown, "steps": _steps_markdown, "media": _media_markdown,
                   "contact": _contact_markdown, "status": _status_markdown, "table": _table_markdown,
                   "timeline": _timeline_markdown, "checklist": _checklist_markdown, "list": _list_markdown,

@@ -151,7 +151,7 @@ def register(ctx: Any) -> None:
     # Hermes puts a table, steps or links on the screen of the user's voice
     # call instead of reading them out.
     show_tool.register(ctx, is_child=_is_child, is_room=_is_room_turn, room_board=_save_room_board,
-                       desktop_board=_save_desktop_board, keep_diff=_keep_diff,
+                       desktop_board=_save_desktop_board, keep_diff=_keep_diff, reviews=_ReviewHost(),
                        skill_path=Path(__file__).resolve().parent / "skills" / show_tool.SKILL_NAME / "SKILL.md")
     # Hermes writes the title and body of the push its turn sends when it
     # ends, for a result the user asked to be told about (#1415).
@@ -425,6 +425,39 @@ def _keep_diff(diff: dict) -> str | None:
         return room_boards.KeptDiffs(room_identity.root_home(get_hermes_home())).add(diff)
     except Exception:  # noqa: BLE001 — the card lists the diff's files alone
         room_rules.warn_often("kept diff", "conduit_push: couldn't keep a diff; its card lists the files alone")
+        return None
+
+
+class _ReviewHost(show_tool.ReviewHost):
+    """Reviews kept in the root home, and the bot's Bot Chat and workstreams
+    (work_tool), for conduit_show's review cards."""
+
+    def store(self) -> Any:
+        from . import review_store, room_identity
+        return review_store.KeptReviews(room_identity.root_home(get_hermes_home()))
+
+    def in_workstream(self, session: str) -> bool:
+        return work_tool.in_workstream(session)
+
+    def is_bot_chat(self, session: str) -> bool:
+        return work_tool.is_bot_chat(session)
+
+    def workstream(self, ref: str) -> bool:
+        return work_tool.owns_review(ref)
+
+
+def _review_note(session_id: str) -> str | None:
+    """The chat's reviews still open, with the ids to show their next rounds
+    under, and the workstream each belongs to."""
+    try:
+        from . import review_store, room_identity
+        home = get_hermes_home()
+        if not (room_identity.root_home(home) / review_store.DIRECTORY).exists():
+            return None
+        return show_tool.open_reviews_note(review_store.KeptReviews(room_identity.root_home(home))
+                                           .open_reviews(session_id))
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: open reviews note failed", exc_info=True)
         return None
 
 
@@ -1160,6 +1193,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else _checklist_note(session_id),
         # A card's tap button the user tapped, with their message about it (card_actions), once.
         None if child else _tap_note(session_id, kwargs.get("user_message")),
+        # Reviews this chat showed that still wait on a round or the user's marks (show_tool), by id.
+        None if child else _review_note(session_id),
         # When to draw a board instead of writing it out (show_tool).
         None if child else _board_rule(kwargs.get("platform")),
     ]
@@ -1181,7 +1216,8 @@ def _tap_note(session_id: str, user_message: Any) -> str | None:
     try:
         from . import card_actions
 
-        return card_actions.TapStore(get_hermes_home()).note(session_id, user_message)
+        return card_actions.TapStore(get_hermes_home()).note(
+            session_id, user_message, forward=lambda ref, text: work_tool.forward_review(session_id, ref, text))
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.debug("conduit_push: card tap note failed", exc_info=True)
         return None

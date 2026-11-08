@@ -1,6 +1,6 @@
 ---
 name: drawing-boards
-description: Recipes for boards in Conduit (conduit_show cards) - a trip plan, comparing options, a dashboard from the user's own data, a tracker, showing changes as a diff, and composed cards with buttons and fields (an email ready to send, a day's agenda, watches, an idea to act on) saved as templates - with which cards to use, in what order, and what to leave to the reply.
+description: Recipes for boards in Conduit (conduit_show cards) - a trip plan, comparing options, a dashboard from the user's own data, a tracker, showing changes as a diff, options to look at and pick from (a quick pick or a design review in rounds), and composed cards with buttons and fields (an email ready to send, a day's agenda, watches, an idea to act on) saved as templates - with which cards to use, in what order, and what to leave to the reply.
 ---
 
 # Drawing boards in Conduit
@@ -107,6 +107,36 @@ Your reply says what changed and why in a sentence or two; never paste the
 diff again. `next`: "Explain the change in Login.swift", "Fix the warning",
 "Show only the tests". If your terminal runs in a container or on another
 machine, `patch_file` can't see its files: pass `patch` instead.
+
+## Showing options to choose between
+
+For "mock up a few directions", "how should the chart look?", "which
+colour?" or any choice that's easier to see than describe.
+
+1. Make two to four options for each decision, each a self-contained HTML
+   page (inline CSS, no outside scripts) sized for a phone, or a picture.
+   Give a page as `html`, or write it to a file on the Hermes host and give
+   `file` (an .html page, or a .png or .jpg you made); a picture you found
+   online goes as `image` (https).
+2. A `review` card: a `title`, and `review.decisions`, each with a `title`,
+   a line of `text` on what's being decided and its `options` (`label`, a
+   line of `text`, `recommended` on the one you'd pick). `layout`: `side`
+   to see them side by side (the default), `switch` to flip between them
+   full size, `before_after` for a current and a proposed version.
+3. One decision is a quick pick the user taps right in the chat. Several (up
+   to six) open a review: the user marks each Approve, Change or Skip, adds
+   notes, and sends.
+4. Their marks come back as their message. Keep what they approved, rework
+   what they marked Change as their notes say, and show the next round with
+   the same `review.id` (the earlier card's answer gives it); leave out the
+   decisions they settled. When everything is approved, go ahead and build it.
+
+In a Bot Chat, have a workstream make the options (it writes the pages to
+files and reports them), then show the review with `for` set to its ref,
+like `W3`. The user's marks go straight to that workstream, and every round
+of the review stays with it: show each round with `for` and the same id.
+Reviews aren't shown in group rooms or on a voice call yet: describe the
+options there instead.
 
 ## Composed cards: build your own, with buttons
 

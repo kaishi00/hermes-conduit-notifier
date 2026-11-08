@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.142.0 (2026-11-08)
+
+### New and improved
+- Hermes can show you options to choose between when they're easier to see
+  than to describe: layouts, colours, charts, posters. Tap the one you like
+  right in the chat, or open a review to mark several choices Approve,
+  Change or Skip with notes, and Hermes comes back with the next round.
+- In Bot Mode, a workstream draws the options and your Bot Chat shows them:
+  your marks go straight back to that workstream, every round.
+
 ## 0.141.4 (2026-11-08)
 
 ### Fixes
