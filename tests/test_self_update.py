@@ -1198,3 +1198,16 @@ def test_a_restart_left_to_run_falls_back_when_it_ends_on_the_root_refusal(monke
     api.self_update.watch_restart_for_root_refusal(types.SimpleNamespace(wait=lambda: 1))
     assert done.wait(5)
     assert ran == [["systemctl", "restart", "--no-block", "hermes-gateway"]]
+
+
+def test_a_managed_host_refuses_the_update(monkeypatch, tmp_path):
+    monkeypatch.setenv("CONDUIT_PUSH_MANAGED", "The Farm")
+    started = []
+    with pytest.raises(api.core.TokenError) as refused:
+        api.self_update.start_self_update(
+            "coder", lambda *_: None, path=tmp_path / api.self_update.SELF_UPDATE_FILE,
+            steps=(lambda: started.append("pull") or {"ok": True}, _restarted),
+            homes=lambda: [tmp_path], notify=lambda _job: None)
+    assert refused.value.status == 409
+    assert "manages the Conduit plugin" in str(refused.value)
+    assert started == [] and not (tmp_path / api.self_update.SELF_UPDATE_FILE).exists()

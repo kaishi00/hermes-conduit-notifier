@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.141.5 (2026-11-08)
+
+### New and improved
+- A host that installs and upgrades the plugin itself can say so with
+  CONDUIT_PUSH_MANAGED. Conduit then stops asking to update the plugin on
+  that host, and an update started from Conduit is refused, so the host
+  keeps the version it was tested with.
+
 ## 0.141.4 (2026-11-08)
 
 ### Fixes

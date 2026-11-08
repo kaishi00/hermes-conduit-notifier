@@ -934,6 +934,8 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
                       notify: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Starts the update on the host, or returns the one still under way."""
     global _self_update_thread, _self_update_job
+    if capabilities.managed_by() is not None:
+        raise core.TokenError(409, "The host manages the Conduit plugin, so it updates with the host, not from Conduit")
     refusal = _self_restart_refusal()
     if refusal is not None:
         raise core.TokenError(*refusal)

@@ -184,3 +184,27 @@ def test_a_newer_version_on_disk_reads_as_restart_needed(monkeypatch):
     assert body["version"] == "99.0.0"
     assert body["loaded_version"] == api.capabilities.LOADED_VERSION != "99.0.0"
     assert body["restart_needed"] is True
+
+
+def test_an_unmanaged_host_reports_no_managed_key(monkeypatch):
+    monkeypatch.delenv("CONDUIT_PUSH_MANAGED", raising=False)
+    body = _client().get(f"{BASE}/capabilities").json()
+    assert "managed" not in body and "managed_by" not in body
+
+
+def test_a_managed_host_says_so(monkeypatch):
+    for value, managed_by in (("1", None), ("true", None), ("YES", None),
+                              ("The Farm", "The Farm"), ("  Family farm\n ", "Family farm"),
+                              ("x" * 200, "x" * 80)):
+        monkeypatch.setenv("CONDUIT_PUSH_MANAGED", value)
+        body = _client().get(f"{BASE}/capabilities").json()
+        assert body["managed"] is True
+        assert body.get("managed_by") == managed_by
+    for value in ("", "0", "false", "no", "off"):
+        monkeypatch.setenv("CONDUIT_PUSH_MANAGED", value)
+        assert "managed" not in _client().get(f"{BASE}/capabilities").json()
+
+
+def test_a_control_character_never_reaches_the_phone(monkeypatch):
+    monkeypatch.setenv("CONDUIT_PUSH_MANAGED", "Farm\x07\x1b[31m")
+    assert _client().get(f"{BASE}/capabilities").json()["managed_by"] == "Farm[31m"
