@@ -372,16 +372,10 @@ class TapStore:
             raise TapError("id is the tap's id, as posting it answered")
         with self._locked() as state:
             before = len(state["taps"])
-            gone = [tap for tap in state["taps"] if tap["id"] == tap_id and not tap["heard"]]
             state["taps"] = [tap for tap in state["taps"] if tap["id"] != tap_id or tap["heard"]]
             dropped = before - len(state["taps"])
-        # A review's marks go with their tap, so the user can send them again.
-        review = next((tap["review"] for tap in gone if isinstance(tap.get("review"), dict)), None)
-        if review is not None:
-            try:
-                self.reviews().drop_marks(review["id"], review["round"])
-            except (review_store.ReviewError, OSError):
-                pass
+        # A review's marks go with their tap (_locked gives them back), so the
+        # user can send them again.
         return {"ok": True, "dropped": dropped > 0}
 
     def note(self, session_id: Any, message: Any,
