@@ -104,6 +104,10 @@ SCHEMA: dict[str, Any] = {
                                         "Leave it out when cards say it all."},
             "cards": card_schema.tool_parameter("Cards for Conduit to draw, shown above the Markdown.",
                                                 {"template": card_templates.TEMPLATE_INPUT}),
+            "from_work": {"type": "string",
+                          "description": "In a Bot Chat: a workstream's ref (\"W3\") whose update says it showed "
+                                         "cards in its own chat. Shows those cards here as it drew them; leave "
+                                         "out cards, layout and next."},
             "save_templates": card_templates.SAVE_SCHEMA,
             "layout": card_schema.LAYOUT_SCHEMA,
             "next": card_schema.NEXT_SCHEMA,
@@ -291,6 +295,17 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if is_child(session):
         return {"ok": False, "error": "subagent",
                 "note": "Only the main conversation can show things on the user's screen. Report back instead."}
+    if args.get("from_work") is not None:
+        # A workstream's cards, shown in the Bot Chat, where the user is.
+        from . import work_tool
+
+        board, why = work_tool.shown_board(session, args["from_work"])
+        if board is None:
+            return {"ok": False, "error": "no_cards", "note": why}
+        args = {**{key: value for key, value in args.items() if key not in ("from_work", "save_templates")},
+                "cards": board["cards"], "layout": board.get("layout"), "next": board.get("next")}
+        if not (isinstance(args.get("title"), str) and args["title"].strip()):
+            args["title"] = board.get("title") or "From your work"
     problems: list[str] = []
     saved: list[str] = []
     templates = card_templates.TemplateStore(get_hermes_home())
@@ -514,7 +529,11 @@ def _diffs_answered(cards: list[dict[str, Any]], keep_diff: Callable[[dict[str, 
     context) never holds a long diff."""
     answered = []
     for card in cards:
-        if card["type"] == "diff" and not card_schema.carries_whole(card["diff"]):
+        # One the host already keeps (a workstream's card shown again with
+        # from_work) carries its id as it is: its hunks were left out.
+        kept = card["type"] == "diff" and isinstance(card["diff"].get("id"), str) and card["diff"]["id"] \
+            and not any(file.get("hunks") for file in card["diff"]["files"])
+        if card["type"] == "diff" and not kept and not card_schema.carries_whole(card["diff"]):
             try:
                 diff_id = keep_diff(card["diff"])
             except Exception:  # noqa: BLE001 — the card lists the files alone

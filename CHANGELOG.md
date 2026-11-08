@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.141.5 (2026-11-08)
+## 0.141.6 (2026-11-08)
 
 ### Fixes
 - Pulse made two or three copies of the same card from one check, and the
@@ -23,6 +23,15 @@ checks it). The format is fixed, because Conduit reads it:
   made every check skip looking at earlier cards. Dates saved like that no
   longer stop any of Pulse's checks, and a card you marked Done or put away
   keeps the same words from coming back for a month.
+
+## 0.141.5 (2026-11-08)
+
+### Fixes
+- A bot asked for a map or the nearest shop in its Bot Chat handed it to a
+  workstream, and the map it drew stayed in that workstream's chat. With
+  "Also Looks Things Up" on, the bot now looks places, directions and
+  travel times up itself, and cards a workstream draws (maps, forecasts
+  and the rest) are shown again in the Bot Chat.
 
 ## 0.141.4 (2026-11-08)
 
