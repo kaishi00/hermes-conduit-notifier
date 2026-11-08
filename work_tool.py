@@ -3825,6 +3825,10 @@ def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, wo
     """Approve once or deny the approval the workstream waits on, by its
     request id: the one the card showed, never another."""
     request_id = body.get("request_id") if isinstance(body.get("request_id"), str) else ""
+    # Every tap is logged as it arrives, so one that answered nothing can be
+    # traced afterwards (an overview Approve that looked taken, 2026-11-08).
+    shown_id = _cut(" ".join(request_id.split()), 120)
+    logger.info("conduit_push: %s %s for %r while %s", work.ref, action, shown_id, work.status)
     if not request_id:
         return {"ok": False, "ref": work.ref, "error": "missing", "note": "Which approval? Open its chat to answer it."}
     if work.status != "needs_you":
@@ -3839,10 +3843,8 @@ def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, wo
                     "note": f"Hermes didn't answer: {_cut(str(error), 200)}"}
         asked = next((entry for entry in pending if entry.get("request_id") == request_id), None)
         if asked is None:
-            # Logged so a tap that answered nothing can be traced afterwards
-            # (an overview Approve that looked taken, 2026-11-08).
-            logger.info("conduit_push: %s approve for %s found no such request; Hermes waits on %s",
-                        work.ref, request_id, [entry.get("request_id") for entry in pending])
+            logger.info("conduit_push: %s approve for %r found no such request; Hermes waits on %s",
+                        work.ref, shown_id, [entry.get("request_id") for entry in pending])
             return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
                     "note": f"{work.ref} isn't waiting on that any more."}
         if not _app_approvable(str(asked.get("command") or "")):
@@ -3851,9 +3853,12 @@ def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, wo
     try:
         answered = broker.answer_approval(work.session_id, request_id, APP_APPROVAL[action])
     except Exception as error:  # noqa: BLE001 — Hermes' own method runs here, as in _app_approval
+        # It may have reached Hermes before the error: the log says so.
+        logger.warning("conduit_push: %s %s for %r in %s failed", work.ref, action, shown_id, work.session_id,
+                       exc_info=True)
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes didn't take it: {_cut(str(error), 200)}"}
-    logger.info("conduit_push: %s %s for %s in %s: Hermes %s it",
-                work.ref, action, request_id, work.session_id, "took" if answered else "didn't take")
+    logger.info("conduit_push: %s %s for %r in %s: Hermes %s it",
+                work.ref, action, shown_id, work.session_id, "took" if answered else "didn't take")
     if not answered:
         return {"ok": False, "ref": work.ref, "error": "not_now", "status": work.status,
                 "note": f"{work.ref} isn't waiting on that any more."}
