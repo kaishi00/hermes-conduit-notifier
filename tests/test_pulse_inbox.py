@@ -460,6 +460,19 @@ def test_a_deadline_is_deleted_a_day_after_it_stops_standing(live):
     assert live.store.item(second) is None and live.store.item(third) is None
 
 
+def test_a_deadline_closed_with_its_time_as_text_is_deleted(live):
+    # Something outside Pulse wrote the close time as text: long ago.
+    import sqlite3
+    now = time.time()
+    gone, stays = kept(live, trial(date.today() + timedelta(days=5), logged=now - 7200, event_id="x1"),
+                       trial(date.today() + timedelta(days=6), logged=now - 7200, event_id="x2"))
+    Phone(live.home).log(event("e9", "z", logged=now - 60))
+    with sqlite3.connect(live.store.path) as conn:
+        conn.execute("UPDATE items SET status='done', closed_at='2026-11-03 15:43:11' WHERE id=?", (gone,))
+    assert memory.forget_inbox(live.store, live.home, now) == 1
+    assert live.store.item(gone) is None and live.store.item(stays) is not None
+
+
 def test_the_inbox_routes_delete_the_deadlines_of_what_they_delete(monkeypatch, tmp_path):
     from test_inbox import Phone as ApiPhone, _batch, _client, _event
 

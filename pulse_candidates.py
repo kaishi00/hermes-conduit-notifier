@@ -617,12 +617,16 @@ def said_alike(card: dict, text: str) -> bool:
 def said_before(pulse_store: store.PulseStore, topic: str | list[str], text: str, now: float) -> bool:
     """Whether a "noticed" card on ``topic`` (or any of a list of topics) from
     the last SAID_WINDOW_S says ``text`` word for word and is still open or
-    was closed by the user: a report written without a candidate list (its
-    list failed) gets no card for it again."""
+    was closed by the user (one with nothing to key on): a report written
+    without a candidate list (its list failed) gets no card for it again."""
     topics = [topic] if isinstance(topic, str) else list(topic)
     since = now - SAID_WINDOW_S
-    return any(said_alike(card, text) for card in [*pulse_store.open_cards_on(topics, since),
-                                                   *pulse_store.closed_cards_on(topics, since)])
+    # A closed card with a remembered item, reminder or calendar entry behind
+    # it keeps that thing's own rules (a reminder's week, an event's day), as
+    # in still_open.
+    closed = [card for card in pulse_store.closed_cards_on(topics, since)
+              if card["item_id"] is None and not str(card.get("ref") or "").startswith((REMINDER, EVENT))]
+    return any(said_alike(card, text) for card in [*pulse_store.open_cards_on(topics, since), *closed])
 
 
 # How far back an open card is matched by its words (still_open).

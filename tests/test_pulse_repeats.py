@@ -6,12 +6,13 @@ as text failed every candidate list, so reports went out with no check
 against earlier cards; and a card the user closed didn't keep the same
 words out."""
 
+import importlib.util
 import sqlite3
 import sys
 import time
 from datetime import timezone
 
-from test_pulse import pulse, report
+from test_pulse import ROOT, pulse, report
 from test_pulse_followup import commitment, live  # noqa: F401
 from test_pulse_next import candidate, candidates, done_in_chat
 
@@ -21,9 +22,13 @@ AUDIT = ("The Hermes Conduit autonomous code audit cron has failed its last 2 ru
 SEABAG = "App Store Connect sent a SeaBag iOS review completion notice for build 2.1.2+111."
 
 
-def card(live, news, *, created_at, topic="watch", **more):
+def card(live, news, *, created_at, topic="watch", ref=None, **more):
+    links = []
+    if ref:  # made from a candidate about a phone reminder or calendar entry
+        links = live.store.add_candidates("run-1", [{**candidate(kind=topic, text=news), "ref": ref,
+                                                     "decision": candidates.SURFACED}], now=created_at)
     [card_id] = live.store.add_cards([{"kind": "noticed", "level": "screen", "topic": topic, "news": news,
-                                       "title": news, "created_at": created_at, **more}])
+                                       "title": news, "created_at": created_at, **more}], links=links)
     return card_id
 
 
@@ -47,6 +52,22 @@ def test_only_one_plugin_copy_in_a_process_runs_the_loop(monkeypatch):
     assert pulse._process_slot() and slot.holder == (pulse._me, pulse.threading.get_ident())
     pulse._leave_slot()
     assert slot.holder is None
+
+
+def test_two_copies_loaded_from_one_folder_are_two_copies(monkeypatch):
+    # A profile whose plugin folder links to the main install: the same file
+    # loaded under another module name is its own copy, and waits.
+    slot = type(sys)("slot")
+    monkeypatch.setitem(sys.modules, pulse._SLOT, slot)
+    name = "conduit_push.pulse_home_0123456789ab"
+    spec = importlib.util.spec_from_file_location(name, ROOT / "pulse.py")
+    other = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, other)
+    spec.loader.exec_module(other)
+    assert other._me != pulse._me
+    assert pulse._process_slot()
+    assert not other._process_slot()
+    pulse._leave_slot()
 
 
 def test_a_loop_started_again_waits_for_the_old_one(monkeypatch):
@@ -113,6 +134,30 @@ def test_a_card_put_away_keeps_the_same_words_out(live):
     live.store.dismiss_card(card_id, False, now - 600)
     live.store.dismiss_card(card_id, True, now - 300)  # put away for good
     assert decide(live, AUDIT, now=now) == ["raised"]
+
+
+def test_a_card_rated_not_useful_keeps_the_same_words_out_but_wrong_time_doesnt(live):
+    now = time.time()
+    card_id = card(live, AUDIT, created_at=now - 86400)
+    assert live.store.rate_card(live.store.card(card_id), rating="down", reason="", now=now - 3600)
+    assert decide(live, AUDIT, now=now) == ["raised"]
+    assert candidates.said_before(live.store, "watch", AUDIT, now)
+    # "Wrong time" only puts it off: still open, not closed.
+    late = card(live, SEABAG, created_at=now - 86400)
+    assert live.store.rate_card(live.store.card(late), rating="down", reason=pulse.store.WRONG_TIME, now=now - 3600)
+    assert [row["id"] for row in live.store.closed_cards_on(["watch"], now - 86400)] == [card_id]
+
+
+def test_a_report_without_a_list_lets_a_closed_reminder_card_come_back(live):
+    # A phone reminder or calendar entry keeps its own rules (a reminder's
+    # week, an event's day), with a list or without one.
+    now = time.time()
+    done = card(live, SEABAG, created_at=now - 86400, ref=f"{candidates.REMINDER}abc")
+    live.store.mark_done(done, None, closed_by="user", now=now - 86000)
+    assert not candidates.said_before(live.store, "watch", SEABAG, now)
+    # Still open, it keeps the same words out.
+    card(live, AUDIT, created_at=now - 86400, ref=f"{candidates.EVENT}def")
+    assert candidates.said_before(live.store, "watch", AUDIT, now)
 
 
 def test_an_open_card_keeps_the_same_words_out_without_a_date(live):
