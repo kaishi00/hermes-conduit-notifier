@@ -2747,3 +2747,33 @@ def test_a_route_change_made_in_the_frozen_copy_as_the_room_moved_leaves_the_mov
     rooms.furina.pass_once()
     assert rooms.home.canonical.peer_routes[key].grant == rooms.home.legacy.peer_routes[key].grant
     assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
+
+
+def test_a_route_the_gateway_wont_take_after_the_move_is_shown_cut_off_and_given_with_the_next_grant(rooms):
+    room_id = _started(rooms)
+    key, member_id = (room_id, slot("link1", 1)), slot("link1", 1)
+    _moved(rooms, room_id)
+    del rooms.home.canonical.peer_routes[key]
+    register = rooms.furina.starter.register
+    refusing = [3]
+
+    def busy(found, **kwargs):
+        if found.kind == "canonical" and refusing[0]:
+            refusing[0] -= 1
+            raise RuntimeError("busy")
+        return register(found, **kwargs)
+
+    rooms.furina.starter.register = busy
+    for _ in range(3):
+        rooms.furina.pass_once()
+
+    draft = rooms.furina.store.read()["drafts"][room_id]
+    assert draft["routes"][member_id] == "cut_off" and "route_todo" not in draft
+    assert key not in rooms.home.canonical.peer_routes
+
+    rooms.clock.now += 12 * HOUR
+    rooms.laifu.pass_once()  # the member's next fresh grant
+    rooms.furina.pass_once()
+
+    assert key in rooms.home.canonical.peer_routes
+    assert rooms.furina.store.read()["drafts"][room_id]["routes"][member_id] == "live"

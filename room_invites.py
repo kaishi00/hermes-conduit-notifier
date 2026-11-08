@@ -835,7 +835,14 @@ class Rooms:
                 current["tries"] += 1
                 if current["tries"] >= START_TRIES:
                     del todos[member_id]
-                    if todo["do"] == "swap":
+                    if todo.get("unseen"):
+                        # The room's service may not have its route at all: it's shown cut off, and the
+                        # member's next fresh grant gives it there as at a start.
+                        draft["routes"][member_id] = "cut_off"
+                        logger.warning("Linked Rooms couldn't give member %s its route in room %s where Hermes "
+                                       "moved it (%s); it's cut off until its next grant", member_id, room_id,
+                                       failed)
+                    elif todo["do"] == "swap":
                         logger.warning("Linked Rooms couldn't give member %s in room %s its fresh grant (%s); its "
                                        "route keeps the one it has", member_id, room_id, failed)
                     else:
