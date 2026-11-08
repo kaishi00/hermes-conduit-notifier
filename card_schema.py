@@ -798,7 +798,6 @@ def _review_rules(review: dict[str, Any], path: str, notes: list[str] | None = N
         if decision["id"] in seen_decisions:
             _note(notes, f"{where}: another decision has that id, left out")
             continue
-        seen_decisions.add(decision["id"])
         options = []
         seen_options: set[str] = set()
         recommended = False
@@ -823,6 +822,8 @@ def _review_rules(review: dict[str, Any], path: str, notes: list[str] | None = N
         if len(options) < 2:
             _note(notes, f"{where}: needs two options, left out")
             continue
+        # Only a decision kept holds its id: a later one may still use it.
+        seen_decisions.add(decision["id"])
         decision["options"] = options
         decisions.append(decision)
     if not decisions:
