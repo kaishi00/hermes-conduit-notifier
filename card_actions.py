@@ -36,7 +36,7 @@ MAX_SESSION_CHARS = 200
 MAX_VALUE_CHARS = 2000
 # What Hermes reads of the card the user saw.
 MAX_CARD_MARKDOWN_CHARS = 3000
-# A review's marks: the button-less tap a review card sends (plugin 0.143+).
+# A review's marks: the button-less tap a review card sends (plugin 0.144+).
 REVIEW_ACTION = "review"
 # A tap Hermes hasn't heard in this long went with a message that never
 # reached it: it's forgotten rather than handed to a later turn.

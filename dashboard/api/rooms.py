@@ -8,6 +8,7 @@ import errno
 import hashlib
 import importlib.util
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -230,16 +231,18 @@ async def post_room_file(request: Request, response: Response, profile: Optional
 
 # --- Room file pictures --------------------------------------------------------
 #
-# Conduit draws a picture sent into a room as the picture, as a chat does.
-# Hermes' /api/fs/read-data-url can't be relied on for it: hosted and locked
-# installs refuse paths outside the files folder. This reads back only what
-# /room-files stored, only pictures (by their bytes, not their name), and
-# only up to the size a data URL takes, as Hermes' route does.
+# Conduit draws a picture sent into a room as the picture, and opens or
+# plays any other file sent there, as a chat does. Hermes'
+# /api/fs/read-data-url can't be relied on for it: hosted and locked installs
+# refuse paths outside the files folder. This reads back only what
+# /room-files stored, up to the size a data URL takes, as Hermes' route does.
+# A picture's type comes from its bytes; any other file's from its name,
+# never a picture type its bytes don't back.
 
 ROOM_FILE_PICTURE_MAX_BYTES = 16 * 1024 * 1024
 # A room's pictures load once each and are kept on the phone; this only
 # stops a client looping 16 MB reads.
-_room_file_picture_limiter = core._MintLimiter(240, 60.0, message="Too many picture reads; try again shortly")
+_room_file_picture_limiter = core._MintLimiter(240, 60.0, message="Too many file reads; try again shortly")
 # Leading bytes of each picture type Conduit can show, with the type.
 _ROOM_FILE_PICTURE_TYPES = (
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -269,10 +272,30 @@ def _room_file_picture_type(head: bytes) -> Optional[str]:
     return None
 
 
+def _room_file_type(name: str, head: bytes) -> str:
+    """A stored file's media type: a picture's from its bytes, anything
+    else's from its name, and never a picture type the bytes don't back. A
+    compressed name (backup.tar.gz) is a plain file, not what it unpacks to."""
+    picture = _room_file_picture_type(head)
+    if picture:
+        return picture
+    guessed, encoding = mimetypes.guess_type(name)
+    if not guessed or encoding or guessed.startswith("image/") or guessed in _ROOM_FILE_SCRIPTABLE_TYPES:
+        return "application/octet-stream"
+    return guessed
+
+
+# Types a viewer would run rather than show; they open as plain files.
+_ROOM_FILE_SCRIPTABLE_TYPES = frozenset((
+    "text/html", "application/xhtml+xml", "text/javascript", "application/javascript",
+    "image/svg+xml", "text/xml", "application/xml",
+))
+
+
 def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
-    """The picture /room-files stored at ``path``, as a data URL: 404 when
-    it isn't one of them (or is gone), 415 when it isn't a picture, 413 past
-    ``ROOM_FILE_PICTURE_MAX_BYTES``."""
+    """The file /room-files stored at ``path``, as a data URL: 404 when it
+    isn't one of them (or is gone), 413 past ``ROOM_FILE_PICTURE_MAX_BYTES``.
+    Named for pictures, which came first (0.142); any file reads since 0.143."""
     headers = {"Cache-Control": "no-store"}
     if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
         raise HTTPException(status_code=400, detail="path must be a stored room file", headers=headers)
@@ -292,13 +315,11 @@ def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
         if not stat.S_ISREG(info.st_mode):
             raise HTTPException(status_code=404, detail="Not a room file", headers=headers)
         if info.st_size > ROOM_FILE_PICTURE_MAX_BYTES:
-            raise HTTPException(status_code=413, detail="The picture is too large to show", headers=headers)
+            raise HTTPException(status_code=413, detail="The file is too large to read here", headers=headers)
         data = handle.read(ROOM_FILE_PICTURE_MAX_BYTES + 1)
     if len(data) > ROOM_FILE_PICTURE_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="The picture is too large to show", headers=headers)
-    mime = _room_file_picture_type(data[:64])
-    if mime is None:
-        raise HTTPException(status_code=415, detail="Not a picture", headers=headers)
+        raise HTTPException(status_code=413, detail="The file is too large to read here", headers=headers)
+    mime = _room_file_type(os.path.basename(real), data[:64])
     return {"dataUrl": f"data:{mime};base64," + base64.b64encode(data).decode("ascii"), "size": len(data)}
 
 

@@ -340,7 +340,7 @@ DIFF_FEATURE = "diff-cards"
 # Composed cards, and buttons on any card (plugin 0.140+, issue 1946).
 COMPOSED_TYPES = ("composed",)
 COMPOSED_FEATURE = "composed-cards"
-# Options to look at and mark: a quick pick or a design review (plugin 0.143+).
+# Options to look at and mark: a quick pick or a design review (plugin 0.144+).
 REVIEW_TYPES = ("review",)
 REVIEW_FEATURE = "review-cards"
 FEATURE_TYPES = {"info-cards": INFO_TYPES, "media-cards": MEDIA_TYPES, "live-cards": LIVE_TYPES,

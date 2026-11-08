@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.143.0 (2026-11-08)
+## 0.144.0 (2026-11-08)
 
 ### New and improved
 - Hermes can show you options to choose between when they're easier to see
@@ -22,6 +22,26 @@ checks it). The format is fixed, because Conduit reads it:
   Change or Skip with notes, and Hermes comes back with the next round.
 - In Bot Mode, a workstream draws the options and your Bot Chat shows them:
   your marks go straight back to that workstream, every round.
+
+## 0.143.1 (2026-11-08)
+
+### Fixes
+- Pulse made two or three copies of the same card from one check, and the
+  morning brief came more than once: on a host with profiles, each profile's
+  copy of the plugin ran Pulse. Now only one does.
+- Pulse cards came back after you marked them Done: one oddly saved date
+  made every check skip looking at earlier cards. Dates saved like that no
+  longer stop any of Pulse's checks, and a card you marked Done or put away
+  keeps the same words from coming back for a month (one about a reminder,
+  a calendar entry or something Pulse remembers keeps that thing's rules).
+
+## 0.143.0 (2026-11-08)
+
+### New and improved
+- Files sent into a group room (PDFs, text, pasted text, audio, video)
+  open, preview and play in Conduit as they do in a chat, instead of
+  showing as a name you can't tap. In a room someone else hosts, they
+  still show by name.
 
 ## 0.142.0 (2026-11-08)
 

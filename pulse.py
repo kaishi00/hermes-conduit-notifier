@@ -45,6 +45,7 @@ import sqlite3
 import sys
 import threading
 import time
+import types
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +59,7 @@ from . import pulse_ahead as ahead
 from . import pulse_brief as brief
 from . import pulse_candidates as candidates
 from . import pulse_claims as claims
+from . import pulse_dates as dates
 from . import pulse_followup as followup
 from . import pulse_hermes as hermes
 from . import pulse_host as host
@@ -150,6 +152,17 @@ LOOK_COUNTS = "look_counts"
 _last_problem = ""
 _last_ratings = 0.0
 _owner = f"{socket.gethostname()}:{os.getpid()}"
+# One Pulse loop per process: Hermes loads a plugin copy per profile scope
+# into one process (each as its own module), and every copy shares the
+# process's lease owner, so each would run the loop and send its own report
+# (Eric, 2026-11-08: three copies of every card from one run). The copy that
+# ticks holds this process-wide slot; another takes it once the holder stops
+# ticking (stopped, or a newer build installed over it).
+_SLOT = "_conduit_push_pulse_slot_registry"
+# Each loaded copy by its module name (Hermes names each scope's its own,
+# "…conduit_push" and "…conduit_push__home_<digest>"): a profile whose plugin
+# folder is a link to the main install still loads a copy of its own.
+_me = __name__
 _memory_thread: Optional[threading.Thread] = None
 _report_thread: Optional[threading.Thread] = None
 # Whether Hermes took the plugin's auxiliary task, so memory calls can name it.
@@ -220,6 +233,35 @@ def register(ctx: Any) -> None:
     _stop = threading.Event()
     _thread = threading.Thread(target=_run, args=(_stop,), name="conduit-pulse", daemon=True)
     _thread.start()
+
+
+def _process_slot() -> bool:
+    """Whether this copy of the plugin runs the loop in this process
+    (``_SLOT``): the slot is free, its own, or its holder hasn't ticked for
+    LEADER_TTL_S. Taking it marks this copy as ticking now. It's held by
+    this copy's loop thread, so a loop started again after an unload waits
+    for the old one to finish rather than ticking beside it."""
+    slot = sys.modules.setdefault(_SLOT, types.ModuleType(_SLOT))
+    lock = slot.__dict__.setdefault("lock", threading.Lock())
+    me, now = (_me, threading.get_ident()), time.monotonic()
+    with lock:
+        holder, at = getattr(slot, "holder", None), getattr(slot, "at", 0.0)
+        if holder not in (None, me) and now - at < LEADER_TTL_S:
+            return False
+        slot.holder, slot.at = me, now
+        return True
+
+
+def _leave_slot() -> None:
+    """Lets go of the slot, if this thread of this copy holds it (_run, as
+    its loop ends: after its last tick, so none can take it again)."""
+    slot = sys.modules.get(_SLOT)
+    lock = getattr(slot, "lock", None)
+    if slot is None or lock is None:
+        return
+    with lock:
+        if getattr(slot, "holder", None) == (_me, threading.get_ident()):
+            slot.holder = None
 
 
 def stop(timeout: float = 1.0) -> None:
@@ -635,6 +677,7 @@ def _run(stopped: threading.Event) -> None:
         except Exception:  # noqa: BLE001 — the loop must outlive a bad tick
             logger.warning("conduit_push: Pulse tick failed", exc_info=True)
         _wake.wait(TICK_S)
+    _leave_slot()
 
 
 def _hosts_chats() -> bool:
@@ -710,6 +753,8 @@ def tick(now: Optional[float] = None) -> None:
                            "stopped running Pulse until it's restarted", _owner)
             _said_stale = True
         return
+    if not _process_slot():
+        return  # another copy of the plugin in this process runs the loop
     if not pulse_store.claim_leader(_owner, LEADER_TTL_S, now, build=_build):
         return  # another process on this Hermes home runs the loop
     changed = delivery.reconcile(pulse_store, home, process_started_at=_started_at, now=now)
@@ -828,6 +873,25 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                 continue
             lines = learning.report_lines(turn.reply) if turn is not None and row["kind"] == REPORT else []
             if lines:
+                # Written without a list: no card for a line an open or
+                # closed card says already, nor for one twice in it.
+                shown = report.shown_kinds(turn.prompt)
+
+                def topics(line: tuple[str, str, Optional[int]]) -> list[str]:
+                    # Its card's topic, as add_noticed_cards gives it. A
+                    # deadline this report doesn't show is "other" here, but
+                    # an earlier report that showed it carded it "deadline".
+                    kind, _, ref = line
+                    if kind == dates.DEADLINE and shown.get(ref) != dates.DEADLINE:
+                        return ["other", dates.DEADLINE]
+                    return [kind] if kind in report.KINDS else ["other"]
+
+                lines = [line for n, line in enumerate(lines)
+                         if not any(store.same_text(line[1]) == store.same_text(other[1]) for other in lines[:n])
+                         and not candidates.said_before(pulse_store, topics(line), line[1], now)]
+                if not lines:
+                    _mark_turn_card(pulse_store, attempt)
+                    continue
                 # Each item its own card; a reply in some other shape stays one
                 # card. The cards and the marks that they landed are one write,
                 # so a retry never adds them twice.
