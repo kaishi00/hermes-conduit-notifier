@@ -108,8 +108,9 @@ async def post_board_checklists(request: Request, response: Response,
 # hook).
 
 # A tap carries the card as the chat holds it, and a diff card keeps a whole
-# diff of up to 150 lines of 1,000 characters each, so the cap leaves it room.
-TAP_MAX_BODY_BYTES = 512 * 1024
+# diff of up to 150 lines of 1,000 characters each, up to 4 bytes apiece in
+# UTF-8 (about 600 KB), so the cap leaves it room.
+TAP_MAX_BODY_BYTES = 1024 * 1024
 _tap_limiter = core._MintLimiter(60, 60.0, message="Too many taps; try again shortly")
 
 

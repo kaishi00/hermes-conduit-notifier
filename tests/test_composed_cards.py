@@ -547,12 +547,13 @@ def test_a_heard_tap_is_not_dropped(tmp_path):
 
 
 def test_a_tap_on_a_whole_diff_card_fits_the_route(route_home):
-    patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,70 +1,70 @@\n" + "".join(f"-line {n} {'a' * 900}\n" for n in range(70)) \
-        + "".join(f"+line {n} {'b' * 900}\n" for n in range(70))
+    # Four-byte characters, the most a line's 1,000 can weigh.
+    patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,75 +1,75 @@\n" + "".join(f"-{n} {'😀' * 990}\n" for n in range(75)) \
+        + "".join(f"+{n} {'🙂' * 990}\n" for n in range(75))
     [card] = card_schema.normalize_cards([{"type": "diff", "title": "Patch", "diff": {"patch": patch},
                                            "actions": [{"label": "Apply", "action": "tap", "id": "apply"}]}], [])
-    body = json.dumps({"sessions": ["chat-1"], "card": card, "action": "apply"})
-    assert len(body) > 64 * 1024
+    body = json.dumps({"sessions": ["chat-1"], "card": card, "action": "apply"}, ensure_ascii=False).encode()
+    assert len(body) > 512 * 1024
     response = _http().post(f"{BASE}/boards/taps", content=body, headers={"content-type": "application/json"})
     assert response.status_code == 200, response.text
 
