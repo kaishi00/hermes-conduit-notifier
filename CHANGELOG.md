@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.141.6 (2026-11-08)
+
+### Fixes
+- Cards a workstream drew before you stopped it never reached its Bot
+  Chat, because a stopped turn sends no update. The bot's next update
+  from it now names them, so they're shown in the Bot Chat.
+
 ## 0.141.5 (2026-11-08)
 
 ### Fixes
