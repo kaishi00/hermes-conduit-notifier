@@ -519,3 +519,23 @@ def test_two_quick_picks_marked_otherwise_are_told_apart_too(tool_home):
                "review": _marks(("d1", "change", "A", "Thinner"))})
     taps.save({"sessions": ["s1"], "card": newer, "action": "review", "review": _marks(("d1", "change", "B", "Darker"))})
     assert older["review"]["id"] in taps.note("s1", "Picked A · Bars")
+
+
+def test_a_review_drawn_on_hermes_desktop_isnt_kept_to_mark(tool_home, monkeypatch):
+    monkeypatch.setattr(tool, "_turn_source", lambda: "desktop")
+    monkeypatch.setattr(tool, "_desktop_app", lambda: True)
+    host = Host(tool_home)
+    answer = _call({"cards": [_review()]}, reviews=host, desktop_board=lambda board: "b1")
+    assert answer["ok"] and answer.get("directive")
+    assert host.store().open_reviews("s1") == []
+
+
+def test_a_show_that_fails_keeps_no_round(tool_home, monkeypatch):
+    def boom(*args, **kwargs):
+        raise OSError("disk")
+
+    monkeypatch.setattr(tool, "_handle_cards", boom)
+    host = Host(tool_home)
+    answer = _call({"cards": [_review()]}, reviews=host)
+    assert not answer["ok"]
+    assert not list((tool_home / review_store.DIRECTORY).glob("rv-*"))

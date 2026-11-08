@@ -334,7 +334,10 @@ class TapStore:
                 state["taps"] = state["taps"][-MAX_TAPS:]
         except BaseException:
             # No tap, no marks: the app's retry can send them again.
-            store.drop_marks(shown["id"], shown["round"])
+            try:
+                store.drop_marks(shown["id"], shown["round"])
+            except (review_store.ReviewError, OSError):
+                pass
             raise
         return {"ok": True, "id": tap["id"]}
 

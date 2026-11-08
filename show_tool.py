@@ -362,13 +362,18 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
                 **({"saved": saved} if saved else {})}
     if saved and not cards and not (isinstance(args.get("markdown"), str) and args["markdown"].strip()):
         return _with_problems({"ok": True, "saved": saved, "note": SAVED_NOTE}, problems)
-    answer = _handle_cards(args, session, cards, problems, is_room, room_board, desktop_board, keep_diff)
+    try:
+        answer = _handle_cards(args, session, cards, problems, is_room, room_board, desktop_board, keep_diff)
+    except BaseException:
+        _drop_unshown(reviews, kept, [])  # a show that failed keeps no round
+        raise
     if saved:
         answer["saved"] = saved
+    # Hermes Desktop's half draws the card but takes no marks (an open gap).
     shown = [card["review"] for card in answer.get("cards", []) if card.get("type") == "review"] \
-        if answer.get("ok") else []
+        if answer.get("ok") and not answer.get("directive") else []
     # A round no card shows (this Conduit draws no reviews, the turn went to
-    # Desktop as Markdown, the card was dropped) isn't kept as one to mark.
+    # Desktop, the card was dropped) isn't kept as one to mark.
     _drop_unshown(reviews, kept, shown)
     if shown and answer.get("ok"):
         review = shown[0]
