@@ -166,7 +166,7 @@ POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. S
                 "work_start, or send it to one that's already on it with work_send.")
 # The step after a quick turn's budget: the rest is longer work.
 STEP_BLOCK = ("This is turning into longer work than the Bot Chat should hold up, so {tool} didn't run. "
-              " Start a workstream for the rest with work_start, saying in its instructions what you've "
+              "Start a workstream for the rest with work_start, saying in its instructions what you've "
               "found or done so far, or send it to one that's already on it with work_send. Then tell the user in a "
               "line that it's running in the background.")
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get questions and work through work_ask, which "
