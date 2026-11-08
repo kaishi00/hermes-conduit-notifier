@@ -187,7 +187,10 @@ def test_picture_types_come_from_the_bytes_not_the_name(tmp_path):
     png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
     webp = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 16
     heic = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 16
-    for data, mime in ((png, "image/png"), (webp, "image/webp"), (heic, "image/heic"), (b"GIF89a....", "image/gif")):
+    heif = b"\x00\x00\x00\x18ftypmif1" + b"\x00" * 16
+    avif = b"\x00\x00\x00\x1cftypavif" + b"\x00" * 16
+    for data, mime in ((png, "image/png"), (webp, "image/webp"), (heic, "image/heic"), (heif, "image/heic"),
+                       (avif, "image/avif"), (b"GIF89a....", "image/gif")):
         stored = api.rooms.store_room_file(str(tmp_path), _body(data, "picture.txt"))
         assert api.rooms.read_room_file_picture(str(tmp_path), stored["path"])["dataUrl"].startswith(f"data:{mime};base64,")
     text = api.rooms.store_room_file(str(tmp_path), _body(b"<svg onload=x>", "photo.jpg"))
