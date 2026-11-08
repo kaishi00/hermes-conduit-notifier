@@ -1973,6 +1973,14 @@ sooner, oldest first, once they pass 2 GB together (checked hourly). An
 upload that would leave under 1 GB free on the host is refused (507).
 Capability `room-files`.
 
+Conduit draws a picture sent into a room as the picture.
+`GET /api/plugins/conduit_push/room-files/data-url?path=…` (plugin 0.142+,
+capability `room-file-pictures`) returns one as `{"dataUrl": "data:image/…"}`,
+as Hermes' `/api/fs/read-data-url` does, which hosted and locked installs
+refuse outside their files folder. It reads only files `/room-files` stored
+(404 otherwise), only JPEG, PNG, GIF, WebP, HEIC and AVIF pictures, told by
+their bytes (415 otherwise), and up to 16 MB (413).
+
 ## Group pictures (plugin 0.41+)
 
 Hermes' gateway-hosted group rooms carry no picture, so Conduit keeps a
@@ -2681,7 +2689,7 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
   left out and buttons and fields are taken off other cards, and Hermes is
   told to offer them in its reply.
 
-### Review cards (plugin 0.142+)
+### Review cards (plugin 0.143+)
 
 A `review` card shows options to choose between when they're easier to see
 than to describe: layouts, colours, charts, posters, a before and after.

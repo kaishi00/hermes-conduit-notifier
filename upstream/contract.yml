@@ -569,6 +569,7 @@ routes:
   - GET /qwen-live/status
   - POST /qwen-live/token
   - POST /room-files
+  - GET /room-files/data-url
   - GET /room-images
   - DELETE /room-images/{room_id}
   - GET /room-images/{room_id}

@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.142.0 (2026-11-08)
+## 0.143.0 (2026-11-08)
 
 ### New and improved
 - Hermes can show you options to choose between when they're easier to see
@@ -22,6 +22,20 @@ checks it). The format is fixed, because Conduit reads it:
   Change or Skip with notes, and Hermes comes back with the next round.
 - In Bot Mode, a workstream draws the options and your Bot Chat shows them:
   your marks go straight back to that workstream, every round.
+
+## 0.142.0 (2026-11-08)
+
+### New and improved
+- A picture sent into a group room shows as the picture in Conduit,
+  instead of a file icon and its name. In a room someone else hosts, it
+  still shows by name.
+
+## 0.141.6 (2026-11-08)
+
+### Fixes
+- Cards a workstream drew before you stopped it never reached its Bot
+  Chat, because a stopped turn sends no update. The bot's next update
+  from it now names them, so they're shown in the Bot Chat.
 
 ## 0.141.5 (2026-11-08)
 
