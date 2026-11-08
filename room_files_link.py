@@ -50,7 +50,6 @@ INCOMING = "incoming"
 CHUNK_BYTES = 96 * 1024
 # Hermes' own data URL cap; a larger file stays on the home (Conduit names it).
 MAX_FILE_BYTES = 16 * 1024 * 1024
-MAX_CHUNKS = math.ceil(MAX_FILE_BYTES / CHUNK_BYTES)
 WAIT_S = 120
 MAX_TRIES = 5
 # How long a member's turn waits for a file its prompt names that's still on its way: well inside the home's
@@ -138,33 +137,49 @@ class Files:
     def __init__(self, rooms: Any) -> None:
         self.rooms = rooms
         self.store = Store(rooms.root)
-        self._told: set[str] = set()
 
     # --- The home ------------------------------------------------------------------------
 
+    def _upload_roots(self) -> set[str]:
+        """Where this installation's uploads are: its root home's room files and each profile's, since
+        POST /room-files stores under the profile Conduit names."""
+        root = Path(self.rooms.root)
+        roots = {os.path.realpath(files_root(root))}
+        try:
+            profiles = list((root / "profiles").iterdir())
+        except OSError:
+            profiles = []
+        roots.update(os.path.realpath(files_root(profile)) for profile in profiles if profile.is_dir())
+        return roots
+
     def note(self, room_id: str, link_id: str, events: Any) -> None:
         """The room files the events of a page going to ``link_id`` name, to send after it."""
-        local_root = os.path.realpath(files_root(self.rooms.root))
+        found = [(event, ref) for event in events or () if isinstance(event, dict)
+                 and event.get("kind") == "message.user"
+                 for ref in references((event.get("payload") if isinstance(event.get("payload"), dict) else {})
+                                       .get("text"))]
+        if not found:
+            return
+        local_roots = self._upload_roots()
         wanted: dict[str, dict[str, Any]] = {}
-        for event in events or ():
-            if not isinstance(event, dict) or event.get("kind") != "message.user":
+        for _event, (path, folder, name) in found:
+            real = os.path.realpath(path)
+            if os.path.dirname(os.path.dirname(real)) not in local_roots or os.path.basename(real) != name \
+                    or os.path.basename(os.path.dirname(real)) != folder:
+                logger.info("Linked Rooms doesn't carry %s/%s to Link %s: it isn't one of this host's uploads",
+                            folder, name, link_id)
                 continue
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            for path, folder, name in references(payload.get("text")):
-                real = os.path.realpath(path)
-                if os.path.dirname(os.path.dirname(real)) != local_root or os.path.basename(real) != name \
-                        or os.path.basename(os.path.dirname(real)) != folder:
-                    continue
-                try:
-                    size = os.stat(real).st_size
-                except OSError:
-                    continue
-                if not os.path.isfile(real) or size > MAX_FILE_BYTES:
-                    if size > MAX_FILE_BYTES:
-                        logger.info("Linked Rooms doesn't carry %s/%s to Link %s: it's over %d MB", folder, name,
-                                    link_id, MAX_FILE_BYTES // (1024 * 1024))
-                    continue
-                wanted[f"{folder}/{name}"] = {"room": room_id, "size": size}
+            try:
+                size = os.stat(real).st_size
+            except OSError:
+                continue
+            if not os.path.isfile(real) or size > MAX_FILE_BYTES:
+                if size > MAX_FILE_BYTES:
+                    logger.info("Linked Rooms doesn't carry %s/%s to Link %s: it's over %d MB", folder, name,
+                                link_id, MAX_FILE_BYTES // (1024 * 1024))
+                continue
+            wanted[f"{folder}/{name}"] = {"room": room_id, "size": size,
+                                          "base": os.path.dirname(os.path.dirname(real))}
         if not wanted:
             return
         with self.store.update() as state:
@@ -188,7 +203,14 @@ class Files:
                 continue
             folder, name = due.split("/", 1)
             entry = out[due]
-            path = files_root(self.rooms.root) / folder / name
+            # Where it was uploaded (an entry from before 0.144's profiles: the root home's), checked again.
+            base = entry.get("base") if isinstance(entry.get("base"), str) else os.path.realpath(
+                files_root(self.rooms.root))
+            path = Path(base) / folder / name
+            if base not in self._upload_roots() or os.path.dirname(os.path.dirname(os.path.realpath(path))) != base:
+                with self.store.update() as kept:
+                    kept["out"].get(link_id, {}).pop(due, None)
+                continue
             try:
                 data = path.read_bytes()
             except OSError:
@@ -235,13 +257,6 @@ class Files:
             entry = state["out"].get(received.link_id, {}).get(key)
             if entry is not None and entry.get("sha") in (None, body.get("sha")):
                 entry["done"] = True
-
-    def forget(self, links: set[str]) -> None:
-        """What's kept for Links no room uses any more goes."""
-        state = self.store.read()
-        if set(state["out"]) - links:
-            with self.store.update() as kept:
-                kept["out"] = {link_id: out for link_id, out in kept["out"].items() if link_id in links}
 
     # --- A member ------------------------------------------------------------------------
 

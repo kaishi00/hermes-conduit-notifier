@@ -57,6 +57,20 @@ def test_a_file_a_room_message_names_reaches_every_member_and_is_answered(copies
     assert len(_sent(copies, "room.file")) == len(chunks)
 
 
+def test_a_file_uploaded_under_a_profile_goes_too(copies):  # noqa: F811
+    # POST /room-files stores under the profile Conduit names (GLM on notifier #629).
+    room_id = started(copies)
+    path = copies.tmp_path / "furina" / "profiles" / "work" / "conduit" / "room-files" / FOLDER / "plan.pdf"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"%PDF-1.7 plan")
+    post(copies, room_id, f"@file:{path}\nRead this")
+
+    copies.furina.pass_once()
+
+    for name in ("laifu", "mona"):
+        assert carried(copies, name, "plan.pdf").read_bytes() == b"%PDF-1.7 plan"
+
+
 def test_only_room_files_under_the_homes_root_go(copies, tmp_path):  # noqa: F811
     room_id = started(copies)
     secret = tmp_path / "secret.txt"
