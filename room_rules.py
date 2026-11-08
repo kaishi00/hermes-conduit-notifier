@@ -22,6 +22,7 @@ session's title to its continuation.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 import sqlite3
@@ -90,6 +91,15 @@ _LEARNING_TOOLS = frozenset({"memory", "skill_manage"})
 ASK_TOOL = "conduit_ask_owner"
 # Run work's tool (work_tool, Eric 2026-11-07): allowed by the room's Run work, not its tools.
 WORK_TOOL = "conduit_room_work"
+
+# A picture sent into the room (Conduit's room files, dashboard/api/rooms.py)
+# is looked at with this tool in every tier, Talk only included, so every
+# agent in the room can see what was sent to all of them (Eric 2026-11-08).
+# Only a file under this host's room-files root; nothing else it could load.
+LOOK_TOOL = "vision_analyze"
+ROOM_FILES = ("conduit", "room-files")
+ROOM_PICTURES_LINE = (f"A picture sent into this room you may look at with {LOOK_TOOL}, by the path its message "
+                      "names, whatever else these rules allow.")
 
 _RULES = "Blocked by your owner's rules for this group room"
 TALK_ONLY_BLOCK = (f"{_RULES}: here you talk, without tools. Answer from what you know, or say you can't "
@@ -278,17 +288,50 @@ def allowed_tools(choices: RoomChoices) -> frozenset[str]:
     return frozenset(allowed - NEVER - {ASK_TOOL, WORK_TOOL})
 
 
-def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Optional[str]:
+def looks_at_room_file(tool_name: Any, args: Any, home: Any) -> bool:
+    """Whether the call is ``LOOK_TOOL`` on a file under ``home``'s room-files
+    root: a picture sent into a room, which every tier may look at."""
+    if str(tool_name or "") != LOOK_TOOL or not isinstance(args, dict) or home is None:
+        return False
+    source = args.get("image_url")
+    if not isinstance(source, str) or not source or "\x00" in source or "://" in source:
+        return False
+    path = os.path.expanduser(source.strip())
+    if not os.path.isabs(path):
+        return False
+    real = os.path.realpath(path)
+    if not os.path.isfile(real):
+        return False
+    # Conduit uploads without a profile, so the files are the root home's;
+    # a profile's own are read too.
+    homes = [Path(home)]
+    try:
+        from . import room_identity
+
+        homes.append(room_identity.root_home(home))
+    except Exception:  # noqa: BLE001 - no Hermes runtime: the home given is all there is
+        pass
+    roots = {os.path.realpath(os.path.join(str(each), *ROOM_FILES)) for each in homes}
+    return any(real.startswith(root + os.sep) for root in roots)
+
+
+def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None, home: Any = None) -> Optional[str]:
     """Why a room turn with other people's agents can't call ``tool_name``
     under ``choices``, or None when it can. ``args``: the call's arguments
-    (a ``tool_call`` is checked by the tools it names)."""
+    (a ``tool_call`` is checked by the tools it names). ``home``: this
+    host's Hermes home, whose room files every tier may look at."""
     name = str(tool_name or "")
     if name == BRIDGE_CALL:
         called_names = _called_names(args)
-        for called in called_names:
-            block = tool_block(called, choices)
+        called_calls = _called_calls(args)
+        for called, called_args in called_calls:
+            block = tool_block(called, choices, called_args, home)
             if block is not None:
                 return block
+        # Only looks at the room's pictures: allowed wherever the bridge is.
+        if called_calls and all(looks_at_room_file(called, called_args, home)
+                                for called, called_args in called_calls):
+            return None
         # One whose tool can't be read is let through only where some tool is.
         if not called_names and not allowed_tools(choices):
             return TALK_ONLY_BLOCK
@@ -296,6 +339,8 @@ def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Option
         return None if choices.share == "ask" else ASK_BLOCK
     if name == WORK_TOOL:
         return None if choices.run_work else WORK_BLOCK
+    if looks_at_room_file(name, args, home):
+        return None
     if name in _LEARNING_TOOLS:
         return LEARNING_BLOCK
     if name in NEVER:
@@ -309,6 +354,32 @@ def tool_block(tool_name: Any, choices: RoomChoices, args: Any = None) -> Option
     if not allowed - {SEARCH_TOOL}:
         return TALK_SEARCH_BLOCK if SEARCH_TOOL in allowed else TALK_ONLY_BLOCK
     return TOOL_BLOCK.format(tool=name or "That tool")
+
+
+def _called_calls(args: Any) -> list[tuple[str, Any]]:
+    """Each call a ``tool_call`` names, with its own arguments when it gives them."""
+    if not isinstance(args, dict):
+        return []
+    calls = args.get("calls")
+    if isinstance(calls, str):
+        try:
+            calls = json.loads(calls)
+        except (ValueError, RecursionError):
+            calls = None
+    if isinstance(calls, dict):
+        calls = [calls]
+    entries = [*(calls if isinstance(calls, list) else ()), args]
+    found = []
+    for entry in entries:
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip():
+            called_args = entry.get("arguments", entry.get("args"))
+            if isinstance(called_args, str):
+                try:
+                    called_args = json.loads(called_args)
+                except (ValueError, RecursionError):
+                    called_args = None
+            found.append((str(entry.get("name")).strip(), called_args))
+    return found
 
 
 def _called_names(args: Any) -> list[str]:
@@ -370,6 +441,8 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     posters = [UNREAD_POSTERS_LINE] if unread and turn is not None else _poster_lines(turn, people, posts)
     lines = [opening, *(f"- {line}" for line in posters), f"- {ANSWER_FOR_YOURSELF}",
              f"- {SHARE_LINES.get(choices.share, SHARE_LINES['ask'])}", f"- {tool_line}"]
+    if LOOK_TOOL not in tools:
+        lines.append(f"- {ROOM_PICTURES_LINE}")
     if FREE_BUSY_TOOL in tools:
         lines.append(f"- {FREE_BUSY_LINES.get(choices.share, FREE_BUSY_LINES['ask'])}")
     if choices.search_chats:

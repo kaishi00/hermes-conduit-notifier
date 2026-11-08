@@ -483,6 +483,37 @@ def test_talk_only_blocks_every_tool_in_a_room_turn(host, session_id, room_id):
 
 
 @pytest.mark.parametrize("session_id, room_id", [("s-home", "room-b"), (REMOTE, "room-a")])
+def test_every_tier_may_look_at_a_picture_sent_into_the_room(host, session_id, room_id, tmp_path):
+    # Every agent in the room sees what was sent to all of them (Eric 2026-11-08): Talk only and
+    # Nothing personal included, but only a file under this host's room-files root.
+    picture = host / "conduit" / "room-files" / "20261108-abc" / "shot.jpg"
+    picture.parent.mkdir(parents=True)
+    picture.write_bytes(b"\xff\xd8")
+    elsewhere = tmp_path / "secret.jpg"
+    elsewhere.write_bytes(b"\xff\xd8")
+    sneaky = picture.parent / "link.jpg"
+    sneaky.symlink_to(elsewhere)
+
+    def look(url):
+        return plugin._pre_tool_call(session_id=session_id, tool_name="vision_analyze",
+                                     args={"image_url": url, "question": "what is it?"}, turn_id="t1")
+
+    for share in ("ask", "nothing"):
+        _choose(host, room_id, share=share)
+        assert look(str(picture)) is None
+        for url in (str(elsewhere), str(sneaky), f"{picture.parent}/../../../../secret.jpg", "https://x.test/a.jpg",
+                    "shot.jpg", str(picture.parent / "gone.jpg"), ""):
+            assert _blocked(look(url)), url
+    # Through Tool Search's bridge too, by the arguments it carries.
+    bridged = plugin._pre_tool_call(session_id=session_id, tool_name="tool_call", turn_id="t1", args={
+        "name": "vision_analyze", "arguments": json.dumps({"image_url": str(picture), "question": "?"})})
+    assert bridged is None
+    assert "vision_analyze, by the path its message names" in _context(session_id)
+    _choose(host, room_id, tools="look")
+    assert rules.ROOM_PICTURES_LINE not in _context(session_id)
+
+
+@pytest.mark.parametrize("session_id, room_id", [("s-home", "room-b"), (REMOTE, "room-a")])
 def test_look_things_up_allows_web_tools_only(host, session_id, room_id):
     _choose(host, room_id, tools="look")
     for tool_name in ("web_search", "web_extract", "x_search", "vision_analyze"):
