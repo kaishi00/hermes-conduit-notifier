@@ -66,6 +66,9 @@ _GUARD_FLAG = "__conduit_room_guard__"
 PULSE_DB = "conduit-pulse.db"
 PULSE_TAG = re.compile(r"\bp[0-9a-f]{8}-[0-9]+\b")
 PULSE_NAME = "Pulse"
+# A whole text shorter than this (a delivery check's line) is easy to quote,
+# so only the ask itself matches it, by its digest.
+QUOTABLE = 500
 
 _lock = threading.Lock()
 # The MemoryManager this load guards, and each method name -> (Hermes' own method, this load's guard)
@@ -174,28 +177,38 @@ def pulse_asks(home: Any, texts: list[Any]) -> list[bool]:
     if not tags or home is None:
         return flags
     path = Path(home) / PULSE_DB
-    try:
-        if not path.exists():
-            return flags
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
+    wanted = sorted(set().union(*tags.values()))
+    for attempt in range(READ_RETRIES + 1):
         try:
-            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(attempts)")}
-            digest = "text_sha" if "text_sha" in columns else "''"
-            sent: dict[str, tuple[str, str]] = {}
-            wanted = sorted(set().union(*tags.values()))
-            for start in range(0, len(wanted), 500):
-                chunk = wanted[start:start + 500]
-                sent.update((tag, (text, sha)) for tag, text, sha in conn.execute(
-                    f"SELECT tag, text, {digest} FROM attempts WHERE tag IN ({','.join('?' * len(chunk))})",
-                    chunk).fetchall())
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001 - the turn then goes to the provider, as Hermes sends it
-        _pulse_unread()
-        return flags
+            if not path.exists():
+                return flags
+            sent = _sent(path, wanted)
+            break
+        except Exception as error:  # noqa: BLE001 - the turn then goes to the provider, as Hermes sends it
+            if attempt == READ_RETRIES or "disk i/o error" not in str(error).lower():
+                _pulse_unread()
+                return flags
+            time.sleep(READ_RETRY_PAUSE)
     for index, found in tags.items():
         flags[index] = any(_sent_as(sent[tag], texts[index]) for tag in found if tag in sent)
     return flags
+
+
+def _sent(path: Path, wanted: list[str]) -> dict[str, tuple[Any, Any]]:
+    """Each wanted tag's stored text and digest, from Pulse's store, read-only."""
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(attempts)")}
+        digest = "text_sha" if "text_sha" in columns else "''"
+        sent: dict[str, tuple[Any, Any]] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            sent.update((tag, (text, sha)) for tag, text, sha in conn.execute(
+                f"SELECT tag, text, {digest} FROM attempts WHERE tag IN ({','.join('?' * len(chunk))})",
+                chunk).fetchall())
+        return sent
+    finally:
+        conn.close()
 
 
 def _sent_as(sent: tuple[Any, Any], text: str) -> bool:
@@ -210,7 +223,7 @@ def _sent_as(sent: tuple[Any, Any], text: str) -> bool:
         return False
     if not isinstance(digest, str) or not digest:
         return whole in text
-    if _digest(whole) == digest:
+    if _digest(whole) == digest and len(whole) >= QUOTABLE:
         return whole in text
     return _digest(text) == digest or _digest(text.strip()) == digest
 
@@ -315,8 +328,8 @@ def _replace_messages(self: Any, args: tuple, kwargs: dict, name: str = "message
     home = _home(self)
     messages = _first(args, kwargs, name)
     kept = without_pulse(home, messages)
-    if kept is not messages and not kept:
-        return None
+    if kept is not messages and not any(isinstance(row, dict) and row.get("role") != "system" for row in kept):
+        return None  # nothing but the system prompt is left
     if name in kwargs:
         kwargs = {**kwargs, name: kept}
     elif args:

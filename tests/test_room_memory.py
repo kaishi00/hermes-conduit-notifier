@@ -510,8 +510,8 @@ def test_pulse_turns_are_left_out_of_what_the_provider_reads_at_the_end_and_befo
 
         # Nothing of the user's: nothing for the provider to read.
         seen.clear()
-        manager.on_session_end(pulse_turn + probe_turn)
-        assert manager.on_pre_compress(pulse_turn, require_checkpoint=True) == ""
+        manager.on_session_end([chat[0], *pulse_turn, *probe_turn])
+        assert manager.on_pre_compress([chat[0], *pulse_turn], require_checkpoint=True) == ""
         assert seen == []
     finally:
         room_memory.uninstall()
@@ -571,3 +571,29 @@ def test_attempts_from_before_digests_get_one_unless_their_text_may_be_cut(guard
     heading = report.splitlines()[0]
     assert guard.pulse_asks(tmp_path, [f"{heading}\nWhat did it mean?", running, probe]) == [False, True, True]
     assert pulse_store.attempt_by_tag(tag)["text_sha"] == store.UNKNOWN_DIGEST
+
+
+def test_a_user_quoting_a_whole_delivery_check_line_is_still_saved(guard, hermes, tmp_path):
+    probe = _pulse_sent(tmp_path, "Pulse delivery check {tag}. Nothing to do: reply with one short line.")
+    manager = _bound(hermes, "sess_pulse", tmp_path)
+
+    quoted = f'Why did you get "{probe}"?'
+    manager.sync_all(probe, "Arrived.", session_id="sess_pulse")
+    manager.sync_all(quoted, "That was Pulse checking in.", session_id="sess_pulse")
+    assert manager.saved == [("sync_all", quoted, "sess_pulse")]
+
+
+def test_a_pulse_store_caught_mid_checkpoint_is_read_again(guard, hermes, tmp_path, monkeypatch):
+    ask = _pulse_sent(tmp_path, REPORT)
+    real, calls = guard._sent, []
+
+    def flaky(path, wanted):
+        calls.append(path)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(path, wanted)
+
+    monkeypatch.setattr(guard, "_sent", flaky)
+    monkeypatch.setattr(guard, "READ_RETRY_PAUSE", 0)
+    assert guard.pulse_asks(tmp_path, [ask]) == [True]
+    assert len(calls) == 2
