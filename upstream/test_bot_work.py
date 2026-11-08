@@ -9,7 +9,9 @@ starts a workstream. The test checks Hermes' state, not the replies: the
 registry row, the worker's session in that profile's own state.db, on that
 profile's model, hidden, with none of its events on the app's socket, and the
 work update that came back into the Bot Chat as a hidden turn. A second chat
-on the profile, and a terminal call in the Bot Chat, are refused. The launch
+on the profile, and a terminal call in the launch bot's Bot Chat (Only
+Coordinates), are refused; the second bot (Quick Things Here) runs five steps
+of a turn itself and hands the sixth on. The launch
 profile's bot asks the secondary one (acceptance test 17): the ask arrives in
 its Bot Chat as a hidden turn, it answers with work_reply, and the answer
 comes back to the asking Bot Chat. Under ``plugins.isolation: host`` the tool
@@ -43,6 +45,9 @@ import yaml
 from conftest import COPY_IGNORE, PLUGIN, ROOT, TOKEN, _free_port, _hermes_bin
 
 PROFILES = ("launch", "second")
+# How many steps a turn tries in a Bot Chat: one past the quick budget
+# (work_tool.QUICK_STEPS, 5).
+STEPS_TRIED = 6
 DONE_TIMEOUT_S = 180
 
 
@@ -93,6 +98,12 @@ def _responder(fake: Any, profile: str):
         messages = body.get("messages") or []
         tools = [tool.get("function", {}).get("name") for tool in body.get("tools") or []]
         last = messages[-1] if messages else {}
+        asked = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), -1)
+        if "PLEASE RUN MANY" in _text_of(messages[asked] if asked >= 0 else {}):
+            # One step after another in the same turn, past the quick budget.
+            ran = sum(1 for m in messages[asked + 1:] if m.get("role") == "tool")
+            if ran < STEPS_TRIED:
+                return fake.ToolCall("terminal", {"command": f"echo quick-step-{ran}"})
         if last.get("role") == "tool":
             return fake.Text(f"COORDINATOR-SAW on {profile}: {_text_of(last)[:800]}")
         user = next((_text_of(m) for m in reversed(messages) if m.get("role") == "user"), "")
@@ -116,7 +127,7 @@ def _responder(fake: Any, profile: str):
     return respond
 
 
-def _write_profile(home: Path, base_url: str, profile: str, isolation: str) -> None:
+def _write_profile(home: Path, base_url: str, profile: str, isolation: str, policy: str = "strict") -> None:
     path = home / "config.yaml"
     config = (yaml.safe_load(path.read_text()) if path.exists() else None) or {}
     config["model"] = {"provider": "custom", "base_url": base_url, "default": f"fake-{profile}",
@@ -138,7 +149,7 @@ def _write_profile(home: Path, base_url: str, profile: str, isolation: str) -> N
              if not line.startswith("OPENAI_API_KEY=")]
     env.write_text("\n".join(lines + ["OPENAI_API_KEY=sk-fake-upstream"]) + "\n")
     (home / "plugins").mkdir(exist_ok=True)
-    _work_store().Store(home).set_policy("strict")
+    _work_store().Store(home).set_policy(policy)
 
 
 class Run:
@@ -237,7 +248,8 @@ async def _drive(port: int, run: Run, script: List[tuple]) -> None:
             await task
 
 
-def _run_dashboard(tmp: Path, isolation: str, script: List[tuple]) -> Run:
+def _run_dashboard(tmp: Path, isolation: str, script: List[tuple],
+                   policies: Optional[Dict[str, str]] = None) -> Run:
     fake = _fake_llm()
     hermes = _hermes_bin()
     home = tmp / "home"
@@ -258,7 +270,7 @@ def _run_dashboard(tmp: Path, isolation: str, script: List[tuple]) -> Run:
         server.start()
         servers[profile] = server
         _write_profile(home if profile == "launch" else home / "profiles" / profile, server.base_url, profile,
-                       isolation)
+                       isolation, (policies or {}).get(profile, "strict"))
     run = Run(home, servers)
     port = _free_port()
     log_path = tmp / "dashboard.log"
@@ -305,9 +317,12 @@ def coordinated(tmp_path_factory: pytest.TempPathFactory) -> Run:
     for profile in PROFILES:
         script += [(profile, "chat", "PLEASE START a workstream", "WAKE-SEEN"),
                    (profile, "chat", "PLEASE RUN a command yourself", "COORDINATOR-SAW"),
+                   (profile, "chat", "PLEASE RUN MANY commands yourself", "COORDINATOR-SAW"),
                    (profile, "other", "PLEASE START from another chat", "COORDINATOR-SAW")]
     script.append(("launch", "chat", "PLEASE ASK the second bot", "ANSWER-SEEN"))
-    return _run_dashboard(tmp_path_factory.mktemp("bot-work"), "", script)
+    # Each profile keeps to its own setting: the launch bot only coordinates,
+    # the second does quick things itself (Quick Things Here, the default).
+    return _run_dashboard(tmp_path_factory.mktemp("bot-work"), "", script, {"second": "lookups"})
 
 
 @pytest.mark.parametrize("profile", PROFILES)
@@ -346,12 +361,25 @@ def test_no_workstream_events_reach_the_apps_socket(coordinated: Run) -> None:
     assert foreign == set()
 
 
-@pytest.mark.parametrize("profile", PROFILES)
-def test_the_coordinator_keeps_to_its_policy(coordinated: Run, profile: str) -> None:
-    seen = [t for t in coordinated.completions(coordinated.chats[profile]) if "PLEASE" not in t]
+def _tool_results(run: Run, profile: str) -> List[str]:
+    return [m.get("content") or "" for m in run.messages(profile, run.stored[profile]) if m.get("role") == "tool"]
+
+
+def test_a_coordinator_that_only_coordinates_keeps_to_its_policy(coordinated: Run) -> None:
+    seen = [t for t in coordinated.completions(coordinated.chats["launch"]) if "PLEASE" not in t]
     refused = [t for t in seen if "don't run terminal yourself" in t]
     assert refused, seen
-    assert not any("coordinator-ran-this" in t for t in seen)
+    assert not any("coordinator-ran-this" in t or "quick-step" in t for t in _tool_results(coordinated, "launch"))
+
+
+def test_a_quick_coordinator_runs_a_few_steps_of_a_turn_itself(coordinated: Run) -> None:
+    # Hermes names every tool call of a turn by the same turn id, which the
+    # budget counts by: five of the turn's steps ran, the sixth was handed on.
+    results = _tool_results(coordinated, "second")
+    assert any("coordinator-ran-this" in t for t in results), results
+    ran = [n for n in range(STEPS_TRIED) if any(f"quick-step-{n}" in t for t in results)]
+    assert ran == list(range(STEPS_TRIED - 1)), results
+    assert any("turning into longer work" in t for t in results), results
 
 
 @pytest.mark.parametrize("profile", PROFILES)

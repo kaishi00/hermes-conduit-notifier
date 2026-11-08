@@ -255,7 +255,8 @@ ROUTE_CAPABILITIES = (
     # in-app banner (Hermes is waiting on you, issue 1705).
     "waiting-list",
     # GET/POST /workstreams/settings: the bot's work settings, which Edit Bot
-    # > Work shows and changes (on or off, lookups, running at once, after a
+    # > Work shows and changes (on or off, what the Bot Chat does itself, which
+    # settings this plugin takes (`policies`), running at once, after a
     # restart, the workstreams' approvals).
     "bot-work-settings",
     # POST /workstreams/adopt: a voice call's job kept in its bot's registry,

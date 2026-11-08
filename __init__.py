@@ -360,7 +360,8 @@ def _screen_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 
 def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
     try:
-        return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"))
+        return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"),
+                                    turn_id=kwargs.get("turn_id"))
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
         # Only a bot that has had work (on by default otherwise) is held when its check fails.

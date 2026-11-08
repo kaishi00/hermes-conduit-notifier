@@ -154,6 +154,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_title_cache", {})
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
     monkeypatch.setattr(work, "_policy_cache", {})
+    monkeypatch.setattr(work, "_steps", {})
     work._wakes.clear()
     work._wake_asks.clear()
     work._wake_held.clear()
@@ -746,27 +747,82 @@ def test_strict_keeps_tools_to_workstreams(on, hermes, tool):
     assert block["action"] == "block" and tool in block["message"]
 
 
-@pytest.mark.parametrize("tool", ["work_start", "work_send", "clarify", "memory", "tool_search", "tool_describe"])
+@pytest.mark.parametrize("tool", ["work_start", "work_send", "clarify", "memory", "tool_search", "tool_describe",
+                                  "conduit_show", "conduit_maps", "browser_vault"])
 def test_strict_allows_the_coordinators_own_tools(on, hermes, tool):
     assert work.tool_block(BOT_CHAT, tool, {}) is None
 
 
-def test_lookups_allows_read_only_lookups(on, hermes):
+def test_quick_runs_any_tool_for_a_few_steps_a_turn(on, hermes):
+    # Eric 2026-11-08 (notifier issue 619, "Step budget, writes allowed"): how long the work
+    # runs decides, not which tool it uses, so a quick ask is answered where the user is.
     on.set_policy("lookups")
-    assert work.tool_block(BOT_CHAT, "web_search", {}) is None
-    assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"
+    steps = ["web_search", "read_file", "terminal", "conduit_location", "browser_navigate"]
+    for tool in steps:
+        assert work.tool_block(BOT_CHAT, tool, {"action": "set_rule"}, turn_id="t1") is None  # writes too
+    block = work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1")
+    assert block["action"] == "block" and "terminal didn't run" in block["message"]
+    assert "work_start" in block["message"] and "found or done so far" in block["message"]
+    assert work.tool_block(BOT_CHAT, "web_search", {}, turn_id="t1")["action"] == "block"  # the rest too
+    # What shows or asks the user, its memory and its work tools never count.
+    for tool in ("conduit_show", "conduit_maps", "browser_vault", "clarify", "memory", "work_start"):
+        assert work.tool_block(BOT_CHAT, tool, {}, turn_id="t1") is None
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2") is None  # the next turn starts afresh
+    assert work.tool_block(OTHER_CHAT, "terminal", {}, turn_id="t1") is None  # other chats as before
 
 
-def test_lookups_hands_a_place_rule_to_a_workstream(on, hermes):
-    # Place rules are cron jobs: a write, not a lookup (notifier #521's review).
+def test_quick_counts_what_a_bridged_call_runs(on, hermes):
     on.set_policy("lookups")
-    assert work.tool_block(BOT_CHAT, "conduit_location", {"action": "now"}) is None
-    for action in ("set_rule", "remove_rule"):
-        assert work.tool_block(BOT_CHAT, "conduit_location", {"action": action})["action"] == "block"
-        bridged = {"name": "conduit_location", "arguments": {"action": action}}
-        assert work.tool_block(BOT_CHAT, "tool_call", bridged)["action"] == "block"
-    assert work.tool_block(BOT_CHAT, "conduit_location", {})["action"] == "block"  # no action read
-    assert work.tool_block(OTHER_CHAT, "conduit_location", {"action": "set_rule"}) is None  # other chats as before
+    for _ in range(4):
+        assert work.tool_block(BOT_CHAT, "tool_call", {"name": "web_search", "arguments": {}}, turn_id="t1") is None
+    assert work.tool_block(BOT_CHAT, "tool_call", {"name": "conduit_maps", "arguments": {}}, turn_id="t1") is None
+    assert work.tool_block(BOT_CHAT, "web_extract", {}, turn_id="t1") is None  # the fifth
+    bridged = work.tool_block(BOT_CHAT, "tool_call", {"name": "read_file", "arguments": {}}, turn_id="t1")
+    assert bridged["action"] == "block" and "read_file didn't run" in bridged["message"]
+
+
+def test_quick_stops_a_turn_that_runs_long(on, hermes, monkeypatch):
+    on.set_policy("lookups")
+    clock = [1000.0]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1") is None
+    clock[0] += work.QUICK_S + 1
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1")["action"] == "block"
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2") is None
+    clock[0] += work._STEP_KEEP_S + 1  # an old turn's count is let go
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3") is None
+    assert list(work._steps) == [(BOT_CHAT, "t3")]
+
+
+def test_quick_hands_subagents_to_a_workstream(on, hermes):
+    on.set_policy("lookups")
+    block = work.tool_block(BOT_CHAT, "delegate_task", {}, turn_id="t1")
+    assert block["message"] == work.POLICY_BLOCK.format(tool="delegate_task")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1") is None  # a refusal takes no step
+    assert work._steps[(BOT_CHAT, "t1")][1] == 1
+
+
+def test_open_runs_everything_in_the_bot_chat(on, hermes):
+    # Notifier issue 619: the work tools and every other tool in one conversation.
+    on.set_policy("open")
+    assert work.available()
+    for _ in range(work.QUICK_STEPS + 3):
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1") is None
+    for tool in ("delegate_task", "browser_vault", "work_start"):
+        assert work.tool_block(BOT_CHAT, tool, {}, turn_id="t1") is None
+    assert "work_ask" in work.tool_block(BOT_CHAT, "message_agent", {})["message"]  # other bots still by asks
+    assert work._steps == {}
+
+
+def test_the_plugins_tool_hook_counts_the_steps_of_hermes_turn(on, hermes, monkeypatch):
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    for n in range(work.QUICK_STEPS):
+        assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={"command": "ls"},
+                                     turn_id="t1", tool_call_id=f"c{n}") is None
+    block = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={"command": "ls"}, turn_id="t1",
+                                  tool_call_id="c9")
+    assert block["message"] == work.STEP_BLOCK.format(tool="terminal")
 
 
 def test_the_memory_providers_tools_are_the_coordinators_own(on, home, hermes, monkeypatch):
@@ -783,10 +839,13 @@ def test_the_memory_providers_tools_are_the_coordinators_own(on, home, hermes, m
     config("hindsight")
     for policy in ("strict", "lookups"):
         on.set_policy(policy)
-        for tool in ("hindsight_retain", "hindsight_recall"):
-            assert work.tool_block(BOT_CHAT, tool, {}) is None
-        assert work.tool_block(BOT_CHAT, "tool_call", {"name": "hindsight_retain", "arguments": {}}) is None
-        assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"
+        for _ in range(work.QUICK_STEPS + 1):  # never a step
+            for tool in ("hindsight_retain", "hindsight_recall"):
+                assert work.tool_block(BOT_CHAT, tool, {}, turn_id="t1") is None
+            assert work.tool_block(BOT_CHAT, "tool_call", {"name": "hindsight_retain", "arguments": {}},
+                                   turn_id="t1") is None
+    on.set_policy("strict")
+    assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"
     assert "hindsight memory tools" in work.digest(BOT_CHAT)
     # A provider whose tools don't carry its name, by the tools it declares.
     provider = types.SimpleNamespace(get_tool_schemas=lambda: [{"name": "brv_query"}, {"function": {"name": "brv_curate"}}])
@@ -809,17 +868,21 @@ def test_a_policy_this_version_doesnt_know_holds_the_bot_chat_to_strict(on):
     assert on.policy() == "strict"
 
 
-def test_lookups_tells_the_coordinator_to_answer_lookups_itself(on, home, hermes):
+def test_each_setting_tells_the_coordinator_what_it_does_itself(on, home, hermes):
     # Eric's Gridania test: with "Also look things up" on, the weather still went to a workstream.
     strict = work.digest(BOT_CHAT)
     assert "Hand anything that needs tools to a workstream" in strict and "weather" not in strict
     work.app_set_settings(home, {"policy": "lookups"})
-    rules = work.digest(BOT_CHAT)
-    assert "Hand anything that needs tools" not in rules
-    assert rules.index("the weather") < rules.index("work_start")
-    assert "the rest of a page web_extract kept" in rules and "reading or changing the user's files" in rules
-    for tool in ("web_search", "web_extract", "session_search", "conduit_location"):
-        assert tool in rules and work.tool_block(BOT_CHAT, tool, {"action": "now"}) is None
+    quick = work.digest(BOT_CHAT)
+    assert "Hand anything that needs tools" not in quick and "Do quick things yourself" in quick
+    assert quick.index("the weather") < quick.index("work_start") and "several steps, long commands" in quick
+    work.app_set_settings(home, {"policy": "open"})
+    everything = work.digest(BOT_CHAT)
+    assert "do it here" in everything and "only for a long task" in everything
+    for rules in (strict, quick, everything):
+        # What shows or asks the user is the Bot Chat's own under every setting (issue 619).
+        assert "conduit_maps" in rules and "browser_vault" in rules and "never through a workstream" in rules
+        assert "asks for something to run in the background, start a workstream" in rules
 
 
 def test_the_coordinator_draws_its_own_cards(on, home, hermes):
@@ -831,30 +894,8 @@ def test_the_coordinator_draws_its_own_cards(on, home, hermes):
         assert work.tool_block(BOT_CHAT, "tool_call", {"name": "conduit_show", "arguments": {}}) is None
         rules = work.digest(BOT_CHAT)
         assert work.SHOW_RULE in rules and rules.index("conduit_show") < rules.index("If the work tools aren't listed")
-    assert work.tool_block(BOT_CHAT, "conduit_present", {})["action"] == "block"  # only drawing, nothing more
-
-
-def test_lookups_reads_the_page_web_extract_kept(on, home, hermes):
-    # Eric's .52 (2026-11-07): web_extract cut the weather page and kept it whole under
-    # cache/web, as Hermes does, telling the model to read_file it; the read was refused.
-    kept = home / "cache" / "web"
-    kept.mkdir(parents=True)
-    (kept / "www.accuweather.com-f8dff445e7.md").write_text("Sunny, 62")
-    (home / "config.yaml").write_text("secret: 1")
-    page = {"path": str(kept / "www.accuweather.com-f8dff445e7.md")}
-    work.app_set_settings(home, {"policy": "lookups"})
-    assert work.tool_block(BOT_CHAT, "read_file", page) is None
-    assert work.tool_block(BOT_CHAT, "tool_call", {"name": "read_file", "arguments": page}) is None
-    for elsewhere in (str(home / "config.yaml"), str(kept / ".." / ".." / "config.yaml"), str(kept),
-                      "cache/web/www.accuweather.com-f8dff445e7.md", ""):
-        assert work.tool_block(BOT_CHAT, "read_file", {"path": elsewhere})["action"] == "block"
-    legacy = home / "web_cache"  # an install from before cache/web keeps using it
-    legacy.mkdir()
-    (legacy / "example.com-0123456789.md").write_text("Rain")
-    assert work.tool_block(BOT_CHAT, "read_file", {"path": str(legacy / "example.com-0123456789.md")}) is None
-    assert work.tool_block(BOT_CHAT, "read_file", {"path": str(legacy) + "-other/x.md"})["action"] == "block"
     work.app_set_settings(home, {"policy": "strict"})
-    assert work.tool_block(BOT_CHAT, "read_file", page)["action"] == "block"  # strict looks nothing up
+    assert work.tool_block(BOT_CHAT, "conduit_present", {})["action"] == "block"  # only drawing, nothing more
 
 
 def test_a_bridged_call_is_checked_by_what_it_calls(on, hermes):
@@ -901,6 +942,8 @@ def test_the_cli_turns_it_on_and_off(home, monkeypatch, capsys):
     assert "safe work is continued" in capsys.readouterr().out
     cli._work(types.SimpleNamespace(work_action="on", policy=None, max_running=None, after_restart="ask"))
     assert store_mod.Store(home).after_restart() == "ask" and "left to ask about" in capsys.readouterr().out
+    cli._work(types.SimpleNamespace(work_action="on", policy="open", max_running=None))
+    assert store_mod.Store(home).policy() == "open" and "does everything itself" in capsys.readouterr().out
     cli._work(types.SimpleNamespace(work_action="off", policy=None, max_running=None))
     assert store_mod.Store(home).policy() == "off"
     assert "Bot workstreams: off" in capsys.readouterr().out
@@ -3017,7 +3060,8 @@ def _hermes_approvals(home, mode):
 
 def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
     settings = work.app_settings(home)
-    assert settings == {"ok": True, "policy": "lookups", "max_running": 2, "max_running_limit": 6,
+    assert settings == {"ok": True, "policy": "lookups", "policies": ["off", "strict", "lookups", "open"],
+                        "max_running": 2, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
                         "workstream_model": None, "unavailable": ""}
     assert not store_mod.exists(home)
@@ -5429,15 +5473,16 @@ def test_reading_a_room_ask_takes_no_lock_and_writes_nothing(on, tmp_path):
 MAP = {"type": "map", "title": "Nearest Dunkin'", "places": [{"name": "Dunkin'", "address": "632 Grassfield Pkwy"}]}
 
 
-def test_lookups_answers_maps_in_the_bot_chat(on, home, hermes):
-    # Eric 2026-11-08: "nearest Dunkin'" went to W14, its map stayed there.
-    work.app_set_settings(home, {"policy": "lookups"})
-    for action in ("search", "travel_times", "navigate"):
-        assert work.tool_block(BOT_CHAT, "conduit_maps", {"action": action}) is None
-        assert work.tool_block(BOT_CHAT, "tool_call", {"name": "conduit_maps", "arguments": {"action": action}}) is None
-    assert "conduit_maps" in work.digest(BOT_CHAT)
-    work.app_set_settings(home, {"policy": "strict"})
-    assert work.tool_block(BOT_CHAT, "conduit_maps", {"action": "search"})["action"] == "block"
+def test_the_bot_chat_answers_maps_itself(on, home, hermes):
+    # Eric 2026-11-08: "nearest Dunkin'" went to W14, its map stayed there. Under every
+    # setting since issue 619: its Go button shows only in the chat that called it.
+    for policy in ("lookups", "strict"):
+        work.app_set_settings(home, {"policy": policy})
+        for action in ("search", "travel_times", "navigate"):
+            assert work.tool_block(BOT_CHAT, "conduit_maps", {"action": action}) is None
+            assert work.tool_block(BOT_CHAT, "tool_call", {"name": "conduit_maps",
+                                                           "arguments": {"action": action}}) is None
+        assert "conduit_maps" in work.digest(BOT_CHAT)
 
 
 def test_a_workstreams_cards_come_back_to_the_bot_chat(on, hermes):
