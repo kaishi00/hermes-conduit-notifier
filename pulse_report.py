@@ -179,8 +179,24 @@ def _clip(text: Any, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
-def _local(epoch: float, zone: tzinfo) -> str:
-    return datetime.fromtimestamp(epoch, zone).strftime("%a %d %b %H:%M")
+def _local(epoch: Any, zone: tzinfo) -> str:
+    """``epoch`` as local time. A time something outside Pulse wrote into
+    its store as text ("2026-11-03 15:43:11", read as local) is read too,
+    and one that isn't a time is "?": a single odd row once failed every
+    report's candidate list (Eric, 2026-11-08)."""
+    if isinstance(epoch, str):
+        try:
+            when = datetime.fromisoformat(epoch.strip())
+        except ValueError:
+            return "?"
+        when = when.replace(tzinfo=zone) if when.tzinfo is None else when.astimezone(zone)
+        return when.strftime("%a %d %b %H:%M")
+    if isinstance(epoch, bool) or not isinstance(epoch, (int, float)):
+        return "?"
+    try:
+        return datetime.fromtimestamp(epoch, zone).strftime("%a %d %b %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return "?"
 
 
 def profile_homes(home: Path) -> list[tuple[str, Path]]:
