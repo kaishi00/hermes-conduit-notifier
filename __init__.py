@@ -371,6 +371,8 @@ def _post_tool_call(**kwargs: Any) -> None:
     if not forks.inside():
         if kwargs.get("tool_name") == "clarify":
             _quietly(work_tool.answered, _text(kwargs.get("session_id")))
+        _quietly(work_tool.card_shown, _text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"),
+                 kwargs.get("result"))
         _quietly(functools.partial(work_tool.step_ended, _text(kwargs.get("session_id")), kwargs.get("tool_name"),
                                    tool_call_id=kwargs.get("tool_call_id"), status=kwargs.get("status"),
                                    error_type=kwargs.get("error_type")))
