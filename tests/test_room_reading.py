@@ -164,6 +164,19 @@ def test_a_messages_attachments_are_named_and_files_alone_are_read(side):
                              ("you", "[attached: plan 'v2'.pdf, a file]")]
 
 
+def test_a_long_message_keeps_its_attachment_names(side):
+    room_id = started(side)
+    picture = {"attachment_id": "a1", "kind": "image", "name": "zoo-map.png", "size": 12, "mime": "image/png"}
+    side.log.add(room_id, "message.user",
+                 {"thread_id": "main", "text": "x" * 5000, "attachments": [None] * 8 + [picture]},
+                 actor={"kind": "user", "id": "desktop"})
+
+    [(who, text)] = froms(reader(side, "furina").read(room_id))
+
+    assert text.endswith("…\n[attached: zoo-map.png]")
+    assert len(text) <= reading_module.MAX_TEXT_CHARS
+
+
 def test_each_message_has_its_seq_and_time(side):
     room_id = started(side)
     seq = say(side, room_id, "Hello")

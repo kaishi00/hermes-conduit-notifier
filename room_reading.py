@@ -376,7 +376,13 @@ def _text(event: dict[str, Any]) -> Optional[str]:
     names = _attached(payload)
     if names:
         line = f"[attached: {', '.join(names)}]"
-        text = f"{text}\n{line}" if text.strip() else line
+        if not text.strip():
+            return line
+        # Cut here rather than in _shown, so a long message keeps its names.
+        room = MAX_TEXT_CHARS - len(line) - 1
+        if len(text) > room:
+            text = text[:room - 1] + "…"
+        return f"{text}\n{line}"
     return text if text.strip() else None
 
 
@@ -385,8 +391,8 @@ def _attached(payload: dict[str, Any]) -> list[str]:
     attachments = payload.get("attachments")
     if not isinstance(attachments, list):
         return []
-    names = (plain(item.get("name")) for item in attachments[:MAX_ATTACHMENTS] if isinstance(item, dict))
-    return [name or "a file" for name in names]
+    items = [item for item in attachments if isinstance(item, dict)][:MAX_ATTACHMENTS]
+    return [plain(item.get("name")) or "a file" for item in items]
 
 
 def _agent_name(member: dict[str, Any]) -> str:
