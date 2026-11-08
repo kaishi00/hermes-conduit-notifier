@@ -5464,11 +5464,11 @@ def test_a_workstreams_cards_come_back_to_the_bot_chat(on, hermes):
     time.sleep(0.01)
     work.turn_started("20261031_work_1")
     assert work.shown_board(BOT_CHAT, "W1")[0]["cards"] == [MAP]
-    assert work._shown_line(on, on.get("W1")) == ""
+    assert work._shown_line(on, on.get("W1"))[0] == ""
     other = {**MAP, "title": "Coffee"}
     work.card_shown("20261031_work_1", "conduit_show", {}, json.dumps({"ok": True, "cards": [other]}))
     assert work.shown_board(BOT_CHAT, "W1")[0]["cards"] == [other]
-    assert "showed 1 card" in work._shown_line(on, on.get("W1"))
+    assert "showed 1 card" in work._shown_line(on, on.get("W1"))[0]
     assert work.shown_board(BOT_CHAT, "W9")[0] is None
     # Resolved work takes its cards with it.
     on.update("W1", status="done")
@@ -5565,3 +5565,30 @@ def test_a_failed_turns_update_names_its_cards(on, hermes):
     work.flush_wakes()
     (_, params, _), = hermes.named("prompt.submit")
     assert "failed" in params["text"] and '"from_work": "W1"' in params["text"]
+
+
+def test_an_interrupted_turns_cards_are_named_by_the_next_update(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_started("20261031_work_1")
+    work.card_shown("20261031_work_1", "conduit_show", {}, json.dumps({"ok": True, "cards": [MAP]}))
+    hermes.calls.clear()
+    work.turn_ended("20261031_work_1", "")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=True)  # the user stopped it
+    work.flush_wakes()
+    assert not hermes.named("prompt.submit")  # an interrupted turn sends no update
+    # Its cards wait for the next update, which names them once.
+    work.turn_started("20261031_work_1")
+    work.turn_ended("20261031_work_1", "Picked up where it left off.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "showed 1 card" in params["text"] and '"from_work": "W1"' in params["text"]
+    assert work._shown_line(on, on.get("W1"))[0] == ""
+    assert work.shown_board(BOT_CHAT, "W1")[0]["cards"]  # still there to show
+
+
+def test_unreadable_kept_cards_read_as_none(on):
+    start()
+    on.set_meta(work._SHOWN + "W1", "[" * 100000)
+    assert work._shown(on, "W1") is None

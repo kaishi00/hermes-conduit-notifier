@@ -174,6 +174,12 @@ ROUTE_CAPABILITIES = (
     # answers but only to the asking device (no "[btw …]" note in Desktop).
     "side-question",
     "room-files",
+    # GET /room-files/data-url: a picture sent into a room, read back so
+    # Conduit draws it instead of its file name.
+    "room-file-pictures",
+    # The same route reads any file sent into a room (up to 16 MB), so
+    # Conduit opens and plays them as a chat does.
+    "room-file-reads",
     "room-images",
     "speech-server",
     "local-live-agent",
