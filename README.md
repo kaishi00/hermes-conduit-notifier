@@ -1557,7 +1557,7 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   you can also answer from the reply field on its card, or in the Bot Chat:
   the bot passes your answer on with `work_send`, and that answers the
   question rather than waiting behind it. Only a Bot Chat turn your own
-  message started passes one on, so the bot never answers it alone, and
+  message started, written after the question came, passes one on, so the bot never answers it alone, and
   what a group room says never does.
 - Up to 2 run at once per bot (`--max-running`). The registry is
   `<profile>/conduit/workstreams.db`, with a journal of each workstream's

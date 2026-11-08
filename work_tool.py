@@ -1276,6 +1276,32 @@ def end_bypasses(home: Path) -> int:
     return left
 
 
+def _users_message_at(home: Path, coordinator: str) -> float:
+    """When the user's message that started the Bot Chat's current turn was
+    written (Hermes' ``timestamp``), or 0 when it can't be told."""
+    import sqlite3
+
+    path = Path(home) / "state.db"
+    if not coordinator or not path.exists():
+        return 0.0
+    try:
+        db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return 0.0
+    try:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+        if "timestamp" not in columns:
+            return 0.0
+        active = " AND active = 1" if "active" in columns else ""
+        row = db.execute(f"SELECT timestamp FROM messages WHERE session_id = ? AND role = 'user'{active} "
+                         "ORDER BY id DESC LIMIT 1", (coordinator,)).fetchone()
+    except sqlite3.Error:
+        return 0.0
+    finally:
+        db.close()
+    return float(row[0]) if row and isinstance(row[0], (int, float)) else 0.0
+
+
 def _users_words(home: Path, coordinator: str) -> str:
     """The user's message that started the Bot Chat's current turn, or ''.
 
@@ -1672,7 +1698,10 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     # A workstream waiting on its question takes what the coordinator passes
     # on as the answer, but only from a turn the user's own message started:
     # the bot never answers it alone (a work update's turn, a room's words).
-    return _deliver(store, broker, work, words, how, answer=text if quoted else "")
+    # And only a question asked before the user wrote: a follow-up in a turn
+    # that began before the question can't be its answer.
+    since = _users_message_at(home, coordinator) if quoted else 0.0
+    return _deliver(store, broker, work, words, how, answer=text if quoted and since else "", since=since)
 
 
 def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: str) -> str:
@@ -1694,14 +1723,14 @@ def _with_unsent_brief(store: work_store.Store, work: work_store.Work, words: st
 
 
 def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_store.Work, words: str, how: str,
-             kind: str = "send", answer: str = "") -> dict:
+             kind: str = "send", answer: str = "", since: Optional[float] = None) -> dict:
     """Words into a workstream, through the outbox: running work takes them
     as ``how`` says, idle work starts a turn with them (a slot allowing).
     ``answer``: the user's own answer, when the words carry one; a
     workstream waiting on a question takes it as the question's answer,
     since words sent into the turn would only wait behind the question."""
     home = store.home
-    if answer and work.status == "needs_you" and _answered_question(home, work, answer):
+    if answer and work.status == "needs_you" and _answered_question(home, work, answer, since):
         return {"ok": True, "ref": work.ref, "title": work.title, "outcome": "answered",
                 "note": f"{work.ref} was waiting on the user's answer to its question: this answered it, "
                         "and it carries on."}
@@ -1754,14 +1783,14 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
             "note": f"Sent to {work.ref}: {work.title}. {said}"}
 
 
-def _answered_question(home: Path, work: work_store.Work, answer: str) -> bool:
+def _answered_question(home: Path, work: work_store.Work, answer: str, since: Optional[float] = None) -> bool:
     """The question the workstream waits on (its clarify), answered with
     the user's words as they'd type them on its card. False when it waits
     on an approval instead, which only the user answers, in its chat or on
     its card."""
     from . import calls
 
-    return bool(work.session_id) and calls.answer_in_writing(home, work.session_id, answer)
+    return bool(work.session_id) and calls.answer_in_writing(home, work.session_id, answer, asked_before=since)
 
 
 def _from_call(work: work_store.Work) -> str:

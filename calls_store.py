@@ -683,14 +683,15 @@ class CallStore:
                 result["next"] = _public_question(item["questions"][following], following, form)
             return result
 
-    def answer_in_writing(self, session_id: Any, words: Any) -> bool:
+    def answer_in_writing(self, session_id: Any, words: Any, *, asked_before: float | None = None) -> bool:
         """The user's written answer, from outside the chat (the Bot Chat
         passing it on, a workstream's card in Conduit), to the question batch
         Hermes waits on in ``session_id``: every question still open takes
         the words as written, as a reply typed on the card would, whether
         or not a call follows the wait. True when the batch is answered now,
         for the clarify loop to take (``take_answers``); False when no
-        question waits there (an approval, or nothing)."""
+        question waits there (an approval, or nothing), or only one asked
+        after ``asked_before`` (when the user wrote the words)."""
         if not isinstance(session_id, str) or not session_id.strip() or not isinstance(words, str) \
                 or not words.strip() or not self.path.exists():
             return False
@@ -698,7 +699,8 @@ class CallStore:
         text = words.strip()[:MAX_WAITING_ANSWER_CHARS]
         with self._locked() as state:
             found = [item for item in state["waiting"]
-                     if item["kind"] == "question" and session_id in item["session_ids"] and item["questions"]]
+                     if item["kind"] == "question" and session_id in item["session_ids"] and item["questions"]
+                     and (asked_before is None or item["at"] < asked_before)]
             if not found:
                 return False
             item = max(found, key=lambda entry: entry["at"])

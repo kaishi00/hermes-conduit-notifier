@@ -2119,6 +2119,17 @@ def test_a_send_carries_the_users_words_as_theirs(on, hermes, home, monkeypatch)
     assert "More." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
 
 
+def _timed_chat_db(home, rows):
+    """state.db with Hermes' timestamp column: rows of (session, role, content, kind, timestamp)."""
+    import sqlite3
+
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, "
+                    "content TEXT, display_kind TEXT, timestamp REAL, active INTEGER NOT NULL DEFAULT 1)")
+        con.executemany("INSERT INTO messages (session_id, role, content, display_kind, timestamp) "
+                        "VALUES (?, ?, ?, ?, ?)", rows)
+
+
 def test_a_send_answers_the_question_a_workstream_waits_on(on, hermes, home, monkeypatch):
     # A tester answered W5's question in the Bot Chat: the bot passed it on,
     # and it waited behind the question while W5 kept needing them.
@@ -2126,12 +2137,25 @@ def test_a_send_answers_the_question_a_workstream_waits_on(on, hermes, home, mon
     start()
     work.needs_you(WORKER, "a question", question=True)
     calls = _waits_on_a_question(home)
-    _chat_db(home, [(BOT_CHAT, "user", "Nimm Shelly", None)])
+    _timed_chat_db(home, [(BOT_CHAT, "user", "Nimm Shelly", None, time.time() + 5)])
     hermes.calls.clear()
     answer = call("work_send", {"ref": "W1", "text": "The user picks Shelly."})
     assert answer["ok"] and answer["outcome"] == "answered"
     assert hermes.named("prompt.submit") == [] and hermes.named("session.redirect") == []
     assert calls.take_answers("conduit-push-q1") == {"q1": "The user picks Shelly."}
+
+
+def test_a_follow_up_from_a_turn_older_than_the_question_doesnt_answer_it(on, hermes, home, monkeypatch):
+    # The user wrote before W1 asked: what the bot sends on in that turn is
+    # a follow-up, not their answer.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    _timed_chat_db(home, [(BOT_CHAT, "user", "Also check the logs", None, time.time() - 60)])
+    work.needs_you(WORKER, "a question", question=True)
+    calls = _waits_on_a_question(home)
+    answer = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert answer["ok"] and answer["outcome"] != "answered"
+    assert calls.take_answers("conduit-push-q1") is None
 
 
 def test_the_bot_never_answers_a_workstreams_question_alone(on, hermes, home, monkeypatch):
@@ -4873,10 +4897,10 @@ def test_a_send_points_its_reports_at_the_sender_before_it_goes_and_back_if_it_d
     seen = []
     real = work._deliver
 
-    def deliver(store, broker, w, words, how, kind="send", answer=""):
+    def deliver(store, broker, w, words, how, kind="send", answer="", since=None):
         # A restart's lost-send notice, or a turn ending first, reads this.
         seen.append(store.get(w.ref).reply_to)
-        return real(store, broker, w, words, how, kind, answer)
+        return real(store, broker, w, words, how, kind, answer, since)
 
     monkeypatch.setattr(work, "_deliver", deliver)
     assert call("work_send", {"ref": "W1", "text": "Now the dark one."}, session_id=ROOM_CHAT)["ok"]
