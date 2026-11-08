@@ -458,12 +458,13 @@ class PresentStore:
 
     def room_ask(self, prompt_id: Any) -> dict[str, Any] | None:
         """One of a room's asks as it stands. An answer stays unheard until
-        the turn the tool gave it to replies (``mark_heard``)."""
-        with self._locked() as state:
-            prompt = _find(state, prompt_id)
-            if prompt is None or not prompt.get("room"):
-                return None
-            return {**_shown(prompt), "preview": prompt["preview"]}
+        the turn the tool gave it to replies (``mark_heard``). Only reads:
+        no lock, since a save replaces the file whole (issue 608), and one
+        that can't be read raises rather than reading as no ask."""
+        prompt = _find(self._load(for_write=True), prompt_id)
+        if prompt is None or not prompt.get("room"):
+            return None
+        return {**_shown(prompt), "preview": prompt["preview"]}
 
     def show(self, title: Any, markdown: Any, *, session_id: Any = None, cards: Any = None,
              markdown_is_fallback: bool = False, layout: str | None = None) -> dict[str, Any]:

@@ -13,6 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.140.1 (2026-11-08)
+
+### Fixes
+- When a send failed just as its "sent from your iPhone, spoken" note was
+  still on its way, the note could land afterwards and label the next
+  message with the same words from another device. It's dropped now.
+- A bot driving its screen rewrote the screen's hold file on every click;
+  it now renews the hold every 30 seconds, and the wait for a free screen
+  reads it once a look.
+- A Linked Room's work ask that the owner left unanswered kept the host
+  reading it every 5 seconds for up to a day; after two minutes it's read
+  every 30 seconds, without locking the file.
+
 ## 0.140.0 (2026-11-08)
 
 ### New and improved

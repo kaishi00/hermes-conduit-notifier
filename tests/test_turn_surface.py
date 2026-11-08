@@ -329,6 +329,50 @@ def test_a_failed_send_discards_its_report(gateway, client):
     assert client.post(f"{BASE}/turn-surface/discard", json={"session_id": "rt-1"}).status_code == 400
 
 
+def test_a_report_landing_after_its_discard_is_dropped(gateway, client):
+    # Issue 610: the report was still on its way when its send failed and
+    # the discard came first. It must not wait for another turn of the text.
+    body = {"session_id": "rt-1", "text_sha256": surfaces.text_sha256("yes")}
+    assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": False}
+    client.post(f"{BASE}/turn-surface", json=_report("carplay", "yes", "spoken"))
+    assert gateway.turn(CONDUIT, "yes") == ""
+    # Other words in the chat still take their own.
+    client.post(f"{BASE}/turn-surface", json=_report("carplay", "no", "spoken"))
+    assert "CarPlay" in gateway.turn(CONDUIT, "no")
+
+
+def test_a_discard_holds_its_text_for_a_while_only():
+    clock = [100.0]
+    session = {}
+    report = surfaces.Report("rt-1", surfaces.text_sha256("yes"), "iphone", "typed")
+    assert surfaces.discard(session, report.text_sha256, lambda: clock[0]) is False
+    surfaces.record(session, report, lambda: clock[0] + 1.0)
+    assert surfaces.take(session, "yes", lambda: clock[0] + 2.0) is None
+    # Past the hold, a report of the same words counts again.
+    later = clock[0] + surfaces.DISCARD_HOLD_S + 1.0
+    surfaces.record(session, report, lambda: later)
+    assert surfaces.take(session, "yes", lambda: later) == ("iphone", "typed")
+
+
+def test_on_the_listener_a_report_landing_after_its_discard_is_dropped(gateway, client, monkeypatch):
+    authority = types.SimpleNamespace(sessions={"auth-1": types.SimpleNamespace(source="src")})
+    run_api = types.ModuleType("gateway.run_api")
+    run_api._ACTIVE_RUNNER = types.SimpleNamespace(session_authority=authority)
+    authorities = types.ModuleType("gateway.session_authorities")
+    authorities.all_authorities = lambda runner: [authority]
+    monkeypatch.setitem(sys.modules, "gateway.run_api", run_api)
+    monkeypatch.setitem(sys.modules, "gateway.session_authorities", authorities)
+    monkeypatch.delitem(sys.__dict__, surfaces._AUTHORITY_STORE, raising=False)
+
+    body = {"session_id": "auth-1", "text_sha256": surfaces.text_sha256("yes")}
+    assert client.post(f"{BASE}/turn-surface/discard", json=body).json() == {"ok": True, "discarded": False}
+    # A turn of other words in the chat leaves the hold in place.
+    assert surfaces.note(False, "something else", session_id="auth-1") is None
+    client.post(f"{BASE}/turn-surface", json=_report("iphone", "yes", "typed", session_id="auth-1"))
+    # Not even another client's turn of those words takes it.
+    assert surfaces.note(False, "yes", session_id="auth-1") is None
+
+
 def test_on_the_listener_a_failed_send_discards_its_report(gateway, client, monkeypatch):
     authority = types.SimpleNamespace(sessions={"auth-1": types.SimpleNamespace(source="src")})
     run_api = types.ModuleType("gateway.run_api")

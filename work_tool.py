@@ -4213,10 +4213,12 @@ def _watch_screen(home: Path) -> None:
                     with _wake_lock:
                         if generation != _screen_generation[0]:
                             return
-                        if not screen_lock.snapshot(home).get("waiting"):
+                        # One read a look (issue 608): who waits and who holds it.
+                        snap = screen_lock.snapshot(home)
+                        if not snap.get("waiting"):
                             _screen_watchers.discard(key)
                             return
-                    if screen_lock.snapshot(home).get("controlling") is None:
+                    if snap.get("controlling") is None:
                         _screen_freed(home)
                 except Exception:  # noqa: BLE001
                     logger.debug("conduit_push: screen watch failed", exc_info=True)
@@ -4646,6 +4648,11 @@ LINKED_WORKER_BLOCK = ("Blocked: this work is for a Linked Room, a group room wi
 # How long the tool waits for the owner's answer: a room turn holds the room meanwhile.
 ROOM_ASK_WAIT_S = 30
 ROOM_ASK_POLL_S = 5.0
+# An ask still unanswered this long after it was last armed is looked at less
+# often: an owner answering a notification hours later is heard within half
+# a minute, and the watch costs next to nothing meanwhile (issue 608).
+ROOM_ASK_FAST_S = 120.0
+ROOM_ASK_SLOW_POLL_S = 30.0
 # A private line waits this long for a turn in its room.
 LINKED_KEEP_S = 24 * 3600.0
 LINKED_COPY = (" (This is work for the Linked Room “{room}”, with other people's agents in it. The bot hears it "
@@ -5041,6 +5048,9 @@ def _post_linked(home: Path, room: room_work.Room, key: str, line: str, item: st
 
 
 _ask_watchers: dict[str, Any] = {}
+# When each home's watch was last armed (a new ask, or one replayed): looked at
+# every ROOM_ASK_POLL_S for ROOM_ASK_FAST_S after.
+_ask_armed: dict[str, float] = {}
 # Bumped when the plugin unloads: a watcher of an older load stops, and the next load's re-arms.
 _ask_generation = [0]
 
@@ -5050,6 +5060,7 @@ def _watch_asks(home: Path) -> None:
     process takes the phone's answer, so this reads the store until none waits)."""
     key = str(home)
     with _ask_lock:
+        _ask_armed[key] = time.monotonic()
         if key in _ask_watchers and _ask_watchers[key].is_alive():
             return
 
@@ -5057,7 +5068,9 @@ def _watch_asks(home: Path) -> None:
 
         def watch() -> None:
             while True:
-                time.sleep(ROOM_ASK_POLL_S)
+                with _ask_lock:
+                    fresh = time.monotonic() - _ask_armed.get(key, 0.0) < ROOM_ASK_FAST_S
+                time.sleep(ROOM_ASK_POLL_S if fresh else ROOM_ASK_SLOW_POLL_S)
                 if generation != _ask_generation[0]:
                     return
                 try:

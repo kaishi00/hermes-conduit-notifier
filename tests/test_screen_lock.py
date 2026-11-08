@@ -579,3 +579,60 @@ def test_another_bots_workstream_with_the_same_ref_isnt_this_ones(on, hermes):
     assert work._same_waiter(mine, row, "default")
     # A host's file holds every bot's entries: another bot's W1 isn't this W1.
     assert not work._same_waiter({**mine, "profile": "other"}, row, "default")
+
+
+def test_the_holders_own_calls_rewrite_the_hold_file_only_now_and_then(home, monkeypatch):
+    # Issue 607: a screen-driving turn calls computer_use several times a
+    # minute; only taking the screen, a new name or a renewal writes.
+    who = {"profile": "default", "kind": "chat", "ref": "", "title": "Trip", "label": "Furina's chat “Trip”"}
+    writes = []
+    replace = lock.os.replace
+    monkeypatch.setattr(lock.os, "replace", lambda src, dst: (writes.append(dst), replace(src, dst)))
+    now = time.time()
+    assert lock.claim(home, "chat-1", who, now=now) is None
+    assert len(writes) == 1
+    for step in range(1, 10):
+        assert lock.claim(home, "chat-1", who, now=now + step) is None
+    assert len(writes) == 1, "renewing within RENEW_S writes nothing"
+    # Renamed meanwhile: the hold names it as it is now.
+    renamed = {**who, "title": "Trip to Rome", "label": "Furina's chat “Trip to Rome”"}
+    assert lock.claim(home, "chat-1", renamed, now=now + 10) is None
+    assert len(writes) == 2 and lock.snapshot(home, now=now + 10)["controlling"]["title"] == "Trip to Rome"
+    # Renewed once RENEW_S has passed, so the hold never runs out mid-turn.
+    assert lock.claim(home, "chat-1", renamed, now=now + 10 + lock.RENEW_S) is None
+    assert len(writes) == 3
+    # Another session is still refused, and a refusal writes nothing.
+    assert lock.claim(home, "chat-2", who, now=now + 11 + lock.RENEW_S)["session_id"] == "chat-1"
+    assert len(writes) == 3
+    # Holder changes always write.
+    lock.release(home, "chat-1")
+    assert lock.claim(home, "chat-2", who, now=now + 12 + lock.RENEW_S) is None
+    assert len(writes) == 5
+
+
+def test_a_holder_still_on_the_waiting_list_is_taken_off_it(home):
+    who = {"profile": "default", "kind": "workstream", "ref": "W1", "title": "Sign in"}
+    now = time.time()
+    assert lock.claim(home, "w1", who, now=now) is None
+    lock.wait(home, "w1", who, now=now + 1)
+    assert lock.claim(home, "w1", who, now=now + 2) is None
+    assert lock.snapshot(home, now=now + 2)["waiting"] == []
+
+
+def test_the_screen_watch_reads_the_hold_once_a_look(on, hermes, monkeypatch):
+    # Issue 608: one snapshot answers both who waits and who holds it.
+    start()
+    assert click(BOT_CHAT) is None
+    assert click(WORKER)["action"] == "block"  # waits, and the watch starts
+    reads = []
+    snapshot = lock.snapshot
+    monkeypatch.setattr(lock, "snapshot", lambda home, now=None: (reads.append(1), snapshot(home, now))[1])
+    freed = []
+    monkeypatch.setattr(work, "_screen_freed", lambda home: freed.append(home) or False)
+    time.sleep(0.2)
+    work._screen_generation[0] += 1  # ends the watch
+    time.sleep(0.05)
+    assert reads, "the watch looked"
+    assert not freed, "the Bot Chat still holds the screen"
+    # Each look is one read (the last, cut short by the stop, may be none).
+    assert len(reads) <= int(0.25 / work.SCREEN_POLL_S) + 2
