@@ -541,3 +541,33 @@ def test_a_finished_report_cut_to_its_first_line_is_still_told_from_a_user_quoti
     chat = [{"role": "user", "content": ask}, {"role": "assistant", "content": "Three cards."},
             {"role": "user", "content": quoted}, {"role": "assistant", "content": "The dentist."}]
     assert guard.without_pulse(tmp_path, chat) == chat[2:]
+
+
+def test_an_unreadable_pulse_store_is_a_warning_once_not_every_turn(guard, hermes, tmp_path, caplog):
+    (tmp_path / guard.PULSE_DB).write_text("not a database")
+    manager = _bound(hermes, "sess_pulse", tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            manager.sync_all("Pulse report p0123abcd-1. Context.", "Cards.", session_id="sess_pulse")
+    assert caplog.text.count("couldn't read Pulse's store") == 1
+
+
+def test_attempts_from_before_digests_get_one_unless_their_text_may_be_cut(guard, tmp_path):
+    store, _ = _pulse_modules()
+    report = _pulse_sent(tmp_path, REPORT)
+    running = _pulse_sent(tmp_path, REPORT)
+    probe = _pulse_sent(tmp_path, "Pulse delivery check {tag}. Nothing to do: reply with one short line.")
+    path = tmp_path / store.DB_NAME
+    pulse_store = store.PulseStore(path)
+    tag = guard.PULSE_TAG.search(report).group(0)
+    pulse_store.update_attempt(pulse_store.attempt_by_tag(tag)["attempt_id"], state=store.DELIVERED)
+    pulse_store.trim_finished("report")
+    with sqlite3.connect(path) as conn:  # as a store from before text_sha has them
+        conn.execute("UPDATE attempts SET text_sha=''")
+
+    store.PulseStore(path)
+
+    heading = report.splitlines()[0]
+    assert guard.pulse_asks(tmp_path, [f"{heading}\nWhat did it mean?", running, probe]) == [False, True, True]
+    assert pulse_store.attempt_by_tag(tag)["text_sha"] == store.UNKNOWN_DIGEST

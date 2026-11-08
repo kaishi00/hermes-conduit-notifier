@@ -73,6 +73,7 @@ _guarded_class: Any = None
 _guarded: dict[str, tuple[Callable[..., Any], Callable[..., Any]]] = {}
 _odd_id_logged = False
 _unread_count = 0
+_pulse_unread_count = 0
 
 
 def is_room_session(session_id: Any, home: Any = None) -> bool:
@@ -190,7 +191,7 @@ def pulse_asks(home: Any, texts: list[Any]) -> list[bool]:
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - the turn then goes to the provider, as Hermes sends it
-        logger.debug("conduit_push: couldn't read Pulse's store to tell its turns from the user's", exc_info=True)
+        _pulse_unread()
         return flags
     for index, found in tags.items():
         flags[index] = any(_sent_as(sent[tag], texts[index]) for tag in found if tag in sent)
@@ -201,8 +202,9 @@ def _sent_as(sent: tuple[Any, Any], text: str) -> bool:
     """Whether ``text`` is the attempt's ask. While Pulse keeps the attempt's
     whole text, the ask holds it. Once Pulse has cut a finished attempt to its
     first line (pulse_store.trim_finished), only the digest kept of the whole
-    text can say, so a user quoting that first line isn't taken for Pulse. An
-    attempt from before digests were kept is matched by its text, as before."""
+    text can say, so a user quoting that first line isn't taken for Pulse (an
+    attempt cut before digests were kept has none to match). A store Pulse
+    hasn't opened since digests came matches by text, as before."""
     whole, digest = sent
     if not isinstance(whole, str) or not whole:
         return False
@@ -215,6 +217,19 @@ def _sent_as(sent: tuple[Any, Any], text: str) -> bool:
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _pulse_unread() -> None:
+    """Warns on the first failure and every 100th after: Pulse's turns then
+    reach the memory provider as Hermes sends them, which an operator should see."""
+    global _pulse_unread_count
+    _pulse_unread_count += 1
+    if _pulse_unread_count % 100 == 1:
+        logger.warning("conduit_push: couldn't read Pulse's store to tell its turns from the user's (%d times "
+                       "so far); until it can be read, Pulse's turns are saved into the memory provider",
+                       _pulse_unread_count, exc_info=True)
+    else:
+        logger.debug("conduit_push: couldn't read Pulse's store", exc_info=True)
 
 
 def _pulse_ask(manager: Any, text: Any) -> bool:
@@ -316,7 +331,8 @@ def _sync_all(original: Callable[..., Any]) -> Callable[..., Any]:
         if _in_room(self, kwargs.get("session_id")) or _pulse_ask(self, _first(args, kwargs, "user_content")):
             return None
         if isinstance(kwargs.get("messages"), list):
-            # A turn of the user's own in the Pulse chat: Pulse's earlier turns stay out.
+            # A turn of the user's own in the Pulse chat: Pulse's earlier turns
+            # stay out. Hermes' sync_all takes messages by keyword only.
             kwargs = {**kwargs, "messages": without_pulse(_home(self), kwargs["messages"])}
         return original(self, *args, **kwargs)
     return _guard(original, sync_all)

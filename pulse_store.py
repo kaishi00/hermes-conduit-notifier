@@ -600,6 +600,10 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}  # a table _ADDED_COLUMNS names
 
 
+# text_sha of an attempt whose whole text was gone before digests were kept.
+UNKNOWN_DIGEST = "unknown"
+
+
 def text_digest(text: str) -> str:
     """An attempt's whole text as ``text_sha`` keeps it (room_memory reads it)."""
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
@@ -655,6 +659,14 @@ class PulseStore:
                     # Another process opening the same store added it first.
                     if column not in _columns(conn, table):
                         raise
+            # Attempts from before text_sha: a whole text gets its digest; one
+            # trim_finished may have cut already (finished, of a kind it cuts)
+            # gets UNKNOWN_DIGEST, so no message is taken for it by its first line.
+            for attempt_id, kind, state, text in conn.execute(
+                    "SELECT attempt_id, kind, state, text FROM attempts WHERE text_sha=''").fetchall():
+                cut = state in FINAL and kind != "probe"
+                conn.execute("UPDATE attempts SET text_sha=? WHERE attempt_id=? AND text_sha=''",
+                             (UNKNOWN_DIGEST if cut else text_digest(text or ""), attempt_id))
             # A report card's why is now its candidate's reason, or nothing: the stock
             # lines from before (an item's, a whole report's) would show behind Why? as
             # if they were one. Cleared once,
