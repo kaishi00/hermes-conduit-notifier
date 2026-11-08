@@ -698,12 +698,15 @@ class CallStore:
         session_id = session_id.strip()
         text = words.strip()[:MAX_WAITING_ANSWER_CHARS]
         with self._locked() as state:
-            found = [item for item in state["waiting"]
-                     if item["kind"] == "question" and session_id in item["session_ids"] and item["questions"]
-                     and (asked_before is None or item["at"] < asked_before)]
+            found = [item for item in state["waiting"] if session_id in item["session_ids"]]
             if not found:
                 return False
+            # The newest wait is what the chat waits on: a question left from
+            # before a restart doesn't take words meant for a newer approval.
             item = max(found, key=lambda entry: entry["at"])
+            if item["kind"] != "question" or not item["questions"] \
+                    or (asked_before is not None and item["at"] >= asked_before):
+                return False
             filled = False
             for entry in item["questions"]:
                 if entry["answer"] is None:

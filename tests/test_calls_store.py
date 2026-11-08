@@ -775,3 +775,14 @@ def test_a_written_answer_leaves_approvals_and_other_chats_alone(tmp_path):
     assert not store.answer_in_writing("s1", "yes")
     assert not store.answer_in_writing("s2", "yes")
     assert not store.answer_in_writing("s1", "  ")
+
+
+def test_a_written_answer_leaves_a_question_older_than_the_approval_waited_on(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock)
+    store.note_waiting("s1", "question", request_id="conduit-push-old", questions=[
+        {"qid": "q1", "question": "Which?", "choices": [], "multi_select": False}])
+    clock.now += 60  # left from before a restart; the chat now waits on an approval
+    store.note_waiting("s1", "approval", description="Delete the backups", command="rm -rf /backups")
+    assert not store.answer_in_writing("s1", "yes")
+    assert store.take_answers("conduit-push-old") is None
