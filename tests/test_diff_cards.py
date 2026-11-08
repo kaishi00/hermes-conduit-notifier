@@ -336,3 +336,14 @@ def test_a_kept_diff_shown_again_keeps_its_id(tool_home):
     answer = _call({"title": "Wide", "cards": [{"type": "diff", "diff": diff}]},
                    keep_diff=lambda given: kept.append(given) or "cd-fedcba9876543210")
     assert not kept and answer["cards"][0]["diff"]["id"] == "cd-0123456789abcdef"
+
+
+def test_a_fresh_wide_diff_with_an_id_is_still_kept(tool_home):
+    # notifier #621's review: only an answered diff (files without hunks) keeps its id.
+    _exchange(PresentStore(tool_home), features=DIFF_FEATURES)
+    kept = []
+    long_patch = "@@ -1,200 +1,200 @@\n" + "".join(f"-{index}\n+{index}!\n" for index in range(200))
+    answer = _call({"title": "Big", "cards": [{"type": "diff", "diff": {"patch": long_patch,
+                                                                         "id": "cd-0123456789abcdef"}}]},
+                   keep_diff=lambda given: kept.append(given) or "cd-fedcba9876543210")
+    assert kept and answer["cards"][0]["diff"]["id"] == "cd-fedcba9876543210"

@@ -3155,13 +3155,11 @@ def card_shown(session_id: Any, tool_name: Any, args: Any, result: Any) -> None:
     work is resolved, a card's live name replacing its earlier one, the
     newest ``SHOWN_CARDS``."""
     if tool_name == "tool_call":
-        from . import pulse_tools
-
-        if SHOW not in [called for called, _ in pulse_tools.called(args)]:
-            return
-    elif tool_name != SHOW:
+        boards = _bridged_boards(args, result)
+    elif tool_name == SHOW:
+        boards = _boards(result, depth=3)  # its own answer, top level only
+    else:
         return
-    boards = _boards(result)
     if not boards:
         return
     home, work = _workstream(session_id)
@@ -3201,6 +3199,35 @@ def _show_args(tool_name: Any, args: Any) -> list[tuple[dict, Any]]:
 
     return [(called_args if isinstance(called_args, dict) else {}, None)
             for called, called_args in pulse_tools.called(args) if called == SHOW]
+
+
+def _bridged_boards(args: Any, result: Any) -> list[dict]:
+    """The boards a bridged call's conduit_show drew, read only from the
+    answers that are the show's: one call, or the shows' places in a list
+    of one answer per call. Another call's answer (a file, a page) may hold
+    text shaped like a board, which never passes for one."""
+    from . import pulse_tools
+
+    names = [called for called, _ in pulse_tools.called(args)]
+    if SHOW not in names:
+        return []
+    if len(names) == 1:
+        return _boards(result)
+    answers = _decoded(result)
+    if isinstance(answers, dict) and isinstance(answers.get("results"), list):
+        answers = answers["results"]
+    if not isinstance(answers, list) or len(answers) != len(names):
+        return []
+    return [board for name, answer in zip(names, answers) if name == SHOW for board in _boards(answer, depth=1)]
+
+
+def _decoded(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, RecursionError):
+            return None
+    return value
 
 
 def _boards(result: Any, depth: int = 0) -> list[dict]:

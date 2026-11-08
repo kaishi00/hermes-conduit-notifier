@@ -531,7 +531,8 @@ def _diffs_answered(cards: list[dict[str, Any]], keep_diff: Callable[[dict[str, 
     for card in cards:
         # One the host already keeps (a workstream's card shown again with
         # from_work) carries its id as it is: its hunks were left out.
-        kept = card["type"] == "diff" and isinstance(card["diff"].get("id"), str) and card["diff"]["id"]
+        kept = card["type"] == "diff" and isinstance(card["diff"].get("id"), str) and card["diff"]["id"] \
+            and not any(file.get("hunks") for file in card["diff"]["files"])
         if card["type"] == "diff" and not kept and not card_schema.carries_whole(card["diff"]):
             try:
                 diff_id = keep_diff(card["diff"])
