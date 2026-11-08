@@ -2686,3 +2686,29 @@ def test_a_grant_made_as_the_room_moved_on_to_a_later_epoch_waits_for_one_for_it
     assert seen == [1, 3]
     [(_, body, _)] = _sent(rooms, "room.grant")
     assert rooms.member["laifu"].decode(body["grant"], "dispatch")["authority_epoch"] == 3
+
+
+def test_a_route_given_as_hermes_moved_the_room_is_given_again_where_it_goes_on(rooms):
+    room_id = _started(rooms)
+    key = (room_id, slot("link1", 1))
+    _moved(rooms, room_id)
+    del rooms.home.canonical.peer_routes[key]  # the move copied the room before its start gave this route
+    rooms.home.canonical.routes.pop(key, None)
+
+    rooms.furina.pass_once()
+
+    assert rooms.home.canonical.peer_routes[key].grant == rooms.home.legacy.peer_routes[key].grant
+    draft = rooms.furina.store.read()["drafts"][room_id]
+    assert draft["routes"][slot("link1", 1)] == "live" and "route_todo" not in draft
+
+
+def test_a_route_the_move_took_along_is_left_as_it_is(rooms):
+    room_id = _started(rooms)
+    key = (room_id, slot("link1", 1))
+    _moved(rooms, room_id)
+    kept = rooms.home.canonical.peer_routes[key]
+
+    rooms.furina.pass_once()
+
+    assert rooms.home.canonical.peer_routes[key] is kept
+    assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]

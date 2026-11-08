@@ -31,6 +31,7 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.parse
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -336,7 +337,8 @@ class Hermes:
         """Who owns a room Hermes moved into the root gateway's store: the owner the move recorded, else the
         host's owner, whom the move makes every moved room's."""
         try:
-            with closing(sqlite3.connect(f"file:{self.root / GATEWAY_STORE}?mode=ro", uri=True, timeout=5)) as conn:
+            with closing(sqlite3.connect(f"file:{urllib.parse.quote(str(self.root / GATEWAY_STORE))}?mode=ro", uri=True,
+                                         timeout=5)) as conn:
                 row = conn.execute("SELECT value FROM state_meta WHERE key=?", (MOVED_OWNER + room_id,)).fetchone()
             if row is not None and isinstance(row[0], str) and row[0]:
                 return row[0]

@@ -645,6 +645,11 @@ class Rooms:
                 draft = state["drafts"].get(room_id)
                 if draft is not None and (draft.get("started_in") or {}).get("kind") == "legacy":
                     draft["started_in"] = where
+                    # A route given as Hermes moved the room went to the frozen copy only: each live one is
+                    # made again where the room goes on, unless the move took it along.
+                    for member_id, route in sorted(draft["routes"].items()):
+                        if route == "live":
+                            _todo(draft, member_id, "swap", unseen=True)
                     logger.info("Linked Rooms follows room %s into the gateway's store, where Hermes moved it",
                                 room_id)
             for room_id in waiting:
@@ -810,7 +815,7 @@ class Rooms:
             if todo["do"] == "swap":
                 self.starter.swap(found, room_id=room_id, home_install_id=draft["home_install_id"],
                                   link_id=member["link"], agent=agent,
-                                  registered=draft["routes"].get(member_id) == "live")
+                                  registered=draft["routes"].get(member_id) == "live" and not todo.get("unseen"))
             elif todo["do"] == "revoke":
                 self.starter.revoke(found, room_id=room_id, member_id=member_id)
             else:
@@ -1489,12 +1494,16 @@ def _member(draft: dict[str, Any], member: Any) -> Optional[dict[str, Any]]:
         (each for each in members if each["handle"].casefold() == handle), None)
 
 
-def _todo(draft: dict[str, Any], member_id: str, do: str) -> None:
+def _todo(draft: dict[str, Any], member_id: str, do: str, *, unseen: bool = False) -> None:
     """A change to a member's route for the rooms loop to make: it takes the place of one waiting that does no
-    more (R15), with tries of its own."""
+    more (R15), with tries of its own. An ``unseen`` swap is for a route the room's service may not have got
+    (its room moved), which it gives again rather than taking as dropped; a swap in its place keeps that."""
     todos = draft.setdefault("route_todo", {})
-    if member_id not in todos or _TODO_RANK[do] >= _TODO_RANK[todos[member_id]["do"]]:
+    waiting = todos.get(member_id)
+    if waiting is None or _TODO_RANK[do] >= _TODO_RANK[waiting["do"]]:
         todos[member_id] = {"do": do, "tries": 0}
+        if do == "swap" and (unseen or waiting is not None and waiting.get("unseen")):
+            todos[member_id]["unseen"] = True
 
 
 def _started_in(found: room_start.Found) -> Optional[dict[str, Any]]:
