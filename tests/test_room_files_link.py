@@ -247,6 +247,27 @@ def test_a_file_no_member_answered_after_every_try_is_given_up(copies):  # noqa:
     assert store.read()["out"].get("link1", {}) == {}
 
 
+def test_a_send_that_doesnt_go_isnt_a_try(copies, monkeypatch):  # noqa: F811
+    # DeepSeek on notifier #629: a mailbox outage spent a file's tries though nothing went.
+    room_id = started(copies)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    post(copies, room_id, f"@file:{path}\nhi")
+    send = copies.furina.send
+
+    def down(link_id, kind, body, **kwargs):
+        if kind == files_module.CHUNK:
+            raise files_module.room_links.LinkError("unavailable", "mailbox down", 503)
+        return send(link_id, kind, body, **kwargs)
+
+    monkeypatch.setattr(copies.furina, "send", down)
+    copies.furina.pass_once()
+
+    owed = [entry for link in files_module.Store(copies.tmp_path / "furina").read()["out"].values()
+            for entry in link.values()]
+    assert owed and all(entry["tries"] == 0 and not entry["done"] for entry in owed)
+    assert not carried(copies, "laifu", "shot.jpg").exists()
+
+
 def test_a_guest_sweeps_its_room_files_without_more_arriving(tmp_path):
     # DeepSeek on notifier #629: carried files aged out only when another arrived.
     import os
