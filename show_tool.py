@@ -449,7 +449,7 @@ def _reviews_kept(given: Any, session: str, problems: list[str], reviews: Review
     for index, raw in enumerate(given):
         if isinstance(raw, dict) and _is_review(raw):
             wanted = raw.get("review", {}).get("id") if isinstance(raw.get("review"), dict) else None
-            if isinstance(wanted, str) and wanted in shown:
+            if _text(wanted, 40) in shown:
                 # One round of a review per answer: a second card's round could never be marked.
                 problems.append(f"cards[{index}].review.id: another card here shows that review; left out")
                 continue
@@ -555,12 +555,17 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
     decisions: list[dict[str, Any]] = []
     pages: dict[str, str] = {}
     seen: set[str] = set()
-    by_title: dict[str, str] = {}
+    # Each title's ids in the latest round that showed it, in order: the
+    # n-th decision of a title here takes the n-th of them.
+    by_title: dict[str, list[str]] = {}
     used_before: set[str] = set()
     for kept in rounds or []:
+        titled: dict[str, list[str]] = {}
         for earlier in kept.get("decisions", []):
-            by_title[str(earlier.get("title", "")).casefold()] = earlier["id"]
+            titled.setdefault(str(earlier.get("title", "")).casefold(), []).append(earlier["id"])
             used_before.add(earlier["id"])
+        by_title.update(titled)
+    title_seen: dict[str, int] = {}
     explicit = {_short_id(raw.get("id")) for raw in given[:6] if isinstance(raw, dict)} - {""}
     if len(given) > 6:
         problems.append(f"{path}.decisions: six at most, the rest were left out")
@@ -575,7 +580,11 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
             continue
         decision_id = _short_id(raw.get("id"))
         if not decision_id:
-            carried = by_title.get(title.casefold(), "")
+            folded = title.casefold()
+            occurrence = title_seen.get(folded, 0)
+            title_seen[folded] = occurrence + 1
+            earlier_ids = by_title.get(folded, [])
+            carried = earlier_ids[occurrence] if occurrence < len(earlier_ids) else ""
             if carried and carried not in explicit and carried not in seen:
                 decision_id = carried
             else:

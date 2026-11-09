@@ -358,6 +358,24 @@ def test_a_next_round_without_ids_keeps_each_decisions_id_by_its_title(tool_home
     assert second["settled"] == [{"title": "Home layout", "mark": "approve", "choice": "Cards", "round": 1}]
 
 
+def test_decisions_sharing_a_title_keep_their_own_ids_in_order(tool_home):
+    host = Host(tool_home)
+    two = [{"title": "Layout", "options": [{"label": "A", "html": PAGE}, {"label": "B", "html": PAGE}]},
+           {"title": "Layout", "options": [{"label": "C", "html": PAGE}, {"label": "D", "html": PAGE}]}]
+    first = _call({"cards": [_review(two)]}, reviews=host)["cards"][0]["review"]
+    assert [d["id"] for d in first["decisions"]] == ["d1", "d2"]
+    second = _call({"cards": [_review(two, id=first["id"])]}, reviews=host)["cards"][0]["review"]
+    assert [d["id"] for d in second["decisions"]] == ["d1", "d2"]
+
+
+def test_a_padded_review_id_is_still_one_round_per_answer(tool_home):
+    host = Host(tool_home)
+    first = _call({"cards": [_review()]}, reviews=host)["cards"][0]["review"]
+    answer = _call({"cards": [_review(id=first["id"]), _review(id=first["id"] + "  ")]}, reviews=host)
+    assert len(answer["cards"]) == 1
+    assert any("another card here shows that review" in problem for problem in answer["problems"])
+
+
 def test_an_automatic_decision_id_never_takes_one_given_explicitly(tool_home):
     host = Host(tool_home)
     review = _call({"cards": [_review([
