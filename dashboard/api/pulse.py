@@ -145,13 +145,15 @@ async def post_pulse_forget(request: Request, response: Response) -> Dict[str, A
 
 
 @router.get("/pulse/feed")
-async def get_pulse_feed(response: Response, proposals: bool = False) -> Dict[str, Any]:
+async def get_pulse_feed(response: Response, proposals: bool = False, looks: bool = False) -> Dict[str, Any]:
     """The Pulse screen: cards newest first, how many are unseen, each kind's loudness and the Pulse chat's id.
     ``proposals``: the app shows suggestion cards (kind "proposal", each with its "proposal"); without it,
-    they're left out and not counted. A card from a Kanban task's worker has "kanban_task", the task's id."""
+    they're left out and not counted. A card from a Kanban task's worker has "kanban_task", the task's id.
+    ``looks``: the app draws cards from their picks; each card then has "look", "card_ref", "subject" and
+    "updated_at" (an app that doesn't ask gets the cards as before)."""
     response.headers["Cache-Control"] = "no-store"
-    return await _pulse_route("feed", lambda control, store, home: control.feed(store, home, proposals=proposals),
-                              reads_only=True)
+    return await _pulse_route("feed", lambda control, store, home: control.feed(store, home, proposals=proposals,
+                                                                               looks=looks), reads_only=True)
 
 
 @router.post("/pulse/proposals/{proposal_id}/add")

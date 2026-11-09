@@ -37,6 +37,7 @@ from . import pulse_dates as dates
 from . import pulse_hours as hours
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
+from . import pulse_picks
 from . import pulse_prefs as prefs
 from . import pulse_report as report
 from . import pulse_store as store
@@ -71,7 +72,7 @@ SOURCES = ("chat", "calendar", "reminders", "notes", "jobs", "tools")
 AREAS = ("work", "personal", "health", "home", "money", "social", "travel", "other")
 # The model call's room: what it reads (about the report turn's), and its answer.
 CONTEXT_BUDGET = 14_000
-REPLY_TOKENS = 4_000
+REPLY_TOKENS = 6_000
 JOURNAL_DAYS = 30
 # A floor comes up whatever learning says, at least on the screen: a promise
 # Hermes made that's overdue, or a commitment (or something the user asked
@@ -118,6 +119,8 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 - "due" (found only): when it's due or happens, as "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM" in the user's local time, only when the context gives the day; otherwise "".
 - "asked" (found only): true when the user asked to be reminded of it.
 - "source" (found only): chat, calendar, reminders, notes, jobs or tools; "chat": the key of the chat it came from, when it did; "reminder": the key of the open reminder it is about (like r2), when it is one; "event": the key of the calendar entry it is about (like v1), when it is one; "area": one of {areas}.
+- "job" (found only): the key of the scheduled job it is about (like j3), when it is one.
+- Every entry with "bring_up": true is also a pick, with "detail", "incident", "shape", "facts" and "actions" as below (its "line" is the pick's line, and a remembered item's subject is the item itself; a found entry's "subject" is its reminder, event or job key, or ""). Leave those out when "bring_up" is false.
 - "after" (found, kind "next" only): the #number under "Done since the last report", or the key under "Events that ended since the last report" (like e1), that it follows.
 
 A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen.
@@ -128,7 +131,9 @@ A scheduled job marked failing covers nothing: weigh what rests on it as if ther
 
 A next step (kind "next") is what concretely still needs doing because of something under "Done since the last report" or an event under "Events that ended since the last report": the hotel once the flights are booked, a thank-you note after an interview, the cleaning the dentist said to book. Only when nothing in the context shows it done, planned or covered, the lines under "Later in the chat each was done in" included; never a generic tip, and never work Hermes would make up for itself. Its "why" says what got done or ended and what comes next, never that nothing shows it happening ("nothing since shows it started"): that only says what the context left out. At most {next} next steps.
 
-Pulse weighs your value against what the user did with earlier cards, so judge each one on what the context shows now.{lessons}"""
+Pulse weighs your value against what the user did with earlier cards, so judge each one on what the context shows now.
+
+{picks}{lessons}"""
 # What the user's reasons taught it, as lines added to INSTRUCTIONS
 # (pulse_learning: "already knew" and "too late" on report cards).
 SEEN_LESSON = ("The user said they already knew about some {kinds} Pulse brought up: leave out any of those that "
@@ -182,7 +187,7 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
         did = ((("gets to" if wait.get("intent") in ("errand", "arrival") else "passes near")
                 if wait.get("kind") == "spot" else "leaves" if wait.get("on") == "leave" else "gets to"))
         ref = f" (remembered #{card['item_id']})" if card["item_id"] is not None else ""
-        line = (f"- {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
+        line = (f"- {pulse_picks.card_id_text(card['id'])} {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
                 f"{_clip(card['news'] or card['title'], RECENT_CLIP)}{ref} (held: Pulse brings it up when the user "
                 f"next {did} {_clip(wait.get('place'), 60) or 'a saved place'})")
         if used + len(line) > RECENT_BUDGET:
@@ -195,7 +200,8 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
                else " (rated not useful)" if card["rating"] == "down" else "")
         did += " (done)" if card["id"] in marks else " (put away)" if card["dismissed_at"] else ""
         ref = f" (remembered #{card['item_id']})" if card["item_id"] is not None else ""
-        line = (f"- {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
+        # Each card by its permanent id, so a pick can update or close it (pulse_picks).
+        line = (f"- {pulse_picks.card_id_text(card['id'])} {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
                 f"{_clip(card['news'] or card['title'], RECENT_BRIEF_CLIP if card['kind'] == 'brief' else RECENT_CLIP)}"
                 f"{ref}{did}")
         if used + len(line) > RECENT_BUDGET:
@@ -219,7 +225,7 @@ def _kinds(kinds: Sequence[str]) -> str:
 
 
 def ask(llm: Llm, gathered: report.Gathered, *, nudge: str, note: str = "",
-        lessons: str = "") -> tuple[list[dict], int]:
+        lessons: str = "", drawn: Sequence[str] = ()) -> tuple[list[dict], int]:
     """A report's candidates (``parse``), from one model call on what
     ``gathered`` holds; and the tokens it used. BadReply when the answer
     isn't a list. ``lessons``: ``lessons_block``'s paragraph."""
@@ -229,15 +235,15 @@ def ask(llm: Llm, gathered: report.Gathered, *, nudge: str, note: str = "",
         fence = secrets.token_hex(6)
     instructions = INSTRUCTIONS.format(bar=report.BARS.get(nudge, report.BARS["balanced"]), limit=MAX_ITEMS,
                                        found=MAX_FOUND, kinds=", ".join(report.LIST_KINDS), areas=", ".join(AREAS),
-                                       next=MAX_NEXT, lessons=lessons)
+                                       next=MAX_NEXT, lessons=lessons, picks=pulse_picks.rules(drawn))
     reply, tokens = llm(instructions + report.note_block(note),
                         TEXT.format(since=gathered.since, fence=fence, context=gathered.text))
     if not isinstance(reply, dict) or not any(isinstance(reply.get(key), list) for key in ("remembered", "found")):
         raise BadReply(f"no candidate list in the reply ({type(reply).__name__})")
-    return parse(reply, gathered), tokens
+    return parse(reply, gathered, drawn=drawn), tokens
 
 
-def parse(reply: Any, gathered: report.Gathered) -> list[dict]:
+def parse(reply: Any, gathered: report.Gathered, drawn: Sequence[str] = ()) -> list[dict]:
     """The candidates the model's ``reply`` gives, as journal rows
     (pulse_store.CANDIDATE_COLUMNS) not yet decided, in its order: the
     remembered items it answered for, one each; those it was shown and said
@@ -251,13 +257,50 @@ def parse(reply: Any, gathered: report.Gathered) -> list[dict]:
         if item is None or item["id"] in answered:
             continue
         answered.add(item["id"])
-        rows.append(remembered_row(item, entry))
+        rows.append(with_pick(remembered_row(item, entry), entry, jobs=gathered.jobs, drawn=drawn))
     rows += [{**remembered_row(item, {}), "decision": UNANSWERED} for item in gathered.shown if item["id"] not in answered]
-    found = [row for row in (found_row(entry, gathered.chats, gathered.zone, follows=gathered)
-                             for entry in _entries(reply.get("found"))) if row]
+    found = [with_pick(row, entry, jobs=gathered.jobs, drawn=drawn, shown=shown)
+             for row, entry in ((found_row(entry, gathered.chats, gathered.zone, follows=gathered), entry)
+                                for entry in _entries(reply.get("found"))) if row]
     rows += found[:MAX_FOUND]
     rows += [{**remembered_row(item, {}), "skip": why, "decision": RESTING} for item, why in gathered.resting]
     return rows
+
+
+def subject_of(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None,
+               shown: Optional[dict[int, dict]] = None) -> str:
+    """A candidate's lasting subject (pulse_picks): its remembered item
+    ("item:<id>"), its reminder or calendar entry (its ref), the scheduled
+    job its "job" (or "subject") key names, or a remembered item a found
+    entry's "#n" names among those shown; "" for none (never a guess)."""
+    if row.get("origin") == MEMORY and row.get("item_id") is not None:
+        return f"item:{row['item_id']}"
+    ref = str(row.get("ref") or "")
+    if ref.startswith((REMINDER, EVENT)):
+        return ref
+    for key in (entry.get("job"), entry.get("subject")):
+        key = str(key or "").strip().lower()
+        if key in (jobs or {}):
+            return (jobs or {})[key]
+    said = _ref(str(entry.get("subject") or "").lstrip("#"))
+    if said is not None and said in (shown or {}):
+        return f"item:{said}"
+    return ""
+
+
+def with_pick(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None, drawn: Sequence[str] = (),
+              shown: Optional[dict[int, dict]] = None) -> dict:
+    """``row`` with its subject and, when the model brings it up, its pick
+    (pulse_picks.parse, its words the row's), as the journal keeps them."""
+    row["subject"] = subject_of(row, entry, jobs=jobs, shown=shown)
+    if row.get("bring_up"):
+        pick, why = pulse_picks.parse(entry, drawn_types=drawn, line=str(row.get("text") or ""))
+        if pick is not None:
+            pick["line"] = pulse_picks.clip(str(row.get("text") or ""), pulse_picks.LINE_LIMIT) or pick["line"]
+            if why:
+                pick["dropped"] = why
+            row["pick"] = pulse_picks.dumps(pick)
+    return row
 
 
 def _entries(value: Any) -> list[dict]:
@@ -530,15 +573,29 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
     for row in rows:
         if row.get("decision") in (None, "", UNANSWERED) and row["origin"] == MEMORY and row["item_id"] in resting:
             row.update(decision=RESTING, skip=resting[row["item_id"]])
+    # A pick that updates or closes an open card by its id says something
+    # new about it on purpose (pulse_picks): the open-card rules below don't
+    # keep it out. A new one about a subject with a card open is held for it.
+    deliberate = set()
+    for row in rows:
+        pick = pulse_picks.loads(row.get("pick"))
+        if pick is None:
+            continue
+        action, _, why = pulse_picks.resolve(pulse_store, pick, str(row.get("subject") or ""), now)
+        if action in (pulse_picks.UPDATE, pulse_picks.CLOSE):
+            deliberate.add(id(row))
+        elif action == pulse_picks.DROP and not row.get("skip"):
+            row["skip"] = "raised"
+            pulse_picks.count(pulse_store, now, ["held_open_subject" if why == pulse_picks.HOLD else f"dropped:{why}"])
     recent, away = reminders_raised(pulse_store, [str(row.get("ref") or "") for row in rows], now)
     for row in rows:
         ref = row.get("ref")
-        if row.get("skip") or not ref:
+        if row.get("skip") or not ref or id(row) in deliberate:
             continue
         if ref in away or (ref in recent and not due_again(row, recent[ref], now)):
             row["skip"] = "raised"  # moving a reminder isn't news, nor a calendar entry coming closer
     once_each(rows)
-    for row in still_open(pulse_store, rows, now):
+    for row in still_open(pulse_store, [row for row in rows if id(row) not in deliberate], now):
         if not row.get("skip"):
             row["skip"] = "raised"  # its card says it still
     if learned is None:
@@ -964,6 +1021,17 @@ def report_text(tag: str, picked: Sequence[dict], since: str) -> str:
 def lines(picked: Sequence[dict]) -> list[tuple[str, str, Optional[int]]]:
     """The picks as pulse_learning.add_noticed_cards takes a report's lines."""
     return [(pick["kind"], pick["text"], pick["item_id"]) for pick in picked]
+
+
+def looks(picked: Sequence[dict]) -> list[str]:
+    """Each pick's pick (pulse_picks, JSON; "" for none):
+    pulse_learning.add_noticed_cards's ``looks``."""
+    return [pick.get("pick") or "" for pick in picked]
+
+
+def subjects(picked: Sequence[dict]) -> list[str]:
+    """Each pick's subject: pulse_learning.add_noticed_cards's ``subjects``."""
+    return [pick.get("subject") or "" for pick in picked]
 
 
 def shown(picked: Sequence[dict]) -> dict[int, str]:

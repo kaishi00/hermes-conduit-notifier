@@ -13,6 +13,25 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.149.0 (2026-11-09)
+
+### Fixes
+- A report could come out as a card with no buttons, about something a
+  follow-up card already showed. Every report card now comes from Pulse's
+  checked list, with its own buttons, and never repeats a card still open.
+
+### New and improved
+- Pulse cards can show what they're about: a date, a deadline, a job's
+  recent runs, a promise in the words it was made, a status or the steps of
+  something underway, with up to two buttons. Ask puts words in the chat for
+  you to edit and send. The latest Conduit draws them; older apps show the
+  cards as before.
+- When something Pulse is following changes (a job fails again, or
+  recovers), its card is updated or closed instead of a new one appearing.
+  If it happens again after it was over, that's a new card.
+- The morning brief comes in parts the app can lay out: a summary, what's
+  on today, what's still open, and how many of each.
+
 ## 0.148.0 (2026-11-09)
 
 ### New and improved

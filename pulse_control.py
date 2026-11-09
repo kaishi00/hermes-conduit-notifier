@@ -14,6 +14,7 @@ from . import pulse, pulse_candidates, pulse_delivery, pulse_followup, pulse_her
 from . import pulse_ahead, pulse_claims, pulse_hours, pulse_places, pulse_proposals, pulse_push, pulse_quiet, pulse_spots
 from . import pulse_host as host
 from . import pulse_report
+from . import pulse_picks
 
 RECENT = 5
 ITEMS = 200
@@ -394,14 +395,18 @@ def followups(pulse_store: Any, limit: int = ITEMS) -> list[dict[str, Any]]:
 
 
 def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learning.CARDS,
-         proposals: bool = False) -> dict[str, Any]:
+         proposals: bool = False, looks: bool = False) -> dict[str, Any]:
     """The Pulse screen: what Pulse brought the user, newest first, how many
     are unseen, each kind's loudness, and the Pulse chat's id ("" when
     there's none), which Conduit keeps behind the screen. ``proposals``:
     the app shows suggestion cards (pulse_proposals), each with its
     "proposal"; an app that doesn't ask gets none, nor counts them. A card
     from a Kanban task's worker has "kanban_task", the task's id ("" when
-    unknown): the app shows the task, and Do it starts a new chat."""
+    unknown): the app shows the task, and Do it starts a new chat.
+    ``looks``: the app draws each card from its pick (pulse_picks): every
+    card gets "look" (shape, facts, actions, line and detail; "plain" for
+    one from before picks), "card_ref" (its permanent "pc_<id>") and
+    "subject"; an app that doesn't ask gets the cards as before."""
     # Pulse off: no chat stands behind the screen, whatever is titled Pulse.
     on = home is not None and pulse_store.get("enabled")
     chat = pulse.home_chat(pulse_store, Path(home))[0] if on else None
@@ -422,6 +427,9 @@ def feed(pulse_store: Any, home: Optional[Path] = None, limit: int = pulse_learn
         proposal = pulse_store.proposal(card.get("proposal")) if card["kind"] == pulse_proposals.PROPOSAL else None
         if proposal is not None:
             entry["proposal"] = pulse_proposals.entry(proposal, Path(home) if home is not None else Path("."), now)
+        if looks:
+            entry.update(look=pulse_picks.look(card), card_ref=pulse_picks.card_id_text(card["id"]),
+                         subject=card.get("subject") or "", updated_at=card.get("updated_at"))
         entries.append(entry)
     return {"cards": entries,
             "unseen": pulse_store.unseen_cards(without=without), "levels": pulse_learning.levels(pulse_store),

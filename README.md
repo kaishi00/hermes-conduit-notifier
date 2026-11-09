@@ -3555,6 +3555,25 @@ keeps it.
   comes back again. Feed cards carry `back` (`unsent` or `not_done`, empty
   for a card never back) and `back_acted_at`, and `hermes conduit-push
   pulse cards` marks them.
+- **Cards as picks** (plugin 0.149+). Every report, look ahead and
+  follow-up card is a checked pick: a headline, at most one more sentence,
+  a shape with its facts (`date`, `due`, `runs`, `promise`, `status`,
+  `steps`, `drawn` for a Conduit card body, or `plain`) and at most two
+  actions (`ask` with words for the chat's composer, `open` with a link,
+  `draft` with a message, `done`, `later`). Facts that don't hold up draw
+  plain. Each pick names its subject (a remembered item, reminder, calendar
+  entry or scheduled job) and its incident: a new card, an update to an open
+  card by its permanent id (`pc_<id>`), or a close. A new card about a
+  subject with an open card from the last day is held back; an update to a
+  closed card is a new one, so a job that fails, recovers and fails again
+  gets a second card. The report is made from its candidate list only: one
+  that fails twice, or a Hermes without model access, skips that report
+  (`pulse candidates` says so). The morning brief's card carries its parts
+  (summary, Today, Still open and the counts) beside the text. `GET
+  /pulse/feed?looks=1` adds `look`, `card_ref`, `subject` and `updated_at`
+  to each card; older apps get the same cards without them. `hermes
+  conduit-push pulse picks` shows each day's counts (shapes, plain and why,
+  updates, closes, holds, skipped reports). Capability `pulse_looks`.
 - **Hermes's claims, kept to judge** (plugin 0.108+). Memory also notes
   when Hermes said in a chat it had just set a reminder, an alarm or a
   timer, added or changed an event, created or changed a scheduled job, or

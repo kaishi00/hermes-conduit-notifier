@@ -124,9 +124,15 @@ def test_every_remembered_item_shown_is_answered_for_or_marked_unanswered():
     assert [(row["item_id"], row.get("decision")) for row in rows] == [
         (2, None), (1, None), (3, candidates.UNANSWERED), (4, candidates.RESTING)]
     owed, covered, _, rested = rows
+    pick = json.loads(owed.pop("pick"))
     assert owed == {"origin": "memory", "item_id": 2, "kind": "promise", "profile": "", "chat_id": CHAT,
                     "source": "chat", "area": "", "due_at": DAY, "actionable": True, "value": 4, "bring_up": True,
-                    "skip": "", "text": "I still owe you the build check", "why": "", "asked": None}
+                    "skip": "", "text": "I still owe you the build check", "why": "", "asked": None,
+                    "subject": "item:2"}
+    # Brought up, it carries its pick: the line, plain with no facts, a new incident.
+    assert (pick["line"], pick["shape"], pick["incident"]) == ("I still owe you the build check", "plain",
+                                                               {"card": "new"})
+    assert "pick" not in covered
     assert (covered["skip"], covered["value"], covered["text"]) == ("covered", 2, "The user will do thing 1.")
     assert rested["skip"] == report.RATED
 
@@ -295,8 +301,7 @@ def test_the_report_turn_says_the_picks_as_report_lines():
     assert text.startswith("Pulse report pab-1.") and f"since {SINCE}" in text
     lines = "1. [date] Ana lands at 18:00\n2. [promise] I still owe you the build check #12"
     assert lines in text
-    # Said back as asked, the reply splits into the same items the cards are made from.
-    assert learning.report_lines(lines) == candidates.lines(picked) == [
+    assert candidates.lines(picked) == [
         ("date", "Ana lands at 18:00", None), ("promise", "I still owe you the build check", 12)]
     # The reasons go to the cards, not the report: none for picks journaled before candidates had one.
     assert candidates.whys(picked) == ["", ""]
@@ -557,35 +562,40 @@ def test_a_list_that_picks_nothing_says_so_and_makes_no_card(reporting):
     assert [row["decision"] for row in live.store.run_candidates(run["id"])] == [candidates.NOT_PICKED]
 
 
-def test_the_report_as_it_was_reads_what_pulse_brought_up_lately(reporting):
+def test_the_list_reads_what_pulse_brought_up_lately_by_card_id(reporting):
     live = reporting
-    live.store.add_card({"kind": store.NOTICED, "level": "push", "topic": "date", "news": "Ana lands at 18:00",
-                         "created_at": time.time() - 3600})
-    live.llm.replies.append(RuntimeError("the model is down"))
-    assert listed(live)["state"] == pulse.RUN_FAILED
-    pulse.tick()
-    [sent] = live.sent()
-    # What the list reads too, so the turn needn't go by Pulse's chat for what was said.
-    recent = sent.split(candidates.RECENT_TITLE + "\n", 1)[1]
-    assert recent.startswith("- ") and "[date] Ana lands at 18:00" in recent.split("\n\n", 1)[0]
+    card = live.store.add_card({"kind": store.NOTICED, "level": "push", "topic": "date",
+                                "news": "Ana lands at 18:00", "created_at": time.time() - 3600})
+    assert listed(live)["state"] == pulse.RUN_READY
+    [call] = live.llm.calls
+    # Each by its permanent id, so a pick can update or close that card.
+    recent = call["input"][0]["text"].split(candidates.RECENT_TITLE + "\n", 1)[1]
+    assert recent.startswith(f"- pc_{card} ") and "[date] Ana lands at 18:00" in recent.split("\n\n", 1)[0]
 
 
 @pytest.mark.parametrize("reply", [RuntimeError("the model is down"), None, {"items": []}])
-def test_a_list_that_fails_leaves_the_report_as_it_was(reporting, reply):
+def test_a_list_that_fails_twice_skips_the_report(reporting, reply):
+    # Eric, 2026-11-09: a report written as free text could come out as a
+    # buttonless card about what a follow-up already showed. A report is
+    # made from its list only: one that fails is asked again, then skipped.
     live = reporting
-    live.llm.replies.append(reply)
-    assert listed(live)["state"] == pulse.RUN_FAILED
+    live.llm.replies += [reply, reply]
+    assert listed(live)["state"] == pulse.RUN_FAILED and len(live.llm.calls) == pulse.REPORT_LIST_TRIES
+    pulse.tick()
+    assert live.sent() == [] and live.store.cards() == []
+    run = live.store.get(pulse.REPORT_RUN)
+    assert run["state"] == pulse.RUN_SKIPPED and run["error"]
+    [counts] = live.store.get(pulse.pulse_picks.PICK_COUNTS).values()
+    assert counts["report_skipped"] == 1
+
+
+def test_a_list_that_fails_once_is_asked_again(reporting):
+    live = reporting
+    live.llm.replies += [RuntimeError("the model is down"), {"remembered": [], "found": [FOUND]}]
+    assert listed(live)["state"] == pulse.RUN_READY
     pulse.tick()
     [sent] = live.sent()
-    assert "write at most 5 numbered items" in sent  # the turn picks its own items, as it used to
-    assert live.store.get(pulse.REPORT_RUN)["state"] == pulse.RUN_SENT
-    assert live.store.candidate_runs(5) == []
-    deliver(live, sent, "1. [follow-up] Look at the flaky deploy\n2. [date] Ana lands at 18:00")
-    assert pulse.pre_llm_call(SID, "t1", sent).startswith(report.REPORT_LOOK_NOTE)
-    assert pulse.push_copy(SID, "t1", "1. [follow-up] Look at the flaky deploy\n2. [date] Ana lands at 18:00")[
-        "body"] == "Look at the flaky deploy · Ana lands at 18:00"
-    pulse.tick(time.time() + 1)
-    assert sorted(card["news"] for card in live.store.cards()) == ["Ana lands at 18:00", "Look at the flaky deploy"]
+    assert "1. [follow-up] Look at the flaky deploy (you asked in Deploy)" in sent
 
 
 def test_a_list_left_working_by_a_process_that_stopped_gives_way(reporting, monkeypatch):
@@ -598,15 +608,15 @@ def test_a_list_left_working_by_a_process_that_stopped_gives_way(reporting, monk
     pulse.tick(now + 60)
     assert live.sent() == [] and not live.store.get("report_requested")  # asked again: it's on its way
     pulse.tick(now + pulse.RUN_STALE_S + 1)
-    [sent] = live.sent()
-    assert "write at most 5 numbered items" in sent
-    assert live.store.get(pulse.REPORT_RUN)["error"] == "left working"
+    assert live.sent() == []  # no list, no report
+    assert (live.store.get(pulse.REPORT_RUN)["state"], live.store.get(pulse.REPORT_RUN)["error"]) == (
+        pulse.RUN_SKIPPED, "left working")
     # The list, coming now, is too late: nothing journaled, nothing sent twice.
     row = {**candidate(), "decision": candidates.SURFACED, "rank": 1}
     assert not live.store.finish_run(pulse.REPORT_RUN, working, [row], {**working, "state": pulse.RUN_READY},
                                      now=now)
     pulse.tick(now + pulse.RUN_STALE_S + 60)
-    assert len(live.sent()) == 1 and live.store.candidate_runs(5) == []
+    assert live.sent() == [] and live.store.candidate_runs(5) == []
 
 
 def test_a_list_is_sent_once_and_not_once_too_late(reporting):
@@ -653,10 +663,10 @@ def test_a_list_hermes_refuses_says_so(reporting, monkeypatch):
     monkeypatch.setattr(pulse, "_sender", lambda pulse_store: lambda chat_id, text: host.Sent(False, "", "chat gone"))
     assert pulse._send_report(live.store, live.home, run, SID, time.time())
     assert live.store.get(pulse.REPORT_RUN)["refused"] == "chat gone"
-    failed = {**run, "id": "f" * 16, "state": pulse.RUN_FAILED, "error": "BadReply"}  # the report as it was
+    failed = {**run, "id": "f" * 16, "state": pulse.RUN_FAILED, "error": "BadReply"}
     live.store.set(pulse.REPORT_RUN, failed)
-    assert pulse._send_report(live.store, live.home, failed, SID, time.time())
-    assert live.store.get(pulse.REPORT_RUN)["refused"] == "chat gone"
+    assert not pulse._send_report(live.store, live.home, failed, SID, time.time())  # a failed list sends nothing
+    assert live.store.get(pulse.REPORT_RUN)["state"] == pulse.RUN_SKIPPED
 
 
 def test_typed_ratings_of_a_list_report_still_name_its_remembered_picks(reporting, monkeypatch):
@@ -683,11 +693,17 @@ def test_a_ref_written_as_a_whole_float_still_counts():
     assert [candidates._ref(value) for value in (12, 12.0, "#12", 12.5, True, 1e12)] == [12, 12, 12, None, None, None]
 
 
-def test_without_model_access_the_report_goes_as_it_was(live):
+def test_without_model_access_there_is_no_report(live):
     live.store.set("report_requested", True)
     pulse.tick()
-    [sent] = live.sent()
-    assert "write at most 5 numbered items" in sent and live.store.get(pulse.REPORT_RUN) is None
+    assert live.sent() == []
+    run = live.store.get(pulse.REPORT_RUN)
+    assert (run["state"], run["error"]) == (pulse.RUN_SKIPPED, "no model access")
+    [counts] = live.store.get(pulse.pulse_picks.PICK_COUNTS).values()
+    assert counts == {"report_skipped:no_model": 1}
+    # It stands in for the scheduled report: the next tick doesn't skip it again.
+    pulse.tick()
+    assert live.store.get(pulse.REPORT_RUN) == run
 
 
 def test_candidates_command(reporting, capsys, monkeypatch):

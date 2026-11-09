@@ -12,6 +12,7 @@ import pytest
 from test_maps import NOW, _phone, location, maps, sharing
 from test_pulse import ROOT, SID, _load, cli, control, plugin, pulse, store
 from test_pulse_followup import CHAT, commitment, followup, live, tell  # noqa: F401
+from test_pulse_candidates import FOUND, deliver, listed, reporting  # noqa: F401
 
 tools = _load("conduit_push.pulse_tools", ROOT / "pulse_tools.py")
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
@@ -482,15 +483,19 @@ def test_what_a_follow_up_looked_up_goes_on_its_card(live):
     assert entry["looked"] == ["calendar", "web"]
 
 
-def test_what_a_report_looked_up_goes_on_each_of_its_cards(live):
-    live.store.set("report_requested", True)
-    pulse.tick()
+def test_what_a_report_looked_up_goes_on_each_of_its_cards(reporting):
+    live = reporting
+    now = time.time()
+    live.db.message("user", "Can you look at the flaky deploy tomorrow?", sid=CHAT, at=now - 600)
+    live.llm.replies.append({"remembered": [], "found": [
+        FOUND, {**FOUND, "line": "Dinner at Nopa is Saturday at 19:00", "kind": "date"}]})
+    listed(live, now)
+    pulse.tick(now + 1)
     [attempt] = live.store.in_flight()
     assert pulse.pre_llm_call(SID, "t1", attempt["text"]).startswith(pulse.report.REPORT_LOOK_NOTE)
     assert pulse.pre_tool_call(SID, "t1", "conduit_maps", {"action": "lookup", "query": "Nopa"}) is None
-    live.db.message("user", attempt["text"])
-    live.db.message("assistant", "1. [date] Dinner at Nopa is Saturday at 19:00.\n2. [other] The deploy is green.")
-    pulse.tick()
+    deliver(live, attempt["text"], "1. Dinner at Nopa is Saturday at 19:00.\n2. The deploy.")
+    pulse.tick(now + 2)
     cards = live.store.cards()
     assert len(cards) == 2 and all(learning.card_entry(card)["looked"] == ["maps"] for card in cards)
 

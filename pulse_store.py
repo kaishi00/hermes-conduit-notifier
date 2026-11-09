@@ -541,7 +541,7 @@ SPLIT_ITEMS = '"split"'
 
 CARD_COLUMNS = ("kind", "item_id", "level", "title", "quote", "news", "why", "profile", "chat_id", "chat_title",
                 "message_id", "topic", "brief", "created_at", "learned", "place", "band", "looked", "proposal",
-                "moment")
+                "moment", "look", "subject")
 # The suggestion columns a tap moves (PulseStore.swap_proposal).
 _PROPOSAL_MOVES = ("state", "change_id", "undo_id", "decided_at", "asked_at", "undo_at")
 # Card columns added after the first build, oldest first, with their types.
@@ -563,7 +563,10 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("items", "place_on", "TEXT NOT NULL DEFAULT ''"), ("cards", "moment", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "back", "TEXT NOT NULL DEFAULT ''"), ("cards", "back_acted_at", "REAL"),
                   ("moments", "reach", "TEXT NOT NULL DEFAULT ''"),
-                  ("attempts", "text_sha", "TEXT NOT NULL DEFAULT ''"))
+                  ("attempts", "text_sha", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "look", "TEXT NOT NULL DEFAULT ''"), ("cards", "subject", "TEXT NOT NULL DEFAULT ''"),
+                  ("cards", "updated_at", "REAL"), ("candidates", "pick", "TEXT NOT NULL DEFAULT ''"),
+                  ("candidates", "subject", "TEXT NOT NULL DEFAULT ''"), ("followups", "pick", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -573,7 +576,7 @@ STOCK_WHY_CLEARED = "stock_noticed_why_cleared"
 LESSON_COLUMNS = ("kind", "what", "value", "profile", "chat_id", "card_id", "cause", "created_at")
 CANDIDATE_COLUMNS = ("origin", "item_id", "kind", "profile", "chat_id", "source", "area", "due_at", "actionable",
                      "value", "bring_up", "skip", "text", "why", "decision", "rank", "asked", "band", "place",
-                     "score", "factor", "floor", "level", "ref")
+                     "score", "factor", "floor", "level", "ref", "pick", "subject")
 # The setting that says a store's signals were first filled in from the
 # ratings, Do its and Dones it had before signals were kept (_sync_signals),
 # and its two-thumb steps retired: before learning, two net thumbs moved a
@@ -587,6 +590,10 @@ OLD_SCORES = "rating_scores"
 USER = "user"
 # Who marked a card done when a chat showed it done (card_done's done_by).
 PULSE = "pulse"
+# Who closed a card when a later pick said its incident was over (pulse_picks:
+# the job recovered, the parcel came): not the user's Done, and not a sign
+# the same words are dealt with, so the next incident's card can say them.
+INCIDENT = "incident"
 
 
 def _listed(conn: Any, key: str) -> list[str]:
@@ -659,6 +666,7 @@ class PulseStore:
                     # Another process opening the same store added it first.
                     if column not in _columns(conn, table):
                         raise
+            conn.execute("CREATE INDEX IF NOT EXISTS cards_subject ON cards(subject)")
             # Attempts from before text_sha: a whole text gets its digest; one
             # trim_finished may have cut already (finished, of a kind it cuts, one
             # line) gets UNKNOWN_DIGEST, so no message is taken for it by its first line.
@@ -1457,6 +1465,12 @@ class PulseStore:
                          (decision, news, why, checks, failures, next_check_at, now,
                           json.dumps(timing, sort_keys=True) if timing else "", item_id))
 
+    def set_followup_pick(self, item_id: int, pick: str) -> None:
+        """The pick (pulse_picks, JSON; "" for none) of the news a check
+        just decided, which the follow-up's card keeps."""
+        with _lock, self._connect() as conn:
+            conn.execute("UPDATE followups SET pick=? WHERE item_id=?", (pick, item_id))
+
     def followups_to_tell(self) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM followups WHERE decision='tell' ORDER BY updated_at").fetchall()
@@ -1566,7 +1580,8 @@ class PulseStore:
                                     tuple(row.values())).lastrowid)
 
     def add_cards(self, rows: Sequence[dict[str, Any]], *, attempt: str = "", marks: Sequence[str] = (),
-                  keep: int = 50, links: Sequence[int] = ()) -> list[int]:
+                  keep: int = 50, links: Sequence[int] = (), updates: Sequence[tuple[int, dict[str, Any]]] = (),
+                  closes: Sequence[int] = (), now: Optional[float] = None) -> list[int]:
         """Adds these cards in one transaction, all or none. With ``attempt``,
         it's appended to each list setting in ``marks`` (the last ``keep``)
         in the same write, so the mark can't be lost apart from the cards;
@@ -1575,11 +1590,23 @@ class PulseStore:
         ``marks``) loses its typed ratings in the same write: it's rated on
         its cards from then on, so an item counts once. ``links`` are the
         journaled candidates the cards come from, one per row, noted on each
-        in the same write (pulse_candidates)."""
+        in the same write (pulse_candidates).
+
+        ``updates`` and ``closes`` are what picks did to open cards
+        (pulse_picks), in the same write: each update is a card id, the
+        columns it rewrites and, under "fallback", the row (and under
+        "link", the candidate) to add instead when that card closed
+        meanwhile; each close is a card id, marked done by INCIDENT unless
+        it's marked already. Ids returned: the added cards, then each
+        update's card, in order (the fallback's when it took its place)."""
         for row in rows:
             _check_columns(row, CARD_COLUMNS)
+        for _, change in updates:
+            _check_columns({k: v for k, v in change.items() if k not in ("fallback", "link")}, CARD_COLUMNS)
+            _check_columns(change["fallback"], CARD_COLUMNS)
         if links and len(links) != len(rows):
             raise ValueError(f"{len(links)} candidate links for {len(rows)} cards")
+        now = time.time() if now is None else now
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1590,6 +1617,24 @@ class PulseStore:
                 ids = [int(conn.execute(f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
                                         tuple(row.values())).lastrowid) for row in rows]
                 conn.executemany("UPDATE candidates SET card_id=? WHERE id=?", list(zip(ids, links)))
+                for card_id, change in updates:
+                    fields = {k: v for k, v in change.items() if k not in ("fallback", "link")}
+                    if _card_open(conn, card_id):
+                        conn.execute(f"UPDATE cards SET {', '.join(f'{k}=?' for k in fields)}, updated_at=?, "
+                                     "seen_at=NULL WHERE id=?", (*fields.values(), now, card_id))
+                    else:
+                        row = change["fallback"]
+                        card_id = int(conn.execute(
+                            f"INSERT INTO cards({', '.join(row)}) VALUES({', '.join('?' * len(row))})",
+                            tuple(row.values())).lastrowid)
+                    if change.get("link") is not None:
+                        conn.execute("UPDATE candidates SET card_id=? WHERE id=?", (card_id, change["link"]))
+                    ids.append(card_id)
+                for card_id in closes:
+                    if _card_open(conn, card_id):
+                        conn.execute("INSERT INTO card_done(card_id, done_at, done_by, prior_json) VALUES(?,?,?,'{}')",
+                                     (card_id, now, INCIDENT))
+                        conn.execute("UPDATE card_acts SET check_at=NULL WHERE card_id=?", (card_id,))
                 if SPLIT_REPORTS in lists:
                     # Its typed ratings go, and the row stays as a mark that
                     # outlasts the trimmed list, so none are read back later.
@@ -1660,6 +1705,13 @@ class PulseStore:
             row = conn.execute("SELECT id FROM cards WHERE kind=? AND chat_id=? AND message_id=?",
                                (kind, chat_id, message_id)).fetchone()
         return int(row["id"]) if row else None
+
+    def brought_by(self, brief: str) -> int:
+        """How many held cards the brief ``brief`` brought (stamped once it
+        was delivered: pulse_brief.settle)."""
+        with self._connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM cards WHERE brief=? AND kind!='brief'",
+                                    (brief,)).fetchone()[0])
 
     def held_count(self) -> int:
         with self._connect() as conn:
@@ -1769,7 +1821,7 @@ class PulseStore:
                 conn.execute("ROLLBACK")
                 return False
             conn.execute("DELETE FROM card_done WHERE card_id=?", (card_id,))
-            if row["done_by"] == PULSE:
+            if row["done_by"] in (PULSE, INCIDENT):
                 conn.execute("UPDATE cards SET put_back_at=? WHERE id=?", (now, card_id))
             conn.execute("DELETE FROM signals WHERE card_id=? AND what=?", (card_id, prefs.DONE))
             conn.execute("UPDATE signals SET weight=MIN(weight, ?) WHERE card_id=? AND what=?",
@@ -2258,6 +2310,52 @@ class PulseStore:
                 (NOTICED, since, *topics)).fetchall()
         return [dict(row) for row in rows]
 
+    def open_cards_with(self, subjects: Sequence[str], since: float) -> list[dict]:
+        """The open cards (follow-ups and report items) about any of
+        ``subjects`` (pulse_picks) made or updated since ``since``, newest first."""
+        subjects = [subject for subject in dict.fromkeys(subjects) if subject]
+        if not subjects:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM cards WHERE kind IN ('followup', ?) "
+                f"AND subject IN ({','.join('?' * len(subjects))}) AND coalesce(updated_at, created_at)>=? "
+                "AND id NOT IN (SELECT card_id FROM card_done) "
+                "AND (dismissed_at IS NULL OR rest_until IS NOT NULL) "
+                "AND NOT (coalesce(rating, '')='down' AND coalesce(reason, '')!='wrong_time') "
+                "ORDER BY coalesce(updated_at, created_at) DESC, id DESC",
+                (NOTICED, *subjects, since)).fetchall()
+        return [dict(row) for row in rows]
+
+    def bump_counts(self, key: str, day: str, names: Sequence[str], keep_days: int = 14) -> None:
+        """Adds one to each of ``names`` under ``day`` in the setting ``key``
+        ({day: {name: n}}), in one write, keeping the newest ``keep_days`` days."""
+        with _lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                found = conn.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
+                try:
+                    days = json.loads(found["value_json"]) if found else {}
+                except ValueError:
+                    days = {}
+                days = days if isinstance(days, dict) else {}
+                today = days.get(day) if isinstance(days.get(day), dict) else {}
+                for name in names:
+                    held = today.get(name)
+                    today[name] = (held if isinstance(held, int) and not isinstance(held, bool) else 0) + 1
+                days[day] = today
+                days = {d: days[d] for d in sorted(days)[-keep_days:]}
+                conn.execute("INSERT INTO settings(key, value_json) VALUES(?, ?) "
+                             "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", (key, json.dumps(days)))
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+
+    def card_open(self, card_id: int) -> bool:
+        with self._connect() as conn:
+            return _card_open(conn, card_id)
+
     def closed_cards_on(self, topics: Sequence[str], since: float) -> list[dict]:
         """The "noticed" cards on any of ``topics`` the user closed since
         ``since`` (however old the card): marked done, put away for good, or
@@ -2271,7 +2369,7 @@ class PulseStore:
                 "SELECT cards.*, candidates.ref AS ref FROM cards LEFT JOIN candidates ON candidates.card_id=cards.id "
                 "WHERE cards.kind=? "
                 f"AND cards.topic IN ({','.join('?' * len(topics))}) "
-                "AND (cards.id IN (SELECT card_id FROM card_done WHERE done_at>=?) "
+                "AND (cards.id IN (SELECT card_id FROM card_done WHERE done_at>=? AND done_by!='incident') "
                 "OR (cards.dismissed_at IS NOT NULL AND cards.rest_until IS NULL AND cards.dismissed_at>=?) "
                 "OR (coalesce(cards.rating, '')='down' AND coalesce(cards.reason, '')!='wrong_time' "
                 "AND coalesce(cards.rated_at, cards.created_at)>=?))",
@@ -2665,6 +2763,15 @@ def _prior(conn: sqlite3.Connection, item_id: int) -> dict[str, Any]:
     item = conn.execute("SELECT status, closed_by, closed_at FROM items WHERE id=?", (item_id,)).fetchone()
     check = conn.execute("SELECT decision, next_check_at FROM followups WHERE item_id=?", (item_id,)).fetchone()
     return {**(dict(item) if item else {}), **(dict(check) if check else {})}
+
+
+def _card_open(conn: sqlite3.Connection, card_id: int) -> bool:
+    """Whether a card is still open, as open_cards_about counts it: there,
+    not marked done, not put away for good, not rated not useful."""
+    return conn.execute(
+        "SELECT 1 FROM cards WHERE id=? AND id NOT IN (SELECT card_id FROM card_done) "
+        "AND (dismissed_at IS NULL OR rest_until IS NOT NULL) "
+        "AND NOT (coalesce(rating, '')='down' AND coalesce(reason, '')!='wrong_time')", (card_id,)).fetchone() is not None
 
 
 def _mark_cards_done(conn: sqlite3.Connection, item_id: int, *, prior: dict[str, Any], now: float) -> list[int]:

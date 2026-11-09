@@ -47,6 +47,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 from . import compaction_skip
 from . import pulse_dates as dates
 from . import pulse_hours as hours
+from . import pulse_picks as picks
 from . import pulse_prefs as prefs
 from . import pulse_store as store
 
@@ -194,13 +195,15 @@ def muted_by(pulse_store: store.PulseStore, kind: str, profile: str, chat_id: st
 
 def add_card(pulse_store: store.PulseStore, *, kind: str, item: dict, level_name: str, news: str, why: str,
              chat_title: str, now: float, learned: Optional[dict] = None, place: str = "", band: str = "",
-             looked: Sequence[str] = ()) -> int:
+             looked: Sequence[str] = (), pick: Optional[dict] = None) -> int:
     """The item's card for this news; the one already there when a crash
     came between making it and closing the item. ``learned``: the biggest
     part learning played in bringing it up (pulse_prefs' Learned.factor),
     for its Why?; ``place`` and ``band``: where it came from and how soon
     it was due as it came up, which its signals carry; ``looked``: what the
-    turn that told it looked up (pulse_tools labels), for its Why? too."""
+    turn that told it looked up (pulse_tools labels), for its Why? too.
+    ``pick``: the news's pick (pulse_picks), which the card keeps for the
+    app to draw; its subject is the item."""
     existing = pulse_store.card_for(kind, item["id"], news)
     if existing is not None:
         return existing
@@ -209,7 +212,7 @@ def add_card(pulse_store: store.PulseStore, *, kind: str, item: dict, level_name
         "quote": _clip(item["evidence"], 300), "news": news, "why": why, "profile": item["profile"],
         "chat_id": item["chat_id"], "chat_title": _clip(chat_title, 120), "message_id": item["message_id"],
         "created_at": now, "learned": factor_json(learned), "place": place, "band": band,
-        "looked": looked_json(looked)})
+        "looked": looked_json(looked), "look": picks.dumps(pick), "subject": f"item:{item['id']}"})
 
 
 def looked_json(looked: Sequence[str]) -> str:
@@ -243,11 +246,13 @@ TURN_NEWS_LIMIT = 6000
 
 
 def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, chat_title: str, turn: Any,
-                  level_name: str, why: str, now: float, brief: str = "", looked: Sequence[str] = ()) -> Optional[int]:
+                  level_name: str, why: str, now: float, brief: str = "", looked: Sequence[str] = (),
+                  look: Optional[dict] = None) -> Optional[int]:
     """The card for a delivered report or brief turn (``turn`` is its
     pulse_hermes.TurnRows), once: the one already there for that reply.
     ``brief``: a brief's attempt item id, which its held cards carry too.
-    ``looked``: what the turn looked up (pulse_tools labels)."""
+    ``looked``: what the turn looked up (pulse_tools labels). ``look``: a
+    brief's parts (pulse_brief.look) for apps that lay it out."""
     if kind not in TURN_KINDS or not turn.reply or turn.reply_id is None or empty_turn(kind, turn.reply):
         return None
     existing = pulse_store.card_for_message(kind, turn.session_id, turn.reply_id)
@@ -259,7 +264,7 @@ def add_turn_card(pulse_store: store.PulseStore, *, kind: str, chat_id: str, cha
     return pulse_store.add_card({
         "kind": kind, "item_id": None, "level": level_name, "news": news, "why": why,
         "chat_id": turn.session_id or chat_id, "chat_title": _clip(chat_title, 120), "message_id": turn.reply_id,
-        "brief": brief, "created_at": now, "looked": looked_json(looked)})
+        "brief": brief, "created_at": now, "looked": looked_json(looked), "look": picks.dumps(look)})
 
 
 # A report item's line starts with its number ("1. [kind] ..."); a report
@@ -290,24 +295,6 @@ def drop_empty_turns(pulse_store: store.PulseStore) -> int:
 # One item of a report, as its own card (the report's lines, split).
 NOTICED = store.NOTICED
 NOTICED_NEWS_LIMIT = 1200
-# "1. [date] text #12", also bold or bulleted; the number, the kind, the rest.
-_REPORT_LINE = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?(\d{1,2})[.)](?:\*\*)?\s*\[([A-Za-z-]+)\]\s*(.+?)\s*$", re.MULTILINE)
-_LINE_REF = re.compile(r"\s*#(\d{1,9})\W*$")
-_ANY_REF = re.compile(r"#\d")
-
-
-def report_lines(reply: Optional[str]) -> list[tuple[str, str, Optional[int]]]:
-    """A report's items in order, as (kind, text, the remembered item its
-    "#n" names); a number used twice is its first line."""
-    lines, numbers = [], set()
-    for number, kind, text in _REPORT_LINE.findall(reply or ""):
-        if number in numbers:
-            continue
-        numbers.add(number)
-        # A "#n" counts only as the line's one: "PR #12 needs #4" links nothing.
-        ref = _LINE_REF.search(text) if len(_ANY_REF.findall(text)) == 1 else None
-        lines.append((kind.lower(), (text[:ref.start()] if ref else text).strip(), int(ref.group(1)) if ref else None))
-    return [line for line in lines if line[1]]
 
 
 def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[tuple[str, str, Optional[int]]],
@@ -316,8 +303,10 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
                       marks: tuple[str, ...] = (), keep: int = 50, links: Sequence[int] = (),
                       found_in: Sequence[tuple[str, str]] = (), whys: Sequence[str] = (),
                       levels: Sequence[str] = (), factors: Sequence[str] = (),
-                      attrs: Sequence[tuple[str, str]] = (), looked: Sequence[str] = ()) -> list[int]:
-    """A delivered report's items (``report_lines``) as cards, one each, all
+                      attrs: Sequence[tuple[str, str]] = (), looked: Sequence[str] = (),
+                      looks: Sequence[str] = (), subjects: Sequence[str] = ()) -> list[int]:
+    """A delivered report's items (its candidate list's picks, as
+    pulse_candidates.lines gives them) as cards, one each, all
     at once, marked as ``add_cards`` marks them. An item drawn from a
     remembered thing (its "#n", shown in the report; what replaced it since,
     if anything) points at the chat that thing came from; one the report
@@ -337,8 +326,12 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
     report found, or one naming something else Pulse remembers, gets "other"
     (pulse_dates.DEADLINE: a model's finds never make one). ``looked``: what
     the turn looked up first (pulse_tools labels), on every card, for Why?.
-    ``item_chat_title`` gives a chat's title from its profile and chat_id."""
-    rows = []
+    ``item_chat_title`` gives a chat's title from its profile and chat_id.
+    ``looks``: each line's pick (pulse_picks, JSON; "" for none) and
+    ``subjects`` its subject: the card keeps both, its news is the pick's
+    words, and a pick that updates or closes an open card by its id does
+    that instead of adding one (in the same write)."""
+    rows, row_links, updates, closes, counted = [], [], [], [], []
     for n, (kind, text, ref) in enumerate(lines):
         current = pulse_store.current_item(ref) if ref is not None and ref in shown else None
         item = pulse_store.item(current) if current is not None else None
@@ -363,8 +356,34 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
         else:
             row.update(item_id=None, title=_clip(text, 300), chat_id=turn.session_id or chat_id,
                        message_id=turn.reply_id, chat_title=_clip(chat_title, 120))
+        pick = picks.loads(looks[n]) if n < len(looks) else None
+        subject = subjects[n] if n < len(subjects) else ""
+        link = links[n] if n < len(links) else None
+        if pick is not None:
+            row.update(look=picks.dumps(pick), subject=subject, news=_clip(picks.news(pick), NOTICED_NEWS_LIMIT))
+            action, target, why = picks.resolve(pulse_store, pick, subject, now)
+            counted += [f"shape:{pick.get('shape')}"] + ([f"plain:{pick['dropped']}"] if pick.get("dropped") else [])
+            if why:
+                counted.append(f"{action}:{why}")
+            if action == picks.CLOSE and target is not None:
+                closes.append(target)
+                counted.append("close")
+                continue
+            if action == picks.DROP:
+                continue
+            if action == picks.UPDATE and target is not None:
+                card = pulse_store.card(target)
+                if card is not None:
+                    updates.append((target, {**picks.updated_card(card, pick), "fallback": row, "link": link}))
+                    counted.append("update")
+                    continue
         rows.append(row)
-    return pulse_store.add_cards(rows, attempt=attempt, marks=marks, keep=keep, links=links)
+        row_links.append(link)
+    ids = pulse_store.add_cards(rows, attempt=attempt, marks=marks, keep=keep,
+                                links=row_links if links else (), updates=updates, closes=closes, now=now)
+    if ids or closes:
+        picks.count(pulse_store, now, counted)
+    return ids
 
 
 def left_out_card(pulse_store: store.PulseStore, found: dict, *, kinds: tuple[str, ...], now: float,
