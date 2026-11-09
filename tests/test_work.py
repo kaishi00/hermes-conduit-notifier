@@ -2022,6 +2022,19 @@ def test_options_a_workstream_made_are_shown_as_a_review_card(on, hermes, tmp_pa
     assert "concept-4-missing" not in text.split("names 3")[1]
 
 
+def test_a_failed_turn_naming_pages_gets_no_review_line(on, hermes, tmp_path):
+    for name in ("a.html", "b.html"):
+        (tmp_path / name).write_text("x")
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    work.turn_ended(WORKER, f"Half done: {tmp_path}/a.html and {tmp_path}/b.html")
+    work.turn_finished(WORKER, failed=True, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "failed" in params["text"] and "review card" not in params["text"]
+
+
 def test_a_report_naming_one_page_or_none_gets_no_review_line(tmp_path):
     page = tmp_path / "report.html"
     page.write_text("<p>Hi</p>")
