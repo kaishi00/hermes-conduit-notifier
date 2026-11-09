@@ -68,8 +68,10 @@ for a plain "managed", or a short text naming who manages it, such as
 `CONDUIT_PUSH_MANAGED="Family farm"`. The capabilities route then reports
 `"managed": true` (and `"managed_by"` for a text), Conduit asks nobody to
 update the plugin on that host and says who keeps it up to date, and
-`POST /self/update` answers 409. A restart already waiting on the host is
-still offered. Leave it unset (or `0`) for a plugin you update from Conduit.
+`POST /self/update` pulls nothing: it answers 409, or, when the copy the host
+put on disk waits for its restart (plugin 0.147.2+), runs only the gateway's
+and the dashboard's restarts, as an update would. Leave it unset (or `0`) for
+a plugin you update from Conduit.
 
 Pairing codes expire after ten minutes and can only be claimed once.
 
@@ -4818,7 +4820,9 @@ while it runs:
   dashboard re-executes once no chat turn runs here. A second call while one
   runs answers the same job. 501 where `/self/restart` would, or when Hermes
   lacks its own pull and gateway restart calls; Conduit then runs the steps
-  above itself. 429 after three starts in ten minutes.
+  above itself. 429 after three starts in ten minutes. On a host that sets
+  `CONDUIT_PUSH_MANAGED` nothing is pulled: 409, or only the restarts its new
+  copy waits on (see the managed paragraph near the top).
 - `GET /api/plugins/conduit_push/self/update` answers `{ok, job, boot_id,
   loaded_version}`. `job.step` is `downloading`, `restarting_gateway`,
   `waiting_for_chats` (with `running_chats`), `restarting_dashboard`, `done`

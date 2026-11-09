@@ -24,6 +24,14 @@ checks it). The format is fixed, because Conduit reads it:
 - A new setting, Everything Here, has the Bot Chat do all of it itself and
   start background work only when it's long or you ask.
 
+## 0.147.2 (2026-11-09)
+
+### Fixes
+- On a host that manages the plugin, Finish Update could leave the gateway
+  on the old plugin where systemd runs it as root (an LXC host). The host
+  now runs those restarts itself, as an update does, and still pulls
+  nothing.
+
 ## 0.147.1 (2026-11-09)
 
 ### Fixes
