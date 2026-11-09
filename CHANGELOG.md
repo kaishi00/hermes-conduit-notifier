@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.152.0 (2026-11-09)
+
+### Fixes
+- An iPad or iPhone still on an older Conduit, opened in the last few days,
+  no longer keeps newer cards (like review cards) from showing on the device
+  you're using. The older one shows less until you update it.
+- When a bot's tool call can't be read, it now hears exactly what was wrong
+  with it, so it can fix the call instead of giving up on the card.
+
 ## 0.151.0 (2026-11-09)
 
 ### New and improved

@@ -189,6 +189,10 @@ MESSAGE_AGENT_IN_WORKSTREAM = ("A workstream doesn't message other bots itself, 
 BRIDGE_BLOCK = ("That tool_call couldn't be read, so it didn't run. Give it the tool's name and its arguments as an "
                 'object, like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": '
                 '"Find out why the login page is slow."}}, and never put a tool_call inside another.')
+BRIDGE_JSON_BLOCK = ("That tool_call's calls is JSON text that couldn't be read ({error}), so nothing ran. "
+                     "Pass calls as an array of objects, not as a string, and check that every {{ and [ closes.")
+SHOW_FROM_WORK_HINT = (' To show a workstream\'s options as a review, call conduit_show with only {"from_work": "W…"} '
+                       "(its ref): the plugin builds the card from the report.")
 CHECK_FAILED = ("This bot's coordinator settings couldn't be checked just now, so its tools are held back for this "
                 "call. Try again in a moment.")
 
@@ -2789,6 +2793,21 @@ def start_recovery(home: Optional[Path] = None) -> None:
 # The hooks
 
 
+def _bridge_block(args: Any) -> str:
+    """The refusal for a bridged call that names nothing readable: the JSON
+    error when its calls are text that doesn't parse, so the model can fix
+    it, with the short from_work form when it was a conduit_show."""
+    from . import pulse_tools
+
+    error = pulse_tools.unreadable_calls(args)
+    if error is None:
+        return BRIDGE_BLOCK
+    message = BRIDGE_JSON_BLOCK.format(error=error)
+    if SHOW in str(args.get("calls")):
+        message += SHOW_FROM_WORK_HINT
+    return message
+
+
 def tool_block(session_id: Any, tool_name: Any, args: Any = None,
                turn_id: Any = None) -> Optional[dict[str, str]]:
     """The bot's policy for its Bot Chat: a block for a tool the coordinator
@@ -2821,7 +2840,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
             _, work, unreadable = _lookup(session_id, home)
             # A call's job is held as any chat is.
             held = (work is not None and not _from_call(work)) or unreadable
-            return {"action": "block", "message": BRIDGE_BLOCK} if held else None
+            return {"action": "block", "message": _bridge_block(args)} if held else None
         return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
     # The memory provider's own tools (hindsight_retain, ...) are the bot's
     # memory, as ``memory`` is, under every setting (Eric 2026-11-04).
@@ -2838,13 +2857,13 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
             titled = _titled_bot_chat(session_id, home)
             # An unreadable title holds it only once the bot has work, as below.
             if titled is True or (titled is None and work_store.exists(home)):
-                return {"action": "block", "message": BRIDGE_BLOCK}
+                return {"action": "block", "message": _bridge_block(args)}
             # A workstream's could hide a message_agent its refusal below
             # never sees.
             _, work, unreadable = _lookup(session_id, home)
             # A call's job is held as any chat is.
             held = (work is not None and not _from_call(work)) or unreadable
-            return {"action": "block", "message": BRIDGE_BLOCK} if held else None
+            return {"action": "block", "message": _bridge_block(args)} if held else None
     held = _workstream_block(session_id, home, names, {MEMORY})
     if held is not None:
         return held

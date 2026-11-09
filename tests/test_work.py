@@ -290,6 +290,13 @@ def test_a_chat_whose_title_cant_be_read_is_held_only_once_the_bot_has_work(home
     work._title_cache.clear()
     assert work.tool_block(OTHER_CHAT, "terminal")["message"] == work.CHECK_FAILED
     assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "tool_call"})["message"] == work.BRIDGE_BLOCK
+    # .52, 2026-11-09: a model left a } off calls given as text; it hears the
+    # parser's words, and for a show the short from_work form.
+    broken = '[{"arguments": {"cards": [{"title": "Pick"}], "type": "review"}], "name": "conduit_show"}]'
+    message = work.tool_block(OTHER_CHAT, "tool_call", {"calls": broken})["message"]
+    assert "Expecting ',' delimiter" in message and "char 63" in message and '"from_work"' in message
+    message = work.tool_block(OTHER_CHAT, "tool_call", {"calls": '[{"name": "terminal", "arguments": {}'})["message"]
+    assert message.startswith("That tool_call's calls is JSON text") and "from_work" not in message
 
 
 def test_turned_off_nothing_is_started(home, hermes):

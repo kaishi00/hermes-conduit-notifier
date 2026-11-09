@@ -250,6 +250,23 @@ def test_an_install_not_used_for_days_doesnt_hold_back_a_feature(store, clock):
     assert store.has_feature_everywhere("board-cards")
 
 
+def test_an_older_build_used_lately_doesnt_hold_back_a_feature(store, clock):
+    # .52, 2026-11-09: a 2.3.0 iPad opened minutes before kept review cards
+    # off the 2.4.0 phone; it shows less until it updates.
+    store.exchange({"installation_id": IPAD, "app_version": "2.3.0", "features": ["chat-cards"], "results": []})
+    store.exchange({"installation_id": PHONE, "app_version": "2.4.0",
+                    "features": ["chat-cards", "review-cards"], "results": []})
+    assert store.has_feature_everywhere("review-cards")
+    # Two installs on the newest build both count, and one with no version
+    # beside a versioned one is older.
+    store.exchange({"installation_id": IPAD, "app_version": "2.4", "features": ["chat-cards"], "results": []})
+    assert not store.has_feature_everywhere("review-cards"), "the same build that can't still counts"
+    store.exchange({"installation_id": IPAD, "app_version": "", "features": ["chat-cards"], "results": []})
+    assert store.has_feature_everywhere("review-cards")
+    store.exchange({"installation_id": IPAD, "app_version": "2.10.0", "features": ["chat-cards"], "results": []})
+    assert not store.has_feature_everywhere("review-cards"), "2.10 is newer than 2.4"
+
+
 def test_a_malformed_exchange_is_refused(store):
     for body in (None, {"installation_id": "x"}, {"installation_id": PHONE, "results": "no"},
                  {"installation_id": PHONE, "results": [{}] * (store_module.MAX_RESULTS + 1)}):
