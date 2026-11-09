@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.148.1 (2026-11-09)
+
+### Fixes
+- A review's next round no longer loses what you marked when Hermes shows
+  it without the decisions' ids: a decision with the same title keeps its
+  marks, and a new one never takes an old one's place.
+- A resent review is no longer cleared, and Hermes shows one round of a
+  review at a time.
+- Hermes no longer reads a review you marked only partly as fully marked.
+
 ## 0.148.0 (2026-11-09)
 
 ### New and improved
