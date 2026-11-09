@@ -433,3 +433,15 @@ def test_a_noted_file_that_moved_or_grew_is_dropped_unsent(copies, monkeypatch):
     assert moved.exists() and grown.exists()
     assert _sent(copies, "room.file") == []
     assert store.read()["out"].get("link1", {}) == {}
+
+
+def test_a_folder_that_wont_go_isnt_counted_as_freed(tmp_path, monkeypatch):
+    # DeepSeek on notifier #629: a folder rmtree couldn't remove was still taken off the total.
+    root = files_module.files_root(tmp_path)
+    stuck = root / ("20261101-" + "3" * 32)
+    stuck.mkdir(parents=True)
+    (stuck / "a.bin").write_bytes(b"x" * 10)
+    monkeypatch.setattr(files_module, "TOTAL_BYTES", 12)
+    monkeypatch.setattr(files_module.shutil, "rmtree", lambda *_args, **_kwargs: None)
+
+    assert files_module._room_for(root, 5, stuck.stat().st_mtime + 60) is False

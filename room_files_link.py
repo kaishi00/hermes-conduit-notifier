@@ -551,8 +551,11 @@ def _room_for(root: Path, size: int, now: float) -> bool:
     total = _held(root)
     while kept and total + size > TOTAL_BYTES:
         folder = kept.pop(0)
-        total -= _held_folder(folder)
+        held = _held_folder(folder)
         shutil.rmtree(folder, ignore_errors=True)
+        # Counted as freed only once it's gone (a file held open on Windows stays).
+        if not os.path.lexists(folder):
+            total -= held
     return total + size <= TOTAL_BYTES and shutil.disk_usage(root).free - size >= FREE_FLOOR_BYTES
 
 

@@ -386,12 +386,21 @@ def read_room_file_picture(root: str, path: Any, carried: Sequence[str] = ()) ->
 
 
 def _carried_room_files() -> List[str]:
-    """Where Linked Rooms keep the room files other hosts send this one: its root home's."""
+    """Where else a room file named here can be: the root home's room files, where Linked Rooms keep
+    the ones other hosts send this one, and each profile's, since an upload under one profile is
+    the room's too."""
     try:
         root = core._plugin_package_module("room_identity").root_home(core._calls_home())
     except Exception:  # noqa: BLE001 - the profile's own uploads still read
         return []
-    return [os.path.join(str(root), "conduit", "room-files")]
+    roots = [os.path.join(str(root), "conduit", "room-files")]
+    try:
+        with os.scandir(os.path.join(str(root), "profiles")) as profiles:
+            roots += sorted(os.path.join(entry.path, "conduit", "room-files") for entry in profiles
+                            if entry.is_dir(follow_symlinks=False))
+    except OSError:
+        pass
+    return roots
 
 
 @router.get("/room-files/data-url")

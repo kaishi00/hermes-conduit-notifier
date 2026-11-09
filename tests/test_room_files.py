@@ -356,3 +356,30 @@ def test_an_upload_waits_on_the_disk_lock_carried_room_files_take(tmp_path):
         assert not done.wait(0.3), "the upload went on while the carried file held the lock"
     worker.join(5)
     assert done.is_set()
+
+
+def test_a_room_file_uploaded_under_another_profile_reads_too(tmp_path, monkeypatch):
+    # DeepSeek on notifier #629: the home's own Conduit couldn't read an upload made under another profile.
+    import types
+
+    root = tmp_path / "root"
+    monkeypatch.setattr(api.core, "_calls_home", lambda: root / "profiles" / "default")
+    real = api.core._plugin_package_module
+
+    def package(name):
+        if name == "room_identity":
+            return types.SimpleNamespace(root_home=lambda home: root)
+        return real(name)
+
+    monkeypatch.setattr(api.core, "_plugin_package_module", package)
+    folder = "20261108-" + "e" * 32
+    upload = root / "profiles" / "work" / "conduit" / "room-files" / folder / "shot.jpg"
+    upload.parent.mkdir(parents=True)
+    upload.write_bytes(_JPEG)
+    active = root / "profiles" / "default" / "conduit" / "room-files"
+    active.mkdir(parents=True)
+
+    carried = api.rooms._carried_room_files()
+
+    assert str(root / "conduit" / "room-files") == carried[0]
+    assert api.rooms.read_room_file_picture(str(active), str(upload), carried)["dataUrl"]
