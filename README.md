@@ -68,8 +68,10 @@ for a plain "managed", or a short text naming who manages it, such as
 `CONDUIT_PUSH_MANAGED="Family farm"`. The capabilities route then reports
 `"managed": true` (and `"managed_by"` for a text), Conduit asks nobody to
 update the plugin on that host and says who keeps it up to date, and
-`POST /self/update` answers 409. A restart already waiting on the host is
-still offered. Leave it unset (or `0`) for a plugin you update from Conduit.
+`POST /self/update` pulls nothing: it answers 409, or, when the copy the host
+put on disk waits for its restart (plugin 0.147.1+), runs only the gateway's
+and the dashboard's restarts, as an update would. Leave it unset (or `0`) for
+a plugin you update from Conduit.
 
 Pairing codes expire after ten minutes and can only be claimed once.
 
