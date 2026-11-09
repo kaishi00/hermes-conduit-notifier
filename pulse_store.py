@@ -1670,7 +1670,7 @@ class PulseStore:
         """The cards made or last updated most recently (pulse_picks), newest
         first, but those held for a moment."""
         with self._connect() as conn:
-            rows = conn.execute("SELECT * FROM cards WHERE level!=? ORDER BY coalesce(updated_at, created_at) DESC, "
+            rows = conn.execute("SELECT * FROM cards WHERE level!=? ORDER BY max(coalesce(updated_at, 0), created_at) DESC, "
                                 "id DESC LIMIT ?", (MOMENT, limit)).fetchall()
         return [dict(row) for row in rows]
 
@@ -2327,11 +2327,11 @@ class PulseStore:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM cards WHERE kind IN ('followup', ?) "
-                f"AND subject IN ({','.join('?' * len(subjects))}) AND coalesce(updated_at, created_at)>=? "
+                f"AND subject IN ({','.join('?' * len(subjects))}) AND max(coalesce(updated_at, 0), created_at)>=? "
                 "AND id NOT IN (SELECT card_id FROM card_done) "
                 "AND (dismissed_at IS NULL OR rest_until IS NOT NULL) "
                 "AND NOT (coalesce(rating, '')='down' AND coalesce(reason, '')!='wrong_time') "
-                "ORDER BY coalesce(updated_at, created_at) DESC, id DESC",
+                "ORDER BY max(coalesce(updated_at, 0), created_at) DESC, id DESC",
                 (NOTICED, *subjects, since)).fetchall()
         return [dict(row) for row in rows]
 

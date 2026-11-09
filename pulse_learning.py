@@ -386,8 +386,11 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
                     # on the first (its run history kept), in its place.
                     earlier = next((n for n, (t, _) in enumerate(updates) if t == target), None)
                     if earlier is not None:
-                        card = {**card, "look": updates[earlier][1]["look"]}
+                        card = {**card, "look": updates[earlier][1]["look"],
+                                "subject": updates[earlier][1].get("subject") or card.get("subject") or ""}
                     update = (target, {**picks.updated_card(card, pick, subject), "fallback": row, "link": link})
+                    if earlier is not None and "subject" in updates[earlier][1] and "subject" not in update[1]:
+                        update[1]["subject"] = updates[earlier][1]["subject"]
                     if earlier is not None:
                         updates[earlier] = update
                     else:

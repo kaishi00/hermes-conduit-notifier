@@ -2008,6 +2008,19 @@ other file's from its name, never a picture type the bytes don't back.
 Capabilities `room-file-pictures` (plugin 0.142+, pictures) and
 `room-file-reads` (0.143+, any file).
 
+In a Linked Room (plugin 0.149+), every participant sees the same files.
+The home sends each file a room message names, up to 16 MB, over the Link
+to every guest with an agent in the room, in 96 KB pieces, sending it again
+(up to five times) until the guest says it has the file. The guest's plugin checks its size and
+SHA-256 and keeps it in its root home under the same
+`conduit/room-files/<id>/<name>`, readable by its own user only. A turn for
+the guest's agent names that copy instead of the home's path (waiting up to
+8 seconds for one still on its way), and `/room-files/data-url` reads a
+home's path from it, so the guest's Conduit draws the room's pictures too.
+A guest keeps which home each upload folder belongs to (the first whose room pages name it, or whose file arrives first) and which Link sent each file: it refuses another home's bytes under that folder, and a turn names only a copy its own room's home sent. Pieces of files that never finish go after a day, swept hourly too. Carried files count toward the guest's 2 GB of room files, at most 20,000 of them (past that the oldest go first), and age out after 30 days, oldest first past the 2 GB, swept hourly by the rooms loop as well as on each arrival; none is kept with under 1 GB free, and uploads and carried files check the disk under one lock (`conduit/room-files.lock` in the root home). Capability `room-files-linked`. A file over 16 MB stays on the home's host.
+In a room with other people's agents, every rule tier may call
+`vision_analyze` on a picture sent into the room, by its room-files path.
+
 ## Group pictures (plugin 0.41+)
 
 Hermes' gateway-hosted group rooms carry no picture, so Conduit keeps a

@@ -133,6 +133,7 @@ def test_every_capability_names_a_served_route_family():
         "room-files": "/room-files",
         "room-file-pictures": "/room-files/data-url",
         "room-file-reads": "/room-files/data-url",
+        "room-files-linked": "/room-files/data-url",
         "room-images": "/room-images",
         "speech-server": "/speech-server/",
         "local-live": "/local-live/",

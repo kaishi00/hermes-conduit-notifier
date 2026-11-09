@@ -281,3 +281,24 @@ def test_a_close_that_didnt_come_up_is_still_applied_with_the_new_card_it_let_th
         chat_id="s", chat_title="Pulse", shown={}, kinds=pulse.report.KINDS, item_chat_title=lambda item: "",
         now=2000.0, looks=[picks.dumps(picks.parse(entry)[0])], subjects=[entry["subject"]], closing=[made])
     assert pulse_store.card_open(new) and not pulse_store.card_open(made)
+
+
+def test_a_card_brought_back_after_an_update_holds_by_when_it_came_back(tmp_path):
+    import sqlite3
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="job:default:41", created_at=1000.0)
+    pulse_store.add_cards([], updates=[(made, {"news": "Audit failed again", "fallback": {}, "link": None})], now=1500.0)
+    later = 1500.0 + 3 * picks.HOLD_S
+    with sqlite3.connect(pulse_store.path) as conn:  # as bring_back, return_card and release_card do
+        conn.execute("UPDATE cards SET created_at=? WHERE id=?", (later, made))
+    pick, _ = picks.parse({"line": "Audit failed", "subject": "job:default:41"})
+    assert picks.resolve(pulse_store, pick, "job:default:41", later + 60) == (picks.DROP, made, picks.HOLD)
+
+
+def test_a_second_update_to_one_card_keeps_the_subject_the_first_gave_it(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="", created_at=1000.0)
+    report_cards(pulse_store, [{"line": "Audit failed", "subject": "job:default:41", "incident": {"card": f"pc_{made}"}},
+                               {"line": "Audit failed twice", "incident": {"card": f"pc_{made}"}}], 2000.0)
+    assert pulse_store.card(made)["subject"] == "job:default:41"
+    assert pulse_store.card(made)["news"] == "Audit failed twice"
