@@ -467,12 +467,50 @@ def test_the_plugins_own_work_update_draws_cards_whichever_client_has_the_chat_o
         assert answer["ok"] is True and answer["cards"] and answer["note"].startswith(tool.IN_CHAT_NOTE), answer
         tool.turn_surface.start_turn("s1", "Show me dinner")
         assert _call({"title": "Dinner", "cards": [MAP]})["error"] == "not_conduit", "the user's own turn as before"
+        # The same text sent twice (one question to two bots) counts for two turns.
+        tool.turn_surface.expect_wake("Work update from your workstreams. ...")
+        tool.turn_surface.expect_wake("Work update from your workstreams. ...")
+        tool.turn_surface.start_turn("s2", "Work update from your workstreams. ...")
+        tool.turn_surface.start_turn("s1", "Work update from your workstreams. ...")
+        assert tool.turn_surface.woken("s1") and tool.turn_surface.woken("s2")
+        tool.turn_surface.start_turn("s2")
         # Only a text the plugin sent counts, and once: a message that reads
         # like one (pasted in Desktop) is the user's.
         tool.turn_surface.start_turn("s1", "Work update from your workstreams. ...")
         assert _call({"title": "Dinner", "cards": [MAP]})["error"] == "not_conduit", "a look-alike isn't a wake"
     finally:
         tool.turn_surface.start_turn("s1")
+
+
+def test_a_work_update_counts_while_it_waits_behind_a_long_turn_and_not_after_its_window():
+    turns = tool.turn_surface
+    text = "Work update from your workstreams. ..."
+    now = [1000.0]
+    clock = lambda: now[0]  # noqa: E731
+    try:
+        turns.expect_wake(text, clock)
+        now[0] += 3600  # queued behind an hour-long turn
+        turns.start_turn("s1", text, clock)
+        assert turns.woken("s1")
+        turns.expect_wake(text, clock)
+        now[0] += turns.WAKE_TTL_S + 1
+        fresh = turns.expect_wake(text, clock)  # the stale sending goes as this one comes
+        assert turns._wakes[text] == [fresh]
+        turns.start_turn("s1", text, clock)
+        assert turns.woken("s1"), "the fresh sending still wakes its turn"
+        turns.expect_wake(text, clock)
+        now[0] += turns.WAKE_TTL_S + 1
+        turns.start_turn("s1", text, clock)
+        assert not turns.woken("s1"), "past the window it's any other turn"
+        # A sending that didn't go out is taken back, and only it.
+        kept = turns.expect_wake(text, clock)
+        now[0] += 1
+        dropped = turns.expect_wake(text, clock)
+        turns.discard_wake(text, dropped)
+        assert turns._wakes[text] == [kept]
+    finally:
+        turns._wakes.pop(text, None)
+        turns.start_turn("s1")
 
 
 def test_a_turn_source_lookup_that_fails_draws_no_cards(tool_home, monkeypatch):

@@ -38,6 +38,8 @@ RPC_TIMEOUT_S = 30.0
 CALL_TIMEOUT_S = 45.0
 # Hermes answers a submit Desktop's chat owns with this code (SESSION_NOT_OWNED).
 NOT_OWNED = 4090
+# prompt.submit statuses that mean the wake went out (work_tool._send_wake counts the rest refused).
+WAKE_SENT = frozenset({"", "queued", "streaming", "accepted"})
 
 UNAVAILABLE_HOST = ("Bot workstreams need the Hermes dashboard to run this bot's plugins in its own process. This "
                     "Hermes runs plugins in a separate plugin host (plugins.isolation: host), where there is no "
@@ -447,6 +449,14 @@ class Broker:
         from . import turn_surface
 
         # Its turn is the plugin's own, whichever client has the chat open.
-        turn_surface.expect_wake(text)
-        return str(self._unbound("prompt.submit", {"session_id": runtime_id, "text": text, "display_kind": "hidden",
-                                                   "queued": True}).get("status") or "")
+        mark = turn_surface.expect_wake(text)
+        try:
+            status = str(self._unbound("prompt.submit", {"session_id": runtime_id, "text": text,
+                                                         "display_kind": "hidden", "queued": True}).get("status") or "")
+        except BaseException:
+            turn_surface.discard_wake(text, mark)
+            raise
+        if status not in WAKE_SENT:
+            # Refused (as work_tool._send_wake counts it): no turn answers it.
+            turn_surface.discard_wake(text, mark)
+        return status

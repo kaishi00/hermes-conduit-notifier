@@ -357,6 +357,23 @@ def as_bot(monkeypatch, homes, name):
     monkeypatch.setattr(work, "_home", lambda: homes[name])
 
 
+@pytest.mark.parametrize("refusal", ["rejected", "error"])
+def test_a_wake_hermes_refused_isnt_the_plugins_own_turn_later(bots, hermes, monkeypatch, refusal):
+    # GLM/DeepSeek on #655: a wake kept 6 hours must not outlive a send
+    # that never went out, or a turn with its text would count as the plugin's.
+    if refusal == "error":
+        hermes.refuse["prompt.submit"] = {"code": -32000, "message": "busy"}
+    else:
+        monkeypatch.setattr(hermes, "prompt_submit", lambda params: {"status": "rejected"}, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "What's the capital of Sumeru?"})
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    turns = sys.modules["conduit_push.turn_surface"]
+    turns.start_turn(NAHIDA_CHAT, params["text"])
+    assert not turns.woken(NAHIDA_CHAT)
+    turns.start_turn(NAHIDA_CHAT)
+
+
 def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, hermes, monkeypatch):
     asked = call("work_ask", {"bot": "nahida", "text": "What's the capital of Sumeru?"})
     assert asked["ok"] and asked["ref"] == "A1" and asked["bot"] == "Nahida"
