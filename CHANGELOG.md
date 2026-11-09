@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.150.4 (2026-11-09)
+
+### Fixes
+- When a workstream reported seven design options, the review card the
+  plugin built from them showed only six. It now splits seven or eight
+  options into two halves, so every one shows.
+
 ## 0.150.3 (2026-11-09)
 
 ### Fixes
