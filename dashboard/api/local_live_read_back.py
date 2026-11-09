@@ -260,7 +260,17 @@ class _ReadBackFrontTurn:
             except local_live_agent._LocalLiveFrontUnavailable:
                 # The fast model is down: this utterance goes to Hermes.
                 self.frames.put_nowait(("delta", local_live_agent.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY + " "))
-                self.hermes = await self.call.start_turn(words)
+                starting = asyncio.ensure_future(self.call.start_turn(words))
+                try:
+                    self.hermes = await asyncio.shield(starting)
+                except asyncio.CancelledError:
+                    # Let go while the phone was being asked: the turn it
+                    # opens is let go too, never left running.
+                    with contextlib.suppress(Exception):
+                        turn = await starting
+                        if turn is not None:
+                            await self.call.cancel_turn(turn)
+                    raise
             while self.hermes is not None:
                 kind, delta = await self.hermes.frames.get()
                 if kind == "done":
@@ -658,9 +668,14 @@ class _LocalLiveReadBack:
         if agent is not None and not words.startswith(local_live_agent.LOCAL_LIVE_READY_PREFIX):
             target = await local_live_agent._local_live_front_target(self.call.profile)
             if target is not None and not self.closed:
-                # The phone's turn before it (a fallback's) is over too.
-                for old in list(getattr(self.call, "turns", {}).values()):
-                    await self.call.cancel_turn(old)
+                # A phone turn still open (the readiness check's) is over
+                # too, let go under the call's turn lock as start_turn does.
+                turns = getattr(self.call, "turns", None)
+                lock = getattr(self.call, "turn_lock", None)
+                if turns and lock is not None:
+                    async with lock:
+                        for old in list(turns.values()):
+                            await self.call.cancel_turn(old)
                 return _ReadBackFrontTurn(self.call, words, target)
         return await self.call.start_turn(words)
 
@@ -692,7 +707,11 @@ class _LocalLiveReadBack:
             await self._send_server(json.dumps({"type": "response.cancel"}))
         turn, self.turn = self.turn, None
         self.turn_over = True
-        if cancel_turn and turn is not None:
+        # A fast model's turn always stops here: the phone's start_turn lets
+        # its own earlier turn go, but nothing else would stop a fast model
+        # (and the Hermes turn it may fall back to) from answering words the
+        # user has moved on from.
+        if turn is not None and (cancel_turn or isinstance(turn, _ReadBackFrontTurn)):
             await self._let_go(turn)
         await self._end_reply("cancelled")
         return cancelled

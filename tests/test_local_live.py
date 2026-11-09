@@ -1428,6 +1428,10 @@ class FrontModel:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 model.requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
                 answer = model.answers.pop(0) if model.answers else [{"content": "ok"}]
+                if isinstance(answer, dict) and "delay" in answer:
+                    # A slow model: nothing for this long, then its answer.
+                    time.sleep(answer["delay"])
+                    answer = answer["answer"]
                 if isinstance(answer, int):
                     self.send_response(answer)
                     self.send_header("Content-Length", "0")
@@ -1702,6 +1706,47 @@ def test_on_a_read_back_server_speech_over_the_fast_models_reply_stops_it(client
         {"role": "user", "content": "Tell me a story"},
         {"role": "assistant", "content": "Once upon a time, there was a fox. "},
         {"role": "user", "content": "Stop"}]
+
+
+def test_on_a_read_back_server_new_words_let_the_fast_model_go_with_its_fallback(client, hermes, server, front):
+    # The first answer fails late: a fast model still at work on words the
+    # user moved on from must never hand those old words to Hermes.
+    front.answers = [{"delay": 1.0, "answer": 503}, [{"content": "Okay."}]]
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent_on_read_back(ws, upstream)
+        _heard(upstream, "Tell me a story")
+        time.sleep(0.2)
+        # New words, with no speech_started first.
+        _heard(upstream, "Never mind")
+        done, seen = _next(ws, "response.done")
+        # Past the first answer's late failure, then everything the call got.
+        time.sleep(1.5)
+        ws.send_text("finish")
+        with contextlib.suppress(Exception):
+            while True:
+                seen.append(json.loads(ws.receive_text()))
+    assert not any(frame["type"] == "conduit.turn" for frame in seen)
+    assert upstream.spoken() == ["Okay."]
+
+
+def test_on_a_read_back_server_talking_over_the_fallback_lets_its_hermes_turn_go(client, hermes, server, front):
+    front.answers = [503]
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent_on_read_back(ws, upstream)
+        upstream.hold = True
+        _heard(upstream, "Tell me a story")
+        turn, _ = _next(ws, "conduit.turn")
+        _say(ws, turn, "Once upon a time, there was a fox. ", done=False)
+        _next(ws, "response.created")
+        upstream.push({"type": "input_audio_buffer.speech_started", "item_id": "item2"})
+        cancel, _ = _next(ws, "conduit.turn.cancel")
+        assert cancel["turn_id"] == turn["turn_id"]
+        done, _ = _next(ws, "response.done")
+        assert done["response"]["status"] == "cancelled"
+        _finish(ws)
+    assert upstream.spoken() == [api.local_live_agent.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY]
 
 
 def test_on_a_read_back_server_without_a_fast_model_hermes_answers(client, hermes, server):
