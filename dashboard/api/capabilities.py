@@ -180,6 +180,10 @@ ROUTE_CAPABILITIES = (
     # The same route reads any file sent into a room (up to 16 MB), so
     # Conduit opens and plays them as a chat does.
     "room-file-reads",
+    # Linked Rooms carry each file sent into a room to its guests' hosts
+    # (room_files_link), and the same route reads a home's path from this
+    # host's copy, so a guest's Conduit draws a room someone else hosts too.
+    "room-files-linked",
     "room-images",
     "speech-server",
     "local-live-agent",

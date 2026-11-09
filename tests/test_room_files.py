@@ -244,6 +244,49 @@ def test_only_stored_room_files_are_read(tmp_path):
         assert refused.value.status_code == status, path
 
 
+def test_a_room_file_another_host_stored_reads_this_hosts_copy(tmp_path):
+    import pytest
+
+    # A guest's phone names the home's path; Linked Rooms keep the copy in
+    # the guest's root home under the same folder and name.
+    profile = tmp_path / "profile" / "conduit" / "room-files"
+    carried = tmp_path / "root" / "conduit" / "room-files"
+    folder = "20261108-" + "c" * 32
+    (carried / folder).mkdir(parents=True)
+    (carried / folder / "shot one.jpg").write_bytes(_JPEG)
+    outside = tmp_path / "secret.jpg"
+    outside.write_bytes(_JPEG)
+    (carried / folder / "link.jpg").symlink_to(outside)
+    home = f"/home/furina/.hermes/conduit/room-files/{folder}"
+
+    read = api.rooms.read_room_file_picture(str(profile), f"{home}/shot one.jpg", [str(carried)])
+    assert read["dataUrl"].startswith("data:image/jpeg;base64,")
+    refused = {
+        f"{home}/link.jpg": 404,  # a copy that leads out isn't one
+        f"{home}/gone.jpg": 404,
+        f"/home/furina/.hermes/conduit/room-files/not-a-folder/shot one.jpg": 404,
+        f"/home/furina/.hermes/other/{folder}/shot one.jpg": 404,
+        f"{home}/..": 404,
+    }
+    for path, status in refused.items():
+        with pytest.raises(api.rooms.HTTPException) as error:
+            api.rooms.read_room_file_picture(str(profile), path, [str(carried)])
+        assert error.value.status_code == status, path
+    # The home's path naming a profile's root here, where the file isn't, reads the copy (Greptile on #629).
+    (profile / folder).mkdir(parents=True)
+    same = str(profile / folder / "shot one.jpg")
+    assert api.rooms.read_room_file_picture(str(profile), same, [str(carried)])["dataUrl"]
+    # A Windows home's path reads the copy too (DeepSeek on notifier #629).
+    windows = f"C:\\Users\\furina\\.hermes\\conduit\\room-files\\{folder}\\shot one.jpg"
+    assert api.rooms.read_room_file_picture(str(profile), windows, [str(carried)])["dataUrl"]
+    # And a POSIX home's path is one on a Windows host, where it isn't absolute (DeepSeek on notifier #629).
+    assert api.rooms._ANY_ABSOLUTE.match(f"/home/furina/.hermes/conduit/room-files/{folder}/shot one.jpg")
+    assert not api.rooms._ANY_ABSOLUTE.match(f"conduit/room-files/{folder}/shot one.jpg")
+    # Without the carried root, another host's path is no file here.
+    with pytest.raises(api.rooms.HTTPException):
+        api.rooms.read_room_file_picture(str(profile), f"{home}/shot one.jpg")
+
+
 def test_a_picture_too_large_for_a_data_url_is_refused(tmp_path, monkeypatch):
     import pytest
 
@@ -296,3 +339,50 @@ def test_picture_reads_are_rate_limited(tmp_path, monkeypatch):
     limited = client.get(f"{BASE}/room-files/data-url", params={"path": path})
     assert limited.status_code == 429
     assert limited.headers["cache-control"] == "no-store"
+
+
+def test_an_upload_waits_on_the_disk_lock_carried_room_files_take(tmp_path):
+    # DeepSeek on notifier #629: uploads and carried files checked the free floor under different locks.
+    import threading
+
+    files_link = api.core._plugin_package_module("room_files_link")
+    lock_path = str(tmp_path / "conduit" / files_link.LOCK_NAME)
+    done = threading.Event()
+
+    def upload():
+        api.rooms.store_room_file(str(tmp_path / "conduit" / "room-files"), _body(b"x"), lock_path=lock_path)
+        done.set()
+
+    with files_link.disk_lock(tmp_path):
+        worker = threading.Thread(target=upload)
+        worker.start()
+        assert not done.wait(0.3), "the upload went on while the carried file held the lock"
+    worker.join(5)
+    assert done.is_set()
+
+
+def test_a_room_file_uploaded_under_another_profile_reads_too(tmp_path, monkeypatch):
+    # DeepSeek on notifier #629: the home's own Conduit couldn't read an upload made under another profile.
+    import types
+
+    root = tmp_path / "root"
+    monkeypatch.setattr(api.core, "_calls_home", lambda: root / "profiles" / "default")
+    real = api.core._plugin_package_module
+
+    def package(name):
+        if name == "room_identity":
+            return types.SimpleNamespace(root_home=lambda home: root)
+        return real(name)
+
+    monkeypatch.setattr(api.core, "_plugin_package_module", package)
+    folder = "20261108-" + "e" * 32
+    upload = root / "profiles" / "work" / "conduit" / "room-files" / folder / "shot.jpg"
+    upload.parent.mkdir(parents=True)
+    upload.write_bytes(_JPEG)
+    active = root / "profiles" / "default" / "conduit" / "room-files"
+    active.mkdir(parents=True)
+
+    carried = api.rooms._carried_room_files()
+
+    assert str(root / "conduit" / "room-files") == carried[0]
+    assert api.rooms.read_room_file_picture(str(active), str(upload), carried)["dataUrl"]

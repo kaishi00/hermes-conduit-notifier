@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import room_bridge, room_choices, room_links
+from . import room_bridge, room_choices, room_files_link, room_links
 
 logger = logging.getLogger(__name__)
 
@@ -310,7 +310,7 @@ class Member:
                 return reply(202, {"run_id": run_id, "status": "completed", "replayed": False},
                              run={"run_id": run_id, "status": "completed", "output": output})
         status, answer = self._call(profile, "POST", "/v1/runs", request.grant, key=key,
-                                    body={"hosted_room_dispatch": fields})
+                                    body={"hosted_room_dispatch": self._localized(fields, link_id)})
         if status is not None and 200 <= status < 300:
             run_id = answer.get("run_id")
             if isinstance(run_id, str) and room_bridge.RUN_ID.fullmatch(run_id):
@@ -321,6 +321,23 @@ class Member:
                 if today is not None and key in today["keys"]:
                     today["keys"].remove(key)
         return _refused(reply, status, answer)
+
+    def _localized(self, fields: dict[str, Any], link_id: Optional[str] = None) -> dict[str, Any]:
+        """The dispatch with the room files its prompt names swapped for this host's copies of them
+        (room_files_link), so the agent reads them here; its digest follows the prompt, as Hermes checks it."""
+        prompt = fields.get("prompt")
+        if not isinstance(prompt, str):
+            return fields
+        try:
+            local = room_files_link.localized(prompt, self.root, origin=link_id)
+            if local == prompt:
+                return fields
+            # A lone surrogate doesn't encode: the turn keeps the home's paths and digest.
+            digest = hashlib.sha256(local.encode("utf-8")).hexdigest()
+        except Exception as exc:  # noqa: BLE001 - the turn goes with the home's paths
+            logger.info("Linked Rooms couldn't swap in this host's room files (%s)", type(exc).__name__)
+            return fields
+        return {**fields, "prompt": local, "prompt_digest": digest}
 
     def _admitted(self, link_id: str, key: str, profile: str, grant: str, run_id: str,
                   answer: dict) -> tuple[dict, dict]:

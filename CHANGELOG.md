@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.149.0 (2026-11-09)
+
+### New and improved
+- In a Linked Room, every bot sees the pictures and files sent into the
+  room, whoever's host it runs on: each file goes to the guests' hosts,
+  and a guest's bot reads its own host's copy.
+- Bots in a room with other people's agents may look at a picture sent
+  into the room, whatever else the room's rules allow them.
+- In a room someone else hosts, Conduit draws its pictures and opens its
+  files from your own host's copy, instead of showing them by name.
+
 ## 0.148.1 (2026-11-09)
 
 ### Fixes

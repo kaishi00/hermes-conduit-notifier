@@ -332,6 +332,37 @@ def test_a_dispatch_is_replayed_with_its_grant_and_key_and_no_input(laifu, herme
     assert call["body"] == {"hosted_room_dispatch": body["hosted_room_dispatch"]}
 
 
+def test_a_prompt_that_cant_be_encoded_keeps_the_homes_paths(laifu):
+    # Beam on notifier #629: a lone surrogate made the digest raise out of _localized.
+    folder = "20261108-" + "c" * 32
+    kept = laifu.root / "conduit" / "room-files" / folder / "shot.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")
+    fields = {"prompt": f"@file:/root/.hermes/conduit/room-files/{folder}/shot.jpg \ud800", "prompt_digest": "d"}
+
+    assert laifu.member._localized(fields) == fields
+
+
+def test_a_dispatch_names_this_hosts_copy_of_a_room_file_and_its_digest_follows(laifu, hermes):
+    folder = "20261108-" + "b" * 32
+    kept = laifu.root / "conduit" / "room-files" / folder / "shot.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")
+    files = sys.modules["conduit_push.room_files_link"]
+    with files.Store(laifu.root).update() as state:
+        state.setdefault("kept", {})[f"{folder}/shot.jpg"] = {"link": "link1", "at": 0}
+    body, key = dispatch(text=prompt(f"User (user): @file:/root/.hermes/conduit/room-files/{folder}/shot.jpg look"))
+
+    ask(laifu, body=body, key=key)
+
+    [call] = hermes.calls
+    sent = call["body"]["hosted_room_dispatch"]
+    assert f"@file:{kept} look" in sent["prompt"]
+    assert sent["prompt_digest"] == hashlib.sha256(sent["prompt"].encode()).hexdigest()
+    assert {k: v for k, v in sent.items() if not k.startswith("prompt")} == {
+        k: v for k, v in body["hosted_room_dispatch"].items() if not k.startswith("prompt")}
+
+
 def test_a_named_profiles_agent_is_reached_at_its_own_path(laifu, hermes):
     scope = dict(SCOPE, target_profile="work")
     member_module.bind(laifu.root, "link1", scope)
@@ -1089,3 +1120,21 @@ def test_two_loads_handle_each_request_once(tmp_path, monkeypatch, mailbox_url, 
     assert len(hermes.calls_to("POST", "/v1/runs")) == 1
     assert [item.kind for item in got] == [bridge.RESPONSE, bridge.STATUS]
     assert got[1].body["status"] == "completed"
+
+
+def test_a_dispatch_doesnt_name_a_copy_another_home_sent(laifu, hermes):
+    # Greptile on notifier #629: a home linked here could send its own bytes under another home's upload name.
+    folder = "20261108-" + "d" * 32
+    kept = laifu.root / "conduit" / "room-files" / folder / "shot.jpg"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"x")
+    files = sys.modules["conduit_push.room_files_link"]
+    with files.Store(laifu.root).update() as state:
+        state.setdefault("kept", {})[f"{folder}/shot.jpg"] = {"link": "link7", "at": 0}
+    home = f"/root/.hermes/conduit/room-files/{folder}/shot.jpg"
+    body, key = dispatch(text=prompt(f"User (user): @file:{home} look"))
+
+    ask(laifu, body=body, key=key)
+
+    [call] = hermes.calls
+    assert f"@file:{home} look" in call["body"]["hosted_room_dispatch"]["prompt"]
