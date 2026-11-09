@@ -165,10 +165,10 @@ def localized(text: str, root: Any, *, wait_s: float = ARRIVAL_WAIT_S, clock: Ca
         tail = _TAIL.search(path)
         if tail is None or (tail.group(1), tail.group(2)) in missing or (tail.group(1), tail.group(2)) not in wanted:
             return match.group(0)
+        if origin is not None and origin_of(root, tail.group(1), tail.group(2)) != origin:
+            return match.group(0)
         local = str(wanted[(tail.group(1), tail.group(2))])
         if local == path:
-            return match.group(0)
-        if origin is not None and origin_of(root, tail.group(1), tail.group(2)) != origin:
             return match.group(0)
         return "@file:" + _quoted(local)
 
@@ -395,6 +395,39 @@ class Files:
 
     # --- A member ------------------------------------------------------------------------
 
+    def claim(self, link_id: str, events: Any, posts: Any = ()) -> None:
+        """The upload folders a page from ``link_id`` names, as that home's: a file in one comes only from
+        it, so another home linked here that read the path in a room page can't send its own bytes first.
+        Only the home's own people's messages count, as on the home (``posts`` are linked people's)."""
+        folders = {folder for event in events or () if isinstance(event, dict)
+                   and event.get("kind") == "message.user" and event.get("event_id") not in set(posts or ())
+                   for _path, folder, _name in references(
+                       (event.get("payload") if isinstance(event.get("payload"), dict) else {}).get("text"))}
+        if folders:
+            with self.store.update() as state:
+                for folder in folders:
+                    self._claim(state, folder, link_id)
+
+    def _claim(self, state: dict[str, Any], folder: str, link_id: str) -> bool:
+        """Whether ``folder`` is ``link_id``'s, claiming it when no home has; the first home to name it keeps
+        it. Past MAX_ORIGINS the oldest claims go, those of folders not here first."""
+        homes = state.setdefault("homes", {})
+        home = homes.get(folder)
+        if isinstance(home, dict) and isinstance(home.get("link"), str):
+            return home["link"] == link_id
+        homes[folder] = {"link": link_id, "at": self.rooms.clock()}
+        if len(homes) > MAX_ORIGINS:
+            root = files_root(self.rooms.root)
+            oldest = sorted((each for each in homes if each != folder),
+                            key=lambda each: ((root / each).is_dir(), _origin_at(homes[each])))
+            for each in oldest[:len(homes) - MAX_ORIGINS]:
+                del homes[each]
+        return True
+
+    def home_of(self, folder: str) -> Optional[str]:
+        home = self.store.read().get("homes", {}).get(folder)
+        return home.get("link") if isinstance(home, dict) and isinstance(home.get("link"), str) else None
+
     def on_chunk(self, received: room_links.Received) -> None:
         """A piece of a room file from the home of a room this installation's agents are in; the file is kept
         once it's whole and its digest matches."""
@@ -413,6 +446,10 @@ class Files:
             return
         target = files_root(self.rooms.root) / body["folder"] / body["name"]
         key = f"{body['folder']}/{body['name']}"
+        if self.home_of(body["folder"]) not in (None, received.link_id):
+            logger.warning("Linked Rooms refused room file %s from Link %s: its upload folder is another home's",
+                           key, received.link_id)
+            return
         if target.is_file():
             # Kept already (sent again before its answer came): answered once, on its last piece, when it's
             # this home's and these bytes. Another home's file under the same folder and name stays as it is.
@@ -440,15 +477,18 @@ class Files:
             logger.info("Linked Rooms couldn't answer a room file from Link %s (%s); the home sends it again",
                         received.link_id, exc.code)
 
-    def _note_origin(self, key: str, link_id: str) -> None:
-        """Which Link sent ``key``. Past MAX_ORIGINS, the records of files gone from here go first, then the
-        oldest files with theirs, so no file kept here is without its sender."""
+    def _note_origin(self, key: str, link_id: str) -> bool:
+        """Which Link sent ``key``, unless its folder is another home's. Past MAX_ORIGINS, the records of
+        files gone from here go first, then the oldest files with theirs, so no file kept here is without
+        its sender."""
         root = files_root(self.rooms.root)
         with self.store.update() as kept:
+            if not self._claim(kept, key.split("/", 1)[0], link_id):
+                return False
             origins = kept.setdefault("kept", {})
             origins[key] = {"link": link_id, "at": self.rooms.clock()}
             if len(origins) <= MAX_ORIGINS:
-                return
+                return True
             for old in [old for old in origins if old != key and not (root / old).is_file()]:
                 del origins[old]
             oldest = sorted((old for old in origins if old != key), key=lambda old: _origin_at(origins[old]))
@@ -462,6 +502,7 @@ class Files:
                 if not os.path.lexists(root / old):
                     del origins[old]
                     over -= 1
+        return True
 
     def _forget_gone(self) -> None:
         """The records of files the sweep took."""
@@ -471,6 +512,13 @@ class Files:
             if isinstance(origins, dict):
                 for old in [old for old in origins if not (root / old).is_file()]:
                     del origins[old]
+            homes = kept.get("homes")
+            if isinstance(homes, dict):
+                # A folder named a day ago that never came, or one the sweep took.
+                now = self.rooms.clock()
+                for old in [old for old in homes if not (root / old).is_dir()
+                            and now - _origin_at(homes[old]) > INCOMING_TTL_S]:
+                    del homes[old]
 
     def _take(self, link_id: str, body: dict[str, Any]) -> Optional[bytes]:
         """Keeps one chunk; the file's bytes once every chunk is here."""
@@ -531,7 +579,10 @@ class Files:
                 if link_id is not None:
                     # Saved before the file shows, so a turn waiting for it never finds it without its sender,
                     # and under the lock the sweep takes, so the sweep can't forget it in between.
-                    self._note_origin(f"{body['folder']}/{body['name']}", link_id)
+                    if not self._note_origin(f"{body['folder']}/{body['name']}", link_id):
+                        logger.warning("Linked Rooms refused room file %s/%s from Link %s: its upload folder "
+                                       "is another home's", body["folder"], body["name"], link_id)
+                        return False
                 descriptor, name = tempfile.mkstemp(prefix=".carried.", dir=target.parent)
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(whole)

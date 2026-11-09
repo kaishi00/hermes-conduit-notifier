@@ -355,6 +355,15 @@ class Copies:
             except Exception as exc:  # noqa: BLE001 - the home sends it again
                 logger.warning("Linked Rooms couldn't keep a page of room %s (%s)", room_id, type(exc).__name__)
                 return
+        files = getattr(self.rooms, "files", None)
+        if files is not None:
+            try:
+                # The upload folders its home's messages name are that home's (room_files_link.Files.claim).
+                files.claim(received.link_id, body["page"].get("events"),
+                            [each["event_id"] for each in body.get("posts", ())])
+            except Exception as exc:  # noqa: BLE001 - the page is kept either way
+                self._tell_once(f"claim:{room_id}", "Linked Rooms couldn't note room %s's upload folders (%s)",
+                                room_id, type(exc).__name__)
         epoch = body["page"]["authority"].get("epoch")
         if type(epoch) is int and epoch > invite["authority_epoch"]:
             # Hermes moved the room into its gateway's store (a page at a later epoch is one Hermes took above,

@@ -428,6 +428,39 @@ def test_another_homes_file_under_the_same_name_isnt_replaced_or_answered(copies
     assert files_module.origin_of(copies.tmp_path / "mona", FOLDER, "shot.jpg") is not None
 
 
+def test_a_folder_another_home_named_first_takes_no_file_from_this_one(copies):  # noqa: F811
+    # DeepSeek on notifier #629: a home that read another's upload path in a room page could send its own
+    # bytes under it before the real ones came.
+    room_id = started(copies)
+    with files_module.Store(copies.tmp_path / "laifu").update() as state:
+        state.setdefault("homes", {})[FOLDER] = {"link": "link9", "at": 0}
+    path = upload(copies, "shot.jpg", b"\xff\xd8 the real one")
+    post(copies, room_id, f"@file:{path}\n\nWhat's this?")
+
+    copies.furina.pass_once()
+
+    assert not carried(copies, "laifu", "shot.jpg").exists()
+    assert carried(copies, "mona", "shot.jpg").read_bytes() == b"\xff\xd8 the real one"
+
+
+def test_a_page_claims_the_upload_folders_its_home_names(copies):  # noqa: F811
+    room_id = started(copies)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    post(copies, room_id, f"@file:{path}\nhi")
+
+    copies.furina.pass_once()
+
+    for side in ("laifu", "mona"):
+        store = files_module.Store(copies.tmp_path / side)
+        home = store.read()["homes"][FOLDER]["link"]
+        assert home == files_module.origin_of(copies.tmp_path / side, FOLDER, "shot.jpg")
+    laifu = files_module.Files(type("Rooms", (), {"root": copies.tmp_path / "laifu",
+                                                  "clock": staticmethod(lambda: 0.0)})())
+    laifu.claim("link9", [{"kind": "message.user", "event_id": "e", "payload": {"text": f"@file:{path}"}}])
+    assert laifu.home_of(FOLDER) == files_module.origin_of(copies.tmp_path / "laifu", FOLDER, "shot.jpg"), \
+        "the first home to name a folder keeps it"
+
+
 def test_a_file_shared_in_two_rooms_goes_while_either_has_the_link(copies):  # noqa: F811
     # Greptile on notifier #629: only the first room that shared a file was kept with it.
     room_id = started(copies)
