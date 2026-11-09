@@ -55,8 +55,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     work = commands.add_parser("work", help="Bot workstreams: this bot's Bot Chat coordinates work sessions of its own "
                                             "(on, off, status)")
     work.add_argument("work_action", choices=["on", "off", "status"])
-    work.add_argument("--policy", choices=["strict", "lookups"], default=None,
-                      help="for on: what the coordinator may do itself (default lookups)")
+    work.add_argument("--policy", choices=["lookups", "open", "strict"], default=None,
+                      help="for on: what the coordinator does itself: quick things, any tool for a few steps a "
+                           "turn (lookups, the default), everything (open), or only coordinating (strict)")
     work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 2)")
     work.add_argument("--after-restart", choices=["continue", "ask"], default=None,
                       help="for on: a workstream a restart cut off with nothing uncertain in flight is continued "
@@ -431,7 +432,7 @@ def _work(args: argparse.Namespace) -> int:
         if action == "status" and not work_store.exists(home):
             # On by default: said so without leaving a registry behind.
             print(f"Bot workstreams: {work_store.DEFAULT_POLICY} (on by default; the coordinator "
-                  f"coordinates and may also look things up; up to {work_store.DEFAULT_MAX_RUNNING} running at once). No work yet. "
+                  f"does quick things itself and hands longer work on; up to {work_store.DEFAULT_MAX_RUNNING} running at once). No work yet. "
                   "`hermes conduit-push work off` turns them off for this bot.")
             code = 0
         else:
@@ -452,6 +453,9 @@ def _work(args: argparse.Namespace) -> int:
 
 
 OWN_MODEL = "the bot's own"
+# What each setting has the coordinator do itself, as `work` says it.
+_POLICY_LINES = {"lookups": "does quick things itself and hands longer work on",
+                 "open": "does everything itself and starts work only when it's long"}
 
 
 def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
@@ -487,7 +491,7 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
         store.set_policy("off")
     mode = store.policy()
     print(f"Bot workstreams: {mode if mode != 'off' else 'off'}"
-          + (f" (the coordinator {'may also look things up' if mode == 'lookups' else 'only coordinates'}; "
+          + (f" (the coordinator {_POLICY_LINES.get(mode, 'only coordinates')}; "
              f"up to {store.max_running()} running at once; after a restart, safe work is "
              f"{'continued' if store.after_restart() == 'continue' else 'left to ask about'}; workstream "
              f"approvals: {store.workstream_approvals()}; workstream model: "

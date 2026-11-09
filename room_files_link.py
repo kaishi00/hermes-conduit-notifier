@@ -304,7 +304,7 @@ class Files:
         """Sends one file's chunks to ``link_id``: the bytes sent (0 when it went no further), or None when
         nothing more goes to that Link this pass."""
         folder, name = due.split("/", 1)
-        # Where it was uploaded (an entry from before 0.148's profiles: the root home's), checked again.
+        # Where it was uploaded (an entry from before 0.149's profiles: the root home's), checked again.
         base = entry.get("base") if isinstance(entry.get("base"), str) else os.path.realpath(
             files_root(self.rooms.root))
         path = Path(base) / folder / name
