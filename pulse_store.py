@@ -1676,11 +1676,14 @@ class PulseStore:
 
     def cards(self, limit: int = 100, without: Sequence[str] = ()) -> list[dict]:
         """The newest cards, but those of the kinds in ``without`` and those
-        held for a moment (``moment_cards``)."""
+        held for a moment (``moment_cards``), newest first: newest by their
+        last word, so one a pick updated lately is among them however old
+        (pulse_picks), listed by when it was made."""
         clause = f" AND kind NOT IN ({','.join('?' * len(without))})" if without else ""
         with self._connect() as conn:
-            rows = conn.execute(f"SELECT * FROM cards WHERE level!=?{clause} ORDER BY created_at DESC, id DESC "
-                                f"LIMIT ?", (MOMENT, *without, limit)).fetchall()
+            rows = conn.execute(f"SELECT * FROM (SELECT * FROM cards WHERE level!=?{clause} "
+                                "ORDER BY max(coalesce(updated_at, 0), created_at) DESC, id DESC LIMIT ?) "
+                                "ORDER BY created_at DESC, id DESC", (MOMENT, *without, limit)).fetchall()
         return [dict(row) for row in rows]
 
     def unseen_cards(self, without: Sequence[str] = ()) -> int:
@@ -2013,7 +2016,8 @@ class PulseStore:
             dropped = conn.execute(
                 "DELETE FROM cards WHERE (NOT ((level='brief' AND briefed_at IS NULL AND dismissed_at IS NULL "
                 "AND id NOT IN (SELECT card_id FROM card_done)) OR level='moment') OR created_at < ?) AND id NOT IN "
-                "(SELECT id FROM cards ORDER BY created_at DESC, id DESC LIMIT ?)", (held_before, keep)).rowcount
+                "(SELECT id FROM cards ORDER BY max(coalesce(updated_at, 0), created_at) DESC, id DESC LIMIT ?)",
+                (held_before, keep)).rowcount
             conn.execute("DELETE FROM card_done WHERE card_id NOT IN (SELECT id FROM cards)")
             conn.execute("DELETE FROM card_acts WHERE card_id NOT IN (SELECT id FROM cards)")
             return dropped

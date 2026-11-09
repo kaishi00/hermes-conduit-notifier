@@ -314,3 +314,15 @@ def test_one_due_today_comes_once_more_past_its_open_card(tmp_path):
     pick, _ = picks.parse({"line": "Send the deck today", "subject": "item:7"})
     assert picks.resolve(pulse_store, pick, "item:7", now)[0] == picks.DROP
     assert picks.resolve(pulse_store, {**pick, picks.DUE_AGAIN: True}, "item:7", now) == (picks.NEW, None, "")
+
+
+def test_a_card_a_pick_updated_stays_in_the_feed_and_isnt_pruned_however_old(tmp_path):
+    pulse_store = fresh(tmp_path)
+    old = card(pulse_store, subject="job:default:41", created_at=1000.0)
+    newer = [card(pulse_store, subject=f"item:{n}", created_at=2000.0 + n) for n in range(3)]
+    assert old not in [entry["id"] for entry in pulse_store.cards(3)]
+    pulse_store.add_cards([], updates=[(old, {"news": "Audit failed again", "fallback": {}, "link": None})], now=5000.0)
+    listed = [entry["id"] for entry in pulse_store.cards(3)]
+    assert old in listed and listed == sorted(listed, reverse=True)  # still listed by when it was made
+    pulse_store.prune_cards(3)
+    assert pulse_store.card(old) is not None and pulse_store.card(newer[0]) is None

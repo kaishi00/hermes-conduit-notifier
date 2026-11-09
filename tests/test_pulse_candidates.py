@@ -1044,3 +1044,21 @@ def test_candidates_command_brings_one_up(live, monkeypatch, capsys):
     live.store.set("enabled", False)
     assert run("bring", str(left)) == 1 and "Pulse is off" in capsys.readouterr().out
 
+
+
+def test_decide_lets_a_new_incident_through_when_the_same_list_closes_its_card(live):
+    now = time.time()
+    [old] = live.store.add_cards([{"kind": store.NOTICED, "item_id": None, "level": "screen", "title": "Audit failed",
+                                   "news": "Audit failed", "why": "", "created_at": now - 3600,
+                                   "subject": "job:default:41", "topic": "other"}])
+    picks = pulse.pulse_picks
+    again = candidate(text="Audit failed again", subject="job:default:41",
+                      pick=picks.dumps(picks.parse({"line": "Audit failed again", "subject": "job:default:41"})[0]))
+    closing = candidate(text="Audit recovered", subject="job:default:41", pick=picks.dumps(picks.parse(
+        {"line": "Audit recovered", "subject": "job:default:41", "incident": {"close": f"pc_{old}"}})[0]))
+    rows = [again, closing]
+    candidates.decide(live.store, rows, now=now)
+    assert again["skip"] == "" and again["decision"] == candidates.SURFACED
+    rows = [candidate(text="Audit failed again", subject="job:default:41", pick=again["pick"])]
+    candidates.decide(live.store, rows, now=now)  # no close in this list: held for its open card
+    assert rows[0]["skip"] == "raised"
