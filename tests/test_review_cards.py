@@ -596,6 +596,22 @@ def test_marks_no_turn_heard_in_time_can_be_sent_again(tool_home):
     assert "Save button colour: skipped" in taps.note("s1", "Sent review · Recipe app home")
 
 
+def test_marks_whose_tap_didnt_save_are_given_back_for_the_retry(tool_home, monkeypatch):
+    host = Host(tool_home)
+    card = _shown(tool_home, host)
+    taps = card_actions.TapStore(tool_home, reviews=host.store())
+
+    def fail(*args, **kwargs):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(card_actions.TapStore, "_save", fail)
+        with pytest.raises(OSError):
+            taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d1", "skip"))})
+    assert host.store().get(card["review"]["id"])["rounds"][0]["marks"] is None
+    assert taps.save({"sessions": ["s1"], "card": card, "action": "review", "review": _marks(("d1", "skip"))})["ok"]
+
+
 def test_heard_marks_stay_once_their_tap_is_gone(tool_home):
     host = Host(tool_home)
     card = _shown(tool_home, host)
