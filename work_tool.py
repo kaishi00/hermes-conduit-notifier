@@ -17,9 +17,10 @@ Around the tools, the plugin's hooks:
 
 - ``pre_llm_call``: a short digest of the bot's open work on every Bot Chat
   turn, so routing never depends on the coordinator remembering a transcript.
-- ``pre_tool_call``: the bot's policy for its Bot Chat (strict: the work tools,
-  clarify and memory; lookups: also read-only lookups), and the step journal
-  for its workstreams.
+- ``pre_tool_call``: the bot's policy for its Bot Chat (strict: its own tools
+  and what shows or asks the user; lookups, "Quick Things Here": any tool for
+  a few steps a turn; open: everything), and the step journal for its
+  workstreams.
 - ``post_tool_call``: closes the journal's step.
 - ``post_llm_call``: a workstream's turn ended, so its row takes the result
   and the Bot Chat gets a hidden, queued "work update" turn (batched).
@@ -68,21 +69,34 @@ TOOLS = ("work_list", "work_start", "work_send", "work_stop", "work_read", "work
 # A workstream's own tool (C.11): only a workstream can call it.
 WORKER_TOOLS = ("work_progress",)
 BRIDGE = frozenset({"tool_search", "tool_describe", "tool_call"})
-# What a coordinator may call itself (C.4). Everything else becomes a workstream.
 # conduit_show draws the coordinator's own answer in its own chat: a
 # workstream's cards land in the workstream's chat, where the user isn't
 # (Eric 2026-11-07: Furina handed a weather card to a workstream).
 SHOW = "conduit_show"
-STRICT = frozenset({*TOOLS, *WORKER_TOOLS, "clarify", "memory", "conduit_notify", SHOW, *BRIDGE})
-# conduit_maps is a lookup too, navigate included: its Go button shows in
-# the chat that called it, so a workstream's would wait where the user isn't
-# (Eric 2026-11-08: "nearest Dunkin'" went to a workstream, and its map
-# never reached the Bot Chat).
-LOOKUPS = STRICT | frozenset({"session_search", "web_search", "web_extract", "skills_list", "skill_view",
-                              "conduit_health", "conduit_location", "conduit_inbox", "conduit_maps"})
-# The lookup tools' actions that change something: a coordinator on lookups
-# hands these to a workstream like any other tool (place rules are cron jobs).
-LOOKUP_WRITES = {"conduit_location": frozenset({"set_rule", "remove_rule"})}
+# What shows the user something or asks them runs in the chat they're
+# reading, so the Bot Chat calls these itself under every setting: a
+# workstream's would wait in its own chat, where the user isn't. Maps' Go
+# button and the vault's unlock, save-login and code prompts show only in the
+# chat that called them (Eric 2026-11-08: W14's map never reached the Bot
+# Chat; notifier issue 619: a vault prompt couldn't open there).
+SHOWS_OR_ASKS = frozenset({"clarify", "conduit_notify", SHOW, "conduit_maps", "browser_vault"})
+# The Bot Chat's own under every setting, never counted as a step: its work
+# tools, its memory, Tool Search's bridge (checked by what it calls) and what
+# shows or asks (C.4). Strict, "Only Coordinates", allows only these.
+STRICT = frozenset({*TOOLS, *WORKER_TOOLS, "memory", *BRIDGE}) | SHOWS_OR_ASKS
+# Always a workstream's on strict and quick: a workstream is the bot's own
+# background work, kept, listed and recovered, where a subagent isn't.
+BACKGROUND = frozenset({"delegate_task"})
+# Quick ("lookups", "Quick Things Here", the default): every other tool runs
+# in the Bot Chat for this many steps, or this long after the turn's first,
+# and the rest goes to a workstream. The plugin judges how long the work is
+# rather than which tool it uses, so a quick ask never lands where the user
+# isn't (Eric 2026-11-08, notifier issue 619: "Step budget, writes allowed").
+QUICK_STEPS = 5
+QUICK_S = 60.0
+# The turns whose steps are counted, kept this long after their first step.
+_STEP_TURNS = 64
+_STEP_KEEP_S = 1800.0
 # Hermes' own bot-to-bot message: a coordinator gives other bots work with work_ask.
 MESSAGE_AGENT = "message_agent"
 WAKE_BATCH_S = 3.0
@@ -150,6 +164,16 @@ _SHOWN = "shown:"
 SHOWN_CARDS = 12
 POLICY_BLOCK = ("As this bot's coordinator you don't run {tool} yourself here. Start a workstream for it with "
                 "work_start, or send it to one that's already on it with work_send.")
+# The step after a quick turn's budget: the rest is longer work.
+STEP_BLOCK = ("This is turning into longer work than the Bot Chat should hold up, so {tool} didn't run. "
+              "Start a workstream for the rest with work_start, saying in its instructions what you've "
+              "found or done so far, or send it to one that's already on it with work_send. Then tell the user in a "
+              "line that it's running in the background.")
+# A batch of calls through tool_call bigger than what's left of the budget:
+# Hermes runs a batch whole, so none of it ran, but single calls still fit.
+STEP_BATCH_BLOCK = ("That tool_call batch has {count} calls, more than the {left} quick steps this turn has left, so "
+                    "none of it ran. Make the calls you still need one at a time, or start a workstream for the rest "
+                    "with work_start, saying in its instructions what you've found or done so far.")
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get questions and work through work_ask, which "
                        "queues it for that bot's coordinator and brings its answer back to you. Use work_ask "
                        'instead, like tool_call {"name": "work_ask", "arguments": {"bot": "Nahida", "text": "..."}}.')
@@ -484,7 +508,7 @@ def _store(home: Optional[Path] = None) -> Optional[work_store.Store]:
 
 def policy(home: Optional[Path] = None) -> str:
     """This bot's setting: on (lookups) unless the user turned it off or
-    picked strict (M3: on for every bot where workstreams can run). A registry that exists but can't
+    picked strict or open (M3: on for every bot where workstreams can run). A registry that exists but can't
     be read is "strict": the coordinator's limits hold until it can be read
     again."""
     home = home or _home()
@@ -2759,11 +2783,16 @@ def start_recovery(home: Optional[Path] = None) -> None:
 # The hooks
 
 
-def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[dict[str, str]]:
+def tool_block(session_id: Any, tool_name: Any, args: Any = None,
+               turn_id: Any = None) -> Optional[dict[str, str]]:
     """The bot's policy for its Bot Chat: a block for a tool the coordinator
-    doesn't run itself, else None. Outside a coordinator it blocks only a
-    workstream's message_agent (other bots are asked through the Bot Chat)
-    and its memory (the coordinator keeps what it reports)."""
+    doesn't run itself, else None. Strict runs only its own tools; quick
+    (lookups) runs any other for QUICK_STEPS steps of a turn (``turn_id``,
+    Hermes' id for the turn), delegate_task never; open runs everything but
+    message_agent. Outside a coordinator it blocks only a workstream's
+    message_agent (other bots are asked through the Bot Chat) and its memory
+    (the coordinator keeps what it reports)."""
+    _last_take.taken = None
     name = str(tool_name or "")
     home = _home()
     if home is None:
@@ -2789,8 +2818,13 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             return {"action": "block", "message": BRIDGE_BLOCK} if held else None
         return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
     # The memory provider's own tools (hindsight_retain, ...) are the bot's
-    # memory, as ``memory`` is, under either setting (Eric 2026-11-04).
-    allowed = (LOOKUPS if mode == "lookups" else STRICT) | _memory_tools(home, names)
+    # memory, as ``memory`` is, under every setting (Eric 2026-11-04).
+    own = STRICT | _memory_tools(home, names)
+
+    def runs(called: str) -> bool:
+        """Whether the coordinator runs it itself, before any budget."""
+        return called in own or (mode == "open" and called != MESSAGE_AGENT)
+
     if name == "tool_call":
         # A bridged call that names nothing readable, or bridges again, is
         # held: Hermes runs what's inside without asking this hook again.
@@ -2808,7 +2842,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
     held = _workstream_block(session_id, home, names, {MEMORY})
     if held is not None:
         return held
-    if all(_allowed(called, called_args, allowed, home) for called, called_args in calls):
+    if all(runs(called) for called in names):
         return None  # allowed in any chat: which one this is doesn't matter
     has_id = isinstance(session_id, str) and session_id.strip()
     # A call that names no chat might be the coordinator's: held like one
@@ -2825,8 +2859,9 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
                 # It might be a workstream: held, as an unreadable title is.
                 return {"action": "block", "message": CHECK_FAILED}
         return None
-    for called, called_args in calls:
-        if _allowed(called, called_args, allowed, home):
+    steps = []
+    for called in names:
+        if runs(called):
             continue
         if titled is None:
             # Which chat this is couldn't be read: it might be the
@@ -2836,8 +2871,63 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None) -> Optional[di
             return {"action": "block", "message": CHECK_FAILED} if work_store.exists(home) else None
         if called == MESSAGE_AGENT:
             return {"action": "block", "message": MESSAGE_AGENT_BLOCK}
-        return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
+        if mode != "lookups" or called in BACKGROUND:
+            return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
+        steps.append(called)
+    if steps:
+        left = _take_steps(session_id, turn_id, len(steps))
+        if left is not None:
+            if len(steps) > 1 and left > 0:
+                return {"action": "block", "message": STEP_BATCH_BLOCK.format(count=len(steps), left=left)}
+            return {"action": "block", "message": STEP_BLOCK.format(tool=steps[0] or "that tool")}
     return None
+
+
+# Each quick turn's steps: (session, Hermes' turn id) -> (its first step's
+# time, how many it took), oldest first.
+_steps: dict[tuple[str, str], tuple[float, int]] = {}
+_steps_lock = threading.Lock()
+# The steps the hook's last tool_block took on this thread, for give_back_steps.
+_last_take = threading.local()
+
+
+def _take_steps(session_id: Any, turn_id: Any, count: int) -> Optional[int]:
+    """Counts ``count`` more steps in the Bot Chat's turn if its budget
+    holds them (QUICK_STEPS, taken within QUICK_S of the first) and answers
+    None; else takes none and answers how many steps are left (0 once its
+    time is up): the rest is a workstream's. A Hermes that names no turn
+    gets a fresh budget once QUICK_S has passed, so its next turn isn't
+    charged for the last one's steps."""
+    key = (str(session_id or ""), str(turn_id or ""))
+    now = time.monotonic()
+    with _steps_lock:
+        for stale in [key for key, (first, _) in _steps.items() if now - first > _STEP_KEEP_S]:
+            del _steps[stale]
+        first, taken = _steps.get(key, (now, 0))
+        if not taken or (not turn_id and now - first > QUICK_S):
+            first, taken = now, 0  # the clock starts at a step that runs
+        if taken and now - first > QUICK_S:
+            return 0
+        if taken + count > QUICK_STEPS:
+            return max(QUICK_STEPS - taken, 0)
+        _steps[key] = (first, taken + count)
+        while len(_steps) > _STEP_TURNS:
+            del _steps[next(iter(_steps))]
+    _last_take.taken = (key, count)
+    return None
+
+
+def give_back_steps() -> None:
+    """Hands back the steps this thread's last tool_block took, for a call a
+    later rule (the screen lock) refused: a call that never ran takes none."""
+    took, _last_take.taken = getattr(_last_take, "taken", None), None
+    if took is None:
+        return
+    key, count = took
+    with _steps_lock:
+        if key in _steps:
+            first, taken = _steps[key]
+            _steps[key] = (first, max(taken - count, 0))
 
 
 # Each home's memory provider and its tools, by config.yaml's mtime.
@@ -2904,42 +2994,6 @@ def _memory_provider(home: Path) -> tuple[str, frozenset]:
         with _memory_tool_lock:
             _memory_tool_cache[key] = cached
     return cached[1], cached[2]
-
-
-def _allowed(called: str, called_args: Any, allowed: frozenset, home: Optional[Path] = None) -> bool:
-    """Whether the coordinator runs this call itself: a tool its policy
-    allows, unless the call is one of a lookup tool's writes, or on lookups
-    a read of a page web_extract kept."""
-    if called == "read_file" and "web_extract" in allowed:
-        return _web_page(called_args, home)
-    if called not in allowed:
-        return False
-    writes = LOOKUP_WRITES.get(called)
-    if not writes:
-        return True
-    action = called_args.get("action") if isinstance(called_args, dict) else None
-    return isinstance(action, str) and action not in writes
-
-
-def _web_page(called_args: Any, home: Optional[Path]) -> bool:
-    """Whether a read_file reads a page Hermes' web_extract kept whole under
-    the profile's cache/web (web_cache before it), which its truncated result
-    tells the model to read_file: the rest of a lookup, not a file of the
-    user's (Eric's .52, 2026-11-07: Furina's weather page was refused)."""
-    path = called_args.get("path") if isinstance(called_args, dict) else None
-    if home is None or not isinstance(path, str) or not path.strip():
-        return False
-    try:
-        target = Path(path.strip()).expanduser()
-        if not target.is_absolute():
-            return False
-        target = target.resolve()
-        for kept in (home / "cache" / "web", home / "web_cache"):
-            if target.is_relative_to(kept.resolve()) and target != kept.resolve():
-                return True
-    except (OSError, ValueError, RuntimeError):
-        return False
-    return False
 
 
 def _linked_worker_block(session_id: Any, home: Path, name: str, names: list[str]) -> Optional[dict[str, str]]:
@@ -3601,7 +3655,8 @@ APP_CHECK_DEFAULT = "Find out whether your last step took effect and report back
 
 def app_settings(home: Path) -> dict:
     """The bot's work settings as Edit Bot > Work shows them: ``policy``
-    (off, strict or lookups), ``max_running`` (with ``max_running_limit``),
+    (off, strict, lookups or open; ``policies`` lists them, so an app
+    offers only what this plugin takes), ``max_running`` (with ``max_running_limit``),
     ``after_restart`` (continue or ask), ``workstream_approvals`` (chats,
     ask or off), the bot's own approval mode in Hermes (``chat_approvals``),
     ``workstream_model``, the model new workstreams start on (None: the
@@ -3609,7 +3664,7 @@ def app_settings(home: Path) -> dict:
     Hermes, or ''."""
     home = Path(home)
     store = work_store.Store(home)
-    return {"ok": True, "policy": policy(home), "max_running": store.max_running(),
+    return {"ok": True, "policy": policy(home), "policies": list(work_store.POLICIES), "max_running": store.max_running(),
             "max_running_limit": work_store.MAX_RUNNING_LIMIT, "after_restart": store.after_restart(),
             "workstream_approvals": workstream_approvals(home), "chat_approvals": approval_mode(home),
             "workstream_model": store.workstream_model() or None,
@@ -4126,21 +4181,28 @@ def digest(session_id: Any) -> Optional[str]:
     mode = policy(home)
     if mode == "lookups":
         # Said first and plainly: a model reading "anything that needs tools"
-        # first handed the weather to a workstream.
-        routing = ("You coordinate this bot's work. Answer a question that a quick read-only lookup settles "
-                   "yourself, in this turn, without a workstream: the weather, news and other current facts "
-                   "(web_search, web_extract), what was said in past chats (session_search), the bot's skills "
-                   "(skills_list, skill_view), the user's health, location and inbox (conduit_health, "
-                   "conduit_location, conduit_inbox), places, directions and travel times, and opening Maps when "
-                   "the user asks to go somewhere (conduit_maps), and the rest of a page web_extract kept for you (read_file "
-                   "on the path it gives). Call them through tool_call when they aren't listed. Hand "
-                   "a workstream (work_start) anything else that needs tools: running commands, reading or "
-                   "changing the user's files, or work of several steps; send follow-ups to the one that's on it "
-                   "(work_send with its ref); answer from what you know otherwise. ")
+        # first handed the weather to a workstream. The plugin hands on what
+        # runs past QUICK_STEPS, so the note says how to tell long work.
+        routing = ("You coordinate this bot's work. Do quick things yourself, in this turn, with any of your tools: "
+                   "a question a lookup or two settles (the weather, news and other current facts, past chats, "
+                   "the user's health, location and inbox, places and directions) or a small task of a step or "
+                   "two. Hand a workstream (work_start) work that takes longer: several steps, long commands, "
+                   "or changes to the user's code or files beyond a quick edit; send follow-ups to the one "
+                   "that's on it (work_send with its ref). After a few steps in one turn the rest goes to a "
+                   "workstream anyway, so start one as soon as you can tell a task is long. ")
+    elif mode == "open":
+        routing = ("You coordinate this bot's work, and the user wants you to do it here: use your tools in this "
+                   "turn. Start a workstream (work_start) only for a long task the user shouldn't wait on in "
+                   "this chat (a build, a long research job), and send follow-ups to the one that's on it "
+                   "(work_send with its ref). ")
     else:
         routing = ("You coordinate this bot's work. Hand anything that needs tools to a workstream (work_start), "
                    "and send follow-ups to the one that's on it (work_send with its ref); answer from what you "
                    "know otherwise. ")
+    routing += ("Apple Maps (conduit_maps), the password vault's prompts (browser_vault) and questions (clarify) "
+                "show only in the chat that calls them, so call them here yourself, never through a workstream. "
+                "When the user asks for something to run in the "
+                "background, start a workstream for it. ")
     routing += SHOW_RULE + " "
     provider, declared = _memory_provider(home)
     if provider:

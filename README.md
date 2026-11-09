@@ -1420,12 +1420,14 @@ call ends without them too (the log says so each time). A call that isn't saved
 A bot's Bot Chat can coordinate work sessions of its own: you ask Furina for
 something, she starts a workstream (a hidden chat on her own profile) and stays
 free to talk while it runs, and its result comes back to her as a work update
-she tells you about. It's on for every bot until you turn it off, and she may
-also look things up herself (lookups), so a quick question doesn't start a
-workstream. Change it in Conduit (Edit Bot > Work) or here:
+she tells you about. It's on for every bot until you turn it off, and she does
+quick things herself (lookups, Conduit's "Quick Things Here"), so a quick
+question or a small task doesn't start a workstream. Change it in Conduit
+(Edit Bot > Work) or here:
 
     hermes -p <bot> conduit-push work off
-    hermes -p <bot> conduit-push work on            # lookups: she may also look things up
+    hermes -p <bot> conduit-push work on            # lookups: she does quick things herself
+    hermes -p <bot> conduit-push work on --policy open      # she does everything herself
     hermes -p <bot> conduit-push work on --policy strict    # she only coordinates
     hermes -p <bot> conduit-push work on --after-restart ask  # after a restart, ask before continuing
     hermes -p <bot> conduit-push work on --approvals ask    # workstreams ask before what can't be undone
@@ -1532,14 +1534,22 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   plugin turned it off in, so a turn you start there yourself asks too. A
   resolved workstream, or a change made with `--approvals`, turns back at
   its next turn through Conduit.
-- Strict leaves the coordinator the work tools, `clarify`, `memory` and
-  `conduit_show` (its cards are its own: a workstream's would show in the
-  workstream's chat, not the Bot Chat; a review card of a workstream's
-  options goes with `for` set to it, and the user's marks go to it);
-  lookups adds read-only lookups (past chats, web search, skills, Conduit's
-  health, location and inbox, and Apple Maps through `conduit_maps`, its
-  navigate's Go button included, which shows in the chat that asked).
-  `message_agent` is refused there in favour of `work_ask`.
+- What the Bot Chat does itself is decided by how long the work runs, not by
+  which tool it uses. Under every setting it keeps its own tools: the work
+  tools, `memory` and the memory provider's, and what shows you something or
+  asks you, which shows only in the chat that calls it: `clarify`,
+  `conduit_notify`, its cards (`conduit_show`; a review card of a workstream's options goes with
+  `for` set to it, and the user's marks go to it), Apple Maps (`conduit_maps`,
+  navigate's Go button included) and the password vault's unlock, save-login
+  and code prompts (`browser_vault`). Strict ("Only Coordinates") leaves it
+  only those. Lookups ("Quick Things Here") also runs any other tool, reads
+  and changes alike, under the bot's usual approvals, for 5 steps of a turn
+  or a minute after the turn's first; the step after that is refused with a
+  note to start a workstream with what it found so far, and `delegate_task`
+  always goes to a workstream. Open ("Everything Here") runs everything in
+  the Bot Chat and starts workstreams when it judges the work long or you ask.
+  Calls through `tool_call` count by what they call. `message_agent` is
+  refused there in favour of `work_ask`.
 - A workstream writes its report for you, in its own chat, which you can open
   and answer. The Bot Chat's update carries a short line of it and the chat's
   link (`work_read` gives the coordinator up to 2,000 characters of it).
@@ -1616,8 +1626,8 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
-| GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, unavailable}` |
-| POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals}` | the settings as they are now |
+| GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, policies, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, workstream_model, unavailable}` (`policy`: off, strict, lookups or open; `policies`: the ones this plugin takes) |
+| POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals, workstream_model}` | the settings as they are now |
 | POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?, chat?, result?}` (`via`: `phone` or `watch`; `result`: the reply of a turn that ended before the phone kept it, which settles the row; `chat`: the chat the call is kept with, so the Bot Chat's makes it the coordinator's workstream, `call` on its row; `call`: the call's own id) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title`, `goal`, `chat` or `result` isn't text; `off` (409) when the bot's workstreams are off |
 | POST | `/api/plugins/conduit_push/workstreams/call-ended` with `{chat, call?}` (a call kept with that chat ended, in any voice mode) | `{ok, bot_chat}`; `bot_chat` is true when the chat is the Bot Chat, whose held updates go 15 s later when the hold is this call's (`call`, the id its adopts named); 400 without `chat` |
 

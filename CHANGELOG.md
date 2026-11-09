@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.147.3 (2026-11-09)
+## 0.148.1 (2026-11-09)
 
 ### Fixes
 - A review's next round no longer loses what you marked when Hermes shows
@@ -22,6 +22,17 @@ checks it). The format is fixed, because Conduit reads it:
 - A resent review is no longer cleared, and Hermes shows one round of a
   review at a time.
 - Hermes no longer reads a review you marked only partly as fully marked.
+
+## 0.148.0 (2026-11-09)
+
+### New and improved
+- A bot's Bot Chat now does quick things itself with any of its tools, and
+  hands work to the background only once it takes more than a few steps.
+  Simple asks are answered where you're reading instead of in a hidden chat.
+- Cards, Apple Maps and the password vault's prompts always show in the Bot
+  Chat, whatever its setting.
+- A new setting, Everything Here, has the Bot Chat do all of it itself and
+  start background work only when it's long or you ask.
 
 ## 0.147.2 (2026-11-09)
 

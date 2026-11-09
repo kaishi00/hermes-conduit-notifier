@@ -363,7 +363,9 @@ class TapStore:
             try:
                 store.drop_marks(shown["id"], shown["round"], tap_id)
             except (review_store.ReviewError, OSError):
-                pass
+                # The round stays marked with no tap to give it back.
+                logger.warning("couldn't give back review %s round %s's marks",
+                               shown["id"], shown["round"], exc_info=True)
             raise
         return {"ok": True, "id": tap["id"]}
 
