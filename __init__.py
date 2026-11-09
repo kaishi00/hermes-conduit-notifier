@@ -289,6 +289,7 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
     # only by a call its other rules let run. Fails open.
     block = _screen_block(kwargs)
     if block is not None:
+        _quietly(work_tool.give_back_steps)  # a call that didn't run takes no quick step
         return block
     if child:
         return None  # a fork: nothing on the Lock Screen, and no question of the chat's

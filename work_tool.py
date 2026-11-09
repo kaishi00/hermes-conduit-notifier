@@ -2792,6 +2792,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
     message_agent. Outside a coordinator it blocks only a workstream's
     message_agent (other bots are asked through the Bot Chat) and its memory
     (the coordinator keeps what it reports)."""
+    _last_take.taken = None
     name = str(tool_name or "")
     home = _home()
     if home is None:
@@ -2886,6 +2887,8 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
 # time, how many it took), oldest first.
 _steps: dict[tuple[str, str], tuple[float, int]] = {}
 _steps_lock = threading.Lock()
+# The steps the hook's last tool_block took on this thread, for give_back_steps.
+_last_take = threading.local()
 
 
 def _take_steps(session_id: Any, turn_id: Any, count: int) -> Optional[int]:
@@ -2910,7 +2913,21 @@ def _take_steps(session_id: Any, turn_id: Any, count: int) -> Optional[int]:
         _steps[key] = (first, taken + count)
         while len(_steps) > _STEP_TURNS:
             del _steps[next(iter(_steps))]
+    _last_take.taken = (key, count)
     return None
+
+
+def give_back_steps() -> None:
+    """Hands back the steps this thread's last tool_block took, for a call a
+    later rule (the screen lock) refused: a call that never ran takes none."""
+    took, _last_take.taken = getattr(_last_take, "taken", None), None
+    if took is None:
+        return
+    key, count = took
+    with _steps_lock:
+        if key in _steps:
+            first, taken = _steps[key]
+            _steps[key] = (first, max(taken - count, 0))
 
 
 # Each home's memory provider and its tools, by config.yaml's mtime.

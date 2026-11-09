@@ -850,6 +850,21 @@ def test_the_plugins_tool_hook_counts_the_steps_of_hermes_turn(on, hermes, monke
     assert block["message"] == work.STEP_BLOCK.format(tool="terminal")
 
 
+def test_a_call_the_screen_lock_refuses_takes_no_quick_step(on, hermes, monkeypatch):
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    held = {"action": "block", "message": "another chat has the screen"}
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: held)
+    on.set_policy("lookups")
+    for n in range(work.QUICK_STEPS + 2):
+        assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="computer_use", args={}, turn_id="t1",
+                                     tool_call_id=f"c{n}") is held
+    assert work._steps[(BOT_CHAT, "t1")][1] == 0
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
+    assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="computer_use", args={}, turn_id="t1",
+                                 tool_call_id="c9") is None
+    assert work._steps[(BOT_CHAT, "t1")][1] == 1  # the call that ran takes its step
+
+
 def test_the_memory_providers_tools_are_the_coordinators_own(on, home, hermes, monkeypatch):
     # Eric's .52 (2026-11-04): Furina handed a hindsight_retain to a workstream. A memory
     # provider's tools are the bot's memory, as memory is, under either setting.
