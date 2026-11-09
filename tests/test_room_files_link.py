@@ -465,3 +465,51 @@ def test_a_disbanded_rooms_last_files_go_after_its_last_page(copies):  # noqa: F
     copies.furina.files.send_files()
 
     assert {link for link, _, _ in _sent(copies, "room.file")} == {"link1"}
+
+
+def test_a_sender_stays_while_its_file_wont_go(tmp_path, monkeypatch):
+    # DeepSeek on notifier #629: the cap dropped a sender whose file couldn't be deleted.
+    monkeypatch.setattr(files_module, "MAX_ORIGINS", 2)
+    files = files_module.Files(type("Rooms", (), {"root": tmp_path, "clock": staticmethod(lambda: 10.0)})())
+    root = files_module.files_root(tmp_path)
+    (root / FOLDER).mkdir(parents=True)
+    for name in ("held.jpg", "next.jpg"):
+        (root / FOLDER / name).write_bytes(b"x")
+    with files.store.update() as state:
+        state["kept"] = {f"{FOLDER}/held.jpg": {"link": "link1", "at": 1}, f"{FOLDER}/next.jpg": {"link": "link1", "at": 2}}
+    unlink = pathlib.Path.unlink
+
+    def held(self, *args, **kwargs):
+        if self.name == "held.jpg":
+            raise PermissionError(13, "in use")
+        return unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(files_module.Path, "unlink", held)
+
+    files._note_origin(f"{FOLDER}/new.jpg", "link2")
+
+    assert set(files.store.read()["kept"]) == {f"{FOLDER}/held.jpg", f"{FOLDER}/new.jpg"}
+    assert not (root / FOLDER / "next.jpg").exists()
+
+
+def test_an_update_doesnt_save_over_a_store_it_couldnt_read(tmp_path, monkeypatch):
+    # DeepSeek on notifier #629: a transient read error made an update save an empty store over it.
+    import pytest
+
+    store = files_module.Store(tmp_path)
+    with store.update() as state:
+        state["out"]["link1"] = {"k": {"done": True}}
+    before = store.path.read_bytes()
+    read_bytes = pathlib.Path.read_bytes
+
+    def flaky(self):
+        if self == store.path:
+            raise PermissionError(13, "not now")
+        return read_bytes(self)
+
+    monkeypatch.setattr(files_module.Path, "read_bytes", flaky)
+    with pytest.raises(OSError):
+        with store.update() as state:
+            state["out"]["link2"] = {}
+    monkeypatch.undo()
+    assert store.path.read_bytes() == before

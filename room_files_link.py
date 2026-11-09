@@ -11,8 +11,8 @@ root at the same ``<upload>/<name>``, answering ``room.file_got`` once it has th
 for one of its agents names the home's path; room_bridge_member swaps in the kept copy's (``localized``), so the
 agent reads the same file on its own host, and the member's Conduit draws it from there too.
 
-Only files under the home's room-files root of at most MAX_FILE_BYTES go, one at a time per Link, each again
-after WAIT_S without its answer, up to MAX_TRIES. A member takes them only from the Link of a room it's in,
+Only this host's uploads of at most MAX_FILE_BYTES go: every file a Link is owed in one pass, up to PASS_BYTES,
+each again after WAIT_S without its answer, up to MAX_TRIES. A member takes them only from the Link of a room it's in,
 under an upload folder and name of the shape the home writes, and only when the bytes match the digest. What
 went and what's coming is kept in ``conduit-rooms/files.json`` beside rooms.json, owner only; chunks wait in
 ``conduit-rooms/incoming/`` until the file is whole.
@@ -418,10 +418,16 @@ class Files:
             for old in [old for old in origins if old != key and not (root / old).is_file()]:
                 del origins[old]
             oldest = sorted((old for old in origins if old != key), key=lambda old: _origin_at(origins[old]))
-            for old in oldest[:max(0, len(origins) - MAX_ORIGINS)]:
+            over = len(origins) - MAX_ORIGINS
+            for old in oldest:
+                if over <= 0:
+                    break
                 with contextlib.suppress(OSError):
                     (root / old).unlink()
-                del origins[old]
+                # A file that wouldn't go (held open on Windows) keeps its sender; the next oldest goes instead.
+                if not os.path.lexists(root / old):
+                    del origins[old]
+                    over -= 1
 
     def _forget_gone(self) -> None:
         """The records of files the sweep took."""
@@ -624,12 +630,19 @@ class Store:
         self.directory = Path(root) / room_identity.DIRECTORY
         self.path = self.directory / FILE_NAME
 
-    def read(self) -> dict[str, Any]:
+    def read(self, *, strict: bool = False) -> dict[str, Any]:
+        """What's kept; empty when there's nothing, or nothing readable. ``strict``: a file that's there but
+        can't be read now (permissions, I/O) raises, so an update doesn't save over it."""
         try:
             state = json.loads(self.path.read_bytes())
         except FileNotFoundError:
             return _empty()
-        except (OSError, ValueError, RecursionError):
+        except OSError:
+            if strict:
+                raise
+            logger.warning("Linked Rooms couldn't read %s now", self.path)
+            return _empty()
+        except (ValueError, RecursionError):
             logger.warning("Linked Rooms couldn't read %s; room files are carried again from the start", self.path)
             return _empty()
         if not isinstance(state, dict) or state.get("version") != VERSION or not isinstance(state.get("out"), dict):
@@ -642,7 +655,7 @@ class Store:
         self.directory.chmod(0o700)
         lock_path = self.directory / f".{FILE_NAME}.lock"
         with _thread_lock, open(lock_path, "a+b") as handle, room_identity._exclusive(handle):
-            state = self.read()
+            state = self.read(strict=True)
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
