@@ -694,8 +694,16 @@ def test_a_room_invite_carries_its_room_bounded():
     assert event["title_label"] == "room.invite"
 
 
-def test_a_room_is_only_attached_to_room_invites():
-    assert "room" not in push_event("response.ready", identifier="response:12345678", room=ROOM)
+def test_a_rooms_names_are_only_attached_to_room_invites():
+    # A turn's reply, failure, background task or approval in a room this
+    # Hermes hosts carries its id alone (hermes-conduit#2064); nothing else
+    # carries a room.
+    for kind in ("response.ready", "turn.failed", "background_task.finished", "approval.needed"):
+        event = push_event(kind, identifier="response:12345678", room=ROOM)
+        assert event["room"] == {"id": ROOM["id"]}
+        assert redact_event(event)["room"] == {"id": ROOM["id"]}, "an id routes, so the plain copy keeps it"
+        assert "room" not in push_event(kind, identifier="response:12345678", room={"id": "bad/id"})
+    assert "room" not in push_event("input.needed", identifier="input:12345678", room=ROOM)
 
 
 @pytest.mark.parametrize("room", [
@@ -728,6 +736,19 @@ def test_redact_event_keeps_only_the_rooms_ids():
     assert redacted["room"] == {"link": ROOM["link"], "id": ROOM["id"]}
     assert "title" not in redacted and "body" not in redacted
     assert redacted["title_label"] == "room.invite"
+
+
+def test_every_copy_of_the_room_kinds_agrees():
+    # A turn's room id rides sealed (e2e), content-free and in the relay's
+    # plain copy: each keeps its own list of the kinds (issue 2064).
+    import re
+
+    import e2e
+    from events import ROOM_KINDS
+    relay = (Path(__file__).resolve().parents[1] / "relay" / "src" / "server.mjs").read_text(encoding="utf-8")
+    [listed] = re.findall(r"const ROOM_REPLY_TYPES = new Set\(\[([^\]]*)\]\)", relay)
+    assert set(e2e._ROOM_KINDS) == set(ROOM_KINDS)
+    assert set(re.findall(r"'([^']+)'", listed)) == set(ROOM_KINDS)
 
 
 def test_a_slot_is_hashed_kept_through_redaction_and_only_on_a_turns_end():

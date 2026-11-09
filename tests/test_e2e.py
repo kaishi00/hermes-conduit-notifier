@@ -179,7 +179,32 @@ def test_a_content_free_room_invite_carries_only_its_rooms_ids():
     assert outgoing["room"] == {"link": ROOM["link"], "id": ROOM["id"]}
     assert "title" not in outgoing and "body" not in outgoing
     assert "room" not in e2e.content_free(_invite(room={**ROOM, "link": "bad link"}))
-    assert "room" not in e2e.content_free({**_invite(), "type": "response.ready"})
+    assert "room" not in e2e.content_free({**_invite(), "type": "input.needed"})
+
+
+def _room_reply(**changes):
+    # hermes-conduit#2064: a reply in a room this Hermes hosts opens the room.
+    return {"event_id": "response:0123456789abcdef0123456789abcdef", "type": "response.ready", "session_id": "s",
+            "title": "Zoo trip", "body": "Lions at 3.", "title_label": "response.ready", "room": {"id": "conduit-1"},
+            **changes}
+
+
+def test_a_sealed_room_reply_carries_its_rooms_id_inside():
+    keys = _keys()
+    sealed = e2e.seal_event(_room_reply(), keys, installation_id=INSTALLATION, gateway_id=GATEWAY, now=1_760_000_000)
+    assert "conduit-1" not in json.dumps(sealed) and "room" not in sealed
+    assert e2e.open_event(sealed, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)["room"] == {"id": "conduit-1"}
+
+
+def test_a_room_reply_too_big_to_seal_whole_or_unsealable_keeps_its_rooms_id():
+    keys = _keys()
+    for kind in ("response.ready", "turn.failed"):
+        sealed = e2e.seal_event(_room_reply(type=kind, body=os.urandom(3000).hex()), keys,
+                                installation_id=INSTALLATION, gateway_id=GATEWAY)
+        inner = e2e.open_event(sealed, keys, installation_id=INSTALLATION, gateway_id=GATEWAY)
+        assert inner == {"session_id": "s", "room": {"id": "conduit-1"}}, kind
+        assert e2e.content_free(_room_reply(type=kind))["room"] == {"id": "conduit-1"}, kind
+    assert "room" not in e2e.content_free(_room_reply(room={"id": "bad/id"}))
 
 
 @pytest.mark.parametrize("tamper", [

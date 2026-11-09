@@ -509,6 +509,25 @@ def is_room_prompt(prompt: Any) -> bool:
     return isinstance(prompt, str) and _PROMPT_START in prompt.split("\n")
 
 
+# Hermes' routing prompt for a room's lead (gateway/hosted_room_lead.py
+# routing_prompt): the header naming the lead on its first line, and its
+# instruction (_ROUTING_INSTRUCTIONS) on a line of its own.
+LEAD_ROUTING_MARK = "You are the lead of this room. A message arrived that names nobody"
+_LEAD_HEADER = re.compile(r'\[Discussion: ".*"\] You are @\S+, the lead of this room\.')
+
+
+def is_lead_routing_prompt(prompt: Any) -> bool:
+    """Whether ``prompt`` is the turn where a room's lead picks who takes a
+    message that names nobody. Hermes writes the header; the message sits
+    between it and the instruction, so a participant quoting the
+    instruction in an ordinary turn's message doesn't make that turn one."""
+    if not isinstance(prompt, str):
+        return False
+    lines = prompt.strip().split("\n")
+    return (_LEAD_HEADER.fullmatch(lines[0].strip()) is not None
+            and any(line.startswith(LEAD_ROUTING_MARK) for line in lines[1:]))
+
+
 def claimed(prompt: Any, name: str) -> list[str]:
     """The messages of a room prompt any line of which says it's ``name``'s
     (starts "<name>: ", as room_posts names a post's lines), whoever's
@@ -881,6 +900,44 @@ def _room_members(room_id: str, home: Path) -> Optional[list[Any]]:
     if unreadable:
         raise RoomStoreError(f"couldn't read room {room_id}'s members")
     return None
+
+
+def room_name(room_id: str, home: Any = None) -> str:
+    """The name of a room this Hermes hosts, as its members see it, or ""
+    when no store that can be read has one (hermes-conduit#2064: its pushes
+    are titled with it instead of the hidden chat's ``Group: <room id>``)."""
+    if not room_id:
+        return ""
+    home_path = Path(home) if home is not None else _hermes_home()
+    if home_path is None:
+        return ""
+    for path in room_stores(home_path):
+        try:
+            name = _read(lambda: _name_in(path, room_id))
+        except Exception:  # noqa: BLE001 - a push titled by its chat is still a push
+            logger.debug("conduit_push: couldn't read room %s's name from %s", room_id, path, exc_info=True)
+            continue
+        if name is not None:
+            return name
+    return ""
+
+
+def _name_in(path: Path, room_id: str) -> Optional[str]:
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
+    try:
+        try:
+            row = conn.execute("SELECT name FROM hosted_rooms WHERE room_id = ?", (room_id,)).fetchone()
+        except sqlite3.OperationalError as error:
+            if any(missing in str(error).lower() for missing in ("no such table", "no such column")):
+                return None
+            raise
+        if row is None or not isinstance(row[0], str) or not row[0].strip():
+            return None
+        return row[0].strip()
+    finally:
+        conn.close()
 
 
 def _members_in(path: Path, room_id: str) -> Optional[list[Any]]:

@@ -93,16 +93,25 @@ test('notificationFor degrades to a routing stub when the payload would exceed t
     sessionId: 'sess-1',
     profile: 'default',
     title: 'Approval needed',
-    // 500 multi-byte chars in the alert body plus a 500-char multi-byte
-    // description (echoed in both conduit copies) push the encoded payload
-    // past the 4 KB APNs cap.
+    // A multi-byte alert body, a 500-char multi-byte description and a
+    // session key at its 512-byte cap push the encoded payload past the
+    // relay's budget under the 4 KB APNs cap.
     body: '€'.repeat(500),
-    decision: { ...approvalDecision, description: '€'.repeat(500) },
+    decision: { ...approvalDecision, session_key: 's'.repeat(512), description: '€'.repeat(500) },
   };
   const { payload } = notificationFor(event, preferences);
-  assert.equal(payload.conduit.decision, undefined, 'oversized decision must be dropped');
+  assert.equal(payload.body.conduit.decision, undefined, 'oversized decision must be dropped');
+  assert.equal(payload.conduit.decision, undefined);
   assert.equal(payload.conduit.session_id, 'sess-1', 'routing stub must survive');
   assert.ok(Buffer.byteLength(JSON.stringify(payload)) <= 3800);
+
+  // A hosted room's approval keeps its room id, as the sealed fallback does,
+  // so the tap still opens the room (hermes-conduit#2064).
+  const inRoom = notificationFor({ ...event, room: { id: 'conduit-1' } }, preferences).payload;
+  assert.equal(inRoom.body.conduit.decision, undefined);
+  assert.deepEqual(inRoom.body.conduit.room, { id: 'conduit-1' });
+  assert.equal(inRoom.conduit.room, undefined, 'the top-level copy stays routing-only');
+  assert.ok(Buffer.byteLength(JSON.stringify(inRoom)) <= 3800);
 });
 
 test('validateDecision only accepts approval decisions on approval events', () => {
@@ -921,8 +930,50 @@ test("validateEvent bounds a room invite's names and drops a malformed room", ()
     { ...ids, id: undefined }, { ...ids, id: '-leading-dash' }, { ...ids, id: 'bad/id' }, { ...ids, id: 'x'.repeat(129) }]) {
     assert.equal(validateEvent({ ...roomInviteBody, room }).room, undefined, JSON.stringify(room));
   }
-  // Only a room invite carries a room.
-  assert.equal(validateEvent({ ...roomInviteBody, type: 'response.ready' }).room, undefined);
+  // Only a room invite carries a room's Link and names; a turn's reply,
+  // failure, background task or approval carries the id of the room it
+  // opens, and nothing else does.
+  assert.deepEqual(validateEvent({ ...roomInviteBody, type: 'response.ready' }).room, { id: roomInviteBody.room.id });
+  assert.equal(validateEvent({ ...roomInviteBody, type: 'input.needed' }).room, undefined);
+});
+
+// ── A reply in a group room its host hosts opens the room (hermes-conduit#2064)
+
+const roomReplyBody = {
+  type: 'response.ready',
+  event_id: 'response:0123456789abcdef0123456789abcdef',
+  session_id: 'bot-room-session',
+  title: 'Zoo trip',
+  body: 'Booked the tickets.',
+  room: { id: 'room-zoo' },
+};
+
+test("validateEvent keeps the room id of a turn's push, and drops a malformed one", () => {
+  for (const type of ['response.ready', 'turn.failed', 'background_task.finished', 'approval.needed']) {
+    assert.deepEqual(validateEvent({ ...roomReplyBody, type }).room, { id: 'room-zoo' }, type);
+    assert.deepEqual(validateEvent({ ...roomReplyBody, type, room: { id: 'room-zoo', name: 'Zoo trip' } }).room, { id: 'room-zoo' },
+      'only the id rides');
+    for (const room of [null, [], 'room-zoo', {}, { id: '-leading-dash' }, { id: 'bad/id' }, { id: 'x'.repeat(129) }]) {
+      assert.equal(validateEvent({ ...roomReplyBody, type, room }).room, undefined, JSON.stringify(room));
+    }
+  }
+});
+
+test("a reply's room id rides in body.conduit with previews on and off, never in the top-level copy", () => {
+  for (const show_previews of [true, false]) {
+    const { payload } = notificationFor(validateEvent(roomReplyBody), { show_previews }, { id: 'gw-1' });
+    assert.deepEqual(payload.body.conduit.room, { id: 'room-zoo' }, `previews ${show_previews}`);
+    assert.equal(payload.body.conduit.session_id, 'bot-room-session', 'the chat still routes an app that knows no rooms');
+    assert.equal(payload.conduit.room, undefined);
+    assert.equal(payload.aps['mutable-content'], 1, 'the extension keeps one per room');
+  }
+  for (const type of ['turn.failed', 'background_task.finished']) {
+    assert.equal(notificationFor(validateEvent({ ...roomReplyBody, type }), {}, { id: 'gw-1' }).payload.aps['mutable-content'], 1, type);
+  }
+  const approval = notificationFor(validateEvent({ ...roomReplyBody, type: 'approval.needed' }), {}, { id: 'gw-1' }).payload;
+  assert.equal(approval.aps['mutable-content'], undefined, 'an approval keeps its own');
+  const { payload } = notificationFor(validateEvent({ ...roomReplyBody, room: undefined }), { show_previews: true }, { id: 'gw-1' });
+  assert.equal(payload.aps['mutable-content'], undefined, 'a push outside a room skips the extension, as before');
 });
 
 test("a room invite with previews off shows the generic copy and only the room's ids", () => {
