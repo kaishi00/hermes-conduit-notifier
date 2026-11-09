@@ -191,8 +191,9 @@ BRIDGE_BLOCK = ("That tool_call couldn't be read, so it didn't run. Give it the 
                 '"Find out why the login page is slow."}}, and never put a tool_call inside another.')
 BRIDGE_JSON_BLOCK = ("That tool_call's calls is JSON text that couldn't be read ({error}), so nothing ran. "
                      "Pass calls as an array of objects, not as a string, and check that every {{ and [ closes.")
-SHOW_FROM_WORK_HINT = (' To show a workstream\'s options as a review, call conduit_show with only {"from_work": "W…"} '
-                       "(its ref): the plugin builds the card from the report.")
+SHOW_FROM_WORK_HINT = (' To show a workstream\'s options as a review, call conduit_show with just '
+                       '{"title": "...", "from_work": "W3"} (its ref) and no cards: the plugin builds the card from '
+                       "the report.")
 CHECK_FAILED = ("This bot's coordinator settings couldn't be checked just now, so its tools are held back for this "
                 "call. Try again in a moment.")
 
