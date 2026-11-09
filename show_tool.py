@@ -582,7 +582,6 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
         if not decision_id:
             folded = title.casefold()
             occurrence = title_seen.get(folded, 0)
-            title_seen[folded] = occurrence + 1
             earlier_ids = by_title.get(folded, [])
             carried = earlier_ids[occurrence] if occurrence < len(earlier_ids) else ""
             if carried and carried not in explicit and carried not in seen:
@@ -645,6 +644,8 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
             decision["layout"] = raw["layout"]
         decision["options"] = options
         seen.add(decision_id)
+        # Only a decision shown takes up its title's next earlier id.
+        title_seen[title.casefold()] = title_seen.get(title.casefold(), 0) + 1
         decisions.append(decision)
         pages.update(option_pages)
     return decisions, pages

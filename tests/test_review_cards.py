@@ -368,6 +368,15 @@ def test_decisions_sharing_a_title_keep_their_own_ids_in_order(tool_home):
     assert [d["id"] for d in second["decisions"]] == ["d1", "d2"]
 
 
+def test_a_dropped_decision_doesnt_take_its_titles_earlier_id(tool_home):
+    host = Host(tool_home)
+    layout = {"title": "Layout", "options": [{"label": "A", "html": PAGE}, {"label": "B", "html": PAGE}]}
+    first = _call({"cards": [_review([layout])]}, reviews=host)["cards"][0]["review"]
+    broken = {"title": "Layout", "options": [{"label": "A", "html": PAGE}]}
+    second = _call({"cards": [_review([broken, layout], id=first["id"])]}, reviews=host)["cards"][0]["review"]
+    assert [d["id"] for d in second["decisions"]] == ["d1"]
+
+
 def test_a_padded_review_id_is_still_one_round_per_answer(tool_home):
     host = Host(tool_home)
     first = _call({"cards": [_review()]}, reviews=host)["cards"][0]["review"]
