@@ -545,6 +545,14 @@ def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[s
     return {**{key: value for key, value in raw.items() if key != "review"}, "review": review}
 
 
+def _release(explicit: set[str], seen: set[str], raw: dict[str, Any]) -> None:
+    """A decision left out doesn't hold the id it named: a later decision of
+    its title may carry it from an earlier round."""
+    named = _short_id(raw.get("id"))
+    if named and named not in seen:
+        explicit.discard(named)
+
+
 def _review_decisions(given: list[Any], path: str, problems: list[str],
                       rounds: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """The decisions as the card shows them, and the pages their options
@@ -575,6 +583,7 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
         title = _text(raw.get("title"), 80)
         if not title:
             problems.append(f"{where}.title: a decision needs one, left out")
+            _release(explicit, seen, raw)
             continue
         decision_id = _short_id(raw.get("id"))
         if not decision_id:
@@ -633,6 +642,7 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
             options.append(option)
         if len(options) < 2:
             problems.append(f"{where}: a decision needs two options, left out")
+            _release(explicit, seen, raw)
             continue
         decision: dict[str, Any] = {"id": decision_id, "title": title}
         text = _text(raw.get("text"), 300)

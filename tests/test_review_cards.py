@@ -387,6 +387,15 @@ def test_a_same_titled_decision_without_an_id_takes_the_one_its_twin_didnt_name(
         assert sorted(d["id"] for d in again["decisions"]) == ["d1", "d2"]
 
 
+def test_a_dropped_decision_doesnt_hold_the_id_it_named(tool_home):
+    host = Host(tool_home)
+    layout = {"title": "Layout", "options": [{"label": "A", "html": PAGE}, {"label": "B", "html": PAGE}]}
+    first = _call({"cards": [_review([layout])]}, reviews=host)["cards"][0]["review"]
+    broken = {"id": "d1", "title": "Layout", "options": [{"label": "A", "html": PAGE}]}
+    second = _call({"cards": [_review([broken, layout], id=first["id"])]}, reviews=host)["cards"][0]["review"]
+    assert [d["id"] for d in second["decisions"]] == ["d1"]
+
+
 def test_a_padded_review_id_is_still_one_round_per_answer(tool_home):
     host = Host(tool_home)
     first = _call({"cards": [_review()]}, reviews=host)["cards"][0]["review"]

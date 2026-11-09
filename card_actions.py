@@ -16,6 +16,7 @@ The dashboard loads this module through the plugin's package.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import os
 import tempfile
@@ -28,6 +29,8 @@ from typing import Any, Callable, Iterator
 
 from . import card_schema, review_store
 from .checklist_store import _exclusive, _sync_directory
+
+logger = logging.getLogger("hermes.plugins.conduit_push")
 
 FILE_NAME = "conduit-card-taps.json"
 MAX_TAPS = 100
@@ -259,7 +262,7 @@ class TapStore:
             try:
                 self.reviews().drop_marks(review_id, number)
             except (review_store.ReviewError, OSError):
-                pass
+                logger.debug("conduit cards: couldn't give a review's marks back", exc_info=True)
 
     def _save(self, state: dict[str, Any]) -> None:
         handle, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".conduit-card-taps-")
