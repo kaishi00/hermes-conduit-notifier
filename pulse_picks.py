@@ -353,11 +353,16 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
                else "update_subject")
     else:
         why = ""
-    # One due today (pulse_candidates.due_again, marked by decide) comes once
-    # more whatever its card says, so a deadline can't slip by behind it.
-    if subject and not subject.startswith(DATE_SUBJECTS) and not pick.get(DUE_AGAIN):
+    # One due today (pulse_candidates.due_again, marked by decide with the
+    # last word of the card it was held for) comes once more past the cards
+    # from before then, so a deadline can't slip by behind them; one carded
+    # since (its repeat already said) still holds it.
+    said_by = pick.get(DUE_AGAIN)
+    said_by = float(said_by) if isinstance(said_by, (int, float)) and not isinstance(said_by, bool) else None
+    if subject and not subject.startswith(DATE_SUBJECTS):
+        last = lambda card: max(float(card["created_at"]), float(card.get("updated_at") or 0))
         open_now = [card for card in pulse_store.open_cards_with([subject], now - HOLD_S)
-                    if int(card["id"]) not in closing]
+                    if int(card["id"]) not in closing and (said_by is None or last(card) > said_by)]
         if open_now:
             # Its card says it still: no second card (Pulse's open-card rule).
             return DROP, int(open_now[0]["id"]), HOLD

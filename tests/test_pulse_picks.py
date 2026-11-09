@@ -309,11 +309,16 @@ def test_one_due_today_comes_once_more_past_its_open_card(tmp_path):
     now = 100 * 86400.0
     made = card(pulse_store, subject="item:7", created_at=now - 20 * 3600)
     row = {"origin": "found", "item_id": None, "due_at": now + 10 * 3600}
-    assert pulse.candidates._due_today(pulse_store, row, made, now)
-    assert not pulse.candidates._due_today(pulse_store, {**row, "due_at": now + 3 * 86400}, made, now)
+    said = pulse.candidates._due_today(pulse_store, row, made, now)
+    assert said == now - 20 * 3600
+    assert pulse.candidates._due_today(pulse_store, {**row, "due_at": now + 3 * 86400}, made, now) is None
     pick, _ = picks.parse({"line": "Send the deck today", "subject": "item:7"})
     assert picks.resolve(pulse_store, pick, "item:7", now)[0] == picks.DROP
-    assert picks.resolve(pulse_store, {**pick, picks.DUE_AGAIN: True}, "item:7", now) == (picks.NEW, None, "")
+    assert picks.resolve(pulse_store, {**pick, picks.DUE_AGAIN: said}, "item:7", now) == (picks.NEW, None, "")
+    # Carded meanwhile (its repeat already said): held again.
+    since = card(pulse_store, subject="item:7", created_at=now - 60)
+    held = picks.resolve(pulse_store, {**pick, picks.DUE_AGAIN: said}, "item:7", now)
+    assert held == (picks.DROP, since, picks.HOLD)
 
 
 def test_a_card_a_pick_updated_stays_in_the_feed_and_isnt_pruned_however_old(tmp_path):
