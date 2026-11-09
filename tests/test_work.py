@@ -2001,6 +2001,42 @@ def test_the_update_carries_a_short_line_and_the_chat_link(on, hermes):
     assert on.get("W1").last_result.startswith("The cause")  # the report is kept (up to RESULT_CHARS)
 
 
+def test_options_a_workstream_made_are_shown_as_a_review_card(on, hermes, tmp_path):
+    folder = tmp_path / "concepts"
+    folder.mkdir()
+    for name in ("concept-1-minimal-dark.html", "concept-2-vibrant.html", "concept-3-terminal.html"):
+        (folder / name).write_text("<h1>Hi</h1>")
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    work.turn_ended(WORKER, f"All 3 concepts are ready at {folder}/:\n- Concept 1 (concept-1-minimal-dark.html)\n"
+                            "- Concept 2 (concept-2-vibrant.html)\n- Concept 3 (concept-3-terminal.html, 350 lines)\n"
+                            "- Not made: concept-4-missing.html")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    text = params["text"]
+    assert "names 3 pages or pictures" in text and '"for" is "W1"' in text and "review card" in text
+    assert f"{folder}/concept-1-minimal-dark.html, {folder}/concept-2-vibrant.html, " \
+           f"{folder}/concept-3-terminal.html." in text
+    assert "concept-4-missing" not in text.split("names 3")[1]
+
+
+def test_a_report_naming_one_page_or_none_gets_no_review_line(tmp_path):
+    page = tmp_path / "report.html"
+    page.write_text("<p>Hi</p>")
+    assert work._option_files(f"Wrote {page}. See also https://example.com/a.html") == [str(page)]
+    assert work._option_files("Nothing on disk: /nope/a.html, /nope/b.png") == []
+    assert work._option_files(f"{page} and again {page}") == [str(page)]
+    assert work._option_files(None) == []
+    assert work._options_line(types.SimpleNamespace(ref="W2"), f"Wrote {page}.") == ""
+
+
+def test_the_worker_brief_says_options_go_in_files_for_a_review():
+    assert "review card" in work.WORKER_PROMPT and "full path" in work.WORKER_PROMPT
+    assert "review card with for set to its ref" in work.SHOW_RULE
+
+
 def test_a_registry_from_before_the_checklist_gets_its_column(home):
     import sqlite3
 
