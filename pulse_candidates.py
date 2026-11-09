@@ -83,6 +83,9 @@ FLOOR_S = 86400.0
 RECENT_S = 3 * 86400.0
 RECENT_CARDS = 60
 RECENT_BUDGET = 2_000
+# Past it, an open card that can hold a pick still gets a short line, in
+# its own small budget (recent_section).
+HOLDING_BUDGET, HOLDING_CLIP = 1_000, 60
 RECENT_TITLE = "## What Pulse brought up lately"
 # The morning brief too: what it summed up isn't raised again an hour later.
 RECENT_KINDS = (store.NOTICED, "followup", "brief")
@@ -184,7 +187,7 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
     # is always listed, past the budget, so a pick can always name it.
     subjects = sorted({str(card.get("subject") or "") for card in cards} - {""})
     holding = {int(card["id"]) for card in pulse_store.open_cards_with(subjects, now - pulse_picks.HOLD_S)}
-    lines, used = [], 0
+    lines, used, extra = [], 0, 0
     for card in pulse_store.moment_cards():
         if card["done"]:
             continue
@@ -212,7 +215,17 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
         line = (f"- {pulse_picks.card_id_text(card['id'])} {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
                 f"{_clip(card['news'] or card['title'], RECENT_BRIEF_CLIP if card['kind'] == 'brief' else RECENT_CLIP)}"
                 f"{ref}{did}")
-        if used + len(line) > RECENT_BUDGET and int(card["id"]) not in holding:
+        if used + len(line) > RECENT_BUDGET:
+            if int(card["id"]) not in holding:
+                continue
+            # Past the budget, short: enough to name it, within its own
+            # small budget, so it doesn't crowd out the fresh sources.
+            line = (f"- {pulse_picks.card_id_text(card['id'])} [{card['topic'] or card['kind']}] "
+                    f"{_clip(card['news'] or card['title'], HOLDING_CLIP)}{did}")
+            if extra + len(line) > HOLDING_BUDGET:
+                continue
+            extra += len(line) + 1
+            lines.append(line)
             continue
         lines.append(line)
         used += len(line) + 1

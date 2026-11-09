@@ -344,6 +344,8 @@ def test_a_card_that_can_hold_a_pick_is_listed_past_the_recent_budget(tmp_path):
     text = pulse.candidates.recent_section(pulse_store, None, now)
     assert f"pc_{holding} " in text
     assert "number 0," not in text  # the budget still cuts the others
+    assert len(text) <= len(pulse.candidates.RECENT_TITLE) + 1 + pulse.candidates.RECENT_BUDGET \
+        + pulse.candidates.HOLDING_BUDGET
 
 
 def test_a_left_out_candidate_with_no_pick_keeps_its_subject(tmp_path):
