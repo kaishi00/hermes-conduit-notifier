@@ -1558,7 +1558,11 @@ question or a small task doesn't start a workstream. Change it in Conduit
   Chat with `conduit_show {"from_work": "W3"}`. When its report names two
   or more pages or pictures, the plugin builds a review card of them (one
   option per file, labelled from the file's name) and the same short call
-  shows it.
+  shows it. A model that writes a `conduit_show` call out as text in its
+  reply instead of making it (weak models do, since Hermes puts a plugin's
+  tools behind its tool-search bridge) still gets its card: the plugin
+  shows the call itself and leaves the board's line in the reply, which
+  Conduit draws. One whose text names that review's files shows the review.
   A workstream keeps a checklist with `work_progress` (its only work
   tool), which the Bot Chat's digest shows, Conduit's Work panel lists, and
   Conduit shows as the Tasks line in the workstream's own chat. The

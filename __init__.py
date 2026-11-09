@@ -15,7 +15,7 @@ from typing import Any
 from hermes_constants import get_hermes_home
 
 from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
-               desktop_selected, forks, health_tool, inbox_tool, link_ask_tool, link_asks, live_activity,
+               desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity,
                location_tool, maps_tool, memory_scan, notify_tool, phone_tool, present_tool, profile_copies, pulse,
                reply_sources, review_notices,
                room_asks, room_chats, room_cleanup, room_cutoff, room_free_busy, room_identity, room_invites,
@@ -1365,10 +1365,120 @@ def _transform_llm_output(**kwargs: Any) -> str | None:
         logger.debug("conduit_push: couldn't check a reply's work links", exc_info=True)
         mended = None
     reply = mended or text
-    if not _in_room_with_others(_text(kwargs.get("session_id")), kwargs.get("platform")):
-        return mended
+    session_id = _text(kwargs.get("session_id"))
+    if not _in_room_with_others(session_id, kwargs.get("platform")):
+        rescued = _rescued_shows(reply, session_id, kwargs.get("turn_id"))
+        return rescued if rescued is not None else mended
     scrubbed = room_rules.scrub(reply)
     return scrubbed if scrubbed != text else None
+
+
+def _rescued_shows(text: str, session_id: str, turn_id: Any = None) -> str | None:
+    """The reply with each conduit_show call it wrote out as text shown, and
+    the board's line in its place (leaked_calls); None when it wrote none.
+    Its review becomes the next round of the workstream's, when the call's
+    Markdown names the files of the review the plugin built (work_tool).
+    A call that shows nothing leaves its Markdown, or nothing. Held to the
+    rules the call itself would be (Pulse's, the coordinator's policy): one
+    they'd block leaves its Markdown too."""
+    try:
+        leaks = leaked_calls.shows(text)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: couldn't read a reply's written-out calls", exc_info=True)
+        return None
+    # A room's boards go through the room (show_tool's room_board), never a
+    # line in the reply.
+    if not leaks or _is_child(session_id) or _is_room_turn(session_id):
+        return None
+    pieces, at = [], 0
+    for leak in leaks:
+        pieces.append(text[at:leak.start].rstrip() + "\n\n")
+        if _rescue_blocked(session_id, turn_id, leak.args):
+            pieces.append(_unshown(leak.args))
+        else:
+            pieces.append(_shown_in_place(leak.args, session_id, text[leak.start:leak.end]))
+        at = leak.end
+    pieces.append(text[at:])
+    return "".join(pieces).strip()
+
+
+def _rescue_blocked(session_id: str, turn_id: Any, args: dict) -> bool:
+    """Whether the call, had it been made, would have been blocked: on a
+    Pulse turn, or by the coordinator's policy. Fails closed."""
+    try:
+        if pulse.pre_tool_call(session_id, turn_id, leaked_calls.SHOW, args) is not None:
+            return True
+    except Exception:  # noqa: BLE001
+        return True
+    return _work_tool_block({"session_id": session_id, "tool_name": leaked_calls.SHOW, "args": args,
+                             "turn_id": turn_id}) is not None
+
+
+def _shown_in_place(args: dict, session_id: str, written: str) -> str:
+    args = dict(args)
+    written_args = args
+    # Only Markdown (and a title): a call's screen text, or a review's files.
+    if not args.get("cards") and args.get("from_work") is None and set(args) <= {"title", "markdown"}:
+        try:
+            ref = work_tool.review_naming(session_id, written)
+        except Exception:  # noqa: BLE001
+            ref = None
+        if ref:
+            args = {"title": args.get("title") or "", "from_work": ref}
+        else:
+            # Markdown alone is for a call's screen: in a chat it's the reply.
+            return args["markdown"] if isinstance(args.get("markdown"), str) else ""
+    try:
+        result = show_tool.handle(args, session_id=session_id, is_child=_is_child, is_room=_is_room_turn,
+                                  room_board=_save_room_board, desktop_board=_save_desktop_board,
+                                  keep_diff=_keep_diff, reviews=_ReviewHost())
+        answer = json.loads(result)
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: couldn't show a written-out call", exc_info=True)
+        result, answer = None, {}
+    if not isinstance(answer, dict):
+        answer = {}
+    if answer.get("ok") and not forks.inside():
+        # Kept for the coordinator, as a made call's are (_post_tool_call).
+        _quietly(work_tool.card_shown, session_id, leaked_calls.SHOW, args, result)
+    shown = _unshown(args, answer)
+    # A review that didn't show leaves what the call wrote.
+    return shown or (_unshown(written_args) if written_args is not args else "")
+
+
+def _unshown(args: dict, answer: dict | None = None) -> str:
+    """What takes a written-out call's place: the board's line when it was
+    shown, else what it would have shown, as the reply's text."""
+    answer = answer or {}
+    if answer.get("directive"):
+        return answer["directive"]
+    if answer.get("ok") and answer.get("cards"):
+        board = {key: answer[key] for key in ("cards", "layout", "next", "markdown") if key in answer}
+        board_id = _keep_line_board(board)
+        if board_id:
+            return f'::conduit-board{{id="{board_id}"}}'
+    # Not shown: what it would have shown, as the reply's text.
+    markdown = answer.get("markdown") if isinstance(answer.get("markdown"), str) else ""
+    if not markdown and isinstance(args.get("markdown"), str):
+        markdown = args["markdown"]
+    if not markdown and isinstance(args.get("cards"), list):
+        try:
+            markdown = show_tool.card_schema.fallback_markdown(show_tool.card_schema.normalize_cards(args["cards"], []))
+        except Exception:  # noqa: BLE001
+            markdown = ""
+    return markdown
+
+
+def _keep_line_board(board: dict) -> str | None:
+    """Keeps a board a reply's line names, for Conduit to draw where the
+    reply holds ``::conduit-board{id="cb-…"}`` (room_boards.DesktopBoards)."""
+    try:
+        from . import room_boards, room_identity
+        return room_boards.DesktopBoards(room_identity.root_home(get_hermes_home())).add(board)
+    except Exception:  # noqa: BLE001
+        room_rules.warn_often("line board", "conduit_push: couldn't keep a written-out card; its Markdown goes in "
+                              "the reply")
+        return None
 
 
 def _in_room_with_others(session_id: str, platform: Any = None) -> bool:
