@@ -331,7 +331,11 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
     ``subjects`` its subject: the card keeps both, its news is the pick's
     words, and a pick that updates or closes an open card by its id does
     that instead of adding one (in the same write)."""
-    rows, row_links, updates, closes, counted = [], [], [], [], []
+    rows, row_links, updates, counted = [], [], [], []
+    # Every close first: a new incident about a card this report closes isn't
+    # held by it, whichever comes first in the report.
+    closes = picks.closed_in(pulse_store, [(picks.loads(looks[n]) if n < len(looks) else None,
+                                            subjects[n] if n < len(subjects) else "") for n in range(len(lines))], now)
     for n, (kind, text, ref) in enumerate(lines):
         current = pulse_store.current_item(ref) if ref is not None and ref in shown else None
         item = pulse_store.item(current) if current is not None else None
@@ -368,7 +372,6 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
                 counted.append("held_open_subject" if why == picks.HOLD
                                else f"dropped:{why}" if action == picks.DROP else f"{action}:{why}")
             if action == picks.CLOSE and target is not None:
-                closes.append(target)
                 counted.append("close")
                 continue
             if action == picks.DROP:
@@ -381,7 +384,7 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
                     earlier = next((n for n, (t, _) in enumerate(updates) if t == target), None)
                     if earlier is not None:
                         card = {**card, "look": updates[earlier][1]["look"]}
-                    update = (target, {**picks.updated_card(card, pick), "fallback": row, "link": link})
+                    update = (target, {**picks.updated_card(card, pick, subject), "fallback": row, "link": link})
                     if earlier is not None:
                         updates[earlier] = update
                     else:
@@ -423,6 +426,12 @@ def left_out_card(pulse_store: store.PulseStore, found: dict, *, kinds: tuple[st
                    chat_title=_clip(item_chat_title({"profile": found["profile"], "chat_id": found["chat_id"]}), 120))
     else:
         row.update(item_id=None, title=_clip(found["text"], 300))
+    # Its pick, as the report would have carded it (a new card: the incident
+    # it named may have moved on since).
+    pick = picks.loads(found.get("pick"))
+    if pick is not None:
+        row.update(look=picks.dumps({**pick, "incident": {"card": "new"}}), subject=str(found.get("subject") or ""),
+                   news=_clip(picks.news(pick), NOTICED_NEWS_LIMIT))
     return row
 
 

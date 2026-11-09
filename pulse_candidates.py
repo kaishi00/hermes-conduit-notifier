@@ -31,7 +31,7 @@ import math
 import re
 import secrets
 from datetime import datetime, timezone, tzinfo
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Collection, Optional, Sequence
 
 from . import pulse_dates as dates
 from . import pulse_hours as hours
@@ -581,7 +581,9 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
     # A pick that updates or closes an open card by its id says something
     # new about it on purpose (pulse_picks): the open-card rules below don't
     # keep it out. A new one about a subject with a card open is held for it.
-    deliberate, closing = set(), []
+    deliberate = set()
+    closing = pulse_picks.closed_in(
+        pulse_store, [(pulse_picks.loads(row.get("pick")), str(row.get("subject") or "")) for row in rows], now)
     for row in rows:
         pick = pulse_picks.loads(row.get("pick"))
         if pick is None:
@@ -589,8 +591,6 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
         action, target, why = pulse_picks.resolve(pulse_store, pick, str(row.get("subject") or ""), now, closing)
         if action in (pulse_picks.UPDATE, pulse_picks.CLOSE):
             deliberate.add(id(row))
-            if action == pulse_picks.CLOSE and target is not None:
-                closing.append(target)
         elif action == pulse_picks.DROP and not row.get("skip"):
             row["skip"] = "raised"
             pulse_picks.count(pulse_store, now, ["held_open_subject" if why == pulse_picks.HOLD else f"dropped:{why}"])
@@ -602,7 +602,7 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
         if ref in away or (ref in recent and not due_again(row, recent[ref], now)):
             row["skip"] = "raised"  # moving a reminder isn't news, nor a calendar entry coming closer
     once_each(rows)
-    for row in still_open(pulse_store, [row for row in rows if id(row) not in deliberate], now):
+    for row in still_open(pulse_store, [row for row in rows if id(row) not in deliberate], now, closing):
         if not row.get("skip"):
             row["skip"] = "raised"  # its card says it still
     if learned is None:
@@ -615,7 +615,8 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
                  cap=None if zone is None else time_cap(pulse_store, zone, now))
 
 
-def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) -> list[dict]:
+def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float,
+               closing: Collection[int] = ()) -> list[dict]:
     """The rows about something whose card is still open (a remembered item
     by its id, a phone reminder or calendar entry by its ref): on the Pulse
     screen, held for the brief or a place, or resting with Not now, not
@@ -625,20 +626,23 @@ def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float) 
     (due_again), so a deadline can't slip by behind an earlier card. A card
     with no item or ref (the model found it in a chat) counts by its words:
     an open card of the same kind from the last 30 days that names the same
-    person or thing on the same day (same_subject)."""
+    person or thing on the same day (same_subject). ``closing``: cards a
+    pick in the same report closes (pulse_picks.closed_in), which say
+    nothing still."""
     about = lambda row: (row["item_id"] if row["origin"] == MEMORY and row.get("item_id") is not None else None,
                          str(row.get("ref") or "") if str(row.get("ref") or "").startswith((REMINDER, EVENT)) else "")
     keys = [about(row) for row in rows]
     keyed = lambda card: card["item_id"] is not None or str(card.get("ref") or "").startswith((REMINDER, EVENT))
     cards = pulse_store.open_cards_about([item for item, _ in keys if item is not None],
                                          [ref for _, ref in keys if ref], (store.NOTICED, "followup"))
+    cards = [card for card in cards if int(card["id"]) not in closing]
     # A card with no item or ref (the model found it, or it came before refs)
     # is matched by what it says (Eric, 2026-10-31: Kwan's birthday again,
     # Tuesday's card still open, both from the model with nothing to key on).
     topics = [str(row.get("kind") or "") for row in rows]
     # A deadline line a report didn't show the item for was carded "other".
     topics += ["other"] if dates.DEADLINE in topics else []
-    worded = pulse_store.open_cards_on(topics, now - SAID_WINDOW_S)
+    worded = [card for card in pulse_store.open_cards_on(topics, now - SAID_WINDOW_S) if int(card["id"]) not in closing]
     # A card the user marked done or put away, word for word again: they
     # dealt with it (Eric, 2026-11-08: the audit cron card, Done on Friday,
     # back on Saturday). Not on its due day either.

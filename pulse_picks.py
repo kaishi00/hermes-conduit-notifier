@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime, timezone
-from typing import Any, Collection, Mapping, Optional, Sequence
+from typing import Any, Collection, Iterable, Mapping, Optional, Sequence
 
 from . import card_schema
 
@@ -318,9 +318,10 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
     update to a card that's gone, closed or about something else is a new
     card; a close of one is nothing; a new incident about a ``subject`` that
     has a card open from the last HOLD_S is held for that card (DROP, HOLD):
-    only an update by the card's id changes it. ``closing``: cards an
-    earlier pick in the same batch closes, which hold nothing back (a job
-    that recovered and failed again since the last report)."""
+    only an update by the card's id changes it. ``closing``: cards a pick
+    in the same batch closes (``closed_in``), which hold nothing back (a job
+    that recovered and failed again since the last report) and take no
+    update."""
     kind, target = incident(pick.get("incident"))
     if target is not None:
         card = pulse_store.card(target)
@@ -328,11 +329,12 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
                 and (not subject or not card.get("subject") or card["subject"] == subject))
         if kind == CLOSE:
             return (CLOSE, target, "") if mine else (DROP, None, "close_unknown")
-        if mine:
+        if mine and target not in closing:
             return UPDATE, target, ""
         kind = NEW
         why = ("update_unknown" if card is None or card["kind"] not in CARD_KINDS
-               else "update_subject" if pulse_store.card_open(target) else "update_closed")
+               else "update_closed" if target in closing or not pulse_store.card_open(target)
+               else "update_subject")
     else:
         why = ""
     if subject and not subject.startswith(DATE_SUBJECTS):
@@ -344,9 +346,27 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
     return NEW, None, why
 
 
-def updated_card(card: Mapping[str, Any], pick: Mapping[str, Any]) -> dict[str, Any]:
+def closed_in(pulse_store: Any, entries: Iterable[tuple[Optional[Mapping[str, Any]], str]],
+              now: float) -> list[int]:
+    """The open cards a batch's picks close (each entry a pick, or None, and
+    its subject), found before any pick is resolved, so a new incident about
+    the same subject isn't held by a card the batch closes, wherever in it
+    the close comes."""
+    out: list[int] = []
+    for pick, subject in entries:
+        if pick is None or incident(pick.get("incident"))[0] != CLOSE:
+            continue
+        action, target, _ = resolve(pulse_store, pick, subject, now)
+        if action == CLOSE and target is not None and target not in out:
+            out.append(target)
+    return out
+
+
+def updated_card(card: Mapping[str, Any], pick: Mapping[str, Any], subject: str = "") -> dict[str, Any]:
     """The columns an update rewrites on ``card``: its words and its look,
-    the facts built up on the card's when the shape stays."""
+    the facts built up on the card's when the shape stays, and ``subject``
+    when the card had none (one from before picks), so a later pick about it
+    is held for it."""
     old = loads(card.get("look")) or {}
     merged = dict(pick)
     if old.get("shape") == pick.get("shape") and isinstance(old.get("facts"), dict):
@@ -354,7 +374,10 @@ def updated_card(card: Mapping[str, Any], pick: Mapping[str, Any]) -> dict[str, 
     if not merged.get("actions") and isinstance(old.get("actions"), list):
         merged["actions"] = old["actions"]
     merged["incident"] = {"card": card_id_text(int(card["id"]))}
-    return {"news": news(merged), "look": dumps(merged)}
+    columns = {"news": news(merged), "look": dumps(merged)}
+    if subject and not card.get("subject"):
+        columns["subject"] = subject
+    return columns
 
 
 # Counting (a day's picks, kept in Pulse's store for `pulse picks`) ----------

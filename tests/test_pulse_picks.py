@@ -194,3 +194,67 @@ def test_a_card_a_pick_updated_lately_is_still_in_the_recent_list(tmp_path):
     assert f"pc_{old} " not in pulse.candidates.recent_section(pulse_store, None, now)
     pulse_store.add_cards([], updates=[(old, {"news": "Audit failed again", "fallback": {}, "link": None})], now=now - 60)
     assert f"pc_{old} " in pulse.candidates.recent_section(pulse_store, None, now)
+
+
+def report_cards(pulse_store, entries, now):
+    from types import SimpleNamespace
+    return pulse.learning.add_noticed_cards(
+        pulse_store, turn=SimpleNamespace(session_id="s", reply_id=1), lines=[("other", entry["line"], None)
+                                                                             for entry in entries],
+        chat_id="s", chat_title="Pulse", shown={}, kinds=pulse.report.KINDS, item_chat_title=lambda item: "",
+        now=now, looks=[picks.dumps(picks.parse(entry)[0]) for entry in entries],
+        subjects=[entry.get("subject", "") for entry in entries])
+
+
+def test_a_close_later_in_the_same_report_still_lets_the_new_incident_through(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="job:default:41", created_at=1000.0)
+    again = {"line": "Audit failed again", "subject": "job:default:41"}
+    closing = {"line": "Audit recovered", "subject": "job:default:41", "incident": {"close": f"pc_{made}"}}
+    assert picks.closed_in(pulse_store, [(picks.parse(again)[0], again["subject"]),
+                                         (picks.parse(closing)[0], closing["subject"])], 2000.0) == [made]
+    [new] = report_cards(pulse_store, [again, closing], 2000.0)
+    assert new != made and pulse_store.card(new)["news"] == "Audit failed again"
+    assert not pulse_store.card_open(made) and pulse_store.card_open(new)
+
+
+def test_an_update_to_a_card_the_same_report_closes_is_a_new_card(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="job:default:41", created_at=1000.0)
+    pick, _ = picks.parse({"line": "x", "incident": {"card": f"pc_{made}"}})
+    assert picks.resolve(pulse_store, pick, "job:default:41", 2000.0, closing=[made]) == (picks.NEW, None,
+                                                                                         "update_closed")
+
+
+def test_an_update_gives_a_card_without_a_subject_its_subject(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="", created_at=1000.0)
+    report_cards(pulse_store, [{"line": "Audit failed again", "subject": "job:default:41",
+                                "incident": {"card": f"pc_{made}"}}], 2000.0)
+    assert pulse_store.card(made)["subject"] == "job:default:41"
+    assert "subject" not in picks.updated_card({"id": 1, "subject": "item:7", "look": ""},
+                                               picks.parse({"line": "x"})[0], "item:8")
+    pick, _ = picks.parse({"line": "Audit failed", "subject": "job:default:41"})
+    assert picks.resolve(pulse_store, pick, "job:default:41", 3000.0)[0] == picks.DROP
+
+
+def test_a_card_the_report_closes_says_nothing_still(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="", kind="noticed", created_at=1000.0)
+    pulse_store.add_cards([], updates=[(made, {"news": "Audit failed", "topic": "other", "fallback": {}, "link": None})],
+                          now=1500.0)
+    row = {"origin": "found", "item_id": None, "ref": "", "kind": "other", "text": "Audit failed"}
+    assert pulse.candidates.still_open(pulse_store, [row], 2000.0) == [row]
+    assert pulse.candidates.still_open(pulse_store, [row], 2000.0, [made]) == []
+
+
+def test_a_left_out_pick_brought_up_keeps_its_look_and_subject(tmp_path):
+    pulse_store = fresh(tmp_path)
+    pick, _ = picks.parse({"line": "Audit failed", "subject": "job:default:41", "incident": {"card": "pc_3"},
+                           "shape": "runs", "facts": {"job": "audit", "results": ["ok", "fail"]}})
+    found = {"kind": "other", "text": "Audit failed", "why": "", "factor": "", "place": "", "band": "",
+             "item_id": None, "chat_id": "", "profile": "", "pick": picks.dumps(pick), "subject": "job:default:41"}
+    row = pulse.learning.left_out_card(pulse_store, found, kinds=pulse.report.KINDS, now=1.0,
+                                       item_chat_title=lambda item: "")
+    assert row["subject"] == "job:default:41" and json.loads(row["look"])["shape"] == "runs"
+    assert json.loads(row["look"])["incident"] == {"card": "new"}
