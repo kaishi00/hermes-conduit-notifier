@@ -5463,3 +5463,35 @@ def _report_linked(home: Path, work: work_store.Work, line: str, kind: str, chat
         logger.info("conduit_push: %s's news for its Linked Room isn't posted (%s)", work.ref, error)
     _tell_room(home, room_work.Room(room_id=room.room_id, session_id=room.session_id,
                                     handle=handle if error is None else "", linked=True, side=room.side), line)
+
+
+# --- Reviews a workstream made ----------------------------------------------------
+#
+# A review card the Bot Chat shows for a workstream (conduit_show's review,
+# ``for: W3``) stays with that workstream for every round: the user's marks
+# go to it, through work_send's own path, so a resolved one reopens rather
+# than a new one starting (Eric, 2026-11-08).
+
+
+def owns_review(ref: Any) -> bool:
+    """Whether ref names one of this bot's workstreams (not an ask)."""
+    home = _home()
+    if home is None or not isinstance(ref, str) or not work_store.exists(home):
+        return False
+    try:
+        work = work_store.Store(home).get(ref)
+    except Exception:  # noqa: BLE001 — an unreadable registry owns nothing
+        logger.debug("conduit_push: couldn't read the work registry", exc_info=True)
+        return False
+    return work is not None and work.kind == "workstream"
+
+
+def in_workstream(session_id: Any) -> bool:
+    """Whether the session is one of this bot's workstreams."""
+    return _workstream(session_id)[1] is not None
+
+
+def forward_review(session_id: Any, ref: str, text: str) -> dict:
+    """The user's marks on a review, sent from the Bot Chat to the workstream
+    that made it, as work_send sends them; its answer."""
+    return _handle("work_send", {"ref": ref, "text": text, "how": "after"}, session_id)

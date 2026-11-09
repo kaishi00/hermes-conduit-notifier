@@ -34,11 +34,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import card_schema, card_templates, client, reply_sources, turn_surface
+from . import card_schema, card_templates, client, reply_sources, review_store, turn_surface
 from .present_store import (CHAT_CARDS_FEATURE, MAX_CARD_MARKDOWN_CHARS, MAX_CARD_TITLE_CHARS, PresentError,
                             PresentStore, clip_markdown)
 
@@ -68,7 +69,10 @@ SCHEMA: dict[str, Any] = {
         "toward goals, a tip or warning (callout), or a diff of changes to code, a config or any text (give a patch, "
         "a patch_file for a long one, or before and after; put the pull request or commit in source), or a composed "
         "card you build from text, metrics, badges, icons, images, progress bars, fields and buttons for anything "
-        "else (an email ready to send, a day's agenda, an idea to act on). Any card can carry up to three buttons "
+        "else (an email ready to send, a day's agenda, an idea to act on). When a choice is easier to see than to "
+        "describe (layouts, colours, charts, posters, before and after), show a review card: its options as HTML "
+        "pages or pictures, one decision as a quick pick or several the user marks Approve, Change or Skip with "
+        "notes; their marks come back as their message, and you show the next round with the review's id. Any card can carry up to three buttons "
         "(actions): open a link, copy, send a message as the user, or tap, which reaches you at once as the user's "
         "message with the card's field values: do it with your tools, then show the card again under its live name "
         "with the result. A tap is the user's OK for exactly what the card showed, so put what will happen on the "
@@ -91,7 +95,8 @@ SCHEMA: dict[str, Any] = {
         "URLs you actually found) and [title](url) for links. Then say in a sentence that it's on their screen and "
         "give the gist; don't read it out, and don't repeat it in your reply. In a typed chat, use it only for "
         "cards and write the rest in your reply: Markdown alone shows nothing there. If the answer lists "
-        f"problems, fix those cards and show the whole board again. For a trip plan, a comparison, a dashboard or a tracker, load "
+        f"problems, fix those cards and show the whole board again. For a trip plan, a comparison, a dashboard, a tracker or "
+        f"options to choose between, load "
         f"skill_view(\"conduit_push:{SKILL_NAME}\") first."
     ),
     "parameters": {
@@ -167,6 +172,21 @@ OLD_ACTIONS_NOTE = ("cards: this version of Conduit draws no buttons or fields, 
 ROOM_ACTIONS_NOTE = ("cards: a tap in a room would speak for the user to everyone in it, so fields and send and tap "
                      "buttons were left out; open and copy buttons stay")
 SAVED_NOTE = "Saved. Show a template with a card of type template, its name and the values for its slots."
+REVIEW_SHOWN_NOTE = ("The review {id} is round {round}: the user marks it in the chat and their marks come back as "
+                     "their message. Don't ask them to reply in words, and don't post your own got-it.")
+REVIEW_FOR_NOTE = (" Their marks go to {ref}, which builds the next round; show it with this review's id and for "
+                   "{ref}.")
+REVIEW_NEXT_NOTE = (" Show the next round with this review's id, so it stays the same review, and each decision's "
+                    "id (d1, d2…) as this round has it.")
+ROOM_REVIEW_NOTE = ("cards: a review in a group room comes later (everyone votes), so it was left out: describe the "
+                    "options in your reply")
+WORKSTREAM_REVIEW_NOTE = ("cards: only the Bot Chat shows a review, so it was left out: write the options' pages to "
+                          "files and name them in your report; the Bot Chat shows them for you")
+SPOKEN_REVIEW_NOTE = ("cards: a review is marked in the chat, not on a call, so it was left out: say you'll put the "
+                      "options in the chat, and show them once the user types there")
+NO_REVIEWS_NOTE = "cards: reviews can't be kept on this host right now, left out"
+REVIEW_ELSEWHERE_NOTE = ("cards[{index}].review: {id} belongs to {ref}, which makes every round of it: show its rounds "
+                         "with for {ref}, and send what the user says about it to {ref} with work_send")
 
 
 BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (the weather or a forecast, a "
@@ -209,11 +229,29 @@ def _with_templates(rule: str) -> str:
     return f"{rule}\n{TEMPLATES_RULE.format(names=', '.join(names))}" if names else rule
 
 
+class ReviewHost:
+    """What a review card needs from the rest of the plugin: where reviews
+    are kept, and which chats and workstreams are the bot's."""
+
+    def store(self) -> review_store.KeptReviews:
+        raise NotImplementedError
+
+    def in_workstream(self, session: str) -> bool:
+        return False
+
+    def is_bot_chat(self, session: str) -> bool:
+        return False
+
+    def workstream(self, ref: str) -> bool:
+        return False
+
+
 def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
              is_room: Callable[[Any], bool] = lambda _: False,
              room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
              desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
-             keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None, skill_path: Any = None) -> None:
+             keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None, skill_path: Any = None,
+             reviews: ReviewHost | None = None) -> None:
     """Registers the tool and its recipes, if this Hermes supports plugin
     tools and skills."""
     if skill_path is not None and hasattr(ctx, "register_skill"):
@@ -226,7 +264,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool] = lambda _: False,
 
     def handler(args: Any, session_id: Any = None, **_: Any) -> str:
         return handle(args, session_id=session_id, is_child=is_child, is_room=is_room, room_board=room_board,
-                      desktop_board=desktop_board, keep_diff=keep_diff)
+                      desktop_board=desktop_board, keep_diff=keep_diff, reviews=reviews)
 
     tool = {"name": TOOL_NAME, "toolset": TOOLSET, "schema": SCHEMA, "handler": handler, "check_fn": available}
     try:
@@ -274,10 +312,11 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
            is_room: Callable[[Any], bool] = lambda _: False,
            room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
            desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
-           keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None) -> str:
+           keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None,
+           reviews: ReviewHost | None = None) -> str:
     try:
         return json.dumps(_handle(args if isinstance(args, dict) else {}, session_id, is_child, is_room, room_board,
-                                  desktop_board, keep_diff), ensure_ascii=False)
+                                  desktop_board, keep_diff, reviews), ensure_ascii=False)
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_show failed", exc_info=True)
         return json.dumps({"ok": False, "error": "unavailable",
@@ -288,7 +327,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
             is_room: Callable[[Any], bool] = lambda _: False,
             room_board: Callable[[Any, dict[str, Any]], bool] = lambda *_: False,
             desktop_board: Callable[[dict[str, Any]], str | None] = lambda _: None,
-            keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None) -> dict[str, Any]:
+            keep_diff: Callable[[dict[str, Any]], str | None] = lambda _: None,
+            reviews: ReviewHost | None = None) -> dict[str, Any]:
     session = session_id.strip() if isinstance(session_id, str) else ""
     # The user's screen belongs to the conversation they're in, not to a
     # subagent's work.
@@ -312,16 +352,259 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if args.get("save_templates") is not None:
         saved = templates.save(args["save_templates"], problems)
     given = _filled_templates(args.get("cards"), templates, problems)
+    given = _reviews_kept(given, session, problems, reviews, is_room)
+    # Every round kept above, however the card spelled its type.
+    kept = [card["review"] for card in given if isinstance(card, dict) and _is_review(card)] \
+        if isinstance(given, list) and reviews is not None else []
     cards = card_schema.normalize_cards(given, problems)
     if args.get("cards") not in (None, []) and not cards:
+        _drop_unshown(reviews, kept, [])
         return {"ok": False, "error": "invalid_cards", "note": INVALID_CARDS_NOTE, "problems": problems[:20],
                 **({"saved": saved} if saved else {})}
     if saved and not cards and not (isinstance(args.get("markdown"), str) and args["markdown"].strip()):
         return _with_problems({"ok": True, "saved": saved, "note": SAVED_NOTE}, problems)
-    answer = _handle_cards(args, session, cards, problems, is_room, room_board, desktop_board, keep_diff)
+    try:
+        answer = _handle_cards(args, session, cards, problems, is_room, room_board, desktop_board, keep_diff)
+    except BaseException:
+        _drop_unshown(reviews, kept, [])  # a show that failed keeps no round
+        raise
     if saved:
         answer["saved"] = saved
+    # Hermes Desktop's half draws the card but takes no marks (an open gap).
+    shown = [card["review"] for card in answer.get("cards", []) if card.get("type") == "review"] \
+        if answer.get("ok") and not answer.get("directive") else []
+    # A round no card shows (this Conduit draws no reviews, the turn went to
+    # Desktop, the card was dropped) isn't kept as one to mark.
+    _drop_unshown(reviews, kept, shown)
+    if shown and answer.get("ok"):
+        review = shown[0]
+        answer["note"] += " " + REVIEW_SHOWN_NOTE.format(id=review["id"], round=review["round"]) + (
+            REVIEW_FOR_NOTE.format(ref=review["for"]) if review.get("for") else REVIEW_NEXT_NOTE)
     return answer
+
+
+def _drop_unshown(reviews: ReviewHost | None, kept: list[dict[str, Any]], shown: list[dict[str, Any]]) -> None:
+    showing = {(review["id"], review["round"]) for review in shown}
+    # Newest first: only a review's newest round can be taken back.
+    for review in reversed(kept):
+        if (review["id"], review["round"]) in showing:
+            continue
+        try:
+            reviews.store().drop_round(review["id"], review["round"])
+        except (review_store.ReviewError, OSError):
+            logger.debug("conduit_show: couldn't drop an unshown review round", exc_info=True)
+
+
+def open_reviews_note(reviews: list[dict[str, Any]]) -> str | None:
+    """The turn's line on the chat's open reviews (review_store.open_reviews):
+    the id to show each one's next round under, and the workstream it stays
+    with."""
+    if not reviews:
+        return None
+    lines = []
+    for meta in reviews[:3]:
+        marked = bool(meta["rounds"][-1].get("marks"))
+        state = "marked, waiting on its next round" if marked else "waiting on the user's marks"
+        line = f'- {meta["id"]} "{meta["title"] or "untitled"}", round {len(meta["rounds"])}: {state}'
+        if meta["for"]:
+            line += f'; it belongs to {meta["for"]}: what the user says about it goes to {meta["for"]} (work_send)'
+        lines.append(line)
+    return ("[Conduit: reviews open in this chat (conduit_show review cards). Show a next round with its id; a "
+            "new review only for new options:\n" + "\n".join(lines) + "]")
+
+
+_ID_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _short_id(value: Any) -> str:
+    """A decision's or option's id as the tool gave it, letters, digits, _ and
+    - only."""
+    return _ID_CHARS.sub("", card_schema.clean_text(value))[:40] if isinstance(value, str) else ""
+
+
+def _text(value: Any, limit: int) -> str:
+    return card_schema.clean_text(value).strip()[:limit].rstrip() if isinstance(value, str) else ""
+
+
+def _is_review(card: dict[str, Any]) -> bool:
+    return isinstance(card.get("type"), str) and card_schema.clean_text(card["type"]).strip().lower() == "review"
+
+
+def _reviews_kept(given: Any, session: str, problems: list[str], reviews: ReviewHost | None,
+                  is_room: Callable[[Any], bool]) -> Any:
+    """The cards with each review's options kept on the host, round by
+    round, and the review as the card carries it: labels, ids and pictures'
+    links, never a page (review_store)."""
+    if not isinstance(given, list):
+        return given
+    cards = []
+    for index, raw in enumerate(given):
+        if isinstance(raw, dict) and _is_review(raw):
+            raw = _kept_review(raw, index, session, problems, reviews, is_room)
+            if raw is None:
+                continue
+        cards.append(raw)
+    return cards
+
+
+def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[str], reviews: ReviewHost | None,
+                 is_room: Callable[[Any], bool]) -> dict[str, Any] | None:
+    path = f"cards[{index}]"
+    if session and is_room(session):
+        problems.append(ROOM_REVIEW_NOTE)
+        return None
+    if reviews is None:
+        problems.append(NO_REVIEWS_NOTE)
+        return None
+    if session and reviews.in_workstream(session):
+        problems.append(WORKSTREAM_REVIEW_NOTE)
+        return None
+    if turn_surface.turn_entry(session) == "spoken":
+        problems.append(SPOKEN_REVIEW_NOTE)
+        return None
+    given = raw.get("review")
+    if not isinstance(given, dict) or not isinstance(given.get("decisions"), list):
+        problems.append(f"{path}.review: a review card needs its decisions, each with its options")
+        return None
+    store = reviews.store()
+    wanted = _text(given.get("id"), 40)
+    existing = None
+    if wanted:
+        try:
+            existing = store.get(wanted)
+        except review_store.ReviewError:
+            existing = None
+        if existing is None:
+            problems.append(f"{path}.review.id: no review {wanted} is kept here (they go after a month); leave id "
+                            "out to start a new one")
+            return None
+    for_ref = _text(given.get("for"), 8)
+    if for_ref and not card_schema.WORK_REF.fullmatch(for_ref):
+        problems.append(f"{path}.review.for: a workstream ref like W3, left out")
+        for_ref = ""
+    elif for_ref and not reviews.is_bot_chat(session):
+        problems.append(f"{path}.review.for: only a Bot Chat shows a review for a workstream, left out")
+        for_ref = ""
+    elif for_ref and not reviews.workstream(for_ref):
+        problems.append(f"{path}.review.for: {for_ref} isn't one of this bot's workstreams; show the review for "
+                        "the one that made the options")
+        return None
+    if existing is not None and existing["for"] and not reviews.is_bot_chat(session):
+        # Its marks go to its workstream from the Bot Chat alone.
+        problems.append(f"{path}.review: {wanted} belongs to {existing['for']}, so only the Bot Chat shows its rounds")
+        return None
+    if existing is not None:
+        bound = existing["for"]
+        if bound and for_ref and for_ref != bound:
+            problems.append(REVIEW_ELSEWHERE_NOTE.format(index=index, id=wanted, ref=bound))
+            return None
+        if bound:
+            for_ref = bound
+        elif for_ref:
+            problems.append(f"{path}.review.for: {wanted} started outside a workstream, so its rounds stay in this "
+                            "chat; left out")
+            for_ref = ""
+    title = _text(raw.get("title"), card_schema.CARD_SCHEMA["properties"]["title"]["maxLength"])
+    decisions, pages = _review_decisions(given["decisions"], f"{path}.review", problems)
+    if not decisions:
+        problems.append(f"{path}.review: no decision has two options that could be shown")
+        return None
+    started = ""
+    try:
+        review_id = wanted or store.start(title, session, for_ref)
+        started = "" if wanted else review_id
+        number = store.add_round(review_id, title, decisions, pages, session)
+        started = ""
+        settled = store.settled(review_id, {decision["id"] for decision in decisions}) if existing else []
+    except (review_store.ReviewError, OSError) as error:
+        if started:
+            # A new review whose first round didn't save leaves nothing behind.
+            try:
+                store.drop_empty(started)
+            except (review_store.ReviewError, OSError):
+                pass
+        problems.append(f"{path}.review: {error}" if isinstance(error, review_store.ReviewError) else NO_REVIEWS_NOTE)
+        return None
+    review = {"id": review_id, "round": number, **({"for": for_ref} if for_ref else {}), "decisions": decisions,
+              **({"settled": settled} if settled else {})}
+    return {**{key: value for key, value in raw.items() if key != "review"}, "review": review}
+
+
+def _review_decisions(given: list[Any], path: str, problems: list[str]) -> tuple[list[dict[str, Any]],
+                                                                                  dict[str, str]]:
+    """The decisions as the card shows them, and the pages their options
+    open, by decision and option id."""
+    decisions: list[dict[str, Any]] = []
+    pages: dict[str, str] = {}
+    seen: set[str] = set()
+    if len(given) > 6:
+        problems.append(f"{path}.decisions: six at most, the rest were left out")
+    for d_index, raw in enumerate(given[:6]):
+        where = f"{path}.decisions[{d_index}]"
+        if not isinstance(raw, dict):
+            problems.append(f"{where}: not a decision, left out")
+            continue
+        title = _text(raw.get("title"), 80)
+        if not title:
+            problems.append(f"{where}.title: a decision needs one, left out")
+            continue
+        decision_id = _short_id(raw.get("id")) or f"d{d_index + 1}"
+        if decision_id in seen:
+            problems.append(f"{where}.id: another decision has it, left out")
+            continue
+        options: list[dict[str, Any]] = []
+        option_pages: dict[str, str] = {}
+        taken: set[str] = set()
+        recommended = False
+        raw_options = raw.get("options") if isinstance(raw.get("options"), list) else []
+        if len(raw_options) > 6:
+            problems.append(f"{where}.options: six at most, the rest were left out")
+        for o_index, option_raw in enumerate(raw_options[:6]):
+            named = f"{where}.options[{o_index}]"
+            if not isinstance(option_raw, dict):
+                problems.append(f"{named}: not an option, left out")
+                continue
+            label = _text(option_raw.get("label"), 60)
+            if not label:
+                problems.append(f"{named}.label: an option needs one, left out")
+                continue
+            option_id = _short_id(option_raw.get("id")) or next(
+                letter for letter in "ABCDEFGHIJKL" if letter not in taken)
+            if option_id in taken:
+                problems.append(f"{named}.id: another option has it, left out")
+                continue
+            try:
+                kind, content = review_store.read_page(option_raw)
+            except review_store.ReviewError as error:
+                problems.append(f"{named}: {error}, left out")
+                continue
+            option: dict[str, Any] = {"id": option_id, "label": label, "kind": kind}
+            text = _text(option_raw.get("text"), 200)
+            if text:
+                option["text"] = text
+            if option_raw.get("recommended") is True and not recommended:
+                option["recommended"] = True
+                recommended = True
+            if kind == "image":
+                option["url"] = content
+            else:
+                option_pages[f"{decision_id}/{option_id}"] = content
+            taken.add(option_id)
+            options.append(option)
+        if len(options) < 2:
+            problems.append(f"{where}: a decision needs two options, left out")
+            continue
+        decision: dict[str, Any] = {"id": decision_id, "title": title}
+        text = _text(raw.get("text"), 300)
+        if text:
+            decision["text"] = text
+        if raw.get("layout") in ("side", "switch", "before_after"):
+            decision["layout"] = raw["layout"]
+        decision["options"] = options
+        seen.add(decision_id)
+        decisions.append(decision)
+        pages.update(option_pages)
+    return decisions, pages
 
 
 def _filled_templates(given: Any, templates: card_templates.TemplateStore, problems: list[str]) -> Any:
