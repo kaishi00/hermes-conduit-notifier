@@ -1870,6 +1870,30 @@ def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(modeled, db):
     assert f"#{kept} " in report.remembered(live.store, UTC, time.time())  # brought up again: back in the report
 
 
+def test_a_delivered_reports_cards_keep_their_picks_look_and_subject(modeled, db):
+    live = modeled
+    db.session()
+    _due_report(live)
+    live.store.set("memory", True)
+    now = time.time()
+    [kept] = live.store.advance("", "work", message_id=1, at=now - 3600, items=[{
+        "kind": "commitment", "text": "The user will send the deck.", "evidence": "I'll send the deck",
+        "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": now - 3600}])
+    live.llm.replies.append({"remembered": [{"ref": kept, "bring_up": True, "value": 3, "skip": "",
+                                             "actionable": True, "line": "Send the deck", "subject": f"#{kept}",
+                                             "shape": "status", "facts": {"label": "Deck", "state": "warn"},
+                                             "why": "You said you would."}], "found": []})
+    live.store.set("report_requested", True)
+    report_tick()
+    row = live.store.in_flight()[0]
+    db.message("user", row["text"], display_kind="hidden")
+    db.message("assistant", f"1. [commitment] Send the deck #{kept}")
+    pulse.tick(now=time.time() + 1)
+    [card] = [card for card in live.store.cards(50) if card["item_id"] == kept]
+    assert card["subject"] == f"item:{kept}"
+    assert json.loads(card["look"])["shape"] == "status" and json.loads(card["look"])["line"] == "Send the deck"
+
+
 def test_report_command(live, db, capsys, monkeypatch):
     db.session()
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", pulse.get_hermes_home)
