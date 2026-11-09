@@ -3359,6 +3359,9 @@ def _shown_line(store: work_store.Store, work: work_store.Work) -> tuple[str, An
 # instead of a review card (Eric, 2026-11-09).
 _OPTION_FILE = re.compile(r"[\w.~/-]*?[\w-]\.(?:html?|png|jpe?g|gif|webp|svg)\b", re.IGNORECASE)
 _OPTION_DIR = re.compile(r"(?<![\w.])(?:~|/)[\w.~/-]*/")
+# A path in quotes or backticks may hold spaces.
+_OPTION_QUOTED = re.compile(r"[`\"'“‘]((?:~|/)[^`\"'”’\n]{1,400}?)[`\"'”’]")
+_OPTION_SUFFIX = re.compile(r"\.(?:html?|png|jpe?g|gif|webp|svg)$", re.IGNORECASE)
 OPTIONS_MAX = 8
 
 
@@ -3367,11 +3370,15 @@ def _option_files(text: Any) -> list[str]:
     paths, and bare names in a folder it names."""
     if not isinstance(text, str) or not text:
         return []
+    quoted = [(m.start(1), m.group(1).strip()) for m in _OPTION_QUOTED.finditer(text)]
     folders = [os.path.expanduser(m.group(0)) for m in _OPTION_DIR.finditer(text)]
+    folders += [os.path.expanduser(q) for _, q in quoted if q.endswith("/")]
     folders = [folder for folder in dict.fromkeys(folders) if os.path.isabs(folder)]
+    named = [(at, q) for at, q in quoted if _OPTION_SUFFIX.search(q)]
+    named += [(m.start(), m.group(0)) for m in _OPTION_FILE.finditer(text)]
+    names = [name for _, name in sorted(named, key=lambda pair: pair[0])]
     found: list[str] = []
-    for match in _OPTION_FILE.finditer(text):
-        name = match.group(0)
+    for name in names:
         if name.startswith(("/", "~")):
             candidates = [os.path.expanduser(name)]
         elif "/" in name:
@@ -3578,8 +3585,8 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         line = f"- {work.ref} “{work.title}” {said} (work_read shows what it did).{tail}"
     shown, shown_turn = _shown_line(store, work)  # a failed turn's cards too: they're in its chat
     line += shown
-    if not failed and not screen:
-        line += _options_line(work, text)
+    # Only for the Bot Chat: a group room can't show a review yet.
+    options = _options_line(work, text) if not failed and not screen else ""
     # Only while it's still active: a stop that came meanwhile wins, and an
     # end reported twice settles (and tells the coordinator) once.
     if store.update(work.ref, only_if=_SETTLES, **fields) is None:
@@ -3590,7 +3597,7 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     # A turn that ended on its own: a later restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
     if not work.closed_at and (work.coordinator or _in_room(work)):
-        _report(home, work, line, kind="call" if _call_of(work) else "work")
+        _report(home, work, line, kind="call" if _call_of(work) else "work", bot_chat_extra=options)
         if shown:
             _shown_named(store, work.ref, shown_turn)
     return True
@@ -4654,10 +4661,11 @@ def _in_room(work: work_store.Work) -> bool:
 
 
 def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", chat: Optional[str] = None,
-            key: str = "", item: str = "") -> None:
+            key: str = "", item: str = "", bot_chat_extra: str = "") -> None:
     """A line about a workstream for whoever it reports to: posted in the
     group room it was started from (room_work), else queued for the Bot
-    Chat's work update, as is a room's line that couldn't be posted. A
+    Chat's work update, as is a room's line that couldn't be posted, with
+    ``bot_chat_extra`` (what only the Bot Chat can do) after it there. A
     room's line is in the outbox until it's posted, so one a restart cut
     off is posted again (``_replay``), under its own key: the same post."""
     if _in_room(work) and (work.reply_to or {}).get("linked"):
@@ -4692,7 +4700,7 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
         store, item = None, ""
     target = chat or work.coordinator or _bot_chat_of(home)
     if target:
-        _queue_wake(home, target, line, kind=kind)
+        _queue_wake(home, target, line + bot_chat_extra, kind=kind)
         # Settled only once the Bot Chat's line is kept: a restart in between posts it again.
         _settle_room_line(store, item, "refused")
     else:

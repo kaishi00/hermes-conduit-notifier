@@ -2032,6 +2032,35 @@ def test_a_report_naming_one_page_or_none_gets_no_review_line(tmp_path):
     assert work._options_line(types.SimpleNamespace(ref="W2"), f"Wrote {page}.") == ""
 
 
+def test_quoted_paths_with_spaces_are_read_whole(tmp_path):
+    folder = tmp_path / "site concepts"
+    folder.mkdir()
+    for name in ("a b.html", "c.png"):
+        (folder / name).write_text("x")
+    text = f'Pages: "{folder}/a b.html" and `{folder}/c.png`.'
+    assert work._option_files(text) == [str(folder / "a b.html"), str(folder / "c.png")]
+    assert work._option_files(f"In `{folder}/`: c.png, then a.html") == [str(folder / "c.png")]
+
+
+def test_a_room_hears_the_report_without_the_review_line(on, home, monkeypatch, tmp_path):
+    pages = [tmp_path / "a.html", tmp_path / "b.html"]
+    for page in pages:
+        page.write_text("x")
+    posted, queued = [], []
+    monkeypatch.setattr(work, "_in_room", lambda w: True)
+    monkeypatch.setattr(work.room_work, "still_here", lambda *a, **k: (None, "h"))
+    monkeypatch.setattr(work.room_work, "post", lambda reply_to, **k: posted.extend(k["lines"]))
+    monkeypatch.setattr(work, "_queue_wake", lambda home, target, line, kind: queued.append(line))
+    w = types.SimpleNamespace(ref="W1", reply_to={"to": "room"}, coordinator="bot-chat", title="T")
+    extra = work._options_line(w, f"Made {pages[0]} and {pages[1]}")
+    assert extra
+    work._report(home, w, "- W1 finished.", bot_chat_extra=extra)
+    assert posted == ["- W1 finished."] and not queued
+    monkeypatch.setattr(work.room_work, "post", lambda reply_to, **k: "room gone")
+    work._report(home, w, "- W1 finished.", bot_chat_extra=extra)
+    assert queued and queued[0].endswith(extra)
+
+
 def test_the_worker_brief_says_options_go_in_files_for_a_review():
     assert "review card" in work.WORKER_PROMPT and "full path" in work.WORKER_PROMPT
     assert "review card with for set to its ref" in work.SHOW_RULE
