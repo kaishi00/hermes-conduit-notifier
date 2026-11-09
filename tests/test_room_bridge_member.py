@@ -350,7 +350,7 @@ def test_a_dispatch_names_this_hosts_copy_of_a_room_file_and_its_digest_follows(
     kept.write_bytes(b"x")
     files = sys.modules["conduit_push.room_files_link"]
     with files.Store(laifu.root).update() as state:
-        state.setdefault("kept", {})[f"{folder}/shot.jpg"] = "link1"
+        state.setdefault("kept", {})[f"{folder}/shot.jpg"] = {"link": "link1", "at": 0}
     body, key = dispatch(text=prompt(f"User (user): @file:/root/.hermes/conduit/room-files/{folder}/shot.jpg look"))
 
     ask(laifu, body=body, key=key)
@@ -1130,7 +1130,7 @@ def test_a_dispatch_doesnt_name_a_copy_another_home_sent(laifu, hermes):
     kept.write_bytes(b"x")
     files = sys.modules["conduit_push.room_files_link"]
     with files.Store(laifu.root).update() as state:
-        state.setdefault("kept", {})[f"{folder}/shot.jpg"] = "link7"
+        state.setdefault("kept", {})[f"{folder}/shot.jpg"] = {"link": "link7", "at": 0}
     home = f"/root/.hermes/conduit/room-files/{folder}/shot.jpg"
     body, key = dispatch(text=prompt(f"User (user): @file:{home} look"))
 

@@ -201,6 +201,7 @@ class Files:
         try:
             with disk_lock(self.rooms.root):
                 _room_for(root, 0, now)
+            self._forget_gone()
         except OSError as exc:
             logger.info("Linked Rooms couldn't sweep the room files here (%s)", type(exc).__name__)
 
@@ -381,20 +382,19 @@ class Files:
             # this home's and these bytes. Another home's file under the same folder and name stays as it is.
             if body["index"] != body["count"] - 1:
                 return
-            if self.store.read().get("kept", {}).get(key) != received.link_id or _digest(target) != body["sha"]:
+            if origin_of(self.rooms.root, body["folder"], body["name"]) != received.link_id \
+                    or _digest(target) != body["sha"]:
                 logger.warning("Linked Rooms refused room file %s from Link %s: another file has its folder and "
                                "name here", key, received.link_id)
                 return
         else:
             whole = self._take(received.link_id, body)
-            if whole is None or not self._keep(target, whole, body):
+            if whole is None:
                 return
-            with self.store.update() as kept:
-                origins = kept.setdefault("kept", {})
-                origins.pop(key, None)
-                origins[key] = received.link_id
-                for old in list(origins)[:max(0, len(origins) - MAX_ORIGINS)]:
-                    del origins[old]
+            # Saved before the file shows, so a turn waiting for it never finds it without its sender.
+            self._note_origin(key, received.link_id)
+            if not self._keep(target, whole, body):
+                return
         try:
             self.rooms.send(received.link_id, GOT, {"v": VERSION, "room_id": body["room_id"],
                                                     "folder": body["folder"], "name": body["name"],
@@ -405,6 +405,32 @@ class Files:
         except room_links.LinkError as exc:
             logger.info("Linked Rooms couldn't answer a room file from Link %s (%s); the home sends it again",
                         received.link_id, exc.code)
+
+    def _note_origin(self, key: str, link_id: str) -> None:
+        """Which Link sent ``key``. Past MAX_ORIGINS, the records of files gone from here go first, then the
+        oldest files with theirs, so no file kept here is without its sender."""
+        root = files_root(self.rooms.root)
+        with self.store.update() as kept:
+            origins = kept.setdefault("kept", {})
+            origins[key] = {"link": link_id, "at": self.rooms.clock()}
+            if len(origins) <= MAX_ORIGINS:
+                return
+            for old in [old for old in origins if old != key and not (root / old).is_file()]:
+                del origins[old]
+            oldest = sorted((old for old in origins if old != key), key=lambda old: _origin_at(origins[old]))
+            for old in oldest[:max(0, len(origins) - MAX_ORIGINS)]:
+                with contextlib.suppress(OSError):
+                    (root / old).unlink()
+                del origins[old]
+
+    def _forget_gone(self) -> None:
+        """The records of files the sweep took."""
+        root = files_root(self.rooms.root)
+        with self.store.update() as kept:
+            origins = kept.get("kept")
+            if isinstance(origins, dict):
+                for old in [old for old in origins if not (root / old).is_file()]:
+                    del origins[old]
 
     def _take(self, link_id: str, body: dict[str, Any]) -> Optional[bytes]:
         """Keeps one chunk; the file's bytes once every chunk is here."""
@@ -485,7 +511,13 @@ def _digest(path: Path) -> Optional[str]:
 def origin_of(root: Any, folder: str, name: str) -> Optional[str]:
     """The Link whose home sent the room file kept here under ``folder``/``name``."""
     origin = Store(root).read().get("kept", {}).get(f"{folder}/{name}")
+    origin = origin.get("link") if isinstance(origin, dict) else None
     return origin if isinstance(origin, str) else None
+
+
+def _origin_at(origin: Any) -> float:
+    at = origin.get("at") if isinstance(origin, dict) else None
+    return at if isinstance(at, (int, float)) else float("-inf")
 
 
 def _held(directory: Path) -> int:

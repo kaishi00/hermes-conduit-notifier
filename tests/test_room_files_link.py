@@ -294,7 +294,7 @@ def test_another_homes_file_under_the_same_name_isnt_replaced_or_answered(copies
     planted.parent.mkdir(parents=True)
     planted.write_bytes(b"not it")
     with files_module.Store(copies.tmp_path / "laifu").update() as state:
-        state.setdefault("kept", {})[f"{FOLDER}/shot.jpg"] = "link9"
+        state.setdefault("kept", {})[f"{FOLDER}/shot.jpg"] = {"link": "link9", "at": 0}
     path = upload(copies, "shot.jpg", b"\xff\xd8 the real one")
     post(copies, room_id, f"@file:{path}\n\nWhat's this?")
 
@@ -331,3 +331,46 @@ def test_a_file_shared_again_in_another_room_is_kept_with_both(copies):  # noqa:
 
     entry = files_module.Store(copies.tmp_path / "furina").read()["out"]["link1"][f"{FOLDER}/shot.jpg"]
     assert entry["rooms"] == ["room-one", "room-two"]
+
+
+def test_a_carried_files_sender_is_saved_before_the_file_shows(copies, monkeypatch):  # noqa: F811
+    # Greptile on notifier #629: a turn waiting for the copy could see it before its sender was saved.
+    room_id = started(copies)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    seen = []
+    keep = files_module.Files._keep
+
+    def watched(self, target, whole, body):
+        seen.append(files_module.origin_of(self.rooms.root, FOLDER, "shot.jpg"))
+        return keep(self, target, whole, body)
+
+    monkeypatch.setattr(files_module.Files, "_keep", watched)
+    post(copies, room_id, f"@file:{path}\nhi")
+
+    copies.furina.pass_once()
+
+    assert len(seen) == 2 and all(seen)
+
+
+def test_senders_past_the_cap_go_with_their_files_gone_ones_first(tmp_path, monkeypatch):
+    # Greptile on notifier #629: the cap dropped senders of files still kept, which then never read.
+    monkeypatch.setattr(files_module, "MAX_ORIGINS", 2)
+    clock = [10.0]
+    files = files_module.Files(type("Rooms", (), {"root": tmp_path, "clock": staticmethod(lambda: clock[0])})())
+    root = files_module.files_root(tmp_path)
+    for name in ("old.jpg", "new.jpg"):
+        (root / FOLDER).mkdir(parents=True, exist_ok=True)
+        (root / FOLDER / name).write_bytes(b"x")
+    with files.store.update() as state:
+        state["kept"] = {f"{FOLDER}/gone.jpg": {"link": "link1", "at": 0}, f"{FOLDER}/old.jpg": {"link": "link1", "at": 2},
+                         f"{FOLDER}/new.jpg": {"link": "link1", "at": 1}}
+
+    files._note_origin(f"{FOLDER}/next.jpg", "link2")
+
+    assert set(files.store.read()["kept"]) == {f"{FOLDER}/old.jpg", f"{FOLDER}/next.jpg"}
+    assert not (root / FOLDER / "new.jpg").exists(), "the oldest file goes with its sender"
+    assert (root / FOLDER / "old.jpg").exists()
+    assert files_module.origin_of(tmp_path, FOLDER, "old.jpg") == "link1"
+
+    files.sweep()
+    assert set(files.store.read()["kept"]) == {f"{FOLDER}/old.jpg"}, "the sweep forgets files that aren't here"
