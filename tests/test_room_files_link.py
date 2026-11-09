@@ -400,3 +400,17 @@ def test_a_guest_takes_a_disbanded_rooms_files_but_not_one_it_left(copies):  # n
 
     assert not carried(copies, "laifu", "shot.jpg").exists()
     assert carried(copies, "mona", "shot.jpg").read_bytes() == b"\xff\xd8 shot"
+
+
+def test_an_answer_for_a_file_not_sent_yet_doesnt_count(copies):  # noqa: F811
+    # Beam on notifier #629: a room.file_got with no digest marked a noted file done before it went.
+    started(copies)
+    store = files_module.Store(copies.tmp_path / "furina")
+    with store.update() as state:
+        state["out"]["link1"] = {f"{FOLDER}/shot.jpg": {"room": "r", "size": 1, "at": None, "tries": 0,
+                                                       "done": False, "noted": 0}}
+    received = files_module.room_links.Received(link_id="link1", kind=files_module.GOT, message_id="m", at=0,
+                                                body={"v": files_module.VERSION, "folder": FOLDER, "name": "shot.jpg"})
+    copies.furina.files.on_got(received)
+
+    assert store.read()["out"]["link1"][f"{FOLDER}/shot.jpg"]["done"] is False

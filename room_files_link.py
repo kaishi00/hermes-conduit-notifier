@@ -359,7 +359,8 @@ class Files:
         key = f"{body['folder']}/{body['name']}"
         with self.store.update() as state:
             entry = state["out"].get(received.link_id, {}).get(key)
-            if entry is not None and entry.get("sha") in (None, body.get("sha")):
+            # Only for bytes it was sent: an answer before any went says nothing.
+            if entry is not None and entry.get("sha") is not None and entry["sha"] == body.get("sha"):
                 entry["done"] = True
 
     # --- A member ------------------------------------------------------------------------
