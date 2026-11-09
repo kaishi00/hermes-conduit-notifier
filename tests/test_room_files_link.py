@@ -169,7 +169,7 @@ def test_room_files_age_out_and_make_room_on_a_guest_that_never_uploads(tmp_path
     old, recent = root / ("20261001-" + "1" * 32), root / ("20261107-" + "2" * 32)
     for folder in (old, recent):
         folder.mkdir(parents=True)
-        (folder / "a.bin").write_bytes(b"x" * 10)
+        (folder / "a.bin").write_bytes(b"x" * (160_000 + 1))
     now = recent.stat().st_mtime + 60
     os.utime(old, (now - files_module.RETENTION_S - 1,) * 2)
 
@@ -440,7 +440,7 @@ def test_a_folder_that_wont_go_isnt_counted_as_freed(tmp_path, monkeypatch):
     root = files_module.files_root(tmp_path)
     stuck = root / ("20261101-" + "3" * 32)
     stuck.mkdir(parents=True)
-    (stuck / "a.bin").write_bytes(b"x" * 10)
+    (stuck / "a.bin").write_bytes(b"x" * (160_000 + 1))
     monkeypatch.setattr(files_module, "TOTAL_BYTES", 12)
     monkeypatch.setattr(files_module.shutil, "rmtree", lambda *_args, **_kwargs: None)
 
@@ -513,3 +513,18 @@ def test_an_update_doesnt_save_over_a_store_it_couldnt_read(tmp_path, monkeypatc
             state["out"]["link2"] = {}
     monkeypatch.undo()
     assert store.path.read_bytes() == before
+
+
+def test_a_message_too_big_for_a_page_still_carries_its_files(copies, monkeypatch):  # noqa: F811
+    # Greptile on notifier #629: the page drops a too-big message's payload, and its files went with it.
+    from test_room_copies import copies_module
+
+    room_id = started(copies)
+    monkeypatch.setattr(copies_module, "PAGE_BYTES", 4000)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 big")
+    post(copies, room_id, f"@file:{path}\n\n" + "x" * 5000)
+
+    for _ in range(3):
+        copies.furina.pass_once()
+
+    assert carried(copies, "laifu", "shot.jpg").read_bytes() == b"\xff\xd8 big"

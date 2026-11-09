@@ -225,8 +225,11 @@ class Copies:
         if files is not None:
             try:
                 # Only what the home's own people sent: a linked person's post naming a path carries nothing.
-                files.note(room_id, link_id, [event for event in events
-                                              if not (isinstance(event, dict) and event.get("event_id") in posts)])
+                # From the events as Hermes gave them: one too big for a page goes without its payload.
+                whole = {event.get("event_id"): event for event in page.get("events") or ()
+                         if isinstance(event, dict)}
+                files.note(room_id, link_id, [whole.get(event.get("event_id"), event) for event in events
+                                              if isinstance(event, dict) and event.get("event_id") not in posts])
             except Exception as exc:  # noqa: BLE001 - the page goes either way
                 self._tell_once(f"files:{room_id}", "Linked Rooms couldn't note room %s's files (%s)", room_id,
                                 type(exc).__name__)
