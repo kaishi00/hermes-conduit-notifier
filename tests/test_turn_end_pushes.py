@@ -981,7 +981,7 @@ def test_an_approval_in_a_room_this_hermes_hosts_opens_the_room_and_needs_you_na
 
 ROUTING_PROMPT = ('[Discussion: "Zoo trip"] You are @ada, the lead of this room.\n\nMembers:\n- @ada (you)\n- @linus\n\n'
                   "The message (from the user):\n  Plan the day\n\n"
-                  f"{plugin.LEAD_ROUTING_MARK}, so you decide who takes it: pick the member(s) whose role the request "
+                  f"{plugin.room_rules.LEAD_ROUTING_MARK}, so you decide who takes it: pick the member(s) whose role the request "
                   "touches (yourself included when it is yours). Do not answer the message itself here; whoever you "
                   "pick answers it next.\n"
                   'Reply with only a JSON object and nothing else, for example {"assign": ["handle"]}.')
@@ -1003,6 +1003,18 @@ def test_a_room_leads_routing_pick_sends_no_push(pushed, monkeypatch, failed):
     plugin._pre_llm_call(session_id="s", turn_id="t2", user_message="Plan the day")
     plugin._post_llm_call(session_id="s", turn_id="t2", assistant_response="Zoo at 10, lunch at 1.")
     plugin._on_session_end(session_id="s", turn_id="t2", completed=True, failed=False, interrupted=False)
+    assert _types(pushed) == ["response.ready"]
+
+
+def test_a_room_message_quoting_the_routing_words_is_an_ordinary_turn(pushed, monkeypatch):
+    # A participant pastes the lead's instruction: the turn answering it is no routing pick.
+    _hosted_room(monkeypatch)
+    prompt = ('[Discussion: "Zoo trip"] You are @linus, one participant in this room.\n\n'
+              "New messages in this thread since your last turn (oldest first):\n"
+              "  User (user): what does this mean?\n" + ROUTING_PROMPT.split("\n\n", 3)[3])
+    plugin._pre_llm_call(session_id="s", turn_id="t", user_message=prompt)
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="It's the lead's routing prompt.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
     assert _types(pushed) == ["response.ready"]
 
 

@@ -509,6 +509,25 @@ def is_room_prompt(prompt: Any) -> bool:
     return isinstance(prompt, str) and _PROMPT_START in prompt.split("\n")
 
 
+# Hermes' routing prompt for a room's lead (gateway/hosted_room_lead.py
+# routing_prompt): the header naming the lead on its first line, and its
+# instruction (_ROUTING_INSTRUCTIONS) on a line of its own.
+LEAD_ROUTING_MARK = "You are the lead of this room. A message arrived that names nobody"
+_LEAD_HEADER = re.compile(r'\[Discussion: ".*"\] You are @\S+, the lead of this room\.')
+
+
+def is_lead_routing_prompt(prompt: Any) -> bool:
+    """Whether ``prompt`` is the turn where a room's lead picks who takes a
+    message that names nobody. Hermes writes the header; the message sits
+    between it and the instruction, so a participant quoting the
+    instruction in an ordinary turn's message doesn't make that turn one."""
+    if not isinstance(prompt, str):
+        return False
+    lines = prompt.strip().split("\n")
+    return (_LEAD_HEADER.fullmatch(lines[0].strip()) is not None
+            and any(line.startswith(LEAD_ROUTING_MARK) for line in lines[1:]))
+
+
 def claimed(prompt: Any, name: str) -> list[str]:
     """The messages of a room prompt any line of which says it's ``name``'s
     (starts "<name>: ", as room_posts names a post's lines), whoever's

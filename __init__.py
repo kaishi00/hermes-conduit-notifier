@@ -1498,11 +1498,6 @@ def _turn_surface_note(platform: Any, message: Any, session_id: str = "") -> str
     return turn_surface.note(from_conduit, message, transport, session_id=session_id)
 
 
-# What Hermes asks a room's lead for in its routing turn
-# (gateway/hosted_room_lead.py _ROUTING_INSTRUCTIONS).
-LEAD_ROUTING_MARK = "You are the lead of this room. A message arrived that names nobody"
-
-
 def _note_lead_routing(session_id: str, turn_id: Any, user_message: Any) -> None:
     """Notes a turn that is a room lead's routing pick: in a room routed
     through its lead, Hermes first asks the lead who should take a message
@@ -1511,7 +1506,7 @@ def _note_lead_routing(session_id: str, turn_id: Any, user_message: Any) -> None
     (a failed pick hands the message to the lead, whose answer pushes)."""
     if not isinstance(turn_id, str) or not turn_id:
         return
-    if not any(LEAD_ROUTING_MARK in part for part in _text_parts(user_message)) or not _is_room_turn(session_id):
+    if not any(map(room_rules.is_lead_routing_prompt, _text_parts(user_message))) or not _is_room_turn(session_id):
         return
     with _turn_started_lock:
         _routing_turns.pop(turn_id, None)

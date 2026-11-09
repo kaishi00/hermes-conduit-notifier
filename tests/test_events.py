@@ -738,6 +738,19 @@ def test_redact_event_keeps_only_the_rooms_ids():
     assert redacted["title_label"] == "room.invite"
 
 
+def test_every_copy_of_the_room_kinds_agrees():
+    # A turn's room id rides sealed (e2e), content-free and in the relay's
+    # plain copy: each keeps its own list of the kinds (issue 2064).
+    import re
+
+    import e2e
+    from events import ROOM_KINDS
+    relay = (Path(__file__).resolve().parents[1] / "relay" / "src" / "server.mjs").read_text(encoding="utf-8")
+    [listed] = re.findall(r"const ROOM_REPLY_TYPES = new Set\(\[([^\]]*)\]\)", relay)
+    assert set(e2e._ROOM_KINDS) == set(ROOM_KINDS)
+    assert set(re.findall(r"'([^']+)'", listed)) == set(ROOM_KINDS)
+
+
 def test_a_slot_is_hashed_kept_through_redaction_and_only_on_a_turns_end():
     # #1579: which notification a push replaces, when it isn't the chat's.
     event = push_event("response.ready", identifier="response:1", session_id="s", slot="key:default:report")
