@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.146.1 (2026-11-08)
+## 0.147.1 (2026-11-09)
 
 ### Fixes
 - With a memory provider such as Hindsight or Honcho, every Pulse report,
@@ -21,6 +21,16 @@ checks it). The format is fixed, because Conduit reads it:
   and a provider that reprocesses the whole chat each time could cost
   dollars a day. Pulse's turns now stay out of the memory provider; what
   you write in the Pulse chat is saved as before.
+
+## 0.147.0 (2026-11-08)
+
+### New and improved
+- Hermes can show you options to choose between when they're easier to see
+  than to describe: layouts, colours, charts, posters. Tap the one you like
+  right in the chat, or open a review to mark several choices Approve,
+  Change or Skip with notes, and Hermes comes back with the next round.
+- In Bot Mode, a workstream draws the options and your Bot Chat shows them:
+  your marks go straight back to that workstream, every round.
 
 ## 0.146.0 (2026-11-08)
 

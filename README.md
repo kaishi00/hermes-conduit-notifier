@@ -1532,7 +1532,8 @@ workstream. Change it in Conduit (Edit Bot > Work) or here:
   its next turn through Conduit.
 - Strict leaves the coordinator the work tools, `clarify`, `memory` and
   `conduit_show` (its cards are its own: a workstream's would show in the
-  workstream's chat, not the Bot Chat);
+  workstream's chat, not the Bot Chat; a review card of a workstream's
+  options goes with `for` set to it, and the user's marks go to it);
   lookups adds read-only lookups (past chats, web search, skills, Conduit's
   health, location and inbox, and Apple Maps through `conduit_maps`, its
   navigate's Go button included, which shows in the chat that asked).
@@ -2029,7 +2030,7 @@ naming what's missing. If Hermes' session store (`state.db`) can't be read
 when the plugin needs it to tell whether a session is a room, the plugin logs
 a warning and treats that session as an ordinary chat.
 
-## Pulse and memory providers (plugin 0.146.1+)
+## Pulse and memory providers (plugin 0.147.1+)
 
 Pulse's reports, morning briefs, follow-ups and delivery checks are hidden
 turns in the Pulse chat, and a report carries everything Pulse gathered for
@@ -2722,6 +2723,40 @@ Conduit owns the fonts, colors and spacing. There is no HTML or script.
   draws them. Until every Conduit that draws cards does, composed cards are
   left out and buttons and fields are taken off other cards, and Hermes is
   told to offer them in its reply.
+
+### Review cards (plugin 0.147+)
+
+A `review` card shows options to choose between when they're easier to see
+than to describe: layouts, colours, charts, posters, a before and after.
+It's a mockup review in the chat, not a code review.
+
+- **Input** (`inputs.review`): `decisions`, up to six, each a `title`, a
+  line of `text`, a `layout` (`side`, `switch` or `before_after`) and 2 to
+  6 `options`, each a `label`, a line of `text`, `recommended` on one, and
+  one of `html` (a self-contained page, up to 300,000 characters), `file`
+  (the absolute path of an `.html` page or a picture on this host) or
+  `image` (an https link). To show the next round, give the review's `id`
+  from the earlier card.
+- **Kept on the host.** The pages go in the root home's `conduit-reviews/`,
+  round by round (up to 6 MB a round, 99 rounds, 300 reviews, a month
+  untouched); the card carries labels and ids only. Conduit reads a round
+  with `GET /boards/reviews?id=&round=` (capability `review-cards`).
+- **Marks.** One decision is a quick pick the user taps in the chat; several
+  open the review sheet, where each option draws at a phone, tablet or
+  desktop width, light or dark, and each decision is marked Approve, Change
+  or Skip with a note. Conduit posts the marks as a tap (`POST /boards/taps`,
+  `action: "review"`, with `review.round`, `review.marks` and a note), kept
+  with the round, then sends the user's message ("Sent review · Recipe app
+  home", "Picked B · Line"); that turn hears the marks once. The next
+  round's card lists what earlier rounds approved or skipped.
+- **Bot Mode.** A workstream writes the options' pages and reports them; the
+  Bot Chat shows the review with `for` set to it, like `W3`. The plugin
+  keeps that workstream with the review and sends the user's marks on to it
+  as a follow-up (reopening it if it was resolved); every later round
+  stays with it, and a round for another workstream is refused.
+- **Where.** Typed chats and the Bot Chat only: a group room (votes come
+  later), a workstream's own chat and a call get a note to describe the
+  options instead. Desktop and messaging apps get the decisions' Markdown.
 
 ### Diff cards (plugin 0.133+)
 
