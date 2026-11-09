@@ -172,3 +172,25 @@ def test_an_update_to_an_open_card_about_something_else_says_so(tmp_path):
     made = card(pulse_store, subject="job:default:41", created_at=1000.0)
     pick, _ = picks.parse({"line": "x", "incident": {"card": f"pc_{made}"}})
     assert picks.resolve(pulse_store, pick, "item:3", 2000.0) == (picks.NEW, None, "update_subject")
+
+
+def test_the_next_report_reads_a_closed_incident_as_over_not_done(tmp_path):
+    pulse_store = fresh(tmp_path)
+    now = 10 * 86400.0
+    closed = card(pulse_store, subject="job:default:41", created_at=now - 3600)
+    done = card(pulse_store, subject="item:7", created_at=now - 3600)
+    pulse_store.add_cards([], closes=[closed], now=now - 60)
+    pulse_store.mark_done(done, None, closed_by="user", now=now - 60)
+    text = pulse.candidates.recent_section(pulse_store, None, now)
+    assert f"pc_{closed} " in text and "(closed: that occurrence ended)" in text
+    line = next(line for line in text.splitlines() if f"pc_{done} " in line)
+    assert line.endswith("(done)")
+
+
+def test_a_card_a_pick_updated_lately_is_still_in_the_recent_list(tmp_path):
+    pulse_store = fresh(tmp_path)
+    now = 30 * 86400.0
+    old = card(pulse_store, subject="job:default:41", created_at=now - pulse.candidates.RECENT_S - 3600)
+    assert f"pc_{old} " not in pulse.candidates.recent_section(pulse_store, None, now)
+    pulse_store.add_cards([], updates=[(old, {"news": "Audit failed again", "fallback": {}, "link": None})], now=now - 60)
+    assert f"pc_{old} " in pulse.candidates.recent_section(pulse_store, None, now)

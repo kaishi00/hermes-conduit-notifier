@@ -176,8 +176,9 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
     follow-ups and morning briefs), newest first, and what the user did with
     each; first, what the look ahead holds for a place (pulse_places), so
     it isn't raised twice."""
+    # A card a pick updated lately counts from then, so a pick can still name it.
     cards = [card for card in pulse_store.cards(RECENT_CARDS)
-             if card["kind"] in RECENT_KINDS and card["created_at"] >= now - RECENT_S]
+             if card["kind"] in RECENT_KINDS and max(card["created_at"], card.get("updated_at") or 0) >= now - RECENT_S]
     marks = pulse_store.done_marks([card["id"] for card in cards])
     lines, used = [], 0
     for card in pulse_store.moment_cards():
@@ -198,7 +199,10 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
         did = (" (rated useful)" if card["rating"] == "up"
                else " (the user said it came at the wrong time)" if card["reason"] == store.WRONG_TIME
                else " (rated not useful)" if card["rating"] == "down" else "")
-        did += " (done)" if card["id"] in marks else " (put away)" if card["dismissed_at"] else ""
+        # One a pick closed is over, not done by the user: the same thing
+        # happening again is new (pulse_picks).
+        did += ((" (closed: that occurrence ended)" if marks[card["id"]]["done_by"] == store.INCIDENT else " (done)")
+                if card["id"] in marks else " (put away)" if card["dismissed_at"] else "")
         ref = f" (remembered #{card['item_id']})" if card["item_id"] is not None else ""
         # Each card by its permanent id, so a pick can update or close it (pulse_picks).
         line = (f"- {pulse_picks.card_id_text(card['id'])} {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
@@ -356,7 +360,8 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
             source = "calendar"
     elif follows is not None or reminders:
         listed_reminders = follows.reminders if follows is not None else reminders or {}
-        reminder = (listed_reminders.get(str(entry.get("reminder") or "").strip().lower())
+        # A pick names it as its "subject" too (pulse_picks.PICK_RULES).
+        reminder = (listed_reminders.get(str(entry.get("reminder") or entry.get("subject") or "").strip().lower())
                     or (_reminder_named(listed_reminders, text, entry.get("why")) if source == "reminders" else None))
         if reminder is not None and str(reminder.get("id") or ""):
             ref, source = reminder_ref(reminder), "reminders"
@@ -365,7 +370,7 @@ def found_row(entry: dict, chats: dict[str, tuple[str, str]], zone: Optional[tzi
         if follows is not None:
             events, upcoming = follows.events, follows.upcoming
         listed = events or {}
-        event = listed.get(str(entry.get("event") or "").strip().lower())
+        event = listed.get(str(entry.get("event") or entry.get("subject") or "").strip().lower())
         if event is not None:
             source = source if where else "calendar"  # a chat it named stays its source
         else:  # by its title: the model's source stands
