@@ -383,3 +383,20 @@ def test_senders_past_the_cap_go_with_their_files_gone_ones_first(tmp_path, monk
 
     files.sweep()
     assert set(files.store.read()["kept"]) == {f"{FOLDER}/old.jpg"}, "the sweep forgets files that aren't here"
+
+
+def test_a_guest_takes_a_disbanded_rooms_files_but_not_one_it_left(copies):  # noqa: F811
+    # GLM on notifier #629: a room's last files were refused once it disbanded, though its pages still came.
+    room_id = started(copies)
+    for side, status in ((copies.laifu, "left"), (copies.mona, "ended")):
+        with side.store.update() as state:
+            for invite in state["invites"].values():
+                if invite["room_id"] == room_id:
+                    invite["status"] = status
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    post(copies, room_id, f"@file:{path}\nhi")
+
+    copies.furina.pass_once()
+
+    assert not carried(copies, "laifu", "shot.jpg").exists()
+    assert carried(copies, "mona", "shot.jpg").read_bytes() == b"\xff\xd8 shot"

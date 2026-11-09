@@ -57,7 +57,8 @@ RETENTION_S = 30 * 24 * 3600
 # How often a guest sweeps the room files it keeps, whether or not more arrive.
 SWEEP_S = 3600
 # Uploads (dashboard/api/rooms.py) and carried files check the disk and write under this one lock, in
-# the root home's conduit folder, so they can't both pass the free floor and then fill it together.
+# the root home's conduit folder, so they can't both pass the free floor and then fill it together. Pieces
+# still arriving check it under this process's lock only: INCOMING_BYTES bounds what they can add.
 LOCK_NAME = "room-files.lock"
 # Pieces of files not yet whole, together.
 INCOMING_BYTES = 64 * 1024 * 1024
@@ -372,7 +373,7 @@ class Files:
             return
         state = self.rooms.store.read()
         if not any(invite["link"] == received.link_id and invite["room_id"] == body["room_id"]
-                   and invite.get("status") == "started" for invite in state["invites"].values()):
+                   and invite.get("status") in ("started", "ended") for invite in state["invites"].values()):
             logger.info("Linked Rooms dropped a room.file from Link %s for a room it isn't in", received.link_id)
             return
         target = files_root(self.rooms.root) / body["folder"] / body["name"]
