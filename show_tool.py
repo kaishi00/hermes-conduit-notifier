@@ -755,7 +755,11 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
         if layout:
             problems.insert(0, TEXT_LAYOUT_NOTE)
         return _as_text("group_room", ROOM_NOTE, cards, problems)
-    source = _turn_source() if cards else None
+    # The plugin's own work update was sent by no client: the Bot Chat is
+    # Conduit's, and its chat draws the cards from this answer as a typed
+    # turn's does, whichever client has it open.
+    woken = turn_surface.woken(session)
+    source = _turn_source() if cards and not woken else None
     if source == "desktop" and _desktop_app():
         # Hermes Desktop (not the web dashboard, which turn_source counts as
         # "desktop" too) draws a board through the plugin's Desktop half,
@@ -823,7 +827,7 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
     fallback = bool(cards) and not given_markdown
     if fallback:
         markdown = _fallback(cards)
-    if turn_surface.turn_entry(session) == "typed":
+    if woken or turn_surface.turn_entry(session) == "typed":
         # A typed message's chat is open, not a call's screen: the card would
         # wait unclaimed for a screen that isn't there, and Hermes would tell
         # the user to look at it (hermes-conduit#1808). The chat draws the

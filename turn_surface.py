@@ -317,10 +317,37 @@ _turn_entries_lock = threading.Lock()
 MAX_TURN_ENTRIES = 256
 
 
-def start_turn(session_id: Any) -> None:
+# The plugin's own work updates into a Bot Chat (work_tool.WAKE, ASK_WAKE)
+# start with this. Hermes binds such a turn to whichever client has the chat
+# open, Hermes Desktop or a browser, though no client sent it.
+WAKE_PREFIX = "Work update from "
+_woken: "set[str]" = set()
+
+
+def start_turn(session_id: Any, user_message: Any = None) -> None:
     """A turn of ``session_id`` starts: what an earlier turn's message was
-    sent as no longer counts."""
+    sent as no longer counts. ``user_message`` says whether it's the
+    plugin's own work update."""
     _keep_entry(session_id, None)
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _turn_entries_lock:
+        _woken.discard(session_id)
+        if isinstance(user_message, str) and user_message.startswith(WAKE_PREFIX):
+            _woken.add(session_id)
+            while len(_woken) > MAX_TURN_ENTRIES:
+                _woken.pop()
+
+
+def woken(session_id: Any) -> bool:
+    """Whether ``session_id``'s running turn answers the plugin's own work
+    update, which no client sent: the clients that have the chat open don't
+    say where it came from (.52, 2026-11-09: Desktop alone had the Bot Chat
+    open, and its review card was refused as not_conduit)."""
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    with _turn_entries_lock:
+        return session_id in _woken
 
 
 def turn_entry(session_id: Any) -> Optional[str]:

@@ -455,6 +455,21 @@ def test_a_card_on_disk_keeps_only_valid_rich_cards(store):
     assert "fallback" not in card, "only a true flag is kept"
 
 
+def test_the_plugins_own_work_update_draws_cards_whichever_client_has_the_chat_open(tool_home, monkeypatch):
+    # .52, 2026-11-09: Desktop alone had Furina's Bot Chat open when W18's
+    # update came, and the review card was refused as not_conduit.
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    monkeypatch.setattr(tool, "_turn_source", lambda: "desktop")
+    tool.turn_surface.start_turn("s1", "Work update from your workstreams. ...")
+    try:
+        answer = _call({"title": "Dinner", "cards": [MAP]})
+        assert answer["ok"] is True and answer["cards"] and answer["note"].startswith(tool.IN_CHAT_NOTE), answer
+        tool.turn_surface.start_turn("s1", "Show me dinner")
+        assert _call({"title": "Dinner", "cards": [MAP]})["error"] == "not_conduit", "the user's own turn as before"
+    finally:
+        tool.turn_surface.start_turn("s1")
+
+
 def test_a_turn_source_lookup_that_fails_draws_no_cards(tool_home, monkeypatch):
     _exchange(PresentStore(tool_home), features=("chat-cards",))
 

@@ -1189,7 +1189,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     if not forks.inside():
         # A fork takes its chat's id but isn't a turn of it: the running
         # turn's entry stays for its tools.
-        turn_surface.start_turn(session_id)
+        turn_surface.start_turn(session_id, kwargs.get("user_message"))
     if forks.inside():
         # Pulse holds a fork of its home chat as it holds the chat's turns:
         # only one that started after its attempt (pulse._held_home_turn).

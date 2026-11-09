@@ -21,6 +21,8 @@ checks it). The format is fixed, because Conduit reads it:
   you're using. The older one shows less until you update it.
 - When a bot's tool call can't be read, it now hears exactly what was wrong
   with it, so it can fix the call instead of giving up on the card.
+- A card your Bot Chat shows when a workstream reports back is no longer
+  refused because Hermes Desktop or a browser had the chat open at the time.
 
 ## 0.151.0 (2026-11-09)
 
