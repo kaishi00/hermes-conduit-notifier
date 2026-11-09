@@ -3339,6 +3339,26 @@ def shown_board(session_id: Any, ref: Any) -> tuple[Optional[dict], str]:
     return kept, ""
 
 
+def review_naming(session_id: Any, text: Any) -> Optional[str]:
+    """The workstream whose kept review (the one the plugin built from its
+    report, _keep_options) has two or more options whose files ``text``
+    names, for a conduit_show this Bot Chat wrote out as text with the
+    files in its Markdown (leaked_calls); None when there's none."""
+    home = _home()
+    if not isinstance(text, str) or not text or home is None or not work_store.exists(home) \
+            or not is_bot_chat(session_id, home):
+        return None
+    store = work_store.Store(home)
+    for key in store.meta_keys(_SHOWN):
+        kept = _shown(store, key[len(_SHOWN):])
+        reviews = [card for card in (kept or {}).get("cards", []) if card.get("type") == "review"]
+        files = [option.get("file") for card in reviews for decision in card["review"].get("decisions", [])
+                 for option in decision.get("options", []) if isinstance(option.get("file"), str)]
+        if len(files) >= 2 and sum(1 for path in files if path in text) >= 2:
+            return key[len(_SHOWN):]
+    return None
+
+
 def _shown_line(store: work_store.Store, work: work_store.Work) -> tuple[str, Any]:
     """The update's word on the cards the workstream showed in its own chat
     that no update has named yet (this turn's, or an interrupted or stopped

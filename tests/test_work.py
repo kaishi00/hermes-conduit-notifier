@@ -3,6 +3,7 @@ designs/bot-mode-coordinator): a bot's Bot Chat coordinates work sessions
 of its own, names them by ref only, and keeps to its policy."""
 import contextvars
 import json
+import re
 import pathlib
 import importlib.util
 import sys
@@ -5774,6 +5775,44 @@ def test_reported_options_are_one_short_call_away_and_stay_one_review(on, home, 
     second = show._handle({"from_work": "W1"}, BOT_CHAT, lambda _: False, reviews=Host())
     assert second["ok"], second
     assert seen[-1][0]["review"]["id"] == review_id and seen[-1][0]["review"]["round"] == 2
+
+
+def test_a_written_out_show_naming_a_reports_pages_becomes_its_review(on, home, hermes, monkeypatch, tmp_path):
+    # Eric 2026-11-09: Furina wrote conduit_show out as text again, with the
+    # concepts' files in its Markdown; the plugin shows the review it built.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: no timer races it on a slow runner
+    show = sys.modules["conduit_push.show_tool"]
+    from conduit_push import room_boards, room_identity
+    monkeypatch.setattr(room_identity, "root_home", lambda home=None: tmp_path)
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(show, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(show.client, "load_state", lambda: {"credential": "c"})
+    monkeypatch.setattr(show, "_turn_source", lambda: "conduit")
+    monkeypatch.setattr(show.PresentStore, "has_feature_everywhere", lambda self, feature: True)
+    monkeypatch.setattr(show.PresentStore, "has_feature", lambda self, feature: True)
+    monkeypatch.setattr(plugin, "_in_room_with_others", lambda session_id, platform=None: False)
+    monkeypatch.setattr(work, "is_bot_chat", lambda session_id, home=None: session_id == BOT_CHAT)
+    pages = [tmp_path / "concept-1-minimal-dark.html", tmp_path / "concept-2-vibrant.html"]
+    for page in pages:
+        page.write_text("<h1>Hi</h1>")
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_started(WORKER)
+    work.turn_ended(WORKER, f"Ready: {pages[0]} and {pages[1]}")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    written = ("Here are the concepts.<tool_call> <function=conduit_show> <args> <title>Concepts</title> "
+               f"<markdown>**Concept 1**\nFile: {pages[0]}\n\n**Concept 2**\nFile: {pages[1]}</markdown> </args> </")
+    assert work.review_naming(BOT_CHAT, written) == "W1"
+    assert work.review_naming(WORKER, written) is None, "only the Bot Chat shows a workstream's review"
+    assert work.review_naming(BOT_CHAT, f"Only {pages[0]}") is None, "it names two of its files or more"
+    out = plugin._transform_llm_output(response_text=written, session_id=BOT_CHAT, model="m", platform="api_server")
+    found = re.fullmatch(r'Here are the concepts\.\n\n::conduit-board\{id="(cb-[0-9a-f]{12})"\}', out or "")
+    assert found, out
+    [card] = room_boards.DesktopBoards(tmp_path).get(found.group(1))["cards"]
+    assert card["type"] == "review" and card["review"]["for"] == "W1" and card["review"]["round"] == 1
+    assert [option["label"] for option in card["review"]["decisions"][0]["options"]] == \
+        ["Concept 1 minimal dark", "Concept 2 vibrant"]
 
 
 def test_reported_options_keep_an_interrupted_turns_cards_and_every_option(on, home, hermes, tmp_path, monkeypatch):
