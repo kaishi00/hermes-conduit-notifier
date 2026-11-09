@@ -445,3 +445,23 @@ def test_a_folder_that_wont_go_isnt_counted_as_freed(tmp_path, monkeypatch):
     monkeypatch.setattr(files_module.shutil, "rmtree", lambda *_args, **_kwargs: None)
 
     assert files_module._room_for(root, 5, stuck.stat().st_mtime + 60) is False
+
+
+def test_a_disbanded_rooms_last_files_go_after_its_last_page(copies):  # noqa: F811
+    # Greptile on notifier #629: once a disbanded room's copy had its end, the files still owed were dropped.
+    room_id = started(copies)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 last")
+    copies.furina.disbanded(room_id)
+    from test_room_copies import copies_module
+
+    with copies.furina.store.update() as state:
+        copies_module._copy_of(state["drafts"][room_id], "link1", keep=True)["done"] = True
+    store = files_module.Store(copies.tmp_path / "furina")
+    with store.update() as state:
+        state["out"]["link1"] = {f"{FOLDER}/shot.jpg": {
+            "room": room_id, "rooms": [room_id], "size": path.stat().st_size, "base": str(path.parent.parent),
+            "at": None, "tries": 0, "done": False, "noted": 0}}
+
+    copies.furina.files.send_files()
+
+    assert {link for link, _, _ in _sent(copies, "room.file")} == {"link1"}

@@ -274,7 +274,7 @@ class Files:
             rooms_for: dict[str, str] = {}
             for key, entry in sorted(out.items()):
                 receiving = [room_id for room_id in _rooms_of(entry) if room_id in drafts
-                             and link_id in room_copies._receiving(drafts[room_id])]
+                             and _owed(drafts[room_id], link_id)]
                 if not receiving:
                     # Nobody of that Link's is in its rooms any more, so its host wouldn't keep the file.
                     self._drop(link_id, key)
@@ -498,6 +498,16 @@ class Files:
             logger.log(level, "Linked Rooms couldn't keep room file %s/%s (%s)", body["folder"], body["name"],
                        type(exc).__name__)
             return False
+
+
+def _owed(draft: dict[str, Any], link_id: str) -> bool:
+    """Whether a room still owes ``link_id`` its files: one of its people's agents is in it, as for its
+    pages (room_copies._receiving), and in a room that ended even once its copy has the end, since the
+    last files can come after the last page."""
+    receiving = room_copies._receiving({**draft, "copies": {
+        link: {key: value for key, value in copy.items() if key != "done"}
+        for link, copy in (draft.get("copies") or {}).items()}})
+    return link_id in receiving
 
 
 def _rooms_of(entry: dict[str, Any]) -> list[str]:
