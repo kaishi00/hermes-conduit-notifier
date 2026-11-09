@@ -806,6 +806,19 @@ def test_quick_stops_a_turn_that_runs_long(on, hermes, monkeypatch):
     assert list(work._steps) == [(BOT_CHAT, "t3")]
 
 
+def test_quick_without_hermes_turn_ids_starts_again_after_a_minute(on, hermes, monkeypatch):
+    # A Hermes that names no turn: the budget spans a minute, not the half hour an entry is kept.
+    on.set_policy("lookups")
+    clock = [1000.0]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+    for _ in range(work.QUICK_STEPS):
+        assert work.tool_block(BOT_CHAT, "terminal", {}) is None
+    assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"
+    clock[0] += work.QUICK_S + 1
+    assert work.tool_block(BOT_CHAT, "terminal", {}) is None
+    assert work._steps[(BOT_CHAT, "")][1] == 1
+
+
 def test_quick_hands_subagents_to_a_workstream(on, hermes):
     on.set_policy("lookups")
     block = work.tool_block(BOT_CHAT, "delegate_task", {}, turn_id="t1")

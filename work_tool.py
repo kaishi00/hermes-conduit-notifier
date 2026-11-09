@@ -2892,13 +2892,17 @@ def _take_steps(session_id: Any, turn_id: Any, count: int) -> Optional[int]:
     """Counts ``count`` more steps in the Bot Chat's turn if its budget
     holds them (QUICK_STEPS, taken within QUICK_S of the first) and answers
     None; else takes none and answers how many steps are left (0 once its
-    time is up): the rest is a workstream's."""
+    time is up): the rest is a workstream's. A Hermes that names no turn
+    gets a fresh budget once QUICK_S has passed, so its next turn isn't
+    charged for the last one's steps."""
     key = (str(session_id or ""), str(turn_id or ""))
     now = time.monotonic()
     with _steps_lock:
         for stale in [key for key, (first, _) in _steps.items() if now - first > _STEP_KEEP_S]:
             del _steps[stale]
         first, taken = _steps.get(key, (now, 0))
+        if not turn_id and now - first > QUICK_S:
+            first, taken = now, 0
         if taken and now - first > QUICK_S:
             return 0
         if taken + count > QUICK_STEPS:
