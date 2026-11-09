@@ -36,6 +36,10 @@ _FUNCTION = re.compile(r"<function=(?P<name>[\w.-]{1,64})>(?P<body>.*?)(?:</func
 _PARAMETER = re.compile(r"<parameter=(?P<key>[\w.-]{1,64})>(?P<value>.*?)(?:</parameter>|(?=<parameter=)|\Z)",
                         re.DOTALL)
 _ARGS = re.compile(r"<(?:args|arguments)>(?P<body>.*?)(?:</(?:args|arguments)>|\Z)", re.DOTALL)
+# A fenced example in a reply (how to call it) is text, never a call.
+_FENCE = re.compile(r"^[ \t]*(?P<fence>```|~~~).*?(?:^[ \t]*(?P=fence)|\Z)", re.DOTALL | re.MULTILINE)
+# Arguments that are text: markup in them (HTML in Markdown) stays as written.
+TEXT_ARGS = frozenset({"title", "subtitle", "markdown"})
 MAX_REPLY = 200_000
 
 
@@ -52,8 +56,11 @@ def shows(text: Any) -> list[Leak]:
     """The conduit_show calls ``text`` writes out, in order."""
     if not isinstance(text, str) or "<tool_call>" not in text or len(text) > MAX_REPLY:
         return []
+    fenced = [(match.start(), match.end()) for match in _FENCE.finditer(text)]
     found = []
     for match in _BLOCK.finditer(text):
+        if any(start <= match.start() < end for start, end in fenced):
+            continue
         call = _call(match.group("body"))
         if call is None:
             continue
@@ -75,7 +82,8 @@ def _call(body: str) -> tuple[str, dict[str, Any]] | None:
         return None
     inner = function.group("body")
     if "<parameter=" in inner:
-        return function.group("name"), {m.group("key"): _value(m.group("value"))
+        return function.group("name"), {m.group("key"): (m.group("value").strip() if m.group("key") in TEXT_ARGS
+                                                         else _value(m.group("value")))
                                         for m in _PARAMETER.finditer(inner)}
     args = _ARGS.search(inner)
     if args is not None:
@@ -106,7 +114,7 @@ def _arguments(value: Any) -> dict[str, Any]:
 
 def _elements(body: str) -> dict[str, Any]:
     """An ``<args>`` element's arguments, one element each."""
-    value = _tree(body)
+    value = _tree(body, text_keys=TEXT_ARGS)
     return value if isinstance(value, dict) else {}
 
 
@@ -130,12 +138,14 @@ _TAG = re.compile(r"<(?P<close>/?)(?P<name>[A-Za-z_][\w-]{0,63})>")
 MAX_DEPTH = 12
 
 
-def _tree(body: str) -> Any:
+def _tree(body: str, text_keys: frozenset[str] = frozenset()) -> Any:
     """Elements as values: an element holding only text is its text (JSON
     where it reads as JSON), one holding elements a dict of them, and one
-    whose elements share a name (``<item>``) a list. A tag left open closes
-    where its parent does; other markup in text stays text."""
-    root: list[Any] = ["", [], []]  # name, children, text
+    whose elements share a name (``<item>``) a list. One holding text and
+    elements both (HTML in Markdown) is its text as written, and so is a
+    top-level element named in ``text_keys``. A tag left open closes where
+    its parent does; other markup in text stays text."""
+    root: list[Any] = ["", [], [], 0, len(body)]  # name, children, text, where its inside starts and ends
     stack = [root]
     at = 0
     for match in _TAG.finditer(body):
@@ -145,32 +155,38 @@ def _tree(body: str) -> Any:
         if match.group("close"):
             if any(node[0] == name for node in stack[1:]):
                 while stack[-1][0] != name:
-                    stack.pop()
-                stack.pop()
+                    stack.pop()[4] = match.start()
+                stack.pop()[4] = match.start()
             else:
                 stack[-1][2].append(match.group(0))  # a stray closing tag is text
         elif len(stack) <= MAX_DEPTH:
-            node = [name, [], []]
+            node = [name, [], [], match.end(), len(body)]
             stack[-1][1].append(node)
             stack.append(node)
         else:
             stack[-1][2].append(match.group(0))
     stack[-1][2].append(body[at:])
-    return _node_value(root)
+    if text_keys:
+        for child in root[1]:
+            if child[0] in text_keys:
+                child[1], child[2] = [], [body[child[3]:child[4]]]
+    return _node_value(root, body)
 
 
-def _node_value(node: list[Any]) -> Any:
+def _node_value(node: list[Any], body: str) -> Any:
     children = node[1]
+    if children and "".join(node[2]).strip():
+        return body[node[3]:node[4]].strip()  # text with markup in it
     if not children:
         text = "".join(node[2]).strip()
         parsed = _json(text) if text[:1] in ("{", "[") else None
         return parsed if parsed is not None else text
     names = [child[0] for child in children]
     if len(children) > 1 and len(set(names)) == 1 or names == ["item"]:
-        return [_node_value(child) for child in children]
+        return [_node_value(child, body) for child in children]
     value: dict[str, Any] = {}
     for child in children:
-        item = _node_value(child)
+        item = _node_value(child, body)
         if child[0] in value:
             value[child[0]] = (value[child[0]] if isinstance(value[child[0]], list) else [value[child[0]]]) + [item]
         else:

@@ -55,7 +55,20 @@ def test_other_calls_and_plain_replies_are_left_alone():
     # Markup in a value stays its text; a tag left open closes with its parent.
     [leak] = leaked.shows("<tool_call><function=conduit_show><args><title>A <b>bold</b> one</title>"
                           "<markdown>x</args></function></tool_call>")
-    assert leak.args["markdown"] == "x"
+    assert leak.args["markdown"] == "x" and leak.args["title"] == "A <b>bold</b> one"
+    # HTML in Markdown is the Markdown as written, in either shape.
+    [leak] = leaked.shows("<tool_call><function=conduit_show><args><markdown>Run <code>x</code> next</markdown>"
+                          "<cards><item><type>note</type><body>A <i>b</i></body></item></cards></args></function>"
+                          "</tool_call>")
+    assert leak.args["markdown"] == "Run <code>x</code> next"
+    assert leak.args["cards"] == [{"type": "note", "body": "A <i>b</i>"}]
+    [leak] = leaked.shows("<tool_call><function=conduit_show><parameter=markdown><b>Bold</b></parameter>"
+                          "</function></tool_call>")
+    assert leak.args["markdown"] == "<b>Bold</b>"
+    # A fenced example of a call is the reply's text.
+    example = "Call it like this:\n```xml\n" + REVIEW_XML + "\n```\nThen it shows."
+    assert leaked.shows(example) == []
+    assert len(leaked.shows(example + "\n" + REVIEW_XML)) == 1
 
 
 def test_a_written_out_call_is_shown_and_its_line_takes_its_place(tmp_path, monkeypatch):
@@ -84,3 +97,26 @@ def test_a_written_out_call_is_shown_and_its_line_takes_its_place(tmp_path, monk
     assert out.startswith("I keep hitting") and "File: /root/scratch/concept-2-vibrant-gradient.html" in out
     assert plugin._transform_llm_output(response_text="Plain.", session_id="s1", model="m",
                                         platform="api_server") is None
+    # A call its turn's rules would block (a Pulse turn's) isn't made: its
+    # cards are the reply's text.
+    from conduit_push import pulse
+    monkeypatch.setattr(pulse, "pre_tool_call", lambda session_id, turn_id, tool_name=None, args=None:
+                        {"action": "block", "message": "no"} if turn_id == "pulse-1" else None)
+    shown = []
+    monkeypatch.setattr(show_tool, "handle", lambda *a, **k: shown.append(a) or "{}")
+    out = plugin._transform_llm_output(response_text="Here you go." + cards, session_id="s1", model="m",
+                                       platform="api_server", turn_id="pulse-1")
+    assert not shown and "conduit-board" not in out and "<tool_call>" not in out and out.startswith("Here you go.")
+
+
+def test_a_rescued_board_is_kept_for_the_coordinator(tmp_path, monkeypatch):
+    plugin = _plugin()
+    from conduit_push import show_tool, work_tool
+    answer = json.dumps({"ok": True, "cards": [MAP]})
+    monkeypatch.setattr(show_tool, "handle", lambda *a, **k: answer)
+    monkeypatch.setattr(plugin, "_keep_line_board", lambda board: "cb-0123456789ab")
+    kept = []
+    monkeypatch.setattr(work_tool, "card_shown", lambda *a: kept.append(a))
+    out = plugin._shown_in_place({"title": "Dinner", "cards": [MAP]}, "work-s", "")
+    assert out == '::conduit-board{id="cb-0123456789ab"}'
+    assert kept == [("work-s", "conduit_show", {"title": "Dinner", "cards": [MAP]}, answer)]
