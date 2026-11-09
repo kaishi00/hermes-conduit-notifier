@@ -781,6 +781,18 @@ def test_quick_counts_what_a_bridged_call_runs(on, hermes):
     assert bridged["action"] == "block" and "read_file didn't run" in bridged["message"]
 
 
+def test_quick_says_when_only_a_batch_is_too_big(on, hermes):
+    # GLM's review: Hermes runs a batch whole, so one past what's left is refused whole,
+    # and the bot is told single calls still fit rather than that the turn is done here.
+    on.set_policy("lookups")
+    batch = {"calls": [{"name": "web_search", "arguments": {}} for _ in range(4)]}
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1") is None
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1") is None
+    block = work.tool_block(BOT_CHAT, "tool_call", batch, turn_id="t1")
+    assert block["message"] == work.STEP_BATCH_BLOCK.format(count=4, left=3)
+    assert work.tool_block(BOT_CHAT, "web_search", {}, turn_id="t1") is None  # one at a time still runs
+
+
 def test_quick_stops_a_turn_that_runs_long(on, hermes, monkeypatch):
     on.set_policy("lookups")
     clock = [1000.0]

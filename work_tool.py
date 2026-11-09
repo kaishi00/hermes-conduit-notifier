@@ -169,6 +169,11 @@ STEP_BLOCK = ("This is turning into longer work than the Bot Chat should hold up
               "Start a workstream for the rest with work_start, saying in its instructions what you've "
               "found or done so far, or send it to one that's already on it with work_send. Then tell the user in a "
               "line that it's running in the background.")
+# A batch of calls through tool_call bigger than what's left of the budget:
+# Hermes runs a batch whole, so none of it ran, but single calls still fit.
+STEP_BATCH_BLOCK = ("That tool_call batch has {count} calls, more than the {left} quick steps this turn has left, so "
+                    "none of it ran. Make the calls you still need one at a time, or start a workstream for the rest "
+                    "with work_start, saying in its instructions what you've found or done so far.")
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get questions and work through work_ask, which "
                        "queues it for that bot's coordinator and brings its answer back to you. Use work_ask "
                        'instead, like tool_call {"name": "work_ask", "arguments": {"bot": "Nahida", "text": "..."}}.')
@@ -2868,8 +2873,12 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
         if mode != "lookups" or called in BACKGROUND:
             return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
         steps.append(called)
-    if steps and not _take_steps(session_id, turn_id, len(steps)):
-        return {"action": "block", "message": STEP_BLOCK.format(tool=steps[0] or "that tool")}
+    if steps:
+        left = _take_steps(session_id, turn_id, len(steps))
+        if left is not None:
+            if len(steps) > 1 and left > 0:
+                return {"action": "block", "message": STEP_BATCH_BLOCK.format(count=len(steps), left=left)}
+            return {"action": "block", "message": STEP_BLOCK.format(tool=steps[0] or "that tool")}
     return None
 
 
@@ -2879,22 +2888,25 @@ _steps: dict[tuple[str, str], tuple[float, int]] = {}
 _steps_lock = threading.Lock()
 
 
-def _take_steps(session_id: Any, turn_id: Any, count: int) -> bool:
+def _take_steps(session_id: Any, turn_id: Any, count: int) -> Optional[int]:
     """Counts ``count`` more steps in the Bot Chat's turn if its budget
-    holds them (QUICK_STEPS, taken within QUICK_S of the first), else takes
-    none: the rest is a workstream's."""
+    holds them (QUICK_STEPS, taken within QUICK_S of the first) and answers
+    None; else takes none and answers how many steps are left (0 once its
+    time is up): the rest is a workstream's."""
     key = (str(session_id or ""), str(turn_id or ""))
     now = time.monotonic()
     with _steps_lock:
         for stale in [key for key, (first, _) in _steps.items() if now - first > _STEP_KEEP_S]:
             del _steps[stale]
         first, taken = _steps.get(key, (now, 0))
-        if taken + count > QUICK_STEPS or (taken and now - first > QUICK_S):
-            return False
+        if taken and now - first > QUICK_S:
+            return 0
+        if taken + count > QUICK_STEPS:
+            return max(QUICK_STEPS - taken, 0)
         _steps[key] = (first, taken + count)
         while len(_steps) > _STEP_TURNS:
             del _steps[next(iter(_steps))]
-    return True
+    return None
 
 
 # Each home's memory provider and its tools, by config.yaml's mtime.
