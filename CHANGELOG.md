@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.147.2 (2026-11-09)
+## 0.147.3 (2026-11-09)
 
 ### Fixes
 - A review's next round no longer loses what you marked when Hermes shows
@@ -22,6 +22,14 @@ checks it). The format is fixed, because Conduit reads it:
 - A resent review is no longer cleared, and Hermes shows one round of a
   review at a time.
 - Hermes no longer reads a review you marked only partly as fully marked.
+
+## 0.147.2 (2026-11-09)
+
+### Fixes
+- On a host that manages the plugin, Finish Update could leave the gateway
+  on the old plugin where systemd runs it as root (an LXC host). The host
+  now runs those restarts itself, as an update does, and still pulls
+  nothing.
 
 ## 0.147.1 (2026-11-09)
 

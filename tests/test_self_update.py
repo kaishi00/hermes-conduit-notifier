@@ -1221,6 +1221,7 @@ def test_a_restart_left_to_run_falls_back_when_it_ends_on_the_root_refusal(monke
 
 def test_a_managed_host_refuses_the_update(monkeypatch, tmp_path):
     # A plain "managed" ("1") refuses too: the check is "is not None", not truth.
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: api.capabilities.LOADED_VERSION)
     for value in ("The Farm", "1"):
         monkeypatch.setenv("CONDUIT_PUSH_MANAGED", value)
         started = []
@@ -1232,3 +1233,29 @@ def test_a_managed_host_refuses_the_update(monkeypatch, tmp_path):
         assert refused.value.status == 409
         assert "manages the Conduit plugin" in str(refused.value)
         assert started == [] and not (tmp_path / api.self_update.SELF_UPDATE_FILE).exists()
+    # An unreadable plugin.yaml starts nothing either.
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: None)
+    with pytest.raises(api.core.TokenError) as refused:
+        api.self_update.start_self_update(
+            "coder", lambda *_: None, path=tmp_path / api.self_update.SELF_UPDATE_FILE,
+            steps=(lambda: pytest.fail("a managed host pulled"), _restarted),
+            homes=lambda: [tmp_path], notify=lambda _job: None)
+    assert refused.value.status == 409
+
+
+def test_a_managed_host_runs_only_the_restarts_its_new_copy_waits_on(monkeypatch, tmp_path):
+    # The host put a newer copy on disk than the one running: the job restarts the gateway
+    # through Hermes' restart (its drain and root-unit fallback) and pulls nothing.
+    monkeypatch.setenv("CONDUIT_PUSH_MANAGED", "The Farm")
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: "9.9.9")
+    monkeypatch.setattr(api.self_update, "_gateway_work", lambda: 0)
+    monkeypatch.setattr(api.self_update, "_point_profiles", lambda: [])
+    restarts = []
+    path = tmp_path / api.self_update.SELF_UPDATE_FILE
+    api.self_update.start_self_update(
+        "coder", lambda *_: None, path=path,
+        steps=(lambda: pytest.fail("a managed host pulled"), lambda *_a, **_k: restarts.append(1) or 0),
+        homes=lambda: [tmp_path], notify=lambda _job: None)
+    api.self_update._self_update_thread.join(5)
+    assert restarts == [1]
+    assert json.loads(path.read_text())["version"] == "9.9.9"
