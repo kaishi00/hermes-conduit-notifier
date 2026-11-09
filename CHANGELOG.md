@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.150.1 (2026-11-09)
+
+### Fixes
+- In a group room your Hermes hosts, tapping a bot's notification opened
+  that bot's hidden chat for the room instead of the room. Replies, failed
+  turns, finished background tasks and approvals now open the room, titled
+  with its name, and so does an approval's row in Needs you. Needs the
+  latest Conduit.
+- In a room that routes through its lead, the lead's pick of who answers
+  sent a notification of its own, showing raw JSON. It no longer does; the
+  reply from whoever takes the message still notifies.
+
 ## 0.150.0 (2026-11-09)
 
 ### Fixes

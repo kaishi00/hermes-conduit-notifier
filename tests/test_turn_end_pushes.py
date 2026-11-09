@@ -60,6 +60,7 @@ def pushed(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin, "_later", lambda delay, work: None)
     monkeypatch.setattr(plugin, "_pending_ready", {})
     monkeypatch.setattr(plugin, "_parent_turns", {})
+    monkeypatch.setattr(plugin, "_routing_turns", {})
     sent = []
     monkeypatch.setattr(plugin, "enqueue", sent.append)
     return sent
@@ -115,6 +116,52 @@ def test_a_turn_in_a_room_this_hermes_hosts_still_notifies(pushed, monkeypatch):
     plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Done.")
     plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
     assert _types(pushed) == ["response.ready"]
+
+
+def _hosted_room(monkeypatch, name="Zoo trip"):
+    hosted = plugin.room_rules.RoomTurn(room_id="conduit-1", side="home", with_others=False, session_id="s")
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session_id, home: hosted)
+    monkeypatch.setattr(plugin.room_rules, "room_name", lambda room_id, home=None: name)
+    monkeypatch.setattr(plugin, "_session_title", lambda session_id: "Group: conduit-1")
+
+
+def test_a_reply_in_a_room_this_hermes_hosts_opens_the_room_under_its_name(pushed, monkeypatch):
+    # hermes-conduit#2064: the hidden chat the bot answered in isn't one to open.
+    _hosted_room(monkeypatch)
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Lions at 3.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    [event] = pushed
+    assert event["room"] == {"id": "conduit-1"}
+    assert event["session_id"] == "s", "an app that knows no rooms still opens the chat"
+    assert (event["title"], event["session_title"]) == ("Zoo trip", "Zoo trip")
+
+
+def test_a_failure_in_a_room_this_hermes_hosts_opens_the_room_too(pushed, monkeypatch):
+    _hosted_room(monkeypatch)
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="The provider returned an error.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=False, failed=True, interrupted=False)
+    [event] = pushed
+    assert event["type"] == "turn.failed" and event["room"] == {"id": "conduit-1"}
+    assert (event["title"], event["session_title"]) == ("Turn failed · Zoo trip", "Zoo trip")
+
+
+def test_a_hosted_room_whose_name_cant_be_read_keeps_the_chats_title(pushed, monkeypatch):
+    _hosted_room(monkeypatch, name="")
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Lions at 3.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    [event] = pushed
+    assert event["room"] == {"id": "conduit-1"} and event["session_title"] == "Group: conduit-1"
+
+
+def test_a_legacy_desktop_group_and_an_ordinary_chat_carry_no_room(pushed, monkeypatch):
+    legacy = plugin.room_rules.RoomTurn(room_id="", side="home", with_others=False, session_id="s")
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session_id, home: legacy)
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Done.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session_id, home: None)
+    plugin._post_llm_call(session_id="c", turn_id="t", assistant_response="Done.")
+    plugin._on_session_end(session_id="c", turn_id="t", completed=True, failed=False, interrupted=False)
+    assert [event.get("room") for event in pushed] == [None, None]
 
 
 def test_a_turn_whose_room_cant_be_told_still_notifies(pushed, monkeypatch):
@@ -905,3 +952,63 @@ def test_a_background_task_from_another_turn_keeps_the_chats_slot(pushed, paired
     _subagent(parent="p", parent_turn="other")
     reply, task = pushed
     assert reply["slot"] == events.slot_token("key:default:report") and "slot" not in task
+
+
+def test_a_background_task_from_a_room_this_hermes_hosts_opens_the_room(pushed, monkeypatch):
+    _hosted_room(monkeypatch)
+    plugin._pre_llm_call(session_id="p", turn_id="t")
+    plugin._on_session_end(session_id="p", turn_id="t", completed=True, failed=False, interrupted=False)
+    pushed.clear()
+    _subagent()
+    [event] = pushed
+    assert event["type"] == "background_task.finished" and event["room"] == {"id": "conduit-1"}
+    assert (event["title"], event["session_title"]) == ("Task finished · Zoo trip", "Zoo trip")
+
+
+def test_an_approval_in_a_room_this_hermes_hosts_opens_the_room_and_needs_you_names_it(pushed, monkeypatch):
+    # The room's own card answers it, and the Needs you row opens the room too.
+    _hosted_room(monkeypatch)
+    waits = []
+    monkeypatch.setattr(plugin.calls, "alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugin.calls, "note_waiting", lambda *args, **kwargs: waits.append(kwargs) or False)
+    plugin._pre_approval_request(session_key="s", session_id="s", description="rm -rf build", turn_id="t")
+    [event] = pushed
+    assert event["type"] == "approval.needed" and event["room"] == {"id": "conduit-1"}
+    assert (event["title"], event["session_title"]) == ("Approval needed · Zoo trip", "Zoo trip")
+    [wait] = waits
+    assert (wait["room"], wait["title"]) == ("conduit-1", "Zoo trip")
+
+
+ROUTING_PROMPT = ('[Discussion: "Zoo trip"] You are @ada, the lead of this room.\n\nMembers:\n- @ada (you)\n- @linus\n\n'
+                  "The message (from the user):\n  Plan the day\n\n"
+                  f"{plugin.LEAD_ROUTING_MARK}, so you decide who takes it: pick the member(s) whose role the request "
+                  "touches (yourself included when it is yours). Do not answer the message itself here; whoever you "
+                  "pick answers it next.\n"
+                  'Reply with only a JSON object and nothing else, for example {"assign": ["handle"]}.')
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_a_room_leads_routing_pick_sends_no_push(pushed, monkeypatch, failed):
+    # Hermes records the pick as "Ada gave this to Linus"; whoever takes the message answers with a push.
+    _hosted_room(monkeypatch)
+    alerts = []
+    monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: alerts.append(args) or False)
+    plugin._pre_llm_call(session_id="s", turn_id="t", user_message=ROUTING_PROMPT)
+    plugin._post_llm_call(session_id="s", turn_id="t", user_message=ROUTING_PROMPT,
+                          assistant_response='{"assign": ["linus"]}')
+    plugin._on_session_end(session_id="s", turn_id="t", completed=not failed, failed=failed, interrupted=False)
+    assert pushed == [] and alerts == []
+    assert plugin._routing_turns == {}, "its end forgets it"
+    # The lead's next turn, answering the message itself, pushes as any reply.
+    plugin._pre_llm_call(session_id="s", turn_id="t2", user_message="Plan the day")
+    plugin._post_llm_call(session_id="s", turn_id="t2", assistant_response="Zoo at 10, lunch at 1.")
+    plugin._on_session_end(session_id="s", turn_id="t2", completed=True, failed=False, interrupted=False)
+    assert _types(pushed) == ["response.ready"]
+
+
+def test_the_routing_words_outside_a_room_are_an_ordinary_turn(pushed, monkeypatch):
+    monkeypatch.setattr(plugin.room_rules, "room_turn", lambda session_id, home: None)
+    plugin._pre_llm_call(session_id="c", turn_id="t", user_message=ROUTING_PROMPT)
+    plugin._post_llm_call(session_id="c", turn_id="t", assistant_response='{"assign": ["linus"]}')
+    plugin._on_session_end(session_id="c", turn_id="t", completed=True, failed=False, interrupted=False)
+    assert _types(pushed) == ["response.ready"]

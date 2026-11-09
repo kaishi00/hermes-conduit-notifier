@@ -883,6 +883,44 @@ def _room_members(room_id: str, home: Path) -> Optional[list[Any]]:
     return None
 
 
+def room_name(room_id: str, home: Any = None) -> str:
+    """The name of a room this Hermes hosts, as its members see it, or ""
+    when no store that can be read has one (hermes-conduit#2064: its pushes
+    are titled with it instead of the hidden chat's ``Group: <room id>``)."""
+    if not room_id:
+        return ""
+    home_path = Path(home) if home is not None else _hermes_home()
+    if home_path is None:
+        return ""
+    for path in room_stores(home_path):
+        try:
+            name = _read(lambda: _name_in(path, room_id))
+        except Exception:  # noqa: BLE001 - a push titled by its chat is still a push
+            logger.debug("conduit_push: couldn't read room %s's name from %s", room_id, path, exc_info=True)
+            continue
+        if name is not None:
+            return name
+    return ""
+
+
+def _name_in(path: Path, room_id: str) -> Optional[str]:
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
+    try:
+        try:
+            row = conn.execute("SELECT name FROM hosted_rooms WHERE room_id = ?", (room_id,)).fetchone()
+        except sqlite3.OperationalError as error:
+            if any(missing in str(error).lower() for missing in ("no such table", "no such column")):
+                return None
+            raise
+        if row is None or not isinstance(row[0], str) or not row[0].strip():
+            return None
+        return row[0].strip()
+    finally:
+        conn.close()
+
+
 def _members_in(path: Path, room_id: str) -> Optional[list[Any]]:
     if not path.exists():
         return None

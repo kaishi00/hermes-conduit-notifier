@@ -37,6 +37,9 @@ _clarify_loop_active = False
 # turn_id -> when its pre_llm_call ran (#87, time.monotonic()), oldest first.
 _turn_started: dict[str, float] = {}
 _turn_started_lock = threading.Lock()
+# Turns that are a room lead's routing pick (_lead_routing), by turn id.
+_routing_turns: dict[str, None] = {}
+_MISSING = object()
 MAX_TURN_STARTS = 256
 # (session id, turn_id) -> (its "response ready" event or None, whether it
 # goes out, the grace timer), held from post_llm_call until on_session_end
@@ -492,6 +495,22 @@ def _member_room_turn(session_id: str) -> bool:
     return turn is not None and turn.side == "member"
 
 
+def _home_room(session_id: str) -> tuple[str, str] | None:
+    """``(room id, name)`` of the group room this Hermes hosts that this turn
+    is in, or None for any other turn (hermes-conduit#2064): its reply and
+    failure pushes open the room and are titled with its name. Each bot's
+    stays its own notification, as its hidden chat's slot (each profile
+    pairs, and so seals and threads, on its own). A session that can't be
+    told apart pushes as its chat, as before."""
+    try:
+        turn = room_rules.room_turn(session_id, get_hermes_home())
+        if turn is None or turn.side != "home" or not turn.room_id:
+            return None
+        return turn.room_id, room_rules.room_name(turn.room_id, get_hermes_home())
+    except Exception:  # noqa: BLE001 — logged by room_rules; the push still goes, to the chat
+        return None
+
+
 def _post_llm_call(**kwargs: Any) -> None:
     if forks.inside():
         return
@@ -520,8 +539,10 @@ def _post_llm_call(**kwargs: Any) -> None:
     quiet = (workstream or is_silent_response(response) or compaction_skip.notice(response) == compaction_skip.SKIPPED_DETAIL
              or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
-             or _member_room_turn(session_id))
-    chat_title = "" if quiet or pulse_turn else _session_title(session_id)
+             or _member_room_turn(session_id) or _lead_routing(kwargs.get("turn_id")))
+    # A turn in a room this Hermes hosts opens the room, under its name.
+    room = None if quiet or pulse_turn else _home_room(session_id)
+    chat_title = "" if quiet or pulse_turn else (room and room[1]) or _session_title(session_id)
     # What the turn wrote for its push with conduit_notify, taken whatever
     # happens so it never rides a later turn's reply.
     headline = notify_tool.take(session_id, kwargs.get("turn_id"))
@@ -551,6 +572,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         count=copy.get("count"),
         level=copy.get("level"),
         private=copy.get("private") is True,
+        room={"id": room[0]} if room else None,
         slot=slot,
     )
     # A quick reply in a chat Hermes Desktop has selected: the user most
@@ -836,6 +858,7 @@ def _on_session_end(**kwargs: Any) -> None:
     _quietly(work_tool.screen_turn_ended, session_id)
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
+    routing = _lead_routing(kwargs.get("turn_id"), end=True)
     # A workstream's turn is settled with its reply, or as failed, and its
     # coordinator told (work_tool); a failed one sends no push of its own.
     workstream = _work_turn_finished(session_id, kwargs)
@@ -890,21 +913,26 @@ def _on_session_end(**kwargs: Any) -> None:
         # call the user asked for on it still rings.
         calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
-    if cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id):
-        # A muted cron job's failed run, or an agent's in a room someone else
-        # hosts (where it shows): no push and no automatic alert call. A call
+    if cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id) or routing:
+        # A muted cron job's failed run, an agent's in a room someone else
+        # hosts (where it shows), or a room lead's routing pick (the lead
+        # then takes the message itself): no push and no automatic alert call. A call
         # the user asked for on this job (a watch) still rings.
         calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
+    # A failure in a room this Hermes hosts opens the room, as its reply does.
+    room = _home_room(session_id)
+    room_title = room[1] if room else ""
     failed = push_event(
         "turn.failed",
         identifier=event_id("failure", kwargs.get("turn_id"), session_id),
         session_id=session_id,
         profile=_profile,
         profile_name=_bot_name(),
-        title=_titled("Turn failed", session_id),
+        title=f"Turn failed · {room_title}" if room_title else _titled("Turn failed", session_id),
         title_label="turn.failed",
-        session_title=_session_title(session_id),
+        session_title=room_title or _session_title(session_id),
+        room={"id": room[0]} if room else None,
         slot=slot,
     )
     if calls.turn_ended(session_id, "failed", profile=_profile, fallback=failed):
@@ -934,15 +962,19 @@ def _pre_approval_request(**kwargs: Any) -> None:
     # and the plugin's delivery queue never retries, so a stable id has no
     # at-least-once role to play there.
     turn_id = kwargs.get("turn_id") or uuid.uuid4().hex
+    # One in a room this Hermes hosts opens the room, whose card answers it.
+    room = _home_room(_text(kwargs.get("session_id")) or session_id)
+    room_title = room[1] if room else ""
     enqueue(push_event(
         "approval.needed",
         identifier=event_id("approval", session_id, turn_id, kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
         profile=_profile,
         profile_name=_bot_name(),
-        title=_titled("Approval needed", session_id),
+        title=f"Approval needed · {room_title}" if room_title else _titled("Approval needed", session_id),
         title_label="approval.needed",
-        session_title=_session_title(session_id),
+        session_title=room_title or _session_title(session_id),
+        room={"id": room[0]} if room else None,
         # No description: the phone writes the generic line in its language.
         body=description,
         # Attach the structured card so Conduit can render an answerable
@@ -968,7 +1000,8 @@ def _pre_approval_request(**kwargs: Any) -> None:
     command = kwargs.get("command") if isinstance(kwargs.get("command"), str) else ""
     if session_id and description and calls.note_waiting(
             session_id, "approval", turn_session_id=_text(kwargs.get("session_id")),
-            description=description, command=command, title=_session_title(session_id)):
+            description=description, command=command, title=room_title or _session_title(session_id),
+            room=room[0] if room else ""):
         calls.follow_approval(session_id, command)
 
 
@@ -1087,16 +1120,20 @@ def _subagent_stop(**kwargs: Any) -> None:
     # other ending keeps the host's words, which say how it ended.
     finished = status in ("finished", "completed")
     summary = plain_text(kwargs.get("child_summary"))
+    # One a turn in a room this Hermes hosts started opens the room.
+    room = _home_room(parent)
+    room_title = room[1] if room else ""
     enqueue(push_event(
         "background_task.finished",
         identifier=event_id("subagent", kwargs.get("parent_turn_id"), child, status),
         session_id=parent,
         profile=_profile,
         profile_name=_bot_name(),
-        title=_titled("Task finished", parent),
+        title=f"Task finished · {room_title}" if room_title else _titled("Task finished", parent),
         title_label="background_task.finished" if finished else "",
-        session_title=_session_title(parent),
+        session_title=room_title or _session_title(parent),
         body=summary or ("" if finished else f"A delegated task {status}."),
+        room={"id": room[0]} if room else None,
         slot=slot,
     ))
 
@@ -1164,6 +1201,7 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         return {"context": pulse_note}
     if not child:
         _note_turn_start(kwargs.get("turn_id"))
+        _note_lead_routing(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))
         _drop_unnamed_end(session_id)
         # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
@@ -1458,6 +1496,37 @@ def _turn_surface_note(platform: Any, message: Any, session_id: str = "") -> str
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         from_conduit = False
     return turn_surface.note(from_conduit, message, transport, session_id=session_id)
+
+
+# What Hermes asks a room's lead for in its routing turn
+# (gateway/hosted_room_lead.py _ROUTING_INSTRUCTIONS).
+LEAD_ROUTING_MARK = "You are the lead of this room. A message arrived that names nobody"
+
+
+def _note_lead_routing(session_id: str, turn_id: Any, user_message: Any) -> None:
+    """Notes a turn that is a room lead's routing pick: in a room routed
+    through its lead, Hermes first asks the lead who should take a message
+    that names nobody, and records the JSON answer as "Ada gave this to
+    Linus". It's no reply anyone reads, so it sends no push and no failure
+    (a failed pick hands the message to the lead, whose answer pushes)."""
+    if not isinstance(turn_id, str) or not turn_id:
+        return
+    if not any(LEAD_ROUTING_MARK in part for part in _text_parts(user_message)) or not _is_room_turn(session_id):
+        return
+    with _turn_started_lock:
+        _routing_turns.pop(turn_id, None)
+        _routing_turns[turn_id] = None
+        while len(_routing_turns) > MAX_TURN_STARTS:
+            _routing_turns.pop(next(iter(_routing_turns)))
+
+
+def _lead_routing(turn_id: Any, *, end: bool = False) -> bool:
+    """Whether this turn is a room lead's routing pick (_note_lead_routing);
+    its end forgets it."""
+    if not isinstance(turn_id, str) or not turn_id:
+        return False
+    with _turn_started_lock:
+        return (_routing_turns.pop(turn_id, _MISSING) if end else _routing_turns.get(turn_id, _MISSING)) is not _MISSING
 
 
 def _note_turn_start(turn_id: Any) -> None:

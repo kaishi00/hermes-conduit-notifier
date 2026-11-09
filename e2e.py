@@ -363,7 +363,12 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
 
 
 def _room_ids(event: dict[str, Any]) -> dict[str, str] | None:
-    """A room invite's Link and room ids, without its name or who it's from."""
+    """A room invite's Link and room ids, without its name or who it's from,
+    or the id of the room a turn's push opens (events.ROOM_KINDS)."""
+    if event.get("type") in ("response.ready", "turn.failed", "background_task.finished", "approval.needed"):
+        room = event.get("room")
+        room_id = room.get("id") if isinstance(room, dict) else None
+        return {"id": room_id} if isinstance(room_id, str) and _ROOM_ID.match(room_id) else None
     room = event.get("room") if event.get("type") == "room.invite" else None
     if not isinstance(room, dict):
         return None

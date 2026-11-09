@@ -694,8 +694,16 @@ def test_a_room_invite_carries_its_room_bounded():
     assert event["title_label"] == "room.invite"
 
 
-def test_a_room_is_only_attached_to_room_invites():
-    assert "room" not in push_event("response.ready", identifier="response:12345678", room=ROOM)
+def test_a_rooms_names_are_only_attached_to_room_invites():
+    # A turn's reply, failure, background task or approval in a room this
+    # Hermes hosts carries its id alone (hermes-conduit#2064); nothing else
+    # carries a room.
+    for kind in ("response.ready", "turn.failed", "background_task.finished", "approval.needed"):
+        event = push_event(kind, identifier="response:12345678", room=ROOM)
+        assert event["room"] == {"id": ROOM["id"]}
+        assert redact_event(event)["room"] == {"id": ROOM["id"]}, "an id routes, so the plain copy keeps it"
+        assert "room" not in push_event(kind, identifier="response:12345678", room={"id": "bad/id"})
+    assert "room" not in push_event("input.needed", identifier="input:12345678", room=ROOM)
 
 
 @pytest.mark.parametrize("room", [

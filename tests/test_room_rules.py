@@ -1191,3 +1191,24 @@ def test_a_rooms_private_chat_is_told_its_room(host, notes):
     context = _context("s-chat")
     assert "This chat is about a room your owner shares" in context and "room-a" in context
     assert "This chat is about a room your owner shares" not in _context("s-home")
+
+
+def test_a_hosted_rooms_name_titles_its_pushes(tmp_path):
+    # hermes-conduit#2064: a reply push is titled with the room, not "Group: <room id>".
+    home = tmp_path / "hermes" / "profiles" / "furina"
+    root = tmp_path / "hermes"
+    _room(root / "state.db", "room-b", [FURINA, LAIFU])
+    conn = sqlite3.connect(root / "state.db")
+    conn.execute("UPDATE hosted_rooms SET name = '  Zoo trip ' WHERE room_id = 'room-b'")
+    conn.commit()
+    conn.close()
+    assert rules.room_name("room-b", home) == "Zoo trip", "found in the root's store from a profile"
+    assert rules.room_name("room-x", home) == ""
+    assert rules.room_name("", home) == ""
+    # A store of another shape, or one that can't be read, names nothing.
+    (root / "state.db").write_bytes(b"this is not a database" * 64)
+    legacy = sqlite3.connect(root / "shared-state.db")
+    legacy.execute("CREATE TABLE hosted_rooms (room_id TEXT PRIMARY KEY)")
+    legacy.commit()
+    legacy.close()
+    assert rules.room_name("room-b", home) == ""
