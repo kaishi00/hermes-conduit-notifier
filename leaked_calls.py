@@ -42,8 +42,7 @@ _FENCE = re.compile(r"^[ \t]*(?P<fence>```|~~~).*?(?:^[ \t]*(?P=fence)|\Z)", re.
 TEXT_ARGS = frozenset({"title", "subtitle", "markdown"})
 # Where a block with no </tool_call> ends: after the call's last closing tag,
 # so prose the model wrote after it stays the reply's.
-# A parameter's close doesn't count: a later one may still be unfinished.
-_CALL_CLOSE = re.compile(r"</(?:function|args|arguments)>")
+_CALL_CLOSE = re.compile(r"</(?:function|args|arguments|parameter)>")
 _CLOSING_TAIL = re.compile(r"(?:\s*</?[a-z_]{0,12}>?)*\s*\Z")
 MAX_REPLY = 200_000
 
@@ -85,6 +84,8 @@ def _end(text: str, match: re.Match) -> int:
     if not closes:
         return match.end()
     after = closes[-1].end()
+    if "<parameter=" in block[after:]:
+        return match.end()  # a parameter left unfinished is the call's
     tail = _CLOSING_TAIL.match(block, after)
     return match.start() + (tail.end() if tail else after)
 
