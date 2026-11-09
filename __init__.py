@@ -1417,7 +1417,8 @@ def _rescue_blocked(session_id: str, turn_id: Any, args: dict) -> bool:
 def _shown_in_place(args: dict, session_id: str, written: str) -> str:
     args = dict(args)
     written_args = args
-    if not args.get("cards") and args.get("from_work") is None:
+    # Only Markdown (and a title): a call's screen text, or a review's files.
+    if not args.get("cards") and args.get("from_work") is None and set(args) <= {"title", "markdown"}:
         try:
             ref = work_tool.review_naming(session_id, written)
         except Exception:  # noqa: BLE001
