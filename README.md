@@ -2245,12 +2245,14 @@ and the dashboard routes under one file lock, so they survive restarts:
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
 | GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered, may_leave_blank}]}` (`may_leave_blank` 0.82+) or `{kind: "approval", description, command, command_cut, answered}` |
 | POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "too_late" or "failed" or "unconfirmed", message}` |
-| GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at}]}`, newest first |
+| GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at, room?}]}`, newest first (`room` 0.150.1+) |
 
 - Every chat Hermes waits on the user in is listed by `/waiting` (0.131+),
   one profile at a time, for Conduit's Needs you list, the counts on its
   profile strip and its banner: the chat's ids and title, an approval's
-  description or a batch's first question, and when it began. Never a
+  description or a batch's first question, and when it began. A wait in a
+  group room this Hermes hosts also names the room's id (`room`, 0.150.1+),
+  so its row opens the room, where its card is answered. Never a
   command, never a bot's workstreams (their Work panel shows them), and a
   wait goes once it's answered anywhere or Hermes gave up on it. The list
   only reads; an approval is answered on its chat's card.
