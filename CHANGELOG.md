@@ -13,13 +13,52 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.151.0 (2026-11-09)
+## 0.153.0 (2026-11-09)
 
 ### New and improved
 - Local Live's agent mode now works on speech servers that only read text
   aloud, like the farm's voice adapter: your fast model answers each thing
   you say and hands real work to Hermes as a job, so replies start sooner
   instead of waiting for a full Hermes turn.
+
+## 0.152.0 (2026-11-09)
+
+### Fixes
+- An iPad or iPhone still on an older Conduit, opened in the last few days,
+  no longer keeps newer cards (like review cards) from showing on the device
+  you're using. The older one shows less until you update it.
+- When a bot's tool call can't be read, it now hears exactly what was wrong
+  with it, so it can fix the call instead of giving up on the card.
+- A card your Bot Chat shows when a workstream reports back is no longer
+  refused because Hermes Desktop or a browser had the chat open at the time,
+  and that update's reply no longer counts as sent from Desktop (for its
+  notification and for calls held while you're at a screen).
+- With a chat open in Conduit and in Hermes Desktop at once, a message from
+  the phone that has it on screen gets cards again: the bot is told to draw
+  them, and hears which Conduit screen you wrote from.
+
+## 0.151.0 (2026-11-09)
+
+### New and improved
+- When a bot writes a card out as text in its reply instead of showing it
+  (some free and smaller models do), the plugin now shows the card in its
+  place, and Conduit draws it under the reply. Needs a Conduit build with
+  this change; older ones show the reply without the markup.
+
+## 0.150.4 (2026-11-09)
+
+### Fixes
+- When a workstream reported seven design options, the review card the
+  plugin built from them showed only six. It now splits seven or eight
+  options into two halves, so every one shows.
+
+## 0.150.3 (2026-11-09)
+
+### Fixes
+- A bot could write the review card for its workstream's options out as
+  text in its reply instead of showing it. The plugin now builds that card
+  from the workstream's report, so the bot shows it with one short call,
+  and a later round stays the same review.
 
 ## 0.150.2 (2026-11-09)
 

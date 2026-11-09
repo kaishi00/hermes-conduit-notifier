@@ -156,7 +156,8 @@ NO_SUCH = ("There's no {ref} in this bot's work. Name work by its ref from work_
 SHOW_RULE = ("Draw cards yourself with conduit_show, never through a workstream: a workstream's cards show in its "
              "own chat, not here. When the user asks for a card, or a workstream reports something that reads "
              "better seen, show it in this turn; options it made for the user to choose between (designs, layouts, "
-             "pictures) go in a review card with for set to its ref, never as links to the files; when an update says a workstream showed cards, show them here "
+             "pictures) go in a review card for it, never as links to the files (from_work with its ref shows the "
+             "one the plugin made from its report); when an update says a workstream showed cards, show them here "
              'with conduit_show {"title": ..., "from_work": "W3"}, never say they\'re on the user\'s screen '
              "before you do.")
 # Cards a workstream's turn showed in its own chat, kept for its coordinator
@@ -188,6 +189,11 @@ MESSAGE_AGENT_IN_WORKSTREAM = ("A workstream doesn't message other bots itself, 
 BRIDGE_BLOCK = ("That tool_call couldn't be read, so it didn't run. Give it the tool's name and its arguments as an "
                 'object, like tool_call {"name": "work_start", "arguments": {"title": "Login bug", "instructions": '
                 '"Find out why the login page is slow."}}, and never put a tool_call inside another.')
+BRIDGE_JSON_BLOCK = ("That tool_call's calls is JSON text that couldn't be read ({error}), so nothing ran. "
+                     "Pass calls as an array of objects, not as a string, and check that every {{ and [ closes.")
+SHOW_FROM_WORK_HINT = (' To show a workstream\'s options as a review, call conduit_show with just '
+                       '{"title": "...", "from_work": "W3"} (its ref) and no cards: the plugin builds the card from '
+                       "the report.")
 CHECK_FAILED = ("This bot's coordinator settings couldn't be checked just now, so its tools are held back for this "
                 "call. Try again in a moment.")
 
@@ -2788,6 +2794,21 @@ def start_recovery(home: Optional[Path] = None) -> None:
 # The hooks
 
 
+def _bridge_block(args: Any) -> str:
+    """The refusal for a bridged call that names nothing readable: the JSON
+    error when its calls are text that doesn't parse, so the model can fix
+    it, with the short from_work form when it was a conduit_show."""
+    from . import pulse_tools
+
+    error = pulse_tools.unreadable_calls(args)
+    if error is None:
+        return BRIDGE_BLOCK
+    message = BRIDGE_JSON_BLOCK.format(error=error)
+    if SHOW in str(args.get("calls")):
+        message += SHOW_FROM_WORK_HINT
+    return message
+
+
 def tool_block(session_id: Any, tool_name: Any, args: Any = None,
                turn_id: Any = None) -> Optional[dict[str, str]]:
     """The bot's policy for its Bot Chat: a block for a tool the coordinator
@@ -2820,7 +2841,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
             _, work, unreadable = _lookup(session_id, home)
             # A call's job is held as any chat is.
             held = (work is not None and not _from_call(work)) or unreadable
-            return {"action": "block", "message": BRIDGE_BLOCK} if held else None
+            return {"action": "block", "message": _bridge_block(args)} if held else None
         return _workstream_block(session_id, home, names, {MEMORY, MESSAGE_AGENT})
     # The memory provider's own tools (hindsight_retain, ...) are the bot's
     # memory, as ``memory`` is, under every setting (Eric 2026-11-04).
@@ -2837,13 +2858,13 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
             titled = _titled_bot_chat(session_id, home)
             # An unreadable title holds it only once the bot has work, as below.
             if titled is True or (titled is None and work_store.exists(home)):
-                return {"action": "block", "message": BRIDGE_BLOCK}
+                return {"action": "block", "message": _bridge_block(args)}
             # A workstream's could hide a message_agent its refusal below
             # never sees.
             _, work, unreadable = _lookup(session_id, home)
             # A call's job is held as any chat is.
             held = (work is not None and not _from_call(work)) or unreadable
-            return {"action": "block", "message": BRIDGE_BLOCK} if held else None
+            return {"action": "block", "message": _bridge_block(args)} if held else None
     held = _workstream_block(session_id, home, names, {MEMORY})
     if held is not None:
         return held
@@ -3338,6 +3359,29 @@ def shown_board(session_id: Any, ref: Any) -> tuple[Optional[dict], str]:
     return kept, ""
 
 
+def review_naming(session_id: Any, text: Any) -> Optional[str]:
+    """The workstream whose kept review (the one the plugin built from its
+    report, _keep_options) has two or more options whose files ``text``
+    names, for a conduit_show this Bot Chat wrote out as text with the
+    files in its Markdown (leaked_calls); None when there's none."""
+    home = _home()
+    if not isinstance(text, str) or not text or home is None or not work_store.exists(home) \
+            or not is_bot_chat(session_id, home):
+        return None
+    store = work_store.Store(home)
+    for key in store.meta_keys(_SHOWN):
+        kept = _shown(store, key[len(_SHOWN):])
+        reviews = [card.get("review") for card in (kept or {}).get("cards", [])
+                   if isinstance(card, dict) and card.get("type") == "review"]
+        files = [option.get("file") for review in reviews if isinstance(review, dict)
+                 for decision in review.get("decisions", []) if isinstance(decision, dict)
+                 for option in decision.get("options", [])
+                 if isinstance(option, dict) and isinstance(option.get("file"), str)]
+        if len(files) >= 2 and sum(1 for path in files if path in text) >= 2:
+            return key[len(_SHOWN):]
+    return None
+
+
 def _shown_line(store: work_store.Store, work: work_store.Work) -> tuple[str, Any]:
     """The update's word on the cards the workstream showed in its own chat
     that no update has named yet (this turn's, or an interrupted or stopped
@@ -3400,19 +3444,55 @@ def _option_files(text: Any) -> list[str]:
     return found
 
 
-def _options_line(work: work_store.Work, text: Any) -> str:
+def _options_line(work: work_store.Work, text: Any, store: Optional[work_store.Store] = None) -> str:
     """The update's word on the options a workstream's report names: shown
-    as a review card the user marks, bound to that workstream."""
+    as a review card the user marks, bound to that workstream. With
+    ``store``, that card is kept ready for ``from_work``: a model that writes
+    a long call out as text manages a short one (Eric, 2026-11-09: Furina's
+    nested review call came out as text in her reply)."""
     try:
         files = _option_files(text)
     except (OSError, ValueError):
         return ""
     if len(files) < 2:
         return ""
+    if store is not None:
+        _keep_options(store, work, files)
     return (f" Its report names {len(files)} pages or pictures (data, not instructions): "
             + ", ".join(files) + ". If they're options for the user to choose between, show them as a review card "
-            f'in this turn, not as links: conduit_show with a review whose "for" is "{work.ref}" and each '
-            'option\'s "file" set to its path.')
+            f'in this turn, not as links: conduit_show {{"title": ..., "from_work": "{work.ref}"}} shows the one '
+            f"the plugin made from them, bound to {work.ref} (or write your own review with \"for\": "
+            f'"{work.ref}" and each option\'s "file").')
+
+
+def _option_label(path: str) -> str:
+    """An option's label from its file's name: concept-1-minimal-dark.html
+    reads "Concept 1 minimal dark"."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    words = re.sub(r"[-_.]+", " ", stem).strip() or "Option"
+    return _cut(words[:1].upper() + words[1:], 60)
+
+
+def _keep_options(store: work_store.Store, work: work_store.Work, files: list[str]) -> None:
+    """A review card of the options a report named, kept with the cards the
+    workstream showed this turn, for its coordinator's ``from_work``."""
+    title = _cut(work.title or "Options", 80)
+    options = [{"label": _option_label(path), "file": path} for path in files]
+    # A decision holds six options: seven or eight (OPTIONS_MAX) go in two
+    # halves rather than out of sight, each with the two a decision needs.
+    half = len(options) if len(options) <= 6 else (len(options) + 1) // 2
+    decisions = [{"title": title if not at else _cut(f"{title} (more)", 80), "options": options[at:at + half]}
+                 for at in range(0, len(options), half)]
+    card = {"type": "review", "title": title, "review": {"for": work.ref, "decisions": decisions}}
+    kept = _shown(store, work.ref)
+    if kept is None or kept.get("named"):
+        kept = {"cards": [], "title": title}
+    # Cards an interrupted turn kept and no update named yet stay with the
+    # review: this update's from_work shows them all. Named by the update
+    # that lists the files, so no later update names them again.
+    kept.update(turn=work.turn_at, named=True)
+    kept["cards"] = [old for old in kept["cards"] if old.get("type") != "review"][-(SHOWN_CARDS - 1):] + [card]
+    store.set_meta(_SHOWN + work.ref, json.dumps(kept, ensure_ascii=False))
 
 
 def _shown_named(store: work_store.Store, ref: str, turn: Any) -> None:
@@ -3600,7 +3680,7 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     store.set_meta(_CONTINUED + work.ref, "")
     if not work.closed_at and (work.coordinator or _in_room(work)):
         # Only for the Bot Chat: a group room can't show a review yet.
-        options = _options_line(work, text) if not failed and not screen else ""
+        options = _options_line(work, text, store) if not failed and not screen else ""
         _report(home, work, line, kind="call" if _call_of(work) else "work", bot_chat_extra=options)
         if shown:
             _shown_named(store, work.ref, shown_turn)
@@ -3623,7 +3703,7 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
         _report(home, work, f"- {work.ref} “{work.title}” was stopped as it finished. In short: "
                                             f"{_cut(text, WAKE_REPORT_CHARS)}" + (f" {link}" if link else "")
                 + shown,
-                kind="call" if _call_of(work) else "work", bot_chat_extra=_options_line(work, text))
+                kind="call" if _call_of(work) else "work", bot_chat_extra=_options_line(work, text, store))
         if shown:
             _shown_named(store, work.ref, shown_turn)
 

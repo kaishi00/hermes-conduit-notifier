@@ -156,6 +156,21 @@ _PUBLIC = ("id", "title", "preview", "action_label", "spoken_yes", "session_id",
 _thread_lock = threading.Lock()
 
 
+_BUILD = re.compile(r"\s*(\d+(?:\.\d+){0,3})")
+
+
+def _build(version: Any) -> tuple[int, ...] | None:
+    """A Conduit's app version as numbers to compare ("2.4.0" -> (2, 4, 0)),
+    trailing zeros dropped so 2.4 and 2.4.0 match; None when it has none."""
+    match = _BUILD.match(version) if isinstance(version, str) else None
+    if not match:
+        return None
+    parts = [int(part) for part in match.group(1).split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
 class PresentError(ValueError):
     """A prompt this store won't keep; ``code`` is a short machine word."""
 
@@ -245,14 +260,21 @@ class PresentStore:
                    for device in self._load()["devices"].values())
 
     def has_feature_everywhere(self, feature: str) -> bool:
-        """Whether every Conduit that draws cards (on a call or in chats) and
-        exchanged with this profile in the last FEATURE_DEVICE_RECENT_S says
-        it can do ``feature``; False when there's none."""
+        """Whether every Conduit that draws cards (on a call or in chats),
+        exchanged with this profile in the last FEATURE_DEVICE_RECENT_S and
+        runs the newest Conduit among them says it can do ``feature``; False
+        when there's none. An older build shows less until it updates, and
+        never holds a card back from the one in use (Eric, 2026-11-09: a
+        2.3.0 iPad kept review cards off the 2.4.0 phone)."""
         now = self.clock()
-        drawing = [device["features"] for device in self._load()["devices"].values()
+        drawing = [device for device in self._load()["devices"].values()
                    if {SHOW_FEATURE, CHAT_CARDS_FEATURE} & set(device["features"])
                    and now - device["seen_at"] < FEATURE_DEVICE_RECENT_S]
-        return bool(drawing) and all(feature in features for features in drawing)
+        builds = [_build(device.get("app_version")) for device in drawing]
+        newest = max((build for build in builds if build is not None), default=None)
+        if newest is not None:
+            drawing = [device for device, build in zip(drawing, builds) if build == newest]
+        return bool(drawing) and all(feature in device["features"] for device in drawing)
 
     def confirm(self, title: Any, preview: Any, action_label: Any = None, *, spoken_yes: Any = None,
                 session_id: Any = None, ttl_minutes: Any = None, maps: Any = None) -> dict[str, Any]:

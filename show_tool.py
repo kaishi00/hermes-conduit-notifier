@@ -111,8 +111,9 @@ SCHEMA: dict[str, Any] = {
                                                 {"template": card_templates.TEMPLATE_INPUT}),
             "from_work": {"type": "string",
                           "description": "In a Bot Chat: a workstream's ref (\"W3\") whose update says it showed "
-                                         "cards in its own chat. Shows those cards here as it drew them; leave "
-                                         "out cards, layout and next."},
+                                         "cards in its own chat, or that its report names options to choose "
+                                         "between. Shows those cards here as it drew them, and those options as "
+                                         "a review card for it; leave out cards, layout and next."},
             "save_templates": card_templates.SAVE_SCHEMA,
             "layout": card_schema.LAYOUT_SCHEMA,
             "next": card_schema.NEXT_SCHEMA,
@@ -343,7 +344,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         if board is None:
             return {"ok": False, "error": "no_cards", "note": why}
         args = {**{key: value for key, value in args.items() if key not in ("from_work", "save_templates")},
-                "cards": board["cards"], "layout": board.get("layout"), "next": board.get("next")}
+                "cards": _next_rounds(board["cards"], session, reviews), "layout": board.get("layout"),
+                "next": board.get("next")}
         if not (isinstance(args.get("title"), str) and args["title"].strip()):
             args["title"] = board.get("title") or "From your work"
     problems: list[str] = []
@@ -381,6 +383,27 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
         answer["note"] += " " + REVIEW_SHOWN_NOTE.format(id=review["id"], round=review["round"]) + (
             REVIEW_FOR_NOTE.format(ref=review["for"]) if review.get("for") else REVIEW_NEXT_NOTE)
     return answer
+
+
+def _next_rounds(cards: list[Any], session: str, reviews: ReviewHost | None) -> list[Any]:
+    """The workstream's cards, a review the plugin made from its report (no
+    id) shown as the next round of the review that workstream already has
+    open in this chat, so every round stays one review (Eric, 2026-11-08)."""
+    if reviews is None or not any(isinstance(card, dict) and _is_review(card) for card in cards):
+        return cards
+    try:
+        open_reviews = reviews.store().open_reviews(session)
+    except (review_store.ReviewError, OSError):
+        return cards
+    shown = []
+    for card in cards:
+        given = card.get("review") if isinstance(card, dict) and _is_review(card) else None
+        if isinstance(given, dict) and given.get("for") and not given.get("id"):
+            earlier = next((meta["id"] for meta in open_reviews if meta.get("for") == given["for"]), None)
+            if earlier:
+                card = {**card, "review": {**given, "id": earlier}}
+        shown.append(card)
+    return shown
 
 
 def _drop_unshown(reviews: ReviewHost | None, kept: list[dict[str, Any]], shown: list[dict[str, Any]]) -> None:
@@ -732,7 +755,11 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
         if layout:
             problems.insert(0, TEXT_LAYOUT_NOTE)
         return _as_text("group_room", ROOM_NOTE, cards, problems)
-    source = _turn_source() if cards else None
+    # The plugin's own work update was sent by no client: the Bot Chat is
+    # Conduit's, and its chat draws the cards from this answer, whichever
+    # client has it open (and never a Desktop board).
+    woken = turn_surface.woken(session)
+    source = _turn_source() if cards and not woken else None
     if source == "desktop" and _desktop_app():
         # Hermes Desktop (not the web dashboard, which turn_source counts as
         # "desktop" too) draws a board through the plugin's Desktop half,
@@ -800,7 +827,7 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
     fallback = bool(cards) and not given_markdown
     if fallback:
         markdown = _fallback(cards)
-    if turn_surface.turn_entry(session) == "typed":
+    if woken or turn_surface.turn_entry(session) == "typed":
         # A typed message's chat is open, not a call's screen: the card would
         # wait unclaimed for a screen that isn't there, and Hermes would tell
         # the user to look at it (hermes-conduit#1808). The chat draws the
