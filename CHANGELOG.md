@@ -21,6 +21,14 @@ checks it). The format is fixed, because Conduit reads it:
   you say and hands real work to Hermes as a job, so replies start sooner
   instead of waiting for a full Hermes turn.
 
+## 0.150.2 (2026-11-09)
+
+### Fixes
+- Options a bot's workstream made for you to pick from (designs, layouts,
+  pictures) came back as links to files instead of a card. The Bot Chat now
+  shows them as a review card you mark, and your marks go back to that
+  workstream.
+
 ## 0.150.1 (2026-11-09)
 
 ### Fixes

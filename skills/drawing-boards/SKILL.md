@@ -134,7 +134,8 @@ colour?" or any choice that's easier to see than describe.
 
 In a Bot Chat, have a workstream make the options (it writes the pages to
 files and reports them), then show the review with `for` set to its ref,
-like `W3`. The user's marks go straight to that workstream, and every round
+like `W3`, and each option's `file` the path it reported; never answer
+with links to the files. The user's marks go straight to that workstream, and every round
 of the review stays with it: show each round with `for` and the same id.
 Reviews aren't shown in group rooms or on a voice call yet: describe the
 options there instead.
