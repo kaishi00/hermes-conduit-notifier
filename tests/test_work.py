@@ -5779,8 +5779,9 @@ def test_reported_options_are_one_short_call_away_and_stay_one_review(on, home, 
 def test_reported_options_keep_an_interrupted_turns_cards_and_every_option(on, home, hermes, tmp_path, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: no timer races it on a slow runner
     # notifier #648's review: an interrupted turn's unnamed cards stayed out of
-    # the from_work the update offered, and a seventh and eighth option fell off.
-    pages = [tmp_path / f"concept-{n}.html" for n in range(1, 9)]
+    # the from_work the update offered, and a seventh and eighth option fell off (and a lone seventh in a decision
+    # of its own, which needs two).
+    pages = [tmp_path / f"concept-{n}.html" for n in range(1, 8)]  # seven: no half left with one
     for page in pages:
         page.write_text("<h1>Hi</h1>")
     start()
@@ -5799,7 +5800,7 @@ def test_reported_options_keep_an_interrupted_turns_cards_and_every_option(on, h
     cards = work.shown_board(BOT_CHAT, "W1")[0]["cards"]
     assert cards[0] == MAP and cards[-1]["type"] == "review"
     decisions = cards[-1]["review"]["decisions"]
-    assert [len(d["options"]) for d in decisions] == [6, 2]
+    assert [len(d["options"]) for d in decisions] == [4, 3]
     assert decisions[1]["title"].endswith("(more)")
 
 

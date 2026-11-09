@@ -3435,10 +3435,11 @@ def _keep_options(store: work_store.Store, work: work_store.Work, files: list[st
     workstream showed this turn, for its coordinator's ``from_work``."""
     title = _cut(work.title or "Options", 80)
     options = [{"label": _option_label(path), "file": path} for path in files]
-    # A decision holds six options; the rest (OPTIONS_MAX is eight) go in a
-    # second one rather than out of sight.
-    decisions = [{"title": title if not at else _cut(f"{title} (more)", 80), "options": options[at:at + 6]}
-                 for at in range(0, len(options), 6)]
+    # A decision holds six options: seven or eight (OPTIONS_MAX) go in two
+    # halves rather than out of sight, each with the two a decision needs.
+    half = len(options) if len(options) <= 6 else (len(options) + 1) // 2
+    decisions = [{"title": title if not at else _cut(f"{title} (more)", 80), "options": options[at:at + half]}
+                 for at in range(0, len(options), half)]
     card = {"type": "review", "title": title, "review": {"for": work.ref, "decisions": decisions}}
     kept = _shown(store, work.ref)
     if kept is None or kept.get("named"):
