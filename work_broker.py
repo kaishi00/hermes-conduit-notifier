@@ -444,5 +444,9 @@ class Broker:
                 raise BrokerError("couldn't reopen the Bot Chat")
         if "prompt.submit" not in methods:
             raise BrokerError("unknown method prompt.submit", code=-32601)
+        from . import turn_surface
+
+        # Its turn is the plugin's own, whichever client has the chat open.
+        turn_surface.expect_wake(text)
         return str(self._unbound("prompt.submit", {"session_id": runtime_id, "text": text, "display_kind": "hidden",
                                                    "queued": True}).get("status") or "")

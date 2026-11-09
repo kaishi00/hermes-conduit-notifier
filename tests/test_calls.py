@@ -1537,6 +1537,7 @@ def test_the_plugins_own_work_update_isnt_at_a_screen_because_desktop_has_it_ope
     _from(monkeypatch, None, DESKTOP)
     monkeypatch.setattr(calls.chat_on_screen, "on_screen", lambda home, session: False)
     assert calls._at_screen(home, ["st-1"]) is True
+    calls.turn_surface.expect_wake("Work update from your workstreams. ...")
     calls.turn_surface.start_turn("st-1", "Work update from your workstreams. ...")
     try:
         assert calls._at_screen(home, ["st-1"]) is False

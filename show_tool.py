@@ -756,8 +756,8 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
             problems.insert(0, TEXT_LAYOUT_NOTE)
         return _as_text("group_room", ROOM_NOTE, cards, problems)
     # The plugin's own work update was sent by no client: the Bot Chat is
-    # Conduit's, and its chat draws the cards from this answer as a typed
-    # turn's does, whichever client has it open.
+    # Conduit's, and its chat draws the cards from this answer, whichever
+    # client has it open (and never a Desktop board).
     woken = turn_surface.woken(session)
     source = _turn_source() if cards and not woken else None
     if source == "desktop" and _desktop_app():

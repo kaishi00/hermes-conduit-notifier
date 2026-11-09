@@ -177,6 +177,7 @@ def test_a_chat_open_on_conduit_and_desktop_is_conduits_while_conduit_has_it_on_
     monkeypatch.setattr(plugin.reply_sources, "current_transport", lambda: FanoutTransport(DESKTOP))
     assert plugin._turn_source("tui", "bot-chat") == "desktop", "Desktop alone stays Desktop's"
     # The plugin's own work update was sent by no client.
+    plugin.turn_surface.expect_wake("Work update from your workstreams. ...")
     plugin.turn_surface.start_turn("bot-chat", "Work update from your workstreams. ...")
     try:
         assert plugin._turn_source("tui", "bot-chat") is None

@@ -460,12 +460,17 @@ def test_the_plugins_own_work_update_draws_cards_whichever_client_has_the_chat_o
     # update came, and the review card was refused as not_conduit.
     _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
     monkeypatch.setattr(tool, "_turn_source", lambda: "desktop")
+    tool.turn_surface.expect_wake("Work update from your workstreams. ...")
     tool.turn_surface.start_turn("s1", "Work update from your workstreams. ...")
     try:
         answer = _call({"title": "Dinner", "cards": [MAP]})
         assert answer["ok"] is True and answer["cards"] and answer["note"].startswith(tool.IN_CHAT_NOTE), answer
         tool.turn_surface.start_turn("s1", "Show me dinner")
         assert _call({"title": "Dinner", "cards": [MAP]})["error"] == "not_conduit", "the user's own turn as before"
+        # Only a text the plugin sent counts, and once: a message that reads
+        # like one (pasted in Desktop) is the user's.
+        tool.turn_surface.start_turn("s1", "Work update from your workstreams. ...")
+        assert _call({"title": "Dinner", "cards": [MAP]})["error"] == "not_conduit", "a look-alike isn't a wake"
     finally:
         tool.turn_surface.start_turn("s1")
 

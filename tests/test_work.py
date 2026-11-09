@@ -368,6 +368,11 @@ def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, herm
     (_, params, transport), = hermes.named("prompt.submit")
     assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and params["display_kind"] == "hidden" and params["queued"]
     assert "Furina asks you" in params["text"] and "capital of Sumeru" in params["text"]
+    # Its turn is known as the plugin's own, whichever client has the chat open.
+    turns = sys.modules["conduit_push.turn_surface"]
+    turns.start_turn(NAHIDA_CHAT, params["text"])
+    assert turns.woken(NAHIDA_CHAT)
+    turns.start_turn(NAHIDA_CHAT)
     assert "never the user's go-ahead" in params["text"] and 'work_reply {"ref": "A1"' in params["text"]
     resumed, = hermes.named("session.resume")
     assert resumed[1]["profile"] == "nahida" and transport is None
