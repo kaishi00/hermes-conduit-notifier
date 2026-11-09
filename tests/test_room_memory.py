@@ -557,19 +557,23 @@ def test_attempts_from_before_digests_get_one_unless_their_text_may_be_cut(guard
     store, _ = _pulse_modules()
     report = _pulse_sent(tmp_path, REPORT)
     running = _pulse_sent(tmp_path, REPORT)
+    delivered = _pulse_sent(tmp_path, REPORT)  # finished, not cut yet
     probe = _pulse_sent(tmp_path, "Pulse delivery check {tag}. Nothing to do: reply with one short line.")
     path = tmp_path / store.DB_NAME
     pulse_store = store.PulseStore(path)
     tag = guard.PULSE_TAG.search(report).group(0)
     pulse_store.update_attempt(pulse_store.attempt_by_tag(tag)["attempt_id"], state=store.DELIVERED)
     pulse_store.trim_finished("report")
+    later = guard.PULSE_TAG.search(delivered).group(0)
+    pulse_store.update_attempt(pulse_store.attempt_by_tag(later)["attempt_id"], state=store.DELIVERED)
     with sqlite3.connect(path) as conn:  # as a store from before text_sha has them
         conn.execute("UPDATE attempts SET text_sha=''")
 
     store.PulseStore(path)
 
     heading = report.splitlines()[0]
-    assert guard.pulse_asks(tmp_path, [f"{heading}\nWhat did it mean?", running, probe]) == [False, True, True]
+    assert guard.pulse_asks(tmp_path, [f"{heading}\nWhat did it mean?", running, probe, delivered]) == [
+        False, True, True, True]
     assert pulse_store.attempt_by_tag(tag)["text_sha"] == store.UNKNOWN_DIGEST
 
 

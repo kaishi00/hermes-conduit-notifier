@@ -660,11 +660,13 @@ class PulseStore:
                     if column not in _columns(conn, table):
                         raise
             # Attempts from before text_sha: a whole text gets its digest; one
-            # trim_finished may have cut already (finished, of a kind it cuts)
-            # gets UNKNOWN_DIGEST, so no message is taken for it by its first line.
+            # trim_finished may have cut already (finished, of a kind it cuts, one
+            # line) gets UNKNOWN_DIGEST, so no message is taken for it by its first line.
             for attempt_id, kind, state, text in conn.execute(
                     "SELECT attempt_id, kind, state, text FROM attempts WHERE text_sha=''").fetchall():
-                cut = state in FINAL and kind != "probe"
+                # trim_finished keeps only a first line, so a text with a line
+                # break is still whole.
+                cut = state in FINAL and kind != "probe" and "\n" not in (text or "")
                 conn.execute("UPDATE attempts SET text_sha=? WHERE attempt_id=? AND text_sha=''",
                              (UNKNOWN_DIGEST if cut else text_digest(text or ""), attempt_id))
             # A report card's why is now its candidate's reason, or nothing: the stock
