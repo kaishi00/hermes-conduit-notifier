@@ -6,6 +6,7 @@ Furina hosts; Laifu and Mona join over link1 and link2 (test_room_invites' insta
 """
 import base64
 import hashlib
+import pathlib
 import stat
 
 from test_room_bridge_member import ROOT, _load
@@ -334,22 +335,30 @@ def test_a_file_shared_again_in_another_room_is_kept_with_both(copies):  # noqa:
 
 
 def test_a_carried_files_sender_is_saved_before_the_file_shows(copies, monkeypatch):  # noqa: F811
-    # Greptile on notifier #629: a turn waiting for the copy could see it before its sender was saved.
+    # Greptile on notifier #629: a turn waiting for the copy could see it before its sender was saved, and a
+    # sweep between the two forgot the sender; both now happen under the disk lock the sweep takes.
     room_id = started(copies)
     path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
-    seen = []
-    keep = files_module.Files._keep
+    noted, shown = [], []
+    note_origin, replace = files_module.Files._note_origin, files_module.os.replace
 
-    def watched(self, target, whole, body):
-        seen.append(files_module.origin_of(self.rooms.root, FOLDER, "shot.jpg"))
-        return keep(self, target, whole, body)
+    def noting(self, key, link_id):
+        noted.append(files_module._disk_thread_lock.locked())
+        return note_origin(self, key, link_id)
 
-    monkeypatch.setattr(files_module.Files, "_keep", watched)
+    def replacing(source, target):
+        if pathlib.Path(target).name == "shot.jpg":
+            shown.append(files_module.origin_of(pathlib.Path(target).parents[3], FOLDER, "shot.jpg"))
+        return replace(source, target)
+
+    monkeypatch.setattr(files_module.Files, "_note_origin", noting)
+    monkeypatch.setattr(files_module.os, "replace", replacing)
     post(copies, room_id, f"@file:{path}\nhi")
 
     copies.furina.pass_once()
 
-    assert len(seen) == 2 and all(seen)
+    assert noted == [True, True]
+    assert len(shown) == 2 and all(shown)
 
 
 def test_senders_past_the_cap_go_with_their_files_gone_ones_first(tmp_path, monkeypatch):

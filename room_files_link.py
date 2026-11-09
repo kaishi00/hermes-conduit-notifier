@@ -201,7 +201,7 @@ class Files:
         try:
             with disk_lock(self.rooms.root):
                 _room_for(root, 0, now)
-            self._forget_gone()
+                self._forget_gone()
         except OSError as exc:
             logger.info("Linked Rooms couldn't sweep the room files here (%s)", type(exc).__name__)
 
@@ -391,9 +391,7 @@ class Files:
             whole = self._take(received.link_id, body)
             if whole is None:
                 return
-            # Saved before the file shows, so a turn waiting for it never finds it without its sender.
-            self._note_origin(key, received.link_id)
-            if not self._keep(target, whole, body):
+            if not self._keep(target, whole, body, received.link_id):
                 return
         try:
             self.rooms.send(received.link_id, GOT, {"v": VERSION, "room_id": body["room_id"],
@@ -462,7 +460,7 @@ class Files:
             return None
         return whole
 
-    def _keep(self, target: Path, whole: bytes, body: dict[str, Any]) -> bool:
+    def _keep(self, target: Path, whole: bytes, body: dict[str, Any], link_id: Optional[str] = None) -> bool:
         name = None
         try:
             root = target.parent.parent
@@ -479,6 +477,10 @@ class Files:
                     logger.warning("Linked Rooms didn't keep room file %s/%s: its folder here is a symlink",
                                    body["folder"], body["name"])
                     return False
+                if link_id is not None:
+                    # Saved before the file shows, so a turn waiting for it never finds it without its sender,
+                    # and under the lock the sweep takes, so the sweep can't forget it in between.
+                    self._note_origin(f"{body['folder']}/{body['name']}", link_id)
                 descriptor, name = tempfile.mkstemp(prefix=".carried.", dir=target.parent)
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(whole)
