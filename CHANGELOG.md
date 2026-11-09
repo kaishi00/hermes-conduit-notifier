@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.153.0 (2026-11-09)
+
+### New and improved
+- Local Live's agent mode now works on speech servers that only read text
+  aloud, like a self-hosted voice adapter: your fast model answers each thing
+  you say and hands real work to Hermes as a job, so replies start sooner
+  instead of waiting for a full Hermes turn.
+
 ## 0.152.0 (2026-11-09)
 
 ### Fixes

@@ -12,7 +12,7 @@ from collections import deque
 import contextlib
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from . import core, local_live, watch_local_live
+from . import core, local_live, local_live_agent, watch_local_live
 
 logger = core.logger
 
@@ -37,6 +37,14 @@ logger = core.logger
 # opens the reply the call sees, the sentences wait for its end and continue
 # it, and its transcript joins with a space. The call still sees one response
 # per reply.
+#
+# In agent mode (the phone sent conduit.agent and voice.local_live.front_model
+# is set), the call's fast model answers instead, as on the model address
+# (local_live_agent): its words are read back sentence by sentence the same
+# way, its tools run on the phone, and the work it hands Hermes comes back as
+# a typed turn. The readiness check is always the phone's own turn, and when
+# the fast model can't answer the words go to a Hermes turn after the
+# unreachable line. The Watch's call has no agent, so it keeps Hermes turns.
 #
 # The call's own side doesn't change: the phone's or the Watch's
 # LocalLiveSession sends the same session.update and readiness check, and
@@ -226,6 +234,63 @@ def _local_live_read_back_response(status: Optional[str], response_id: str) -> s
     return json.dumps({"type": "response.done" if status else "response.created", "response": response})
 
 
+class _ReadBackFrontTurn:
+    """A turn the call's fast model answers (agent mode), shaped like the
+    phone's turn: its reply arrives on ``frames`` as ("delta", text) and ends
+    with ("done", ""). A fast model that can't answer says so, and the words
+    go to a Hermes turn whose reply follows on the same frames, as on the
+    model address."""
+
+    def __init__(self, call: Any, words: str, target: Tuple[str, str, str]) -> None:
+        self.call = call
+        self.frames: "asyncio.Queue[Tuple[str, str]]" = asyncio.Queue()
+        # The Hermes turn it fell back to, until its reply ends.
+        self.hermes: Any = None
+        self.task = asyncio.ensure_future(self._run(words, target))
+        local_live._local_live_tasks.add(self.task)
+        self.task.add_done_callback(local_live._local_live_task_done)
+
+    async def _run(self, words: str, target: Tuple[str, str, str]) -> None:
+        try:
+            try:
+                async with contextlib.aclosing(self.call.agent.reply(self.call, words, target)) as replies:
+                    async for delta in replies:
+                        self.frames.put_nowait(("delta", delta))
+                return
+            except local_live_agent._LocalLiveFrontUnavailable:
+                # The fast model is down: this utterance goes to Hermes.
+                self.frames.put_nowait(("delta", local_live_agent.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY + " "))
+                starting = asyncio.ensure_future(self.call.start_turn(words))
+                try:
+                    self.hermes = await asyncio.shield(starting)
+                except asyncio.CancelledError:
+                    # Let go while the phone was being asked: the turn it
+                    # opens is let go too, never left running.
+                    with contextlib.suppress(Exception):
+                        turn = await starting
+                        if turn is not None:
+                            await self.call.cancel_turn(turn)
+                    raise
+            while self.hermes is not None:
+                kind, delta = await self.hermes.frames.get()
+                if kind == "done":
+                    self.hermes = None
+                    return
+                self.frames.put_nowait((kind, delta))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a broken reply ends the turn, not the call
+            logger.warning("Local Live: the fast model's reply failed", exc_info=True)
+        finally:
+            self.frames.put_nowait(("done", ""))
+
+    async def cancel(self) -> None:
+        self.task.cancel()
+        hermes, self.hermes = self.hermes, None
+        if hermes is not None:
+            await self.call.cancel_turn(hermes)
+
+
 class _LocalLiveReadBack:
     """One Local Live connection's turns on a read-back speech server, run by
     the plugin between the call and the server (see above).
@@ -315,6 +380,9 @@ class _LocalLiveReadBack:
     def close(self) -> None:
         self.closed = True
         self._release()
+        if isinstance(self.turn, _ReadBackFrontTurn):
+            # The fast model stops with the call.
+            self.turn.task.cancel()
         if self.follower is not None:
             self.follower.cancel()
             self.follower = None
@@ -574,14 +642,24 @@ class _LocalLiveReadBack:
     async def _start(self, words: str) -> None:
         """A new turn for ``words``: the reply before it stops being spoken
         (the call's start_turn lets its turn go)."""
-        await self._stop(cancel_turn=False)
-        generation = self.generation
+        # _stop bumps the generation before its first await, so this start
+        # owns the value it sets: a later start's bump, even one made while
+        # this _stop still waits on the call, overtakes it.
+        generation = self.generation + 1
+        _, popped = await self._stop_reply(cancel_turn=False)
+        if self.closed or generation != self.generation:
+            # Overtaken while stopping: this start opens nothing, so the
+            # phone turn its stop took (left for start_turn to let go) is
+            # let go here, or it would keep working with no one following.
+            if popped is not None and not isinstance(popped, _ReadBackFrontTurn):
+                await self._let_go(popped)
+            return
         self.reply_open = True
         self.turn_over = False
-        turn = await self.call.start_turn(words) if words else None
+        turn = await self._open_turn(words) if words else None
         if self.closed or generation != self.generation:
             if turn is not None:
-                await self.call.cancel_turn(turn)
+                await self._let_go(turn)
             return
         if turn is None:
             self.turn_over = True
@@ -592,10 +670,40 @@ class _LocalLiveReadBack:
         local_live._local_live_tasks.add(follower)
         follower.add_done_callback(local_live._local_live_task_done)
 
+    async def _open_turn(self, words: str) -> Any:
+        """The turn for ``words``: the call's fast model in agent mode (when
+        one is set up), otherwise the phone's Hermes turn. The readiness
+        check is always the phone's."""
+        agent = getattr(self.call, "agent", None)
+        if agent is not None and not words.startswith(local_live_agent.LOCAL_LIVE_READY_PREFIX):
+            target = await local_live_agent._local_live_front_target(self.call.profile)
+            if target is not None and not self.closed:
+                # A phone turn still open (the readiness check's) is over
+                # too, let go under the call's turn lock as start_turn does.
+                turns = getattr(self.call, "turns", None)
+                lock = getattr(self.call, "turn_lock", None)
+                if turns and lock is not None:
+                    async with lock:
+                        for old in list(turns.values()):
+                            await self.call.cancel_turn(old)
+                return _ReadBackFrontTurn(self.call, words, target)
+        return await self.call.start_turn(words)
+
+    async def _let_go(self, turn: Any) -> None:
+        if isinstance(turn, _ReadBackFrontTurn):
+            await turn.cancel()
+        else:
+            await self.call.cancel_turn(turn)
+
     async def _stop(self, cancel_turn: bool) -> bool:
         """The reply stops: nothing more of it is said. True when the server
         was sent a response.cancel for it, now or before (a send that failed
         counts too: the relay ends with a broken upstream anyway)."""
+        cancelled, _ = await self._stop_reply(cancel_turn)
+        return cancelled
+
+    async def _stop_reply(self, cancel_turn: bool) -> Tuple[bool, Any]:
+        """_stop's work; also the turn it took and didn't let go, if any."""
         # A start still waiting on the call is overtaken.
         self.generation += 1
         self._release()
@@ -614,10 +722,17 @@ class _LocalLiveReadBack:
             await self._send_server(json.dumps({"type": "response.cancel"}))
         turn, self.turn = self.turn, None
         self.turn_over = True
-        if cancel_turn and turn is not None:
-            await self.call.cancel_turn(turn)
+        # A fast model's turn always stops here: the phone's start_turn lets
+        # its own earlier turn go, but nothing else would stop a fast model
+        # (and the Hermes turn it may fall back to) from answering words the
+        # user has moved on from.
+        kept = None
+        if turn is not None and (cancel_turn or isinstance(turn, _ReadBackFrontTurn)):
+            await self._let_go(turn)
+        else:
+            kept = turn
         await self._end_reply("cancelled")
-        return cancelled
+        return cancelled, kept
 
     async def _follow(self, turn: Any) -> None:
         """The turn's reply, sentence by sentence, as it streams."""
@@ -644,7 +759,7 @@ class _LocalLiveReadBack:
             self.follower = None
             self.turn_over = True
             # A turn that timed out is let go; a finished one is gone already.
-            await self.call.cancel_turn(turn)
+            await self._let_go(turn)
             await self._pump()
 
     async def _queue(self, sentences: List[str]) -> None:
