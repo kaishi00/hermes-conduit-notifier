@@ -268,6 +268,30 @@ def test_a_send_that_doesnt_go_isnt_a_try(copies, monkeypatch):  # noqa: F811
     assert not carried(copies, "laifu", "shot.jpg").exists()
 
 
+def test_a_link_over_its_entries_forgets_files_it_has_first(copies, monkeypatch):  # noqa: F811
+    # Beam on notifier #629: the bound dropped the oldest entry even when it hadn't gone.
+    monkeypatch.setattr(files_module, "MAX_KEPT", 2)
+    room_id = started(copies)
+    store = files_module.Store(copies.tmp_path / "furina")
+    first = upload(copies, "first.jpg", b"\xff\xd8 first")
+    post(copies, room_id, f"@file:{first}\nhi")
+    copies.furina.pass_once()
+    links = list(store.read()["out"])
+    with store.update() as state:
+        for link_id in links:
+            state["out"][link_id]["old.jpg"] = {"room": room_id, "rooms": [room_id], "size": 1, "base": "/nowhere",
+                                                "at": 0.0, "tries": 1, "done": True, "noted": 5.0}
+            state["out"][link_id][f"{FOLDER}/first.jpg"].update(done=False, at=10.0 ** 9, noted=-1.0)
+    second = upload(copies, "second.jpg", b"\xff\xd8 second")
+    post(copies, room_id, f"@file:{second}\nhi")
+    copies.furina.pass_once()
+
+    for link_id in links:
+        kept = store.read()["out"][link_id]
+        assert "old.jpg" not in kept, "a file the guest has goes before one still owed"
+        assert any(key.endswith("/first.jpg") for key in kept)
+
+
 def test_a_guest_sweeps_its_room_files_without_more_arriving(tmp_path):
     # DeepSeek on notifier #629: carried files aged out only when another arrived.
     import os

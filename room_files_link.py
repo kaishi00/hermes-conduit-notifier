@@ -269,7 +269,12 @@ class Files:
                     # Shared in another room too: it still goes while either has that Link's people in it.
                     out[key]["rooms"] = [*_rooms_of(out[key]), room_id]
             if len(out) > MAX_KEPT:
-                for key in sorted(out, key=lambda each: out[each]["noted"])[:len(out) - MAX_KEPT]:
+                # Files the guest has go first; one still owed goes only past that, and says so.
+                oldest = sorted(out, key=lambda each: (not out[each]["done"], out[each]["noted"]))
+                for key in oldest[:len(out) - MAX_KEPT]:
+                    if not out[key]["done"]:
+                        logger.info("Linked Rooms stopped carrying room file %s to Link %s: over %d files are "
+                                    "waiting for it", key, link_id, MAX_KEPT)
                     del out[key]
 
     def send_files(self) -> None:
