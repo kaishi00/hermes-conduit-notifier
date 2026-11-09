@@ -292,6 +292,21 @@ def test_a_link_over_its_entries_forgets_files_it_has_first(copies, monkeypatch)
         assert any(key.endswith("/first.jpg") for key in kept)
 
 
+def test_a_guest_sweeps_pieces_that_never_finished_without_more_arriving(tmp_path):
+    # GLM on notifier #629: unfinished pieces aged out only when another piece came.
+    import types
+
+    piece = tmp_path / files_module.room_identity.DIRECTORY / files_module.INCOMING / ("a" * 32) / "00000"
+    piece.parent.mkdir(parents=True)
+    piece.write_bytes(b"x")
+    clock = [piece.parent.stat().st_mtime + files_module.INCOMING_TTL_S + 60]
+    files = files_module.Files(types.SimpleNamespace(root=tmp_path, clock=lambda: clock[0]))
+
+    files.sweep()
+
+    assert not piece.parent.exists()
+
+
 def test_a_guest_sweeps_its_room_files_without_more_arriving(tmp_path):
     # DeepSeek on notifier #629: carried files aged out only when another arrived.
     import os

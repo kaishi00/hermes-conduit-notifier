@@ -200,6 +200,9 @@ class Files:
         if now - self._swept < SWEEP_S:
             return
         self._swept = now
+        # Pieces of files that never finished too, on a guest no more pieces reach.
+        with _thread_lock:
+            _sweep(Path(self.rooms.root) / room_identity.DIRECTORY / INCOMING, now)
         root = files_root(self.rooms.root)
         if not root.is_dir():
             return
