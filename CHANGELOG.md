@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.152.1 (2026-11-09)
+
+### Fixes
+- A workstream's update that waits behind a long turn still shows its cards
+  in the chat when it starts, even if only Desktop has the chat open then.
+- Two identical workstream updates sent close together each count as the
+  plugin's own, not just the first.
+
 ## 0.152.0 (2026-11-09)
 
 ### Fixes
