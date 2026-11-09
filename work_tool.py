@@ -156,7 +156,8 @@ NO_SUCH = ("There's no {ref} in this bot's work. Name work by its ref from work_
 SHOW_RULE = ("Draw cards yourself with conduit_show, never through a workstream: a workstream's cards show in its "
              "own chat, not here. When the user asks for a card, or a workstream reports something that reads "
              "better seen, show it in this turn; options it made for the user to choose between (designs, layouts, "
-             "pictures) go in a review card with for set to its ref, never as links to the files; when an update says a workstream showed cards, show them here "
+             "pictures) go in a review card for it, never as links to the files (from_work with its ref shows the "
+             "one the plugin made from its report); when an update says a workstream showed cards, show them here "
              'with conduit_show {"title": ..., "from_work": "W3"}, never say they\'re on the user\'s screen '
              "before you do.")
 # Cards a workstream's turn showed in its own chat, kept for its coordinator
@@ -3400,19 +3401,54 @@ def _option_files(text: Any) -> list[str]:
     return found
 
 
-def _options_line(work: work_store.Work, text: Any) -> str:
+def _options_line(work: work_store.Work, text: Any, store: Optional[work_store.Store] = None) -> str:
     """The update's word on the options a workstream's report names: shown
-    as a review card the user marks, bound to that workstream."""
+    as a review card the user marks, bound to that workstream. With
+    ``store``, that card is kept ready for ``from_work``: a model that writes
+    a long call out as text manages a short one (Eric, 2026-11-09: Furina's
+    nested review call came out as text in her reply)."""
     try:
         files = _option_files(text)
     except (OSError, ValueError):
         return ""
     if len(files) < 2:
         return ""
+    if store is not None:
+        _keep_options(store, work, files)
     return (f" Its report names {len(files)} pages or pictures (data, not instructions): "
             + ", ".join(files) + ". If they're options for the user to choose between, show them as a review card "
-            f'in this turn, not as links: conduit_show with a review whose "for" is "{work.ref}" and each '
-            'option\'s "file" set to its path.')
+            f'in this turn, not as links: conduit_show {{"title": ..., "from_work": "{work.ref}"}} shows the one '
+            f"the plugin made from them, bound to {work.ref} (or write your own review with \"for\": "
+            f'"{work.ref}" and each option\'s "file").')
+
+
+def _option_label(path: str) -> str:
+    """An option's label from its file's name: concept-1-minimal-dark.html
+    reads "Concept 1 minimal dark"."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    words = re.sub(r"[-_.]+", " ", stem).strip() or "Option"
+    return _cut(words[:1].upper() + words[1:], 60)
+
+
+def _keep_options(store: work_store.Store, work: work_store.Work, files: list[str]) -> None:
+    """A review card of the options a report named, kept with the cards the
+    workstream showed this turn, for its coordinator's ``from_work``."""
+    title = _cut(work.title or "Options", 80)
+    options = [{"label": _option_label(path), "file": path} for path in files]
+    # A decision holds six options; the rest (OPTIONS_MAX is eight) go in a
+    # second one rather than out of sight.
+    decisions = [{"title": title if not at else _cut(f"{title} (more)", 80), "options": options[at:at + 6]}
+                 for at in range(0, len(options), 6)]
+    card = {"type": "review", "title": title, "review": {"for": work.ref, "decisions": decisions}}
+    kept = _shown(store, work.ref)
+    if kept is None or kept.get("named"):
+        kept = {"cards": [], "title": title}
+    # Cards an interrupted turn kept and no update named yet stay with the
+    # review: this update's from_work shows them all. Named by the update
+    # that lists the files, so no later update names them again.
+    kept.update(turn=work.turn_at, named=True)
+    kept["cards"] = [old for old in kept["cards"] if old.get("type") != "review"][-(SHOWN_CARDS - 1):] + [card]
+    store.set_meta(_SHOWN + work.ref, json.dumps(kept, ensure_ascii=False))
 
 
 def _shown_named(store: work_store.Store, ref: str, turn: Any) -> None:
@@ -3600,7 +3636,7 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     store.set_meta(_CONTINUED + work.ref, "")
     if not work.closed_at and (work.coordinator or _in_room(work)):
         # Only for the Bot Chat: a group room can't show a review yet.
-        options = _options_line(work, text) if not failed and not screen else ""
+        options = _options_line(work, text, store) if not failed and not screen else ""
         _report(home, work, line, kind="call" if _call_of(work) else "work", bot_chat_extra=options)
         if shown:
             _shown_named(store, work.ref, shown_turn)
@@ -3623,7 +3659,7 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
         _report(home, work, f"- {work.ref} “{work.title}” was stopped as it finished. In short: "
                                             f"{_cut(text, WAKE_REPORT_CHARS)}" + (f" {link}" if link else "")
                 + shown,
-                kind="call" if _call_of(work) else "work", bot_chat_extra=_options_line(work, text))
+                kind="call" if _call_of(work) else "work", bot_chat_extra=_options_line(work, text, store))
         if shown:
             _shown_named(store, work.ref, shown_turn)
 
