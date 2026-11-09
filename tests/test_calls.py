@@ -1529,3 +1529,17 @@ def test_a_question_at_a_screen_rings_before_hermes_gives_up_on_it(home, fake, c
                     next_call=lambda args: "native")
     assert waits == [due]
 
+
+
+def test_the_plugins_own_work_update_isnt_at_a_screen_because_desktop_has_it_open(home, monkeypatch):
+    # .52, 2026-11-09: Hermes binds a work update to whichever client has the
+    # Bot Chat open, though none sent it.
+    _from(monkeypatch, None, DESKTOP)
+    monkeypatch.setattr(calls.chat_on_screen, "on_screen", lambda home, session: False)
+    assert calls._at_screen(home, ["st-1"]) is True
+    calls.turn_surface.expect_wake("Work update from your workstreams. ...")
+    calls.turn_surface.start_turn("st-1", "Work update from your workstreams. ...")
+    try:
+        assert calls._at_screen(home, ["st-1"]) is False
+    finally:
+        calls.turn_surface.start_turn("st-1")

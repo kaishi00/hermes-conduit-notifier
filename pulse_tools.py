@@ -256,6 +256,21 @@ def called(args: Any) -> list[tuple[str, dict]]:
     return found
 
 
+def unreadable_calls(args: Any) -> str | None:
+    """Why a tool_call's ``calls``, given as JSON text, can't be read (the
+    parser's words, with where), else None."""
+    calls = args.get("calls") if isinstance(args, dict) else None
+    if not isinstance(calls, str):
+        return None
+    try:
+        json.loads(calls)
+    except RecursionError:
+        return "nested too deeply"
+    except ValueError as error:
+        return str(error)
+    return None
+
+
 def maps_uses_where(args: dict) -> bool:
     """Whether a Maps call needs where the user is: "me" (the default for
     "near" and "from") or a saved place, as conduit_maps reads its places.

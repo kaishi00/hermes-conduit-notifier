@@ -38,7 +38,7 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from . import chat_on_screen, client, location_profiles, reply_sources, session_titles
+from . import chat_on_screen, client, location_profiles, reply_sources, session_titles, turn_surface
 from .calls_store import ALERT_DELAY_S, MAX_HOLD_S, CallStore
 from .location_store import LocationStore
 from .events import push_event
@@ -656,11 +656,14 @@ def _at_screen(home: Any, session_ids: list[str]) -> bool:
     try:
         platform = reply_sources.current_platform()
         transport = reply_sources.current_transport()
-        if reply_sources.turn_source(platform, transport) in SCREEN_SOURCES:
+        # The plugin's own work update was sent from no screen, whichever
+        # client has the chat open; Conduit's on-screen chats still count.
+        woken = any(turn_surface.woken(value) for value in session_ids)
+        if not woken and reply_sources.turn_source(platform, transport) in SCREEN_SOURCES:
             return True
         # Hermes' terminal app: no app socket, and not a messaging platform.
         # A fanout is app clients (a chat open on several), never a terminal.
-        if (not reply_sources._is_app_socket(transport) and reply_sources._fanout_peers(transport) is None
+        if (not woken and not reply_sources._is_app_socket(transport) and reply_sources._fanout_peers(transport) is None
                 and isinstance(platform, str)
                 and platform.strip().lower() in TERMINAL_PLATFORMS):
             return True

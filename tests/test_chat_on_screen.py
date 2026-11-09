@@ -163,7 +163,7 @@ def turn(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: False)
     monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
     monkeypatch.setattr(plugin, "_desktop_watched", lambda session_id, started: False)
-    monkeypatch.setattr(plugin, "_source_notifies", lambda platform: True)
+    monkeypatch.setattr(plugin, "_source_notifies", lambda *args: True)
     monkeypatch.setattr(plugin, "_session_title", lambda session_id: "")
     monkeypatch.setattr(plugin, "_titled", lambda title, session_id: title)
     monkeypatch.setattr(plugin, "_later", lambda delay, work: None)

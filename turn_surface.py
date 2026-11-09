@@ -52,6 +52,7 @@ import hashlib
 import re
 import sys
 import threading
+from collections import OrderedDict
 import time
 from typing import Any, Callable, Optional, Tuple
 
@@ -317,10 +318,52 @@ _turn_entries_lock = threading.Lock()
 MAX_TURN_ENTRIES = 256
 
 
-def start_turn(session_id: Any) -> None:
+# The plugin's own work updates into a Bot Chat (work_broker.Broker.wake),
+# by their text, until their turn starts: Hermes binds such a turn to
+# whichever client has the chat open, Hermes Desktop or a browser, though no
+# client sent it. Only a turn whose message is one of them counts, never one
+# that merely reads like one.
+WAKE_TTL_S = 600.0
+_wakes: "OrderedDict[str, float]" = OrderedDict()
+_woken: "OrderedDict[str, bool]" = OrderedDict()
+
+
+def expect_wake(text: Any, clock: Callable[[], float] = time.monotonic) -> None:
+    """The plugin is about to send ``text`` as its own hidden turn."""
+    if not isinstance(text, str) or not text.strip():
+        return
+    with _turn_entries_lock:
+        _wakes.pop(text.strip(), None)
+        _wakes[text.strip()] = clock()
+        while len(_wakes) > MAX_TURN_ENTRIES:
+            _wakes.popitem(last=False)
+
+
+def start_turn(session_id: Any, user_message: Any = None, clock: Callable[[], float] = time.monotonic) -> None:
     """A turn of ``session_id`` starts: what an earlier turn's message was
-    sent as no longer counts."""
+    sent as no longer counts. ``user_message`` says whether it's one of the
+    plugin's own work updates (expect_wake)."""
     _keep_entry(session_id, None)
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _turn_entries_lock:
+        _woken.pop(session_id, None)
+        sent = _wakes.pop(user_message.strip(), None) if isinstance(user_message, str) else None
+        if sent is not None and 0 <= clock() - sent <= WAKE_TTL_S:
+            _woken[session_id] = True
+            while len(_woken) > MAX_TURN_ENTRIES:
+                _woken.popitem(last=False)
+
+
+def woken(session_id: Any) -> bool:
+    """Whether ``session_id``'s running turn answers the plugin's own work
+    update, which no client sent: the clients that have the chat open don't
+    say where it came from (.52, 2026-11-09: Desktop alone had the Bot Chat
+    open, and its review card was refused as not_conduit)."""
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    with _turn_entries_lock:
+        return session_id in _woken
 
 
 def turn_entry(session_id: Any) -> Optional[str]:

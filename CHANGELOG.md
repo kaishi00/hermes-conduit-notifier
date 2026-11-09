@@ -13,6 +13,22 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.152.0 (2026-11-09)
+
+### Fixes
+- An iPad or iPhone still on an older Conduit, opened in the last few days,
+  no longer keeps newer cards (like review cards) from showing on the device
+  you're using. The older one shows less until you update it.
+- When a bot's tool call can't be read, it now hears exactly what was wrong
+  with it, so it can fix the call instead of giving up on the card.
+- A card your Bot Chat shows when a workstream reports back is no longer
+  refused because Hermes Desktop or a browser had the chat open at the time,
+  and that update's reply no longer counts as sent from Desktop (for its
+  notification and for calls held while you're at a screen).
+- With a chat open in Conduit and in Hermes Desktop at once, a message from
+  the phone that has it on screen gets cards again: the bot is told to draw
+  them, and hears which Conduit screen you wrote from.
+
 ## 0.151.0 (2026-11-09)
 
 ### New and improved

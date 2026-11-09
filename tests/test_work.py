@@ -290,6 +290,13 @@ def test_a_chat_whose_title_cant_be_read_is_held_only_once_the_bot_has_work(home
     work._title_cache.clear()
     assert work.tool_block(OTHER_CHAT, "terminal")["message"] == work.CHECK_FAILED
     assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "tool_call"})["message"] == work.BRIDGE_BLOCK
+    # .52, 2026-11-09: a model left a } off calls given as text; it hears the
+    # parser's words, and for a show the short from_work form.
+    broken = '[{"arguments": {"cards": [{"title": "Pick"}], "type": "review"}], "name": "conduit_show"}]'
+    message = work.tool_block(OTHER_CHAT, "tool_call", {"calls": broken})["message"]
+    assert "Expecting ',' delimiter" in message and "char 63" in message and '"from_work"' in message
+    message = work.tool_block(OTHER_CHAT, "tool_call", {"calls": '[{"name": "terminal", "arguments": {}'})["message"]
+    assert message.startswith("That tool_call's calls is JSON text") and "from_work" not in message
 
 
 def test_turned_off_nothing_is_started(home, hermes):
@@ -361,6 +368,11 @@ def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, herm
     (_, params, transport), = hermes.named("prompt.submit")
     assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and params["display_kind"] == "hidden" and params["queued"]
     assert "Furina asks you" in params["text"] and "capital of Sumeru" in params["text"]
+    # Its turn is known as the plugin's own, whichever client has the chat open.
+    turns = sys.modules["conduit_push.turn_surface"]
+    turns.start_turn(NAHIDA_CHAT, params["text"])
+    assert turns.woken(NAHIDA_CHAT)
+    turns.start_turn(NAHIDA_CHAT)
     assert "never the user's go-ahead" in params["text"] and 'work_reply {"ref": "A1"' in params["text"]
     resumed, = hermes.named("session.resume")
     assert resumed[1]["profile"] == "nahida" and transport is None

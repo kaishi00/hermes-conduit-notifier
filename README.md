@@ -2625,9 +2625,10 @@ keep only that field.
 - **Only where they're drawn.** A Conduit says `info-cards` in its
   exchange's `features` when it draws them. Unless every Conduit that
   draws cards (`show-cards` or `chat-cards`) and exchanged with the profile
-  in the last 3 days says it (30 days before plugin 0.130), the tool leaves them out (`unsupported_cards`
-  when nothing else is left): the chat keeps the cards, and an older build
-  opening it would show them as nothing. Each phone's exchange
+  in the last 3 days on the newest Conduit build among them says it (30 days
+  before plugin 0.130; every build before 0.152), the tool leaves them out
+  (`unsupported_cards` when nothing else is left). An older build that
+  opens the chat shows those cards as nothing until it updates. Each phone's exchange
   also leaves out the cards it can't draw and shows the Markdown instead.
 
 ### Media, contact and live cards (plugin 0.47+)
