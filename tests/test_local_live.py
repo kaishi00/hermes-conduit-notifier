@@ -1716,7 +1716,12 @@ def test_on_a_read_back_server_new_words_let_the_fast_model_go_with_its_fallback
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
         _agent_on_read_back(ws, upstream)
         _heard(upstream, "Tell me a story")
-        time.sleep(0.2)
+        # The first words reach the fast model before the new ones, so each
+        # gets its own scripted answer however loaded the runner is.
+        deadline = time.monotonic() + 10
+        while not front.requests and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert front.requests
         # New words, with no speech_started first.
         _heard(upstream, "Never mind")
         done, seen = _next(ws, "response.done")
@@ -1747,6 +1752,89 @@ def test_on_a_read_back_server_talking_over_the_fallback_lets_its_hermes_turn_go
         assert done["response"]["status"] == "cancelled"
         _finish(ws)
     assert upstream.spoken() == [api.local_live_agent.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY]
+
+
+def test_on_a_read_back_server_words_over_an_open_phone_turn_let_it_go(client, hermes, server, front):
+    front.answers = [[{"content": "It's noon."}]]
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        ws.send_text(json.dumps(LIVE_UPDATE))
+        _next(ws, "session.updated")
+        # The readiness check's turn is never answered.
+        ws.send_text(json.dumps(_check("conduit-ready-1234")))
+        ask, _ = _next(ws, "conduit.turn")
+        _heard(upstream, "What time is it?")
+        cancel, before = _next(ws, "conduit.turn.cancel")
+        assert cancel["turn_id"] == ask["turn_id"]
+        # The check's reply ended, cancelled, before the fast model's began.
+        assert [frame["response"]["status"] for frame in before if frame["type"] == "response.done"] == ["cancelled"]
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert not any(frame["type"] == "conduit.turn" for frame in seen)
+    assert upstream.spoken() == ["It's noon."]
+    assert done["response"]["status"] == "completed"
+
+
+def test_on_a_read_back_server_a_typed_turn_goes_to_the_fast_model(client, hermes, server, front):
+    front.answers = [[{"content": "Your job found three new emails."}]]
+    server.upstream = upstream = ReadBackUpstream()
+    item = {"type": "conversation.item.create",
+            "item": {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "Job 1 finished: three new emails."}]}}
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent_on_read_back(ws, upstream)
+        ws.send_text(json.dumps(item))
+        ws.send_text(json.dumps({"type": "response.create"}))
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert not any(frame["type"] == "conduit.turn" for frame in seen)
+    assert upstream.spoken() == ["Your job found three new emails."]
+    assert front.requests[0]["body"]["messages"][-1] == {"role": "user",
+                                                         "content": "Job 1 finished: three new emails."}
+    assert not any(frame["type"] == "conversation.item.create" for frame in upstream.sent)
+
+
+def test_a_start_overtaken_while_it_stops_the_last_reply_opens_no_turn():
+    # The second start's stop runs while the first one's still waits on the
+    # call: only the second words get a turn.
+    async def scenario():
+        started = []
+
+        class Call:
+            agent = None
+            turns = {}
+            turn_lock = asyncio.Lock()
+
+            async def start_turn(self, words):
+                started.append(words)
+                return types.SimpleNamespace(frames=asyncio.Queue())
+
+            async def cancel_turn(self, turn):
+                pass
+
+        gate = asyncio.Event()
+        told = []
+
+        async def to_phone(frame):
+            told.append(frame)
+            if len(told) == 1:
+                await gate.wait()
+
+        async def fail(reason):
+            pass
+
+        relay = api.local_live_read_back._LocalLiveReadBack(Call(), to_phone, fail)
+        relay.reply_open = True
+        first = asyncio.ensure_future(relay._start("Tell me a story"))
+        await asyncio.sleep(0)
+        await relay._start("Never mind")
+        gate.set()
+        await first
+        relay.close()
+        return started
+
+    assert asyncio.run(scenario()) == ["Never mind"]
 
 
 def test_on_a_read_back_server_without_a_fast_model_hermes_answers(client, hermes, server):

@@ -642,8 +642,13 @@ class _LocalLiveReadBack:
     async def _start(self, words: str) -> None:
         """A new turn for ``words``: the reply before it stops being spoken
         (the call's start_turn lets its turn go)."""
+        # _stop bumps the generation before its first await, so this start
+        # owns the value it sets: a later start's bump, even one made while
+        # this _stop still waits on the call, overtakes it.
+        generation = self.generation + 1
         await self._stop(cancel_turn=False)
-        generation = self.generation
+        if self.closed or generation != self.generation:
+            return
         self.reply_open = True
         self.turn_over = False
         turn = await self._open_turn(words) if words else None
