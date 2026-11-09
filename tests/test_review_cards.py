@@ -446,6 +446,11 @@ def test_an_old_taps_give_back_leaves_a_resends_marks(tmp_path):
     store.drop_marks(review_id, 1, "old")  # the old tap's expiry, heard late
     kept = store.read(review_id)
     assert kept["marks"]["decisions"] == [{"decision": "d1", "mark": "skip"}] and "tap" not in kept["marks"]
+    # Marks from before they named a tap are given back by any tap.
+    store.drop_marks(review_id, 1)
+    store.save_marks(review_id, 1, {"decisions": [{"decision": "d1", "mark": "skip"}]}, ["s1"])
+    store.drop_marks(review_id, 1, "older")
+    assert store.read(review_id)["marks"] is None
 
 
 def test_a_round_too_big_is_refused(tmp_path):

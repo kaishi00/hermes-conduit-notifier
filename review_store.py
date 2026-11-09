@@ -336,7 +336,8 @@ class KeptReviews:
             if not _well_formed(meta) or not 1 <= number <= len(meta["rounds"]):
                 return
             marks = meta["rounds"][number - 1].get("marks")
-            if tap is not None and isinstance(marks, dict) and marks.get("tap") != tap:
+            # Marks saved before they named their tap (0.147.0..0.147.2) go with any tap.
+            if tap is not None and isinstance(marks, dict) and "tap" in marks and marks["tap"] != tap:
                 return
             meta["rounds"][number - 1]["marks"] = None
             meta["done"] = _settled_round(meta["rounds"][-1])
