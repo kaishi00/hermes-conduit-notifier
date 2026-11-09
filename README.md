@@ -1555,7 +1555,10 @@ question or a small task doesn't start a workstream. Change it in Conduit
   link (`work_read` gives the coordinator up to 2,000 characters of it).
   When the workstream's turn showed cards in its chat (a map, a forecast),
   the update says so, and the coordinator shows the same cards in the Bot
-  Chat with `conduit_show {"from_work": "W3"}`.
+  Chat with `conduit_show {"from_work": "W3"}`. When its report names two
+  or more pages or pictures, the plugin builds a review card of them (one
+  option per file, labelled from the file's name) and the same short call
+  shows it.
   A workstream keeps a checklist with `work_progress` (its only work
   tool), which the Bot Chat's digest shows, Conduit's Work panel lists, and
   Conduit shows as the Tasks line in the workstream's own chat. The
@@ -2777,7 +2780,10 @@ It's a mockup review in the chat, not a code review.
   home", "Picked B · Line"); that turn hears the marks once. The next
   round's card lists what earlier rounds approved or skipped.
 - **Bot Mode.** A workstream writes the options' pages and reports them; the
-  Bot Chat shows the review with `for` set to it, like `W3`. The plugin
+  Bot Chat shows the review with `for` set to it, like `W3`, or with
+  `conduit_show {"from_work": "W3"}`, which shows the review the plugin
+  built from the pages the report names, as the next round when one is
+  open for that workstream. The plugin
   keeps that workstream with the review and sends the user's marks on to it
   as a follow-up (reopening it if it was resolved); every later round
   stays with it, and a round for another workstream is refused.
