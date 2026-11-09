@@ -279,6 +279,9 @@ def test_a_room_file_another_host_stored_reads_this_hosts_copy(tmp_path):
     # A Windows home's path reads the copy too (DeepSeek on notifier #629).
     windows = f"C:\\Users\\furina\\.hermes\\conduit\\room-files\\{folder}\\shot one.jpg"
     assert api.rooms.read_room_file_picture(str(profile), windows, [str(carried)])["dataUrl"]
+    # And a POSIX home's path is one on a Windows host, where it isn't absolute (DeepSeek on notifier #629).
+    assert api.rooms._ANY_ABSOLUTE.match(f"/home/furina/.hermes/conduit/room-files/{folder}/shot one.jpg")
+    assert not api.rooms._ANY_ABSOLUTE.match(f"conduit/room-files/{folder}/shot one.jpg")
     # Without the carried root, another host's path is no file here.
     with pytest.raises(api.rooms.HTTPException):
         api.rooms.read_room_file_picture(str(profile), f"{home}/shot one.jpg")

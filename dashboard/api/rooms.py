@@ -326,8 +326,9 @@ _ROOM_FILE_SCRIPTABLE_TYPES = frozenset((
 # A room file's path ends in its upload's folder and its name, on whichever
 # host stored it.
 _ROOM_FILE_TAIL = re.compile(r"[/\\]conduit[/\\]room-files[/\\](\d{8}-[0-9a-f]{32})[/\\]([^/\\\x00]+)\Z")
-# A Windows home's path, which isn't absolute on another host's system.
-_WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[/\\]")
+# Any home's absolute path, which needn't be absolute on this host's system: a Windows home's on a POSIX
+# host, a POSIX home's (one leading slash, no drive) on Windows.
+_ANY_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[/\\]|/)")
 
 
 def _room_file_here(path: str, roots: Sequence[str]) -> Optional[str]:
@@ -361,7 +362,7 @@ def read_room_file_picture(root: str, path: Any, carried: Sequence[str] = ()) ->
     ``carried`` root (the root home's, where Linked Rooms keep them)."""
     headers = {"Cache-Control": "no-store"}
     if not isinstance(path, str) or not path or "\x00" in path \
-            or not (os.path.isabs(path) or _WINDOWS_ABSOLUTE.match(path)):
+            or not (os.path.isabs(path) or _ANY_ABSOLUTE.match(path)):
         raise HTTPException(status_code=400, detail="path must be a stored room file", headers=headers)
     real = _room_file_here(path, [root, *carried])
     if real is None:

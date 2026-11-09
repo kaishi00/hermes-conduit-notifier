@@ -85,6 +85,36 @@ def test_every_file_a_message_names_goes_in_one_pass(copies):  # noqa: F811
         assert carried(copies, "laifu", name).exists()
 
 
+def test_a_pass_sends_up_to_its_bytes_and_the_rest_next(copies, monkeypatch):  # noqa: F811
+    # DeepSeek on notifier #629: the per-pass bound had no test.
+    monkeypatch.setattr(files_module, "PASS_BYTES", 2500)
+    room_id = started(copies)
+    names = [f"shot{index}.jpg" for index in range(5)]
+    paths = [upload(copies, name, bytes([index]) * 1000) for index, name in enumerate(names)]
+    post(copies, room_id, "\n".join(f"@file:{path}" for path in paths) + "\n\nThese")
+
+    copies.furina.pass_once()
+    assert [carried(copies, "laifu", name).exists() for name in names] == [True, True, False, False, False]
+
+    copies.furina.pass_once()
+    copies.furina.pass_once()
+    assert all(carried(copies, "laifu", name).exists() for name in names)
+
+
+def test_pieces_past_the_incoming_bound_are_dropped(tmp_path, monkeypatch):
+    # DeepSeek on notifier #629: the 64 MB bound on pieces still arriving had no test.
+    monkeypatch.setattr(files_module, "INCOMING_BYTES", 8)
+    files = files_module.Files(type("Rooms", (), {"root": tmp_path, "clock": staticmethod(lambda: 0.0)})())
+    first = {"sha": "a" * 64, "folder": FOLDER, "name": "one.jpg", "index": 0, "count": 2, "size": 10,
+             "data": b"x" * 5}
+    second = {**first, "sha": "b" * 64, "name": "two.jpg"}
+
+    assert files._take("link1", first) is None
+    assert files._take("link1", second) is None
+    incoming = tmp_path / files_module.room_identity.DIRECTORY / files_module.INCOMING
+    assert sorted(len(piece.read_bytes()) for piece in incoming.rglob("*") if piece.is_file()) == [5]
+
+
 def test_only_room_files_under_the_homes_root_go(copies, tmp_path):  # noqa: F811
     room_id = started(copies)
     secret = tmp_path / "secret.txt"
@@ -423,7 +453,7 @@ def test_a_guest_takes_a_disbanded_rooms_files_but_not_one_it_left(copies):  # n
         with side.store.update() as state:
             for invite in state["invites"].values():
                 if invite["room_id"] == room_id:
-                    invite["status"] = status
+                    invite.update(status=status, reason="left" if status == "left" else "disbanded")
     path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
     post(copies, room_id, f"@file:{path}\nhi")
 
@@ -431,6 +461,23 @@ def test_a_guest_takes_a_disbanded_rooms_files_but_not_one_it_left(copies):  # n
 
     assert not carried(copies, "laifu", "shot.jpg").exists()
     assert carried(copies, "mona", "shot.jpg").read_bytes() == b"\xff\xd8 shot"
+
+
+def test_a_guest_whose_agents_were_taken_out_takes_no_files(copies):  # noqa: F811
+    # DeepSeek on notifier #629: a removed invite ends too, and its home could still send.
+    room_id = started(copies)
+    for side in (copies.laifu, copies.mona):
+        with side.store.update() as state:
+            for invite in state["invites"].values():
+                if invite["room_id"] == room_id:
+                    invite.update(status="ended", reason="removed")
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    post(copies, room_id, f"@file:{path}\nhi")
+
+    copies.furina.pass_once()
+
+    assert not carried(copies, "laifu", "shot.jpg").exists()
+    assert not carried(copies, "mona", "shot.jpg").exists()
 
 
 def test_an_answer_for_a_file_not_sent_yet_doesnt_count(copies):  # noqa: F811

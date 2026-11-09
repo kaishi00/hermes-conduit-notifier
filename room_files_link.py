@@ -388,7 +388,11 @@ class Files:
             return
         state = self.rooms.store.read()
         if not any(invite["link"] == received.link_id and invite["room_id"] == body["room_id"]
-                   and invite.get("status") in ("started", "ended") for invite in state["invites"].values()):
+                   and (invite.get("status") == "started"
+                        # A disbanded room's last files still come, as its last pages do; never once its
+                        # agents left or were taken out.
+                        or invite.get("status") == "ended" and invite.get("reason") == "disbanded")
+                   for invite in state["invites"].values()):
             logger.info("Linked Rooms dropped a room.file from Link %s for a room it isn't in", received.link_id)
             return
         target = files_root(self.rooms.root) / body["folder"] / body["name"]
