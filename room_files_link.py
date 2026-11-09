@@ -239,7 +239,9 @@ class Files:
                 continue
             try:
                 size = os.stat(real).st_size
-            except OSError:
+            except OSError as exc:
+                self._tell_once(f"{link_id}/{folder}/{name}", "Linked Rooms doesn't carry %s/%s to Link %s: it "
+                                "can't be read (%s)", folder, name, link_id, type(exc).__name__)
                 continue
             if not os.path.isfile(real) or size > MAX_FILE_BYTES:
                 if size > MAX_FILE_BYTES:
@@ -313,9 +315,14 @@ class Files:
             return 0
         try:
             data = path.read_bytes()
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             # Swept on the home (a month after its upload): nothing left to carry.
             self._drop(link_id, due)
+            return 0
+        except OSError as exc:
+            # Not readable just now: it stays owed and goes on a later pass.
+            self._tell_once(f"read:{due}", "Linked Rooms couldn't read room file %s to carry it (%s); it tries "
+                                           "again", due, type(exc).__name__)
             return 0
         if len(data) > MAX_FILE_BYTES:
             self._drop(link_id, due)

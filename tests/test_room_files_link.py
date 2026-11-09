@@ -528,3 +528,29 @@ def test_a_message_too_big_for_a_page_still_carries_its_files(copies, monkeypatc
         copies.furina.pass_once()
 
     assert carried(copies, "laifu", "shot.jpg").read_bytes() == b"\xff\xd8 big"
+
+
+def test_a_file_that_cant_be_read_just_now_stays_owed(copies, monkeypatch):  # noqa: F811
+    # DeepSeek on notifier #629: any read error dropped the carry for good.
+    room_id = started(copies)
+    path = upload(copies, "shot.jpg", b"\xff\xd8 shot")
+    store = files_module.Store(copies.tmp_path / "furina")
+    with store.update() as state:
+        state["out"]["link1"] = {f"{FOLDER}/shot.jpg": {
+            "room": room_id, "rooms": [room_id], "size": path.stat().st_size, "base": str(path.parent.parent),
+            "at": None, "tries": 0, "done": False, "noted": 0}}
+    read_bytes = pathlib.Path.read_bytes
+
+    def busy(self):
+        if self.name == "shot.jpg":
+            raise PermissionError(13, "busy")
+        return read_bytes(self)
+
+    monkeypatch.setattr(files_module.Path, "read_bytes", busy)
+    copies.furina.files.send_files()
+    assert f"{FOLDER}/shot.jpg" in store.read()["out"]["link1"]
+    monkeypatch.undo()
+
+    copies.furina.pass_once()
+
+    assert carried(copies, "laifu", "shot.jpg").read_bytes() == b"\xff\xd8 shot"
