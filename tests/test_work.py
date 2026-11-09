@@ -859,10 +859,14 @@ def test_a_call_the_screen_lock_refuses_takes_no_quick_step(on, hermes, monkeypa
         assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="computer_use", args={}, turn_id="t1",
                                      tool_call_id=f"c{n}") is held
     assert work._steps[(BOT_CHAT, "t1")][1] == 0
+    clock = [time.monotonic() + work.QUICK_S + 1]  # held past a minute: the clock starts at a step that runs
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
     assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="computer_use", args={}, turn_id="t1",
                                  tool_call_id="c9") is None
     assert work._steps[(BOT_CHAT, "t1")][1] == 1  # the call that ran takes its step
+    assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="computer_use", args={}, turn_id="t1",
+                                 tool_call_id="c10") is None
 
 
 def test_the_memory_providers_tools_are_the_coordinators_own(on, home, hermes, monkeypatch):

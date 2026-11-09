@@ -2904,8 +2904,8 @@ def _take_steps(session_id: Any, turn_id: Any, count: int) -> Optional[int]:
         for stale in [key for key, (first, _) in _steps.items() if now - first > _STEP_KEEP_S]:
             del _steps[stale]
         first, taken = _steps.get(key, (now, 0))
-        if not turn_id and now - first > QUICK_S:
-            first, taken = now, 0
+        if not taken or (not turn_id and now - first > QUICK_S):
+            first, taken = now, 0  # the clock starts at a step that runs
         if taken and now - first > QUICK_S:
             return 0
         if taken + count > QUICK_STEPS:
