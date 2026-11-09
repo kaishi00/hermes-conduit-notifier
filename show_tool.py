@@ -545,124 +545,115 @@ def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[s
     return {**{key: value for key, value in raw.items() if key != "review"}, "review": review}
 
 
-def _release(explicit: dict[str, int], raw: dict[str, Any]) -> None:
-    """A decision left out doesn't hold the id it named: once no decision
-    still to come names it, a decision of its title may carry it from an
-    earlier round."""
-    named = _short_id(raw.get("id"))
-    if explicit.get(named, 0) > 1:
-        explicit[named] -= 1
-    else:
-        explicit.pop(named, None)
-
-
 def _review_decisions(given: list[Any], path: str, problems: list[str],
                       rounds: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """The decisions as the card shows them, and the pages their options
     open, by decision and option id. A decision given without an id takes
     the id an earlier round gave a decision of the same title, so its marks
     carry over; otherwise the first d1, d2, ... that no decision here or in
-    an earlier round has."""
-    decisions: list[dict[str, Any]] = []
-    pages: dict[str, str] = {}
-    seen: set[str] = set()
+    an earlier round has. Ids are given once every decision is checked, so
+    one left out holds none."""
+    if len(given) > 6:
+        problems.append(f"{path}.decisions: six at most, the rest were left out")
+    kept: list[tuple[str, str, dict[str, Any], dict[str, str]]] = []
+    for d_index, raw in enumerate(given[:6]):
+        checked = _review_decision(raw, f"{path}.decisions[{d_index}]", problems)
+        if checked is not None:
+            kept.append((f"{path}.decisions[{d_index}]", _short_id(raw.get("id")), *checked))
     # Each title's ids in the latest round that showed it, in order.
     by_title: dict[str, list[str]] = {}
     used_before: set[str] = set()
-    for kept in rounds or []:
+    for earlier_round in rounds or []:
         titled: dict[str, list[str]] = {}
-        for earlier in kept.get("decisions", []):
+        for earlier in earlier_round.get("decisions", []):
             titled.setdefault(str(earlier.get("title", "")).casefold(), []).append(earlier["id"])
             used_before.add(earlier["id"])
         by_title.update(titled)
-    # How many decisions name each id: it stays reserved while one may still be kept.
-    explicit: dict[str, int] = {}
-    for raw in given[:6]:
-        named = _short_id(raw.get("id")) if isinstance(raw, dict) else ""
-        if named:
-            explicit[named] = explicit.get(named, 0) + 1
-    if len(given) > 6:
-        problems.append(f"{path}.decisions: six at most, the rest were left out")
-    for d_index, raw in enumerate(given[:6]):
-        where = f"{path}.decisions[{d_index}]"
-        if not isinstance(raw, dict):
-            problems.append(f"{where}: not a decision, left out")
-            continue
-        title = _text(raw.get("title"), 80)
-        if not title:
-            problems.append(f"{where}.title: a decision needs one, left out")
-            _release(explicit, raw)
-            continue
-        decision_id = _short_id(raw.get("id"))
+    explicit = {named for _, named, _, _ in kept if named}
+    decisions: list[dict[str, Any]] = []
+    pages: dict[str, str] = {}
+    seen: set[str] = set()
+    for where, named, decision, option_pages in kept:
+        decision_id = named
         if not decision_id:
             # The first of the title's earlier ids that no decision here
             # holds or names.
-            carried = next((earlier for earlier in by_title.get(title.casefold(), [])
-                            if earlier not in explicit and earlier not in seen), "")
-            if carried:
-                decision_id = carried
-            else:
-                number = 1
-                while f"d{number}" in explicit or f"d{number}" in seen or f"d{number}" in used_before:
-                    number += 1
-                decision_id = f"d{number}"
+            decision_id = next((earlier for earlier in by_title.get(decision["title"].casefold(), [])
+                                if earlier not in explicit and earlier not in seen), "")
+        if not decision_id:
+            number = 1
+            while f"d{number}" in explicit or f"d{number}" in seen or f"d{number}" in used_before:
+                number += 1
+            decision_id = f"d{number}"
         if decision_id in seen:
             problems.append(f"{where}.id: another decision has it, left out")
             continue
-        options: list[dict[str, Any]] = []
-        option_pages: dict[str, str] = {}
-        taken: set[str] = set()
-        recommended = False
-        raw_options = raw.get("options") if isinstance(raw.get("options"), list) else []
-        if len(raw_options) > 6:
-            problems.append(f"{where}.options: six at most, the rest were left out")
-        for o_index, option_raw in enumerate(raw_options[:6]):
-            named = f"{where}.options[{o_index}]"
-            if not isinstance(option_raw, dict):
-                problems.append(f"{named}: not an option, left out")
-                continue
-            label = _text(option_raw.get("label"), 60)
-            if not label:
-                problems.append(f"{named}.label: an option needs one, left out")
-                continue
-            option_id = _short_id(option_raw.get("id")) or next(
-                letter for letter in "ABCDEFGHIJKL" if letter not in taken)
-            if option_id in taken:
-                problems.append(f"{named}.id: another option has it, left out")
-                continue
-            try:
-                kind, content = review_store.read_page(option_raw)
-            except review_store.ReviewError as error:
-                problems.append(f"{named}: {error}, left out")
-                continue
-            option: dict[str, Any] = {"id": option_id, "label": label, "kind": kind}
-            text = _text(option_raw.get("text"), 200)
-            if text:
-                option["text"] = text
-            if option_raw.get("recommended") is True and not recommended:
-                option["recommended"] = True
-                recommended = True
-            if kind == "image":
-                option["url"] = content
-            else:
-                option_pages[f"{decision_id}/{option_id}"] = content
-            taken.add(option_id)
-            options.append(option)
-        if len(options) < 2:
-            problems.append(f"{where}: a decision needs two options, left out")
-            _release(explicit, raw)
-            continue
-        decision: dict[str, Any] = {"id": decision_id, "title": title}
-        text = _text(raw.get("text"), 300)
-        if text:
-            decision["text"] = text
-        if raw.get("layout") in ("side", "switch", "before_after"):
-            decision["layout"] = raw["layout"]
-        decision["options"] = options
         seen.add(decision_id)
-        decisions.append(decision)
-        pages.update(option_pages)
+        decisions.append({"id": decision_id, **decision})
+        pages.update({f"{decision_id}/{option_id}": page for option_id, page in option_pages.items()})
     return decisions, pages
+
+
+def _review_decision(raw: Any, where: str, problems: list[str]) -> tuple[dict[str, Any], dict[str, str]] | None:
+    """A decision as the card shows it, without its id, and the pages its
+    options open by option id; None when it can't be shown."""
+    if not isinstance(raw, dict):
+        problems.append(f"{where}: not a decision, left out")
+        return None
+    title = _text(raw.get("title"), 80)
+    if not title:
+        problems.append(f"{where}.title: a decision needs one, left out")
+        return None
+    options: list[dict[str, Any]] = []
+    option_pages: dict[str, str] = {}
+    taken: set[str] = set()
+    recommended = False
+    raw_options = raw.get("options") if isinstance(raw.get("options"), list) else []
+    if len(raw_options) > 6:
+        problems.append(f"{where}.options: six at most, the rest were left out")
+    for o_index, option_raw in enumerate(raw_options[:6]):
+        named = f"{where}.options[{o_index}]"
+        if not isinstance(option_raw, dict):
+            problems.append(f"{named}: not an option, left out")
+            continue
+        label = _text(option_raw.get("label"), 60)
+        if not label:
+            problems.append(f"{named}.label: an option needs one, left out")
+            continue
+        option_id = _short_id(option_raw.get("id")) or next(
+            letter for letter in "ABCDEFGHIJKL" if letter not in taken)
+        if option_id in taken:
+            problems.append(f"{named}.id: another option has it, left out")
+            continue
+        try:
+            kind, content = review_store.read_page(option_raw)
+        except review_store.ReviewError as error:
+            problems.append(f"{named}: {error}, left out")
+            continue
+        option: dict[str, Any] = {"id": option_id, "label": label, "kind": kind}
+        text = _text(option_raw.get("text"), 200)
+        if text:
+            option["text"] = text
+        if option_raw.get("recommended") is True and not recommended:
+            option["recommended"] = True
+            recommended = True
+        if kind == "image":
+            option["url"] = content
+        else:
+            option_pages[option_id] = content
+        taken.add(option_id)
+        options.append(option)
+    if len(options) < 2:
+        problems.append(f"{where}: a decision needs two options, left out")
+        return None
+    decision: dict[str, Any] = {"title": title}
+    text = _text(raw.get("text"), 300)
+    if text:
+        decision["text"] = text
+    if raw.get("layout") in ("side", "switch", "before_after"):
+        decision["layout"] = raw["layout"]
+    decision["options"] = options
+    return decision, option_pages
 
 
 def _filled_templates(given: Any, templates: card_templates.TemplateStore, problems: list[str]) -> Any:

@@ -405,6 +405,15 @@ def test_an_id_a_kept_decision_names_stays_reserved_after_a_dropped_one_named_it
     assert [(d["id"], d["title"]) for d in review["decisions"]] == [("d2", "Colour"), ("d1", "Font")]
 
 
+def test_a_dropped_twin_naming_the_id_after_the_kept_one_holds_nothing(tool_home):
+    host = Host(tool_home)
+    layout = {"title": "Layout", "options": [{"label": "A", "html": PAGE}, {"label": "B", "html": PAGE}]}
+    first = _call({"cards": [_review([layout])]}, reviews=host)["cards"][0]["review"]
+    broken = {"id": "d1", "title": "Layout", "options": [{"label": "A", "html": PAGE}]}
+    second = _call({"cards": [_review([layout, broken], id=first["id"])]}, reviews=host)["cards"][0]["review"]
+    assert [d["id"] for d in second["decisions"]] == ["d1"]
+
+
 def test_a_padded_review_id_is_still_one_round_per_answer(tool_home):
     host = Host(tool_home)
     first = _call({"cards": [_review()]}, reviews=host)["cards"][0]["review"]
@@ -424,6 +433,20 @@ def test_an_automatic_decision_id_never_takes_one_given_explicitly(tool_home):
 
 
 # --- the store ------------------------------------------------------------------------
+
+def test_an_old_taps_give_back_leaves_a_resends_marks(tmp_path):
+    store = review_store.KeptReviews(tmp_path)
+    review_id = store.start("T", "s1")
+    store.add_round(review_id, "T", [{"id": "d1", "title": "A", "options": [
+        {"id": "A", "label": "A", "kind": "image", "url": "https://img.test/a.png"},
+        {"id": "B", "label": "B", "kind": "image", "url": "https://img.test/b.png"}]}], {}, "s1")
+    store.save_marks(review_id, 1, {"decisions": [{"decision": "d1", "mark": "skip"}], "tap": "old"}, ["s1"])
+    store.drop_marks(review_id, 1, "old")
+    store.save_marks(review_id, 1, {"decisions": [{"decision": "d1", "mark": "skip"}], "tap": "new"}, ["s1"])
+    store.drop_marks(review_id, 1, "old")  # the old tap's expiry, heard late
+    kept = store.read(review_id)
+    assert kept["marks"]["decisions"] == [{"decision": "d1", "mark": "skip"}] and "tap" not in kept["marks"]
+
 
 def test_a_round_too_big_is_refused(tmp_path):
     store = review_store.KeptReviews(tmp_path)

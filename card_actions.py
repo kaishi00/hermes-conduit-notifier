@@ -228,7 +228,7 @@ class TapStore:
         # A review tap no turn heard in time: its marks go too (after the
         # save, in _locked), so the user can send them again.
         self._expired = len(kept) != len(state["taps"])
-        self._unheard_reviews = {(tap["review"]["id"], tap["review"]["round"]) for tap in state["taps"]
+        self._unheard_reviews = {(tap["review"]["id"], tap["review"]["round"], tap["id"]) for tap in state["taps"]
                                  if _well_formed(tap) and now - tap["at"] >= KEEP_S and not tap["heard"]
                                  and isinstance(tap.get("review"), dict)
                                  and isinstance(tap["review"].get("id"), str)
@@ -254,13 +254,13 @@ class TapStore:
             yield state
             # A review tap gone unheard (trimmed past MAX_TAPS) gives its marks back too.
             left = {tap["id"] for tap in state["taps"]}
-            unheard |= {review for tap_id, review in waiting.items() if tap_id not in left}
+            unheard |= {(*review, tap_id) for tap_id, review in waiting.items() if tap_id not in left}
             if expired or json.dumps(state, sort_keys=True) != before:
                 self._save(state)
         # Once the expired taps are gone from the file, so it happens once.
-        for review_id, number in unheard:
+        for review_id, number, tap_id in unheard:
             try:
-                self.reviews().drop_marks(review_id, number)
+                self.reviews().drop_marks(review_id, number, tap_id)
             except (review_store.ReviewError, OSError):
                 logger.debug("conduit cards: couldn't give a review's marks back", exc_info=True)
 
@@ -327,8 +327,10 @@ class TapStore:
             raise TapError("a newer round of that review is in the chat; mark that one")
         decisions = meta["rounds"][shown["round"] - 1]["decisions"]
         marks = _review_marks(value, decisions)
+        # The marks name their tap, so only that tap's going gives them back.
+        tap_id = uuid.uuid4().hex
         try:
-            store.save_marks(shown["id"], shown["round"], marks, sessions)
+            store.save_marks(shown["id"], shown["round"], {**marks, "tap": tap_id}, sessions)
         except review_store.ReviewError as error:
             raise TapError(str(error))
         title = meta["title"] or card.get("title", "")
@@ -344,7 +346,7 @@ class TapStore:
                            if option["id"] == marks["decisions"][0].get("option")), None)
             if option is not None:
                 picked = f'{option["id"]} · {option["label"]}'
-        tap = {"id": uuid.uuid4().hex, "at": self.clock(), "heard": False, "action": REVIEW_ACTION,
+        tap = {"id": tap_id, "at": self.clock(), "heard": False, "action": REVIEW_ACTION,
                "label": label, "title": title, "live": card.get("live", ""),
                "markdown": _review_lines(decisions, marks), "values": {},
                "review": {"id": shown["id"], "round": shown["round"], "for": meta["for"],
@@ -359,7 +361,7 @@ class TapStore:
         except BaseException:
             # No tap, no marks: the app's retry can send them again.
             try:
-                store.drop_marks(shown["id"], shown["round"])
+                store.drop_marks(shown["id"], shown["round"], tap_id)
             except (review_store.ReviewError, OSError):
                 pass
             raise
