@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### New and improved
 - Local Live's agent mode now works on speech servers that only read text
-  aloud, like the farm's voice adapter: your fast model answers each thing
+  aloud, like a self-hosted voice adapter: your fast model answers each thing
   you say and hands real work to Hermes as a job, so replies start sooner
   instead of waiting for a full Hermes turn.
 
