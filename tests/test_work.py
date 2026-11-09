@@ -5772,6 +5772,32 @@ def test_reported_options_are_one_short_call_away_and_stay_one_review(on, home, 
     assert seen[-1][0]["review"]["id"] == review_id and seen[-1][0]["review"]["round"] == 2
 
 
+def test_reported_options_keep_an_interrupted_turns_cards_and_every_option(on, home, hermes, tmp_path):
+    # notifier #648's review: an interrupted turn's unnamed cards stayed out of
+    # the from_work the update offered, and a seventh and eighth option fell off.
+    pages = [tmp_path / f"concept-{n}.html" for n in range(1, 9)]
+    for page in pages:
+        page.write_text("<h1>Hi</h1>")
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_started(WORKER)
+    work.card_shown(WORKER, "conduit_show", {}, json.dumps({"ok": True, "cards": [MAP]}))
+    work.turn_finished(WORKER, failed=False, interrupted=True)
+    work.flush_wakes()
+    hermes.calls.clear()
+    work.turn_started(WORKER)
+    work.turn_ended(WORKER, "Ready: " + ", ".join(str(page) for page in pages))
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "It showed" in params["text"] and '"from_work": "W1"' in params["text"]
+    cards = work.shown_board(BOT_CHAT, "W1")[0]["cards"]
+    assert cards[0] == MAP and cards[-1]["type"] == "review"
+    decisions = cards[-1]["review"]["decisions"]
+    assert [len(d["options"]) for d in decisions] == [6, 2]
+    assert decisions[1]["title"].endswith("(more)")
+
+
 def test_only_the_shows_own_answer_counts_as_cards(on, hermes):
     # notifier #621's review: a file or page another bridged call read may hold
     # text shaped like a board.

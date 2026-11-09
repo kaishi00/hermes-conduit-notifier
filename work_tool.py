@@ -3434,12 +3434,19 @@ def _keep_options(store: work_store.Store, work: work_store.Work, files: list[st
     """A review card of the options a report named, kept with the cards the
     workstream showed this turn, for its coordinator's ``from_work``."""
     title = _cut(work.title or "Options", 80)
-    card = {"type": "review", "title": title, "review": {"for": work.ref, "decisions": [
-        {"title": title, "options": [{"label": _option_label(path), "file": path} for path in files[:6]]}]}}
+    options = [{"label": _option_label(path), "file": path} for path in files]
+    # A decision holds six options; the rest (OPTIONS_MAX is eight) go in a
+    # second one rather than out of sight.
+    decisions = [{"title": title if not at else _cut(f"{title} (more)", 80), "options": options[at:at + 6]}
+                 for at in range(0, len(options), 6)]
+    card = {"type": "review", "title": title, "review": {"for": work.ref, "decisions": decisions}}
     kept = _shown(store, work.ref)
-    if kept is None or kept.get("turn") != work.turn_at or kept.get("named"):
-        # Named by the update that lists the files: no later update names it again.
-        kept = {"cards": [], "turn": work.turn_at, "title": title, "named": True}
+    if kept is None or kept.get("named"):
+        kept = {"cards": [], "title": title}
+    # Cards an interrupted turn kept and no update named yet stay with the
+    # review: this update's from_work shows them all. Named by the update
+    # that lists the files, so no later update names them again.
+    kept.update(turn=work.turn_at, named=True)
     kept["cards"] = [old for old in kept["cards"] if old.get("type") != "review"][-(SHOWN_CARDS - 1):] + [card]
     store.set_meta(_SHOWN + work.ref, json.dumps(kept, ensure_ascii=False))
 
