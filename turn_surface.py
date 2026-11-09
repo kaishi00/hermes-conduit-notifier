@@ -324,7 +324,7 @@ MAX_TURN_ENTRIES = 256
 # client sent it. Only a turn whose message is one of them counts, never one
 # that merely reads like one.
 WAKE_TTL_S = 6 * 3600.0  # queued behind the chat's running turn, which may be long
-_wakes: "OrderedDict[str, float]" = OrderedDict()
+_wakes: "OrderedDict[str, list[float]]" = OrderedDict()
 _woken: "OrderedDict[str, bool]" = OrderedDict()
 
 
@@ -333,8 +333,10 @@ def expect_wake(text: Any, clock: Callable[[], float] = time.monotonic) -> None:
     if not isinstance(text, str) or not text.strip():
         return
     with _turn_entries_lock:
-        _wakes.pop(text.strip(), None)
-        _wakes[text.strip()] = clock()
+        # The same text may go to two chats (one question asked of two
+        # bots): each sending waits for a turn of its own.
+        sent = _wakes.pop(text.strip(), [])
+        _wakes[text.strip()] = [*sent, clock()][-MAX_TURN_ENTRIES:]
         while len(_wakes) > MAX_TURN_ENTRIES:
             _wakes.popitem(last=False)
 
@@ -348,8 +350,15 @@ def start_turn(session_id: Any, user_message: Any = None, clock: Callable[[], fl
         return
     with _turn_entries_lock:
         _woken.pop(session_id, None)
-        sent = _wakes.pop(user_message.strip(), None) if isinstance(user_message, str) else None
-        if sent is not None and 0 <= clock() - sent <= WAKE_TTL_S:
+        key = user_message.strip() if isinstance(user_message, str) else None
+        now = clock()
+        times = [at for at in _wakes.get(key, []) if 0 <= now - at <= WAKE_TTL_S] if key else []
+        if key in _wakes:
+            del _wakes[key]
+        sent = times.pop(0) if times else None
+        if times:
+            _wakes[key] = times
+        if sent is not None:
             _woken[session_id] = True
             while len(_woken) > MAX_TURN_ENTRIES:
                 _woken.popitem(last=False)

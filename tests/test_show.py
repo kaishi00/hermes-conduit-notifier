@@ -467,6 +467,13 @@ def test_the_plugins_own_work_update_draws_cards_whichever_client_has_the_chat_o
         assert answer["ok"] is True and answer["cards"] and answer["note"].startswith(tool.IN_CHAT_NOTE), answer
         tool.turn_surface.start_turn("s1", "Show me dinner")
         assert _call({"title": "Dinner", "cards": [MAP]})["error"] == "not_conduit", "the user's own turn as before"
+        # The same text sent twice (one question to two bots) counts for two turns.
+        tool.turn_surface.expect_wake("Work update from your workstreams. ...")
+        tool.turn_surface.expect_wake("Work update from your workstreams. ...")
+        tool.turn_surface.start_turn("s2", "Work update from your workstreams. ...")
+        tool.turn_surface.start_turn("s1", "Work update from your workstreams. ...")
+        assert tool.turn_surface.woken("s1") and tool.turn_surface.woken("s2")
+        tool.turn_surface.start_turn("s2")
         # Only a text the plugin sent counts, and once: a message that reads
         # like one (pasted in Desktop) is the user's.
         tool.turn_surface.start_turn("s1", "Work update from your workstreams. ...")
