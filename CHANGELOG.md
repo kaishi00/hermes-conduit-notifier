@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.150.3 (2026-11-09)
+
+### Fixes
+- A bot could write the review card for its workstream's options out as
+  text in its reply instead of showing it. The plugin now builds that card
+  from the workstream's report, so the bot shows it with one short call,
+  and a later round stays the same review.
+
 ## 0.150.2 (2026-11-09)
 
 ### Fixes

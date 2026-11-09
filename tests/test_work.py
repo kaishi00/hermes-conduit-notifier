@@ -2016,7 +2016,7 @@ def test_options_a_workstream_made_are_shown_as_a_review_card(on, hermes, tmp_pa
     work.flush_wakes()
     (_, params, _), = hermes.named("prompt.submit")
     text = params["text"]
-    assert "names 3 pages or pictures" in text and '"for" is "W1"' in text and "review card" in text
+    assert "names 3 pages or pictures" in text and '"from_work": "W1"' in text and "review card" in text
     assert f"{folder}/concept-1-minimal-dark.html, {folder}/concept-2-vibrant.html, " \
            f"{folder}/concept-3-terminal.html." in text
     assert "concept-4-missing" not in text.split("names 3")[1]
@@ -2080,7 +2080,7 @@ def test_a_room_hears_the_report_without_the_review_line(on, home, monkeypatch, 
 
 def test_the_worker_brief_says_options_go_in_files_for_a_review():
     assert "review card" in work.WORKER_PROMPT and "full path" in work.WORKER_PROMPT
-    assert "review card with for set to its ref" in work.SHOW_RULE
+    assert "review card for it" in work.SHOW_RULE and "from_work" in work.SHOW_RULE
 
 
 def test_a_registry_from_before_the_checklist_gets_its_column(home):
@@ -5722,6 +5722,54 @@ def test_conduit_show_from_work_draws_the_workstreams_cards(on, home, hermes, mo
     on.add("ask_out", title="Ask Nahida", status="waiting")
     asked = show._handle({"from_work": "A1", "title": "x"}, BOT_CHAT, lambda _: False)
     assert asked["error"] == "no_cards" and "an ask between bots" in asked["note"]
+
+
+def test_reported_options_are_one_short_call_away_and_stay_one_review(on, home, hermes, monkeypatch, tmp_path):
+    # Eric 2026-11-09: Furina wrote the long nested review call out as text.
+    show = _load("conduit_push.show_tool", ROOT / "show_tool.py")
+    from conduit_push import review_store as reviews_mod
+
+    class Host(show.ReviewHost):
+        def store(self):
+            return reviews_mod.KeptReviews(tmp_path / "reviews")
+
+        def is_bot_chat(self, session):
+            return session == BOT_CHAT
+
+        def workstream(self, ref):
+            return True
+
+    monkeypatch.setattr(show.turn_surface, "turn_entry", lambda session: "typed")
+    seen = []
+    monkeypatch.setattr(show, "_handle_cards", lambda args, session, cards, problems, *rest: (
+        seen.append(cards), {"ok": True, "cards": cards, "note": ""})[1])
+    pages = [tmp_path / "concept-1-minimal-dark.html", tmp_path / "concept-2-vibrant.html"]
+    for page in pages:
+        page.write_text("<h1>Hi</h1>")
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    work.turn_started(WORKER)
+    work.turn_ended(WORKER, f"Ready: {pages[0]} and {pages[1]}")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert '"from_work": "W1"' in params["text"]
+    first = show._handle({"from_work": "W1", "title": "Concepts"}, BOT_CHAT, lambda _: False, reviews=Host())
+    assert first["ok"], first
+    card = seen[-1][0]
+    assert card["type"] == "review" and card["review"]["for"] == "W1"
+    options = card["review"]["decisions"][0]["options"]
+    assert [option["label"] for option in options] == ["Concept 1 minimal dark", "Concept 2 vibrant"]
+    review_id = card["review"]["id"]
+    # The next round the workstream reports is the same review.
+    work.turn_started(WORKER)
+    work.turn_ended(WORKER, f"Round two: {pages[1]} and {pages[0]}")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    second = show._handle({"from_work": "W1"}, BOT_CHAT, lambda _: False, reviews=Host())
+    assert second["ok"], second
+    assert seen[-1][0]["review"]["id"] == review_id and seen[-1][0]["review"]["round"] == 2
 
 
 def test_only_the_shows_own_answer_counts_as_cards(on, hermes):
