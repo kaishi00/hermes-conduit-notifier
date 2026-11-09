@@ -591,6 +591,10 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
         action, target, why = pulse_picks.resolve(pulse_store, pick, str(row.get("subject") or ""), now, closing)
         if action in (pulse_picks.UPDATE, pulse_picks.CLOSE):
             deliberate.add(id(row))
+        elif action == pulse_picks.DROP and why == pulse_picks.HOLD and target is not None and _due_today(
+                pulse_store, row, target, now):
+            # Its day: once more, as still_open lets it (due_again).
+            row["pick"] = pulse_picks.dumps({**pick, pulse_picks.DUE_AGAIN: True})
         elif action == pulse_picks.DROP and not row.get("skip"):
             row["skip"] = "raised"
             pulse_picks.count(pulse_store, now, ["held_open_subject" if why == pulse_picks.HOLD else f"dropped:{why}"])
@@ -613,6 +617,16 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
                  muted=lambda row: bool(row["chat_id"]) and (row["profile"], row["chat_id"]) in muted,
                  pace=functools.lru_cache(maxsize=None)(lambda kind: learning.report_pace(pulse_store, kind)),
                  cap=None if zone is None else time_cap(pulse_store, zone, now))
+
+
+def _due_today(pulse_store: store.PulseStore, row: dict, card_id: int, now: float) -> bool:
+    """Whether ``row``, held for its open card ``card_id``, is due soon
+    enough to come once more (due_again, from that card's last word)."""
+    card = pulse_store.card(card_id)
+    if card is None:
+        return False
+    last = max(float(card["created_at"]), float(card.get("updated_at") or 0))
+    return due_again(row, last, now, due=_due_point(pulse_store, row))
 
 
 def still_open(pulse_store: store.PulseStore, rows: Sequence[dict], now: float,

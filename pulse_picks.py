@@ -307,6 +307,8 @@ DROP = "drop"
 CARD_KINDS = ("followup", "noticed")
 # A remembered item's subject (pulse_candidates.subject_of).
 ITEM_SUBJECT = "item:"
+# A pick decide let past the hold because it is due today (pulse_candidates).
+DUE_AGAIN = "due_again"
 # A yearly date's or a deadline's subject (pulse_dates keys): it comes up at
 # each of its lead times on purpose, each once by its ref, so a card open
 # from the last lead time doesn't hold the next one back.
@@ -351,7 +353,9 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
                else "update_subject")
     else:
         why = ""
-    if subject and not subject.startswith(DATE_SUBJECTS):
+    # One due today (pulse_candidates.due_again, marked by decide) comes once
+    # more whatever its card says, so a deadline can't slip by behind it.
+    if subject and not subject.startswith(DATE_SUBJECTS) and not pick.get(DUE_AGAIN):
         open_now = [card for card in pulse_store.open_cards_with([subject], now - HOLD_S)
                     if int(card["id"]) not in closing]
         if open_now:

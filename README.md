@@ -3568,7 +3568,7 @@ keeps it.
   comes back again. Feed cards carry `back` (`unsent` or `not_done`, empty
   for a card never back) and `back_acted_at`, and `hermes conduit-push
   pulse cards` marks them.
-- **Cards as picks** (plugin 0.149+). Every report, look ahead and
+- **Cards as picks** (plugin 0.150+). Every report, look ahead and
   follow-up card is a checked pick: a headline, at most one more sentence,
   a shape with its facts (`date`, `due`, `runs`, `promise`, `status`,
   `steps`, `drawn` for a Conduit card body, or `plain`) and at most two

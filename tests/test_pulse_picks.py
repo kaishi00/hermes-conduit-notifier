@@ -302,3 +302,15 @@ def test_a_second_update_to_one_card_keeps_the_subject_the_first_gave_it(tmp_pat
                                {"line": "Audit failed twice", "incident": {"card": f"pc_{made}"}}], 2000.0)
     assert pulse_store.card(made)["subject"] == "job:default:41"
     assert pulse_store.card(made)["news"] == "Audit failed twice"
+
+
+def test_one_due_today_comes_once_more_past_its_open_card(tmp_path):
+    pulse_store = fresh(tmp_path)
+    now = 100 * 86400.0
+    made = card(pulse_store, subject="item:7", created_at=now - 20 * 3600)
+    row = {"origin": "found", "item_id": None, "due_at": now + 10 * 3600}
+    assert pulse.candidates._due_today(pulse_store, row, made, now)
+    assert not pulse.candidates._due_today(pulse_store, {**row, "due_at": now + 3 * 86400}, made, now)
+    pick, _ = picks.parse({"line": "Send the deck today", "subject": "item:7"})
+    assert picks.resolve(pulse_store, pick, "item:7", now)[0] == picks.DROP
+    assert picks.resolve(pulse_store, {**pick, picks.DUE_AGAIN: True}, "item:7", now) == (picks.NEW, None, "")
