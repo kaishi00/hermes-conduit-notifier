@@ -42,7 +42,8 @@ _FENCE = re.compile(r"^[ \t]*(?P<fence>```|~~~).*?(?:^[ \t]*(?P=fence)|\Z)", re.
 TEXT_ARGS = frozenset({"title", "subtitle", "markdown"})
 # Where a block with no </tool_call> ends: after the call's last closing tag,
 # so prose the model wrote after it stays the reply's.
-_CALL_CLOSE = re.compile(r"</(?:function|args|arguments|parameter)>")
+# A parameter's close doesn't count: a later one may still be unfinished.
+_CALL_CLOSE = re.compile(r"</(?:function|args|arguments)>")
 _CLOSING_TAIL = re.compile(r"(?:\s*</?[a-z_]{0,12}>?)*\s*\Z")
 MAX_REPLY = 200_000
 

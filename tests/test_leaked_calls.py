@@ -69,6 +69,9 @@ def test_other_calls_and_plain_replies_are_left_alone():
     prose = "Here." + REVIEW_XML.replace("</function></tool_call>", "") + " Which one do you like?"
     [leak] = leaked.shows(prose)
     assert prose[leak.end:] == " Which one do you like?" and leak.args["title"] == "W17"
+    cut = "Hi.<tool_call><function=conduit_show><parameter=title>T</parameter><parameter=markdown>Hello"
+    [leak] = leaked.shows(cut)
+    assert leak.end == len(cut) and leak.args["markdown"] == "Hello", "an unfinished parameter is the call's"
     # A fenced example of a call is the reply's text.
     example = "Call it like this:\n```xml\n" + REVIEW_XML + "\n```\nThen it shows."
     assert leaked.shows(example) == []
