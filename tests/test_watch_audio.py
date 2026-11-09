@@ -629,6 +629,95 @@ def test_a_watch_stream_starts_echoes_and_ends(monkeypatch):
     _run(scenario())
 
 
+def test_a_watch_call_holds_the_users_call_presence_until_they_hang_up(monkeypatch):
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_PRESENCE_RENEW_S", 0.02)
+
+    async def scenario():
+        held = []
+        bridge = _bridge()
+        bridge.grant.profile = "work"
+
+        async def presence(profile, hold_s):
+            held.append((profile, hold_s))
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: len(held) >= 3)
+        assert set(held) == {("work", api.watch_audio.WATCH_AUDIO_PRESENCE_S)}, "renewed while the call runs"
+        # The Watch dropping keeps it, for the rejoin.
+        await bridge._handle(bytes([0, 2]))
+        assert ("work", 0) not in held and bridge.presence_held
+        rejoined = Watch()
+        await bridge._handle(rejoined.hello())
+        await bridge._handle(rejoined.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: bridge.session is not None)
+        held.clear()
+        await bridge._handle(rejoined.control({"type": "end"}))
+        await _until(lambda: ("work", 0) in held)
+        assert held[-1] == ("work", 0) and not bridge.presence_held, "hung up: let go"
+        await asyncio.sleep(0.06)
+        assert held[-1] == ("work", 0), "no renewal after the call"
+        assert len(socket.sent) >= 2
+
+    _run(scenario())
+
+
+def test_the_grants_end_lets_go_of_a_presence_a_dropped_call_kept():
+    async def scenario():
+        held = []
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            held.append(hold_s)
+        bridge.presence = presence
+        bridge.stop_requested.set()
+        await bridge._main()
+        assert held == [], "never held: nothing to let go"
+        bridge.presence_held = True
+        await bridge._main()
+        assert held == [0]
+
+    _run(scenario())
+
+
+def test_a_presence_that_cant_be_set_never_stops_the_call(monkeypatch):
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+
+    async def scenario():
+        bridge = _bridge()
+        tried = []
+
+        async def presence(profile, hold_s):
+            tried.append(hold_s)
+            raise OSError("disk")
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: len(socket.sent) == 1 and tried)
+        assert watch.open(socket.sent[0]) == (3, {"type": "started", "engine": "grok"})
+        await bridge._handle(watch.control({"type": "end"}))
+        await _until(lambda: len(socket.sent) == 2)
+        assert not bridge.presence_held and tried == [api.watch_audio.WATCH_AUDIO_PRESENCE_S]
+
+    _run(scenario())
+
+
+def test_the_host_sets_presence_only_for_a_paired_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_load_pairing_state", lambda path: None)
+    api.watch_audio._watch_call_presence_now(90)
+    assert not (tmp_path / "conduit-calls.json").exists()
+    monkeypatch.setattr(api.core, "_load_pairing_state", lambda path: {"credential": "x"})
+    api.watch_audio._watch_call_presence_now(90)
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
+    assert store.in_call() is True
+
+
 def test_the_watch_leaving_ends_the_session_without_writing_to_its_stream(monkeypatch):
     monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
 

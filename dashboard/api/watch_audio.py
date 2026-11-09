@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from fastapi import HTTPException, Request, Response
 
-from . import core, gpt_live, grok_live, local_live, speech_server, watch_local_live, watch_tools
+from . import core, gpt_live, grok_live, hermes_calls, local_live, speech_server, watch_local_live, watch_tools
 
 logger = core.logger
 router = core.router
@@ -128,6 +128,12 @@ GROK_WATCH_RATE = 24_000
 # Grok sends audio faster than real time: the Watch gets at most this much
 # ahead of real time, which keeps the relay's rate limit and the Watch's
 # buffer in bounds. Audio goes out in pieces of WATCH_AUDIO_CHUNK_S.
+# While a Watch call runs, this host holds the user's call presence, as the
+# phone does for its own calls (AppState.beginHermesCallPresence): a call from
+# Hermes doesn't ring over it (it would ring the busy Watch, which declines
+# it and loses its microphone to CallKit), and the call tool says so at once.
+WATCH_AUDIO_PRESENCE_S = 90
+WATCH_AUDIO_PRESENCE_RENEW_S = 30.0
 WATCH_AUDIO_LEAD_S = 1.5
 WATCH_AUDIO_CHUNK_S = 0.1
 # Audio held for pacing past this (a stalled Watch) drops its oldest.
@@ -1057,6 +1063,17 @@ async def _connect_watch_audio_relay(url: str, credential: str) -> Any:
         raise WatchAudioRelayRefused(status_of(exc))
 
 
+def _watch_call_presence_now(hold_s: int) -> None:
+    """Sets this profile's call presence (in its scope), if it's paired."""
+    if core._load_pairing_state(core._pairing_state_path()) is None:
+        return
+    hermes_calls._calls_store().CallStore(core._calls_home()).set_presence(hold_s)
+
+
+async def _watch_call_presence(profile: Optional[str], hold_s: int) -> None:
+    await core._run_scoped(profile, lambda: _watch_call_presence_now(hold_s))
+
+
 class _WatchAudioBridge:
     """A grant's audio: this host's socket to the relay, while the grant is open.
 
@@ -1067,13 +1084,17 @@ class _WatchAudioBridge:
 
     def __init__(self, grant: watch_tools._WatchGrant, secret: bytes, *, runtime: Optional[_WatchAudioRuntime] = None,
                  connect: Optional[Callable[[str, str], Any]] = None,
-                 slots: Optional[_WatchAudioSlots] = None, clock: Callable[[], float] = time.monotonic) -> None:
+                 slots: Optional[_WatchAudioSlots] = None, clock: Callable[[], float] = time.monotonic,
+                 presence: Optional[Callable[[Optional[str], int], Any]] = None) -> None:
         self.grant = grant
         self.secret = secret
         self.runtime = runtime or _watch_audio_runtime
         self.connect = connect or _connect_watch_audio_relay
         self.slots = slots or _watch_audio_slots
         self.clock = clock
+        self.presence = presence or _watch_call_presence
+        # Whether this bridge set the user's call presence since it last let go.
+        self.presence_held = False
         self.stop_requested = threading.Event()
         self.finished = threading.Event()
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1126,8 +1147,14 @@ class _WatchAudioBridge:
         self.loop = asyncio.get_running_loop()
         self.wake = asyncio.Event()
         self.send_lock = asyncio.Lock()
-        if self.stop_requested.is_set():
-            return
+        try:
+            if not self.stop_requested.is_set():
+                await self._bridge()
+        finally:
+            # The grant's end: the call is over, whatever its last session did.
+            await self._release_presence()
+
+    async def _bridge(self) -> None:
         url = _watch_audio_ws_url(self.grant.relay_url, self.grant.grant_id, "host")
         backoff = 1.0
         while not self._done():
@@ -1281,7 +1308,31 @@ class _WatchAudioBridge:
         self.session = session
         self.session_task = asyncio.ensure_future(self._run_session(session))
 
+    async def _hold_presence(self, session: _WatchAudioSession) -> None:
+        """Renews the user's call presence while ``session`` runs. Never
+        raises: a call goes on without it (Hermes' calls then ring over it)."""
+        while True:
+            try:
+                await self.presence(session.profile, WATCH_AUDIO_PRESENCE_S)
+                self.presence_held = True
+            except Exception as exc:  # noqa: BLE001 — retried at the next renewal
+                logger.info("A Watch call couldn't hold the user's call presence: %s", type(exc).__name__)
+            await asyncio.sleep(WATCH_AUDIO_PRESENCE_RENEW_S)
+
+    async def _release_presence(self) -> None:
+        """Lets go of the presence this bridge set: Hermes may call again. A
+        session that only dropped keeps it, for the Watch's rejoin; unrenewed,
+        it runs out on its own."""
+        if not self.presence_held:
+            return
+        self.presence_held = False
+        try:
+            await self.presence(self.grant.profile, 0)
+        except Exception as exc:  # noqa: BLE001 — it runs out on its own
+            logger.info("A Watch call couldn't let go of the user's call presence: %s", type(exc).__name__)
+
     async def _run_session(self, session: _WatchAudioSession) -> None:
+        holding = asyncio.ensure_future(self._hold_presence(session))
         try:
             await session.run()
         except WatchAudioFailure as exc:
@@ -1296,10 +1347,15 @@ class _WatchAudioBridge:
             await self.control(session.stream, {"type": "error", "code": "failed",
                                                 "message": f"The Watch call failed on the host ({type(exc).__name__})"})
         finally:
+            holding.cancel()
+            await asyncio.gather(holding, return_exceptions=True)
             self.slots.release()
             if self.session is session:
                 self.session = None
                 self.session_task = None
+            if session.reason == "ended" and self.session is None:
+                # The user hung up on the Watch.
+                await self._release_presence()
             with contextlib.suppress(Exception):
                 await self.control(session.stream, {"type": "ended", "engine": session.engine, "reason": session.reason})
 
