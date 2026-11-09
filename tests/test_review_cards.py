@@ -396,6 +396,15 @@ def test_a_dropped_decision_doesnt_hold_the_id_it_named(tool_home):
     assert [d["id"] for d in second["decisions"]] == ["d1"]
 
 
+def test_an_id_a_kept_decision_names_stays_reserved_after_a_dropped_one_named_it(tool_home):
+    host = Host(tool_home)
+    broken = {"id": "d1", "title": "Layout", "options": [{"label": "A", "html": PAGE}]}
+    plain = {"title": "Colour", "options": [{"label": "A", "html": PAGE}, {"label": "B", "html": PAGE}]}
+    named = {"id": "d1", "title": "Font", "options": [{"label": "A", "html": PAGE}, {"label": "B", "html": PAGE}]}
+    review = _call({"cards": [_review([broken, plain, named])]}, reviews=host)["cards"][0]["review"]
+    assert [(d["id"], d["title"]) for d in review["decisions"]] == [("d2", "Colour"), ("d1", "Font")]
+
+
 def test_a_padded_review_id_is_still_one_round_per_answer(tool_home):
     host = Host(tool_home)
     first = _call({"cards": [_review()]}, reviews=host)["cards"][0]["review"]

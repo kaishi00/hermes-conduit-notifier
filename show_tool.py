@@ -545,12 +545,15 @@ def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[s
     return {**{key: value for key, value in raw.items() if key != "review"}, "review": review}
 
 
-def _release(explicit: set[str], seen: set[str], raw: dict[str, Any]) -> None:
-    """A decision left out doesn't hold the id it named: a later decision of
-    its title may carry it from an earlier round."""
+def _release(explicit: dict[str, int], raw: dict[str, Any]) -> None:
+    """A decision left out doesn't hold the id it named: once no decision
+    still to come names it, a decision of its title may carry it from an
+    earlier round."""
     named = _short_id(raw.get("id"))
-    if named and named not in seen:
-        explicit.discard(named)
+    if explicit.get(named, 0) > 1:
+        explicit[named] -= 1
+    else:
+        explicit.pop(named, None)
 
 
 def _review_decisions(given: list[Any], path: str, problems: list[str],
@@ -572,7 +575,12 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
             titled.setdefault(str(earlier.get("title", "")).casefold(), []).append(earlier["id"])
             used_before.add(earlier["id"])
         by_title.update(titled)
-    explicit = {_short_id(raw.get("id")) for raw in given[:6] if isinstance(raw, dict)} - {""}
+    # How many decisions name each id: it stays reserved while one may still be kept.
+    explicit: dict[str, int] = {}
+    for raw in given[:6]:
+        named = _short_id(raw.get("id")) if isinstance(raw, dict) else ""
+        if named:
+            explicit[named] = explicit.get(named, 0) + 1
     if len(given) > 6:
         problems.append(f"{path}.decisions: six at most, the rest were left out")
     for d_index, raw in enumerate(given[:6]):
@@ -583,7 +591,7 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
         title = _text(raw.get("title"), 80)
         if not title:
             problems.append(f"{where}.title: a decision needs one, left out")
-            _release(explicit, seen, raw)
+            _release(explicit, raw)
             continue
         decision_id = _short_id(raw.get("id"))
         if not decision_id:
@@ -642,7 +650,7 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
             options.append(option)
         if len(options) < 2:
             problems.append(f"{where}: a decision needs two options, left out")
-            _release(explicit, seen, raw)
+            _release(explicit, raw)
             continue
         decision: dict[str, Any] = {"id": decision_id, "title": title}
         text = _text(raw.get("text"), 300)
