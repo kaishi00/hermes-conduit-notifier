@@ -1386,7 +1386,9 @@ def _rescued_shows(text: str, session_id: str, turn_id: Any = None) -> str | Non
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         logger.debug("conduit_push: couldn't read a reply's written-out calls", exc_info=True)
         return None
-    if not leaks or _is_child(session_id):
+    # A room's boards go through the room (show_tool's room_board), never a
+    # line in the reply.
+    if not leaks or _is_child(session_id) or _is_room_turn(session_id):
         return None
     pieces, at = [], 0
     for leak in leaks:
@@ -1414,6 +1416,7 @@ def _rescue_blocked(session_id: str, turn_id: Any, args: dict) -> bool:
 
 def _shown_in_place(args: dict, session_id: str, written: str) -> str:
     args = dict(args)
+    written_args = args
     if not args.get("cards") and args.get("from_work") is None:
         try:
             ref = work_tool.review_naming(session_id, written)
@@ -1437,7 +1440,9 @@ def _shown_in_place(args: dict, session_id: str, written: str) -> str:
     if answer.get("ok") and not forks.inside():
         # Kept for the coordinator, as a made call's are (_post_tool_call).
         _quietly(work_tool.card_shown, session_id, leaked_calls.SHOW, args, result)
-    return _unshown(args, answer)
+    shown = _unshown(args, answer)
+    # A review that didn't show leaves what the call wrote.
+    return shown or (_unshown(written_args) if written_args is not args else "")
 
 
 def _unshown(args: dict, answer: dict | None = None) -> str:

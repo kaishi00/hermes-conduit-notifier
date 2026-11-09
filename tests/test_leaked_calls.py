@@ -65,6 +65,10 @@ def test_other_calls_and_plain_replies_are_left_alone():
     [leak] = leaked.shows("<tool_call><function=conduit_show><parameter=markdown><b>Bold</b></parameter>"
                           "</function></tool_call>")
     assert leak.args["markdown"] == "<b>Bold</b>"
+    # Left unclosed, the call ends at its last closing tag: prose after it stays.
+    prose = "Here." + REVIEW_XML.replace("</function></tool_call>", "") + " Which one do you like?"
+    [leak] = leaked.shows(prose)
+    assert prose[leak.end:] == " Which one do you like?" and leak.args["title"] == "W17"
     # A fenced example of a call is the reply's text.
     example = "Call it like this:\n```xml\n" + REVIEW_XML + "\n```\nThen it shows."
     assert leaked.shows(example) == []
@@ -107,6 +111,21 @@ def test_a_written_out_call_is_shown_and_its_line_takes_its_place(tmp_path, monk
     out = plugin._transform_llm_output(response_text="Here you go." + cards, session_id="s1", model="m",
                                        platform="api_server", turn_id="pulse-1")
     assert not shown and "conduit-board" not in out and "<tool_call>" not in out and out.startswith("Here you go.")
+
+
+def test_a_review_that_does_not_show_leaves_what_the_call_wrote(monkeypatch):
+    plugin = _plugin()
+    from conduit_push import show_tool, work_tool
+    monkeypatch.setattr(work_tool, "review_naming", lambda session_id, text: "W1")
+    monkeypatch.setattr(show_tool, "handle", lambda *a, **k: json.dumps({"ok": False, "error": "no_such"}))
+    assert plugin._shown_in_place({"title": "T", "markdown": "The concepts"}, "s1", "") == "The concepts"
+
+
+def test_a_room_reply_is_left_as_it_is(monkeypatch):
+    plugin = _plugin()
+    monkeypatch.setattr(plugin, "_is_child", lambda session_id: False)
+    monkeypatch.setattr(plugin, "_is_room_turn", lambda session_id: True)
+    assert plugin._rescued_shows("Here." + REVIEW_XML, "room-s") is None
 
 
 def test_a_rescued_board_is_kept_for_the_coordinator(tmp_path, monkeypatch):

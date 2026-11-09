@@ -40,6 +40,10 @@ _ARGS = re.compile(r"<(?:args|arguments)>(?P<body>.*?)(?:</(?:args|arguments)>|\
 _FENCE = re.compile(r"^[ \t]*(?P<fence>```|~~~).*?(?:^[ \t]*(?P=fence)|\Z)", re.DOTALL | re.MULTILINE)
 # Arguments that are text: markup in them (HTML in Markdown) stays as written.
 TEXT_ARGS = frozenset({"title", "subtitle", "markdown"})
+# Where a block with no </tool_call> ends: after the call's last closing tag,
+# so prose the model wrote after it stays the reply's.
+_CALL_CLOSE = re.compile(r"</(?:function|args|arguments|parameter)>")
+_CLOSING_TAIL = re.compile(r"(?:\s*</?[a-z_]{0,12}>?)*\s*\Z")
 MAX_REPLY = 200_000
 
 
@@ -66,8 +70,22 @@ def shows(text: Any) -> list[Leak]:
             continue
         name, args = _unbridged(*call)
         if name == SHOW:
-            found.append(Leak(match.start(), match.end(), name, args))
+            found.append(Leak(match.start(), _end(text, match), name, args))
     return found
+
+
+def _end(text: str, match: re.Match) -> int:
+    """Where a block ends: its closing tag, or, left unclosed, its call's
+    last closing tag and any closing tags after it."""
+    block = match.group(0)
+    if block.endswith("</tool_call>"):
+        return match.end()
+    closes = list(_CALL_CLOSE.finditer(block))
+    if not closes:
+        return match.end()
+    after = closes[-1].end()
+    tail = _CLOSING_TAIL.match(block, after)
+    return match.start() + (tail.end() if tail else after)
 
 
 def _call(body: str) -> tuple[str, dict[str, Any]] | None:

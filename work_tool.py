@@ -3351,9 +3351,12 @@ def review_naming(session_id: Any, text: Any) -> Optional[str]:
     store = work_store.Store(home)
     for key in store.meta_keys(_SHOWN):
         kept = _shown(store, key[len(_SHOWN):])
-        reviews = [card for card in (kept or {}).get("cards", []) if card.get("type") == "review"]
-        files = [option.get("file") for card in reviews for decision in card["review"].get("decisions", [])
-                 for option in decision.get("options", []) if isinstance(option.get("file"), str)]
+        reviews = [card.get("review") for card in (kept or {}).get("cards", [])
+                   if isinstance(card, dict) and card.get("type") == "review"]
+        files = [option.get("file") for review in reviews if isinstance(review, dict)
+                 for decision in review.get("decisions", []) if isinstance(decision, dict)
+                 for option in decision.get("options", [])
+                 if isinstance(option, dict) and isinstance(option.get("file"), str)]
         if len(files) >= 2 and sum(1 for path in files if path in text) >= 2:
             return key[len(_SHOWN):]
     return None
