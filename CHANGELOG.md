@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.151.0 (2026-11-09)
+
+### New and improved
+- When a bot writes a card out as text in its reply instead of showing it
+  (some free and smaller models do), the plugin now shows the card in its
+  place, and Conduit draws it under the reply. Needs a Conduit build with
+  this change; older ones show the reply without the markup.
+
 ## 0.150.4 (2026-11-09)
 
 ### Fixes
