@@ -414,3 +414,22 @@ def test_an_answer_for_a_file_not_sent_yet_doesnt_count(copies):  # noqa: F811
     copies.furina.files.on_got(received)
 
     assert store.read()["out"]["link1"][f"{FOLDER}/shot.jpg"]["done"] is False
+
+
+def test_a_noted_file_that_moved_or_grew_is_dropped_unsent(copies, monkeypatch):  # noqa: F811
+    # GLM on notifier #629: _send_file's guards had no tests.
+    room_id = started(copies)
+    moved = upload(copies, "moved.jpg", b"x")
+    grown = upload(copies, "grown.jpg", b"y")
+    store = files_module.Store(copies.tmp_path / "furina")
+    entry = {"room": room_id, "rooms": [room_id], "size": 1, "at": None, "tries": 0, "done": False, "noted": 0}
+    with store.update() as state:
+        state["out"]["link1"] = {f"{FOLDER}/moved.jpg": {**entry, "base": str(copies.tmp_path / "elsewhere")},
+                                 f"{FOLDER}/grown.jpg": {**entry, "base": str(grown.parent.parent)}}
+    monkeypatch.setattr(files_module, "MAX_FILE_BYTES", 0)
+
+    copies.furina.pass_once()
+
+    assert moved.exists() and grown.exists()
+    assert _sent(copies, "room.file") == []
+    assert store.read()["out"].get("link1", {}) == {}
