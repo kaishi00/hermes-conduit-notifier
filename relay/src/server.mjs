@@ -1191,6 +1191,12 @@ function notificationFor(event, preferences, gateway = undefined) {
     ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
     ...(event.type === 'phone.changes' ? { category: PHONE_CHANGE_CATEGORY } : {}),
     ...levelAps(event),
+    // A turn's reply, failure or task from a group room runs through
+    // Conduit's notification service extension, as a sealed one does, so
+    // the room keeps one notification across its bots (hermes-conduit#2064):
+    // each bot pairs on its own, so no collapse id here spans them. An
+    // approval keeps its own.
+    ...(room && ROOM_REPLY_TYPES.has(event.type) && event.type !== 'approval.needed' ? { 'mutable-content': 1 } : {}),
     // Thread grouping is gateway-scoped: two dashboards both using session
     // "default" must never share a Notification Center thread. Gateway-less
     // callers (direct/test use) keep the legacy raw-session shape. A slot
@@ -1207,7 +1213,10 @@ function notificationFor(event, preferences, gateway = undefined) {
   // notification. The headroom under the 4096 cap absorbs per-request APNs
   // headers and JSON escaping.
   if ((decision || call || room) && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
-    payload = { aps, body: { conduit: routing }, conduit: routing };
+    // A turn's room is only an id, routing as the sealed fallback keeps it
+    // (e2e.seal_event), so its tap still opens the room.
+    const replyRoom = room && ROOM_REPLY_TYPES.has(event.type) ? { room } : {};
+    payload = { aps, body: { conduit: { ...routing, ...replyRoom } }, conduit: routing };
   }
   // Collapse key: same gateway + session + type collapses (repeat alerts
   // for one conversation replace each other) without ever colliding with

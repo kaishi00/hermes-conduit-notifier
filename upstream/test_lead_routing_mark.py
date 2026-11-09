@@ -4,7 +4,8 @@ routing_prompt), its header and its instruction, so a reworded prompt would
 bring back the "response ready" push of the lead's raw JSON pick. This plans
 a lead-routed room's turn through Hermes' own Discussion policy and holds
 room_rules.is_lead_routing_prompt to the prompt it writes, and an ordinary
-member's turn, quoting the instruction, to not being one.
+member's turn, or the lead's own when a message names it, quoting the
+instruction, to not being one.
 
 Run in a child with a Hermes home of its own, since Hermes reads its home
 from the environment as its modules load.
@@ -63,9 +64,12 @@ def first_turn(room_id, text, **settings):
 lead_reason, lead_prompt = first_turn("room-lead", "Plan the day", routing="lead", lead_member_id="member-ada")
 quote = "What does this mean?\n" + room_rules.LEAD_ROUTING_MARK + ", so you decide who takes it."
 member_reason, member_prompt = first_turn("room-all", quote)
+# Named directly, the lead answers as a participant, even quoting the instruction.
+named_reason, named_prompt = first_turn("room-named", "@ada " + quote, routing="lead", lead_member_id="member-ada")
 print(json.dumps({
     "lead": [lead_reason, lead_prompt, room_rules.is_lead_routing_prompt(lead_prompt)],
     "member": [member_reason, member_prompt, room_rules.is_lead_routing_prompt(member_prompt)],
+    "named": [named_reason, named_prompt, room_rules.is_lead_routing_prompt(named_prompt)],
 }))
 """
 
@@ -82,3 +86,5 @@ def test_the_plugin_knows_a_leads_routing_turn_by_hermes_own_prompt(tmp_path: Pa
     assert routing, prompt
     reason, prompt, routing = seen["member"]
     assert prompt and not routing, prompt
+    reason, prompt, routing = seen["named"]
+    assert reason != "lead_routing" and prompt and not routing, seen["named"]
