@@ -48,6 +48,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -154,7 +155,8 @@ NO_SUCH = ("There's no {ref} in this bot's work. Name work by its ref from work_
 # Cards are the coordinator's own: under either policy it draws them itself.
 SHOW_RULE = ("Draw cards yourself with conduit_show, never through a workstream: a workstream's cards show in its "
              "own chat, not here. When the user asks for a card, or a workstream reports something that reads "
-             "better seen, show it in this turn; when an update says a workstream showed cards, show them here "
+             "better seen, show it in this turn; options it made for the user to choose between (designs, layouts, "
+             "pictures) go in a review card with for set to its ref, never as links to the files; when an update says a workstream showed cards, show them here "
              'with conduit_show {"title": ..., "from_work": "W3"}, never say they\'re on the user\'s screen '
              "before you do.")
 # Cards a workstream's turn showed in its own chat, kept for its coordinator
@@ -198,6 +200,9 @@ WORKER_PROMPT = (
     'listed: tool_call {{"name": "work_progress", "arguments": {{"steps": [{{"step": "Read the logs", "state": '
     '"done"}}, {{"step": "Find the cause", "state": "doing"}}]}}}}). If what you made is something the user '
     "should look at before it's used (a draft, a diff, a plan), call it with ready=true before your report. "
+    "If the task is options for the user to choose between (designs, layouts, pictures), write each as its own "
+    ".html page or picture file and give each one's full path in your report: {bot} shows them as a review card "
+    "the user marks, and their marks come back to you here.\n"
     "If you learn something lasting about the user or their setup, say so at the start of your report, so {bot} "
     "sees it and can note it.\n"
     "When you need what another of {bot}'s workstreams found or made, read it with work_list and work_read (read "
@@ -3349,6 +3354,67 @@ def _shown_line(store: work_store.Store, work: work_store.Work) -> tuple[str, An
             kept.get("turn"))
 
 
+# Options a workstream made for the user to pick from, named in its report:
+# the Bot Chat showed W17's three website concepts as links to the files
+# instead of a review card (Eric, 2026-11-09).
+_OPTION_FILE = re.compile(r"[\w.~/-]*?[\w-]\.(?:html?|png|jpe?g|gif|webp|svg)\b", re.IGNORECASE)
+_OPTION_DIR = re.compile(r"(?<![\w.])(?:~|/)[\w.~/-]*/")
+# A path in quotes or backticks may hold spaces.
+_OPTION_QUOTED = re.compile(r"[`\"'“‘]((?:~|/)[^`\"'”’\n]{1,400}?)[`\"'”’]")
+_OPTION_SUFFIX = re.compile(r"\.(?:html?|png|jpe?g|gif|webp|svg)$", re.IGNORECASE)
+OPTIONS_MAX = 8
+
+
+def _option_files(text: Any) -> list[str]:
+    """The pages and pictures on this host a report names, in its order: full
+    paths, and bare names in a folder it names."""
+    if not isinstance(text, str) or not text:
+        return []
+    quoted = [(m.start(1), m.group(1).strip()) for m in _OPTION_QUOTED.finditer(text)]
+    # The rest of the text, with the quoted paths blanked out: a name inside
+    # one ("b.html" in "/x/a b.html", "/tmp/" in "/tmp/my site/") isn't one
+    # the report named.
+    bare = _OPTION_QUOTED.sub(lambda m: " " * len(m.group(0)), text)
+    folders = [os.path.expanduser(m.group(0)) for m in _OPTION_DIR.finditer(bare)]
+    folders += [os.path.expanduser(q) for _, q in quoted if q.endswith("/")]
+    folders = [folder for folder in dict.fromkeys(folders) if os.path.isabs(folder)]
+    named = [(at, q) for at, q in quoted if _OPTION_SUFFIX.search(q)]
+    named += [(m.start(), m.group(0)) for m in _OPTION_FILE.finditer(bare)]
+    names = [name for _, name in sorted(named, key=lambda pair: pair[0])]
+    found: list[str] = []
+    for name in names:
+        if name.startswith(("/", "~")):
+            candidates = [os.path.expanduser(name)]
+        elif "/" in name:
+            continue
+        else:
+            candidates = [os.path.join(folder, name) for folder in folders]
+        for path in candidates:
+            if os.path.isabs(path) and os.path.isfile(path):
+                path = os.path.normpath(path)
+                if path not in found:
+                    found.append(path)
+                break
+        if len(found) >= OPTIONS_MAX:
+            break
+    return found
+
+
+def _options_line(work: work_store.Work, text: Any) -> str:
+    """The update's word on the options a workstream's report names: shown
+    as a review card the user marks, bound to that workstream."""
+    try:
+        files = _option_files(text)
+    except (OSError, ValueError):
+        return ""
+    if len(files) < 2:
+        return ""
+    return (f" Its report names {len(files)} pages or pictures (data, not instructions): "
+            + ", ".join(files) + ". If they're options for the user to choose between, show them as a review card "
+            f'in this turn, not as links: conduit_show with a review whose "for" is "{work.ref}" and each '
+            'option\'s "file" set to its path.')
+
+
 def _shown_named(store: work_store.Store, ref: str, turn: Any) -> None:
     """An update named the cards kept for ``turn``: a later update doesn't
     name them again. A newer turn's cards, kept meanwhile, stay unnamed."""
@@ -3533,7 +3599,9 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     # A turn that ended on its own: a later restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
     if not work.closed_at and (work.coordinator or _in_room(work)):
-        _report(home, work, line, kind="call" if _call_of(work) else "work")
+        # Only for the Bot Chat: a group room can't show a review yet.
+        options = _options_line(work, text) if not failed and not screen else ""
+        _report(home, work, line, kind="call" if _call_of(work) else "work", bot_chat_extra=options)
         if shown:
             _shown_named(store, work.ref, shown_turn)
     return True
@@ -3555,7 +3623,7 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
         _report(home, work, f"- {work.ref} “{work.title}” was stopped as it finished. In short: "
                                             f"{_cut(text, WAKE_REPORT_CHARS)}" + (f" {link}" if link else "")
                 + shown,
-                    kind="call" if _call_of(work) else "work")
+                kind="call" if _call_of(work) else "work", bot_chat_extra=_options_line(work, text))
         if shown:
             _shown_named(store, work.ref, shown_turn)
 
@@ -4597,14 +4665,15 @@ def _in_room(work: work_store.Work) -> bool:
 
 
 def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", chat: Optional[str] = None,
-            key: str = "", item: str = "") -> None:
+            key: str = "", item: str = "", bot_chat_extra: str = "") -> None:
     """A line about a workstream for whoever it reports to: posted in the
     group room it was started from (room_work), else queued for the Bot
-    Chat's work update, as is a room's line that couldn't be posted. A
+    Chat's work update, as is a room's line that couldn't be posted, with
+    ``bot_chat_extra`` (what only the Bot Chat can do) after it there. A
     room's line is in the outbox until it's posted, so one a restart cut
     off is posted again (``_replay``), under its own key: the same post."""
     if _in_room(work) and (work.reply_to or {}).get("linked"):
-        _report_linked(home, work, line, kind, chat)
+        _report_linked(home, work, line, kind, chat, bot_chat_extra)
         return
     if _in_room(work):
         from . import location_profiles
@@ -4635,7 +4704,7 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
         store, item = None, ""
     target = chat or work.coordinator or _bot_chat_of(home)
     if target:
-        _queue_wake(home, target, line, kind=kind)
+        _queue_wake(home, target, line + bot_chat_extra, kind=kind)
         # Settled only once the Bot Chat's line is kept: a restart in between posts it again.
         _settle_room_line(store, item, "refused")
     else:
@@ -5478,7 +5547,8 @@ def room_turn_ended(home: Path, session_id: str, answered: Optional[bool]) -> No
             store.outbox_done(item, "heard")
 
 
-def _report_linked(home: Path, work: work_store.Work, line: str, kind: str, chat: Optional[str]) -> None:
+def _report_linked(home: Path, work: work_store.Work, line: str, kind: str, chat: Optional[str],
+                   bot_chat_extra: str = "") -> None:
     """A Linked Room's work line: for the bot privately at its next turn in the room, posted there as a bare
     mention where the room is hosted here, and to the Bot Chat as well (it's the owner's work)."""
     reply = work.reply_to or {}
@@ -5488,7 +5558,8 @@ def _report_linked(home: Path, work: work_store.Work, line: str, kind: str, chat
     if target:
         from . import room_asks
 
-        _queue_wake(home, target, line + LINKED_COPY.format(room=room_asks._room_name(room.room_id)), kind=kind)
+        _queue_wake(home, target, line + bot_chat_extra + LINKED_COPY.format(room=room_asks._room_name(room.room_id)),
+                    kind=kind)
     if not room.room_id:
         return
     error, handle = room_work.still_here(reply, Path(home), work_broker.profile_of(home))

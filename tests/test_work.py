@@ -2001,6 +2001,88 @@ def test_the_update_carries_a_short_line_and_the_chat_link(on, hermes):
     assert on.get("W1").last_result.startswith("The cause")  # the report is kept (up to RESULT_CHARS)
 
 
+def test_options_a_workstream_made_are_shown_as_a_review_card(on, hermes, tmp_path):
+    folder = tmp_path / "concepts"
+    folder.mkdir()
+    for name in ("concept-1-minimal-dark.html", "concept-2-vibrant.html", "concept-3-terminal.html"):
+        (folder / name).write_text("<h1>Hi</h1>")
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    work.turn_ended(WORKER, f"All 3 concepts are ready at {folder}/:\n- Concept 1 (concept-1-minimal-dark.html)\n"
+                            "- Concept 2 (concept-2-vibrant.html)\n- Concept 3 (concept-3-terminal.html, 350 lines)\n"
+                            "- Not made: concept-4-missing.html")
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    text = params["text"]
+    assert "names 3 pages or pictures" in text and '"for" is "W1"' in text and "review card" in text
+    assert f"{folder}/concept-1-minimal-dark.html, {folder}/concept-2-vibrant.html, " \
+           f"{folder}/concept-3-terminal.html." in text
+    assert "concept-4-missing" not in text.split("names 3")[1]
+
+
+def test_a_failed_turn_naming_pages_gets_no_review_line(on, hermes, tmp_path):
+    for name in ("a.html", "b.html"):
+        (tmp_path / name).write_text("x")
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    hermes.calls.clear()
+    work.turn_ended(WORKER, f"Half done: {tmp_path}/a.html and {tmp_path}/b.html")
+    work.turn_finished(WORKER, failed=True, interrupted=False)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "failed" in params["text"] and "review card" not in params["text"]
+
+
+def test_a_report_naming_one_page_or_none_gets_no_review_line(tmp_path):
+    page = tmp_path / "report.html"
+    page.write_text("<p>Hi</p>")
+    assert work._option_files(f"Wrote {page}. See also https://example.com/a.html") == [str(page)]
+    assert work._option_files("Nothing on disk: /nope/a.html, /nope/b.png") == []
+    assert work._option_files(f"{page} and again {page}") == [str(page)]
+    assert work._option_files(None) == []
+    assert work._options_line(types.SimpleNamespace(ref="W2"), f"Wrote {page}.") == ""
+
+
+def test_quoted_paths_with_spaces_are_read_whole(tmp_path):
+    folder = tmp_path / "site concepts"
+    folder.mkdir()
+    for name in ("a b.html", "c.png"):
+        (folder / name).write_text("x")
+    text = f'Pages: "{folder}/a b.html" and `{folder}/c.png`.'
+    assert work._option_files(text) == [str(folder / "a b.html"), str(folder / "c.png")]
+    assert work._option_files(f"In `{folder}/`: c.png, then a.html") == [str(folder / "c.png")]
+    (folder / "b.html").write_text("x")  # inside "a b.html", but never named
+    assert work._option_files(f'In `{folder}/`: "{folder}/a b.html"') == [str(folder / "a b.html")]
+    (tmp_path / "c.png").write_text("x")  # in the quoted folder's parent, never named
+    assert work._option_files(f"In `{folder}/`: c.png") == [str(folder / "c.png")]
+
+
+def test_a_room_hears_the_report_without_the_review_line(on, home, monkeypatch, tmp_path):
+    pages = [tmp_path / "a.html", tmp_path / "b.html"]
+    for page in pages:
+        page.write_text("x")
+    posted, queued = [], []
+    monkeypatch.setattr(work, "_in_room", lambda w: True)
+    monkeypatch.setattr(work.room_work, "still_here", lambda *a, **k: (None, "h"))
+    monkeypatch.setattr(work.room_work, "post", lambda reply_to, **k: posted.extend(k["lines"]))
+    monkeypatch.setattr(work, "_queue_wake", lambda home, target, line, kind: queued.append(line))
+    w = types.SimpleNamespace(ref="W1", reply_to={"to": "room"}, coordinator="bot-chat", title="T")
+    extra = work._options_line(w, f"Made {pages[0]} and {pages[1]}")
+    assert extra
+    work._report(home, w, "- W1 finished.", bot_chat_extra=extra)
+    assert posted == ["- W1 finished."] and not queued
+    monkeypatch.setattr(work.room_work, "post", lambda reply_to, **k: "room gone")
+    work._report(home, w, "- W1 finished.", bot_chat_extra=extra)
+    assert queued and queued[0].endswith(extra)
+
+
+def test_the_worker_brief_says_options_go_in_files_for_a_review():
+    assert "review card" in work.WORKER_PROMPT and "full path" in work.WORKER_PROMPT
+    assert "review card with for set to its ref" in work.SHOW_RULE
+
+
 def test_a_registry_from_before_the_checklist_gets_its_column(home):
     import sqlite3
 
@@ -5383,6 +5465,23 @@ def test_linked_work_reports_privately_and_the_bot_chat_hears_it(on, hermes, lin
     work.room_turn_replied(ROOM_CHAT, True)
     work.room_turn_ended(on.home, ROOM_CHAT, answered=True)
     assert work.frame_room(on.home, "room-1", ROOM_CHAT) == []
+
+
+def test_a_linked_rooms_bot_chat_copy_carries_the_review_line(on, hermes, linked, monkeypatch, tmp_path):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    for row in store_mod.Store(on.home).outbox_pending():
+        if row["kind"] == "line_linked":
+            on.outbox_done(row["id"], "heard")
+    for name in ("a.html", "b.html"):
+        (tmp_path / name).write_text("x")
+    _finish("20261031_work_1", f"Two looks: {tmp_path}/a.html and {tmp_path}/b.html")
+    line, = batched()
+    assert "show them as a review card" in line and "Linked Room “Picnic”" in line
+    framed = work.frame_room(on.home, "room-1", ROOM_CHAT)
+    assert framed and "review card" not in framed[0], "the room's bot can't show a review"
 
 
 def test_a_member_side_room_hears_its_work_without_a_post(on, hermes, linked):
