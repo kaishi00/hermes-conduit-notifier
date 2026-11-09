@@ -9,6 +9,7 @@ import pytest
 
 from test_pulse import ROOT, _load, cli, control, pulse  # noqa: F401
 from test_pulse_followup import live, tell  # noqa: F401
+from test_pulse_candidates import Llm
 from test_pulse_learning import brief_due_now
 
 quiet = _load("conduit_push.pulse_quiet", ROOT / "pulse_quiet.py")
@@ -70,7 +71,26 @@ def test_the_settings_take_quiet_days_and_a_spell_until_today_or_a_day(live):
     assert state["quiet_until"] is None and state["quiet_now"] == "" and state["quiet_ends_at"] is None
 
 
-def test_while_quiet_nothing_goes_on_its_own_but_what_is_asked_for_does(live):
+@pytest.fixture
+def modeled(live, monkeypatch):
+    """The loop with model access, so a report has its candidate list."""
+    live.llm = Llm()
+    monkeypatch.setattr(pulse._ctx, "llm", live.llm, raising=False)
+    monkeypatch.setattr(pulse, "_report_thread", None)
+    monkeypatch.setattr(pulse, "_maybe_memory", lambda *args: None)
+    return live
+
+
+def report_tick(live):
+    """A tick, the candidate list it starts, and the tick that sends it."""
+    pulse.tick()
+    if pulse._report_thread is not None:
+        pulse._report_thread.join(5)
+    pulse.tick()
+
+
+def test_while_quiet_nothing_goes_on_its_own_but_what_is_asked_for_does(modeled):
+    live = modeled
     live.store.set("time_zone", "UTC")
     live.store.set("daily_report", True)
     now = time.time()
@@ -79,12 +99,13 @@ def test_while_quiet_nothing_goes_on_its_own_but_what_is_asked_for_does(live):
     pulse.tick()
     assert live.sent() == []
     live.store.set("report_requested", True)
-    pulse.tick()
+    report_tick(live)
     [asked] = live.sent()
     assert asked.startswith("Pulse report")
 
 
-def test_a_quiet_day_holds_the_report_for_the_next_scheduled_one(live):
+def test_a_quiet_day_holds_the_report_for_the_next_scheduled_one(modeled):
+    live = modeled
     live.store.set("time_zone", "UTC")
     live.store.set("daily_report", True)
     now = time.time()
@@ -93,7 +114,7 @@ def test_a_quiet_day_holds_the_report_for_the_next_scheduled_one(live):
     pulse.tick()
     assert live.sent() == []
     live.store.set("quiet_days", [])
-    pulse.tick()
+    report_tick(live)
     [sent] = live.sent()
     assert sent.startswith("Pulse report")
 
@@ -106,7 +127,8 @@ def test_a_scheduled_report_on_its_way_when_pulse_goes_quiet_doesnt_go(live):
     pulse.tick()
     assert live.sent() == [] and live.store.get(pulse.REPORT_RUN)["state"] == pulse.RUN_DROPPED
     # One the user asked for still goes.
-    live.store.set(pulse.REPORT_RUN, {"id": "r2", "state": pulse.RUN_FAILED, "started_at": now - 60, "asked": True})
+    live.store.set(pulse.REPORT_RUN, {"id": "r2", "state": pulse.RUN_READY, "started_at": now - 60, "asked": True,
+                                      "since": "Mon 09:00"})
     pulse.tick()
     [sent] = live.sent()
     assert sent.startswith("Pulse report")

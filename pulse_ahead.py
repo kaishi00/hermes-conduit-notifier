@@ -49,6 +49,7 @@ from . import pulse_dates
 from . import pulse_followup as followup
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
+from . import pulse_picks
 from . import pulse_places as places
 from . import pulse_push as push
 from . import pulse_quiet as quiet
@@ -117,6 +118,12 @@ A date or an "ahead" entry may wait for a place instead of the morning brief: ad
 SPOT_RULE = """
 
 A date or an "ahead" entry may instead wait for the user to pass a kind of shop: add "moment": {"spot": "a florist"}, a few words for the shop as you'd search a map for it ("a florist", "a pharmacy", "a card shop", "Costco"). The phone watches the nearest ones and Pulse brings it up when the user comes near one. Give one only when it's best done on the way past a shop, a day or more before its day: flowers before an anniversary, a card for a birthday. Add "intent" for how close the user has to be: "opportunity" (the default) when a short detour is worth it, as for flowers on the way (about 750 m walking, 3 km driving); "errand" when it only makes sense at that shop; "arrival" when only being there counts. You may add "radius_m" to size the circle yourself (500 to 5000 for an opportunity, 50 to 300 otherwise). The same line rule applies: name the day, not "in two weeks"."""
+# Added to INSTRUCTIONS: each entry brought up is a pick (pulse_picks).
+PICKS_RULE = """
+
+Every entry with "bring_up": true is also a pick, with "detail", "shape", "facts" and "actions" as below (its "line" is the pick's line). Every look-ahead pick is new: give no "incident". Leave those out when "bring_up" is false.
+
+"""
 PLACES_TITLE = "## Saved places (what may wait for the user to get to or leave one)"
 
 TEXT = """Pulse look ahead.
@@ -389,7 +396,7 @@ def _day_end(day: date, zone: tzinfo) -> float:
 
 # What it says ----------------------------------------------------------------
 
-def parse(reply: Any, looked: Looked, *, zone: tzinfo) -> list[dict]:
+def parse(reply: Any, looked: Looked, *, zone: tzinfo, drawn: Sequence[str] = ()) -> list[dict]:
     """The look ahead's candidates, as journal rows (pulse_store.
     CANDIDATE_COLUMNS) not yet decided: every date at a lead time today, in
     the model's words where it answered for one (``reply``) and in code's
@@ -404,8 +411,8 @@ def parse(reply: Any, looked: Looked, *, zone: tzinfo) -> list[dict]:
         if found is None or found.ref not in due_now or found.ref in answered:
             continue
         answered.add(found.ref)
-        rows.append(_held(date_row(found, entry, zone), entry, looked))
-    rows += [date_row(found, {}, zone) for found in looked.due if found.ref not in answered]
+        rows.append(_held(date_pick(date_row(found, entry, zone), found, entry, zone), entry, looked))
+    rows += [date_pick(date_row(found, {}, zone), found, {}, zone) for found in looked.due if found.ref not in answered]
     others, items = [], set()
     for entry in _entries(reply.get("ahead")):
         item = looked.items.get(_number(entry.get("ref")))
@@ -418,8 +425,32 @@ def parse(reply: Any, looked: Looked, *, zone: tzinfo) -> list[dict]:
             row = candidates.found_row(entry, {}, zone, events=looked.events, upcoming=looked.upcoming,
                                        reminders=looked.reminders)
         if row is not None:
+            row = candidates.with_pick(row, {**entry, "incident": None}, drawn=drawn)
             others.append(_held(row, entry, looked))
     return rows + others[:MAX_AHEAD]
+
+
+def date_pick(row: dict, entry: pulse_dates.Coming, said: dict, zone: tzinfo) -> dict:
+    """A yearly date's or a deadline's row with its pick, drawn from what
+    Pulse knows of it (a calendar tile for a date, a bar to its day for a
+    deadline) whatever the model said, with the model's words and buttons
+    when it gave them; its subject is the date itself."""
+    found = entry.date
+    if isinstance(found, pulse_dates.Deadline):
+        logged = found.item.get("valid_from")
+        noticed = (datetime.fromtimestamp(logged, zone).date().isoformat()
+                   if isinstance(logged, (int, float)) and not isinstance(logged, bool) else "")
+        shape = {"shape": "due", "facts": {"due": entry.on.isoformat(), **({"noticed": noticed} if noticed else {})}}
+    else:
+        shape = {"shape": "date", "facts": {"day": entry.on.isoformat(), "what": found.occasion
+                                            if found.occasion != pulse_dates.OTHER else "",
+                                            "whose": found.who}}
+    pick, _ = pulse_picks.parse({**said, **shape, "incident": None}, line=str(row.get("text") or ""))
+    if pick is not None:
+        pick["line"] = pulse_picks.clip(str(row.get("text") or ""), pulse_picks.LINE_LIMIT) or pick["line"]
+        row["pick"] = pulse_picks.dumps(pick)
+    row["subject"] = found.key
+    return row
 
 
 def _held(row: dict, entry: dict, looked: Looked) -> dict:
@@ -528,6 +559,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: candidates.Llm, *, zone:
                      due_now=[entry for entry in staged if entry.ref not in decided])
     last = {"at": now, "run": "", "dates": len(looked.due), "picked": 0, "held": False, "tokens": 0, "error": ""}
     reply: Any = None
+    drawn: tuple[str, ...] = ()
     if looked.ahead and done.get("tokens", 0) >= budget:
         last["error"] = "budget"
     elif looked.ahead:
@@ -536,6 +568,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: candidates.Llm, *, zone:
             return
         text = ""
         try:
+            drawn = pulse_picks.drawn_types(home)
             fence = secrets.token_hex(6)
             while fence in looked.text:
                 fence = secrets.token_hex(6)
@@ -543,6 +576,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: candidates.Llm, *, zone:
             reply, tokens = llm(INSTRUCTIONS.format(limit=MAX_AHEAD, kinds=", ".join(report.FOUND_KINDS),
                                                     areas=", ".join(candidates.AREAS))
                                 + (MOMENT_RULE if looked.places else "") + (SPOT_RULE if looked.spots else "")
+                                + PICKS_RULE + pulse_picks.rules(drawn)
                                 + report.note_block(report.note(pulse_store)),
                                 text)
         except Exception as error:  # noqa: BLE001 — the dates still come up, in code's words
@@ -557,7 +591,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: candidates.Llm, *, zone:
             if not isinstance(reply, dict) or not any(isinstance(reply.get(key), list) for key in ("dates", "ahead")):
                 last["error"] = f"no list in the reply ({type(reply).__name__})"
                 reply = None
-    rows = parse(reply, looked, zone=zone)
+    rows = parse(reply, looked, zone=zone, drawn=drawn)
     if rows:
         decide(pulse_store, rows, zone=zone, now=now)
         if not still_leader():
@@ -630,6 +664,10 @@ def card_row(row: dict, looked: Looked, *, home: Path, now: float, moment: Optio
         "news": _clip(row["text"], learning.NOTICED_NEWS_LIMIT), "why": row["why"] or "", "created_at": now,
         "learned": row["factor"] or "", "place": row["place"] or "", "band": row["band"] or "",
         "moment": json.dumps(moment, sort_keys=True) if moment else ""}
+    pick = pulse_picks.loads(row.get("pick"))
+    if pick is not None:
+        card.update(look=pulse_picks.dumps(pick), subject=row.get("subject") or "",
+                    news=_clip(pulse_picks.news(pick), learning.NOTICED_NEWS_LIMIT))
     item = looked.items.get(row["item_id"]) if row["origin"] == candidates.MEMORY else None
     fact = next((entry.date.item for entry in looked.due if entry.ref == row.get("ref")), None) \
         if row["origin"] == candidates.DATE else None

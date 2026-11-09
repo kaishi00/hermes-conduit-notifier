@@ -53,6 +53,7 @@ from . import pulse_evidence as evidence
 from . import pulse_hermes as hermes
 from . import pulse_hours as hours
 from . import pulse_learning as learning
+from . import pulse_picks
 from . import pulse_ledger as ledger
 from . import pulse_prefs as prefs
 from . import pulse_report as report
@@ -195,6 +196,10 @@ Return a JSON object {"decision": ..., "news": ..., "why": ..., "check_again_hou
 - "why": one short sentence saying what in the material led to the decision.
 - "check_again_hours": for "wait", when checking again could find something new (a number from 0.5 to 72), else null.""" + WHEN_FIELDS + JOBS_RULE + UNSET_RULE
 
+# Added to every check: news it tells is a pick too (pulse_picks).
+PICK_INSTRUCTION = ("\n\nFor \"tell\", the news is also a pick: add \"line\" (its headline, one sentence), "
+                    "\"detail\", \"shape\", \"facts\" and \"actions\" as below; \"news\" stays the "
+                    "whole of it. Give no \"subject\" or \"incident\": it's about this item.\n\n")
 # Added to a check made as the user got to (or left) the place it was said for.
 PLACE_INSTRUCTION = ("\n\nIt was said for a place, and the material says the user just got there (or just left it): "
                      "that's when it was meant for. Answer \"tell\" unless the material shows it's done or no "
@@ -530,30 +535,39 @@ def material(pulse_store: store.PulseStore, home: Path, item: dict, *, zone: tzi
 
 
 def check(llm: Llm, text: str, *, skip_seen: bool = False, kind: str = PROMISE,
-          note: str = "", place: bool = False) -> tuple[dict[str, Any], int]:
+          note: str = "", place: bool = False, drawn: Sequence[str] = ()) -> tuple[dict[str, Any], int]:
     """One check: the decision, news, why, wait hint, when the news is
     useful (pulse_hours.WHEN) and whether it's urgent, or a ``wait`` with
     the reason when the reply is unusable. ``place``: made as the user got
-    to (or left) the place it was said for."""
+    to (or left) the place it was said for. News it tells comes with its
+    pick (pulse_picks, "pick": its words the news's unless it gave a
+    headline; None for none), which its card keeps."""
     mark = secrets.token_hex(4)
     while mark in text:  # the material can't close its own fence
         mark = secrets.token_hex(4)
     instructions = {COMMITMENT: COMMITMENT_INSTRUCTIONS, WATCH: WATCH_INSTRUCTIONS}.get(kind, INSTRUCTIONS)
     # "Already knew" is about news: a reminder is meant to repeat.
     parsed, tokens = llm(instructions + (SEEN_INSTRUCTION if skip_seen and kind != COMMITMENT else "")
-                         + (PLACE_INSTRUCTION if place else "") + report.note_block(note),
+                         + (PLACE_INSTRUCTION if place else "") + PICK_INSTRUCTION + pulse_picks.rules(drawn)
+                         + report.note_block(note),
                          f"<<<check {mark}\n{text}\ncheck {mark}>>>")
     if not isinstance(parsed, dict) or parsed.get("decision") not in DECISIONS:
         return {"decision": "wait", "news": "", "why": "the check's reply was unusable", "hint": None,
-                "when": hours.ANY, "urgent": False}, tokens
+                "when": hours.ANY, "urgent": False, "pick": None}, tokens
     news = _clip(parsed.get("news"), NEWS_LIMIT)
     decision = parsed["decision"]
     if decision == "tell" and not news:
         decision = "wait"
     when = parsed.get("when")
+    pick = None
+    if decision == "tell":
+        # A follow-up is about its own item: a new card each time it tells.
+        pick, why = pulse_picks.parse({**parsed, "incident": None, "subject": None}, drawn_types=drawn, line=news)
+        if pick is not None and why:
+            pick["dropped"] = why
     return {"decision": decision, "news": news, "why": _clip(parsed.get("why"), WHY_LIMIT),
             "hint": parsed.get("check_again_hours"), "when": when if when in hours.WHEN else hours.ANY,
-            "urgent": parsed.get("urgent") is True}, tokens
+            "urgent": parsed.get("urgent") is True, "pick": pick}, tokens
 
 
 # Do it on a card: the chat is read once it has answered and been quiet a
@@ -1192,7 +1206,7 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         try:
             text = material(pulse_store, home, item, zone=zone, now=now, moment=moment)
             outcome, tokens = check(llm, text, skip_seen=skip_seen, kind=item["kind"], note=report.note(pulse_store),
-                                    place=moment is not None)
+                                    place=moment is not None, drawn=pulse_picks.drawn_types(home))
         except Exception as error:  # noqa: BLE001 — a failed check waits for the next
             logger.warning("conduit_push: Pulse follow-up check failed", exc_info=True)
             # A call that failed may still have been billed: count its input
@@ -1226,6 +1240,8 @@ def run(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzinfo, no
         done["tokens"] = done.get("tokens", 0) + tokens
         done["checks"] = done.get("checks", 0) + 1
         decision = outcome["decision"]
+        # The news's pick, kept with the follow-up for its card (_told); none for no news.
+        pulse_store.set_followup_pick(item["id"], pulse_picks.dumps(outcome.get("pick")))
         # News held for its time keeps the time it was held for (a check
         # saying another would hold it again), and what held it, for its Why?.
         kept = followup_timing(row) if held else {}
@@ -1584,10 +1600,14 @@ def _told(pulse_store: store.PulseStore, item: dict, followup: dict, now: float,
         why = f"{why}{'' if not why or why[-1] in '.!?…' else '.'} {note}".strip()
     # The week-old ask names what it's about; the follow-up row keeps STALE_NEWS as its mark.
     news = stale_news(item.get("text"), item.get("kind") or "") if followup["news"] == STALE_NEWS else followup["news"]
+    pick = pulse_picks.loads(followup.get("pick")) if followup["news"] != STALE_NEWS else None
+    if pick is not None:
+        pulse_picks.count(pulse_store, now, [f"shape:{pick.get('shape')}"]
+                          + ([f"plain:{pick['dropped']}"] if pick.get("dropped") else []))
     learning.add_card(pulse_store, kind=FOLLOWUP, item=item, level_name=loudness, news=news, why=why,
                       chat_title=chat_title(home, item) if home is not None else "", now=now,
                       learned=pulse_store.learned(now).factor(attrs), place=attrs["place"], band=attrs["band"],
-                      looked=looked)
+                      looked=looked, pick=pick)
     if followup["news"] == STALE_NEWS and item["status"] == "open" and item["superseded_at"] is None:
         # The ask is done with: news from the last check gets its own attempts.
         pulse_store.retire_attempts(f"-f{item['id']}")

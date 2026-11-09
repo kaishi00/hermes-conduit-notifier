@@ -72,11 +72,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                            "(\"bot\": the bot's own, the one its Bot Chat uses, the default)")
     pulse = commands.add_parser("pulse", help="Pulse, the proactivity experiment: on, off, status, probe, report, home, outcomes, memory, followups, "
                                                  "cards, rate, done, learned, nudge, budget, candidates, note, quiet, night, "
-                                                 "dates, ahead, inbox, look, where, private, claims, spots")
+                                                 "dates, ahead, inbox, look, where, private, claims, spots, picks")
     pulse.add_argument("pulse_action", choices=["on", "off", "status", "probe", "report", "home", "outcomes", "memory",
                                                 "followups", "cards", "rate", "done", "learned", "nudge", "budget",
                                                 "candidates", "note", "quiet", "night", "dates", "ahead", "inbox",
-                                                "look", "where", "private", "claims", "spots"])
+                                                "look", "where", "private", "claims", "spots", "picks"])
     pulse.add_argument("value", nargs="?", default="",
                        help="for home: the id of the chat to use, or 'auto' to find it by title; "
                             "for outcomes: how many to show, or a chat id; "
@@ -512,7 +512,7 @@ def _pulse(args: argparse.Namespace) -> int:
     home = get_hermes_home()
     action = args.pulse_action
     # Follow-ups are on by default, so even `followups on|off` needs no file yet.
-    listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates", "claims") \
+    listing = action in ("followups", "cards", "rate", "done", "learned", "candidates", "dates", "claims", "picks") \
         or (action in ("memory", "ahead", "inbox", "look", "where", "private", "spots")
             and (args.value or "").strip() not in ("on", "off")) \
         or (action == "nudge" and not (args.value or "").strip()) \
@@ -586,6 +586,8 @@ def _pulse(args: argparse.Namespace) -> int:
         return _pulse_memory(pulse_store, home, (args.value or "").strip(), str(getattr(args, "extra", "") or "").strip())
     if action == "dates":
         return _pulse_dates(pulse_store, home)
+    if action == "picks":
+        return _pulse_picks(pulse_store)
     if action == "ahead":
         return _pulse_ahead(pulse_store, home, (args.value or "").strip())
     if action == "inbox":
@@ -1919,9 +1921,25 @@ def _preference_text(preference: dict) -> str:
     return f"{how} {lean} of {what}{counted}"
 
 
+def _pulse_picks(pulse_store: Any) -> int:
+    """How Pulse's picks went each day (pulse_picks.count): the shapes they
+    drew, what fell back to plain and why, the updates, closes and holds."""
+    from . import pulse_picks
+    counts = pulse_store.get(pulse_picks.PICK_COUNTS)
+    days = {day: value for day, value in counts.items() if isinstance(value, dict)} if isinstance(counts, dict) else {}
+    if not days:
+        print("No picks counted yet.")
+        return 0
+    for day in sorted(days, reverse=True):
+        names = days[day]
+        print(day + ": " + ", ".join(f"{_printable(str(name))} {int(names[name])}" for name in sorted(names)
+                                    if isinstance(names[name], int) and not isinstance(names[name], bool)))
+    return 0
+
+
 CANDIDATE_RUNS = 50
 RUN_STATES = {"working": "being made", "ready": "ready to send", "failed": "failed", "sent": "sent",
-              "dropped": "too late to send"}
+              "dropped": "too late to send", "skipped": "skipped (no report this time)"}
 
 
 def _pulse_candidates(pulse_store: Any, home: Any, value: str, extra: str = "") -> int:
@@ -1951,7 +1969,7 @@ def _pulse_candidates(pulse_store: Any, home: Any, value: str, extra: str = "") 
         if isinstance(run.get("refused"), str) and run["refused"]:
             state = f"sent, but Hermes didn't take it ({run['refused']}); the report is tried again as usual"
         elif isinstance(error, str) and error and run["state"] != "dropped":
-            state = f"failed ({error}), so the report {'went' if run['state'] == 'sent' else 'goes'} out as before"
+            state = f"failed ({error}), so that report was skipped"
         used = f", {tokens} tokens" if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens else ""
         print(_printable(f"Latest list: {state}{used}"))
     runs = pulse_store.candidate_runs(max(1, min(int(value or 1), CANDIDATE_RUNS)))

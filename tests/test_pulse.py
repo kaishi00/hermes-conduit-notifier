@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import pathlib
-import re
 import socket
 import sqlite3
 import subprocess
@@ -1422,10 +1421,7 @@ def test_the_report_context_is_the_recent_real_chats(live, db, tmp_path):
         assert absent not in context
     assert "Eric likes short answers." in context
     assert "build → error: exit 1" in context
-    text = report.report_text("pabc-1", context, since)
-    fence = re.search(r"<<<context (\w+)\n", text).group(1)
-    assert text.endswith(f"context {fence}>>>") and report.report_text("pabc-1", context, since) != text
-    assert f"covering {since} onward" in text and text.startswith("Pulse report pabc-1.") and context in text
+    assert len(context) <= report.report_room()
     ledger.forget_cache()
 
 
@@ -1525,7 +1521,7 @@ def test_the_whole_report_message_stays_under_its_budget(db, tmp_path, live, mon
     (tmp_path / "memories" / "USER.md").write_text("u" * 9000)
     (tmp_path / "memories" / "MEMORY.md").write_text("m" * 9000)
     context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
-    assert len(report.report_text("p12345678-1", context, since)) <= report.REPORT_BUDGET
+    assert len(context) <= report.report_room() < report.REPORT_BUDGET
     assert "### Chat 39" in context  # the chats still get their share
 
 
@@ -1540,15 +1536,14 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
     # LCM's default threshold counts even when nothing here says it's on.
     assert report.report_budget() == report.LCM_DEFAULT_THRESHOLD - report.LCM_MARGIN
     context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
-    assert len(report.report_text("p12345678-1", context, since)) < report.LCM_DEFAULT_THRESHOLD
+    assert len(context) <= report.report_room() < report.LCM_DEFAULT_THRESHOLD
     assert "### Chat 39" in context
     # The user's note to Pulse takes its share of the message first: the
     # context is gathered to fit beside it, so the newest chat lines stay.
     long_note = "n" * control.NOTE_LIMIT
     live.store.set("note", long_note)
     context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
-    text = report.report_text("p12345678-1", context, since, note=long_note)
-    assert context in text and long_note in text and len(text) <= report.report_budget(long_note)
+    assert len(context) + len(report.note_block(long_note)) <= report.report_budget(long_note)
     assert "### Chat 39" in context
     live.store.set("note", "")
     monkeypatch.setenv(report.LCM_THRESHOLD, "50000")
@@ -1566,12 +1561,7 @@ def test_the_report_stays_under_lcms_externalization_threshold(db, tmp_path, liv
     monkeypatch.setattr(report, "MEMORY_BUDGET", 12_000)  # the other sections alone fill the report
     context, since = report.build(tmp_path, live.store, home_chat_id=SID, now=now)
     assert "(cut here: no room in this report)" in context and "### Chat 39" in context
-    assert len(report.report_text("p12345678-1", context, since)) <= report.report_budget()
-    monkeypatch.setenv(report.LCM_THRESHOLD, "1")
-    text = report.report_text("p12345678-12", "y" * 50_000, "Tue 20 Oct 18:00")
-    assert len(text) <= report.report_budget() and text.endswith(">>>")
-    text = report.report_text("p12345678-12", "y" * 50_000, "Tue 20 Oct 18:00", note="z" * 1_000)
-    assert len(text) <= report.report_budget("z" * 1_000) and text.endswith(">>>") and "z" * 1_000 in text
+    assert len(context) <= report.report_room()
 
 
 def test_items_and_ratings_are_read_from_the_text():
@@ -1674,7 +1664,63 @@ def _due_report(live):
     live.store.update_attempt("old:1", state=store.DELIVERED)  # no probe due
 
 
-def test_the_report_goes_out_once_after_its_time(live, db):
+class Llm:
+    """Hermes's model access: each call gets the next reply queued (an
+    exception raises), and is kept."""
+
+    def __init__(self):
+        self.replies = []
+        self.calls = []
+
+    def complete_structured(self, **kwargs):
+        self.calls.append(kwargs)
+        reply = self.replies.pop(0) if self.replies else {"remembered": [], "found": []}
+        if isinstance(reply, Exception):
+            raise reply
+        return types.SimpleNamespace(parsed=reply, usage=types.SimpleNamespace(total_tokens=321))
+
+
+class _Inline:
+    """A thread that runs where it's started: the report's candidate list,
+    made within the tick that starts it."""
+
+    def __init__(self, target=None, args=(), kwargs=None, **_):
+        self._run = lambda: target(*args, **(kwargs or {}))
+
+    def start(self):
+        self._run()
+
+    def join(self, timeout=None):
+        pass
+
+    def is_alive(self):
+        return False
+
+
+class _Threads:
+    def __getattr__(self, name):
+        return _Inline if name == "Thread" else getattr(threading, name)
+
+
+@pytest.fixture
+def modeled(live, monkeypatch):
+    """The loop with model access: a report's list is made in the tick that
+    starts it, and the next tick sends the report."""
+    live.llm = Llm()
+    monkeypatch.setattr(live.ctx, "llm", live.llm, raising=False)
+    monkeypatch.setattr(pulse, "threading", _Threads())
+    monkeypatch.setattr(pulse, "_report_thread", None)
+    return live
+
+
+def report_tick(now=None):
+    """The tick that makes the report's list, and the one that sends it."""
+    pulse.tick(now=now)
+    pulse.tick(now=now)
+
+
+def test_the_report_goes_out_once_after_its_time(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     now = time.time()
@@ -1683,7 +1729,7 @@ def test_the_report_goes_out_once_after_its_time(live, db):
     pulse.tick(now=now)
     assert live.sent() == []  # not time yet
     live.store.set("report_time", today)
-    pulse.tick(now=now)
+    report_tick(now)
     [text] = live.sent()
     assert text.startswith("Pulse report")
     row = live.store.in_flight()[0]
@@ -1695,41 +1741,44 @@ def test_the_report_goes_out_once_after_its_time(live, db):
     assert len(live.sent()) == 1  # delivered today
 
 
-def test_a_failed_report_is_tried_again_later_that_day(live, db):
+def test_a_failed_report_is_tried_again_later_that_day(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     now = time.time()
     live.store.set("report_time", time.strftime("%H:%M", time.gmtime(now - 60)))
     step = pulse.REPORT_RETRY_S + 30
     for n in range(pulse.REPORT_TRIES):
-        pulse.tick(now=now + n * step)
+        report_tick(now + n * step)
         row = live.store.in_flight()[0]
         live.store.update_attempt(row["attempt_id"], state=store.NOT_ADMITTED)
         with sqlite3.connect(live.store.path) as conn:  # as if it was marked at the tick's time
             conn.execute("UPDATE attempts SET updated_at=? WHERE attempt_id=?", (now + n * step, row["attempt_id"]))
         pulse.tick(now=now + n * step + 60)  # too soon to retry
         assert len(live.sent()) == n + 1
-    pulse.tick(now=now + 10 * step)
+    report_tick(now + 10 * step)
     assert len(live.sent()) == pulse.REPORT_TRIES
 
 
-def test_a_report_long_past_its_time_waits_for_the_next_one(live, db):
+def test_a_report_long_past_its_time_waits_for_the_next_one(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     evening = time.time() - time.time() % 86400 + 20 * 3600  # 20:00 UTC, 12 h after 08:00
     live.store.set("report_time", "08:00")
     live.store.set("brief_time", BRIEF_OUT_OF_REACH)  # these ticks are at set hours, not now
-    pulse.tick(now=evening)
+    report_tick(evening)
     assert live.sent() == []
-    pulse.tick(now=evening - 12 * 3600 + pulse.REPORT_WINDOW_S - 60)  # inside the window
+    report_tick(evening - 12 * 3600 + pulse.REPORT_WINDOW_S - 60)  # inside the window
     assert len(live.sent()) == 1
 
 
-def test_a_report_turn_gets_the_report_note_and_may_only_look_things_up(live, db):
+def test_a_report_turn_gets_the_report_note_and_may_only_look_things_up(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     live.store.set("report_requested", True)
-    pulse.tick()
+    report_tick()
     [text] = live.sent()
     look = pulse.tools.look_note(pulse.tools.Turn(pulse.REPORT))
     assert pulse.pre_llm_call(SID, "t9", text) == f"{report.REPORT_LOOK_NOTE} {look}"
@@ -1746,81 +1795,26 @@ def test_a_report_turn_gets_the_report_note_and_may_only_look_things_up(live, db
         "action": "block", "message": pulse.BLOCK_MESSAGE}
 
 
-def test_a_probe_and_a_report_due_together_go_on_separate_ticks(live, db):
+def test_a_probe_and_a_report_due_together_go_on_separate_ticks(modeled, db):
+    live = modeled
     db.session()
     live.store.set("enabled", True)
     live.store.set("probe_requested", True)
     live.store.set("report_requested", True)
     pulse.tick()
     assert len(live.sent()) == 1 and live.sent()[0].startswith("Pulse delivery check")
+    pulse.tick()  # the report's list
+    assert len(live.sent()) == 1
     pulse.tick()
     assert len(live.sent()) == 2 and live.sent()[1].startswith("Pulse report")
 
 
-def test_a_report_without_a_list_skips_lines_a_card_says_already(live, db):
-    # Eric, 2026-11-08: with every candidate list failing, reports went out
-    # as Hermes wrote them, and their lines came back as cards he'd marked done.
-    db.session()
-    _due_report(live)
-    [done] = live.store.add_cards([{"kind": "noticed", "level": "screen", "topic": "commitment",
-                                    "news": "Send the deck to Mara before Friday (you said so in Work)",
-                                    "created_at": time.time() - 86400}])
-    live.store.mark_done(done, None, closed_by="user", now=time.time() - 3600)
-    live.store.set("report_requested", True)
-    pulse.tick()
-    row = live.store.in_flight()[0]
-    db.message("user", row["text"], display_kind="hidden")
-    db.message("assistant", REPLY.replace("3. [weird] Something else", "3. [promise] I said I'd check the build; "
-                                          "it failed (tool calls)"))
-    pulse.tick(now=time.time() + 1)
-    made = [card["news"] for card in live.store.cards() if card["id"] != done]
-    assert made == ["I said I'd check the build; it failed (tool calls)"]
-
-
-def test_a_deadline_line_without_a_shown_deadline_matches_the_card_it_made(live, db):
-    # Its card's topic is "other" (no deadline the report showed), and so is its check.
-    db.session()
-    _due_report(live)
-    words = "Renew the passport by 20 November"
-    [done] = live.store.add_cards([{"kind": "noticed", "level": "screen", "topic": "other", "news": words,
-                                    "created_at": time.time() - 86400}])
-    live.store.mark_done(done, None, closed_by="user", now=time.time() - 3600)
-    live.store.set("report_requested", True)
-    pulse.tick()
-    row = live.store.in_flight()[0]
-    db.message("user", row["text"], display_kind="hidden")
-    db.message("assistant", f"Here's what I would have told you today:\n1. [deadline] {words}\n"
-                            "2. [promise] I said I'd check the build; it failed (tool calls)")
-    pulse.tick(now=time.time() + 1)
-    made = [card["news"] for card in live.store.cards() if card["id"] != done]
-    assert made == ["I said I'd check the build; it failed (tool calls)"]
-
-
-def test_a_deadline_line_matches_a_deadline_card_an_earlier_report_made(live, db):
-    # An earlier report showed the item and carded it "deadline"; this one
-    # doesn't show it, and still knows the card.
-    db.session()
-    _due_report(live)
-    words = "Renew the passport by 20 November"
-    [done] = live.store.add_cards([{"kind": "noticed", "level": "screen", "topic": "deadline", "news": words,
-                                    "created_at": time.time() - 86400}])
-    live.store.mark_done(done, None, closed_by="user", now=time.time() - 3600)
-    live.store.set("report_requested", True)
-    pulse.tick()
-    row = live.store.in_flight()[0]
-    db.message("user", row["text"], display_kind="hidden")
-    db.message("assistant", f"Here's what I would have told you today:\n1. [deadline] {words}\n"
-                            "2. [promise] I said I'd check the build; it failed (tool calls)")
-    pulse.tick(now=time.time() + 1)
-    made = [card["news"] for card in live.store.cards() if card["id"] != done]
-    assert made == ["I said I'd check the build; it failed (tool calls)"]
-
-
-def test_ratings_are_read_back_and_counted(live, db):
+def test_ratings_are_read_back_and_counted(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     live.store.set("report_requested", True)
-    pulse.tick()
+    report_tick()
     row = live.store.in_flight()[0]
     db.message("user", row["text"], display_kind="hidden")
     db.message("assistant", REPLY)
@@ -1844,7 +1838,8 @@ def _unsplit(pulse_store):
         conn.execute("DELETE FROM report_ratings WHERE items_json=?", (store.SPLIT_ITEMS,))
 
 
-def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(live, db):
+def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     live.store.set("memory", True)
@@ -1852,10 +1847,13 @@ def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(live, db):
     [kept] = live.store.advance("", "work", message_id=1, at=now - 3600, items=[{
         "kind": "commitment", "text": "The user will send the deck.", "evidence": "I'll send the deck",
         "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": now - 3600}])
+    live.llm.replies.append({"remembered": [{"ref": kept, "bring_up": True, "value": 3, "skip": "",
+                                             "actionable": True, "line": "Send the deck",
+                                             "why": "You said you would."}], "found": []})
     live.store.set("report_requested", True)
-    pulse.tick()
+    report_tick()
     row = live.store.in_flight()[0]
-    assert f"#{kept} [commitment]" in row["text"]
+    assert f"[commitment] Send the deck #{kept}" in row["text"]
     db.message("user", row["text"], display_kind="hidden")  # Hermes keeps the whole message; Pulse trims its copy
     db.message("assistant", f"1. [commitment] Send the deck #{kept}\n2. [follow-up] Chase PR #99")
     db.message("user", "1 no, 2 no")
@@ -1870,6 +1868,30 @@ def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(live, db):
         "kind": "commitment", "text": "The user will send the deck.", "evidence": "the deck", "explicit": 1, "due": "",
         "due_at": None, "message_id": 2, "mentioned_at": time.time() + 3, "same_as": kept}])
     assert f"#{kept} " in report.remembered(live.store, UTC, time.time())  # brought up again: back in the report
+
+
+def test_a_delivered_reports_cards_keep_their_picks_look_and_subject(modeled, db):
+    live = modeled
+    db.session()
+    _due_report(live)
+    live.store.set("memory", True)
+    now = time.time()
+    [kept] = live.store.advance("", "work", message_id=1, at=now - 3600, items=[{
+        "kind": "commitment", "text": "The user will send the deck.", "evidence": "I'll send the deck",
+        "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": now - 3600}])
+    live.llm.replies.append({"remembered": [{"ref": kept, "bring_up": True, "value": 3, "skip": "",
+                                             "actionable": True, "line": "Send the deck", "subject": f"#{kept}",
+                                             "shape": "status", "facts": {"label": "Deck", "state": "warn"},
+                                             "why": "You said you would."}], "found": []})
+    live.store.set("report_requested", True)
+    report_tick()
+    row = live.store.in_flight()[0]
+    db.message("user", row["text"], display_kind="hidden")
+    db.message("assistant", f"1. [commitment] Send the deck #{kept}")
+    pulse.tick(now=time.time() + 1)
+    [card] = [card for card in live.store.cards(50) if card["item_id"] == kept]
+    assert card["subject"] == f"item:{kept}"
+    assert json.loads(card["look"])["shape"] == "status" and json.loads(card["look"])["line"] == "Send the deck"
 
 
 def test_report_command(live, db, capsys, monkeypatch):
@@ -1922,7 +1944,8 @@ def test_the_report_times():
     assert report.next_time(hours(19), zone, times) == hours(8 + 24)
 
 
-def test_each_report_time_sends_once(live, db):
+def test_each_report_time_sends_once(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     midnight = time.time() - time.time() % 86400
@@ -1930,7 +1953,7 @@ def test_each_report_time_sends_once(live, db):
     live.store.set("brief_time", BRIEF_OUT_OF_REACH)  # these ticks are at set hours, not now
 
     def deliver_at(hour):
-        pulse.tick(now=midnight + hour * 3600)
+        report_tick(midnight + hour * 3600)
         rows = live.store.in_flight()
         for row in rows:
             live.store.update_attempt(row["attempt_id"], state=store.DELIVERED)
@@ -1945,11 +1968,12 @@ def test_each_report_time_sends_once(live, db):
     assert deliver_at(18.1) == 0  # stands in for 18:00
 
 
-def test_a_finished_report_keeps_only_its_first_line(live, db):
+def test_a_finished_report_keeps_only_its_first_line(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     live.store.set("report_requested", True)
-    pulse.tick()
+    report_tick()
     row = live.store.in_flight()[0]
     assert "\n" in row["text"]
     live.store.update_attempt(row["attempt_id"], state=store.DELIVERED)
@@ -1957,15 +1981,16 @@ def test_a_finished_report_keeps_only_its_first_line(live, db):
     assert live.store.attempt_by_tag(row["tag"])["text"] == f"Pulse report {row['tag']}."
 
 
-def test_an_early_report_stands_in_for_the_scheduled_one(live, db):
+def test_an_early_report_stands_in_for_the_scheduled_one(modeled, db):
+    live = modeled
     db.session()
     _due_report(live)
     now = time.time()
     live.store.set("report_requested", True)
-    pulse.tick(now=now - 60)
+    report_tick(now - 60)
     live.store.update_attempt(live.store.in_flight()[0]["attempt_id"], state=store.DELIVERED)
     live.store.set("report_time", time.strftime("%H:%M", time.gmtime(now - 30)))
-    pulse.tick(now=now)
+    report_tick(now)
     assert len(live.sent()) == 1
 
 
@@ -3369,10 +3394,8 @@ def test_pulse_state_and_settings_as_data(remembering, db):
         control.request_report(store_)
 
 
-def test_the_report_turn_carries_the_users_note():
-    text = report.report_text("pabc-1", "ctx", "Mon 20 Oct 08:00", note=" Never bring up the gym. ")
-    assert f"and stop.\n\n{report.NOTE_TITLE}\nNever bring up the gym.\n\nEverything between the context markers" in text
-    assert report.NOTE_TITLE not in report.report_text("pabc-1", "ctx", "Mon 20 Oct 08:00")
+def test_the_users_note_block():
+    assert report.note_block(" Never bring up the gym. ") == f"\n\n{report.NOTE_TITLE}\nNever bring up the gym."
     assert report.note_block("") == "" and report.note_block(None) == ""
 
 

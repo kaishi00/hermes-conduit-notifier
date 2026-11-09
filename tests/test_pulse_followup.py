@@ -712,7 +712,8 @@ def test_already_knew_doesnt_reach_a_reminder_check():
     llm = lambda instructions, text: seen.append(instructions) or ({"decision": "wait"}, 1)
     followup.check(llm, "x", skip_seen=True)
     followup.check(llm, "x", skip_seen=True, kind=followup.COMMITMENT)
-    assert seen[0].endswith(followup.SEEN_INSTRUCTION) and seen[1] == followup.COMMITMENT_INSTRUCTIONS
+    assert followup.SEEN_INSTRUCTION in seen[0] and followup.SEEN_INSTRUCTION not in seen[1]
+    assert seen[1].startswith(followup.COMMITMENT_INSTRUCTIONS)
 
 
 def test_followups_now_checks_everything_at_once(live):
@@ -765,10 +766,11 @@ def test_the_nudge_level_sets_reminders_pace_budget_and_the_reports_bar(live, ca
     assert (state["nudge"], state["followup_daily_tokens"], state["followup_daily_tokens_set"]) == ("eager", 80_000, True)
     control.update(live.store, {"followup_daily_tokens": None})
     assert pulse._spent_today(live.store, "followup", "")[1] == 300_000
-    since = "Tue 20 Oct 18:00"
-    assert report.BARS["eager"] in report.report_text("p1-1", "", since, "eager")
-    assert report.BARS["gentle"] in report.report_text("p1-1", "", since, "gentle")
-    assert report.BARS["balanced"] in report.report_text("p1-1", "", since, "nonsense")
+    for nudge, bar in (("eager", "eager"), ("gentle", "gentle"), ("nonsense", "balanced")):
+        asked = []
+        pulse.candidates.ask(lambda instructions, text: (asked.append(instructions), ({"remembered": []}, 0))[1],
+                             report.Gathered("", "Tue 20 Oct 18:00", {}, {}, {}, None), nudge=nudge)
+        assert report.BARS[bar] in asked[0]
     now = time.time()
     for _ in range(6):
         assert followup._hold_reminder(live.store, now) is None
