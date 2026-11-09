@@ -646,8 +646,13 @@ class _LocalLiveReadBack:
         # owns the value it sets: a later start's bump, even one made while
         # this _stop still waits on the call, overtakes it.
         generation = self.generation + 1
-        await self._stop(cancel_turn=False)
+        _, popped = await self._stop_reply(cancel_turn=False)
         if self.closed or generation != self.generation:
+            # Overtaken while stopping: this start opens nothing, so the
+            # phone turn its stop took (left for start_turn to let go) is
+            # let go here, or it would keep working with no one following.
+            if popped is not None and not isinstance(popped, _ReadBackFrontTurn):
+                await self._let_go(popped)
             return
         self.reply_open = True
         self.turn_over = False
@@ -694,6 +699,11 @@ class _LocalLiveReadBack:
         """The reply stops: nothing more of it is said. True when the server
         was sent a response.cancel for it, now or before (a send that failed
         counts too: the relay ends with a broken upstream anyway)."""
+        cancelled, _ = await self._stop_reply(cancel_turn)
+        return cancelled
+
+    async def _stop_reply(self, cancel_turn: bool) -> Tuple[bool, Any]:
+        """_stop's work; also the turn it took and didn't let go, if any."""
         # A start still waiting on the call is overtaken.
         self.generation += 1
         self._release()
@@ -716,10 +726,13 @@ class _LocalLiveReadBack:
         # its own earlier turn go, but nothing else would stop a fast model
         # (and the Hermes turn it may fall back to) from answering words the
         # user has moved on from.
+        kept = None
         if turn is not None and (cancel_turn or isinstance(turn, _ReadBackFrontTurn)):
             await self._let_go(turn)
+        else:
+            kept = turn
         await self._end_reply("cancelled")
-        return cancelled
+        return cancelled, kept
 
     async def _follow(self, turn: Any) -> None:
         """The turn's reply, sentence by sentence, as it streams."""

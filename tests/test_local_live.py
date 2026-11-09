@@ -1837,6 +1837,53 @@ def test_a_start_overtaken_while_it_stops_the_last_reply_opens_no_turn():
     assert asyncio.run(scenario()) == ["Never mind"]
 
 
+def test_a_start_overtaken_by_a_stop_lets_the_phone_turn_it_took_go():
+    # A start's stop takes the open phone turn, leaving it for start_turn to
+    # let go; a bare stop (Interrupt) overtakes the start while it waits on
+    # the call, so the start lets that turn go itself.
+    async def scenario():
+        started, cancelled = [], []
+
+        class Call:
+            agent = None
+            turns = {}
+            turn_lock = asyncio.Lock()
+
+            async def start_turn(self, words):
+                started.append(words)
+                return types.SimpleNamespace(frames=asyncio.Queue())
+
+            async def cancel_turn(self, turn):
+                cancelled.append(turn)
+
+        gate = asyncio.Event()
+        told = []
+
+        async def to_phone(frame):
+            told.append(frame)
+            if len(told) == 1:
+                await gate.wait()
+
+        async def fail(reason):
+            pass
+
+        relay = api.local_live_read_back._LocalLiveReadBack(Call(), to_phone, fail)
+        old = types.SimpleNamespace(frames=asyncio.Queue())
+        relay.turn = old
+        relay.reply_open = True
+        start = asyncio.ensure_future(relay._start("Never mind"))
+        await asyncio.sleep(0)
+        await relay._stop(cancel_turn=True)
+        gate.set()
+        await start
+        relay.close()
+        return started, cancelled, old
+
+    started, cancelled, old = asyncio.run(scenario())
+    assert started == []
+    assert cancelled == [old]
+
+
 def test_on_a_read_back_server_without_a_fast_model_hermes_answers(client, hermes, server):
     server.upstream = upstream = ReadBackUpstream()
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
