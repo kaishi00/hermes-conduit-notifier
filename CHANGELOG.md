@@ -24,6 +24,14 @@ checks it). The format is fixed, because Conduit reads it:
 - In a room someone else hosts, Conduit draws its pictures and opens its
   files from your own host's copy, instead of showing them by name.
 
+## 0.147.2 (2026-11-09)
+
+### Fixes
+- On a host that manages the plugin, Finish Update could leave the gateway
+  on the old plugin where systemd runs it as root (an LXC host). The host
+  now runs those restarts itself, as an update does, and still pulls
+  nothing.
+
 ## 0.147.1 (2026-11-09)
 
 ### Fixes
