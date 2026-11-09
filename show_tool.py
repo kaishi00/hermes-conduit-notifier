@@ -555,8 +555,7 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
     decisions: list[dict[str, Any]] = []
     pages: dict[str, str] = {}
     seen: set[str] = set()
-    # Each title's ids in the latest round that showed it, in order: the
-    # n-th decision of a title here takes the n-th of them.
+    # Each title's ids in the latest round that showed it, in order.
     by_title: dict[str, list[str]] = {}
     used_before: set[str] = set()
     for kept in rounds or []:
@@ -565,7 +564,6 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
             titled.setdefault(str(earlier.get("title", "")).casefold(), []).append(earlier["id"])
             used_before.add(earlier["id"])
         by_title.update(titled)
-    title_seen: dict[str, int] = {}
     explicit = {_short_id(raw.get("id")) for raw in given[:6] if isinstance(raw, dict)} - {""}
     if len(given) > 6:
         problems.append(f"{path}.decisions: six at most, the rest were left out")
@@ -580,11 +578,11 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
             continue
         decision_id = _short_id(raw.get("id"))
         if not decision_id:
-            folded = title.casefold()
-            occurrence = title_seen.get(folded, 0)
-            earlier_ids = by_title.get(folded, [])
-            carried = earlier_ids[occurrence] if occurrence < len(earlier_ids) else ""
-            if carried and carried not in explicit and carried not in seen:
+            # The first of the title's earlier ids that no decision here
+            # holds or names.
+            carried = next((earlier for earlier in by_title.get(title.casefold(), [])
+                            if earlier not in explicit and earlier not in seen), "")
+            if carried:
                 decision_id = carried
             else:
                 number = 1
@@ -644,8 +642,6 @@ def _review_decisions(given: list[Any], path: str, problems: list[str],
             decision["layout"] = raw["layout"]
         decision["options"] = options
         seen.add(decision_id)
-        # Only a decision shown takes up its title's next earlier id.
-        title_seen[title.casefold()] = title_seen.get(title.casefold(), 0) + 1
         decisions.append(decision)
         pages.update(option_pages)
     return decisions, pages
