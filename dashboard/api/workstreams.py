@@ -107,8 +107,9 @@ async def get_workstreams(request: Request, response: Response, profile: Optiona
 
 @router.get("/workstreams/settings")
 async def get_workstreams_settings(request: Request, response: Response, profile: Optional[str] = None) -> Any:
-    """The bot's work settings for Edit Bot > Work: ``policy`` (off, strict
-    or lookups), ``max_running`` and ``max_running_limit``,
+    """The bot's work settings for Edit Bot > Work: ``policy`` (off, strict,
+    lookups or open), ``policies`` (the ones this plugin takes, so an app
+    offers only those), ``max_running`` and ``max_running_limit``,
     ``after_restart`` (continue or ask), ``workstream_approvals`` (chats,
     ask or off), ``chat_approvals`` (the bot's approval mode in Hermes),
     ``workstream_model`` (the model new workstreams start on, {"model",
