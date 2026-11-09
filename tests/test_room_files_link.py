@@ -275,6 +275,24 @@ def test_a_carried_file_isnt_written_through_a_symlinked_folder(tmp_path):
     assert list(elsewhere.iterdir()) == []
 
 
+def test_a_drive_qualified_name_isnt_one():
+    # Greptile on notifier #629: joined on a Windows home, D:report.txt leaves the upload folder.
+    for name in ("D:report.txt", "c:shot.jpg", "D:", "a|b.txt", "what?.jpg"):
+        assert files_module._name_ok(name) is False, name
+    assert files_module._name_ok("report final (2).txt") is True
+
+
+def test_a_carried_file_isnt_written_outside_room_files(tmp_path):
+    # Greptile on notifier #629: the final target is checked, whatever the name.
+    root = tmp_path / "laifu"
+    files = files_module.Files(type("Rooms", (), {"root": root, "clock": staticmethod(lambda: 0.0)})())
+    outside = tmp_path / "outside.txt"
+
+    assert files._keep(files_module.files_root(root) / FOLDER / outside, b"data",
+                       {"folder": FOLDER, "name": "outside.txt"}) is False
+    assert not outside.exists()
+
+
 def test_a_piece_that_cant_be_written_is_dropped(tmp_path, monkeypatch):
     # Beam on notifier #629: an OSError escaped _take.
     files = files_module.Files(type("Rooms", (), {"root": tmp_path, "clock": staticmethod(lambda: 0.0)})())

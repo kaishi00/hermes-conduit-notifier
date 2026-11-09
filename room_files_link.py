@@ -28,6 +28,7 @@ import hashlib
 import json
 import logging
 import math
+import ntpath
 import os
 import re
 import shutil
@@ -81,7 +82,9 @@ INCOMING_TTL_S = 24 * 3600
 ROOM_FILES = ("conduit", "room-files")
 # An upload's folder and name as dashboard/api/rooms.py writes them.
 _FOLDER = re.compile(r"^\d{8}-[0-9a-f]{32}\Z")
-_UNSAFE_NAME = re.compile(r"[\\/\x00-\x1f\x7f]")
+# What an upload's name never holds (dashboard/api/rooms.py _ROOM_FILE_UNSAFE), so no carried name does
+# either: a drive (``D:report.txt``) would leave the upload folder on a Windows home.
+_UNSAFE_NAME = re.compile(r"[\\/\x00-\x1f\x7f\x85\u2028\u2029:*?\"'`<>|\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 _DIGEST = re.compile(r"^[0-9a-f]{64}\Z")
 # An `@file:` reference, quoted as Hermes quotes one (format_reference_value) or bare.
 _REFERENCE = re.compile(r"@file:(?:`([^`\r\n]+)`|\"([^\"\r\n]+)\"|'([^'\r\n]+)'|([^\s`\"'<>]+))")
@@ -114,7 +117,8 @@ def _name_ok(name: Any) -> bool:
         size = len(name.encode("utf-8"))
     except UnicodeEncodeError:  # a lone surrogate JSON let through
         return False
-    return 0 < size <= 255 and name not in (".", "..") and not _UNSAFE_NAME.search(name)
+    return 0 < size <= 255 and name not in (".", "..") and not _UNSAFE_NAME.search(name) \
+        and not ntpath.splitdrive(name)[0] and not os.path.isabs(name)
 
 
 def references(text: Any) -> list[tuple[str, str, str]]:
@@ -478,7 +482,7 @@ class Files:
     def _keep(self, target: Path, whole: bytes, body: dict[str, Any], link_id: Optional[str] = None) -> bool:
         name = None
         try:
-            root = target.parent.parent
+            root = files_root(self.rooms.root)
             root.mkdir(parents=True, exist_ok=True, mode=0o700)
             with disk_lock(self.rooms.root):
                 if not _room_for(root, len(whole), self.rooms.clock()):
@@ -486,7 +490,16 @@ class Files:
                                 "under %d GB free)", body["folder"], body["name"], TOTAL_BYTES >> 30,
                                 FREE_FLOOR_BYTES >> 30)
                     return False
-                target.parent.mkdir(exist_ok=True, mode=0o700)
+                # Checked again on the final path, whatever the name let through.
+                inside = os.path.dirname(os.path.abspath(target.parent)) == os.path.abspath(root) \
+                    and os.path.dirname(os.path.abspath(target)) == os.path.abspath(target.parent)
+                if inside:
+                    target.parent.mkdir(exist_ok=True, mode=0o700)
+                    inside = os.path.dirname(os.path.realpath(target.parent)) == os.path.realpath(root)
+                if not inside:
+                    logger.warning("Linked Rooms didn't keep room file %s/%s: it would land outside room files",
+                                   body["folder"], body["name"])
+                    return False
                 if target.parent.is_symlink() or target.is_symlink():
                     # Nothing Linked Rooms or an upload makes: a carried file is never written through one.
                     logger.warning("Linked Rooms didn't keep room file %s/%s: its folder here is a symlink",
