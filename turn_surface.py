@@ -328,17 +328,39 @@ _wakes: "OrderedDict[str, list[float]]" = OrderedDict()
 _woken: "OrderedDict[str, bool]" = OrderedDict()
 
 
-def expect_wake(text: Any, clock: Callable[[], float] = time.monotonic) -> None:
-    """The plugin is about to send ``text`` as its own hidden turn."""
+MAX_WAKE_SENDS = 32  # per text; past it the oldest sending's turn counts as any other
+
+
+def expect_wake(text: Any, clock: Callable[[], float] = time.monotonic) -> Optional[float]:
+    """The plugin is about to send ``text`` as its own hidden turn. Returns
+    the sending's mark, for discard_wake when the send doesn't go out."""
     if not isinstance(text, str) or not text.strip():
-        return
+        return None
+    key = text.strip()
     with _turn_entries_lock:
         # The same text may go to two chats (one question asked of two
-        # bots): each sending waits for a turn of its own.
-        sent = _wakes.pop(text.strip(), [])
-        _wakes[text.strip()] = [*sent, clock()][-MAX_TURN_ENTRIES:]
+        # bots): each sending waits for a turn of its own. A sending past
+        # the window will never count, so it goes now.
+        now = clock()
+        sent = [at for at in _wakes.pop(key, []) if 0 <= now - at <= WAKE_TTL_S]
+        _wakes[key] = [*sent, now][-MAX_WAKE_SENDS:]
         while len(_wakes) > MAX_TURN_ENTRIES:
             _wakes.popitem(last=False)
+        return now
+
+
+def discard_wake(text: Any, at: Optional[float]) -> None:
+    """A sending expect_wake recorded didn't go out (refused or failed): no
+    turn will answer it, so a turn with that text later isn't the plugin's."""
+    if not isinstance(text, str) or at is None:
+        return
+    key = text.strip()
+    with _turn_entries_lock:
+        sent = _wakes.get(key)
+        if sent and at in sent:
+            sent.remove(at)
+            if not sent:
+                del _wakes[key]
 
 
 def start_turn(session_id: Any, user_message: Any = None, clock: Callable[[], float] = time.monotonic) -> None:

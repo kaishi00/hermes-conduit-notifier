@@ -482,6 +482,37 @@ def test_the_plugins_own_work_update_draws_cards_whichever_client_has_the_chat_o
         tool.turn_surface.start_turn("s1")
 
 
+def test_a_work_update_counts_while_it_waits_behind_a_long_turn_and_not_after_its_window():
+    turns = tool.turn_surface
+    text = "Work update from your workstreams. ..."
+    now = [1000.0]
+    clock = lambda: now[0]  # noqa: E731
+    try:
+        turns.expect_wake(text, clock)
+        now[0] += 3600  # queued behind an hour-long turn
+        turns.start_turn("s1", text, clock)
+        assert turns.woken("s1")
+        turns.expect_wake(text, clock)
+        now[0] += turns.WAKE_TTL_S + 1
+        fresh = turns.expect_wake(text, clock)  # the stale sending goes as this one comes
+        assert turns._wakes[text] == [fresh]
+        turns.start_turn("s1", text, clock)
+        assert turns.woken("s1"), "the fresh sending still wakes its turn"
+        turns.expect_wake(text, clock)
+        now[0] += turns.WAKE_TTL_S + 1
+        turns.start_turn("s1", text, clock)
+        assert not turns.woken("s1"), "past the window it's any other turn"
+        # A sending that didn't go out is taken back, and only it.
+        kept = turns.expect_wake(text, clock)
+        now[0] += 1
+        dropped = turns.expect_wake(text, clock)
+        turns.discard_wake(text, dropped)
+        assert turns._wakes[text] == [kept]
+    finally:
+        turns._wakes.pop(text, None)
+        turns.start_turn("s1")
+
+
 def test_a_turn_source_lookup_that_fails_draws_no_cards(tool_home, monkeypatch):
     _exchange(PresentStore(tool_home), features=("chat-cards",))
 
