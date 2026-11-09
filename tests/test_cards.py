@@ -102,7 +102,7 @@ def test_every_type_has_its_field_and_markdown():
               "weather": "weather", "comparison": "options", "steps": "steps", "media": "media",
               "contact": "people", "status": "status", "table": "table", "timeline": "timeline",
               "checklist": "checklist", "list": "list", "progress": "progress", "callout": "callout",
-              "diff": "diff", "composed": "sections"}
+              "diff": "diff", "review": "review", "composed": "sections"}
     assert set(card_schema.CARD_SCHEMA["properties"]["type"]["enum"]) == set(fields)
     for kind, field in fields.items():
         assert card_schema._TYPE_FIELDS[kind][0] == field
@@ -168,7 +168,10 @@ def test_the_tool_parameter_wraps_the_card():
     items = parameter.pop("items")
     assert parameter == {"type": "array", "maxItems": card_schema.MAX_CARDS, "description": "Cards."}
     assert items["properties"]["diff"] == card_schema.DEFINITION["inputs"]["diff"], "a diff is given as its input"
-    assert {**items, "properties": {**items["properties"], "diff": card_schema.CARD_SCHEMA["properties"]["diff"]}} \
+    assert items["properties"]["review"] == card_schema.DEFINITION["inputs"]["review"], \
+        "a review is given as its input"
+    assert {**items, "properties": {**items["properties"], "diff": card_schema.CARD_SCHEMA["properties"]["diff"],
+                                    "review": card_schema.CARD_SCHEMA["properties"]["review"]}} \
         == card_schema.CARD_SCHEMA, "the rest is the card as is"
 
 

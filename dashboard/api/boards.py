@@ -1,6 +1,6 @@
 """Boards: the ticks on conduit_show's checklist cards, the taps on its cards'
-buttons, the boards agents showed in group rooms, the boards Hermes Desktop draws, and the diffs too long
-for a card to carry, kept on the host."""
+buttons, the boards agents showed in group rooms, the boards Hermes Desktop draws, the diffs too long
+for a card to carry, and the rounds of review cards, kept on the host."""
 
 from __future__ import annotations
 
@@ -311,3 +311,43 @@ async def get_kept_diff(request: Request, response: Response, profile: Optional[
         raise
     except Exception as exc:
         raise core._unexpected("diff-cards", exc, feature="Diff cards")
+
+
+# --- Reviews kept for their cards ----------------------------------------------
+#
+# A review card (conduit_show) carries its options' labels and ids; the pages
+# they open are kept round by round on the host (review_store.KeptReviews, in
+# the root home), and Conduit reads a round here when the user opens the
+# review, with the marks sent on it.
+
+_kept_reviews_limiter = core._MintLimiter(240, 60.0, message="Too many review reads; try again shortly")
+
+
+def read_kept_review(review_id: Optional[str], number: Optional[str]) -> Dict[str, Any]:
+    module = core._plugin_package_module("review_store")
+    root = core._plugin_package_module("room_identity").root_home(core._calls_home())
+    try:
+        review = module.KeptReviews(root).read(review_id, number)
+    except ValueError as exc:
+        raise core.TokenError(400, str(exc))
+    if review is None:
+        raise core.TokenError(404, "That review is gone")
+    return {"review": review}
+
+
+@router.get("/boards/reviews")
+async def get_kept_review(request: Request, response: Response, profile: Optional[str] = None,
+                          id: Optional[str] = None,  # noqa: A002 — the query's name
+                          round: Optional[str] = None) -> Dict[str, Any]:  # noqa: A002 — the query's name
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    try:
+        return await core._run_scoped(profile, core._limited(_kept_reviews_limiter, profile,
+                                                             lambda: read_kept_review(id, round)))
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=NO_STORE)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **NO_STORE}
+        raise
+    except Exception as exc:
+        raise core._unexpected("review-cards", exc, feature="Review cards")
