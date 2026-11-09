@@ -139,7 +139,7 @@ ROUTE_CAPABILITIES = (
     # line, detail}; shape one of date, due, runs, promise, status,
     # steps, drawn, plain), "card_ref" ("pc_<id>"), "subject" and
     # "updated_at"; an action that "ask"s leaves its "say" in the chat's
-    # composer. The morning brief's card has "brief_look" too.
+    # composer. The morning brief's parts come in its "look" (shape "brief").
     "pulse_looks",
     # Walking past (pulse_spots): a /location/ingest batch carrying
     # "spot_entries" (the watched shops the user came near, maybe none) and

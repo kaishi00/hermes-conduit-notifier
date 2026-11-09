@@ -5,7 +5,7 @@ most two actions, the subject it's about and what it does to a card."""
 
 import json
 
-from test_pulse import pulse
+from test_pulse import control, pulse
 
 picks = pulse.pulse_picks
 store = pulse.store
@@ -145,3 +145,30 @@ def test_the_brief_is_laid_out_from_its_parts():
     assert picks.look({"look": picks.dumps(look)})["shape"] == picks.BRIEF
     # Lines under no heading are still open.
     assert pulse.brief.look("Quiet.\n- One thing", held=0)["facts"]["open"] == ["One thing"]
+
+
+def test_the_feed_adds_looks_only_for_apps_that_ask(tmp_path):
+    pulse_store = fresh(tmp_path)
+    look = {"line": "Relay is up", "shape": "status", "facts": {"label": "Relay", "state": "ok"}, "actions": []}
+    made = card(pulse_store, subject="job:default:9", created_at=1000.0, look=look)
+    [old] = [entry for entry in control.feed(pulse_store)["cards"] if entry["id"] == made]
+    assert not {"look", "card_ref", "subject", "updated_at"} & set(old)
+    [new] = [entry for entry in control.feed(pulse_store, looks=True)["cards"] if entry["id"] == made]
+    assert new["card_ref"] == f"pc_{made}" and new["subject"] == "job:default:9" and "updated_at" in new
+    assert new["look"]["shape"] == "status" and new["look"]["facts"] == {"label": "Relay", "state": "ok"}
+    assert {key: value for key, value in new.items() if key not in ("look", "card_ref", "subject", "updated_at")} == old
+
+
+def test_a_close_earlier_in_the_same_report_holds_nothing_back(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="job:default:41", created_at=1000.0)
+    again, _ = picks.parse({"line": "Audit failed again", "subject": "job:default:41"})
+    assert picks.resolve(pulse_store, again, "job:default:41", 2000.0)[0] == picks.DROP
+    assert picks.resolve(pulse_store, again, "job:default:41", 2000.0, closing=[made]) == (picks.NEW, None, "")
+
+
+def test_an_update_to_an_open_card_about_something_else_says_so(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="job:default:41", created_at=1000.0)
+    pick, _ = picks.parse({"line": "x", "incident": {"card": f"pc_{made}"}})
+    assert picks.resolve(pulse_store, pick, "item:3", 2000.0) == (picks.NEW, None, "update_subject")

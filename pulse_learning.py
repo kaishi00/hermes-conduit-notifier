@@ -361,7 +361,7 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
         link = links[n] if n < len(links) else None
         if pick is not None:
             row.update(look=picks.dumps(pick), subject=subject, news=_clip(picks.news(pick), NOTICED_NEWS_LIMIT))
-            action, target, why = picks.resolve(pulse_store, pick, subject, now)
+            action, target, why = picks.resolve(pulse_store, pick, subject, now, closes)
             counted += [f"shape:{pick.get('shape')}"] + ([f"plain:{pick['dropped']}"] if pick.get("dropped") else [])
             if why:
                 counted.append(f"{action}:{why}")
@@ -381,7 +381,10 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
         row_links.append(link)
     ids = pulse_store.add_cards(rows, attempt=attempt, marks=marks, keep=keep,
                                 links=row_links if links else (), updates=updates, closes=closes, now=now)
-    if ids or closes:
+    # Counted once: a tick that finds the attempt already landed (another
+    # process's) adds nothing and counts nothing; one whose picks all
+    # dropped had nothing to add and still counts them.
+    if ids or closes or not (rows or updates):
         picks.count(pulse_store, now, counted)
     return ids
 

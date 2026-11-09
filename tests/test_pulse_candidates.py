@@ -728,7 +728,7 @@ def test_candidates_command(reporting, capsys, monkeypatch):
     capsys.readouterr()
     live.store.set(pulse.REPORT_RUN, {**live.store.get(pulse.REPORT_RUN), "state": "sent", "error": "BadReply"})
     run()
-    assert capsys.readouterr().out.startswith("Latest list: failed (BadReply), so the report went out as before")
+    assert capsys.readouterr().out.startswith("Latest list: failed (BadReply), so that report was skipped")
 
 
 # What Pulse left out (pulse_control.left_out, bring_up) ---------------------------

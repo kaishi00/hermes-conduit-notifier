@@ -1969,7 +1969,7 @@ def _pulse_candidates(pulse_store: Any, home: Any, value: str, extra: str = "") 
         if isinstance(run.get("refused"), str) and run["refused"]:
             state = f"sent, but Hermes didn't take it ({run['refused']}); the report is tried again as usual"
         elif isinstance(error, str) and error and run["state"] != "dropped":
-            state = f"failed ({error}), so the report {'went' if run['state'] == 'sent' else 'goes'} out as before"
+            state = f"failed ({error}), so that report was skipped"
         used = f", {tokens} tokens" if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens else ""
         print(_printable(f"Latest list: {state}{used}"))
     runs = pulse_store.candidate_runs(max(1, min(int(value or 1), CANDIDATE_RUNS)))

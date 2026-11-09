@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime, timezone
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Collection, Mapping, Optional, Sequence
 
 from . import card_schema
 
@@ -311,13 +311,16 @@ CARD_KINDS = ("followup", "noticed")
 DATE_SUBJECTS = ("person:", "fact:", "deadline:")
 
 
-def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float) -> tuple[str, Optional[int], str]:
+def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
+            closing: Collection[int] = ()) -> tuple[str, Optional[int], str]:
     """What a pick does, checked against the store: (NEW, None, why),
     (UPDATE, card, ""), (CLOSE, card, "") or (DROP, card or None, why). An
     update to a card that's gone, closed or about something else is a new
     card; a close of one is nothing; a new incident about a ``subject`` that
     has a card open from the last HOLD_S is held for that card (DROP, HOLD):
-    only an update by the card's id changes it."""
+    only an update by the card's id changes it. ``closing``: cards an
+    earlier pick in the same batch closes, which hold nothing back (a job
+    that recovered and failed again since the last report)."""
     kind, target = incident(pick.get("incident"))
     if target is not None:
         card = pulse_store.card(target)
@@ -328,11 +331,13 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float)
         if mine:
             return UPDATE, target, ""
         kind = NEW
-        why = "update_closed" if card is not None else "update_unknown"
+        why = ("update_unknown" if card is None or card["kind"] not in CARD_KINDS
+               else "update_subject" if pulse_store.card_open(target) else "update_closed")
     else:
         why = ""
     if subject and not subject.startswith(DATE_SUBJECTS):
-        open_now = pulse_store.open_cards_with([subject], now - HOLD_S)
+        open_now = [card for card in pulse_store.open_cards_with([subject], now - HOLD_S)
+                    if int(card["id"]) not in closing]
         if open_now:
             # Its card says it still: no second card (Pulse's open-card rule).
             return DROP, int(open_now[0]["id"]), HOLD

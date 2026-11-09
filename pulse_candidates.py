@@ -94,7 +94,7 @@ Llm = Callable[[str, str], tuple[Any, int]]
 
 class BadReply(ValueError):
     """The model's answer isn't a candidate list (no JSON object, or cut
-    off): the report goes out as it used to."""
+    off): asked once more, then that report is skipped."""
 
 INSTRUCTIONS = """You pick what Pulse brings up. Pulse is the part of Hermes (an AI assistant) that speaks up on its own: a few times a day it sends the user a short report on what's worth their attention.
 
@@ -576,14 +576,16 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
     # A pick that updates or closes an open card by its id says something
     # new about it on purpose (pulse_picks): the open-card rules below don't
     # keep it out. A new one about a subject with a card open is held for it.
-    deliberate = set()
+    deliberate, closing = set(), []
     for row in rows:
         pick = pulse_picks.loads(row.get("pick"))
         if pick is None:
             continue
-        action, _, why = pulse_picks.resolve(pulse_store, pick, str(row.get("subject") or ""), now)
+        action, target, why = pulse_picks.resolve(pulse_store, pick, str(row.get("subject") or ""), now, closing)
         if action in (pulse_picks.UPDATE, pulse_picks.CLOSE):
             deliberate.add(id(row))
+            if action == pulse_picks.CLOSE and target is not None:
+                closing.append(target)
         elif action == pulse_picks.DROP and not row.get("skip"):
             row["skip"] = "raised"
             pulse_picks.count(pulse_store, now, ["held_open_subject" if why == pulse_picks.HOLD else f"dropped:{why}"])
