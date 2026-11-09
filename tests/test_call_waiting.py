@@ -107,6 +107,17 @@ def test_the_needs_you_list_keeps_every_wait_even_with_alert_calls_off(tmp_path)
     assert [item["kind"] for item in calls.waiting_list()] == ["question"]
 
 
+def test_a_wait_in_a_room_this_hermes_hosts_names_the_room(tmp_path):
+    # hermes-conduit#2064: Needs you opens the room, whose card answers it.
+    calls = CallStore(tmp_path, clock=lambda: 1000.0)
+    calls.note_waiting("s1", "approval", description="Run it?", title="Zoo trip", room="conduit-1")
+    calls.note_waiting("s2", "approval", description="Run that?", room="bad/room id")
+    calls.note_waiting("s3", "approval", description="And this?")
+    listed = {item["session_ids"][0]: item for item in calls.waiting_list()}
+    assert listed["s1"]["room"] == "conduit-1" and listed["s1"]["title"] == "Zoo trip"
+    assert "room" not in listed["s2"] and "room" not in listed["s3"]
+
+
 def test_the_needs_you_list_drops_waits_hermes_gave_up_on_and_workstreams(store):
     store.note_waiting("s1", "approval", description="Run it?", command="make")
     store.note_waiting("w1", "approval", description="Push it?", command="git push")

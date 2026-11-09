@@ -131,6 +131,9 @@ const SLOT_PATTERN = /^[0-9a-f]{16}$/;
 // room_bridge, and the names its room_links.NAME_MAX and room name.
 const ROOM_LINK_PATTERN = /^[A-Za-z0-9_-]{1,48}$/;
 const ROOM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+// A turn's reply, failure, background task or approval in a group room its
+// host hosts carries the room's id, which opens the room (hermes-conduit#2064).
+const ROOM_REPLY_TYPES = new Set(['response.ready', 'turn.failed', 'background_task.finished', 'approval.needed']);
 // A location request is only worth answering right away.
 const LOCATION_PUSH_TTL_S = 60;
 // Locate and maps lookups (conduit_maps) share it; the plugin keeps tighter budgets per kind.
@@ -1177,9 +1180,10 @@ function notificationFor(event, preferences, gateway = undefined) {
     ? (preferences.show_previews ? event.call : (({ title: _title, reason: _reason, ...rest }) => rest)(event.call))
     : undefined;
   // A room invite's room and who it's from are chat content too.
+  // The room a turn's push opens is only an id: routing.
   const room = event.type === 'room.invite' && event.room
     ? (preferences.show_previews ? event.room : { link: event.room.link, id: event.room.id })
-    : undefined;
+    : event.room && ROOM_REPLY_TYPES.has(event.type) ? event.room : undefined;
   const bodyConduit = { ...routing, ...(decision ? { decision } : {}), ...(call ? { call } : {}), ...(room ? { room } : {}) };
   const aps = {
     alert: { title, ...(subtitle ? { subtitle } : {}), body },
@@ -1187,6 +1191,12 @@ function notificationFor(event, preferences, gateway = undefined) {
     ...(event.type === 'call.requested' ? { category: CALL_CATEGORY } : {}),
     ...(event.type === 'phone.changes' ? { category: PHONE_CHANGE_CATEGORY } : {}),
     ...levelAps(event),
+    // A turn's reply, failure or task from a group room runs through
+    // Conduit's notification service extension, as a sealed one does, so
+    // the room keeps one notification across its bots (hermes-conduit#2064):
+    // each bot pairs on its own, so no collapse id here spans them. An
+    // approval keeps its own.
+    ...(room && ROOM_REPLY_TYPES.has(event.type) && event.type !== 'approval.needed' ? { 'mutable-content': 1 } : {}),
     // Thread grouping is gateway-scoped: two dashboards both using session
     // "default" must never share a Notification Center thread. Gateway-less
     // callers (direct/test use) keep the legacy raw-session shape. A slot
@@ -1203,7 +1213,10 @@ function notificationFor(event, preferences, gateway = undefined) {
   // notification. The headroom under the 4096 cap absorbs per-request APNs
   // headers and JSON escaping.
   if ((decision || call || room) && Buffer.byteLength(JSON.stringify(payload)) > MAX_NOTIFICATION_BYTES) {
-    payload = { aps, body: { conduit: routing }, conduit: routing };
+    // A turn's room is only an id, routing as the sealed fallback keeps it
+    // (e2e.seal_event), so its tap still opens the room.
+    const replyRoom = room && ROOM_REPLY_TYPES.has(event.type) ? { room } : {};
+    payload = { aps, body: { conduit: { ...routing, ...replyRoom } }, conduit: routing };
   }
   // Collapse key: same gateway + session + type collapses (repeat alerts
   // for one conversation replace each other) without ever colliding with
@@ -1611,7 +1624,8 @@ function validateEvent(body) {
     call: body.type === 'call.requested' ? validateCall(body.call) : undefined,
     locate: body.type === 'location.requested' ? validateLocate(body.locate) : undefined,
     maps: body.type === 'location.requested' ? validateMaps(body.maps) : undefined,
-    room: body.type === 'room.invite' ? validateRoom(body.room) : undefined,
+    room: body.type === 'room.invite' ? validateRoom(body.room)
+      : ROOM_REPLY_TYPES.has(body.type) ? validateReplyRoom(body.room) : undefined,
     ...(mode ? { mode } : {}),
     ...(level ? { level } : {}),
     // A sealed event folds its slot into the envelope's thread token instead.
@@ -1655,6 +1669,15 @@ function validateRoom(value) {
   const name = cleanText(value.name, 120);
   const from = cleanText(value.from, 64);
   return { link: value.link, id: value.id, ...(name ? { name } : {}), ...(from ? { from } : {}) };
+}
+
+// The group room a turn's push came from, when its host hosts it
+// (hermes-conduit#2064), mirroring the plugin's events.room_reply_id: its
+// id alone, which opens the room. A malformed one is dropped and the
+// notification opens the turn's chat.
+function validateReplyRoom(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return typeof value.id === 'string' && ROOM_ID_PATTERN.test(value.id) ? { id: value.id } : undefined;
 }
 
 // The job a call request is about (#449), mirroring the plugin's

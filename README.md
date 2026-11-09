@@ -136,7 +136,7 @@ The plugin currently emits notifications for:
 - completed background tasks: a delegated task that ends while the turn that started it is still running is part of that turn's reply and sends nothing of its own (plugin 0.35+)
 - calendar and reminder changes Hermes asks your phone to make (see [Calendar, Reminders, Focus and phone status](#calendar-reminders-focus-and-phone-status-from-conduit-plugin-027)): a notification to approve, or a silent wake for adds you let Hermes make without asking
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
-- room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.105+, relay 0.21+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them.
+- room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.105+, relay 0.21+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them. In a room this Hermes hosts, a turn's reply, failure, finished background task and approval open the room, titled with its name, not the bot's hidden chat there (plugin 0.150.1+), and a lead's pick of who answers sends nothing.
 
 A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. A Hermes Desktop directive reads the same way (plugin 0.120.4+): a page shown with `::preview{file="…"}` as its file, and a Desktop plugin's card, such as hermes-rich-ui's `::richui{id="…"}`, as `🗂 hermes-rich-ui card`. Code in a reply's fenced block stays as written.
 
@@ -2255,12 +2255,14 @@ and the dashboard routes under one file lock, so they survive restarts:
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
 | GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered, may_leave_blank}]}` (`may_leave_blank` 0.82+) or `{kind: "approval", description, command, command_cut, answered}` |
 | POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "too_late" or "failed" or "unconfirmed", message}` |
-| GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at}]}`, newest first |
+| GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at, room?}]}`, newest first (`room` 0.150.1+) |
 
 - Every chat Hermes waits on the user in is listed by `/waiting` (0.131+),
   one profile at a time, for Conduit's Needs you list, the counts on its
   profile strip and its banner: the chat's ids and title, an approval's
-  description or a batch's first question, and when it began. Never a
+  description or a batch's first question, and when it began. A wait in a
+  group room this Hermes hosts also names the room's id (`room`, 0.150.1+),
+  so its row opens the room, where its card is answered. Never a
   command, never a bot's workstreams (their Work panel shows them), and a
   wait goes once it's answered anywhere or Hermes gave up on it. The list
   only reads; an approval is answered on its chat's card.

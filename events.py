@@ -196,6 +196,14 @@ def push_event(
         sanitized_room = sanitize_room(room)
         if sanitized_room:
             event["room"] = sanitized_room
+    # On a turn's reply, failure, background task or approval, `room` is the
+    # group room this Hermes hosts that the turn is in (hermes-conduit#2064):
+    # its id alone, which takes the tap to the room instead of the bot's
+    # hidden chat there. Routing, not content.
+    if room is not None and kind in ROOM_KINDS:
+        room_id = room_reply_id(room)
+        if room_id:
+            event["room"] = {"id": room_id}
     # `level` (a Pulse reply, pulse_push) is how much the push may interrupt:
     # the relay sets it as the alert's interruption level (relay 0.20+; an
     # older one ignores it). Routing, not content: it stays visible to the
@@ -237,6 +245,19 @@ _MAPS_ID = re.compile(r"^m_[A-Za-z0-9_-]{16,64}\Z")
 # as the relay checks them.
 _ROOM_LINK = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z")
 _ROOM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+
+
+# The pushes from a turn in a group room this Hermes hosts that open the room
+# instead of the bot's hidden chat there (hermes-conduit#2064): its reply, a
+# failure, a background task it started and an approval (the room's own card
+# answers it). Hosted rooms turn clarify off, so no question comes from one.
+ROOM_KINDS = ("response.ready", "turn.failed", "background_task.finished", "approval.needed")
+
+
+def room_reply_id(value: Any) -> str:
+    """The id of the room a ROOM_KINDS push opens, or "" when malformed."""
+    room_id = value.get("id") if isinstance(value, dict) else None
+    return room_id if isinstance(room_id, str) and _ROOM_ID.match(room_id) else ""
 
 
 def sanitize_room(value: Any) -> dict[str, Any] | None:
@@ -379,6 +400,10 @@ def redact_event(event: dict[str, Any]) -> dict[str, Any]:
     if room:
         # The room's name and who it's from are content; its Link and id route.
         redacted["room"] = {"link": room["link"], "id": room["id"]}
+    room_id = room_reply_id(event.get("room")) if event.get("type") in ROOM_KINDS else ""
+    if room_id:
+        # The room the push opens: an id, which routes.
+        redacted["room"] = {"id": room_id}
     return redacted
 
 

@@ -362,8 +362,19 @@ def content_free(event: dict[str, Any], keys: Keys | None = None) -> dict[str, A
     return outgoing
 
 
+# The pushes whose room id a turn's tap opens: events.ROOM_KINDS, kept here
+# since this module imports nothing of the plugin's (tests hold them equal,
+# and the relay's ROOM_REPLY_TYPES).
+_ROOM_KINDS = ("response.ready", "turn.failed", "background_task.finished", "approval.needed")
+
+
 def _room_ids(event: dict[str, Any]) -> dict[str, str] | None:
-    """A room invite's Link and room ids, without its name or who it's from."""
+    """A room invite's Link and room ids, without its name or who it's from,
+    or the id of the room a turn's push opens (events.ROOM_KINDS)."""
+    if event.get("type") in _ROOM_KINDS:
+        room = event.get("room")
+        room_id = room.get("id") if isinstance(room, dict) else None
+        return {"id": room_id} if isinstance(room_id, str) and _ROOM_ID.match(room_id) else None
     room = event.get("room") if event.get("type") == "room.invite" else None
     if not isinstance(room, dict):
         return None
