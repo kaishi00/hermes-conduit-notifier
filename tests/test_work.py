@@ -2001,7 +2001,8 @@ def test_the_update_carries_a_short_line_and_the_chat_link(on, hermes):
     assert on.get("W1").last_result.startswith("The cause")  # the report is kept (up to RESULT_CHARS)
 
 
-def test_options_a_workstream_made_are_shown_as_a_review_card(on, hermes, tmp_path):
+def test_options_a_workstream_made_are_shown_as_a_review_card(on, hermes, tmp_path, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: no timer races it on a slow runner
     folder = tmp_path / "concepts"
     folder.mkdir()
     for name in ("concept-1-minimal-dark.html", "concept-2-vibrant.html", "concept-3-terminal.html"):
@@ -2022,7 +2023,8 @@ def test_options_a_workstream_made_are_shown_as_a_review_card(on, hermes, tmp_pa
     assert "concept-4-missing" not in text.split("names 3")[1]
 
 
-def test_a_failed_turn_naming_pages_gets_no_review_line(on, hermes, tmp_path):
+def test_a_failed_turn_naming_pages_gets_no_review_line(on, hermes, tmp_path, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: no timer races it on a slow runner
     for name in ("a.html", "b.html"):
         (tmp_path / name).write_text("x")
     start()
@@ -5628,7 +5630,8 @@ def test_the_bot_chat_answers_maps_itself(on, home, hermes):
         assert "conduit_maps" in work.digest(BOT_CHAT)
 
 
-def test_a_workstreams_cards_come_back_to_the_bot_chat(on, hermes):
+def test_a_workstreams_cards_come_back_to_the_bot_chat(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: no timer races it on a slow runner
     start()
     hermes.live(BOT_CHAT, transport=object())
     work.turn_started("20261031_work_1")
@@ -5726,6 +5729,7 @@ def test_conduit_show_from_work_draws_the_workstreams_cards(on, home, hermes, mo
 
 def test_reported_options_are_one_short_call_away_and_stay_one_review(on, home, hermes, monkeypatch, tmp_path):
     # Eric 2026-11-09: Furina wrote the long nested review call out as text.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: no timer races it on a slow runner
     show = _load("conduit_push.show_tool", ROOT / "show_tool.py")
     from conduit_push import review_store as reviews_mod
 
@@ -5772,7 +5776,8 @@ def test_reported_options_are_one_short_call_away_and_stay_one_review(on, home, 
     assert seen[-1][0]["review"]["id"] == review_id and seen[-1][0]["review"]["round"] == 2
 
 
-def test_reported_options_keep_an_interrupted_turns_cards_and_every_option(on, home, hermes, tmp_path):
+def test_reported_options_keep_an_interrupted_turns_cards_and_every_option(on, home, hermes, tmp_path, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends: no timer races it on a slow runner
     # notifier #648's review: an interrupted turn's unnamed cards stayed out of
     # the from_work the update offered, and a seventh and eighth option fell off.
     pages = [tmp_path / f"concept-{n}.html" for n in range(1, 9)]
