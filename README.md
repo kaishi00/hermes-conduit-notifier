@@ -1153,6 +1153,13 @@ bridge alike:
 - Each finished transcription (`conversation.item.input_audio_transcription.completed`)
   starts the call's turn, as the model address would. The readiness check's
   marker and a typed turn do too, so neither is read aloud.
+- In agent mode (below) the call's fast model answers that turn instead of
+  Hermes, exactly as on the model address: its words are read back the same
+  way, its tool calls go to Conduit, and talking over it stops it. The
+  readiness check stays Conduit's own turn, and with no fast model set, or
+  one that fails before saying anything, the words go to Hermes after the
+  "isn't answering" line (plugin 0.149.0). The Watch's bridge has no agent
+  mode, so it keeps one Hermes turn per utterance.
 - The reply, as it streams, goes back in sentences, one read-back
   `response.create` (inline input) per sentence, one at a time. The first
   sentence goes as soon as it ends; later ones join until they're 40
@@ -1234,6 +1241,9 @@ How a call runs:
 - The readiness check is still answered by Conduit. With no fast model set,
   or with one that fails before saying anything, the utterance goes to
   Hermes as a turn instead.
+- On a read-back speech server (above), which never asks for replies
+  itself, the plugin asks the fast model for each transcription on the
+  relay, with the same tools, history and fallback (plugin 0.149.0).
 
 An engine that runs its own fast model (Pipecat behind the relay, say) uses
 the same tools with the Local Live key:

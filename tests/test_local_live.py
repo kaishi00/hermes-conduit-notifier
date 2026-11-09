@@ -1607,6 +1607,115 @@ def test_a_fast_model_that_is_down_hands_the_utterance_to_hermes(client, hermes,
         api.local_live_agent.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY + " Hi from Hermes."
 
 
+# Agent mode on a read-back speech server: the plugin drives the turns, and
+# the fast model answers them.
+
+def _agent_on_read_back(ws, upstream):
+    _ready(ws, upstream)
+    _agent(ws)
+
+
+def test_on_a_read_back_server_the_fast_model_answers_and_its_reply_is_read_back(client, hermes, server, front):
+    front.answers = [[{"content": "<think>hmm</think>It's noon. "}, {"content": "Anything else you need today?"}]]
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent_on_read_back(ws, upstream)
+        _heard(upstream, "What time is it?")
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    # No Hermes turn: the fast model's words, read back a sentence at a time.
+    assert not any(frame["type"] == "conduit.turn" for frame in seen)
+    assert upstream.spoken() == ["It's noon.", "Anything else you need today?"]
+    assert done["response"]["status"] == "completed"
+    assert "".join(frame["delta"] for frame in seen if frame["type"] == "response.output_audio_transcript.delta") == \
+        "It's noon. Anything else you need today?"
+    assert front.requests[0]["body"]["messages"][1:] == [{"role": "user", "content": "What time is it?"}]
+
+
+def test_on_a_read_back_server_the_readiness_check_stays_the_phones_turn(client, hermes, server, front):
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent(ws)
+        # _ready asserts the check's marker reached the phone as a turn.
+        _ready(ws, upstream, greeting="Hi.")
+        _finish(ws)
+    assert front.requests == []
+    assert upstream.spoken() == ["Hi."]
+
+
+def test_on_a_read_back_server_a_fast_model_tool_runs_on_the_phone(client, hermes, server, front):
+    front.answers = [
+        [{"content": "On it. "},
+         {"tool_calls": [{"index": 0, "id": "call_a", "function": {"name": "start_job",
+                                                                    "arguments": '{"instructions": "check mail"}'}}]}],
+        [{"content": "Hermes is checking your mail."}],
+    ]
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent_on_read_back(ws, upstream)
+        _heard(upstream, "Check my mail")
+        call, _ = _next(ws, "conduit.tool.call")
+        assert call["name"] == "start_job"
+        ws.send_text(json.dumps({"type": "conduit.tool.result", "call_id": call["call_id"],
+                                 "output": '{"status":"started","job":"1"}'}))
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert upstream.spoken() == ["On it.", "Hermes is checking your mail."]
+    assert done["response"]["status"] == "completed"
+
+
+@pytest.mark.parametrize("answer", [503, []])
+def test_on_a_read_back_server_a_fast_model_that_is_down_hands_the_words_to_hermes(client, hermes, server, front, answer):
+    front.answers = [answer]
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent_on_read_back(ws, upstream)
+        _heard(upstream, "What's on my plate today?")
+        turn, _ = _next(ws, "conduit.turn")
+        assert turn["text"] == "What's on my plate today?"
+        _say(ws, turn, "Two meetings.")
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert upstream.spoken() == [api.local_live_agent.LOCAL_LIVE_FRONT_UNREACHABLE_REPLY, "Two meetings."]
+    assert done["response"]["status"] == "completed"
+
+
+def test_on_a_read_back_server_speech_over_the_fast_models_reply_stops_it(client, hermes, server, front):
+    front.answers = [[{"content": "Once upon a time, there was a fox. "}], [{"content": "Okay."}]]
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent_on_read_back(ws, upstream)
+        upstream.hold = True
+        _heard(upstream, "Tell me a story")
+        _next(ws, "response.created")
+        upstream.push({"type": "input_audio_buffer.speech_started", "item_id": "item2"})
+        done, _ = _next(ws, "response.done")
+        assert done["response"]["status"] == "cancelled"
+        upstream.hold = False
+        _heard(upstream, "Stop")
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert {"type": "response.cancel"} in upstream.sent
+    assert upstream.spoken() == ["Once upon a time, there was a fox.", "Okay."]
+    # What was said stays in the fast model's conversation.
+    assert front.requests[1]["body"]["messages"][1:] == [
+        {"role": "user", "content": "Tell me a story"},
+        {"role": "assistant", "content": "Once upon a time, there was a fox. "},
+        {"role": "user", "content": "Stop"}]
+
+
+def test_on_a_read_back_server_without_a_fast_model_hermes_answers(client, hermes, server):
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _agent_on_read_back(ws, upstream)
+        _heard(upstream, "Hello")
+        turn, _ = _next(ws, "conduit.turn")
+        _say(ws, turn, "Hi there.")
+        _next(ws, "response.done")
+        _finish(ws)
+    assert upstream.spoken() == ["Hi there."]
+
+
 def test_a_server_without_tool_support_is_asked_again_without_tools(client, hermes, front):
     front.answers = [400, [{"content": "Hello."}]]
     headers = {"Authorization": f"Bearer {_key(hermes)}"}
