@@ -201,6 +201,13 @@ def turn_source(platform: Any, transport: Any = None) -> str | None:
     return "messaging" if _is_messaging(name) else None
 
 
+def conduit_among(transport: Any) -> bool:
+    """Whether a Conduit is among the live clients of a chat open on several
+    (Hermes' fanout), whatever the others are."""
+    peers = _fanout_peers(transport)
+    return bool(peers) and any(turn_source(None, peer) == "conduit" for peer in peers)
+
+
 def is_desktop_app(transport: Any) -> bool:
     """Whether the turn's socket is Hermes Desktop's own (an Electron
     browser engine), not the web dashboard in a browser, which turn_source

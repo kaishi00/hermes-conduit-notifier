@@ -162,6 +162,29 @@ def test_a_chat_open_on_several_clients_is_theirs_when_they_agree(transport, exp
     assert sources.is_desktop_app(transport) is desktop
 
 
+def test_a_chat_open_on_conduit_and_desktop_is_conduits_while_conduit_has_it_on_screen(monkeypatch):
+    # Eric, 2026-11-09: Desktop open beside the phone kept the board rule
+    # and cards from the phone.
+    mixed = FanoutTransport(PHONE, DESKTOP)
+    assert sources.conduit_among(mixed) and not sources.conduit_among(FanoutTransport(DESKTOP))
+    assert not sources.conduit_among(PHONE), "one client isn't a fanout"
+    monkeypatch.setattr(plugin.reply_sources, "current_transport", lambda: mixed)
+    on_screen = []
+    monkeypatch.setattr(plugin.chat_on_screen, "on_screen", lambda home, session: session in on_screen)
+    assert plugin._turn_source("tui", "bot-chat") is None, "either could have sent it"
+    on_screen.append("bot-chat")
+    assert plugin._turn_source("tui", "bot-chat") == "conduit"
+    monkeypatch.setattr(plugin.reply_sources, "current_transport", lambda: FanoutTransport(DESKTOP))
+    assert plugin._turn_source("tui", "bot-chat") == "desktop", "Desktop alone stays Desktop's"
+    # The plugin's own work update was sent by no client.
+    plugin.turn_surface.start_turn("bot-chat", "Work update from your workstreams. ...")
+    try:
+        assert plugin._turn_source("tui", "bot-chat") is None
+        assert plugin._source_notifies("tui", "bot-chat") is True
+    finally:
+        plugin.turn_surface.start_turn("bot-chat")
+
+
 def test_unreadable_fanout_clients_are_unknown():
     class Broken:
         def transports(self):
