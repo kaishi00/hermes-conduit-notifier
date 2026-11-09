@@ -3371,13 +3371,14 @@ def _option_files(text: Any) -> list[str]:
     if not isinstance(text, str) or not text:
         return []
     quoted = [(m.start(1), m.group(1).strip()) for m in _OPTION_QUOTED.finditer(text)]
-    folders = [os.path.expanduser(m.group(0)) for m in _OPTION_DIR.finditer(text)]
+    # The rest of the text, with the quoted paths blanked out: a name inside
+    # one ("b.html" in "/x/a b.html", "/tmp/" in "/tmp/my site/") isn't one
+    # the report named.
+    bare = _OPTION_QUOTED.sub(lambda m: " " * len(m.group(0)), text)
+    folders = [os.path.expanduser(m.group(0)) for m in _OPTION_DIR.finditer(bare)]
     folders += [os.path.expanduser(q) for _, q in quoted if q.endswith("/")]
     folders = [folder for folder in dict.fromkeys(folders) if os.path.isabs(folder)]
     named = [(at, q) for at, q in quoted if _OPTION_SUFFIX.search(q)]
-    # The rest of the text, with the quoted paths blanked out: a name inside
-    # one ("b.html" in "/x/a b.html") isn't a file the report named.
-    bare = _OPTION_QUOTED.sub(lambda m: " " * len(m.group(0)), text)
     named += [(m.start(), m.group(0)) for m in _OPTION_FILE.finditer(bare)]
     names = [name for _, name in sorted(named, key=lambda pair: pair[0])]
     found: list[str] = []
@@ -3588,8 +3589,6 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         line = f"- {work.ref} “{work.title}” {said} (work_read shows what it did).{tail}"
     shown, shown_turn = _shown_line(store, work)  # a failed turn's cards too: they're in its chat
     line += shown
-    # Only for the Bot Chat: a group room can't show a review yet.
-    options = _options_line(work, text) if not failed and not screen else ""
     # Only while it's still active: a stop that came meanwhile wins, and an
     # end reported twice settles (and tells the coordinator) once.
     if store.update(work.ref, only_if=_SETTLES, **fields) is None:
@@ -3600,6 +3599,8 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
     # A turn that ended on its own: a later restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
     if not work.closed_at and (work.coordinator or _in_room(work)):
+        # Only for the Bot Chat: a group room can't show a review yet.
+        options = _options_line(work, text) if not failed and not screen else ""
         _report(home, work, line, kind="call" if _call_of(work) else "work", bot_chat_extra=options)
         if shown:
             _shown_named(store, work.ref, shown_turn)
@@ -3622,7 +3623,7 @@ def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, 
         _report(home, work, f"- {work.ref} “{work.title}” was stopped as it finished. In short: "
                                             f"{_cut(text, WAKE_REPORT_CHARS)}" + (f" {link}" if link else "")
                 + shown,
-                    kind="call" if _call_of(work) else "work")
+                kind="call" if _call_of(work) else "work", bot_chat_extra=_options_line(work, text))
         if shown:
             _shown_named(store, work.ref, shown_turn)
 

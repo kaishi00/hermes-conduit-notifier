@@ -2042,6 +2042,8 @@ def test_quoted_paths_with_spaces_are_read_whole(tmp_path):
     assert work._option_files(f"In `{folder}/`: c.png, then a.html") == [str(folder / "c.png")]
     (folder / "b.html").write_text("x")  # inside "a b.html", but never named
     assert work._option_files(f'In `{folder}/`: "{folder}/a b.html"') == [str(folder / "a b.html")]
+    (tmp_path / "c.png").write_text("x")  # in the quoted folder's parent, never named
+    assert work._option_files(f"In `{folder}/`: c.png") == [str(folder / "c.png")]
 
 
 def test_a_room_hears_the_report_without_the_review_line(on, home, monkeypatch, tmp_path):
@@ -5450,6 +5452,23 @@ def test_linked_work_reports_privately_and_the_bot_chat_hears_it(on, hermes, lin
     work.room_turn_replied(ROOM_CHAT, True)
     work.room_turn_ended(on.home, ROOM_CHAT, answered=True)
     assert work.frame_room(on.home, "room-1", ROOM_CHAT) == []
+
+
+def test_a_linked_rooms_bot_chat_copy_carries_the_review_line(on, hermes, linked, monkeypatch, tmp_path):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
+    answer(on.home, "confirmed")
+    work.check_asks(on.home)
+    for row in store_mod.Store(on.home).outbox_pending():
+        if row["kind"] == "line_linked":
+            on.outbox_done(row["id"], "heard")
+    for name in ("a.html", "b.html"):
+        (tmp_path / name).write_text("x")
+    _finish("20261031_work_1", f"Two looks: {tmp_path}/a.html and {tmp_path}/b.html")
+    line, = batched()
+    assert "show them as a review card" in line and "Linked Room “Picnic”" in line
+    framed = work.frame_room(on.home, "room-1", ROOM_CHAT)
+    assert framed and "review card" not in framed[0], "the room's bot can't show a review"
 
 
 def test_a_member_side_room_hears_its_work_without_a_post(on, hermes, linked):
