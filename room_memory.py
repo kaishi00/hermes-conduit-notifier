@@ -1,4 +1,4 @@
-"""Group room turns stay out of the memory provider (designs/cross-owner-agents).
+"""Group room turns and Pulse's own turns stay out of the memory provider.
 
 A gateway-hosted room runs each member's turn on the host of that member's
 owner, in a hidden session of its own (source ``bot_room``, titled
@@ -11,11 +11,25 @@ anything: the per-turn sync, the session-end extraction and the summary it
 adds before compressing are skipped. Recall still runs, the way MEMORY.md
 still loads: the agent knows its owner in the room, it just doesn't learn
 from what others say there.
+
+Pulse's turns (designs/proactivity.md) are hidden asks the plugin sends into
+the Pulse chat a few times a day, each with tens of thousands of characters of
+context that mostly repeat the last one, and a short delivery check every few
+hours. Hermes treated them as the user's: every one was retained and recalled
+against, and a provider that reprocesses a session's document on each append
+(Hindsight) did so for the whole, ever longer chat (notifier #633: about $2 a
+day on the provider's model). Pulse keeps its own memory, so its turns reach
+no provider: no retain, no recall and no turn tick for one, and the chat's
+session end and pre-compress summary see the user's own turns there with
+Pulse's left out. A Pulse ask is told apart as Pulse's note hook tells it
+(pulse.pre_llm_call): it holds the whole text of an attempt this profile's
+Pulse store sent.
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 import re
@@ -46,6 +60,15 @@ READ_RETRIES, READ_RETRY_PAUSE = 3, 0.05
 MARK = "_conduit_room_session"
 HOME = "_conduit_room_home"
 _GUARD_FLAG = "__conduit_room_guard__"
+# Pulse's store in a profile's home (pulse_store.DB_NAME), and the tag every
+# attempt's text holds (pulse_delivery.new_tag: "p", 8 hex digits, "-", the
+# attempt's number). Every ask names Pulse (pulse.pre_llm_call reads only those).
+PULSE_DB = "conduit-pulse.db"
+PULSE_TAG = re.compile(r"\bp[0-9a-f]{8}-[0-9]+\b")
+PULSE_NAME = "Pulse"
+# A whole text shorter than this (a delivery check's line) is easy to quote,
+# so only the ask itself matches it, by its digest.
+QUOTABLE = 500
 
 _lock = threading.Lock()
 # The MemoryManager this load guards, and each method name -> (Hermes' own method, this load's guard)
@@ -53,6 +76,7 @@ _guarded_class: Any = None
 _guarded: dict[str, tuple[Callable[..., Any], Callable[..., Any]]] = {}
 _odd_id_logged = False
 _unread_count = 0
+_pulse_unread_count = 0
 
 
 def is_room_session(session_id: Any, home: Any = None) -> bool:
@@ -142,6 +166,113 @@ def _delegated(source: Any, config: Any) -> bool:
         bool(marks.get("_delegate_from")) or str(source or "").strip().lower() == "subagent")
 
 
+def pulse_asks(home: Any, texts: list[Any]) -> list[bool]:
+    """Which of ``texts`` are Pulse's own asks: each holds the whole text of
+    an attempt the profile's Pulse store sent. Anything unreadable counts as
+    no, so a turn is only kept from the provider when it is surely Pulse's."""
+    flags = [False] * len(texts)
+    tags = {index: set(PULSE_TAG.findall(text)) for index, text in enumerate(texts)
+            if isinstance(text, str) and PULSE_NAME in text}
+    tags = {index: found for index, found in tags.items() if found}
+    if not tags or home is None:
+        return flags
+    path = Path(home) / PULSE_DB
+    wanted = sorted(set().union(*tags.values()))
+    for attempt in range(READ_RETRIES + 1):
+        try:
+            if not path.exists():
+                return flags
+            sent = _sent(path, wanted)
+            break
+        except Exception as error:  # noqa: BLE001 - the turn then goes to the provider, as Hermes sends it
+            if attempt == READ_RETRIES or "disk i/o error" not in str(error).lower():
+                _pulse_unread()
+                return flags
+            time.sleep(READ_RETRY_PAUSE)
+    for index, found in tags.items():
+        flags[index] = any(_sent_as(sent[tag], texts[index]) for tag in found if tag in sent)
+    return flags
+
+
+def _sent(path: Path, wanted: list[str]) -> dict[str, tuple[Any, Any]]:
+    """Each wanted tag's stored text and digest, from Pulse's store, read-only."""
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(attempts)")}
+        digest = "text_sha" if "text_sha" in columns else "''"
+        sent: dict[str, tuple[Any, Any]] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start:start + 500]
+            sent.update((tag, (text, sha)) for tag, text, sha in conn.execute(
+                f"SELECT tag, text, {digest} FROM attempts WHERE tag IN ({','.join('?' * len(chunk))})",
+                chunk).fetchall())
+        return sent
+    finally:
+        conn.close()
+
+
+def _sent_as(sent: tuple[Any, Any], text: str) -> bool:
+    """Whether ``text`` is the attempt's ask. While Pulse keeps the attempt's
+    whole text, the ask holds it. Once Pulse has cut a finished attempt to its
+    first line (pulse_store.trim_finished), only the digest kept of the whole
+    text can say, so a user quoting that first line isn't taken for Pulse (an
+    attempt cut before digests were kept has none to match). A store Pulse
+    hasn't opened since digests came matches by text, as before."""
+    whole, digest = sent
+    if not isinstance(whole, str) or not whole:
+        return False
+    if not isinstance(digest, str) or not digest:
+        return whole in text
+    if _digest(whole) == digest and len(whole) >= QUOTABLE:
+        return whole in text
+    return _digest(text) == digest or _digest(text.strip()) == digest
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _pulse_unread() -> None:
+    """Warns on the first failure and every 100th after: Pulse's turns then
+    reach the memory provider as Hermes sends them, which an operator should see."""
+    global _pulse_unread_count
+    _pulse_unread_count += 1
+    if _pulse_unread_count % 100 == 1:
+        logger.warning("conduit_push: couldn't read Pulse's store to tell its turns from the user's (%d times "
+                       "so far); until it can be read, Pulse's turns are saved into the memory provider",
+                       _pulse_unread_count, exc_info=True)
+    else:
+        logger.debug("conduit_push: couldn't read Pulse's store", exc_info=True)
+
+
+def _pulse_ask(manager: Any, text: Any) -> bool:
+    return pulse_asks(_home(manager), [text])[0]
+
+
+def _home(manager: Any) -> Any:
+    return getattr(manager, HOME, None) or _hermes_home()
+
+
+def without_pulse(home: Any, messages: Any) -> Any:
+    """``messages`` with Pulse's turns left out: each of its asks and what
+    followed it (the reply, its tool calls) up to the next user message. The
+    list itself when nothing in it is Pulse's."""
+    if not isinstance(messages, list) or not messages:
+        return messages
+    asks = [i for i, row in enumerate(messages) if isinstance(row, dict) and row.get("role") == "user"]
+    flags = pulse_asks(home, [messages[i].get("content") for i in asks])
+    if not any(flags):
+        return messages
+    pulse = {i for i, flag in zip(asks, flags) if flag}
+    kept, skipping = [], False
+    for index, row in enumerate(messages):
+        if isinstance(row, dict) and row.get("role") == "user":
+            skipping = index in pulse
+        if not skipping:
+            kept.append(row)
+    return kept
+
+
 def _hermes_home() -> Optional[Path]:
     try:
         from hermes_constants import get_hermes_home
@@ -187,19 +318,74 @@ def _on_session_switch(original: Callable[..., Any]) -> Callable[..., Any]:
     return _guard(original, on_session_switch)
 
 
+def _first(args: tuple, kwargs: dict, name: str) -> Any:
+    return kwargs.get(name, args[0] if args else None)
+
+
+def _replace_messages(self: Any, args: tuple, kwargs: dict, name: str = "messages") -> Optional[tuple]:
+    """The call's arguments with Pulse's turns left out of its messages (and
+    the same for ``evidence_messages``), or None when nothing is left of them."""
+    home = _home(self)
+    messages = _first(args, kwargs, name)
+    kept = without_pulse(home, messages)
+    if kept is not messages and not any(isinstance(row, dict) and row.get("role") != "system" for row in kept):
+        return None  # nothing but the system prompt is left
+    if name in kwargs:
+        kwargs = {**kwargs, name: kept}
+    elif args:
+        args = (kept, *args[1:])
+    if isinstance(kwargs.get("evidence_messages"), list):
+        kwargs = {**kwargs, "evidence_messages": without_pulse(home, kwargs["evidence_messages"])}
+    return args, kwargs
+
+
 def _sync_all(original: Callable[..., Any]) -> Callable[..., Any]:
     def sync_all(self: Any, *args: Any, **kwargs: Any) -> Any:
-        if _in_room(self, kwargs.get("session_id")):
+        if _in_room(self, kwargs.get("session_id")) or _pulse_ask(self, _first(args, kwargs, "user_content")):
             return None
+        if isinstance(kwargs.get("messages"), list):
+            # A turn of the user's own in the Pulse chat: Pulse's earlier turns
+            # stay out. Hermes' sync_all takes messages by keyword only.
+            kwargs = {**kwargs, "messages": without_pulse(_home(self), kwargs["messages"])}
         return original(self, *args, **kwargs)
     return _guard(original, sync_all)
+
+
+def _prefetch_all(original: Callable[..., Any]) -> Callable[..., Any]:
+    def prefetch_all(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # Nothing recalled for a Pulse turn, as with no provider: its context
+        # is Pulse's own, and the whole ask would be the query.
+        if _pulse_ask(self, _first(args, kwargs, "query")):
+            return ""
+        return original(self, *args, **kwargs)
+    return _guard(original, prefetch_all)
+
+
+def _queue_prefetch_all(original: Callable[..., Any]) -> Callable[..., Any]:
+    def queue_prefetch_all(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if _pulse_ask(self, _first(args, kwargs, "query")):
+            return None
+        return original(self, *args, **kwargs)
+    return _guard(original, queue_prefetch_all)
+
+
+def _on_turn_start(original: Callable[..., Any]) -> Callable[..., Any]:
+    def on_turn_start(self: Any, *args: Any, **kwargs: Any) -> Any:
+        message = kwargs.get("message", args[1] if len(args) > 1 else None)
+        if _pulse_ask(self, message):
+            return None
+        return original(self, *args, **kwargs)
+    return _guard(original, on_turn_start)
 
 
 def _on_session_end(original: Callable[..., Any]) -> Callable[..., Any]:
     def on_session_end(self: Any, *args: Any, **kwargs: Any) -> Any:
         if _in_room(self):
             return None
-        return original(self, *args, **kwargs)
+        call = _replace_messages(self, args, kwargs)
+        if call is None:
+            return None  # only Pulse's turns: nothing of the user's to extract
+        return original(self, *call[0], **call[1])
     return _guard(original, on_session_end)
 
 
@@ -209,7 +395,10 @@ def _on_pre_compress(original: Callable[..., Any]) -> Callable[..., Any]:
         # the room's transcript still compresses.
         if _in_room(self):
             return ""
-        return original(self, *args, **kwargs)
+        call = _replace_messages(self, args, kwargs)
+        if call is None:
+            return ""
+        return original(self, *call[0], **call[1])
     return _guard(original, on_pre_compress)
 
 
@@ -217,6 +406,9 @@ _WRAPPERS = {
     "initialize_all": _initialize_all,
     "on_session_switch": _on_session_switch,
     "sync_all": _sync_all,
+    "prefetch_all": _prefetch_all,
+    "queue_prefetch_all": _queue_prefetch_all,
+    "on_turn_start": _on_turn_start,
     "on_session_end": _on_session_end,
     "on_pre_compress": _on_pre_compress,
 }
@@ -246,8 +438,8 @@ def install() -> bool:
                 found[name] = method
         missing = sorted(set(_WRAPPERS) - set(found))
         if missing:
-            logger.warning("conduit_push: Hermes' memory manager has no %s, so group room turns may be saved "
-                           "into the memory provider the way Hermes sends them", ", ".join(missing))
+            logger.warning("conduit_push: Hermes' memory manager has no %s, so group room turns and Pulse's "
+                           "turns may reach the memory provider the way Hermes sends them", ", ".join(missing))
         if not found:
             return False
         guards = {name: _WRAPPERS[name](method) for name, method in found.items()}

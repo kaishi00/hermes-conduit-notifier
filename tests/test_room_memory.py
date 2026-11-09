@@ -1,4 +1,4 @@
-"""Group room turns stay out of the memory provider (designs/cross-owner-agents)."""
+"""Group room turns and Pulse's own turns stay out of the memory provider."""
 import importlib.util
 import json
 import logging
@@ -48,6 +48,12 @@ def _manager_class():
 
         def prefetch_all(self, query, *, session_id=""):
             return f"recalled for {query}"
+
+        def queue_prefetch_all(self, query, *, session_id=""):
+            self.saved.append(("queue_prefetch_all", query))
+
+        def on_turn_start(self, turn_number, message, **kwargs):
+            self.saved.append(("on_turn_start", message))
 
     return MemoryManager
 
@@ -263,7 +269,8 @@ def test_a_room_session_is_found_while_another_connection_commits(guard, hermes,
     assert manager.saved == []
 
 
-GUARDED = ("initialize_all", "on_session_switch", "sync_all", "on_session_end", "on_pre_compress")
+GUARDED = ("initialize_all", "on_session_switch", "sync_all", "on_session_end", "on_pre_compress", "prefetch_all",
+           "queue_prefetch_all", "on_turn_start")
 
 
 def test_installing_twice_wraps_once_and_uninstall_puts_hermes_methods_back(hermes):
@@ -388,7 +395,7 @@ def test_a_hermes_with_none_of_the_methods_is_left_alone(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         assert _load().install() is False
     assert caplog.text.count("has no initialize_all, on_pre_compress, on_session_end, on_session_switch, "
-                             "sync_all") == 1
+                             "on_turn_start, prefetch_all, queue_prefetch_all, sync_all") == 1
     assert vars(MemoryManager).keys().isdisjoint(GUARDED)
 
 
@@ -396,3 +403,201 @@ def test_no_hermes_memory_at_all_is_not_an_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "agent.memory_manager", None)
 
     assert _load().install() is False
+
+
+# Pulse's own turns (notifier #633) --------------------------------------------
+
+def _pulse_modules():
+    """The plugin's Pulse store and delivery, loaded as the plugin loads them."""
+    if "conduit_push" not in sys.modules:
+        package = types.ModuleType("conduit_push")
+        package.__path__ = [str(ROOT)]
+        sys.modules["conduit_push"] = package
+    return importlib.import_module("conduit_push.pulse_store"), importlib.import_module("conduit_push.pulse_delivery")
+
+
+class _Sent:
+    ok, status, detail = True, "streaming", ""
+
+
+def _pulse_sent(home, text):
+    """What Pulse sent into its chat from this profile: the attempt's whole text."""
+    store, delivery = _pulse_modules()
+    pulse_store = store.PulseStore(Path(home) / store.DB_NAME)
+    attempt = delivery.submit(pulse_store, lambda chat_id, body: _Sent(), kind="report", chat_id="sess_pulse",
+                              text=lambda tag: text.format(tag=tag))
+    return attempt["text"]
+
+
+REPORT = "Pulse report {tag}.\n" + "Context Pulse gathered, mostly the same as last time.\n" * 50
+
+
+def test_the_pulse_store_and_tag_the_guard_reads_are_pulses_own():
+    store, delivery = _pulse_modules()
+    room_memory = _load()
+
+    assert room_memory.PULSE_DB == store.DB_NAME
+    for item_id in ("0123abcd-f12", "89abcdef-m3", "fedc0123-brief", "0123456789abcdef0123456789abcdef"):
+        assert room_memory.PULSE_TAG.fullmatch(delivery.new_tag(item_id, 2))
+
+
+def test_a_pulse_turn_is_not_saved_recalled_or_counted_by_the_provider(guard, hermes, tmp_path):
+    ask = _pulse_sent(tmp_path, REPORT)
+    manager = _bound(hermes, "sess_pulse", tmp_path)
+
+    assert manager.prefetch_all(ask, session_id="sess_pulse") == ""
+    manager.on_turn_start(4, ask)
+    manager.sync_all(ask, "Three cards.", session_id="sess_pulse", messages=[])
+    manager.queue_prefetch_all(ask, session_id="sess_pulse")
+    assert manager.saved == []
+
+    # The user's own turn in the Pulse chat goes on as any chat's.
+    assert manager.prefetch_all("why the dentist?", session_id="sess_pulse") == "recalled for why the dentist?"
+    manager.on_turn_start(5, "why the dentist?")
+    manager.sync_all("why the dentist?", "It's Thursday.", session_id="sess_pulse")
+    assert manager.saved == [("on_turn_start", "why the dentist?"), ("sync_all", "why the dentist?", "sess_pulse")]
+
+
+def test_a_user_quoting_a_pulse_tag_is_still_saved(guard, hermes, tmp_path):
+    ask = _pulse_sent(tmp_path, REPORT)
+    tag = guard.PULSE_TAG.search(ask).group(0)
+    manager = _bound(hermes, "sess_pulse", tmp_path)
+
+    quoted = f"What did Pulse report {tag} mean?"
+    manager.sync_all(quoted, "It was the morning report.", session_id="sess_pulse")
+    assert manager.saved == [("sync_all", quoted, "sess_pulse")]
+
+
+def test_pulse_turns_are_left_out_of_what_the_provider_reads_at_the_end_and_before_compressing(
+        hermes, tmp_path, monkeypatch):
+    seen = []
+
+    class MemoryManager:
+        def initialize_all(self, session_id, **kwargs):
+            pass
+
+        def sync_all(self, user_content, assistant_content, *, session_id="", messages=None):
+            seen.append(("sync_all", messages))
+
+        def on_session_end(self, messages):
+            seen.append(("on_session_end", messages))
+
+        def on_pre_compress(self, messages, *, evidence_messages=None, require_checkpoint=False):
+            seen.append(("on_pre_compress", messages, evidence_messages))
+            return "summary"
+
+    _hermes_with(monkeypatch, MemoryManager)
+    room_memory = _load()
+    assert room_memory.install()
+    try:
+        probe = _pulse_sent(tmp_path, "Pulse delivery check {tag}. Nothing to do: reply with one short line.")
+        report = _pulse_sent(tmp_path, REPORT)
+        user = [{"role": "user", "content": "why the dentist?"}, {"role": "assistant", "content": "It's Thursday."}]
+        pulse_turn = [{"role": "user", "content": report, "display_kind": "hidden"},
+                      {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+                      {"role": "tool", "content": "calendar"},
+                      {"role": "assistant", "content": "Three cards."}]
+        probe_turn = [{"role": "user", "content": probe}, {"role": "assistant", "content": "Arrived."}]
+        chat = [{"role": "system", "content": "You are Hermes."}, *probe_turn, *user, *pulse_turn]
+
+        manager = MemoryManager()
+        manager.initialize_all(session_id="sess_pulse", hermes_home=str(tmp_path))
+        manager.on_session_end(chat)
+        assert manager.on_pre_compress(chat, evidence_messages=pulse_turn + user, require_checkpoint=True) == "summary"
+        manager.sync_all("why the dentist?", "It's Thursday.", session_id="sess_pulse", messages=chat)
+        kept = [chat[0], *user]
+        assert seen == [("on_session_end", kept), ("on_pre_compress", kept, user), ("sync_all", kept)]
+
+        # Nothing of the user's: nothing for the provider to read.
+        seen.clear()
+        manager.on_session_end([chat[0], *pulse_turn, *probe_turn])
+        assert manager.on_pre_compress([chat[0], *pulse_turn], require_checkpoint=True) == ""
+        assert seen == []
+    finally:
+        room_memory.uninstall()
+
+
+def test_an_unreadable_pulse_store_leaves_turns_to_hermes(guard, hermes, tmp_path):
+    (tmp_path / guard.PULSE_DB).write_text("not a database")
+    manager = _bound(hermes, "sess_pulse", tmp_path)
+
+    ask = "Pulse report p0123abcd-1. Context."
+    manager.sync_all(ask, "Cards.", session_id="sess_pulse")
+    assert manager.saved == [("sync_all", ask, "sess_pulse")]
+
+
+def test_a_finished_report_cut_to_its_first_line_is_still_told_from_a_user_quoting_it(guard, hermes, tmp_path):
+    store, _ = _pulse_modules()
+    ask = _pulse_sent(tmp_path, REPORT)
+    pulse_store = store.PulseStore(tmp_path / store.DB_NAME)
+    attempt = pulse_store.attempt_by_tag(guard.PULSE_TAG.search(ask).group(0))
+    pulse_store.update_attempt(attempt["attempt_id"], state=store.DELIVERED)
+    pulse_store.trim_finished("report")
+    heading = ask.splitlines()[0]
+    assert pulse_store.attempt_by_tag(attempt["tag"])["text"] == heading
+
+    quoted = f"{heading}\nWhat did the second card mean?"
+    assert guard.pulse_asks(tmp_path, [ask, quoted, heading]) == [True, False, False]
+    chat = [{"role": "user", "content": ask}, {"role": "assistant", "content": "Three cards."},
+            {"role": "user", "content": quoted}, {"role": "assistant", "content": "The dentist."}]
+    assert guard.without_pulse(tmp_path, chat) == chat[2:]
+
+
+def test_an_unreadable_pulse_store_is_a_warning_once_not_every_turn(guard, hermes, tmp_path, caplog):
+    (tmp_path / guard.PULSE_DB).write_text("not a database")
+    manager = _bound(hermes, "sess_pulse", tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            manager.sync_all("Pulse report p0123abcd-1. Context.", "Cards.", session_id="sess_pulse")
+    assert caplog.text.count("couldn't read Pulse's store") == 1
+
+
+def test_attempts_from_before_digests_get_one_unless_their_text_may_be_cut(guard, tmp_path):
+    store, _ = _pulse_modules()
+    report = _pulse_sent(tmp_path, REPORT)
+    running = _pulse_sent(tmp_path, REPORT)
+    delivered = _pulse_sent(tmp_path, REPORT)  # finished, not cut yet
+    probe = _pulse_sent(tmp_path, "Pulse delivery check {tag}. Nothing to do: reply with one short line.")
+    path = tmp_path / store.DB_NAME
+    pulse_store = store.PulseStore(path)
+    tag = guard.PULSE_TAG.search(report).group(0)
+    pulse_store.update_attempt(pulse_store.attempt_by_tag(tag)["attempt_id"], state=store.DELIVERED)
+    pulse_store.trim_finished("report")
+    later = guard.PULSE_TAG.search(delivered).group(0)
+    pulse_store.update_attempt(pulse_store.attempt_by_tag(later)["attempt_id"], state=store.DELIVERED)
+    with sqlite3.connect(path) as conn:  # as a store from before text_sha has them
+        conn.execute("UPDATE attempts SET text_sha=''")
+
+    store.PulseStore(path)
+
+    heading = report.splitlines()[0]
+    assert guard.pulse_asks(tmp_path, [f"{heading}\nWhat did it mean?", running, probe, delivered]) == [
+        False, True, True, True]
+    assert pulse_store.attempt_by_tag(tag)["text_sha"] == store.UNKNOWN_DIGEST
+
+
+def test_a_user_quoting_a_whole_delivery_check_line_is_still_saved(guard, hermes, tmp_path):
+    probe = _pulse_sent(tmp_path, "Pulse delivery check {tag}. Nothing to do: reply with one short line.")
+    manager = _bound(hermes, "sess_pulse", tmp_path)
+
+    quoted = f'Why did you get "{probe}"?'
+    manager.sync_all(probe, "Arrived.", session_id="sess_pulse")
+    manager.sync_all(quoted, "That was Pulse checking in.", session_id="sess_pulse")
+    assert manager.saved == [("sync_all", quoted, "sess_pulse")]
+
+
+def test_a_pulse_store_caught_mid_checkpoint_is_read_again(guard, hermes, tmp_path, monkeypatch):
+    ask = _pulse_sent(tmp_path, REPORT)
+    real, calls = guard._sent, []
+
+    def flaky(path, wanted):
+        calls.append(path)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(path, wanted)
+
+    monkeypatch.setattr(guard, "_sent", flaky)
+    monkeypatch.setattr(guard, "READ_RETRY_PAUSE", 0)
+    assert guard.pulse_asks(tmp_path, [ask]) == [True]
+    assert len(calls) == 2
