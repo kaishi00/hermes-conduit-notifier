@@ -323,7 +323,7 @@ MAX_TURN_ENTRIES = 256
 # whichever client has the chat open, Hermes Desktop or a browser, though no
 # client sent it. Only a turn whose message is one of them counts, never one
 # that merely reads like one.
-WAKE_TTL_S = 600.0
+WAKE_TTL_S = 6 * 3600.0  # queued behind the chat's running turn, which may be long
 _wakes: "OrderedDict[str, float]" = OrderedDict()
 _woken: "OrderedDict[str, bool]" = OrderedDict()
 
