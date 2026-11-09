@@ -104,6 +104,8 @@ def test_every_capability_names_a_served_route_family():
         "pulse_private": "/pulse",
         # Next steps: their level is in /pulse/learned, their cards in the feed.
         "pulse_next": "/pulse/learned",
+        # Cards drawn from their picks: each card's look in the feed.
+        "pulse_looks": "/pulse/feed",
         # Walking past: the reply to a location batch, and a setting on the /pulse control route.
         "pulse_spots": "/location/ingest",
         "present-v1": "/present/",
@@ -131,6 +133,7 @@ def test_every_capability_names_a_served_route_family():
         "room-files": "/room-files",
         "room-file-pictures": "/room-files/data-url",
         "room-file-reads": "/room-files/data-url",
+        "room-files-linked": "/room-files/data-url",
         "room-images": "/room-images",
         "speech-server": "/speech-server/",
         "local-live": "/local-live/",

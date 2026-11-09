@@ -1158,7 +1158,7 @@ bridge alike:
   way, its tool calls go to Conduit, and talking over it stops it. The
   readiness check stays Conduit's own turn, and with no fast model set, or
   one that fails before saying anything, the words go to Hermes after the
-  "isn't answering" line (plugin 0.149.0). The Watch's bridge has no agent
+  "isn't answering" line (plugin 0.151.0). The Watch's bridge has no agent
   mode, so it keeps one Hermes turn per utterance.
 - The reply, as it streams, goes back in sentences, one read-back
   `response.create` (inline input) per sentence, one at a time. The first
@@ -1243,7 +1243,7 @@ How a call runs:
   Hermes as a turn instead.
 - On a read-back speech server (above), which never asks for replies
   itself, the plugin asks the fast model for each transcription on the
-  relay, with the same tools, history and fallback (plugin 0.149.0).
+  relay, with the same tools, history and fallback (plugin 0.151.0).
 
 An engine that runs its own fast model (Pipecat behind the relay, say) uses
 the same tools with the Local Live key:
@@ -2017,6 +2017,19 @@ picture's type comes from its bytes (JPEG, PNG, GIF, WebP, HEIC, AVIF); any
 other file's from its name, never a picture type the bytes don't back.
 Capabilities `room-file-pictures` (plugin 0.142+, pictures) and
 `room-file-reads` (0.143+, any file).
+
+In a Linked Room (plugin 0.149+), every participant sees the same files.
+The home sends each file a room message names, up to 16 MB, over the Link
+to every guest with an agent in the room, in 96 KB pieces, sending it again
+(up to five times) until the guest says it has the file. The guest's plugin checks its size and
+SHA-256 and keeps it in its root home under the same
+`conduit/room-files/<id>/<name>`, readable by its own user only. A turn for
+the guest's agent names that copy instead of the home's path (waiting up to
+8 seconds for one still on its way), and `/room-files/data-url` reads a
+home's path from it, so the guest's Conduit draws the room's pictures too.
+A guest keeps which home each upload folder belongs to (the first whose room pages name it, or whose file arrives first) and which Link sent each file: it refuses another home's bytes under that folder, and a turn names only a copy its own room's home sent. Pieces of files that never finish go after a day, swept hourly too. Carried files count toward the guest's 2 GB of room files, at most 20,000 of them (past that the oldest go first), and age out after 30 days, oldest first past the 2 GB, swept hourly by the rooms loop as well as on each arrival; none is kept with under 1 GB free, and uploads and carried files check the disk under one lock (`conduit/room-files.lock` in the root home). Capability `room-files-linked`. A file over 16 MB stays on the home's host.
+In a room with other people's agents, every rule tier may call
+`vision_analyze` on a picture sent into the room, by its room-files path.
 
 ## Group pictures (plugin 0.41+)
 
@@ -3565,6 +3578,25 @@ keeps it.
   comes back again. Feed cards carry `back` (`unsent` or `not_done`, empty
   for a card never back) and `back_acted_at`, and `hermes conduit-push
   pulse cards` marks them.
+- **Cards as picks** (plugin 0.150+). Every report, look ahead and
+  follow-up card is a checked pick: a headline, at most one more sentence,
+  a shape with its facts (`date`, `due`, `runs`, `promise`, `status`,
+  `steps`, `drawn` for a Conduit card body, or `plain`) and at most two
+  actions (`ask` with words for the chat's composer, `open` with a link,
+  `draft` with a message, `done`, `later`). Facts that don't hold up draw
+  plain. Each pick names its subject (a remembered item, reminder, calendar
+  entry or scheduled job) and its incident: a new card, an update to an open
+  card by its permanent id (`pc_<id>`), or a close. A new card about a
+  subject with an open card from the last day is held back; an update to a
+  closed card is a new one, so a job that fails, recovers and fails again
+  gets a second card. The report is made from its candidate list only: one
+  that fails twice, or a Hermes without model access, skips that report
+  (`pulse candidates` says so). The morning brief's card carries its parts
+  (summary, Today, Still open and the counts) beside the text. `GET
+  /pulse/feed?looks=1` adds `look`, `card_ref`, `subject` and `updated_at`
+  to each card; older apps get the same cards without them. `hermes
+  conduit-push pulse picks` shows each day's counts (shapes, plain and why,
+  updates, closes, holds, skipped reports). Capability `pulse_looks`.
 - **Hermes's claims, kept to judge** (plugin 0.108+). Memory also notes
   when Hermes said in a chat it had just set a reminder, an alarm or a
   timer, added or changed an event, created or changed a scheduled job, or

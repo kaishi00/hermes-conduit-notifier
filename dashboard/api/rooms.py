@@ -19,7 +19,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import HTTPException, Request, Response
 
@@ -92,6 +92,33 @@ _room_file_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cond
 _room_file_lock = threading.Lock()
 
 
+def _room_files_lock_path() -> Optional[str]:
+    """The disk lock uploads share with the room files Linked Rooms carry
+    here (room_files_link.LOCK_NAME, in the root home's conduit folder), or
+    None without a Hermes home to put it in."""
+    try:
+        root = core._plugin_package_module("room_identity").root_home(core._calls_home())
+    except Exception:  # noqa: BLE001 - the upload still has this process's lock
+        return None
+    return os.path.join(str(root), "conduit", "room-files.lock")
+
+
+@contextlib.contextmanager
+def _room_files_disk(lock_path: Optional[str]):
+    """This process's lock, and the one carried files take too where
+    ``lock_path`` names it."""
+    with _room_file_lock, contextlib.ExitStack() as stack:
+        if lock_path is not None:
+            try:
+                os.makedirs(os.path.dirname(lock_path), mode=0o700, exist_ok=True)
+                handle = stack.enter_context(open(lock_path, "a+b"))
+            except OSError:
+                handle = None
+            if handle is not None:
+                stack.enter_context(core._plugin_package_module("room_identity")._exclusive(handle))
+        yield
+
+
 def _sweep_room_files(root: str, now: float, incoming: int = 0) -> None:
     """Deletes uploads past retention, then the oldest until the rest and
     ``incoming`` fit the total cap. Runs at most hourly per root, and again
@@ -133,9 +160,11 @@ def _room_file_free(root: str) -> int:
         return 0
 
 
-def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[str, Any]:
+def store_room_file(root: str, body: Any, now: Optional[float] = None,
+                    lock_path: Optional[str] = None) -> Dict[str, Any]:
     """Writes one uploaded file under ``root``; returns where it went and the
-    `@file:` reference Hermes reads."""
+    `@file:` reference Hermes reads. ``lock_path``: the disk lock it shares
+    with carried room files (_room_files_lock_path)."""
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
     encoded = body.get("data_base64")
@@ -149,7 +178,7 @@ def store_room_file(root: str, body: Any, now: Optional[float] = None) -> Dict[s
         raise HTTPException(status_code=413, detail="The file is too large", headers={"Cache-Control": "no-store"})
     now = time.time() if now is None else now
     name = _room_file_name(body.get("name"))
-    with _room_file_lock:
+    with _room_files_disk(lock_path):
         if now - _room_file_last_sweep.get(root, float("-inf")) >= ROOM_FILE_SWEEP_INTERVAL_S:
             _sweep_room_files(root, now, len(data))
         try:
@@ -211,7 +240,9 @@ async def post_room_file(request: Request, response: Response, profile: Optional
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     try:
         body = await core._read_json_body(request, ROOM_FILE_MAX_BODY_BYTES)
-        stored = await core._run_scoped(profile, lambda: store_room_file(_room_files_root(), body), _room_file_executor)
+        lock_path = _room_files_lock_path()
+        stored = await core._run_scoped(profile, lambda: store_room_file(_room_files_root(), body, lock_path=lock_path),
+                                        _room_file_executor)
     except core.TokenError as exc:
         # The profile couldn't be scoped; nothing was stored.
         _room_file_limiter.release(key, mint)
@@ -292,17 +323,50 @@ _ROOM_FILE_SCRIPTABLE_TYPES = frozenset((
 ))
 
 
-def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
+# A room file's path ends in its upload's folder and its name, on whichever
+# host stored it.
+_ROOM_FILE_TAIL = re.compile(r"[/\\]conduit[/\\]room-files[/\\](\d{8}-[0-9a-f]{32})[/\\]([^/\\\x00]+)\Z")
+# Any home's absolute path, which needn't be absolute on this host's system: a Windows home's on a POSIX
+# host (a drive, or a network share's \\server\share), a POSIX home's (one leading slash, no drive) on
+# Windows.
+_ANY_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[/\\]|/|\\\\)")
+
+
+def _room_file_here(path: str, roots: Sequence[str]) -> Optional[str]:
+    """``path`` resolved inside one of ``roots``' uploads, or this host's
+    copy of a room file another host stored: a room someone else hosts names
+    the home's path, and Linked Rooms carry each file to its guests' hosts
+    under the same folder and name (room_files_link). None when neither."""
+    bases = [os.path.realpath(root) for root in roots]
+    if os.path.isabs(path):
+        real = os.path.realpath(path)
+        # Only a file inside an upload's own folder, never a root itself.
+        # Only when it's there: the same path on two hosts may name a profile's root here and the copy
+        # Linked Rooms keep in the root home.
+        if os.path.dirname(os.path.dirname(real)) in bases and os.path.lexists(real):
+            return real
+    tail = _ROOM_FILE_TAIL.search(path)
+    if tail is None or tail.group(2) in (".", ".."):
+        return None
+    for base in bases:
+        copy = os.path.realpath(os.path.join(base, tail.group(1), tail.group(2)))
+        if os.path.dirname(os.path.dirname(copy)) == base and os.path.lexists(copy):
+            return copy
+    return None
+
+
+def read_room_file_picture(root: str, path: Any, carried: Sequence[str] = ()) -> Dict[str, Any]:
     """The file /room-files stored at ``path``, as a data URL: 404 when it
     isn't one of them (or is gone), 413 past ``ROOM_FILE_PICTURE_MAX_BYTES``.
-    Named for pictures, which came first (0.142); any file reads since 0.143."""
+    Named for pictures, which came first (0.142); any file reads since 0.143.
+    Another host's path reads this host's copy, under ``root`` or a
+    ``carried`` root (the root home's, where Linked Rooms keep them)."""
     headers = {"Cache-Control": "no-store"}
-    if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
+    if not isinstance(path, str) or not path or "\x00" in path \
+            or not (os.path.isabs(path) or _ANY_ABSOLUTE.match(path)):
         raise HTTPException(status_code=400, detail="path must be a stored room file", headers=headers)
-    base = os.path.realpath(root)
-    real = os.path.realpath(path)
-    # Only a file inside an upload's own folder, never the root itself.
-    if os.path.dirname(os.path.dirname(real)) != base:
+    real = _room_file_here(path, [root, *carried])
+    if real is None:
         raise HTTPException(status_code=404, detail="Not a room file", headers=headers)
     try:
         # Non-blocking, so a FIFO in its place can't hang the read; the
@@ -323,12 +387,30 @@ def read_room_file_picture(root: str, path: Any) -> Dict[str, Any]:
     return {"dataUrl": f"data:{mime};base64," + base64.b64encode(data).decode("ascii"), "size": len(data)}
 
 
+def _carried_room_files() -> List[str]:
+    """Where else a room file named here can be: the root home's room files, where Linked Rooms keep
+    the ones other hosts send this one, and each profile's, since an upload under one profile is
+    the room's too."""
+    try:
+        root = core._plugin_package_module("room_identity").root_home(core._calls_home())
+    except Exception:  # noqa: BLE001 - the profile's own uploads still read
+        return []
+    roots = [os.path.join(str(root), "conduit", "room-files")]
+    try:
+        with os.scandir(os.path.join(str(root), "profiles")) as profiles:
+            roots += sorted(os.path.join(entry.path, "conduit", "room-files") for entry in profiles
+                            if entry.is_dir(follow_symlinks=False))
+    except OSError:
+        pass
+    return roots
+
+
 @router.get("/room-files/data-url")
 async def get_room_file_picture(response: Response, path: str = "", profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
         return await core._run_scoped(profile, core._limited(
-            _room_file_picture_limiter, profile, lambda: read_room_file_picture(_room_files_root(), path)))
+            _room_file_picture_limiter, profile, lambda: read_room_file_picture(_room_files_root(), path, _carried_room_files())))
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:

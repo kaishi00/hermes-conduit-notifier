@@ -22,6 +22,7 @@ from typing import Any, Callable, Optional
 from . import pulse_candidates as candidates
 from . import pulse_learning as learning
 from . import pulse_ledger as ledger
+from . import pulse_picks as picks
 from . import pulse_places as places
 from . import pulse_report as report
 from . import pulse_store as store
@@ -60,8 +61,9 @@ _NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on i
          "brief: one card that sums up what's still outstanding for them. Start with one short, friendly "
          f"sentence under {SUMMARY_LIMIT} characters that sums up their day (it's also the notification). Then, as "
          "short lines starting with \"- \", at most 8 of what still needs them besides the held news, the most "
-         "pressing first: what's due or on the calendar today, then open promises Hermes made and things the user "
-         "said they'd do, then anything the phone logged that needs them. Leave out anything the \"Later on the "
+         "pressing first: what's due or on the calendar today under a line that says only \"Today:\", then open "
+         "promises Hermes made, things the user said they'd do and anything the phone logged that needs them under "
+         "a line that says only \"Still open:\" (leave out a heading with nothing under it). Leave out anything the \"Later on the "
          "same subject\" lines, the reminders or what the phone logged show done or moved past, and anything not "
          "worth their morning. News under \"Held for this morning\" is already shown as its own card under your "
          "reply: give it a few words at most. What's under \"Related to today's events\" is what Pulse remembers that "
@@ -167,6 +169,36 @@ def summary_line(reply: str) -> str:
     """The brief's first line, for its push (cut to ``SUMMARY_LIMIT`` if the
     reply ran on): the rest is for its card."""
     return _clip(next((text for text in reply.splitlines() if text.strip()), ""), SUMMARY_LIMIT)
+
+
+# The headings NOTE asks for, each with the key its lines go under in the
+# brief's look; lines under no heading are still open.
+HEADINGS = {"today": "today", "still open": "open"}
+_HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)?([A-Za-z ]+?)(?:\*\*)?\s*:?\s*(?:\*\*)?\s*$")
+_ITEM = re.compile(r"^\s*[-*\u2022]\s+(.*\S)")
+MAX_LINES = 8
+
+
+def look(reply: str, held: int) -> dict:
+    """The brief's parts for the app to lay out (pulse_picks.BRIEF): its
+    summary sentence, its lines under Today and Still open, and how many of
+    each, the held cards it brought counted too. Old apps show the reply
+    as it is."""
+    groups: dict[str, list[str]] = {"today": [], "open": []}
+    current = "open"
+    for text in (reply or "").splitlines()[1:]:
+        item = _ITEM.match(text)
+        if item:
+            if sum(map(len, groups.values())) < MAX_LINES:
+                groups[current].append(_clip(item.group(1).replace("**", ""), LINE_LIMIT))
+            continue
+        heading = _HEADING.match(text)
+        if heading and heading.group(1).strip().lower() in HEADINGS:
+            current = HEADINGS[heading.group(1).strip().lower()]
+    counts = {key: len(lines) for key, lines in groups.items()}
+    counts["held"] = max(0, int(held))
+    return {"shape": picks.BRIEF, "line": summary_line(reply), "detail": "", "actions": [],
+            "facts": {"summary": summary_line(reply), "counts": counts, **groups}}
 
 
 def next_attempt(pulse_store: store.PulseStore, now: float, zone: Any, time_value: Any) -> Optional[tuple[str, int]]:

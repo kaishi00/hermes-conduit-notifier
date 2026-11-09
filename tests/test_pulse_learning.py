@@ -8,6 +8,7 @@ import time
 import pytest
 
 from test_pulse import ROOT, SID, _load, cli, control, pulse, store
+from test_pulse_candidates import listed, reporting  # noqa: F401
 from test_pulse_followup import CHAT, _iso, check_now, followup, live, llm_saying, logged, promise, tell  # noqa: F401
 
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
@@ -880,65 +881,48 @@ def test_a_delivered_brief_lands_on_the_pulse_screen_as_hermes_wrote_it(live):
         control.rate(live.store, brief_card["id"], "up")
 
 
-def test_a_requested_report_lands_on_the_pulse_screen_and_pushes_its_items(live):
-    live.store.set("report_requested", True)
+def found(line, kind="follow-up", **more):
+    """A thing the report's list found, brought up."""
+    return {"kind": kind, "bring_up": True, "value": 4, "skip": "", "actionable": True, "line": line,
+            "why": "It came up today.", "source": "notes", "area": "work", **more}
+
+
+def sent_report(live, *, remembered=(), finds=()):
+    """A report asked for (``reporting``), its list answered with these
+    picks, and sent: its attempt."""
+    live.llm.replies.append({"remembered": list(remembered), "found": list(finds)})
+    listed(live)
     pulse.tick()
     [attempt] = live.store.in_flight()
     assert attempt["kind"] == "report"
-    pulse._mark_turn(SID, "turn-r", attempt["tag"])
-    assert pulse.pushes(SID, "turn-r") is False
-    assert pulse.pushes(SID, "turn-r", "Nothing worth bringing up right now.") is False
-    # A report that brought something up tells the phone, in plain lines.
-    reply = "1. [date] Car service Friday at 9\n2. [promise] Send the deck #4"
-    assert pulse.pushes(SID, "turn-r", reply) is True
-    assert pulse.push_copy(SID, "turn-r", reply) == {
-        "title_label": "pulse.noticed", "title": "Pulse noticed 2 things", "count": 2,
-        "body": "Car service Friday at 9 · Send the deck", "level": "active"}
-    one = pulse.push_copy(SID, "turn-r", "1. [date] Dentist\n   Friday")
-    assert one["title"] == "Pulse noticed something" and "count" not in one
-    # The dentist is health: the push says only that Pulse has something.
-    assert (one["body"], one["private"]) == ("Pulse has something for you.", True)
-    assert pulse.push_copy(SID, "other-turn", reply)["body"] == reply
-    live.db.message("user", attempt["text"])
-    reply_id = live.db.message("assistant", "Here's your report.\n1. Deploy: green")
-    pulse.tick()
-    [card] = live.store.cards()
-    assert card["kind"] == "report" and card["level"] == "screen" and card["message_id"] == reply_id
-    assert live.store.unseen_cards() == 1
-    # A whole-report card gives no stock reason for Why?.
-    assert card["why"] == ""
-    # A report written without a list asks for its lines without the reason in brackets.
-    assert "(why now" not in attempt["text"] and "1. [kind] what to tell the user #12" in attempt["text"]
+    return attempt
 
 
-def test_a_failed_report_makes_no_card_and_feed_has_no_chat_without_home(live, tmp_path):
-    live.store.set("report_requested", True)
-    pulse.tick()
-    [attempt] = live.store.in_flight()
+def test_a_failed_report_makes_no_card_and_feed_has_no_chat_without_home(reporting, tmp_path):
+    live = reporting
+    attempt = sent_report(live, finds=[found("Dentist Friday", "date")])
     live.store.update_attempt(attempt["attempt_id"], state=store.FAILED, detail="boom")
     pulse.tick()
     assert live.store.cards() == []
     assert control.feed(live.store)["home_chat_id"] == ""
 
 
-def test_a_report_card_a_busy_state_db_kept_out_lands_on_a_later_tick(live, monkeypatch):
-    live.store.set("report_requested", True)
-    pulse.tick()
-    [attempt] = live.store.in_flight()
+def test_a_report_card_a_busy_state_db_kept_out_lands_on_a_later_tick(reporting, monkeypatch):
+    live = reporting
+    attempt = sent_report(live, finds=[found("Dentist Friday", "date")])
     live.db.message("user", attempt["text"])
-    live.db.message("assistant", "Here's your report.")
-    learning = pulse.learning
-    real = learning.add_turn_card
+    live.db.message("assistant", "1. Dentist Friday")
+    real = learning.add_noticed_cards
 
     def locked(*args, **kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(learning, "add_turn_card", locked)
+    monkeypatch.setattr(pulse.learning, "add_noticed_cards", locked)
     pulse.tick()  # delivered, but the card couldn't be written; the tick goes on
     assert live.store.cards() == [] and live.store.get("last_tick_at")
-    monkeypatch.setattr(learning, "add_turn_card", real)
+    monkeypatch.setattr(pulse.learning, "add_noticed_cards", real)
     pulse.tick()
-    assert [card["kind"] for card in live.store.cards()] == ["report"]
+    assert [card["news"] for card in live.store.cards()] == ["Dentist Friday"]
     assert live.store.get(pulse.TURN_CARDS_DONE) == [attempt["attempt_id"]]
     looked = []
     monkeypatch.setattr(pulse.hermes, "find_turn", lambda *a, **kw: looked.append(a))
@@ -946,25 +930,27 @@ def test_a_report_card_a_busy_state_db_kept_out_lands_on_a_later_tick(live, monk
     assert looked == [] and len(live.store.cards()) == 1
 
 
-def test_a_report_becomes_one_card_per_item(live, monkeypatch):
+def test_a_report_becomes_one_card_per_item(reporting, monkeypatch):
+    live = reporting
     item_id = promise(live)
-    live.store.set("report_requested", True)
-    pulse.tick()
-    [attempt] = live.store.in_flight()
-    live.db.message("user", attempt["text"] + f"\n\n## What Pulse remembers\n#{item_id} [promise] Tell the deploy")
-    reply_id = live.db.message("assistant", f"""1. [date] The dentist is Friday at 9 (calendar).
-2. [promise] Hermes still owes the deploy note (from Monday) #{item_id}
-3. [Weird] Something odd #999999""")
+    live.store.set("memory", True)
+    attempt = sent_report(live, remembered=[{
+        "ref": item_id, "bring_up": True, "value": 3, "skip": "", "actionable": True,
+        "line": "Hermes still owes the deploy note (from Monday)", "why": "You were promised it Monday."}],
+        finds=[found("The dentist is Friday at 9 (calendar).", "date", source="calendar"),
+               found("Something odd", "weird", value=3)])
+    live.db.message("user", attempt["text"])
+    reply_id = live.db.message("assistant", "1. The dentist.\n2. The deploy note.\n3. Something odd.")
     pulse.tick()
     cards = sorted(live.store.cards(), key=lambda card: card["id"])
     assert [(c["kind"], c["topic"]) for c in cards] == [("noticed", "date"), ("noticed", "promise"),
                                                          ("noticed", "other")]
     date, owed, odd = cards
     assert date["news"] == "The dentist is Friday at 9 (calendar)." and date["item_id"] is None
-    assert date["chat_id"] == SID and date["message_id"] == reply_id and date["level"] == "screen"
+    assert date["chat_id"] == SID and date["message_id"] == reply_id
     # Drawn from a remembered thing: points at its chat, so Do it and Done work.
     assert owed["item_id"] == item_id and owed["chat_id"] == CHAT and owed["news"].endswith("(from Monday)")
-    assert odd["item_id"] is None  # #999999 wasn't shown in the report
+    assert odd["item_id"] is None
     assert live.store.get(pulse.TURN_CARDS_DONE) == [attempt["attempt_id"]]
     pulse.tick()
     assert len(live.store.cards()) == 3  # once
@@ -995,10 +981,9 @@ def test_a_report_becomes_one_card_per_item(live, monkeypatch):
     assert pulse.report.rating_counts(live.store) == counts
 
 
-def test_report_item_cards_and_their_mark_land_together(live, monkeypatch):
-    live.store.set("report_requested", True)
-    pulse.tick()
-    [attempt] = live.store.in_flight()
+def test_report_item_cards_and_their_mark_land_together(reporting, monkeypatch):
+    live = reporting
+    attempt = sent_report(live, finds=[found("Dentist Friday", "date"), found("The repo moved", "fact", value=3)])
     live.db.message("user", attempt["text"])
     live.db.message("assistant", "1. [date] Dentist Friday\n2. [fact] The repo moved")
     # The mark fails to land: the cards don't either, and the next tick adds them once.
@@ -1020,10 +1005,9 @@ def test_report_item_cards_and_their_mark_land_together(live, monkeypatch):
     assert len(live.store.cards()) == 2
 
 
-def test_a_rating_typed_before_the_split_goes_with_it(live):
-    live.store.set("report_requested", True)
-    pulse.tick()
-    [attempt] = live.store.in_flight()
+def test_a_rating_typed_before_the_split_goes_with_it(reporting):
+    live = reporting
+    attempt = sent_report(live, finds=[found("Dentist Friday", "date"), found("The repo moved", "fact", value=3)])
     live.db.message("user", attempt["text"])
     live.db.message("assistant", "1. [date] Dentist Friday\n2. [fact] The repo moved")
     live.store.set_ratings(attempt["attempt_id"], "[]", '[[1, "date", true]]')
@@ -1050,21 +1034,9 @@ def test_a_settled_card_mark_is_appended_once(live):
     assert live.store.get(pulse.TURN_CARDS_DONE) == ["a1", "a2"]
 
 
-def test_a_line_naming_more_than_one_number_links_nothing():
-    assert learning.report_lines("1. [interest] PR #12 is waiting on #4") == [
-        ("interest", "PR #12 is waiting on #4", None)]
-    assert learning.report_lines("1. [promise] Send the deck #4") == [("promise", "Send the deck", 4)]
-
-
-def test_report_text_asks_for_cards_not_a_shadow():
-    text = pulse.report.report_text("pAAAA-1", "context", "Mon 09:00")
-    assert "would have" not in text and "Rate them" not in text and "dry run" not in text
-
-
-def test_a_report_that_brought_nothing_up_makes_no_card(live, monkeypatch):
-    live.store.set("report_requested", True)
-    pulse.tick()
-    [attempt] = live.store.in_flight()
+def test_a_report_that_brought_nothing_up_makes_no_card(reporting, monkeypatch):
+    live = reporting
+    attempt = sent_report(live)
     live.db.message("user", attempt["text"])
     live.db.message("assistant", "Here's what I would have brought up:\n\nNothing worth bringing up right now.")
     pulse.tick()

@@ -134,6 +134,13 @@ ROUTE_CAPABILITIES = (
     # "levels" has "next", held for the morning brief until the user turns
     # it up.
     "pulse_next",
+    # Pulse cards come from structured picks (pulse_picks): GET
+    # /pulse/feed?looks=1 gives each card "look" ({shape, facts, actions,
+    # line, detail}; shape one of date, due, runs, promise, status,
+    # steps, drawn, plain), "card_ref" ("pc_<id>"), "subject" and
+    # "updated_at"; an action that "ask"s leaves its "say" in the chat's
+    # composer. The morning brief's parts come in its "look" (shape "brief").
+    "pulse_looks",
     # Walking past (pulse_spots): a /location/ingest batch carrying
     # "spot_entries" (the watched shops the user came near, maybe none) and
     # "spots_room" gets "reply" back, sealed (spots_aad): {"spots": [{"id",
@@ -180,6 +187,10 @@ ROUTE_CAPABILITIES = (
     # The same route reads any file sent into a room (up to 16 MB), so
     # Conduit opens and plays them as a chat does.
     "room-file-reads",
+    # Linked Rooms carry each file sent into a room to its guests' hosts
+    # (room_files_link), and the same route reads a home's path from this
+    # host's copy, so a guest's Conduit draws a room someone else hosts too.
+    "room-files-linked",
     "room-images",
     "speech-server",
     "local-live-agent",

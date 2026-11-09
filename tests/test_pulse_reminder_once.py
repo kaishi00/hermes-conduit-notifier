@@ -186,3 +186,10 @@ def test_a_reminder_rated_useful_again_is_let_go(live):
         conn.execute("UPDATE cards SET rating='up' WHERE id=?", (card_id,))
     live.store.mark_done(card_id, None, closed_by="user", now=now - 19 * 86400)
     assert decided(live, now)[0] == (candidates.SURFACED, "")
+
+
+def test_a_pick_naming_a_reminder_as_its_subject_carries_it():
+    # PICK_RULES asks for "subject": "r1"; the row carries that reminder's ref, so its subject does.
+    row = candidates.found_row({**FOUND, "subject": "r1"}, {}, follows=follows())
+    assert row["ref"] == "reminder:r_lock"
+    assert candidates.subject_of(row, {"subject": "r1"}) == "reminder:r_lock"

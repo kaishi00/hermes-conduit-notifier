@@ -13,13 +13,50 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.149.0 (2026-11-09)
+## 0.151.0 (2026-11-09)
 
 ### New and improved
 - Local Live's agent mode now works on speech servers that only read text
   aloud, like the farm's voice adapter: your fast model answers each thing
   you say and hands real work to Hermes as a job, so replies start sooner
   instead of waiting for a full Hermes turn.
+
+## 0.150.0 (2026-11-09)
+
+### Fixes
+- A report could come out as a card with no buttons, about something a
+  follow-up card already showed. Every report card now comes from Pulse's
+  checked list, with its own buttons, and never repeats a card still open.
+
+### New and improved
+- Pulse cards can show what they're about: a date, a deadline, a job's
+  recent runs, a promise in the words it was made, a status or the steps of
+  something underway, with up to two buttons. Ask puts words in the chat for
+  you to edit and send. The latest Conduit draws them; older apps show the
+  cards as before.
+- When something Pulse is following changes (a job fails again, or
+  recovers), its card is updated or closed instead of a new one appearing.
+  If it happens again after it was over, that's a new card.
+- The morning brief comes in parts the app can lay out: a summary, what's
+  on today, what's still open, and how many of each.
+
+## 0.149.1 (2026-11-09)
+
+### Fixes
+- In a room hosted on a Windows computer whose Hermes lives on a network
+  share, Conduit on another host showed the room's pictures and files by
+  name instead of drawing and opening them.
+
+## 0.149.0 (2026-11-09)
+
+### New and improved
+- In a Linked Room, every bot sees the pictures and files sent into the
+  room, whoever's host it runs on: each file goes to the guests' hosts,
+  and a guest's bot reads its own host's copy.
+- Bots in a room with other people's agents may look at a picture sent
+  into the room, whatever else the room's rules allow them.
+- In a room someone else hosts, Conduit draws its pictures and opens its
+  files from your own host's copy, instead of showing them by name.
 
 ## 0.148.1 (2026-11-09)
 
