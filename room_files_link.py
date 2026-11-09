@@ -359,12 +359,12 @@ class Files:
             else:
                 logger.info("Linked Rooms will carry %s to Link %s later (%s)", due, link_id, exc.code)
                 if index == 0:
-                    # Nothing went (the mailbox or the network is down): that isn't one of its tries, as a
-                    # room's pages wait out an outage too. The same try's ids go next time.
+                    # Nothing went (the mailbox or the network is down): that isn't one of its tries, and it
+                    # goes again next pass, as a room's pages do. The same try's ids go next time.
                     with self.store.update() as kept:
                         kept_entry = kept["out"].get(link_id, {}).get(due)
                         if kept_entry is not None and kept_entry["tries"] == tries:
-                            kept_entry["tries"] = entry["tries"]
+                            kept_entry.update(tries=entry["tries"], at=entry["at"])
             return None
         return len(data)
 

@@ -264,7 +264,7 @@ def test_a_send_that_doesnt_go_isnt_a_try(copies, monkeypatch):  # noqa: F811
 
     owed = [entry for link in files_module.Store(copies.tmp_path / "furina").read()["out"].values()
             for entry in link.values()]
-    assert owed and all(entry["tries"] == 0 and not entry["done"] for entry in owed)
+    assert owed and all(entry["tries"] == 0 and entry["at"] is None and not entry["done"] for entry in owed)
     assert not carried(copies, "laifu", "shot.jpg").exists()
 
 
