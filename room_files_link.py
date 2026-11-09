@@ -247,10 +247,13 @@ class Files:
                 self._tell_once(f"{link_id}/{folder}/{name}", "Linked Rooms doesn't carry %s/%s to Link %s: it "
                                 "can't be read (%s)", folder, name, link_id, type(exc).__name__)
                 continue
-            if not os.path.isfile(real) or size > MAX_FILE_BYTES:
-                if size > MAX_FILE_BYTES:
-                    self._tell_once(f"{link_id}/{folder}/{name}", "Linked Rooms doesn't carry %s/%s to Link %s: "
-                                    "it's over %d MB", folder, name, link_id, MAX_FILE_BYTES // (1024 * 1024))
+            if not os.path.isfile(real):
+                self._tell_once(f"{link_id}/{folder}/{name}", "Linked Rooms doesn't carry %s/%s to Link %s: "
+                                "it isn't a file", folder, name, link_id)
+                continue
+            if size > MAX_FILE_BYTES:
+                self._tell_once(f"{link_id}/{folder}/{name}", "Linked Rooms doesn't carry %s/%s to Link %s: "
+                                "it's over %d MB", folder, name, link_id, MAX_FILE_BYTES // (1024 * 1024))
                 continue
             wanted[f"{folder}/{name}"] = {"room": room_id, "size": size,
                                           "base": os.path.dirname(os.path.dirname(real))}
@@ -454,14 +457,14 @@ class Files:
         incoming = Path(self.rooms.root) / room_identity.DIRECTORY / INCOMING
         folder = incoming / hashlib.sha256(f"{link_id}\0{body['sha']}".encode()).hexdigest()[:32]
         with _thread_lock:
-            incoming.mkdir(parents=True, exist_ok=True, mode=0o700)
-            _sweep(incoming, self.rooms.clock())
-            if _held(incoming) + len(body["data"]) > INCOMING_BYTES \
-                    or shutil.disk_usage(incoming).free - len(body["data"]) < FREE_FLOOR_BYTES:
-                logger.info("Linked Rooms dropped a piece of room file %s/%s from Link %s: no room for it here",
-                            body["folder"], body["name"], link_id)
-                return None
             try:
+                incoming.mkdir(parents=True, exist_ok=True, mode=0o700)
+                _sweep(incoming, self.rooms.clock())
+                if _held(incoming) + len(body["data"]) > INCOMING_BYTES \
+                        or shutil.disk_usage(incoming).free - len(body["data"]) < FREE_FLOOR_BYTES:
+                    logger.info("Linked Rooms dropped a piece of room file %s/%s from Link %s: no room for it here",
+                                body["folder"], body["name"], link_id)
+                    return None
                 folder.mkdir(exist_ok=True, mode=0o700)
                 (folder / f"{body['index']:05d}").write_bytes(body["data"])
                 parts = sorted(folder.iterdir())

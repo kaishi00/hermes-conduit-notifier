@@ -306,6 +306,19 @@ def test_a_piece_that_cant_be_written_is_dropped(tmp_path, monkeypatch):
     assert files._take("link1", body) is None
 
 
+def test_a_full_disk_drops_a_piece_before_its_written(tmp_path, monkeypatch):
+    # GLM on notifier #629: an OSError checking room for a piece escaped _take.
+    files = files_module.Files(type("Rooms", (), {"root": tmp_path, "clock": staticmethod(lambda: 0.0)})())
+
+    def full(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(files_module.shutil, "disk_usage", full)
+    body = {"sha": "a" * 64, "folder": FOLDER, "name": "shot.jpg", "index": 0, "count": 2, "size": 10,
+            "data": b"x" * 5}
+    assert files._take("link1", body) is None
+
+
 def test_another_homes_file_under_the_same_name_isnt_replaced_or_answered(copies):  # noqa: F811
     # Greptile on notifier #629: a home linked here could send its own bytes first under another's upload name.
     room_id = started(copies)
