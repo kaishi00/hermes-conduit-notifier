@@ -2040,6 +2040,8 @@ def test_quoted_paths_with_spaces_are_read_whole(tmp_path):
     text = f'Pages: "{folder}/a b.html" and `{folder}/c.png`.'
     assert work._option_files(text) == [str(folder / "a b.html"), str(folder / "c.png")]
     assert work._option_files(f"In `{folder}/`: c.png, then a.html") == [str(folder / "c.png")]
+    (folder / "b.html").write_text("x")  # inside "a b.html", but never named
+    assert work._option_files(f'In `{folder}/`: "{folder}/a b.html"') == [str(folder / "a b.html")]
 
 
 def test_a_room_hears_the_report_without_the_review_line(on, home, monkeypatch, tmp_path):

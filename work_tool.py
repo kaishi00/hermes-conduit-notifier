@@ -3375,7 +3375,10 @@ def _option_files(text: Any) -> list[str]:
     folders += [os.path.expanduser(q) for _, q in quoted if q.endswith("/")]
     folders = [folder for folder in dict.fromkeys(folders) if os.path.isabs(folder)]
     named = [(at, q) for at, q in quoted if _OPTION_SUFFIX.search(q)]
-    named += [(m.start(), m.group(0)) for m in _OPTION_FILE.finditer(text)]
+    # The rest of the text, with the quoted paths blanked out: a name inside
+    # one ("b.html" in "/x/a b.html") isn't a file the report named.
+    bare = _OPTION_QUOTED.sub(lambda m: " " * len(m.group(0)), text)
+    named += [(m.start(), m.group(0)) for m in _OPTION_FILE.finditer(bare)]
     names = [name for _, name in sorted(named, key=lambda pair: pair[0])]
     found: list[str] = []
     for name in names:
@@ -4669,7 +4672,7 @@ def _report(home: Path, work: work_store.Work, line: str, kind: str = "work", ch
     room's line is in the outbox until it's posted, so one a restart cut
     off is posted again (``_replay``), under its own key: the same post."""
     if _in_room(work) and (work.reply_to or {}).get("linked"):
-        _report_linked(home, work, line, kind, chat)
+        _report_linked(home, work, line, kind, chat, bot_chat_extra)
         return
     if _in_room(work):
         from . import location_profiles
@@ -5543,7 +5546,8 @@ def room_turn_ended(home: Path, session_id: str, answered: Optional[bool]) -> No
             store.outbox_done(item, "heard")
 
 
-def _report_linked(home: Path, work: work_store.Work, line: str, kind: str, chat: Optional[str]) -> None:
+def _report_linked(home: Path, work: work_store.Work, line: str, kind: str, chat: Optional[str],
+                   bot_chat_extra: str = "") -> None:
     """A Linked Room's work line: for the bot privately at its next turn in the room, posted there as a bare
     mention where the room is hosted here, and to the Bot Chat as well (it's the owner's work)."""
     reply = work.reply_to or {}
@@ -5553,7 +5557,8 @@ def _report_linked(home: Path, work: work_store.Work, line: str, kind: str, chat
     if target:
         from . import room_asks
 
-        _queue_wake(home, target, line + LINKED_COPY.format(room=room_asks._room_name(room.room_id)), kind=kind)
+        _queue_wake(home, target, line + bot_chat_extra + LINKED_COPY.format(room=room_asks._room_name(room.room_id)),
+                    kind=kind)
     if not room.room_id:
         return
     error, handle = room_work.still_here(reply, Path(home), work_broker.profile_of(home))
