@@ -15,7 +15,8 @@ A few times a day it also sends the report (pulse_report): what Hermes would
 bring up since the last one, each item its own card on the Pulse screen. A
 model call lists the report's candidates first, on a thread of its own, and
 code picks what goes in (pulse_candidates); without model access, or when the
-list fails, the report turn picks its items itself, as it always did. Those
+list fails twice, that report is skipped and the next scheduled one makes a
+new list (a report is never written without its list). Those
 model calls, memory's and follow-ups' too, run on the model the Pulse chat
 runs on unless the user gave Hermes's "Pulse memory" slot one of its own
 (``lent_route``).
@@ -98,8 +99,8 @@ REPORT_TRIES = 3
 REPORT_WINDOW_S = 8 * 3600.0
 # The report's candidate list (pulse_candidates): {"id", "state", "started_at",
 # ...}. Its model call runs on a thread of its own ("working"); the tick then
-# sends its picks ("ready"), or the report as it used to be when the list
-# failed ("failed") or was left working by a process that stopped.
+# sends its picks ("ready"); a list that failed ("failed") or was left working
+# by a process that stopped skips that report ("skipped").
 REPORT_RUN = "report_run"
 RUN_WORKING, RUN_READY, RUN_FAILED, RUN_SENT, RUN_DROPPED = "working", "ready", "failed", "sent", "dropped"
 RUN_SKIPPED = "skipped"  # the list failed twice (or no model access): no report this time
@@ -1144,7 +1145,7 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
         candidates.decide(pulse_store, rows, now=now, zone=zone)
         ready = {**run, "state": RUN_READY, "since": gathered.since, "tokens": tokens}
         if not pulse_store.finish_run(REPORT_RUN, run, rows, ready, now=now):
-            logger.info("conduit_push: Pulse: the report's candidate list took too long; the report went without it")
+            logger.info("conduit_push: Pulse: the report's candidate list took too long; that report is skipped")
     except BaseException as error:  # noqa: BLE001 — asked once more, then the report is skipped
         logger.warning("conduit_push: Pulse couldn't list the report's candidates; the report is skipped this time",
                        exc_info=True)

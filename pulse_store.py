@@ -1666,6 +1666,14 @@ class PulseStore:
             row = conn.execute("SELECT * FROM cards WHERE id=?", (card_id,)).fetchone()
         return dict(row) if row else None
 
+    def touched_cards(self, limit: int) -> list[dict]:
+        """The cards made or last updated most recently (pulse_picks), newest
+        first, but those held for a moment."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM cards WHERE level!=? ORDER BY coalesce(updated_at, created_at) DESC, "
+                                "id DESC LIMIT ?", (MOMENT, limit)).fetchall()
+        return [dict(row) for row in rows]
+
     def cards(self, limit: int = 100, without: Sequence[str] = ()) -> list[dict]:
         """The newest cards, but those of the kinds in ``without`` and those
         held for a moment (``moment_cards``)."""

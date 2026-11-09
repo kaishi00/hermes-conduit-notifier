@@ -177,7 +177,7 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
     each; first, what the look ahead holds for a place (pulse_places), so
     it isn't raised twice."""
     # A card a pick updated lately counts from then, so a pick can still name it.
-    cards = [card for card in pulse_store.cards(RECENT_CARDS)
+    cards = [card for card in pulse_store.touched_cards(RECENT_CARDS)
              if card["kind"] in RECENT_KINDS and max(card["created_at"], card.get("updated_at") or 0) >= now - RECENT_S]
     marks = pulse_store.done_marks([card["id"] for card in cards])
     lines, used = [], 0

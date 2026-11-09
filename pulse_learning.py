@@ -364,7 +364,9 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
             action, target, why = picks.resolve(pulse_store, pick, subject, now, closes)
             counted += [f"shape:{pick.get('shape')}"] + ([f"plain:{pick['dropped']}"] if pick.get("dropped") else [])
             if why:
-                counted.append(f"{action}:{why}")
+                # Named as decide counts them (pulse_candidates.decide).
+                counted.append("held_open_subject" if why == picks.HOLD
+                               else f"dropped:{why}" if action == picks.DROP else f"{action}:{why}")
             if action == picks.CLOSE and target is not None:
                 closes.append(target)
                 counted.append("close")
@@ -374,7 +376,16 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
             if action == picks.UPDATE and target is not None:
                 card = pulse_store.card(target)
                 if card is not None:
-                    updates.append((target, {**picks.updated_card(card, pick), "fallback": row, "link": link}))
+                    # A second update to the same card in this report builds
+                    # on the first (its run history kept), in its place.
+                    earlier = next((n for n, (t, _) in enumerate(updates) if t == target), None)
+                    if earlier is not None:
+                        card = {**card, "look": updates[earlier][1]["look"]}
+                    update = (target, {**picks.updated_card(card, pick), "fallback": row, "link": link})
+                    if earlier is not None:
+                        updates[earlier] = update
+                    else:
+                        updates.append(update)
                     counted.append("update")
                     continue
         rows.append(row)
