@@ -69,7 +69,7 @@ for a plain "managed", or a short text naming who manages it, such as
 `"managed": true` (and `"managed_by"` for a text), Conduit asks nobody to
 update the plugin on that host and says who keeps it up to date, and
 `POST /self/update` pulls nothing: it answers 409, or, when the copy the host
-put on disk waits for its restart (plugin 0.147.1+), runs only the gateway's
+put on disk waits for its restart (plugin 0.147.2+), runs only the gateway's
 and the dashboard's restarts, as an update would. Leave it unset (or `0`) for
 a plugin you update from Conduit.
 
@@ -2031,6 +2031,26 @@ methods the plugin guards, the plugin guards the rest and logs a warning
 naming what's missing. If Hermes' session store (`state.db`) can't be read
 when the plugin needs it to tell whether a session is a room, the plugin logs
 a warning and treats that session as an ordinary chat.
+
+## Pulse and memory providers (plugin 0.147.1+)
+
+Pulse's reports, morning briefs, follow-ups and delivery checks are hidden
+turns in the Pulse chat, and a report carries everything Pulse gathered for
+it, often tens of thousands of characters that mostly repeat the last one.
+Hermes would hand each of those turns to the profile's external memory
+provider like a message of yours: saved after the turn, recalled against
+before it, and read again with the whole chat when the chat ends or is
+compacted. A provider that reprocesses a session each time something is
+added (Hindsight) then spent dollars a day on the Pulse chat alone
+(notifier #633). Pulse keeps its own memory, so the plugin keeps its turns
+from the provider: for a Pulse turn there's no save, no recall and no turn
+count, and the chat's end and its compaction hand the provider the chat with
+Pulse's turns (each ask and its reply) left out. What you write in the Pulse
+chat yourself is saved and recalled as in any chat. A turn counts as Pulse's
+when it holds the whole text Pulse sent from this profile (its store,
+`conduit-pulse.db`, says), so quoting a Pulse tag doesn't make your message
+Pulse's. If that store can't be read, the turn goes to the provider as
+Hermes sends it.
 
 ## Long group room threads (plugin 0.77.6+)
 
@@ -4790,7 +4810,9 @@ while it runs:
   dashboard re-executes once no chat turn runs here. A second call while one
   runs answers the same job. 501 where `/self/restart` would, or when Hermes
   lacks its own pull and gateway restart calls; Conduit then runs the steps
-  above itself. 429 after three starts in ten minutes.
+  above itself. 429 after three starts in ten minutes. On a host that sets
+  `CONDUIT_PUSH_MANAGED` nothing is pulled: 409, or only the restarts its new
+  copy waits on (see the managed paragraph near the top).
 - `GET /api/plugins/conduit_push/self/update` answers `{ok, job, boot_id,
   loaded_version}`. `job.step` is `downloading`, `restarting_gateway`,
   `waiting_for_chats` (with `running_chats`), `restarting_dashboard`, `done`
