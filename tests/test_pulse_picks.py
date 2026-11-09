@@ -331,3 +331,25 @@ def test_a_card_a_pick_updated_stays_in_the_feed_and_isnt_pruned_however_old(tmp
     assert old in listed and listed == sorted(listed, reverse=True)  # still listed by when it was made
     pulse_store.prune_cards(3)
     assert pulse_store.card(old) is not None and pulse_store.card(newer[0]) is None
+
+
+def test_a_card_that_can_hold_a_pick_is_listed_past_the_recent_budget(tmp_path):
+    pulse_store = fresh(tmp_path)
+    now = 30 * 86400.0
+    holding = card(pulse_store, subject="job:default:41", created_at=now - 6 * 3600)
+    for n in range(40):
+        pulse_store.add_cards([{"kind": "noticed", "item_id": None, "level": "screen", "title": "x",
+                                "news": f"Something else entirely, number {n}, " + "words " * 30, "why": "x",
+                                "created_at": now - 3600 + n, "topic": "other"}])
+    text = pulse.candidates.recent_section(pulse_store, None, now)
+    assert f"pc_{holding} " in text
+    assert "number 0," not in text  # the budget still cuts the others
+
+
+def test_a_left_out_candidate_with_no_pick_keeps_its_subject(tmp_path):
+    pulse_store = fresh(tmp_path)
+    found = {"kind": "other", "text": "Audit failed", "why": "", "factor": "", "place": "", "band": "",
+             "item_id": None, "chat_id": "", "profile": "", "pick": "", "subject": "job:default:41"}
+    row = pulse.learning.left_out_card(pulse_store, found, kinds=pulse.report.KINDS, now=1.0,
+                                       item_chat_title=lambda item: "")
+    assert row["subject"] == "job:default:41" and "look" not in row

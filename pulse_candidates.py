@@ -180,6 +180,10 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
     cards = [card for card in pulse_store.touched_cards(RECENT_CARDS)
              if card["kind"] in RECENT_KINDS and max(card["created_at"], card.get("updated_at") or 0) >= now - RECENT_S]
     marks = pulse_store.done_marks([card["id"] for card in cards])
+    # A card that can hold a new pick about its subject (pulse_picks.resolve)
+    # is always listed, past the budget, so a pick can always name it.
+    subjects = sorted({str(card.get("subject") or "") for card in cards} - {""})
+    holding = {int(card["id"]) for card in pulse_store.open_cards_with(subjects, now - pulse_picks.HOLD_S)}
     lines, used = [], 0
     for card in pulse_store.moment_cards():
         if card["done"]:
@@ -208,8 +212,8 @@ def recent_section(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> s
         line = (f"- {pulse_picks.card_id_text(card['id'])} {_local(card['created_at'], zone)} [{card['topic'] or card['kind']}] "
                 f"{_clip(card['news'] or card['title'], RECENT_BRIEF_CLIP if card['kind'] == 'brief' else RECENT_CLIP)}"
                 f"{ref}{did}")
-        if used + len(line) > RECENT_BUDGET:
-            break
+        if used + len(line) > RECENT_BUDGET and int(card["id"]) not in holding:
+            continue
         lines.append(line)
         used += len(line) + 1
     return RECENT_TITLE + "\n" + "\n".join(lines) if lines else ""

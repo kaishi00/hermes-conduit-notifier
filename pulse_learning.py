@@ -432,11 +432,13 @@ def left_out_card(pulse_store: store.PulseStore, found: dict, *, kinds: tuple[st
                    chat_title=_clip(item_chat_title({"profile": found["profile"], "chat_id": found["chat_id"]}), 120))
     else:
         row.update(item_id=None, title=_clip(found["text"], 300))
-    # Its pick, as the report would have carded it (a new card: the incident
-    # it named may have moved on since).
+    # Its subject, so the next report's hold sees it, and its pick, as the
+    # report would have carded it (a new card: the incident it named may
+    # have moved on since).
+    row["subject"] = str(found.get("subject") or "")
     pick = picks.loads(found.get("pick"))
     if pick is not None:
-        row.update(look=picks.dumps({**pick, "incident": {"card": "new"}}), subject=str(found.get("subject") or ""),
+        row.update(look=picks.dumps({**pick, "incident": {"card": "new"}}),
                    news=_clip(picks.news(pick), NOTICED_NEWS_LIMIT))
     return row
 
