@@ -327,6 +327,47 @@ def test_the_open_reviews_note_names_ids_and_workstreams(tool_home):
     assert tool.open_reviews_note([]) is None
 
 
+def test_the_open_reviews_note_tells_a_partly_marked_round_from_a_marked_one(tool_home):
+    host = Host(tool_home)
+    review = _call({"cards": [_review()]}, reviews=host)["cards"][0]["review"]
+    assert "waiting on the user's marks" in tool.open_reviews_note(host.store().open_reviews("s1"))
+    host.store().save_marks(review["id"], 1, {"decisions": [{"decision": "d1", "mark": "change", "option": "B"}]},
+                            ["s1"])
+    note = tool.open_reviews_note(host.store().open_reviews("s1"))
+    assert "partly marked" in note and "marked, waiting" not in note
+    host.store().drop_marks(review["id"], 1)
+    host.store().save_marks(review["id"], 1, {"decisions": [{"decision": "d1", "mark": "change", "option": "B"},
+                                                           {"decision": "d2", "mark": "change", "option": "A"}]},
+                            ["s1"])
+    assert "marked, waiting on its next round" in tool.open_reviews_note(host.store().open_reviews("s1"))
+
+
+def test_a_next_round_without_ids_keeps_each_decisions_id_by_its_title(tool_home):
+    host = Host(tool_home)
+    first = _call({"cards": [_review()]}, reviews=host)["cards"][0]["review"]
+    host.store().save_marks(first["id"], 1, {"decisions": [{"decision": "d1", "mark": "approve", "option": "A"},
+                                                          {"decision": "d2", "mark": "change", "option": "B"}]},
+                            ["s1"])
+    # The model leaves ids out and shows only the colour again, then adds a new decision.
+    second = _call({"cards": [_review([
+        {"title": "Save button colour", "options": [{"label": "Amber, darker", "html": PAGE},
+                                                    {"label": "Green, softer", "html": PAGE}]},
+        {"title": "Font", "options": [{"label": "Serif", "html": PAGE}, {"label": "Sans", "html": PAGE}]}],
+        id=first["id"])]}, reviews=host)["cards"][0]["review"]
+    assert [d["id"] for d in second["decisions"]] == ["d2", "d3"], "the colour keeps d2; the font takes a new id"
+    assert second["settled"] == [{"title": "Home layout", "mark": "approve", "choice": "Cards", "round": 1}]
+
+
+def test_an_automatic_decision_id_never_takes_one_given_explicitly(tool_home):
+    host = Host(tool_home)
+    review = _call({"cards": [_review([
+        {"title": "Layout", "options": [{"label": "A", "html": PAGE}, {"label": "B", "html": PAGE}]},
+        {"id": "d1", "title": "Colour", "options": [{"label": "A", "html": PAGE}, {"label": "B", "html": PAGE}]}])]},
+        reviews=host)
+    assert review["ok"], review
+    assert [d["id"] for d in review["cards"][0]["review"]["decisions"]] == ["d2", "d1"]
+
+
 # --- the store ------------------------------------------------------------------------
 
 def test_a_round_too_big_is_refused(tmp_path):

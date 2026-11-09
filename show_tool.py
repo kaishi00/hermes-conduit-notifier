@@ -403,8 +403,15 @@ def open_reviews_note(reviews: list[dict[str, Any]]) -> str | None:
         return None
     lines = []
     for meta in reviews[:3]:
-        marked = bool(meta["rounds"][-1].get("marks"))
-        state = "marked, waiting on its next round" if marked else "waiting on the user's marks"
+        kept = meta["rounds"][-1]
+        marks = kept.get("marks") or {}
+        marked = {entry.get("decision") for entry in marks.get("decisions", [])}
+        if not marks:
+            state = "waiting on the user's marks"
+        elif {decision["id"] for decision in kept.get("decisions", [])} <= marked:
+            state = "marked, waiting on its next round"
+        else:
+            state = "partly marked (the user left some decisions unmarked), waiting on its next round"
         line = f'- {meta["id"]} "{meta["title"] or "untitled"}", round {len(meta["rounds"])}: {state}'
         if meta["for"]:
             line += f'; it belongs to {meta["for"]}: what the user says about it goes to {meta["for"]} (work_send)'
@@ -512,7 +519,8 @@ def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[s
                             "chat; left out")
             for_ref = ""
     title = _text(raw.get("title"), card_schema.CARD_SCHEMA["properties"]["title"]["maxLength"])
-    decisions, pages = _review_decisions(given["decisions"], f"{path}.review", problems)
+    decisions, pages = _review_decisions(given["decisions"], f"{path}.review", problems,
+                                         existing["rounds"] if existing is not None else [])
     if not decisions:
         problems.append(f"{path}.review: no decision has two options that could be shown")
         return None
@@ -537,13 +545,23 @@ def _kept_review(raw: dict[str, Any], index: int, session: str, problems: list[s
     return {**{key: value for key, value in raw.items() if key != "review"}, "review": review}
 
 
-def _review_decisions(given: list[Any], path: str, problems: list[str]) -> tuple[list[dict[str, Any]],
-                                                                                  dict[str, str]]:
+def _review_decisions(given: list[Any], path: str, problems: list[str],
+                      rounds: list[dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """The decisions as the card shows them, and the pages their options
-    open, by decision and option id."""
+    open, by decision and option id. A decision given without an id takes
+    the id an earlier round gave a decision of the same title, so its marks
+    carry over; otherwise the first d1, d2, ... that no decision here or in
+    an earlier round has."""
     decisions: list[dict[str, Any]] = []
     pages: dict[str, str] = {}
     seen: set[str] = set()
+    by_title: dict[str, str] = {}
+    used_before: set[str] = set()
+    for kept in rounds or []:
+        for earlier in kept.get("decisions", []):
+            by_title[str(earlier.get("title", "")).casefold()] = earlier["id"]
+            used_before.add(earlier["id"])
+    explicit = {_short_id(raw.get("id")) for raw in given[:6] if isinstance(raw, dict)} - {""}
     if len(given) > 6:
         problems.append(f"{path}.decisions: six at most, the rest were left out")
     for d_index, raw in enumerate(given[:6]):
@@ -555,7 +573,16 @@ def _review_decisions(given: list[Any], path: str, problems: list[str]) -> tuple
         if not title:
             problems.append(f"{where}.title: a decision needs one, left out")
             continue
-        decision_id = _short_id(raw.get("id")) or f"d{d_index + 1}"
+        decision_id = _short_id(raw.get("id"))
+        if not decision_id:
+            carried = by_title.get(title.casefold(), "")
+            if carried and carried not in explicit and carried not in seen:
+                decision_id = carried
+            else:
+                number = 1
+                while f"d{number}" in explicit or f"d{number}" in seen or f"d{number}" in used_before:
+                    number += 1
+                decision_id = f"d{number}"
         if decision_id in seen:
             problems.append(f"{where}.id: another decision has it, left out")
             continue
