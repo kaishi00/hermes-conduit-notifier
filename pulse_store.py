@@ -11,6 +11,7 @@ Never raises into a hook: callers wrap it. Off unless ``enabled`` is set.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -561,7 +562,8 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("cards", "proposal", "INTEGER"), ("items", "place_words", "TEXT NOT NULL DEFAULT ''"),
                   ("items", "place_on", "TEXT NOT NULL DEFAULT ''"), ("cards", "moment", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "back", "TEXT NOT NULL DEFAULT ''"), ("cards", "back_acted_at", "REAL"),
-                  ("moments", "reach", "TEXT NOT NULL DEFAULT ''"))
+                  ("moments", "reach", "TEXT NOT NULL DEFAULT ''"),
+                  ("attempts", "text_sha", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -596,6 +598,15 @@ def _listed(conn: Any, key: str) -> list[str]:
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}  # a table _ADDED_COLUMNS names
+
+
+# text_sha of an attempt whose whole text was gone before digests were kept.
+UNKNOWN_DIGEST = "unknown"
+
+
+def text_digest(text: str) -> str:
+    """An attempt's whole text as ``text_sha`` keeps it (room_memory reads it)."""
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _check_columns(row: dict, allowed: tuple) -> None:
@@ -648,6 +659,16 @@ class PulseStore:
                     # Another process opening the same store added it first.
                     if column not in _columns(conn, table):
                         raise
+            # Attempts from before text_sha: a whole text gets its digest; one
+            # trim_finished may have cut already (finished, of a kind it cuts, one
+            # line) gets UNKNOWN_DIGEST, so no message is taken for it by its first line.
+            for attempt_id, kind, state, text in conn.execute(
+                    "SELECT attempt_id, kind, state, text FROM attempts WHERE text_sha=''").fetchall():
+                # trim_finished keeps only a first line, so a text with a line
+                # break is still whole.
+                cut = state in FINAL and kind != "probe" and "\n" not in (text or "")
+                conn.execute("UPDATE attempts SET text_sha=? WHERE attempt_id=? AND text_sha=''",
+                             (UNKNOWN_DIGEST if cut else text_digest(text or ""), attempt_id))
             # A report card's why is now its candidate's reason, or nothing: the stock
             # lines from before (an item's, a whole report's) would show behind Why? as
             # if they were one. Cleared once,
@@ -786,10 +807,12 @@ class PulseStore:
         call still leaves a record for the reconciler to look up."""
         now = time.time()
         with _lock, self._connect() as conn:
+            # The whole text's digest outlives trim_finished: the memory guard
+            # (room_memory) still tells the turn from the user's once the text is cut.
             conn.execute(
                 "INSERT INTO attempts(attempt_id, item_id, attempt, kind, tag, text, session_key, state, "
-                "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (attempt_id, item_id, attempt, kind, tag, text, session_key, SUBMITTED, now, now),
+                "created_at, updated_at, text_sha) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (attempt_id, item_id, attempt, kind, tag, text, session_key, SUBMITTED, now, now, text_digest(text)),
             )
 
     def update_attempt(self, attempt_id: str, *, state: Optional[str] = None, detail: Optional[str] = None,

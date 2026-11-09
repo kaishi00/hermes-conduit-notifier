@@ -2030,6 +2030,26 @@ naming what's missing. If Hermes' session store (`state.db`) can't be read
 when the plugin needs it to tell whether a session is a room, the plugin logs
 a warning and treats that session as an ordinary chat.
 
+## Pulse and memory providers (plugin 0.147.1+)
+
+Pulse's reports, morning briefs, follow-ups and delivery checks are hidden
+turns in the Pulse chat, and a report carries everything Pulse gathered for
+it, often tens of thousands of characters that mostly repeat the last one.
+Hermes would hand each of those turns to the profile's external memory
+provider like a message of yours: saved after the turn, recalled against
+before it, and read again with the whole chat when the chat ends or is
+compacted. A provider that reprocesses a session each time something is
+added (Hindsight) then spent dollars a day on the Pulse chat alone
+(notifier #633). Pulse keeps its own memory, so the plugin keeps its turns
+from the provider: for a Pulse turn there's no save, no recall and no turn
+count, and the chat's end and its compaction hand the provider the chat with
+Pulse's turns (each ask and its reply) left out. What you write in the Pulse
+chat yourself is saved and recalled as in any chat. A turn counts as Pulse's
+when it holds the whole text Pulse sent from this profile (its store,
+`conduit-pulse.db`, says), so quoting a Pulse tag doesn't make your message
+Pulse's. If that store can't be read, the turn goes to the provider as
+Hermes sends it.
+
 ## Long group room threads (plugin 0.77.6+)
 
 Hermes plans a gateway-hosted room's next turn from the last 24 messages of
