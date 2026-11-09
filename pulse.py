@@ -372,6 +372,15 @@ def _run_picks(pulse_store: store.PulseStore, attempt: dict) -> Optional[list[di
     return candidates.picks(rows) if rows else None
 
 
+def _run_closes(pulse_store: store.PulseStore, attempt: dict, now: float) -> list[int]:
+    """The open cards any pick of a report attempt's list closes, whether
+    that pick came up or not: decide let a new pick about the same subject
+    through on it (pulse_candidates.decide), so the close is applied too."""
+    rows = pulse_store.run_candidates(str(attempt["item_id"])) if attempt["item_id"] else []
+    return pulse_picks.closed_in(pulse_store, [(pulse_picks.loads(row.get("pick")), str(row.get("subject") or ""))
+                                               for row in rows], now)
+
+
 def _pushed_picks(attempt: dict) -> Optional[list[dict]]:
     """A report turn's picks that came up as a push (pulse_candidates.levels;
     one journaled before levels were counts as one, as every item rode its
@@ -849,7 +858,8 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
             picked = _run_picks(pulse_store, row) if turn is not None and row["kind"] == REPORT else None
             if picked is not None:
                 # Made from the candidate list: its picks are its cards, whatever the reply says.
-                if picked:
+                closing = _run_closes(pulse_store, row, now)
+                if picked or closing:
                     learning.add_noticed_cards(
                         pulse_store, turn=turn, lines=candidates.lines(picked), chat_id=row["session_key"],
                         chat_title=title, shown=candidates.shown(picked),
@@ -859,7 +869,7 @@ def _turn_cards(pulse_store: store.PulseStore, home: Path, changed: list[dict], 
                         found_in=candidates.found_in(picked), whys=candidates.whys(picked),
                         levels=candidates.levels(picked), factors=candidates.factors(picked),
                         attrs=candidates.card_attrs(picked), looked=looked,
-                        looks=candidates.looks(picked), subjects=candidates.subjects(picked))
+                        looks=candidates.looks(picked), subjects=candidates.subjects(picked), closing=closing)
                 else:
                     _mark_turn_card(pulse_store, attempt)
                 continue

@@ -258,3 +258,26 @@ def test_a_left_out_pick_brought_up_keeps_its_look_and_subject(tmp_path):
                                        item_chat_title=lambda item: "")
     assert row["subject"] == "job:default:41" and json.loads(row["look"])["shape"] == "runs"
     assert json.loads(row["look"])["incident"] == {"card": "new"}
+
+
+def test_a_report_can_update_or_close_a_look_ahead_date_card_by_its_id(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="deadline:12", created_at=1000.0)
+    update, _ = picks.parse({"line": "Passport renewal is due tomorrow", "incident": {"card": f"pc_{made}"}})
+    assert picks.resolve(pulse_store, update, "item:12", 2000.0) == (picks.UPDATE, made, "")
+    closing, _ = picks.parse({"line": "Passport renewed", "incident": {"close": f"pc_{made}"}})
+    assert picks.resolve(pulse_store, closing, "item:12", 2000.0) == (picks.CLOSE, made, "")
+    # Two keys of one kind that differ are two things.
+    assert picks.resolve(pulse_store, closing, "deadline:13", 2000.0) == (picks.DROP, None, "close_subject")
+
+
+def test_a_close_that_didnt_come_up_is_still_applied_with_the_new_card_it_let_through(tmp_path):
+    pulse_store = fresh(tmp_path)
+    made = card(pulse_store, subject="job:default:41", created_at=1000.0)
+    from types import SimpleNamespace
+    entry = {"line": "Audit failed again", "subject": "job:default:41"}
+    [new] = pulse.learning.add_noticed_cards(
+        pulse_store, turn=SimpleNamespace(session_id="s", reply_id=1), lines=[("other", entry["line"], None)],
+        chat_id="s", chat_title="Pulse", shown={}, kinds=pulse.report.KINDS, item_chat_title=lambda item: "",
+        now=2000.0, looks=[picks.dumps(picks.parse(entry)[0])], subjects=[entry["subject"]], closing=[made])
+    assert pulse_store.card_open(new) and not pulse_store.card_open(made)

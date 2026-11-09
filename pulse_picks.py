@@ -305,10 +305,24 @@ HOLD_S = 86400.0
 HOLD = "hold"
 DROP = "drop"
 CARD_KINDS = ("followup", "noticed")
+# A remembered item's subject (pulse_candidates.subject_of).
+ITEM_SUBJECT = "item:"
 # A yearly date's or a deadline's subject (pulse_dates keys): it comes up at
 # each of its lead times on purpose, each once by its ref, so a card open
 # from the last lead time doesn't hold the next one back.
 DATE_SUBJECTS = ("person:", "fact:", "deadline:")
+
+
+def same_subject(card_subject: str, subject: str) -> bool:
+    """Whether a pick about ``subject`` may change a card about
+    ``card_subject`` it names by id: either has none, they're the same, or
+    one is a look ahead's date (person:, fact:, deadline:) and the other a
+    remembered item (item:), which a report keys the same day by: the id
+    named wins there. Otherwise two subjects are two things."""
+    if not card_subject or not subject or card_subject == subject:
+        return True
+    pair = {card_subject.startswith(DATE_SUBJECTS), subject.startswith(DATE_SUBJECTS)}
+    return pair == {True, False} and ITEM_SUBJECT in (card_subject[:len(ITEM_SUBJECT)], subject[:len(ITEM_SUBJECT)])
 
 
 def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
@@ -325,10 +339,10 @@ def resolve(pulse_store: Any, pick: Mapping[str, Any], subject: str, now: float,
     kind, target = incident(pick.get("incident"))
     if target is not None:
         card = pulse_store.card(target)
-        mine = (card is not None and card["kind"] in CARD_KINDS and pulse_store.card_open(target)
-                and (not subject or not card.get("subject") or card["subject"] == subject))
+        live = card is not None and card["kind"] in CARD_KINDS and pulse_store.card_open(target)
+        mine = live and same_subject(str(card.get("subject") or ""), subject)
         if kind == CLOSE:
-            return (CLOSE, target, "") if mine else (DROP, None, "close_unknown")
+            return (CLOSE, target, "") if mine else (DROP, None, "close_subject" if live else "close_unknown")
         if mine and target not in closing:
             return UPDATE, target, ""
         kind = NEW

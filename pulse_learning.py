@@ -304,7 +304,8 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
                       found_in: Sequence[tuple[str, str]] = (), whys: Sequence[str] = (),
                       levels: Sequence[str] = (), factors: Sequence[str] = (),
                       attrs: Sequence[tuple[str, str]] = (), looked: Sequence[str] = (),
-                      looks: Sequence[str] = (), subjects: Sequence[str] = ()) -> list[int]:
+                      looks: Sequence[str] = (), subjects: Sequence[str] = (),
+                      closing: Sequence[int] = ()) -> list[int]:
     """A delivered report's items (its candidate list's picks, as
     pulse_candidates.lines gives them) as cards, one each, all
     at once, marked as ``add_cards`` marks them. An item drawn from a
@@ -330,12 +331,14 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
     ``looks``: each line's pick (pulse_picks, JSON; "" for none) and
     ``subjects`` its subject: the card keeps both, its news is the pick's
     words, and a pick that updates or closes an open card by its id does
-    that instead of adding one (in the same write)."""
+    that instead of adding one (in the same write). ``closing``: cards the
+    report's list closes besides, by picks that didn't come up."""
     rows, row_links, updates, counted = [], [], [], []
     # Every close first: a new incident about a card this report closes isn't
     # held by it, whichever comes first in the report.
     closes = picks.closed_in(pulse_store, [(picks.loads(looks[n]) if n < len(looks) else None,
                                             subjects[n] if n < len(subjects) else "") for n in range(len(lines))], now)
+    closes += [target for target in closing if target not in closes]
     for n, (kind, text, ref) in enumerate(lines):
         current = pulse_store.current_item(ref) if ref is not None and ref in shown else None
         item = pulse_store.item(current) if current is not None else None
