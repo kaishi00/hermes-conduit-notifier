@@ -1233,6 +1233,14 @@ def test_a_managed_host_refuses_the_update(monkeypatch, tmp_path):
         assert refused.value.status == 409
         assert "manages the Conduit plugin" in str(refused.value)
         assert started == [] and not (tmp_path / api.self_update.SELF_UPDATE_FILE).exists()
+    # An unreadable plugin.yaml starts nothing either.
+    monkeypatch.setattr(api.capabilities, "_plugin_version", lambda: None)
+    with pytest.raises(api.core.TokenError) as refused:
+        api.self_update.start_self_update(
+            "coder", lambda *_: None, path=tmp_path / api.self_update.SELF_UPDATE_FILE,
+            steps=(lambda: pytest.fail("a managed host pulled"), _restarted),
+            homes=lambda: [tmp_path], notify=lambda _job: None)
+    assert refused.value.status == 409
 
 
 def test_a_managed_host_runs_only_the_restarts_its_new_copy_waits_on(monkeypatch, tmp_path):

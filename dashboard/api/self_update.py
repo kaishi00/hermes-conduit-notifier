@@ -938,7 +938,8 @@ def start_self_update(profile: Optional[str], schedule: Callable[[float, Callabl
     # waits for its restarts, the job runs only those (the gateway's, with its drain and its
     # root-unit fallback, then the dashboard's); otherwise there is nothing to do.
     managed = capabilities.managed_by() is not None
-    if managed and capabilities._plugin_version() == capabilities.LOADED_VERSION:
+    # An unreadable copy on disk reads as nothing waiting: no job, no failure push.
+    if managed and capabilities._plugin_version() in (capabilities.LOADED_VERSION, None):
         raise core.TokenError(409, "The host manages the Conduit plugin, so it updates with the host, not from Conduit")
     refusal = _self_restart_refusal()
     if refusal is not None:
