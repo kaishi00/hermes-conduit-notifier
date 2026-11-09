@@ -461,6 +461,18 @@ def test_a_page_claims_the_upload_folders_its_home_names(copies):  # noqa: F811
         "the first home to name a folder keeps it"
 
 
+def test_a_linked_persons_post_claims_no_folder(tmp_path):
+    # DeepSeek on notifier #629: only the home's own people's messages say whose a folder is.
+    files = files_module.Files(type("Rooms", (), {"root": tmp_path, "clock": staticmethod(lambda: 0.0)})())
+    path = f"/root/.hermes/conduit/room-files/{FOLDER}/shot.jpg"
+    files.claim("link1", [{"kind": "message.user", "event_id": "theirs", "payload": {"text": f"@file:{path}"}}],
+                ["theirs"])
+    assert files.home_of(FOLDER) is None
+
+    files.claim("link1", [{"kind": "message.user", "event_id": "ours", "payload": {"text": f"@file:{path}"}}])
+    assert files.home_of(FOLDER) == "link1"
+
+
 def test_a_file_shared_in_two_rooms_goes_while_either_has_the_link(copies):  # noqa: F811
     # Greptile on notifier #629: only the first room that shared a file was kept with it.
     room_id = started(copies)

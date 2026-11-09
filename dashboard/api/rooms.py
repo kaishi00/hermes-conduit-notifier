@@ -327,8 +327,9 @@ _ROOM_FILE_SCRIPTABLE_TYPES = frozenset((
 # host stored it.
 _ROOM_FILE_TAIL = re.compile(r"[/\\]conduit[/\\]room-files[/\\](\d{8}-[0-9a-f]{32})[/\\]([^/\\\x00]+)\Z")
 # Any home's absolute path, which needn't be absolute on this host's system: a Windows home's on a POSIX
-# host, a POSIX home's (one leading slash, no drive) on Windows.
-_ANY_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[/\\]|/)")
+# host (a drive, or a network share's \\server\share), a POSIX home's (one leading slash, no drive) on
+# Windows.
+_ANY_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[/\\]|/|\\\\)")
 
 
 def _room_file_here(path: str, roots: Sequence[str]) -> Optional[str]:

@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.149.1 (2026-11-09)
+
+### Fixes
+- In a room hosted on a Windows computer whose Hermes lives on a network
+  share, Conduit on another host showed the room's pictures and files by
+  name instead of drawing and opening them.
+
 ## 0.149.0 (2026-11-09)
 
 ### New and improved
