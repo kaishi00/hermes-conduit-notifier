@@ -32,6 +32,16 @@ checks it). The format is fixed, because Conduit reads it:
 - The morning brief comes in parts the app can lay out: a summary, what's
   on today, what's still open, and how many of each.
 
+## 0.148.1 (2026-11-09)
+
+### Fixes
+- A review's next round no longer loses what you marked when Hermes shows
+  it without the decisions' ids: a decision with the same title keeps its
+  marks, and a new one never takes an old one's place.
+- A resent review is no longer cleared, and Hermes shows one round of a
+  review at a time.
+- Hermes no longer reads a review you marked only partly as fully marked.
+
 ## 0.148.0 (2026-11-09)
 
 ### New and improved
