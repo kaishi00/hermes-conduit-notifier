@@ -192,6 +192,13 @@ def _settled_round(kept: dict[str, Any]) -> bool:
         entry.get("mark") in ("approve", "skip") and not entry.get("note") for entry in entries)
 
 
+def _shown_marks(marks: Any) -> Any:
+    """Marks as Conduit reads them: without the tap that saved them."""
+    if isinstance(marks, dict) and "tap" in marks:
+        return {key: value for key, value in marks.items() if key != "tap"}
+    return marks
+
+
 class KeptReviews:
     def __init__(self, root: Any, clock: Callable[[], float] = time.time,
                  new_id: Callable[[], str] = lambda: "rv-" + secrets.token_hex(8)) -> None:
@@ -320,12 +327,17 @@ class KeptReviews:
         except OSError:
             pass
 
-    def drop_marks(self, review_id: str, number: int) -> None:
+    def drop_marks(self, review_id: str, number: int, tap: str | None = None) -> None:
         """Forgets a round's marks whose message Conduit didn't send, so the
-        user can send them again."""
+        user can send them again. With a tap, only the marks that tap saved:
+        a resend's newer marks stay."""
         with self._locked(review_id) as folder:
             meta = _read_json(folder / META)
             if not _well_formed(meta) or not 1 <= number <= len(meta["rounds"]):
+                return
+            marks = meta["rounds"][number - 1].get("marks")
+            # Marks saved before they named their tap (0.147.0..0.147.2) go with any tap.
+            if tap is not None and isinstance(marks, dict) and "tap" in marks and marks["tap"] != tap:
                 return
             meta["rounds"][number - 1]["marks"] = None
             meta["done"] = _settled_round(meta["rounds"][-1])
@@ -354,7 +366,7 @@ class KeptReviews:
         entry = meta["rounds"][number - 1]
         return {"id": review_id, "round": number, "rounds": count, "title": meta["title"],
                 **({"for": meta["for"]} if meta["for"] else {}), "decisions": entry["decisions"],
-                "pages": self.pages(review_id, number), "marks": entry.get("marks")}
+                "pages": self.pages(review_id, number), "marks": _shown_marks(entry.get("marks"))}
 
     def settled(self, review_id: str, keep_ids: set[str]) -> list[dict[str, Any]]:
         """Decisions earlier rounds approved or skipped that the next round
