@@ -4041,7 +4041,8 @@ def app_set_settings(home: Path, body: Optional[dict]) -> dict:
         return {"ok": False, "error": "invalid",
                 "note": f"max_running is a whole number from 1 to {work_store.MAX_RUNNING_LIMIT}."}
     steps = body.get("quick_steps")
-    if "quick_steps" in body and (isinstance(steps, bool) or steps not in work_store.QUICK_STEPS):
+    if "quick_steps" in body and (isinstance(steps, bool) or not isinstance(steps, int)
+                                  or steps not in work_store.QUICK_STEPS):
         return {"ok": False, "error": "invalid",
                 "note": f"quick_steps is one of {', '.join(str(n) for n in work_store.QUICK_STEPS)}."}
     picked = body.get("workstream_model")

@@ -893,7 +893,7 @@ def test_quick_steps_are_the_bots_setting(on, home, hermes, monkeypatch):
     clock[0] += 10 * work.QUICK_STEP_S + 1
     assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")["action"] == "block"  # its time is up
     assert "After 10 steps" in work.digest(BOT_CHAT)
-    for wrong in (7, "10", True, None):
+    for wrong in (7, "10", 10.0, True, None):
         assert work.app_set_settings(home, {"quick_steps": wrong})["error"] == "invalid"
     assert work.app_settings(home)["quick_steps"] == 10
     store_mod.Store(home).set_meta("quick_steps", "7")  # a value this version doesn't know

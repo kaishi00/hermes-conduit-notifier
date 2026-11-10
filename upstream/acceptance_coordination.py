@@ -683,7 +683,14 @@ async def case_conflicting(run: Run) -> dict:
 def check_conflicting(result: dict, f: dict, mode: str) -> List[tuple]:
     about = [p for p in f["proposals"]]
     open_now = [p for p in about if p["status"] == "open"]
-    return [("at most one open question to the user", len(open_now) <= 1, str([p["text"] for p in open_now])[:400]),
+    # Nobody answers in this case: a message that changes the builder's course
+    # after the Bot Chat asked went out while its own question was open.
+    asked = min((p["created_at"] for p in result["proposals"]), default=None)
+    ahead = [s["text"].split("passes on:\n", 1)[-1][:200] for s in result["sends"]
+             if asked is not None and s["ref"] == result["refs"]["builder"] and s.get("own")
+             and s["created_at"] > asked and not any(word in s["text"].lower() for word in KEEPS)]
+    return [("didn't steer the builder while its own question was open", not ahead, str(ahead)[:400]),
+            ("at most one open question to the user", len(open_now) <= 1, str([p["text"] for p in open_now])[:400]),
             ("at most two questions in all", len(about) <= 2, f"{len(about)} proposal(s)"),
             ("no more than three messages to the builder on its own", f["own_sends_to_builder"] <= 3,
              f"{f['own_sends_to_builder']} own send(s)"),
