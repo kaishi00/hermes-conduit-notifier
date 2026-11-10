@@ -150,10 +150,16 @@ def test_the_brief_is_laid_out_from_its_parts():
 def test_the_brief_drops_the_contexts_item_markers():
     # Eric's brief, 2026-11-10: the reply copied an item's line from the context.
     reply = ("Two duty days ahead.\nStill open:\n- [interest] Verify commit b8a4ba59 correctly closes GitHub issues "
-             "#2059 and #2062. #481\n- #12 [promise] Send the deck (due Friday)\n- Track order #4 by phone\n- #481")
+             "#2059 and #2062. #481\n- #12 [promise] Send the deck (due Friday)\n- Track order #4 by phone\n- #481\n"
+             "- #77: Dan said the venue moved\n- Lunch with Dan: #31 [follow-up] Ask about the lease\n"
+             "- #1 priority: call the bank")
     assert pulse.brief.look(reply, held=0)["facts"]["open"] == [
         "Verify commit b8a4ba59 correctly closes GitHub issues #2059 and #2062.",
-        "Send the deck (due Friday)", "Track order #4 by phone"]
+        "Send the deck (due Friday)", "Track order #4 by phone", "Dan said the venue moved",
+        "Lunch with Dan: Ask about the lease", "#1 priority: call the bank"]
+    copied = "**#9 [next]** Renew the passport\n- Pay rent"
+    assert pulse.brief.summary_line(copied) == "Renew the passport"
+    assert pulse.brief.look(copied, held=0)["line"] == "Renew the passport"
     assert "never copy an item's" in pulse.brief.NOTE
 
 

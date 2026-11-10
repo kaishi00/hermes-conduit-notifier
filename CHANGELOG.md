@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.157.3 (2026-11-10)
+
+### Fixes
+- The morning brief also drops the follow-up, other and next tags, an item
+  number copied from its related or later lines, and markers in its opening
+  line, which is the brief's push. A line starting with a real number, such
+  as "#1 priority", keeps it.
+
 ## 0.157.2 (2026-11-10)
 
 ### Fixes
