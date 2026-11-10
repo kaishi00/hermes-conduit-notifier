@@ -271,3 +271,20 @@ def test_what_the_user_wrote_while_it_ran_is_read_when_the_turn_ends(on, hermes,
     monkeypatch.setattr(work.work_coord, "read_user_words", lambda home, store, item: 1)
     work._ledger_turn_end(home, on, on.get("W1"), "done", failed=False, began=time.time())
     assert seen == ["W1"]
+    # Also when the board read those words first, so this read found none new.
+    monkeypatch.setattr(work.work_coord, "read_user_words", lambda home, store, item: 0)
+    on.event_add("W2", "user", "user", "Keep the CSV format")
+    work._ledger_turn_end(home, on, on.get("W2"), "done", failed=False, began=time.time())
+    work._ledger_turn_end(home, on, on.get("W1"), "done", failed=False, began=time.time() + 60)
+    assert seen == ["W1", "W2"]
+
+
+def test_an_older_own_send_keeps_its_state_after_many_later_sends(on, hermes, home):
+    start()
+    first = on.outbox_add("W1", "send", WORKER, "Use /v2/users", own=True)
+    on.outbox_delivered(first)
+    on.event_add("W1", "sent", "coordinator", "Use /v2/users", source=f"outbox:{first}:own")
+    for number in range(55):
+        on.outbox_add("W1", "send", WORKER, f"Later {number}")
+    item, = [item for item in work.work_coord.app_items(on, {"W1": "Login bug"}) if item["kind"] == "sent"]
+    assert item["state"] == "delivered"

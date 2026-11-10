@@ -44,7 +44,7 @@ OPEN_WORK = 12
 WORK_LINES = 6
 GOAL_CHARS = 300
 WHY_CHARS = 300
-READ_LINES = 3
+READ_LINES = 6
 # Hidden turns the watch may start in a bot's Bot Chat in an hour.
 FLAGS_PER_HOUR = 12
 CALL_TIMEOUT_S = 60.0
