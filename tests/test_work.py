@@ -2027,6 +2027,10 @@ def test_different_numbers_and_shared_folders_alone_arent_related(on, hermes, tm
     assert start("Settings loader", "Make config.py read the new keys.", cwd=str(one))["ok"]
     assert start("Timeouts", "Raise the default in config.py.", cwd=str(two))["ok"]
     assert start("Retries", "Add a retry count to config.py.", cwd=str(one))["error"] == "similar_work"
+    # "e.g." is no file, and a README both mention ties nothing (GLM on #675).
+    assert start("Fonts", "Check the fonts, e.g. the headings. Note it in README.md.", cwd=str(one), new=True)["ok"]
+    assert start("Tables", "Sort the rows, e.g. by date. README.md gets a line.", cwd=str(one))["ok"]
+    assert work._files("Odd cases, e.g. empty ones, i.e. none.") == set()
     assert work._files("See example.com and v1.2.3, then edit docs/API-Status.md and run export.py.") == {
         "api-status.md", "export.py"}
 

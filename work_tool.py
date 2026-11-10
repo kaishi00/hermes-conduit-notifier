@@ -5358,6 +5358,8 @@ _GENERIC = frozenset("count list show get latest current version versions file f
 _FILE = re.compile(r"(?<![\w.-])(?:[\w.~-]+/)*[\w-]+\.[A-Za-z][A-Za-z0-9]{0,5}(?![\w-])")
 # Endings that are a sentence's or a site's, not a file's.
 _NOT_FILES = frozenset("com org net io dev app ai e.g i.e etc".split())
+# Files most tasks in a project mention: sharing one doesn't make two tasks one.
+_EVERYWHERE = frozenset("readme.md changelog.md todo.md agents.md claude.md package.json".split())
 
 
 def _files(text: Any) -> set[str]:
@@ -5366,7 +5368,8 @@ def _files(text: Any) -> set[str]:
     names = set()
     for found in _FILE.findall(str(text or "")):
         name = found.rsplit("/", 1)[-1].lower()
-        if name.rsplit(".", 1)[-1] not in _NOT_FILES and not name.replace(".", "").isdigit():
+        if (name not in _NOT_FILES and name.rsplit(".", 1)[-1] not in _NOT_FILES
+                and not name.replace(".", "").isdigit()):
             names.add(name)
     return names
 
@@ -5430,7 +5433,7 @@ def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -
             continue
         folder = _folder(work)
         # config.py in another repository is another file.
-        both = [] if here and folder and here != folder else sorted(files & set(_work_files(store, work)))
+        both = [] if here and folder and here != folder else sorted((files - _EVERYWHERE) & set(_work_files(store, work)))
         if both:
             found.append((1, -work.updated_at, work, "it works on " + ", ".join(both[:3])))
             continue
