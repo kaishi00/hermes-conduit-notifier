@@ -49,9 +49,13 @@ UNAVAILABLE_NO_API = ("Bot workstreams run in the Hermes dashboard, next to the 
 
 
 class BrokerError(Exception):
-    def __init__(self, message: str, code: Any = None) -> None:
+    def __init__(self, message: str, code: Any = None, timeout: bool = False) -> None:
         super().__init__(message)
         self.code = code
+        # True when the call gave up waiting but may still land: Hermes'
+        # worker keeps running after the timeout, so the send is not
+        # known to have failed. wake() reads this to keep the wake mark.
+        self.timeout = timeout
 
     @property
     def not_owned(self) -> bool:
@@ -161,7 +165,7 @@ def _on_own_thread(work: Callable[[], Any], timeout: float = CALL_TIMEOUT_S) -> 
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        raise BrokerError("Hermes didn't answer in time")
+        raise BrokerError("Hermes didn't answer in time", timeout=True)
     if failed:
         raise failed[0]
     return out[0] if out else None
@@ -211,7 +215,7 @@ class Broker:
                 if response is None:
                     # A slow method answers from Hermes' worker pool.
                     if not done.wait(timeout):
-                        raise BrokerError(f"{method} timed out")
+                        raise BrokerError(f"{method} timed out", timeout=True)
                     response = box[0]
                 return response
             finally:
@@ -453,7 +457,11 @@ class Broker:
         try:
             status = str(self._unbound("prompt.submit", {"session_id": runtime_id, "text": text,
                                                          "display_kind": "hidden", "queued": True}).get("status") or "")
-        except BaseException:
+        except BaseException as error:
+            if isinstance(error, BrokerError) and error.timeout:
+                # The submit may still queue the turn: its worker keeps
+                # running after the timeout, so the mark stays.
+                raise
             turn_surface.discard_wake(text, mark)
             raise
         if status not in WAKE_SENT:

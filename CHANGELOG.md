@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.153.6 (2026-11-10)
+
+### Fixes
+- A work update whose prompt.submit timed out lost its woken mark, so its late turn didn't count as the plugin's own and its review card could be refused.
+
 ## 0.153.4 (2026-11-10)
 
 ### Fixes

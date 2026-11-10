@@ -374,6 +374,52 @@ def test_a_wake_hermes_refused_isnt_the_plugins_own_turn_later(bots, hermes, mon
     turns.start_turn(NAHIDA_CHAT)
 
 
+def test_a_wake_whose_prompt_submit_times_out_is_still_the_plugins_own_turn_later(bots, hermes, monkeypatch):
+    # #659: a prompt.submit that times out may still queue the turn after
+    # the caller gives up (its worker thread keeps running), so the wake
+    # mark must survive the timeout or the late turn wouldn't count as the
+    # plugin's own.
+    orig = broker_mod._on_own_thread
+    monkeypatch.setattr(broker_mod, "_on_own_thread", lambda work, timeout=0.05: orig(work, timeout))
+
+    def slow(params):
+        time.sleep(0.5)
+        return {"status": "streaming"}
+
+    monkeypatch.setattr(hermes, "prompt_submit", slow, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "What's the capital of Sumeru?"})
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    turns = sys.modules["conduit_push.turn_surface"]
+    turns.start_turn(NAHIDA_CHAT, params["text"])
+    assert turns.woken(NAHIDA_CHAT)
+    turns.start_turn(NAHIDA_CHAT)
+
+
+def test_a_wake_whose_prompt_submit_fails_outright_isnt_the_plugins_own_turn_later(bots, hermes, monkeypatch):
+    # Control for #659: only a timeout keeps the mark. A submit that fails
+    # outright never went out, so the mark goes with it.
+    def broken(params):
+        raise RuntimeError("submit exploded")
+
+    monkeypatch.setattr(hermes, "prompt_submit", broken, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "What's the capital of Sumeru?"})
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    turns = sys.modules["conduit_push.turn_surface"]
+    turns.start_turn(NAHIDA_CHAT, params["text"])
+    assert not turns.woken(NAHIDA_CHAT)
+    turns.start_turn(NAHIDA_CHAT)
+
+
+def test_a_timed_out_broker_call_marks_its_error():
+    # #659: the timeout signal wake() reads is BrokerError.timeout, set
+    # where the call gives up, not by matching the message.
+    with pytest.raises(broker_mod.BrokerError) as caught:
+        broker_mod._on_own_thread(lambda: time.sleep(0.5), timeout=0.05)
+    assert caught.value.timeout
+
+
 def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, hermes, monkeypatch):
     asked = call("work_ask", {"bot": "nahida", "text": "What's the capital of Sumeru?"})
     assert asked["ok"] and asked["ref"] == "A1" and asked["bot"] == "Nahida"
