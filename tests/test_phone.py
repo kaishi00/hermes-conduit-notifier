@@ -1997,7 +1997,8 @@ def test_a_run_needs_a_listed_shortcut_and_its_result_comes_back(store, iphone):
 
 def test_a_too_long_shortcut_name_is_left_out_not_the_whole_list(store, iphone):
     batch = _batch(sharing=_sharing(shortcuts=True),
-                   shortcuts=[{"name": "x" * (phone.MAX_SHORTCUT_NAME_CHARS + 1)}, {"name": "Log water"}])
+                   shortcuts=[{"name": "x" * (phone.MAX_SHORTCUT_NAME_CHARS + 1)},
+                              {"name": "x" * phone.MAX_SHORTCUT_NAME_CHARS + " "}, {"name": "Log water"}])
     store.ingest(iphone.seal(batch))
     with store.reader("shortcuts") as (db, device):
         assert store.shortcuts(db, device["id"])[0] == [{"name": "Log water"}]
@@ -2011,8 +2012,18 @@ def test_what_shortcuts_gave_back_fits_one_exchange_together(store, iphone):
     iphone.changes(store, [{"id": run["id"], "outcome": "applied", "result": long} for run in runs],
                    call_id="call-00000002")
     given = [store.change_outcome(run["id"]).get("result") or "" for run in runs]
-    assert sum(map(len, given)) == phone.MAX_RESULTS_TEXT_CHARS
+    assert sum(len(text.encode()) for text in given) == phone.MAX_RESULTS_TEXT_BYTES
     assert given[0] == long and given[-1] == ""
+    # Counted in bytes, never cutting a character in two.
+    store.ingest(iphone.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    more = [store.add_change("run_shortcut", {"shortcut": "Log water"}) for _ in range(5)]
+    iphone.changes(store, call_id="call-00000003")
+    emoji = "🎬" * phone.MAX_RESULT_CHARS
+    iphone.changes(store, [{"id": run["id"], "outcome": "applied", "result": emoji} for run in more],
+                   call_id="call-00000004")
+    given = [store.change_outcome(run["id"]).get("result") or "" for run in more]
+    assert sum(len(text.encode()) for text in given) == phone.MAX_RESULTS_TEXT_BYTES
+    assert all(set(text) <= {"🎬"} for text in given)
 
 
 def test_running_without_asking_needs_shortcuts_and_turning_them_off_refuses_a_waiting_run(store, iphone):

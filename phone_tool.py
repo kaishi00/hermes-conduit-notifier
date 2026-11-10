@@ -141,7 +141,7 @@ CALENDAR_SCHEMA: dict[str, Any] = {
 PHONE_SCHEMA: dict[str, Any] = {
     "name": PHONE_TOOL,
     "description": (
-        "Set alarms and timers on the user's iPhone, run the Shortcuts they allow; read its battery, Focus and more. "
+        "Set iPhone alarms and timers, run its Shortcuts; read battery, Focus and more. "
         "This is the iPhone as Conduit shares it. status: battery and charging, Low Power Mode, CarPlay, "
         "audio route (headphones, car, speaker), network, motion (walking, driving...) and which Focus is on "
         "(the label the user gave it, e.g. Work or Sleep), each with its age. Use it when it matters to what you "

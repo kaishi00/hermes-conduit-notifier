@@ -183,9 +183,10 @@ MAX_SHORTCUT_NOTE_CHARS = 200
 MAX_SHORTCUT_INPUT_CHARS = 4000
 # A shortcut's text, as it gave it back.
 MAX_RESULT_CHARS = 4000
-# What every shortcut in one exchange gave back, together, so a sealed body
-# stays under the exchange's 64 KiB cap. The phone trims to the same.
-MAX_RESULTS_TEXT_CHARS = 16_000
+# What every shortcut in one exchange gave back, together, in UTF-8 bytes,
+# so a sealed body (base64, JSON escapes) stays under the exchange's 64 KiB
+# cap. The phone trims to the same.
+MAX_RESULTS_TEXT_BYTES = 16_000
 # A run waits for the user to open Conduit at most this long: later, what it
 # was for has usually passed.
 SHORTCUT_TTL_S = 3600
@@ -2146,7 +2147,7 @@ def _parse_results(value: Any) -> list[dict[str, Any]]:
     if len(results) > MAX_RESULTS:
         raise PhoneError("too_large", f"At most {MAX_RESULTS} results per exchange", status=413)
     parsed = []
-    budget = MAX_RESULTS_TEXT_CHARS
+    budget = MAX_RESULTS_TEXT_BYTES
     for index, result in enumerate(results):
         field = f"results[{index}]"
         if not isinstance(result, dict):
@@ -2160,8 +2161,8 @@ def _parse_results(value: Any) -> list[dict[str, Any]]:
         item_id = result.get("item_id")
         given = clean_notes(result.get("result"), f"{field}.result", MAX_RESULT_CHARS)
         if given is not None:
-            given = given[:budget].strip() or None
-            budget -= len(given or "")
+            given = given.encode("utf-8")[:budget].decode("utf-8", "ignore").strip() or None
+            budget -= len(given.encode("utf-8")) if given else 0
         parsed.append({"id": change_id, "outcome": outcome,
                        "item_id": None if item_id is None else _item_id(item_id, f"{field}.item_id"),
                        "note": clean_text(result.get("note"), f"{field}.note", MAX_NOTE_CHARS, cap=True),
@@ -2452,8 +2453,9 @@ def _parse_shortcuts(value: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             raise PhoneError("malformed", f"{field} must be an object")
         raw = item.get("name")
-        if isinstance(raw, str) and len(raw.strip()) > MAX_SHORTCUT_NAME_CHARS:
-            # Too long to run by name: that one is left out, not the list.
+        if isinstance(raw, str) and len(raw) > MAX_SHORTCUT_NAME_CHARS:
+            # Too long to run by name (clean_text's own limit): that one is
+            # left out, not the list.
             continue
         name = clean_text(raw, f"{field}.name", MAX_SHORTCUT_NAME_CHARS)
         if not name:
