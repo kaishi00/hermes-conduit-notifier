@@ -13,6 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.156.0 (2026-11-10)
+
+### Fixes
+- A Bot Chat that asked you a question about a workstream waits for your
+  answer. Without the update it could ask and then redirect the workstream
+  anyway.
+
+### New and improved
+- Quick Things Here: you choose how many steps the Bot Chat does itself in
+  one turn before the rest goes to a workstream: 5 (as before), 10 or 20,
+  per bot, in Edit Bot > Work (with a Conduit build that shows it). The
+  time it may take grows with the steps.
+
 ## 0.155.2 (2026-11-10)
 
 ### Fixes
