@@ -217,8 +217,9 @@ def look(reply: str, held: int) -> dict:
             current = HEADINGS[heading.group(1).strip().lower()]
     counts = {key: len(lines) for key, lines in groups.items()}
     counts["held"] = max(0, int(held))
-    return {"shape": picks.BRIEF, "line": summary_line(reply), "detail": "", "actions": [],
-            "facts": {"summary": summary_line(reply), "counts": counts, **groups}}
+    summary = summary_line(reply)
+    return {"shape": picks.BRIEF, "line": summary, "detail": "", "actions": [],
+            "facts": {"summary": summary, "counts": counts, **groups}}
 
 
 def next_attempt(pulse_store: store.PulseStore, now: float, zone: Any, time_value: Any) -> Optional[tuple[str, int]]:

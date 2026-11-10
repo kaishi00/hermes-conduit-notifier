@@ -215,14 +215,36 @@ def _url(value: Any) -> str:
     return url
 
 
-# A calendar entry's subject key (pulse_report.phone_context), and the
-# button words that would put it on the calendar it came from.
+# A calendar entry's key as the model gives it (pulse_report.phone_context)
+# and as a card keeps it (pulse_candidates.EVENT), and the button words
+# that would put it on, or check it against, the calendar it came from.
+# Moving or cancelling it is a real step and stays.
 _CALENDAR_SUBJECT = re.compile(r"v\d+")
-_ONTO_CALENDAR = re.compile(r"\b(?:add|block|put|schedule|book|create|save)\b.*\b(?:calendar|time)\b", re.I)
+CALENDAR_CARD_SUBJECT = "event:"
+_ONTO_CALENDAR = re.compile(r"\b(?:calendar|schedule)\b|\bblock\b.*\btime\b", re.IGNORECASE)
+_KEEPS_STEP = re.compile(r"\b(?:reschedul\w*|cancel\w*)\b", re.IGNORECASE)
 
 
 def _onto_calendar(action: Mapping[str, Any]) -> bool:
-    return any(_ONTO_CALENDAR.search(str(action.get(key) or "")) for key in ("label", "say"))
+    words = " ".join(str(action.get(key) or "") for key in ("label", "say"))
+    return bool(_ONTO_CALENDAR.search(words)) and not _KEEPS_STEP.search(words)
+
+
+def from_calendar(subject: Any, event: Any = "") -> bool:
+    """Whether a pick or card is about a calendar entry: by the model's key
+    ("v1", as its subject or event) or by a card's "event:" subject."""
+    for key in (subject, event):
+        key = str(key or "").strip().lower()
+        if _CALENDAR_SUBJECT.fullmatch(key) or key.startswith(CALENDAR_CARD_SUBJECT):
+            return True
+    return False
+
+
+def off_calendar(actions: Any) -> list:
+    """``actions`` without a button to put a calendar entry on the calendar
+    it was read from."""
+    return [action for action in actions if not (isinstance(action, Mapping) and _onto_calendar(action))] \
+        if isinstance(actions, list) else []
 
 
 def _actions(value: Any) -> list[dict]:
@@ -289,9 +311,9 @@ def parse(entry: Any, *, drawn_types: Sequence[str] = (), line: str = "") -> tup
     subject = entry.get("subject")
     if isinstance(subject, str) and subject.strip():
         pick["subject"] = subject.strip()[:40]
-        if _CALENDAR_SUBJECT.fullmatch(pick["subject"]):
-            # It came from the calendar: a button to put it there again is noise.
-            pick["actions"] = [action for action in pick["actions"] if not _onto_calendar(action)]
+    if from_calendar(subject, entry.get("event")):
+        # It came from the calendar: a button to put it there again is noise.
+        pick["actions"] = off_calendar(pick["actions"])
     return pick, why
 
 
@@ -341,9 +363,11 @@ def look(card: Mapping[str, Any]) -> dict:
     pick = loads(card.get("look"))
     if pick is None:
         return {"shape": PLAIN, "facts": {}, "actions": []}
+    actions = pick.get("actions") if isinstance(pick.get("actions"), list) else []
     return {"shape": pick.get("shape") if pick.get("shape") in SHAPES + (BRIEF,) else PLAIN,
             "facts": pick.get("facts") if isinstance(pick.get("facts"), dict) else {},
-            "actions": pick.get("actions") if isinstance(pick.get("actions"), list) else [],
+            # A card kept from before calendar entries lost the button loses it too.
+            "actions": off_calendar(actions) if from_calendar(card.get("subject"), pick.get("subject")) else actions,
             "line": str(pick.get("line") or ""), "detail": str(pick.get("detail") or "")}
 
 
@@ -444,6 +468,8 @@ def updated_card(card: Mapping[str, Any], pick: Mapping[str, Any], subject: str 
         merged["facts"] = merged_facts(str(pick.get("shape")), old["facts"], pick.get("facts") or {})
     if not merged.get("actions") and isinstance(old.get("actions"), list):
         merged["actions"] = old["actions"]
+    if from_calendar(subject or card.get("subject"), pick.get("subject")):
+        merged["actions"] = off_calendar(merged.get("actions"))
     merged["incident"] = {"card": card_id_text(int(card["id"]))}
     columns = {"news": news(merged), "look": dumps(merged)}
     if subject and not card.get("subject"):
