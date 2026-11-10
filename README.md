@@ -1443,11 +1443,12 @@ question or a small task doesn't start a workstream. Change it in Conduit
     hermes -p <bot> conduit-push work on --policy strict    # she only coordinates
     hermes -p <bot> conduit-push work on --after-restart ask  # after a restart, ask before continuing
     hermes -p <bot> conduit-push work on --approvals ask    # workstreams ask before what can't be undone
+    hermes -p <bot> conduit-push work on --coordination auto   # she keeps her workstreams in step on her own
     hermes -p <bot> conduit-push work on --model anthropic:claude-sonnet-5-5   # new workstreams' model (bot: her own)
     hermes -p <bot> conduit-push work status
 
 - The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
-  `work_read`, `work_close`, `work_note`, `work_ask` and `work_reply` (behind
+  `work_read`, `work_close`, `work_note`, `work_propose`, `work_ask` and `work_reply` (behind
   Hermes' Tool Search). They answer in that bot's canonical Bot Chat, and
   name work by ref (W1, W2 for workstreams, A1, A2 for asks), never by session
   id, so a bot only ever reaches its own work.
@@ -1546,6 +1547,29 @@ question or a small task doesn't start a workstream. Change it in Conduit
   plugin turned it off in, so a turn you start there yourself asks too. A
   resolved workstream, or a change made with `--approvals`, turns back at
   its next turn through Conduit.
+- The Bot Chat keeps its workstreams working together (plugin 0.154+). The
+  plugin keeps a ledger of what happens in each one, with who said it: what
+  a worker reports with `work_progress` (`found`, `assumes`, `changed`), what
+  you write in a workstream's own chat, how each turn ended, and what the Bot
+  Chat sent and whether it arrived. Each of her turns gets that as a board in
+  her note, so when W2 finds something that breaks what W1 relies on, she can
+  act before you tell her. A work update she has nothing to tell you about
+  she answers with `[SILENT]`, and you see nothing. Coordination (Edit Bot >
+  Work, or `--coordination`) sets how independently she acts in the turns
+  she starts herself, a work update's: `ask` (the default) lets her pass
+  information on and ask a workstream to check something, and has her ask
+  you before she starts, stops or redirects work (the plugin refuses those
+  in such a turn, and adds her words to a running turn without
+  interrupting it); `auto` lets her do those on her own and tell you in a
+  line; `off` is the Bot Chat as it was, passing reports on. When you write
+  to her, she acts on your message under any setting. What she asks you and
+  what you answer is kept with `work_propose`, so she doesn't ask twice. A
+  workstream you set to Leave alone (its card in Conduit) gets nothing from
+  her and isn't stopped by her in a turn you didn't start. Past eight
+  messages to one workstream in an hour from such turns, the next is refused
+  and she tells you. None of this changes what Hermes lets a workstream's
+  tools do: approvals, dangerous-command rules and `/yolo` stay as you set
+  them.
 - What the Bot Chat does itself is decided by how long the work runs, not by
   which tool it uses. Under every setting it keeps its own tools: the work
   tools, `memory` and the memory provider's, and what shows you something or
@@ -2335,7 +2359,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 - **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
   presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
   Nothing rings meanwhile: a call that would go out sends the usual push.
-  An Apple Watch call holds it too (0.153.9+): the host renews 90 seconds
+  An Apple Watch call holds it too (0.154.1+): the host renews 90 seconds
   every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
   keeps it through a rejoin, and lets go when the Watch hangs up, the call
   ends or fails on the host, or the grant ends. Two Watch calls on one
@@ -2392,7 +2416,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
 - `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
   decides". Either way the limits apply, presence holds it, and a session
   already watched keeps one watch (it takes the reason). While presence
-  holds (0.153.9+), the tool answers `in_call` at once and sets nothing up,
+  holds (0.154.1+), the tool answers `in_call` at once and sets nothing up,
   so Hermes doesn't promise a ring that won't come; a call for later, once
   something finishes, is still set up with `conduit_call_watch`.
 - **What's worth a call (0.16+):** with `rules` written (the user's own

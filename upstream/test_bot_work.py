@@ -14,7 +14,9 @@ Coordinates), are refused; the second bot (Quick Things Here) runs five steps
 of a turn itself and hands the sixth on. The launch
 profile's bot asks the secondary one (acceptance test 17): the ask arrives in
 its Bot Chat as a hidden turn, it answers with work_reply, and the answer
-comes back to the asking Bot Chat. Under ``plugins.isolation: host`` the tool
+comes back to the asking Bot Chat. Each workstream reports what it found with
+work_progress, which lands in its bot's ledger and on the board in the work
+update's turn (work_coord). Under ``plugins.isolation: host`` the tool
 answers with the reason. After a restart, Hermes' own re-run of a crash-killed
 workstream turn is retired (acceptance test 6), and a live sibling's marker kept.
 Hermes' turn stopper, which a clean shutdown runs, is watched on both its
@@ -104,6 +106,13 @@ def _responder(fake: Any, profile: str):
             ran = sum(1 for m in messages[asked + 1:] if m.get("role") == "tool")
             if ran < STEPS_TRIED:
                 return fake.ToolCall("terminal", {"command": f"echo quick-step-{ran}"})
+        first = next((_text_of(m) for m in messages if m.get("role") == "user"), "")
+        if "WORKER-TASK" in first:
+            # A workstream: it reports what it found for its coordinator's
+            # board (work_coord), then answers.
+            if last.get("role") == "tool":
+                return fake.Text(f"WORKER-OK from the {profile} model")
+            return _call(fake, tools, "work_progress", {"found": f"FOUND-BY-{profile}"})
         if last.get("role") == "tool":
             return fake.Text(f"COORDINATOR-SAW on {profile}: {_text_of(last)[:800]}")
         user = next((_text_of(m) for m in reversed(messages) if m.get("role") == "user"), "")
@@ -116,8 +125,6 @@ def _responder(fake: Any, profile: str):
             return fake.Text(f"WAKE-SEEN on {profile}")
         if "PLEASE ASK" in user:
             return _call(fake, tools, "work_ask", {"bot": "second", "text": "ASK-TASK: what's two and two?"})
-        if "WORKER-TASK" in user:
-            return fake.Text(f"WORKER-OK from the {profile} model")
         if "PLEASE START" in user:
             return _call(fake, tools, "work_start", {"title": f"Probe on {profile}",
                                                      "instructions": "WORKER-TASK: answer briefly"})
@@ -351,6 +358,23 @@ def test_the_work_update_comes_back_as_a_hidden_turn(coordinated: Run, profile: 
     assert wakes, rows
     assert all(m.get("display_kind") == "hidden" for m in wakes if "display_kind" in m)
     assert f"WORKER-OK from the {profile} model" in wakes[0]["content"]
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_what_a_workstream_reports_reaches_its_coordinators_board(coordinated: Run, profile: str) -> None:
+    """Coordination (work_coord): a worker's work_progress, called in the
+    workstream's own session, lands in that bot's ledger, and the work
+    update's turn gets it on the board in its note, with leave to stay
+    silent."""
+    events = _work_store().Store(coordinated.profile_home(profile)).events("W1", kinds=("found",))
+    assert [(event["who"], event["text"]) for event in events] == [("worker", f"FOUND-BY-{profile}")], events
+    wakes = [body for body in _requests(coordinated, profile)
+             if any(m.get("role") == "user" and "Work update from your workstreams" in _text_of(m)
+                    for m in body.get("messages") or [])]
+    assert wakes, "no work update reached the coordinator's model"
+    seen = "\n".join(_text_of(m) for m in wakes[0]["messages"] if m.get("role") == "user")
+    assert "it found" in seen and f"FOUND-BY-{profile}" in seen, seen[-3000:]
+    assert "exactly [SILENT]" in seen
 
 
 def test_no_workstream_events_reach_the_apps_socket(coordinated: Run) -> None:
