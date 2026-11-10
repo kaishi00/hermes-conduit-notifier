@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.157.1 (2026-11-10)
+
+### Fixes
+- A new task is no longer taken for part of an open workstream because both
+  say "a.m." or name files of the same kind, or because each names a
+  config.py in a different folder of one project. Without the update the
+  Bot Chat could send it into the wrong workstream.
+
 ## 0.157.0 (2026-11-10)
 
 ### Fixes

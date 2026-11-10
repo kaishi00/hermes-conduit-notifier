@@ -2035,6 +2035,21 @@ def test_different_numbers_and_shared_folders_alone_arent_related(on, hermes, tm
         "api-status.md", "export.py"}
 
 
+def test_folders_of_one_repository_prose_and_file_endings_arent_related(on, hermes, tmp_path):
+    on.set_max_running(6)
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir(), two.mkdir()
+    # Review of #675.
+    front, back = one / "frontend", one / "backend"
+    front.mkdir(), back.mkdir()
+    assert start("Front ports", "Move the port into frontend/settings.py.", cwd=str(front), new=True)["ok"]
+    assert start("Back hosts", "Read the host from backend/settings.py.", cwd=str(back))["ok"]
+    assert start("Front colors", "Add a color to settings.py.", cwd=str(front))["error"] == "similar_work"
+    assert work._files("Run it at 10 a.m. in the U.S. office, then fix src/a.c.") == {"a.c"}
+    assert start("Config", "Tidy the unused imports in config.py.", cwd=str(two), new=True)["ok"]
+    assert start("Export", "Tidy the unused imports in export.py.")["ok"]
+
+
 def test_the_note_says_what_each_workstream_covers(on, hermes):
     start("Auth callback bug", "The sign-in redirect loops after the provider calls back. Fix it in auth/callback.py.")
     on.event_add("W1", "changed", "worker", "Edited src/session/cookies.py so the session cookie survives the redirect.")
