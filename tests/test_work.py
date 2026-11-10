@@ -2020,6 +2020,13 @@ def test_a_new_task_is_held_against_what_open_work_covers(on, hermes, monkeypatc
 def test_different_numbers_and_shared_folders_alone_arent_related(on, hermes, tmp_path):
     start("Port 8080", "Find out which process listens on port 8080 on the build host.")
     assert start("Port 9090", "Find out which process listens on port 9090 on the build host.")["ok"]
+    # The same file name in another repository is another file (Greptile on #675).
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir(), two.mkdir()
+    on.set_max_running(6)
+    assert start("Settings loader", "Make config.py read the new keys.", cwd=str(one))["ok"]
+    assert start("Timeouts", "Raise the default in config.py.", cwd=str(two))["ok"]
+    assert start("Retries", "Add a retry count to config.py.", cwd=str(one))["error"] == "similar_work"
     assert work._files("See example.com and v1.2.3, then edit docs/API-Status.md and run export.py.") == {
         "api-status.md", "export.py"}
 

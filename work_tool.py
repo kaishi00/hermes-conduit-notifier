@@ -5410,8 +5410,9 @@ def _covers(store: work_store.Store, work: work_store.Work) -> str:
 def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -> list[tuple[work_store.Work, str]]:
     """The bot's open workstreams a new task looks like or belongs with,
     each with why, the surest first: the same title words (work of the last
-    LOOKALIKE_RECENT_S), a file both name, or tasks that share most of
-    their words (fewer when both are in one folder)."""
+    LOOKALIKE_RECENT_S), a file both name (unless they are known to be in
+    different folders), or tasks that share most of their words (fewer when
+    both are in one folder)."""
     now = time.time()
     mine = _words(title) - _GENERIC
     task = (_words(title) | _words(instructions)) - _GENERIC
@@ -5427,7 +5428,9 @@ def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -
         if fresh and _similar(mine, _words(work.title) - _GENERIC):
             found.append((0, -work.updated_at, work, "its title is nearly the same"))
             continue
-        both = sorted(files & set(_work_files(store, work)))
+        folder = _folder(work)
+        # config.py in another repository is another file.
+        both = [] if here and folder and here != folder else sorted(files & set(_work_files(store, work)))
         if both:
             found.append((1, -work.updated_at, work, "it works on " + ", ".join(both[:3])))
             continue
@@ -5436,7 +5439,7 @@ def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -
         numbers = {word for word in task if any(ch.isdigit() for ch in word)}
         if numbers and not numbers & theirs and {word for word in theirs if any(ch.isdigit() for ch in word)}:
             continue  # different ports, issues or versions: different tasks
-        same_place = bool(here and here == _folder(work))
+        same_place = bool(here and here == folder)
         need = RELATED_WORDS_HERE if same_place else RELATED_WORDS
         if len(shared) >= need and len(shared) / max(1, min(len(task), len(theirs))) >= RELATED_SHARE:
             words = ", ".join(sorted(shared, key=lambda word: (-len(word), word))[:4])
