@@ -347,6 +347,54 @@ def test_what_the_bot_chat_asked_and_what_the_user_answered_is_kept(on, hermes, 
     assert call("work_propose", {"text": "x"}, session_id=WORKER)["error"] == "not_bot_chat"
 
 
+def test_one_question_per_workstream_a_no_stands_and_one_question_covers_related_work(on, hermes, home):
+    # Eric 2026-11-10: under Ask, nothing stops a model asking twice or splitting one decision.
+    on.set_max_running(3)
+    start()
+    start("Invoice count", "Count the invoices sent in March.")
+    start("Shed photos", "Tidy the garden shed photos.")
+    woken(home)
+    made = call("work_propose", {"text": "Move W1 and W2 to the v2 API: v1 returns 410.", "refs": ["w1", "W2"]})
+    assert made["ok"] and made["id"] == "P1" and "It covers W1 and W2" in made["note"]
+    assert "- P1 (about W1 and W2), asked just now" in work.digest(BOT_CHAT)
+    # Asking again about either while it's open is refused, with the open one's id.
+    again = call("work_propose", {"text": "Stop W2 instead.", "ref": "W2"})
+    assert again["error"] == "already_asked" and again["id"] == "P1" and "replaces P1" in again["note"]
+    # Unrelated work can still be asked about.
+    assert call("work_propose", {"text": "Pause W3 for the night?", "ref": "W3"})["id"] == "P2"
+    # New evidence rewords the open question, still one question.
+    reworded = call("work_propose", {"text": "Move W1 and W2 to v2: v1 is gone in staging too.", "replaces": "p1"})
+    assert reworded["ok"] and reworded["id"] == "P1"
+    note = work.digest(BOT_CHAT)
+    assert "- P1 (about W1 and W2), asked just now, no answer yet: «Move W1 and W2 to v2: v1 is gone" in note
+    assert call("work_propose", {"text": "x", "replaces": "P9"})["error"] == "no_such_proposal"
+    # Rewording can't fold in work another open question covers, and keeps the work it had.
+    folded = call("work_propose", {"text": "Move all three.", "replaces": "P1", "refs": ["W3"]})
+    assert folded["error"] == "already_asked" and folded["id"] == "P2"
+    assert "- P1 (about W1 and W2)" in work.digest(BOT_CHAT)
+    # The user's one answer covers both; a no stands for the day unless something new came up.
+    asked(home, "No, leave both on v1")
+    assert call("work_propose", {"id": "P1", "answer": "declined"})["status"] == "declined"
+    refused = call("work_propose", {"text": "Move W1 to v2 after all?", "ref": "W1"})
+    assert refused["error"] == "declined" and refused["id"] == "P1"
+    retried = call("work_propose", {"text": "Move W1 to v2 after all?", "ref": "W1",
+                                    "new": "The v1 shutdown moved up to tonight."})
+    assert retried["ok"] and retried["id"] == "P3"
+    # Rewording P2 to take in W2, declined today, needs what's new too; adding it keeps W3.
+    widened = call("work_propose", {"text": "Pause W3 and W2?", "replaces": "P2", "refs": ["W2"]})
+    assert widened["error"] == "declined" and widened["id"] == "P1"
+    widened = call("work_propose", {"text": "Pause W3 and W2?", "replaces": "P2", "refs": ["W2"],
+                                    "new": "W2's API key expires tonight."})
+    assert widened["ok"] and "- P2 (about W3 and W2)" in work.digest(BOT_CHAT)
+    note = work.digest(BOT_CHAT)
+    assert "- P3 (about W1), asked just now, no answer yet: «Move W1 to v2 after all?» New since the last no: " \
+           "«The v1 shutdown moved up to tonight.»" in note
+    # The Work panel names every workstream a question covers; older apps read ref and title.
+    item, = [item for item in work.work_coord.app_items(on, {"W1": "Login bug", "W2": "Invoice count"})
+             if item["id"] == "P1"]
+    assert item["ref"] == "W1" and item["refs"] == ["W1", "W2"] and item["title"] == "Login bug · Invoice count"
+
+
 # What the user and the worker are told --------------------------------------------
 
 def test_a_new_workstream_is_told_what_to_report_and_the_brief_keeps_its_shape(on, hermes):
