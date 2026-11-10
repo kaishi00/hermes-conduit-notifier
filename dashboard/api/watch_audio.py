@@ -1066,18 +1066,17 @@ async def _connect_watch_audio_relay(url: str, credential: str) -> Any:
 
 
 def _watch_call_presence_now(hold_s: int, profile: Optional[str] = None) -> None:
-    """Sets this profile's call presence (in its scope), if it's paired. A
-    release (0) is checked and written under the holders' lock, so a Watch
-    call that claimed the presence after the release was decided keeps it."""
+    """Sets this profile's call presence (in its scope), if it's paired.
+    Checked and written under the holders' lock: a hold goes only while a
+    Watch call claims it, so a renewal that lands after the release (a slow
+    write, a loop that closed) writes nothing, and a release (0) goes only
+    when nobody claims it, so a call that claimed it meanwhile keeps it."""
     if core._load_pairing_state(core._pairing_state_path()) is None:
         return
     store = hermes_calls._calls_store().CallStore(core._calls_home())
-    if hold_s:
-        store.set_presence(hold_s)
-        return
     with _watch_presence_holders_lock:
-        if not _watch_presence_holders.get(profile):
-            store.set_presence(0)
+        if bool(hold_s) == bool(_watch_presence_holders.get(profile)):
+            store.set_presence(hold_s)
 
 
 async def _watch_call_presence(profile: Optional[str], hold_s: int) -> None:

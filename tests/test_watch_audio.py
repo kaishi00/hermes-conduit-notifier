@@ -899,6 +899,7 @@ def test_the_host_sets_presence_only_for_a_paired_profile(tmp_path, monkeypatch)
     api.watch_audio._watch_call_presence_now(90)
     assert not (tmp_path / "conduit-calls.json").exists()
     monkeypatch.setattr(api.core, "_load_pairing_state", lambda path: {"credential": "x"})
+    api.watch_audio._claim_watch_presence(None, object())
     api.watch_audio._watch_call_presence_now(90)
     store = api.hermes_calls._calls_store().CallStore(tmp_path)
     assert store.in_call() is True
@@ -907,11 +908,13 @@ def test_the_host_sets_presence_only_for_a_paired_profile(tmp_path, monkeypatch)
 def test_a_release_never_clears_a_presence_another_watch_call_claimed(tmp_path, monkeypatch):
     monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
     monkeypatch.setattr(api.core, "_load_pairing_state", lambda path: {"credential": "x"})
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
     api.watch_audio._watch_call_presence_now(90, "work")
+    assert store.in_call() is False, "a renewal nobody claims (it landed after the release) writes nothing"
     # Another bridge claimed it after this release was decided.
     api.watch_audio._claim_watch_presence("work", object())
+    api.watch_audio._watch_call_presence_now(90, "work")
     api.watch_audio._watch_call_presence_now(0, "work")
-    store = api.hermes_calls._calls_store().CallStore(tmp_path)
     assert store.in_call() is True
     monkeypatch.setattr(api.watch_audio, "_watch_presence_holders", {})
     api.watch_audio._watch_call_presence_now(0, "work")
