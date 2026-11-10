@@ -66,6 +66,27 @@ def test_a_calendar_entry_gets_no_button_to_put_it_on_the_calendar():
     kept, _ = picks.parse({**entry, "subject": "#41"})
     assert kept["actions"][0]["label"] == "Block calendar time"
     assert "never offer to add it" in picks.PICK_RULES
+    assert "never a reason or advice the context doesn't give" in picks.PICK_RULES
+
+
+def test_a_calendar_entry_loses_the_button_however_it_is_named_or_kept():
+    block = {"label": "Block calendar time", "does": "ask", "say": "Block the day for work"}
+    check = {"label": "Check work schedule", "does": "ask", "say": "Look over my schedule that week"}
+    move = {"label": "Reschedule it", "does": "ask", "say": "Move it on my calendar to Friday"}
+    done = {"label": "Done", "does": "done"}
+    # Named by the found entry's "event" key, not its subject.
+    pick, _ = picks.parse({"line": "Duty Day on Tuesday", "event": "v2", "actions": [block, done]})
+    assert pick["actions"] == [done]
+    assert picks.off_calendar([check, move, done, {"label": "Put it on my schedule", "does": "later"}]) == [move, done]
+    # A card stored before this change, and an update whose buttons all went.
+    old = {"id": 7, "subject": "event:abc:2026-11-17",
+           "look": picks.dumps({"line": "Duty Day", "shape": "plain", "facts": {}, "actions": [block, done]})}
+    assert picks.look(old)["actions"] == [done]
+    update, _ = picks.parse({"line": "Duty Day moved", "subject": "v1", "actions": [block]})
+    assert update["actions"] == []
+    assert picks.loads(picks.updated_card(old, update)["look"])["actions"] == [done]
+    # A card about something else keeps what it had.
+    assert picks.look({**old, "subject": "item:41"})["actions"] == [block, done]
 
 
 def test_drawn_bodies_only_for_apps_that_draw_them():

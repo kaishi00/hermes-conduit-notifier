@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.157.4 (2026-11-10)
+
+### Fixes
+- A card about something on your calendar also loses an "add to calendar",
+  "block time" or "check your schedule" button when Pulse matched it to the
+  entry by name, when the card is updated, and on cards you already have.
+  Moving or cancelling the entry is still offered.
+
 ## 0.157.3 (2026-11-10)
 
 ### Fixes
