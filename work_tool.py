@@ -846,7 +846,7 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     if wrong:
         return {"ok": False, "ref": work.ref, "error": "report", "note": wrong}
     raw = args.get("steps")
-    told = any(args.get(kind) not in (None, "", []) for kind in ("found", "assumes", "changed"))
+    told = work_coord.reports(args)
     if raw is None and told and not ("ready" in args or "screen" in args):
         return {"ok": True, "ref": work.ref,
                 "note": f"Kept for {_bot_name(found)}, who keeps the other workstreams in step with it."}

@@ -130,7 +130,7 @@ def ask_wake_sent(store: work_store.Store, item: str) -> None:
         kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
     except ValueError:
         kept = []
-    kept = [name for name in kept if isinstance(name, str)][-(_ASK_WAKES_KEPT - 1):] + [item]
+    kept = ([name for name in kept if isinstance(name, str)] + [item])[-_ASK_WAKES_KEPT:]
     store.set_meta(_ASK_WAKES, json.dumps(kept))
 
 
@@ -173,7 +173,7 @@ def _turn_prompts(home: Path, session_id: Any) -> Optional[list[tuple[str, Any]]
             ended = db.execute("SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'assistant'"
                                f"{active} AND (tool_calls IS NULL OR tool_calls IN ('', '[]', 'null'))",
                                (str(session_id),)).fetchone()
-            where, limit = where + " AND id > ?", 20
+            where, limit = where + " AND id > ?", 500
             args.append(ended[0] if ended and ended[0] is not None else 0)
         rows = db.execute(f"SELECT content, {kind} FROM messages WHERE {where} ORDER BY id DESC LIMIT {limit}",
                           args).fetchall()
@@ -181,7 +181,9 @@ def _turn_prompts(home: Path, session_id: Any) -> Optional[list[tuple[str, Any]]
         return None
     finally:
         db.close()
-    return [(content if isinstance(content, str) else "", shown) for content, shown in rows]
+    # Hermes' own summary of the chat so far is nobody's message.
+    return [(content, shown) for content, shown in ((text if isinstance(text, str) else "", kind) for text, kind in rows)
+            if not content.lstrip().startswith(_SUMMARIES)]
 
 
 def _users_own(prompt: tuple[str, Any]) -> bool:
@@ -215,6 +217,15 @@ def _short(value: Any, limit: int) -> str:
 
 
 # What the worker reports
+
+def reports(args: dict) -> bool:
+    """Whether the call gave anything to report: a line with words in it."""
+    for kind in ("found", "assumes", "changed"):
+        raw = args.get(kind)
+        if any(isinstance(item, str) and item.strip() for item in (raw if isinstance(raw, list) else [raw])):
+            return True
+    return False
+
 
 def report(store: work_store.Store, work: work_store.Work, args: dict, session_id: Any) -> tuple[int, str]:
     """Keeps a worker's found, assumes and changed lines (work_progress).
