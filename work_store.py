@@ -50,7 +50,9 @@ POLICIES = ("off", "strict", "lookups", "open")
 # 2026-11-03): a quick ask answered in the Bot Chat beats a workstream
 # started for it; strict and open stay choices in Edit Bot > Work.
 DEFAULT_POLICY = "lookups"
-DEFAULT_MAX_RUNNING = 2
+# Four at once (Eric 2026-11-10, raised from 2 after six ran cleanly in the
+# two-hour coordination run); a bot with a saved number keeps it.
+DEFAULT_MAX_RUNNING = 4
 # How many steps a Quick Things Here turn does in the Bot Chat before the
 # rest goes to a workstream (Eric 2026-11-10: "can that number be
 # configurable?"). The first is the default.

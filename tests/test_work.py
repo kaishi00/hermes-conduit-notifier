@@ -658,6 +658,8 @@ def test_start_offers_lookalikes_first(on, hermes):
 
 
 def test_start_stops_at_the_bots_running_limit(on, hermes):
+    assert on.max_running() == 4, "the default (Eric 2026-11-10)"
+    on.set_max_running(2)
     start("One thing")
     start("Second matter", "Count the invoices sent in March.")
     answer = start("Third question", "Tidy the garden shed photos.")
@@ -1543,6 +1545,7 @@ def test_a_start_waits_for_the_sweep(on, hermes, monkeypatch):
 
 
 def test_a_send_to_idle_work_keeps_to_the_running_limit(on, hermes):
+    on.set_max_running(2)
     start("One thing")
     start("Second matter", "Count the invoices sent in March.")
     on.update("W1", status="done")
@@ -3423,7 +3426,7 @@ def _hermes_approvals(home, mode):
 def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
     settings = work.app_settings(home)
     assert settings == {"ok": True, "policy": "lookups", "policies": ["off", "strict", "lookups", "open"],
-                        "max_running": 2, "max_running_limit": 6,
+                        "max_running": 4, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
                         "workstream_model": None, "coordination": "ask",
                         "coordinations": ["off", "ask", "auto"], "quick_steps": 5,
