@@ -708,33 +708,36 @@ def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo, remembered: Sequenc
 # A run -----------------------------------------------------------------------------
 
 # Closed once (0.153.6): items an older build kept from a subagent's run,
-# whose "user" was the parent agent's brief (hermes._NOT_SUBAGENT).
+# whose "user" was the parent agent's brief (hermes._subagent).
 SUBAGENT_SWEPT = "subagent_items_swept"
 SUBAGENT_CLOSED_BY = "pulse: read from a subagent's run, not the user"
 
 
 def forget_subagent_items(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]]) -> int:
-    """Closes the open items read from a subagent's run in any of
-    ``sources``, once every profile could be read; returns how many."""
-    if pulse_store.get(SUBAGENT_SWEPT):
-        return 0
-    closed, readable = 0, True
+    """Closes the open items read from a subagent's run, once per profile:
+    a profile in ``sources`` is marked swept once its state.db could be
+    read, so one left out (reports from "this" profile only) or unreadable
+    is swept on a later run that reads it; returns how many closed."""
+    marked = pulse_store.get(SUBAGENT_SWEPT)
+    swept = set(marked) if isinstance(marked, list) else set()
+    closed, newly = 0, set()
     items = pulse_store.open_items()
     for profile, home, _ in sources:
+        if profile in swept:
+            continue
         mine = [item for item in items if item["profile"] == profile]
-        if not mine:
-            continue
-        try:
-            runs = hermes.subagent_chats(home, [item["chat_id"] for item in mine])
-        except hermes.HermesUnreadable:
-            readable = False
-            continue
-        for item in mine:
-            if item["chat_id"] in runs and pulse_store.close_item(item["id"], status="cancelled",
-                                                                 closed_by=SUBAGENT_CLOSED_BY):
-                closed += 1
-    if readable:
-        pulse_store.set(SUBAGENT_SWEPT, True)
+        if mine:
+            try:
+                runs = hermes.subagent_chats(home, [item["chat_id"] for item in mine])
+            except hermes.HermesUnreadable:
+                continue
+            for item in mine:
+                if item["chat_id"] in runs and pulse_store.close_item(item["id"], status="cancelled",
+                                                                     closed_by=SUBAGENT_CLOSED_BY):
+                    closed += 1
+        newly.add(profile)
+    if newly:
+        pulse_store.set(SUBAGENT_SWEPT, sorted(swept | newly))
     return closed
 
 
@@ -748,7 +751,8 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
     read, a backfill (``memory_backfill``) reads older history the same way,
     and is marked done when nothing in its window is left: for every
     profile only if ``sources`` were every profile's (``reads`` "all").
-    Counts go into ``done`` as they happen, so a caller's dict keeps them
+    Each profile's first run also closes the open items an older build
+    kept from a subagent's run (``forget_subagent_items``). Counts go into ``done`` as they happen, so a caller's dict keeps them
     when the run stops on an unreadable state.db."""
     done = {} if done is None else done
     for key in ("chunks", "items", "tokens", "failed", "skipped"):

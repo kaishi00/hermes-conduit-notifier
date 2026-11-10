@@ -220,9 +220,25 @@ _NOT_WORK = ("s.id NOT IN (WITH RECURSIVE work(id) AS (SELECT value FROM json_ea
              "UNION SELECT c.id FROM sessions c JOIN work ON c.parent_session_id = work.id) SELECT id FROM work)")
 
 # A subagent's run (tools/delegate_tool): its "user" turn is the brief the
-# parent agent or a job wrote, never the person (as room_memory reads it).
-_NOT_SUBAGENT = ("lower(COALESCE(s.source, '')) != 'subagent' AND COALESCE(json_extract(CASE WHEN "
-                 "json_valid(s.model_config) THEN s.model_config ELSE '{}' END, '$._delegate_from'), '') = ''")
+# parent agent or a job wrote, never the person. As room_memory._delegated
+# reads it: Hermes' subagent source or a _delegate_from mark, but never a
+# branch (_branched_from), which copies its parent's marks and is a chat of
+# its own. A state.db with no model_config column goes by the source alone.
+def _subagent(home: Path) -> str:
+    """SQL true for a session ``s`` that is a subagent's run."""
+    conn = _connect(home)
+    try:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
+    except sqlite3.Error as error:
+        raise HermesUnreadable(str(error)) from error
+    finally:
+        conn.close()
+    marks = ("(CASE WHEN json_valid(s.model_config) THEN s.model_config ELSE '{}' END)"
+             if "model_config" in columns else "'{}'")
+    return (f"(COALESCE(json_extract({marks}, '$._branched_from'), '') = '' AND "
+            f"(lower(COALESCE(s.source, '')) = 'subagent' OR "
+            f"COALESCE(json_extract({marks}, '$._delegate_from'), '') != ''))")
+
 
 # The chats a person had: every session but ``excluded`` (the home chat's
 # whole compression chain), cron runs, subagent runs, hidden chats and a
@@ -233,17 +249,19 @@ _EXCLUDED = (
     "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
     "excluded(id) AS (SELECT ? UNION SELECT id FROM up "
     "UNION SELECT s.id FROM sessions s JOIN excluded e ON s.parent_session_id = e.id) ")
-_PERSON_ROWS = (
-    "m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
-    "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
-    "AND " + _NOT_SUBAGENT + " AND " + _NOT_WORK)
+
+
+def _person_rows(home: Path) -> str:
+    return ("m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
+            "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 "
+            "AND s.id NOT IN (SELECT id FROM excluded) AND NOT " + _subagent(home) + " AND " + _NOT_WORK)
 
 
 def subagent_chats(home: Path, chat_ids: Iterable[str]) -> set[str]:
-    """Which of ``chat_ids`` are a subagent's runs (``_NOT_SUBAGENT``)."""
+    """Which of ``chat_ids`` are a subagent's runs (``_subagent``)."""
     ids = json.dumps(sorted({chat for chat in chat_ids if chat}))
-    rows = _run(home, "SELECT s.id FROM sessions s WHERE s.id IN (SELECT value FROM json_each(?)) AND NOT ("
-                + _NOT_SUBAGENT + ")", (ids,))
+    rows = _run(home, "SELECT s.id FROM sessions s WHERE s.id IN (SELECT value FROM json_each(?)) AND "
+                + _subagent(home), (ids,))
     return {row["id"] for row in rows}
 
 
@@ -256,7 +274,7 @@ def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: i
     return _run(home, (
         _EXCLUDED + "SELECT * FROM (SELECT s.id AS chat_id, s.title, m.role, substr(m.content, 1, ?) AS content, "
         "m.timestamp, m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
-        "WHERE m.timestamp >= ? AND " + _PERSON_ROWS + " "
+        "WHERE m.timestamp >= ? AND " + _person_rows(home) + " "
         "ORDER BY m.timestamp DESC, m.id DESC LIMIT ?) ORDER BY timestamp, id"
     ), (exclude_chat, exclude_chat, max_chars, since, _workstreams(home), limit))
 
@@ -271,7 +289,7 @@ def chat_activity(home: Path, *, exclude_chat: str, since: float,
         _EXCLUDED + "SELECT s.id AS chat_id, s.parent_session_id AS parent, MAX(m.id) AS last_id, "
         "MAX(m.timestamp) AS last_at, SUM(MIN(LENGTH(m.content), ?)) AS chars FROM messages m "
         "JOIN sessions s ON s.id = m.session_id WHERE m.timestamp > ? AND m.timestamp <= ? AND "
-        + _PERSON_ROWS + " GROUP BY s.id ORDER BY last_at"
+        + _person_rows(home) + " GROUP BY s.id ORDER BY last_at"
     ), (exclude_chat, exclude_chat, max_chars, since, float("inf") if until is None else until,
         _workstreams(home)))
 

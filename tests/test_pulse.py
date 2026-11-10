@@ -2431,6 +2431,24 @@ def test_a_subagents_run_is_not_a_chat_the_person_had(db, tmp_path):
     assert [r["chat_id"] for r in hermes.chat_activity(tmp_path, exclude_chat=SID, since=DAY)] == ["work"]
     assert [r["chat_id"] for r in hermes.recent_messages(tmp_path, exclude_chat=SID, since=DAY)] == ["work"]
     assert hermes.subagent_chats(tmp_path, ["work", "sub", "marked", "gone"]) == {"sub", "marked"}
+    # A branch copies its parent's marks but is a chat of its own (as room_memory reads it).
+    db.session("branch", title="Branch", pinned=0)
+    db.model("branch", model="m", config={"_delegate_from": "work", "_branched_from": "marked"})
+    db.message("user", "My own question", sid="branch", at=DAY + 50)
+    assert [r["chat_id"] for r in hermes.chat_activity(tmp_path, exclude_chat=SID, since=DAY)] == ["work", "branch"]
+    assert hermes.subagent_chats(tmp_path, ["branch"]) == set()
+
+
+def test_a_state_db_without_model_config_goes_by_the_subagent_source(db, tmp_path):
+    db.session()
+    db.session("work", title="Work", pinned=0)
+    db.session("sub", title="[yelan] Subagent: audit", pinned=0, source="subagent")
+    db.message("user", "hello", sid="work", at=DAY + 20)
+    db.message("user", "finish the audit", sid="sub", at=DAY + 30)
+    db._exec("ALTER TABLE sessions DROP COLUMN model_config")
+    assert [r["chat_id"] for r in hermes.chat_activity(tmp_path, exclude_chat=SID, since=DAY)] == ["work"]
+    assert [r["chat_id"] for r in hermes.recent_messages(tmp_path, exclude_chat=SID, since=DAY)] == ["work"]
+    assert hermes.subagent_chats(tmp_path, ["work", "sub"]) == {"sub"}
 
 
 _RECALLED = ("<memory-context>\n[System note: The following is recalled memory context, NOT new user input. "
@@ -2687,6 +2705,10 @@ def test_items_an_older_build_kept_from_a_subagents_run_close_once(remembering, 
     # Once: a later run doesn't look again.
     remembering.store.advance("", "sub", message_id=2, at=DAY + 70, items=[{**item, "message_id": 2}])
     assert memory.forget_subagent_items(remembering.store, [("", remembering.store.path.parent, SID)]) == 0
+    # A profile the first run didn't read (reports from "this" profile only) is swept when one does.
+    remembering.store.advance("other", "sub", message_id=1, at=DAY, items=[item])
+    assert memory.forget_subagent_items(remembering.store, [("other", remembering.store.path.parent, SID)]) == 1
+    assert remembering.store.get(memory.SUBAGENT_SWEPT) == ["", "other"]
 
 
 def test_a_commitment_learned_after_its_time_is_kept_as_expired(remembering, db):
