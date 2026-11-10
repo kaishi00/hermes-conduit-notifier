@@ -2070,3 +2070,60 @@ def test_the_phone_tool_lists_and_runs_shortcuts_and_always_alerts(home):
     assert stray["ok"] is False and "label" in stray["note"]
     missing = json.loads(tool.handle_phone({"action": "run_shortcut", "shortcut": "Nope"}, profile="work"))
     assert missing["ok"] is False and missing["error"] == "unknown_shortcut"
+
+
+# --- Contact changes ---------------------------------------------------------------------
+
+
+def test_contact_changes_need_the_user_to_allow_them_and_a_picked_person(store, iphone):
+    store.ingest(iphone.seal(_phone_batch()))
+    with pytest.raises(phone.PhoneError) as raised:
+        store.add_change("add_contact", {"given_name": "Jo"})
+    assert raised.value.code == "nothing_shared"
+    store.ingest(iphone.seal(_phone_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", contacts_edit=True)))
+    added = store.add_change("add_contact", {"given_name": "Jo", "family_name": "Park", "relation": "dentist",
+                                             "phones": [{"number": "+1 555 0100", "label": "work"}]},
+                             )
+    # Never without asking, whatever else the user lets Hermes add.
+    assert added["summary"] == "Add Jo Park" and added["auto"] is False
+    with pytest.raises(phone.PhoneError) as raised:
+        store.add_change("update_contact", {"nickname": "S"}, {"contact_id": "p_nobody"})
+    assert raised.value.code == "unknown_contact"
+    changed = store.add_change("update_contact", {"emails": []}, {"contact_id": "p_sam"})
+    assert changed["summary"] == "Change Sam Taylor"
+    deleted = store.add_change("delete_contact", None, {"contact_id": "p_alex"})
+    assert deleted["summary"] == "Delete Alex Kim"
+    sent = {change["kind"]: change for change in iphone.changes(store)}
+    assert sent["add_contact"]["fields"]["name"] == "Jo Park" and sent["add_contact"]["target"] is None
+    assert sent["update_contact"]["fields"] == {"emails": [], "name": "Sam Taylor"}
+    assert sent["delete_contact"]["fields"] == {"name": "Alex Kim"}
+    for fields, target in (({"shoe_size": 9}, None), ({}, None), ({"phones": [{"number": "call me"}]}, None),
+                           ({"nickname": "x"}, {"contact_id": "p_sam", "x": 1})):
+        with pytest.raises(phone.PhoneError):
+            store.add_change("add_contact" if target is None else "update_contact", fields, target)
+    with pytest.raises(phone.PhoneError):
+        store.add_change("delete_contact", {"name": "x"}, {"contact_id": "p_sam"})
+    # Editing is part of sharing them.
+    store.ingest(iphone.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00",
+                                    sharing=_sharing(contacts_edit=True))))
+    with pytest.raises(phone.PhoneError):
+        store.add_change("add_contact", {"given_name": "Jo"})
+
+
+def test_the_contacts_tool_asks_the_phone_to_add_change_and_delete(home):
+    store, handset = _shared(home, contacts=True, contacts_edit=True)
+    store.ingest(handset.seal(_phone_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", contacts_edit=True)))
+    added = json.loads(tool.handle_contacts({"action": "add", "given_name": "Jo", "reason": "From the email"},
+                                            profile="work"))
+    assert added["ok"] is True and added["status"] == "waiting_for_approval" and added["summary"] == "Add Jo"
+    assert home.sent[-1]["title_label"] == "phone.add_contact"
+    changed = json.loads(tool.handle_contacts({"action": "update", "contact_id": "p_sam", "nickname": "Sam"},
+                                              profile="work"))
+    assert changed["ok"] is True and changed["summary"] == "Change Sam Taylor"
+    stray = json.loads(tool.handle_contacts({"action": "delete", "contact_id": "p_sam", "nickname": "x"},
+                                            profile="work"))
+    assert stray["ok"] is False and "nickname" in stray["note"]
+    assert json.loads(tool.handle_contacts({"action": "add", "contact_id": "p_sam", "given_name": "x"},
+                                           profile="work"))["ok"] is False
+    # People still reads; voice keeps only people.
+    assert json.loads(tool.handle_contacts({"action": "people"}))["ok"] is True

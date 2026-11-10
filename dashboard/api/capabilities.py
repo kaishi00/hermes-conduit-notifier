@@ -157,6 +157,9 @@ ROUTE_CAPABILITIES = (
     # sharing.shortcuts and a batch's "shortcuts" (the Shortcuts Hermes may
     # run, by name), the run_shortcut change and a result's "result" text.
     "phone-shortcuts",
+    # sharing.contacts_edit and the add_contact, update_contact and
+    # delete_contact changes.
+    "phone-contact-edits",
     "location-sync",
     "location-locate",
     # sharing.other_profiles: the host's other profiles paired with the
