@@ -347,6 +347,15 @@ def tool_watch(session_id: str, reason: str, *, asked: bool) -> dict[str, Any]:
     return _store(get_hermes_home()).add_tool_watch(session_id, reason, asked)
 
 
+def in_call() -> bool:
+    """Whether the user is in a voice call with Hermes right now, so nothing
+    rings. Never raises: an unreadable store reads as not in a call."""
+    try:
+        return _store(get_hermes_home()).in_call()
+    except Exception:  # noqa: BLE001 — the call's own decision checks again
+        return False
+
+
 def alert(session_id: str, kind: str, reason: str, *, profile: str, turn_session_id: str = "") -> None:
     """Hermes waits on the user's approval or answer: call if it stays
     unanswered (alert calls on). ``turn_session_id``: the id the turn hooks

@@ -20,8 +20,10 @@ Hermes gave. With "approval, question and failure calls" on, a request for
 the user's approval or answer that goes unanswered for a minute calls too
 (an alert: a watch that is already due), and so does a failed turn.
 
-While the user is in a Live Voice call (Conduit renews a presence hold),
-nothing rings: a call that would go out then sends the usual push instead.
+While the user is in a Live Voice call (Conduit renews a presence hold, and
+so does the host while it relays an Apple Watch call), nothing rings: a call
+that would go out then sends the usual push instead, and the call tool says
+so at once.
 
 A call the user declines, or that goes unanswered, comes back from Conduit
 as an outcome on the call's sessions; the next turn of one of them takes it,
@@ -891,6 +893,14 @@ class CallStore:
         with self._locked() as state:
             state["presence_until"] = self.clock() + hold if hold else 0.0
             return {"status": "present" if hold else "away"}
+
+    def in_call(self) -> bool:
+        """Whether the user is talking to Hermes right now (a call's presence,
+        or a watch Conduit holds through the call it was asked for in), so a
+        call would not ring (``_decide``'s "busy")."""
+        state = self._load()
+        now = self.clock()
+        return state["presence_until"] > now or _in_call(state, now)
 
     def hold(self, watch_id: Any, hold_s: Any) -> dict[str, Any]:
         """Renews a watch's hold for ``hold_s`` seconds while the call goes

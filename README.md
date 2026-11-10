@@ -2399,6 +2399,11 @@ and the dashboard routes under one file lock, so they survive restarts:
 - **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
   presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
   Nothing rings meanwhile: a call that would go out sends the usual push.
+  An Apple Watch call holds it too (0.158.2+): the host renews 90 seconds
+  every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
+  keeps it through a rejoin or a provider's drop, and lets go when the
+  Watch hangs up, the call fails on the host, or the grant ends. Two Watch calls on one
+  profile share it: it goes only when the last one ends.
 - **Declined and missed calls (0.15+):** when you decline a call, or it
   rings out, reaches a phone that was offline or is silenced by Do Not
   Disturb, Conduit reports it here with the call's id, session ids, kind,
@@ -2450,7 +2455,10 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   Voice.
 - `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
   decides". Either way the limits apply, presence holds it, and a session
-  already watched keeps one watch (it takes the reason).
+  already watched keeps one watch (it takes the reason). While presence
+  holds (0.158.2+), the tool answers `in_call` at once and sets nothing up,
+  so Hermes doesn't promise a ring that won't come; a call for later, once
+  something finishes, is still set up with `conduit_call_watch`.
 - **What's worth a call (0.16+):** with `rules` written (the user's own
   words, such as "only if production is down"), a call Hermes decides on
   first answers `check_rules` with them. It goes only when Hermes calls again

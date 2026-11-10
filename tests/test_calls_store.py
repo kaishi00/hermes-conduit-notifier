@@ -614,6 +614,20 @@ def test_a_watch_held_through_a_call_keeps_hermes_calls_from_ringing_over_it(tmp
     assert [result["status"] for result in store.fire_due()] == ["call"]
 
 
+def test_in_call_reads_what_keeps_a_call_from_ringing(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock=clock, enabled=True)
+    assert store.in_call() is False
+    store.set_presence(90)
+    assert store.in_call() is True
+    clock.now += 91
+    assert store.in_call() is False, "a presence that ran out"
+    store.add_watch(["st-1"], "Check the server", hold_s=60)
+    assert store.in_call() is True, "a watch held through the call it was asked for in"
+    clock.now += 61
+    assert store.in_call() is False
+
+
 def test_presence_released_before_any_state_writes_nothing(tmp_path):
     store = CallStore(tmp_path, clock=Clock())
     assert store.set_presence(0) == {"status": "away"}

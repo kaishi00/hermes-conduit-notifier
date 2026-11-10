@@ -143,6 +143,14 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
     if client.load_state() is None:
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
+    if calls.in_call():
+        # Already talking to Hermes (a phone, CarPlay or Apple Watch call):
+        # nothing would ring, so the model mustn't promise that it will.
+        return {"ok": False, "error": "in_call",
+                "note": ("The user is in a voice call with you right now, so their phone won't ring. If this "
+                         "conversation is that call, just tell them here. Otherwise put the news in your reply: "
+                         "they get the usual notification. To call them later, once something finishes, set up a call watch "
+                         f"with {call_watches.SETUP_TOOL} instead: it still calls after this call ends.")}
     if not asked:
         settings = calls.settings()
         rules = settings["rules"] if settings["enabled"] and settings["decides"] else ""

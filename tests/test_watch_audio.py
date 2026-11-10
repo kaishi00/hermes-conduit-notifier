@@ -553,6 +553,12 @@ class Watch:
         return kind, json.loads(plain) if kind == 3 else plain
 
 
+@pytest.fixture(autouse=True)
+def _fresh_presence_holders(monkeypatch):
+    """Each test starts with no bridge holding anyone's call presence."""
+    monkeypatch.setattr(api.watch_audio, "_watch_presence_holders", {})
+
+
 def _bridge(sessions=None, slots=None):
     grant = types.SimpleNamespace(grant_id=GRANT_ID, profile=None, relay_url="https://relay.example",
                                   credential="c", expires_at=time.monotonic() + 600, closed=types.SimpleNamespace(is_set=lambda: False))
@@ -627,6 +633,275 @@ def test_a_watch_stream_starts_echoes_and_ends(monkeypatch):
         assert bridge.session is None and bridge.slots.used == 0
 
     _run(scenario())
+
+
+def test_a_watch_call_holds_the_users_call_presence_until_they_hang_up(monkeypatch):
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_PRESENCE_RENEW_S", 0.02)
+
+    async def scenario():
+        held = []
+        bridge = _bridge()
+        bridge.grant.profile = "work"
+
+        async def presence(profile, hold_s):
+            held.append((profile, hold_s))
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: len(held) >= 3)
+        assert set(held) == {("work", api.watch_audio.WATCH_AUDIO_PRESENCE_S)}, "renewed while the call runs"
+        # The Watch dropping keeps it, for the rejoin.
+        await bridge._handle(bytes([0, 2]))
+        assert ("work", 0) not in held and bridge.presence_held
+        rejoined = Watch()
+        await bridge._handle(rejoined.hello())
+        await bridge._handle(rejoined.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: bridge.session is not None)
+        held.clear()
+        await bridge._handle(rejoined.control({"type": "end"}))
+        await _until(lambda: ("work", 0) in held)
+        assert held[-1] == ("work", 0) and not bridge.presence_held, "hung up: let go"
+        await asyncio.sleep(0.06)
+        assert held[-1] == ("work", 0), "no renewal after the call"
+        assert len(socket.sent) >= 2
+
+    _run(scenario())
+
+
+def test_the_grants_end_lets_go_of_a_presence_a_dropped_call_kept():
+    async def scenario():
+        held = []
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            held.append(hold_s)
+        bridge.presence = presence
+        bridge.stop_requested.set()
+        await bridge._main()
+        assert held == [], "never held: nothing to let go"
+        bridge.presence_held = True
+        await bridge._main()
+        assert held == [0]
+
+    _run(scenario())
+
+
+def test_a_presence_that_cant_be_set_never_stops_the_call(monkeypatch):
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+
+    async def scenario():
+        bridge = _bridge()
+        tried = []
+
+        async def presence(profile, hold_s):
+            tried.append(hold_s)
+            raise OSError("disk")
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: len(socket.sent) == 1 and tried)
+        assert watch.open(socket.sent[0]) == (3, {"type": "started", "engine": "grok"})
+        await bridge._handle(watch.control({"type": "end"}))
+        await _until(lambda: len(socket.sent) == 2)
+        # Claimed before its first write, so the hang-up still lets go.
+        assert not bridge.presence_held and tried == [api.watch_audio.WATCH_AUDIO_PRESENCE_S, 0]
+
+    _run(scenario())
+
+
+def test_a_failed_watch_session_lets_go_of_the_presence(monkeypatch):
+    class FailingGrok(EchoSession):
+        async def run(self):
+            raise api.watch_audio.WatchAudioFailure("failed", "no runtime")
+
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", FailingGrok)
+
+    async def scenario():
+        held = []
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            await asyncio.sleep(0)
+            held.append(hold_s)
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: bridge.session is None and 0 in held)
+        assert held[-1] == 0 and not bridge.presence_held, "a failed session is over: let go"
+        await asyncio.sleep(0.05)
+        assert held[-1] == 0, "nothing written after the release"
+
+    _run(scenario())
+
+
+def test_one_watch_calls_end_keeps_another_calls_presence(monkeypatch):
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_PRESENCE_RENEW_S", 0.02)
+    async def scenario():
+        held = []
+
+        async def presence(profile, hold_s):
+            held.append((profile, hold_s))
+        bridges = []
+        for _ in range(2):
+            bridge = _bridge()
+            bridge.grant.profile = "work"
+            bridge.presence = presence
+            socket = await _attach(bridge)
+            watch = Watch()
+            await bridge._handle(watch.hello())
+            await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+            await _until(lambda: bridge.session is not None)
+            bridges.append((bridge, watch))
+        first, first_watch = bridges[0]
+        await first._handle(first_watch.control({"type": "end"}))
+        await _until(lambda: first.session is None and not first.presence_held)
+        assert ("work", 0) not in held, "the other Watch call still holds it"
+        second, second_watch = bridges[1]
+        await second._handle(second_watch.control({"type": "end"}))
+        await _until(lambda: ("work", 0) in held)
+        assert held[-1] == ("work", 0)
+
+    _run(scenario())
+
+
+def test_a_provider_drop_keeps_the_presence_for_the_next_start(monkeypatch):
+    class DroppedGrok(EchoSession):
+        async def run(self):
+            await self.bridge.control(self.stream, {"type": "started", "engine": self.engine})
+            self.reason = "The connection to xAI was lost"
+
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", DroppedGrok)
+
+    async def scenario():
+        held = []
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            held.append(hold_s)
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: bridge.session is None and len(socket.sent) == 2)
+        assert 0 not in held and bridge.presence_held, "the Watch may start again: kept"
+        # The user hangs up with nothing running: let go.
+        await bridge._handle(watch.control({"type": "end"}))
+        await _until(lambda: 0 in held)
+        assert not bridge.presence_held
+
+    _run(scenario())
+
+
+def test_an_unreachable_provider_keeps_the_presence_and_a_failure_lets_go(monkeypatch):
+    async def scenario(code):
+        class FailingCode(EchoSession):
+            async def run(self):
+                # Mid-call: the hold is written before the provider fails.
+                await self.bridge.control(self.stream, {"type": "started", "engine": self.engine})
+                await _until(lambda: held)
+                raise api.watch_audio.WatchAudioFailure(code, "no")
+
+        monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", FailingCode)
+        # Each call alone: a kept hold from the call before would hold on.
+        monkeypatch.setattr(api.watch_audio, "_watch_presence_holders", {})
+        held = []
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            held.append(hold_s)
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: bridge.session is None and len(socket.sent) == 3)
+        assert held[0] == api.watch_audio.WATCH_AUDIO_PRESENCE_S
+        return held, bridge
+
+    for code in ("unreachable", "rate_limited"):
+        held, bridge = _run(scenario(code))
+        assert 0 not in held and bridge.presence_held, code
+    for code in ("unavailable", "failed", "busy", "refused"):
+        held, bridge = _run(scenario(code))
+        assert held[-1] == 0 and not bridge.presence_held, code
+
+
+def test_a_write_slower_than_the_wait_is_undone_after_the_release(monkeypatch):
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", EchoSession)
+    monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_STOP_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(api.watch_audio, "WATCH_AUDIO_PRESENCE_RENEW_S", 0.02)
+
+    async def scenario():
+        held = []
+        slow = asyncio.Event()
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            if hold_s and slow.is_set():
+                await asyncio.sleep(0.1)
+            held.append(hold_s)
+        bridge.presence = presence
+        await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: len(held) >= 1)
+        slow.set()
+        await asyncio.sleep(0.03)  # a renewal is now in flight
+        await bridge._handle(watch.control({"type": "end"}))
+        await _until(lambda: bridge.session is None and 0 in held)
+        await asyncio.sleep(0.2)
+        assert held[-1] == 0 and held.count(0) == 2, "released, then the late write undone"
+        assert bridge.slots.used == 0
+
+    _run(scenario())
+
+
+def test_a_newer_session_on_the_stream_gets_no_ended_for_the_one_before(monkeypatch):
+    class Replaced(EchoSession):
+        async def run(self):
+            # A newer session took this stream before this one's cleanup.
+            self.bridge.session = types.SimpleNamespace(stream=self.stream)
+            self.reason = "restarted"
+
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", Replaced)
+
+    async def scenario():
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            pass
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        task = bridge.session_task
+        await asyncio.gather(task, return_exceptions=True)
+        assert socket.sent == [], "no ended for the replaced session"
+        assert bridge.presence_held, "the newer session keeps the presence"
+
+    _run(scenario())
+
+
+def test_the_host_sets_presence_only_for_a_paired_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_load_pairing_state", lambda path: None)
+    api.watch_audio._watch_call_presence_now(90)
+    assert not (tmp_path / "conduit-calls.json").exists()
+    monkeypatch.setattr(api.core, "_load_pairing_state", lambda path: {"credential": "x"})
+    api.watch_audio._watch_call_presence_now(90)
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
+    assert store.in_call() is True
 
 
 def test_the_watch_leaving_ends_the_session_without_writing_to_its_stream(monkeypatch):

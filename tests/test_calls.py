@@ -971,6 +971,24 @@ def test_nothing_rings_during_a_live_voice_call(home, fake, paired):
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
 
 
+def test_the_tool_says_at_once_that_a_user_in_a_call_wont_be_rung(home, fake, paired):
+    _settings(home)
+    calls._store(home).set_presence(90)
+    answer = _tool({"reason": "Done.", "asked_by_user": True})
+    assert answer["ok"] is False and answer["error"] == "in_call"
+    assert "won't ring" in answer["note"]
+    assert calls._store(home).watch_count() == 0, "nothing waits to ring after the call either"
+    calls._store(home).set_presence(0)
+    assert _tool({"reason": "Done.", "asked_by_user": True})["status"] == "call_at_turn_end"
+
+
+def test_an_unreadable_call_store_never_reads_as_a_call(home, monkeypatch):
+    def broken(home):
+        raise OSError("disk")
+    monkeypatch.setattr(calls, "_store", broken)
+    assert calls.in_call() is False
+
+
 def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clock, monkeypatch, paired):
     loop = sys.modules["conduit_push.clarify_loop"]
     _settings(home, alerts=True)

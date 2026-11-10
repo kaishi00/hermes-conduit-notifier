@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.158.2 (2026-11-10)
+
+### Fixes
+- During an Apple Watch call, Hermes could still try to phone you and say
+  your phone was about to ring. The ring then hit the busy Watch, which
+  declined it and could lose its microphone until you tapped. A Watch call
+  now counts as being in a call, as a phone call does: nothing rings over
+  it, and Hermes is told at once that you're already talking.
+
 ## 0.158.1 (2026-11-10)
 
 ### Fixes
