@@ -70,6 +70,8 @@ WHY_LIMIT = 300
 SKIPS = ("done", "covered", "raised", "rated", "minor")
 # Left out by ``decide``, not the model: its pick fits no card type.
 SHAPELESS = "shapeless"
+# Remembered kinds the user asked Pulse for: they come up even as plain words.
+ASKED_KINDS = ("reminder", "watch")
 SOURCES = ("chat", "calendar", "reminders", "notes", "jobs", "tools")
 AREAS = ("work", "personal", "health", "home", "money", "social", "travel", "other")
 # The model call's room: what it reads (about the report turn's), and its answer.
@@ -633,23 +635,24 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
             continue
         if ref in away or (ref in recent and not due_again(row, recent[ref], now)):
             row["skip"] = "raised"  # moving a reminder isn't news, nor a calendar entry coming closer
-    once_each(rows)
-    for row in still_open(pulse_store, [row for row in rows if id(row) not in deliberate], now, closing):
-        if not row.get("skip"):
-            row["skip"] = "raised"  # its card says it still
     # What fits no card type stays out (Eric, 2026-11-10: a shape's facts are
     # checked, and the cards that read as noise were the plain ones), unless
-    # the user asked to be reminded of it, it's a floor, or it updates or
-    # closes a card on purpose.
+    # the user asked for it (a found one marked asked, a remembered reminder
+    # or watch), it's a floor, or it updates or closes a card on purpose.
+    # Before once_each, so a plain one never takes its shaped double's place.
     for row in rows:
-        if (row.get("decision") or row.get("skip") or id(row) in deliberate
-                or row.get("asked") is True or floor(row, now)):
+        if (row.get("decision") or row.get("skip") or id(row) in deliberate or row.get("asked") is True
+                or (row["origin"] == MEMORY and row["kind"] in ASKED_KINDS) or floor(row, now)):
             continue
         pick = pulse_picks.loads(row.get("pick"))
         if pick is not None and pick.get("shape") == pulse_picks.PLAIN:
             row["skip"] = SHAPELESS
             failed = str((pick or {}).get("dropped") or "")
             pulse_picks.count(pulse_store, now, ["left_out:plain"] + ([f"left_out:plain:{failed}"] if failed else []))
+    once_each(rows)
+    for row in still_open(pulse_store, [row for row in rows if id(row) not in deliberate], now, closing):
+        if not row.get("skip"):
+            row["skip"] = "raised"  # its card says it still
     if learned is None:
         learned = pulse_store.learned(now)
     muted = {(rule["profile"], rule["chat_id"]) for rule in learning.chat_rules(pulse_store) if rule["chat_id"]}
