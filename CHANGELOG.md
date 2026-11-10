@@ -20,6 +20,9 @@ checks it). The format is fixed, because Conduit reads it:
   number copied from its related or later lines, and markers in its opening
   line, which is the brief's push. A line starting with a real number, such
   as "#1 priority", keeps it.
+- A card about something on your calendar no longer offers to add it to the
+  calendar or block time for it, and its headline says the thing without
+  made-up advice.
 
 ## 0.157.2 (2026-11-10)
 

@@ -54,6 +54,20 @@ def test_actions_without_what_they_need_are_left_out():
     assert actions == [{"label": "Retry", "does": "ask", "say": "Run the audit again"}]
 
 
+def test_a_calendar_entry_gets_no_button_to_put_it_on_the_calendar():
+    # Eric's brief, 2026-11-10: "Block calendar time" on a Duty Day read from his calendar.
+    entry = {"line": "Duty Day on Tuesday 17 November", "subject": "v1", "shape": "date",
+             "facts": {"day": "2026-11-17", "what": "Duty Day", "whose": ""},
+             "actions": [{"label": "Block calendar time", "does": "ask", "say": "Block the day for work"},
+                         {"label": "Done", "does": "done"}]}
+    pick, _ = picks.parse(entry)
+    assert pick["actions"] == [{"label": "Done", "does": "done"}]
+    # Something remembered (not read from the calendar) may still offer it.
+    kept, _ = picks.parse({**entry, "subject": "#41"})
+    assert kept["actions"][0]["label"] == "Block calendar time"
+    assert "never offer to add it" in picks.PICK_RULES
+
+
 def test_drawn_bodies_only_for_apps_that_draw_them():
     entry = {"line": "Rain at 4", "shape": "drawn",
              "facts": {"body": {"type": "weather", "title": "Rain", "location": "Paris"}}}
