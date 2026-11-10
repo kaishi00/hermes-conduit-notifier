@@ -97,7 +97,10 @@ async def get_workstreams(request: Request, response: Response, profile: Optiona
     take and how they can file it (``manage``: pin, unpin, resolve,
     reopen); ``counts`` for the Work strip (working, needs_you, ready,
     waiting); ``resolved_count``; ``policy`` ("off" when the bot's
-    workstreams are off) and ``bot_chat``. ``resolved=1``: the Resolved
+    workstreams are off), ``bot_chat`` and ``coordination`` (its ``mode``
+    and ``items``: what the watch flagged, what the Bot Chat sent on its own
+    and asked the user over the last day, each with the lines behind it).
+    ``resolved=1``: the Resolved
     list instead, last resolved first, a page at a time (``before``: the
     last row's ``closed_at``; ``more`` says there's another page)."""
     response.headers["Cache-Control"] = "no-store"
