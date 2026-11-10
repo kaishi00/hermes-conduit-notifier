@@ -3154,6 +3154,52 @@ def test_a_message_hermes_never_stored_goes_back_to_the_coordinator(on, hermes, 
     assert "Use staging." not in wake["text"]
 
 
+def test_a_message_hermes_joined_to_another_counts_as_stored(on, hermes, home, monkeypatch):
+    """Hermes v0.23 saves what's steered into a turn as one row in its own
+    wrapper, the user's words and the bot's together, and runs what's queued
+    behind a turn as one message. The copy it keeps while a message waits is
+    inactive, and isn't the message having run."""
+    import sqlite3
+
+    start()
+    steered = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nSwitch to v2.")
+    queued = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nThen write tests.")
+    waiting = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nNever ran.")
+    _chat_db(home, [(WORKER_1, "user", "[OUT-OF-BAND USER MESSAGE — a direct message from the user]\nKeep the CSV "
+                                       "format\nBot passes on:\nSwitch to v2.\n[/OUT-OF-BAND USER MESSAGE]", "steer"),
+                    (WORKER_1, "user", "Bot passes on:\nThen write tests.\n\nAlso update the README", None)])
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("INSERT INTO messages (session_id, role, content, active) VALUES (?, 'user', ?, 0)",
+                    (WORKER_1, "Bot passes on:\nNever ran."))
+    on.update("W1", status="done")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert submitted_to(hermes, WORKER_1) == []
+    assert not {steered, queued, waiting} & {row["id"] for row in on.outbox_pending()}
+    work.flush_wakes()
+    wake, = submitted_to(hermes, BOT_CHAT)
+    assert "Never ran." in wake["text"] and "may not have reached it" in wake["text"]
+    assert "Switch to v2." not in wake["text"] and "Then write tests." not in wake["text"]
+
+
+def test_a_longer_message_that_starts_the_same_is_not_this_one(on, home):
+    """A send is in the transcript as a whole part of a row, on lines of its
+    own. A registry from before Hermes marked rows active is read too."""
+    import sqlite3
+
+    _chat_db(home, [(WORKER_1, "user", "Bot passes on:\nUse staging. Do not deploy.", None),
+                    (WORKER_1, "user", "Bot passes on:\nStop.\nOnly if the API breaks.", None),
+                    (WORKER_1, "user", "First\n\nBot passes on:\nSecond.\n\nThird", None)])
+    assert not work._in_transcript(home, WORKER_1, "Bot passes on:\nUse staging.")
+    assert work._in_transcript(home, WORKER_1, "Bot passes on:\nUse staging. Do not deploy.")
+    assert not work._in_transcript(home, WORKER_1, "Bot passes on:\nStop.")
+    assert work._in_transcript(home, WORKER_1, "Bot passes on:\nSecond.")
+    assert not work._in_transcript(home, WORKER_1, "Second")
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("ALTER TABLE messages DROP COLUMN active")
+    assert work._in_transcript(home, WORKER_1, "Bot passes on:\nSecond.")
+
+
 # The Work panel (M2): what Conduit shows, and the user's own actions --------------
 
 def test_the_work_panel_lists_work_with_its_counts_and_actions(on, hermes):

@@ -1,5 +1,6 @@
 """Group room turns and Pulse's own turns stay out of the memory provider."""
 import importlib.util
+import hashlib
 import json
 import logging
 import sqlite3
@@ -53,7 +54,10 @@ def _manager_class():
             self.saved.append(("queue_prefetch_all", query))
 
         def on_turn_start(self, turn_number, message, **kwargs):
-            self.saved.append(("on_turn_start", message))
+            if "previous_message" in kwargs:
+                self.saved.append(("on_turn_start", message, kwargs["previous_message"]))
+            else:
+                self.saved.append(("on_turn_start", message))
 
     return MemoryManager
 
@@ -457,6 +461,13 @@ def test_a_pulse_turn_is_not_saved_recalled_or_counted_by_the_provider(guard, he
     manager.sync_all("why the dentist?", "It's Thursday.", session_id="sess_pulse")
     assert manager.saved == [("on_turn_start", "why the dentist?"), ("sync_all", "why the dentist?", "sess_pulse")]
 
+    # Hermes 0.23 hands the provider the person's last message, stripped; after
+    # a Pulse ask that is the ask, which the provider gets as no message (#652).
+    manager.saved.clear()
+    manager.on_turn_start(6, "and Friday?", previous_message=ask.strip())
+    manager.on_turn_start(7, "thanks", previous_message="and Friday?")
+    assert manager.saved == [("on_turn_start", "and Friday?", ""), ("on_turn_start", "thanks", "and Friday?")]
+
 
 def test_a_user_quoting_a_pulse_tag_is_still_saved(guard, hermes, tmp_path):
     ask = _pulse_sent(tmp_path, REPORT)
@@ -537,7 +548,13 @@ def test_a_finished_report_cut_to_its_first_line_is_still_told_from_a_user_quoti
     assert pulse_store.attempt_by_tag(attempt["tag"])["text"] == heading
 
     quoted = f"{heading}\nWhat did the second card mean?"
-    assert guard.pulse_asks(tmp_path, [ask, quoted, heading]) == [True, False, False]
+    # Hermes hands a provider the last message stripped (#652): REPORT ends in a newline.
+    assert ask != ask.strip()
+    assert guard.pulse_asks(tmp_path, [ask, ask.strip(), quoted, heading]) == [True, True, False, False]
+    # An attempt stored before 0.153.4 has the digest of its whole text, newline included.
+    with sqlite3.connect(tmp_path / store.DB_NAME) as conn:
+        conn.execute("UPDATE attempts SET text_sha=?", (hashlib.sha256(ask.encode()).hexdigest(),))
+    assert guard.pulse_asks(tmp_path, [ask, ask.strip(), quoted, heading]) == [True, True, False, False]
     chat = [{"role": "user", "content": ask}, {"role": "assistant", "content": "Three cards."},
             {"role": "user", "content": quoted}, {"role": "assistant", "content": "The dentist."}]
     assert guard.without_pulse(tmp_path, chat) == chat[2:]

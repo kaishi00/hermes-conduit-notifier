@@ -282,7 +282,8 @@ def unreadable_arguments(args: Any) -> tuple[str, str] | None:
     """Where a call's arguments, given as JSON text, can't be read and the
     parser's words (``("calls[1].arguments", "Expecting ...")``), as Hermes
     reads them (tools/tool_search_validation.normalize_tool_call_entries):
-    each entry of ``calls`` when it's there, else the single ``arguments``.
+    each entry of ``calls`` when it's there, else the single ``arguments``
+    (or ``args``, which ``called`` also reads).
     Blank text is no arguments, as there. None when every one reads, or when
     ``calls`` itself doesn't (``unreadable_calls``)."""
     if not isinstance(args, dict):
@@ -301,7 +302,8 @@ def unreadable_arguments(args: Any) -> tuple[str, str] | None:
     else:
         entries = [("arguments", args)]
     for where, entry in entries:
-        arguments = entry.get("arguments") if isinstance(entry, dict) else None
+        # "args" too, as ``called`` reads it, so neither spelling is read as {}.
+        arguments = entry.get("arguments", entry.get("args")) if isinstance(entry, dict) else None
         if not isinstance(arguments, str) or not arguments.strip():
             continue
         try:

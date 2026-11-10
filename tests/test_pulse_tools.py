@@ -205,6 +205,7 @@ def test_a_bridged_calls_unreadable_arguments_text_gets_the_parsers_words():
     assert not verdict.allowed
     assert verdict.message.startswith("That tool_call's calls[1].arguments is JSON text that couldn't be read (")
     assert tools.unreadable_arguments({"name": "conduit_phone", "arguments": "{"})[0] == "arguments"
+    assert tools.unreadable_arguments({"name": "conduit_maps", "args": "{"})[0] == "arguments"
     assert tools.unreadable_arguments(bridged(("conduit_contacts", '{"action": "people"'), as_text=True))[0] == \
         "calls[0].arguments"
     # Blank text is no arguments, as Hermes reads it; readable text and objects pass.

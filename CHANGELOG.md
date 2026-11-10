@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.153.5 (2026-11-10)
+## 0.153.6 (2026-11-10)
 
 ### Fixes
 - A bot whose tool call carries arguments that aren't valid JSON is told
@@ -24,6 +24,19 @@ checks it). The format is fixed, because Conduit reads it:
   desktop app has the Bot Chat open.
 - A review of seven or eight options from a workstream with a long name
   keeps "(more)" on its second half, so the two halves read differently.
+
+## 0.153.5 (2026-11-10)
+
+### Fixes
+- A message a Bot Chat sends to a workstream is no longer sent a second time
+  after a restart when Hermes had saved it joined to another message, such
+  as your own words sent at the same moment.
+
+## 0.153.4 (2026-11-10)
+
+### Fixes
+- On a Hermes newer than 0.23.0, your first message after a Pulse report no
+  longer hands the report to your memory provider as your last message.
 
 ## 0.153.3 (2026-11-10)
 

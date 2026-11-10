@@ -2691,24 +2691,50 @@ def _asked_in(home: Path, session_id: str) -> Optional[bool]:
 
 
 def _in_transcript(home: Path, session_id: str, text: str) -> bool:
-    """Whether Hermes stored this message in the session (queued or run)."""
+    """Whether this message is in the session's transcript, as its own
+    message or inside one: Hermes joins what's steered into a turn into one
+    row, in its own wrapper, and what's queued behind a turn into one
+    message (seen on v0.23.0). The copy Hermes keeps of a message while it
+    waits in the queue is inactive, and isn't the turn that ran with it.
+    Only a whole part counts: a longer message that starts with the same
+    words is another message."""
     import sqlite3
 
     path = Path(home) / "state.db"
-    if not path.exists():
+    if not path.exists() or not text:
         return False
     try:
         db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
     except sqlite3.Error:
         return False
     try:
-        row = db.execute("SELECT 1 FROM messages WHERE session_id = ? AND role = 'user' AND content = ? LIMIT 1",
-                         (session_id, text)).fetchone()
+        active = "AND active = 1 " if any(row[1] == "active" for row in db.execute("PRAGMA table_info(messages)")) else ""
+        rows = db.execute(f"SELECT content FROM messages WHERE session_id = ? AND role = 'user' {active}"
+                          "AND instr(content, ?) > 0 ORDER BY rowid DESC LIMIT 500", (session_id, text)).fetchall()
     except sqlite3.Error:
         return False
     finally:
         db.close()
-    return row is not None
+    return any(_whole_part(row[0], text) for row in rows)
+
+
+def _whole_part(content, text: str) -> bool:
+    """Whether the message is a whole part of this saved row, not the start
+    of a longer message that begins with the same words. Queued messages
+    are joined by a blank line, so there the part ends at one or at the
+    row's end; what's steered in is joined line to line inside Hermes'
+    wrapper, so there a line's end is enough."""
+    if not isinstance(content, str):
+        return False
+    steered = content.startswith("[OUT-OF-BAND")
+    at = content.find(text)
+    while at >= 0:
+        end = at + len(text)
+        after = content[end:end + 2]
+        if (at == 0 or content[at - 1] == "\n") and (not after or after == "\n\n" or (steered and after[0] == "\n")):
+            return True
+        at = content.find(text, at + 1)
+    return False
 
 
 _shutting_down = threading.Event()
@@ -3489,7 +3515,8 @@ def _keep_options(store: work_store.Store, work: work_store.Work, files: list[st
     # halves rather than out of sight, each with the two a decision needs.
     half = len(options) if len(options) <= 6 else (len(options) + 1) // 2
     # The second half's title keeps its "(more)" however long the first's.
-    decisions = [{"title": title if not at else _cut(title, 72) + " (more)", "options": options[at:at + half]}
+    more = " (more)"
+    decisions = [{"title": title if not at else _cut(title, 80 - len(more)) + more, "options": options[at:at + half]}
                  for at in range(0, len(options), half)]
     card = {"type": "review", "title": title, "review": {"for": work.ref, "decisions": decisions}}
     kept = _shown(store, work.ref)
