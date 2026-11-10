@@ -19,6 +19,12 @@ checks it). The format is fixed, because Conduit reads it:
 - With Read replies aloud on in Conduit, Hermes knows a typed message's
   answer will be heard too, so it doesn't send a sound file of its own.
 
+## 0.155.2 (2026-11-10)
+
+### Fixes
+- A Pulse card about something that went wrong offers to fix it. Without the
+  update its button could only ask how it stands.
+
 ## 0.155.1 (2026-11-10)
 
 ### Fixes
