@@ -20,6 +20,7 @@ from test_pulse_followup import CHAT, commitment, fake_redactor, followup, live 
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
 prefs = _load("conduit_push.pulse_prefs", ROOT / "pulse_prefs.py")
+picks = pulse.pulse_picks
 
 DAY = 1_792_454_400.0  # 2026-10-20 00:00 UTC
 SINCE = "Mon 19 Oct 08:00"
@@ -162,6 +163,31 @@ def test_found_candidates_need_a_line_and_say_where_they_came_from():
     # An unknown chat key, source and area name nothing; a wild value, a pick or a flag that isn't one count as none.
     assert (third["source"], third["area"], third["chat_id"], third["value"], third["bring_up"],
             third["actionable"]) == ("", "", "", None, False, None)
+
+
+def test_an_entry_with_a_line_keeps_its_pick_even_when_the_model_didnt_bring_it_up():
+    # What learning brings up anyway (pulse_candidates.route) is drawn from
+    # its pick, not left a plain card; an entry with no line has none.
+    def entry(**more):
+        return {"kind": "follow-up", "bring_up": False, "value": 4, "skip": "", "actionable": True,
+                "line": "Your Anker power bank's warranty ends Friday", "why": "From your order chat.",
+                "source": "chat", "chat": "c1", "area": "personal", "shape": "due",
+                "facts": {"due": "2026-11-13", "noticed": "2026-11-09"}, "actions": [], **more}
+
+    shown = [item(1)]
+    reply = {"remembered": [{"ref": 1, "bring_up": False, "value": 2, "skip": "", "line": "", "shape": "due",
+                             "facts": {"due": "2026-11-13", "noticed": "2026-11-09"}}],
+             "found": [entry()]}
+    rows = candidates.parse(reply, gathered(shown, chats={"c1": ("nahida", CHAT)}))
+    remembered, found = rows[0], rows[1]
+    assert not remembered.get("pick")
+    pick = picks.loads(found["pick"])
+    assert (pick["shape"], pick["facts"]["due"], pick["line"]) == (
+        "due", "2026-11-13", "Your Anker power bank's warranty ends Friday")
+
+
+def test_the_list_asks_for_a_pick_on_every_entry_with_a_line():
+    assert 'Every entry with a "line" is also a pick, "bring_up" true or not' in candidates.INSTRUCTIONS
 
 
 @pytest.mark.parametrize("value, expected", [(3, 3), (3.6, 4), ("5", 5), (0, None), (6, None), (True, None),

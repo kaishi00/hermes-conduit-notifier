@@ -13,6 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.153.2 (2026-11-10)
+
+### Fixes
+- Pulse cards that Pulse's learning brings up on its own get the same
+  headline, facts and buttons as the rest, instead of plain text.
+- Pulse cards no longer repeat their headline in the sentence under it,
+  draw a due bar that starts and ends on the same day, or show "your"
+  where a date names whose it is.
+
+### New and improved
+- Pulse asks for shorter headlines, a named first step instead of a bare
+  "Do it", and a job's run history when it has one.
+
 ## 0.153.1 (2026-11-09)
 
 ### Fixes

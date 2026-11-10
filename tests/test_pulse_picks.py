@@ -355,3 +355,25 @@ def test_a_left_out_candidate_with_no_pick_keeps_its_subject(tmp_path):
     row = pulse.learning.left_out_card(pulse_store, found, kinds=pulse.report.KINDS, now=1.0,
                                        item_chat_title=lambda item: "")
     assert row["subject"] == "job:default:41" and "look" not in row
+
+
+def test_a_pick_drops_facts_and_words_that_say_nothing_new():
+    # Eric's cards (2026-11-09): a due bar from today to today, a date
+    # "whose" of "your", and a detail that says the headline again.
+    due, _ = picks.parse({"line": "Apple Cash now requires Green Dot ID verification to reload, effective today",
+                          "detail": "Verification is required to continue using Apple Cash reloads.",
+                          "shape": "due", "facts": {"due": "2026-11-09", "noticed": "2026-11-09"}})
+    assert due["facts"] == {"due": "2026-11-09"} and due["detail"] == ""
+    earlier, _ = picks.parse({"line": "Renew the passport", "detail": "The form needs a new photo.",
+                              "shape": "due", "facts": {"due": "2026-11-20", "noticed": "2026-11-09"}})
+    assert earlier["facts"]["noticed"] == "2026-11-09" and earlier["detail"] == "The form needs a new photo."
+    for whose, kept in (("your", ""), ("Your", ""), ("the user", ""), ("Kwan", "Kwan")):
+        date, _ = picks.parse({"line": "Veterans Day and Duty Day", "shape": "date",
+                               "facts": {"day": "2026-11-11", "what": "Duty Day", "whose": whose}})
+        assert date["facts"]["whose"] == kept
+
+
+def test_the_pick_rules_ask_for_a_named_first_step_and_no_repeated_detail():
+    rules = picks.rules(())
+    assert "never the line said again" in rules and 'never a bare "Do it"' in rules
+    assert '"whose": a person\'s name' in rules
