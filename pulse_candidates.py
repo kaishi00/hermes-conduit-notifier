@@ -319,10 +319,11 @@ def with_pick(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None, 
     drawn from its pick too."""
     row["subject"] = subject_of(row, entry, jobs=jobs, shown=shown)
     if row.get("bring_up") or pulse_picks.clip(entry.get("line"), pulse_picks.LINE_LIMIT):
+        if pulse_picks.from_calendar(row["subject"]) and isinstance(entry.get("actions"), list):
+            # Matched to a calendar entry by its title too, not only its key:
+            # its buttons are filtered before the cap, as parse does by key.
+            entry = {**entry, "actions": pulse_picks.off_calendar(entry["actions"])}
         pick, why = pulse_picks.parse(entry, drawn_types=drawn, line=str(row.get("text") or ""))
-        if pick is not None and pulse_picks.from_calendar(row["subject"]):
-            # Matched to a calendar entry by its title too, not only its key.
-            pick["actions"] = pulse_picks.off_calendar(pick["actions"])
         if pick is not None:
             pick["line"] = pulse_picks.clip(str(row.get("text") or ""), pulse_picks.LINE_LIMIT) or pick["line"]
             if why:

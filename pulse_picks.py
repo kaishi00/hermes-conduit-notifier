@@ -221,7 +221,7 @@ def _url(value: Any) -> str:
 # Moving or cancelling it is a real step and stays.
 _CALENDAR_SUBJECT = re.compile(r"v\d+")
 CALENDAR_CARD_SUBJECT = "event:"
-_ONTO_CALENDAR = re.compile(r"\b(?:calendar|schedule)\b|\bblock\b.*\btime\b", re.IGNORECASE)
+_ONTO_CALENDAR = re.compile(r"\b(?:calendar|schedule|remind\w*)\b|\bblock\b.*\btime\b", re.IGNORECASE)
 _KEEPS_STEP = re.compile(r"\b(?:reschedul\w*|cancel\w*|mov(?:e|es|ed|ing)|shift\w*)\b", re.IGNORECASE)
 
 

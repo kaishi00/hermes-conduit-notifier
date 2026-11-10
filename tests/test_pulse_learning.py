@@ -504,12 +504,13 @@ def test_one_brief_when_several_processes_reach_its_time_together(live, monkeypa
         return real_swap(key, old, new)
     monkeypatch.setattr(live.store, "swap", swap)
     assert not pulse._maybe_brief(live.store, live.home, time.time()) and live.store.in_flight() == []
-    monkeypatch.undo()
+    monkeypatch.setattr(live.store, "swap", real_swap)  # the live fixture's own patches stay
     assert not pulse._maybe_brief(live.store, live.home, time.time())  # its claim stands for this slot
     assert live.store.in_flight() == []
-    # A claim whose process died before recording its attempt lapses.
+    # A claim whose process died before recording its attempt lapses, and the brief goes.
     assert pulse._maybe_brief(live.store, live.home, time.time() + pulse.brief.CLAIM_S + 1)
-    assert len(live.store.attempts_since(pulse.brief.BRIEF, 0)) == 1
+    [attempt] = live.store.attempts_since(pulse.brief.BRIEF, 0)
+    assert attempt["state"] != store.REFUSED
 
 
 def test_a_brief_with_nothing_kept_still_reads_the_calendar(live, monkeypatch):

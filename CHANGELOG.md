@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.157.6 (2026-11-10)
+
+### Fixes
+- A card about a calendar entry no longer offers a reminder for it, since the
+  entry has its own alerts.
+- A card matched to a calendar entry by its name could lose its Done button
+  when the buttons it shouldn't have were dropped.
+
 ## 0.157.5 (2026-11-10)
 
 ### Fixes

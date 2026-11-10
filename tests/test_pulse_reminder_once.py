@@ -4,6 +4,7 @@ for one cipher-lock reminder moved back each morning)."""
 
 import sqlite3
 import time
+from datetime import datetime
 
 import pytest
 
@@ -35,6 +36,14 @@ def test_the_list_gives_each_open_reminder_a_key(live):
     plain = report.gather(live.home, live.store, home_chat_id=SID, now=now)
     assert plain.reminders == {} and "\n- Buy milk" in plain.text
     assert "\n- Buy milk" in report.phone_context(live.home, now)[0]
+
+
+def test_the_phone_context_names_each_entrys_calendar(live):
+    # A holiday on another country's calendar read as the user's day off (Eric's host, 10 Nov).
+    phone_home(live.home)
+    synced = datetime(2026, 10, 14, 7, 0, tzinfo=UTC).timestamp()  # when phone_home's batch was synced
+    text = report.phone_context(live.home, synced)[0]
+    assert "Bank holiday (" in text and "; UK Holidays calendar)" in text
 
 
 @pytest.mark.parametrize("key, ref", [("r1", "reminder:r_lock"), (" R1 ", "reminder:r_lock"), ("r2", None),
