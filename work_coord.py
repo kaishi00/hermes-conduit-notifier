@@ -166,24 +166,22 @@ def _turn_prompts(home: Path, session_id: Any) -> Optional[list[tuple[str, Any]]
         columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
         active = " AND active = 1" if "active" in columns else ""
         kind = "display_kind" if "display_kind" in columns else "NULL"
-        calls = "tool_calls" if "tool_calls" in columns else "NULL"
-        rows = db.execute(f"SELECT role, content, {kind}, {calls} FROM messages WHERE session_id = ?{active} "
-                          "AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT 60",
-                          (str(session_id),)).fetchall()
+        where, args = f"session_id = ? AND role = 'user'{active}", [str(session_id)]
+        limit = 1  # no telling where the turn began: its newest prompt
+        if "tool_calls" in columns:
+            # However many tool calls the turn has made since.
+            ended = db.execute("SELECT MAX(id) FROM messages WHERE session_id = ? AND role = 'assistant'"
+                               f"{active} AND (tool_calls IS NULL OR tool_calls IN ('', '[]', 'null'))",
+                               (str(session_id),)).fetchone()
+            where, limit = where + " AND id > ?", 20
+            args.append(ended[0] if ended and ended[0] is not None else 0)
+        rows = db.execute(f"SELECT content, {kind} FROM messages WHERE {where} ORDER BY id DESC LIMIT {limit}",
+                          args).fetchall()
     except sqlite3.Error:
         return None
     finally:
         db.close()
-    prompts: list[tuple[str, Any]] = []
-    for role, content, shown, tool_calls in rows:
-        if role == "assistant":
-            if "tool_calls" in columns and tool_calls in (None, "", "[]", "null"):
-                break  # the reply that ended the turn before
-            continue
-        prompts.append((content if isinstance(content, str) else "", shown))
-        if "tool_calls" not in columns:
-            break  # no telling where the turn began: its newest prompt
-    return prompts
+    return [(content if isinstance(content, str) else "", shown) for content, shown in rows]
 
 
 def _users_own(prompt: tuple[str, Any]) -> bool:

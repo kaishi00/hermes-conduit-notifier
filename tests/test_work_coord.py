@@ -245,6 +245,10 @@ def test_a_turn_is_the_users_when_any_of_its_messages_is(on, hermes, home):
         con.execute("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
                     (BOT_CHAT, '[{"id": "c1"}]'))
     assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:  # a long turn's tool calls don't hide its prompt
+        con.executemany("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
+                        [(BOT_CHAT, '[{"id": "c"}]')] * 80)
+    assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
 
 
 def test_a_report_said_again_is_taken_and_kept_once(on, hermes):
