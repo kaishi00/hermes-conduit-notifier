@@ -4434,7 +4434,8 @@ def digest(session_id: Any) -> Optional[str]:
         have = {work.ref for work in rows}
         recent = time.time() - work_coord.BOARD_AGE_S
         more = [work for work in store.list(limit=DIGEST_ITEMS, calls=False, by_change=True)
-                if work.ref not in have and work.kind == "workstream" and work.updated_at >= recent]
+                if work.ref not in have and work.kind == "workstream" and work.updated_at >= recent
+                and not work.changed_since_seen]  # one with news still to give waits its turn in the list above
         heard = {work.ref for work in more[:DIGEST_HEARD_ITEMS]}
         rows = rows + more[:DIGEST_HEARD_ITEMS]
     # While a call kept with this Bot Chat is on, what its workstreams
