@@ -1952,15 +1952,18 @@ details only the user can give go in one clarify call with open questions,
 which Conduit shows as a form they may leave partly blank (0.82+). A spoken
 message adds that the answer is heard: Hermes says it in words, not with
 `text_to_speech` or a sound file of its own, which a voice would read out as
-a file path; a file the user asks for still goes (0.115.1+).
+a file path; a file the user asks for still goes (0.115.1+). A typed message
+whose reply Conduit's Read replies aloud setting reads out adds the same
+about sound files, since the answer is heard as well as read (0.156.0+).
 
 - `POST /api/plugins/conduit_push/turn-surface` with
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
   answers `{"ok": true, "recorded": true}`. `text_sha256` is the SHA-256 of
   the UTF-8 text Conduit sends in `prompt.submit`. Surfaces: `iphone`,
   `ipad`, `mac`, `vision`, `watch`, `carplay`, `siri`; `input` is `typed`
-  or `spoken`, or left out when unknown (a Shortcut). Capability
-  `turn-surface`.
+  or `spoken`, or left out when unknown (a Shortcut). `"heard": true` on a
+  typed message says Conduit will read its reply aloud (0.156.0+; a plugin
+  before it ignores the key). Capability `turn-surface`.
 - The report is kept on Hermes' in-memory record of that chat (up to 8, for
   15 minutes) and taken by the turn whose message has that hash, when the
   turn came from Conduit's socket. A message that steered or redirected a
