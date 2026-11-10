@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.153.6 (2026-11-10)
+
+### Fixes
+- A bot whose tool call carries arguments that aren't valid JSON is told
+  what's wrong with them, instead of being refused as if it had asked for
+  nothing.
+- A workstream's update that Hermes took too long to accept still counts
+  as Conduit's own turn, so its review card isn't refused when only the
+  desktop app has the Bot Chat open.
+- A review of seven or eight options from a workstream with a long name
+  keeps "(more)" on its second half, so the two halves read differently.
+
 ## 0.153.5 (2026-11-10)
 
 ### Fixes
@@ -31,6 +43,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 - A Pulse card keeps a short sentence that adds one word to its headline,
   such as "today" or a name, instead of dropping it as a repeat.
+- A Pulse date card no longer says whose day it is as "The user's".
 
 ## 0.153.2 (2026-11-10)
 
