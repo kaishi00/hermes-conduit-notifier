@@ -366,6 +366,8 @@ def add_noticed_cards(pulse_store: store.PulseStore, *, turn: Any, lines: list[t
         pick = picks.loads(looks[n]) if n < len(looks) else None
         subject = subjects[n] if n < len(subjects) else ""
         link = links[n] if n < len(links) else None
+        if pick is None and looks:
+            counted.append("plain:no_pick")  # it came up with no pick behind it
         if pick is not None:
             row.update(look=picks.dumps(pick), subject=subject, news=_clip(picks.news(pick), NOTICED_NEWS_LIMIT))
             action, target, why = picks.resolve(pulse_store, pick, subject, now, closes)
