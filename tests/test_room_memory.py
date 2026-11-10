@@ -547,7 +547,9 @@ def test_a_finished_report_cut_to_its_first_line_is_still_told_from_a_user_quoti
     assert pulse_store.attempt_by_tag(attempt["tag"])["text"] == heading
 
     quoted = f"{heading}\nWhat did the second card mean?"
-    assert guard.pulse_asks(tmp_path, [ask, quoted, heading]) == [True, False, False]
+    # Hermes hands a provider the last message stripped (#652): REPORT ends in a newline.
+    assert ask != ask.strip()
+    assert guard.pulse_asks(tmp_path, [ask, ask.strip(), quoted, heading]) == [True, True, False, False]
     chat = [{"role": "user", "content": ask}, {"role": "assistant", "content": "Three cards."},
             {"role": "user", "content": quoted}, {"role": "assistant", "content": "The dentist."}]
     assert guard.without_pulse(tmp_path, chat) == chat[2:]
