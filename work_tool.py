@@ -2695,7 +2695,9 @@ def _in_transcript(home: Path, session_id: str, text: str) -> bool:
     message or inside one: Hermes joins what's steered into a turn into one
     row, in its own wrapper, and what's queued behind a turn into one
     message (seen on v0.23.0). The copy Hermes keeps of a message while it
-    waits in the queue is inactive, and isn't the turn that ran with it."""
+    waits in the queue is inactive, and isn't the turn that ran with it.
+    Only a whole part counts: a longer message that starts with the same
+    words is another message."""
     import sqlite3
 
     path = Path(home) / "state.db"
@@ -2707,13 +2709,28 @@ def _in_transcript(home: Path, session_id: str, text: str) -> bool:
         return False
     try:
         active = "AND active = 1 " if any(row[1] == "active" for row in db.execute("PRAGMA table_info(messages)")) else ""
-        row = db.execute(f"SELECT 1 FROM messages WHERE session_id = ? AND role = 'user' {active}"
-                         "AND instr(content, ?) > 0 LIMIT 1", (session_id, text)).fetchone()
+        rows = db.execute(f"SELECT content FROM messages WHERE session_id = ? AND role = 'user' {active}"
+                          "AND instr(content, ?) > 0 ORDER BY rowid DESC LIMIT 50", (session_id, text)).fetchall()
     except sqlite3.Error:
         return False
     finally:
         db.close()
-    return row is not None
+    return any(_whole_part(row[0], text) for row in rows)
+
+
+def _whole_part(content, text: str) -> bool:
+    """Whether the message is a whole part of this saved row: on lines of
+    its own, not the start of a longer message that begins with the same
+    words."""
+    if not isinstance(content, str):
+        return False
+    at = content.find(text)
+    while at >= 0:
+        end = at + len(text)
+        if (at == 0 or content[at - 1] == "\n") and (end == len(content) or content[end] == "\n"):
+            return True
+        at = content.find(text, at + 1)
+    return False
 
 
 _shutting_down = threading.Event()

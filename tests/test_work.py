@@ -3143,6 +3143,22 @@ def test_a_message_hermes_joined_to_another_counts_as_stored(on, hermes, home, m
     assert "Switch to v2." not in wake["text"] and "Then write tests." not in wake["text"]
 
 
+def test_a_longer_message_that_starts_the_same_is_not_this_one(on, home):
+    """A send is in the transcript as a whole part of a row, on lines of its
+    own. A registry from before Hermes marked rows active is read too."""
+    import sqlite3
+
+    _chat_db(home, [(WORKER_1, "user", "Bot passes on:\nUse staging. Do not deploy.", None),
+                    (WORKER_1, "user", "First\n\nBot passes on:\nSecond.\n\nThird", None)])
+    assert not work._in_transcript(home, WORKER_1, "Bot passes on:\nUse staging.")
+    assert work._in_transcript(home, WORKER_1, "Bot passes on:\nUse staging. Do not deploy.")
+    assert work._in_transcript(home, WORKER_1, "Bot passes on:\nSecond.")
+    assert not work._in_transcript(home, WORKER_1, "Second")
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("ALTER TABLE messages DROP COLUMN active")
+    assert work._in_transcript(home, WORKER_1, "Bot passes on:\nSecond.")
+
+
 # The Work panel (M2): what Conduit shows, and the user's own actions --------------
 
 def test_the_work_panel_lists_work_with_its_counts_and_actions(on, hermes):
