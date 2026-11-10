@@ -2299,6 +2299,7 @@ def test_a_start_from_a_work_update_quotes_no_older_message(on, hermes, home):
     _chat_db(home, [(BOT_CHAT, "user", "Fix the login bug", None),
                     (BOT_CHAT, "assistant", "Started W9.", None),
                     (BOT_CHAT, "user", "Work update from your workstreams. W9 finished.", "hidden")])
+    on.set_coordination("auto")  # under Ask, a work update's turn starts nothing
     start("Deploy", "Deploy the fix.")
     brief = _brief_text(hermes)
     assert "Fix the login bug" not in brief and "W9 finished" not in brief and "is answering now" not in brief
@@ -3267,7 +3268,8 @@ def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
     assert settings == {"ok": True, "policy": "lookups", "policies": ["off", "strict", "lookups", "open"],
                         "max_running": 2, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
-                        "workstream_model": None, "unavailable": ""}
+                        "workstream_model": None, "coordination": "ask",
+                        "coordinations": ["off", "ask", "auto"], "unavailable": ""}
     assert not store_mod.exists(home)
     _hermes_approvals(home, "smart")
     assert work.app_settings(home)["chat_approvals"] == "smart"
@@ -3956,11 +3958,11 @@ def test_the_user_pins_resolves_and_reopens_work_without_a_turn(on, hermes):
     start()
     on.update("W1", status="done", last_result="Found it.")
     row, = work.app_list(on.home)["work"]
-    assert row["manage"] == ["pin", "resolve"] and not row["pinned"]
+    assert row["manage"] == ["pin", "resolve", "leave_alone"] and not row["pinned"]
     hermes.calls.clear()
     on.mark_seen(["W1"])
     pinned = work.app_act(on.home, "W1", "pin")
-    assert pinned["ok"] and pinned["work"]["pinned"] and pinned["work"]["manage"] == ["unpin", "resolve"]
+    assert pinned["ok"] and pinned["work"]["pinned"] and pinned["work"]["manage"] == ["unpin", "resolve", "leave_alone"]
     assert not on.get("W1").changed_since_seen  # a pin isn't news for the coordinator
     resolved = work.app_act(on.home, "W1", "resolve")
     assert resolved["ok"] and resolved["work"]["closed"] and resolved["work"]["resolved_by"] == "user"
@@ -4078,7 +4080,7 @@ def test_resolved_work_shows_in_desktop_so_its_link_opens(on, hermes, monkeypatc
 def test_work_still_at_it_isnt_resolved(on, hermes):
     start()
     row, = work.app_list(on.home)["work"]
-    assert row["manage"] == ["pin"]
+    assert row["manage"] == ["pin", "leave_alone"]
     answer = work.app_act(on.home, "W1", "resolve")
     assert answer["error"] == "still_running" and "Stop it first" in answer["note"]
     assert not on.get("W1").closed_at
@@ -5164,7 +5166,7 @@ def test_a_send_points_its_reports_at_the_sender_before_it_goes_and_back_if_it_d
     seen = []
     real = work._deliver
 
-    def deliver(store, broker, w, words, how, kind="send", answer="", since=None):
+    def deliver(store, broker, w, words, how, kind="send", answer="", since=None, **_):
         # A restart's lost-send notice, or a turn ending first, reads this.
         seen.append(store.get(w.ref).reply_to)
         return real(store, broker, w, words, how, kind, answer, since)

@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.154.0 (2026-11-10)
+
+### New and improved
+- A Bot Chat keeps its workstreams working together. It sees what each one
+  found, relies on and changed, and what you told it in its own chat, and
+  acts when one affects another. Under Edit Bot > Work > Coordination, Ask
+  (the default) has it ask you before it starts, stops or redirects work on
+  its own, Automatic lets it, and Off keeps it as it was.
+- A work update the bot has nothing to tell you about stays silent.
+- Leave alone on a workstream's card keeps the bot from sending to it or
+  stopping it on its own.
+
 ## 0.153.5 (2026-11-10)
 
 ### Fixes
