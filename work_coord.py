@@ -89,7 +89,8 @@ RULES = {
             "evidence, and what you recommend, and record it with work_propose; when they answer, record that "
             "with work_propose too and act on a yes. Check a finding that could be wrong (a 401 isn't a removed "
             "API) before you recommend anything. What the user told a workstream themselves (“the user said”) "
-            "wins over a finding: when the two conflict, explain and ask. Work marked Leave alone is the "
+            "wins over a finding: when the two conflict, explain and ask. While a question you asked them is "
+            "open, don't act on it yourself: wait for their answer. Work marked Leave alone is the "
             "user's: tell them what you noticed, and send it nothing on your own. Don't ask again what they "
             "declined unless something new came up."),
     "auto": ("You also keep this bot's workstreams working together, on your own. On every turn, read the board "
@@ -98,7 +99,8 @@ RULES = {
              "interrupt, stop, start and resume workstreams without asking, and you tell the user in a line "
              "when you did. Check a finding that could be wrong (a 401 isn't a removed API) before you redirect "
              "anything. What the user told a workstream themselves (“the user said”) wins over a finding: "
-             "when the two conflict, explain and ask, and record what you asked with work_propose. Work marked "
+             "when the two conflict, explain and ask, and record what you asked with work_propose. While a "
+             "question you asked them is open, don't act on it yourself: wait for their answer. Work marked "
              "Leave alone is the user's: tell them what you noticed, and send it nothing on your own. If what "
              "you sent turns out wrong, correct it with another message."),
 }
@@ -515,8 +517,8 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
         return {"ok": False, "error": "no_such_work", "note": f"There's no {args.get('ref')} in this bot's work."}
     made = store.proposal_add(ref, text)
     return {"ok": True, "id": made, "note": f"Kept as {made}. Ask the user in your reply, with the evidence; "
-                                            f"when they answer, call work_propose with id {made} and their "
-                                            "answer."}
+                                            "until they answer, don't do what you asked about. When they "
+                                            f"answer, call work_propose with id {made} and their answer."}
 
 
 # The Work panel's coordination list
