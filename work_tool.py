@@ -2983,7 +2983,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
                turn_id: Any = None) -> Optional[dict[str, str]]:
     """The bot's policy for its Bot Chat: a block for a tool the coordinator
     doesn't run itself, else None. Strict runs only its own tools; quick
-    (lookups) runs any other for QUICK_STEPS steps of a turn (``turn_id``,
+    (lookups) runs any other for the bot's quick_steps of a turn (``turn_id``,
     Hermes' id for the turn), delegate_task never; open runs everything but
     message_agent. Outside a coordinator it blocks only a workstream's
     message_agent (other bots are asked through the Bot Chat) and its memory
