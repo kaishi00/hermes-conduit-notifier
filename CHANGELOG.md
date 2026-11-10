@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.153.8 (2026-11-10)
+## 0.153.9 (2026-11-10)
 
 ### Fixes
 - During an Apple Watch call, Hermes could still try to phone you and say
@@ -21,6 +21,13 @@ checks it). The format is fixed, because Conduit reads it:
   declined it and could lose its microphone until you tapped. A Watch call
   now counts as being in a call, as a phone call does: nothing rings over
   it, and Hermes is told at once that you're already talking.
+
+## 0.153.8 (2026-11-10)
+
+### Fixes
+- Pulse no longer reads a subagent's chat as if you wrote it, so a task a
+  bot handed to a subagent no longer comes up as "You requested…". What it
+  already learned that way is forgotten once.
 
 ## 0.153.7 (2026-11-10)
 
