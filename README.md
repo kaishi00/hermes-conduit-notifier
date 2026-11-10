@@ -2088,7 +2088,9 @@ added (Hindsight) then spent dollars a day on the Pulse chat alone
 from the provider: for a Pulse turn there's no save, no recall and no turn
 count, and the chat's end and its compaction hand the provider the chat with
 Pulse's turns (each ask and its reply) left out. What you write in the Pulse
-chat yourself is saved and recalled as in any chat. A turn counts as Pulse's
+chat yourself is saved and recalled as in any chat, and the turn after a
+Pulse turn doesn't hand the provider Pulse's ask as your last message
+(plugin 0.153.4+, notifier #652). A turn counts as Pulse's
 when it holds the whole text Pulse sent from this profile (its store,
 `conduit-pulse.db`, says), so quoting a Pulse tag doesn't make your message
 Pulse's. If that store can't be read, the turn goes to the provider as

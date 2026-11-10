@@ -612,8 +612,10 @@ UNKNOWN_DIGEST = "unknown"
 
 
 def text_digest(text: str) -> str:
-    """An attempt's whole text as ``text_sha`` keeps it (room_memory reads it)."""
-    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    """An attempt's whole text as ``text_sha`` keeps it (room_memory reads it),
+    without the whitespace around it: Hermes hands a provider the person's last
+    message stripped (notifier #652)."""
+    return hashlib.sha256(text.strip().encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _check_columns(row: dict, allowed: tuple) -> None:

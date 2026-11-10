@@ -21,6 +21,12 @@ checks it). The format is fixed, because Conduit reads it:
   notification or show Lock Screen progress. Their answers go to whoever
   ran them; one they write with `conduit_notify` still comes.
 
+## 0.153.4 (2026-11-10)
+
+### Fixes
+- On a Hermes newer than 0.23.0, your first message after a Pulse report no
+  longer hands the report to your memory provider as your last message.
+
 ## 0.153.3 (2026-11-10)
 
 ### Fixes
