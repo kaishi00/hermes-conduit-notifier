@@ -250,9 +250,10 @@ def test_the_model_words_the_dates_and_adds_what_needs_getting_ready_for(live):
         {"ref": "D1", "bring_up": False, "skip": "done", "line": "Your anniversary is next Wednesday."}],
         "ahead": [
         {"kind": "date", "bring_up": True, "value": 4, "line": "Kyoto starts Saturday 24 October: time to pack.",
-         "why": "Your calendar has Kyoto from Saturday.", "due": "2026-10-24", "source": "calendar", "area": "travel"},
+         "why": "Your calendar has Kyoto from Saturday.", "due": "2026-10-24", "source": "calendar", "area": "travel",
+         "shape": "date", "facts": {"day": "2026-10-24", "what": "Kyoto"}},
         {"kind": "commitment", "bring_up": True, "value": 4, "line": "Pick up the suit before Kyoto.",
-         "why": "You said you would.", "ref": f"#{suit}"},
+         "why": "You said you would.", "ref": f"#{suit}", "shape": "due", "facts": {"due": "2026-10-23"}},
         {"kind": "other", "bring_up": True, "value": 4, "line": ""}]})
     done = look(live, now, model)
     [(instructions, text)] = model.asked

@@ -906,7 +906,8 @@ def test_a_delivered_brief_lands_on_the_pulse_screen_as_hermes_wrote_it(live):
 def found(line, kind="follow-up", **more):
     """A thing the report's list found, brought up."""
     return {"kind": kind, "bring_up": True, "value": 4, "skip": "", "actionable": True, "line": line,
-            "why": "It came up today.", "source": "notes", "area": "work", **more}
+            "why": "It came up today.", "source": "notes", "area": "work",
+            "shape": "status", "facts": {"label": "Today", "state": "warn"}, **more}
 
 
 def sent_report(live, *, remembered=(), finds=()):
@@ -958,7 +959,8 @@ def test_a_report_becomes_one_card_per_item(reporting, monkeypatch):
     live.store.set("memory", True)
     attempt = sent_report(live, remembered=[{
         "ref": item_id, "bring_up": True, "value": 3, "skip": "", "actionable": True,
-        "line": "Hermes still owes the deploy note (from Monday)", "why": "You were promised it Monday."}],
+        "line": "Hermes still owes the deploy note (from Monday)", "why": "You were promised it Monday.",
+        "shape": "promise", "facts": {"said": "I'll write the deploy note"}}],
         finds=[found("The dentist is Friday at 9 (calendar).", "date", source="calendar"),
                found("Something odd", "weird", value=3)])
     live.db.message("user", attempt["text"])

@@ -68,6 +68,8 @@ TEXT_LIMIT = 600
 # A candidate's reason (why now, where it came from), the card's Why?.
 WHY_LIMIT = 300
 SKIPS = ("done", "covered", "raised", "rated", "minor")
+# Left out by ``decide``, not the model: its pick fits no card type.
+SHAPELESS = "shapeless"
 SOURCES = ("chat", "calendar", "reminders", "notes", "jobs", "tools")
 AREAS = ("work", "personal", "health", "home", "money", "social", "travel", "other")
 # The model call's room: what it reads (about the report turn's), and its answer.
@@ -112,7 +114,7 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 {{"kind": "date", "bring_up": true, "value": 4, "skip": "", "actionable": true, "line": "...", "why": "...", "due": "2026-10-27T14:00", "asked": false, "source": "chat", "chat": "c2", "area": "work"}}
 {{"kind": "reminder", "bring_up": true, "value": 3, "skip": "", "actionable": true, "line": "...", "why": "...", "due": "2026-10-28T09:00", "asked": true, "source": "reminders", "reminder": "r2", "area": "personal"}}
 
-- "bring_up": true when it belongs in this report. {bar} At most {limit} in all.
+- "bring_up": true when it belongs in this report. {bar} At most {limit} in all, and none is fine. When unsure, leave it out. One that fits no shape but "plain" comes up only when the user asked to be reminded of it, or when it updates or closes a card: give it the shape its facts support, never one they don't.
 - "value": how useful hearing it now would be, from 1 (not at all) to 5 (they'd want it now).
 - "skip": when it should stay out, why, in one word: "done" (already done, in any chat or cron run, marked (done) in what Pulse brought up lately, or later work moved past it), "covered" (their calendar, reminders, Hermes's scheduled jobs or something running in the background cover it; a job marked failing covers nothing), "raised" (Pulse brought it up lately and nothing about it changed), "rated" (the user rated it "no" before) or "minor"; otherwise "".
 - "actionable": whether the user could do something about it.
@@ -635,6 +637,19 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
     for row in still_open(pulse_store, [row for row in rows if id(row) not in deliberate], now, closing):
         if not row.get("skip"):
             row["skip"] = "raised"  # its card says it still
+    # What fits no card type stays out (Eric, 2026-11-10: a shape's facts are
+    # checked, and the cards that read as noise were the plain ones), unless
+    # the user asked to be reminded of it, it's a floor, or it updates or
+    # closes a card on purpose.
+    for row in rows:
+        if (row.get("decision") or row.get("skip") or id(row) in deliberate
+                or row.get("asked") is True or floor(row, now)):
+            continue
+        pick = pulse_picks.loads(row.get("pick"))
+        if pick is not None and pick.get("shape") == pulse_picks.PLAIN:
+            row["skip"] = SHAPELESS
+            failed = str((pick or {}).get("dropped") or "")
+            pulse_picks.count(pulse_store, now, ["left_out:plain"] + ([f"left_out:plain:{failed}"] if failed else []))
     if learned is None:
         learned = pulse_store.learned(now)
     muted = {(rule["profile"], rule["chat_id"]) for rule in learning.chat_rules(pulse_store) if rule["chat_id"]}

@@ -315,7 +315,9 @@ class Sim:
                 # Each report's find is a new occurrence, in words of its own: the same
                 # words on a card still open, or one closed, are the same thing (still_open).
                 "line": f"{template.key} {template.kind} in {template.chat or 'notes'}"
-                        + ("" if item_id is not None else f" at {now:.0f}")}
+                        + ("" if item_id is not None else f" at {now:.0f}"),
+                # Each fits a card type: what fits none stays out (candidates.decide).
+                "shape": "status", "facts": {"label": template.key, "state": "warn"}}
 
     def report(self, day: int, now: float) -> None:
         views = {key: self.seen(template) for key, template in TEMPLATES.items()}

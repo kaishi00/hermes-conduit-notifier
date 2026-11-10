@@ -1848,7 +1848,7 @@ def test_a_no_on_a_remembered_item_keeps_it_out_of_later_reports(modeled, db):
         "kind": "commitment", "text": "The user will send the deck.", "evidence": "I'll send the deck",
         "explicit": 1, "due": "", "due_at": None, "message_id": 1, "mentioned_at": now - 3600}])
     live.llm.replies.append({"remembered": [{"ref": kept, "bring_up": True, "value": 3, "skip": "",
-                                             "actionable": True, "line": "Send the deck",
+                                             "actionable": True, "line": "Send the deck", "shape": "promise", "facts": {"said": "I'll do it"},
                                              "why": "You said you would."}], "found": []})
     live.store.set("report_requested", True)
     report_tick()
