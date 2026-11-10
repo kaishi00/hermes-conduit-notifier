@@ -105,16 +105,25 @@ FORM_HINT = ("When you need several details only the user can give (like dates o
 # for still goes: the chat shows it as a card.
 SPOKEN_HINT = ("The answer is heard: say it in words, never with text_to_speech or a sound file of your own. "
                "A file the user asks for is still fine.")
+# Said for a typed message whose reply Conduit reads aloud as well as shows
+# (its Read replies aloud setting, notifier issue 674): a sound file of the
+# agent's own would be a second voice under Conduit's, and its MEDIA: tag
+# isn't read. The answer is still read on a screen, so nothing else changes.
+HEARD_HINT = ("Conduit also reads the answer aloud: never say it with text_to_speech or a sound file of your own. "
+              "A file the user asks for is still fine.")
 
 
 class Report:
-    __slots__ = ("session_id", "text_sha256", "surface", "entry")
+    __slots__ = ("session_id", "text_sha256", "surface", "entry", "heard")
 
-    def __init__(self, session_id: str, text_sha256: str, surface: str, entry: Optional[str]) -> None:
+    def __init__(self, session_id: str, text_sha256: str, surface: str, entry: Optional[str],
+                 heard: bool = False) -> None:
         self.session_id = session_id
         self.text_sha256 = text_sha256
         self.surface = surface
         self.entry = entry
+        # A typed message whose reply Conduit reads aloud (HEARD_HINT).
+        self.heard = heard
 
 
 def parse(body: Any) -> Report:
@@ -134,7 +143,10 @@ def parse(body: Any) -> Report:
     entry = body.get("input")
     if entry is not None and (not isinstance(entry, str) or entry not in INPUTS):
         raise ValueError(f"input must be one of {', '.join(INPUTS)}, or left out")
-    return Report(session_id.strip(), digest, surface, entry)
+    heard = body.get("heard", False)
+    if not isinstance(heard, bool):
+        raise ValueError("heard must be true or false, or left out")
+    return Report(session_id.strip(), digest, surface, entry, heard)
 
 
 def text_sha256(text: str) -> str:
@@ -151,7 +163,7 @@ def record(session: dict, report: Report, clock: Callable[[], float] = time.mono
     kept = {digest: value for digest, value in kept.items() if _fresh(value, now)} if isinstance(kept, dict) else {}
     # A repeated text moves to the end, so eviction takes the oldest report.
     kept.pop(report.text_sha256, None)
-    kept[report.text_sha256] = (report.surface, report.entry, now)
+    kept[report.text_sha256] = (report.surface, report.entry, now, bool(report.heard))
     while len(kept) > MAX_KEPT:
         kept.pop(next(iter(kept)))
     # One assignment: the turn thread reads the whole map or the old one.
@@ -159,9 +171,9 @@ def record(session: dict, report: Report, clock: Callable[[], float] = time.mono
 
 
 def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic,
-         fresh_s: float = FRESH_S) -> Optional[Tuple[str, Optional[str]]]:
+         fresh_s: float = FRESH_S) -> Optional[Tuple[str, Optional[str], bool]]:
     """Removes the report for ``message`` kept on ``session`` and returns its
-    surface and entry while fresh."""
+    surface, entry and whether its reply is heard, while fresh."""
     if not isinstance(session, dict):
         return None
     kept = session.get(KEY)
@@ -171,12 +183,12 @@ def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic
     value = kept.pop(text_sha256(text), None)
     if value is None or not _fresh(value, clock(), fresh_s):
         return None
-    surface, entry, _at = value
-    return surface, entry if entry in INPUTS else None
+    surface, entry, _at, heard = value
+    return surface, entry if entry in INPUTS else None, heard is True
 
 
 def _fresh(value: Any, now: float, fresh_s: float = FRESH_S) -> bool:
-    if not (isinstance(value, tuple) and len(value) == 3 and value[0] in SURFACES):
+    if not (isinstance(value, tuple) and len(value) == 4 and value[0] in SURFACES):
         return False
     at = value[2]
     return isinstance(at, float) and 0 <= now - at <= fresh_s
@@ -194,10 +206,11 @@ def _message_text(message: Any) -> Optional[str]:
     return None
 
 
-def line(surface: str, entry: Optional[str] = None) -> str:
+def line(surface: str, entry: Optional[str] = None, heard: bool = False) -> str:
     where = SURFACES[surface] + (f", {entry}" if entry else "")
     hint = FORM_HINT if surface in SCREENS and entry == "typed" else HINTS.get(surface)
-    hints = [text for text in (hint, SPOKEN_HINT if entry == "spoken" else None) if text]
+    sound = SPOKEN_HINT if entry == "spoken" else HEARD_HINT if heard else None
+    hints = [text for text in (hint, sound) if text]
     return f"[Conduit: this message came from {where}.{''.join(' ' + text for text in hints)}]"
 
 
@@ -297,7 +310,7 @@ def parse_discard(body: Any) -> Tuple[str, str]:
 
 
 def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float]
-                        ) -> Optional[Tuple[str, Optional[str]]]:
+                        ) -> Optional[Tuple[str, Optional[str], bool]]:
     if not isinstance(session_id, str) or not session_id:
         return None
     lock, chats = _authority_store()
@@ -441,11 +454,11 @@ def note(from_conduit: bool, message: Any, transport: Any = None,
         if kept is None:
             # The plugin's Watch jobs and call chats name their own surface.
             surface = getattr(transport, "conduit_surface", None)
-            kept = (surface, getattr(transport, "conduit_input", None)) if surface in SURFACES else None
+            kept = (surface, getattr(transport, "conduit_input", None), False) if surface in SURFACES else None
         if kept is None:
             return None
-        surface, entry = kept
+        surface, entry, heard = kept
         _keep_entry(session_id, entry)
-        return line(surface, entry if entry in INPUTS else None)
+        return line(surface, entry if entry in INPUTS else None, heard)
     except Exception:  # noqa: BLE001
         return None

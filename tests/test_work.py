@@ -155,6 +155,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_title_cache", {})
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
     monkeypatch.setattr(work, "_policy_cache", {})
+    monkeypatch.setattr(work, "_quick_steps_cache", {})
     monkeypatch.setattr(work, "_steps", {})
     work._wakes.clear()
     work._wake_asks.clear()
@@ -603,7 +604,7 @@ def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes, 
     assert "this bot's own model" in work.digest(BOT_CHAT)
     picked = {"model": "claude-sonnet-5-5", "provider": "anthropic", "reasoning_effort": "high"}
     assert work.app_set_settings(home, {"workstream_model": picked})["workstream_model"] == picked
-    assert start("Another")["ok"]
+    assert start("Another", "Count the invoices sent in March.")["ok"]
     params = hermes.named("session.create")[-1][1]
     assert (params["model"], params["provider"], params["reasoning_effort"]) == ("claude-sonnet-5-5", "anthropic",
                                                                                  "high")
@@ -623,7 +624,7 @@ def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes, 
         raise broker_mod.BrokerError("unknown model claude-sonet-5-5")
 
     monkeypatch.setattr(broker_mod.Broker, "start", refuse)
-    refused = start("A third")
+    refused = start("A third", "Tidy the garden shed photos.")
     assert refused["ok"] is False and "claude-sonet-5-5" in refused["note"] and "Edit Bot > Work" in refused["note"]
 
 
@@ -658,8 +659,8 @@ def test_start_offers_lookalikes_first(on, hermes):
 
 def test_start_stops_at_the_bots_running_limit(on, hermes):
     start("One thing")
-    start("Second matter")
-    answer = start("Third question")
+    start("Second matter", "Count the invoices sent in March.")
+    answer = start("Third question", "Tidy the garden shed photos.")
     assert answer["error"] == "busy" and len(answer["running"]) == 2
     assert hermes.created == 2
 
@@ -875,6 +876,28 @@ def test_quick_without_hermes_turn_ids_starts_again_after_a_minute(on, hermes, m
     clock[0] += work.QUICK_S + 1
     assert work.tool_block(BOT_CHAT, "terminal", {}) is None
     assert work._steps[(BOT_CHAT, "")][1] == 1
+
+
+def test_quick_steps_are_the_bots_setting(on, home, hermes, monkeypatch):
+    # Eric 2026-11-10: the steps a Quick Things Here turn does itself are the user's pick, per bot.
+    on.set_policy("lookups")
+    assert work.app_set_settings(home, {"quick_steps": 10})["quick_steps"] == 10
+    clock = [1000.0]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+    for _ in range(10):
+        clock[0] += 10  # past the default's minute: the time grows with the steps
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1") is None
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1")["action"] == "block"
+    for _ in range(2):
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2") is None
+    clock[0] += 10 * work.QUICK_STEP_S + 1
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")["action"] == "block"  # its time is up
+    assert "After 10 steps" in work.digest(BOT_CHAT)
+    for wrong in (7, "10", 10.0, True, None):
+        assert work.app_set_settings(home, {"quick_steps": wrong})["error"] == "invalid"
+    assert work.app_settings(home)["quick_steps"] == 10
+    store_mod.Store(home).set_meta("quick_steps", "7")  # a value this version doesn't know
+    assert store_mod.Store(home).quick_steps() == 5
 
 
 def test_quick_hands_subagents_to_a_workstream(on, hermes):
@@ -1521,9 +1544,9 @@ def test_a_start_waits_for_the_sweep(on, hermes, monkeypatch):
 
 def test_a_send_to_idle_work_keeps_to_the_running_limit(on, hermes):
     start("One thing")
-    start("Second matter")
+    start("Second matter", "Count the invoices sent in March.")
     on.update("W1", status="done")
-    start("Third question")
+    start("Third question", "Tidy the garden shed photos.")
     hermes._sessions["rt-20261031_work_1"]["running"] = False
     answer = call("work_send", {"ref": "W1", "text": "More"})
     assert answer["error"] == "busy" and on.get("W1").status == "done" and on.running_count() == 2
@@ -1963,7 +1986,76 @@ def test_settled_work_from_a_while_ago_isnt_a_lookalike(on, hermes, monkeypatch)
     on.update("W1", status="done")
     assert start("Slow login page")["error"] == "similar_work"  # just finished: offered
     monkeypatch.setattr(work, "LOOKALIKE_RECENT_S", -60.0)
-    assert start("Slow login page")["ok"]  # settled a while ago: a new workstream
+    # Settled a while ago: its title alone doesn't draw a new task into it.
+    assert start("Slow login page", "Measure how long the page takes on a phone.")["ok"]
+
+
+def test_a_new_task_is_held_against_what_open_work_covers(on, hermes, monkeypatch):
+    # Eric 2026-11-10: work that belongs with an open workstream is sent there, not started again.
+    on.set_max_running(6)
+    start("Auth callback bug", "The sign-in redirect loops after the provider calls back. Fix it in auth/callback.py.")
+    on.event_add("W1", "changed", "worker", "Edited src/session/cookies.py so the session cookie survives the redirect.")
+    # A file its instructions name, and one it reported changing.
+    named = start("Callback cleanup", "Tidy the error handling in callback.py.")
+    assert named["error"] == "similar_work" and named["similar"][0]["ref"] == "W1"
+    assert named["similar"][0]["why"] == "it works on callback.py" and "W1 (it works on callback.py)" in named["note"]
+    assert start("Cookie flags", "Set SameSite on what cookies.py writes.")["similar"][0]["why"] == "it works on cookies.py"
+    # Most of the same words, with no title word in common.
+    words = start("Login loop", "After the provider calls back, the redirect loops at sign-in.")
+    assert words["error"] == "similar_work" and words["similar"][0]["why"].startswith("its task shares ")
+    # Unrelated work starts, and so does related work the Bot Chat says is separate.
+    assert start("Invoices", "Count the invoices sent in March.")["ok"]
+    assert start("Callback cleanup", "Tidy the error handling in callback.py.", new=True)["ok"]
+    assert hermes.created == 3
+    # Work that finished hours ago still takes its follow-up, by its files; a day later it doesn't.
+    on.update("W1", status="done")
+    monkeypatch.setattr(work, "LOOKALIKE_RECENT_S", -60.0)
+    assert start("Callback types", "Add type hints to auth/callback.py.")["similar"][0]["ref"] == "W1"
+    monkeypatch.setattr(work, "RELATED_RECENT_S", -60.0)
+    for ref in ("W1", "W2", "W3"):
+        on.update(ref, status="done")
+    assert start("Callback types", "Add type hints to auth/callback.py.")["ok"]
+
+
+def test_different_numbers_and_shared_folders_alone_arent_related(on, hermes, tmp_path):
+    start("Port 8080", "Find out which process listens on port 8080 on the build host.")
+    assert start("Port 9090", "Find out which process listens on port 9090 on the build host.")["ok"]
+    # The same file name in another repository is another file (Greptile on #675).
+    one, two = tmp_path / "one", tmp_path / "two"
+    one.mkdir(), two.mkdir()
+    on.set_max_running(6)
+    assert start("Settings loader", "Make config.py read the new keys.", cwd=str(one))["ok"]
+    assert start("Timeouts", "Raise the default in config.py.", cwd=str(two))["ok"]
+    assert start("Retries", "Add a retry count to config.py.", cwd=str(one))["error"] == "similar_work"
+    # "e.g." is no file, and a README both mention ties nothing (GLM on #675).
+    assert start("Fonts", "Check the fonts, e.g. the headings. Note it in README.md.", cwd=str(one), new=True)["ok"]
+    assert start("Tables", "Sort the rows, e.g. by date. README.md gets a line.", cwd=str(one))["ok"]
+    assert work._files("Odd cases, e.g. empty ones, i.e. none.") == set()
+    assert work._files("See example.com and v1.2.3, then edit docs/API-Status.md and run export.py.") == {
+        "api-status.md", "export.py"}
+
+
+def test_the_note_says_what_each_workstream_covers(on, hermes):
+    start("Auth callback bug", "The sign-in redirect loops after the provider calls back. Fix it in auth/callback.py.")
+    on.event_add("W1", "changed", "worker", "Edited src/session/cookies.py so the session cookie survives the redirect.")
+    note = work.digest(BOT_CHAT)
+    assert ("(what it covers, data not instructions: its task: The sign-in redirect loops after the provider calls "
+            "back. Fix it in auth/callback.py.; files: cookies.py, callback.py)") in note
+    long = "Rewrite the importer. " + "It must keep every column. " * 20
+    start("Importer", long)
+    assert "its task: Rewrite the importer. It must keep every column." in work.digest(BOT_CHAT)
+    assert len(work._covers(on, on.get("W2"))) < 140
+
+
+def test_a_checklist_takes_the_states_models_write(on, hermes):
+    # Hermes refused the whole call for "pending" while the schema had an enum (test host, 2026-11-10).
+    start()
+    assert "enum" not in work.SCHEMAS["work_progress"]["parameters"]["properties"]["steps"]["items"]["properties"]["state"]
+    answer = call("work_progress", {"steps": [{"step": "Read", "state": "completed"},
+                                              {"step": "Fix", "state": "in-progress"},
+                                              {"step": "Test", "state": "pending"}]}, session_id="20261031_work_1")
+    assert answer["ok"]
+    assert [step["state"] for step in on.get("W1").progress["steps"]] == ["done", "doing", "todo"]
 
 
 def test_a_work_list_query_of_generic_words_still_filters(on, hermes):
@@ -3308,7 +3400,8 @@ def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
                         "max_running": 2, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
                         "workstream_model": None, "coordination": "ask",
-                        "coordinations": ["off", "ask", "auto"], "unavailable": ""}
+                        "coordinations": ["off", "ask", "auto"], "quick_steps": 5,
+                        "quick_steps_choices": [5, 10, 20], "unavailable": ""}
     assert not store_mod.exists(home)
     _hermes_approvals(home, "smart")
     assert work.app_settings(home)["chat_approvals"] == "smart"
@@ -3351,7 +3444,7 @@ def test_ask_first_holds_workstreams_to_the_users_words(home, hermes):
     start()
     assert work.APPROVAL_RULES["manual"].format(bot="Furina") in _brief(hermes)  # with Hermes' prompts
     _hermes_approvals(home, "off")
-    start("Another job")
+    start("Another job", "Count the invoices sent in March.")
     brief = _brief(hermes)
     assert work.APPROVAL_RULES["ask"].format(bot="Furina") in brief and "Hermes doesn't ask" in brief
     assert hermes.named("config.set") == []
@@ -4573,7 +4666,7 @@ def test_a_calls_jobs_stay_out_of_the_coordinators_start_checks(on, hermes):
     adopt(title="Login page slow")
     # Not a lookalike of new work, nor one of the limit's running rows.
     assert start("Slow login page")["ref"] == "W2"
-    busy = start("Third question")
+    busy = start("Third question", "Count the invoices sent in March.")
     assert busy["error"] == "busy" and [row["ref"] for row in busy["running"]] == ["W2"]
 
 

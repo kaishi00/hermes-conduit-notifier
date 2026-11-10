@@ -1468,6 +1468,16 @@ question or a small task doesn't start a workstream. Change it in Conduit
   another found or made without the coordinator passing it on. It can't send
   to, stop or start work; if it needs another workstream to do something, it
   says so in its report.
+- The Bot Chat's note says what each open workstream covers: its task in a
+  few words, the folder it works in, and the files its instructions name or
+  it reported changing. `work_start` holds a new task against that before it
+  starts anything: a title that is nearly the same (work of the last ten
+  minutes), a file both name, or tasks that share most of their words (work
+  that is running or settled in the last six hours). A match is refused with
+  the workstreams and why (`similar_work`), so the Bot Chat sends the work
+  there with `work_send`; `new: true` starts it anyway.
+- `work_progress` takes a step's state as done, doing or todo, and reads
+  what models write for them (pending, in_progress, completed).
 - `work_start` with `cwd` records the git repository that folder is in. When
   other running work is in the same repository, the coordinator is told and
   the new workstream's brief names them, so it leaves their changes alone.
@@ -1598,7 +1608,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   and code prompts (`browser_vault`). Strict ("Only Coordinates") leaves it
   only those. Lookups ("Quick Things Here") also runs any other tool, reads
   and changes alike, under the bot's usual approvals, for 5 steps of a turn
-  or a minute after the turn's first; the step after that is refused with a
+  or a minute after the turn's first (the user can pick 10 or 20 steps per
+  bot, `quick_steps`, with 12 seconds for each); the step after that is refused with a
   note to start a workstream with what it found so far, and `delegate_task`
   always goes to a workstream. Open ("Everything Here") runs everything in
   the Bot Chat and starts workstreams when it judges the work long or you ask.
@@ -1687,8 +1698,8 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
-| GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, policies, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, workstream_model, unavailable}` (`policy`: off, strict, lookups or open; `policies`: the ones this plugin takes) |
-| POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals, workstream_model}` | the settings as they are now |
+| GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, policies, quick_steps, quick_steps_choices, coordination, coordinations, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, workstream_model, unavailable}` (`policy`: off, strict, lookups or open; `policies`: the ones this plugin takes; `quick_steps`: the steps a lookups turn does in the Bot Chat) |
+| POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, quick_steps, coordination, max_running, after_restart, workstream_approvals, workstream_model}` | the settings as they are now |
 | POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?, chat?, result?}` (`via`: `phone` or `watch`; `result`: the reply of a turn that ended before the phone kept it, which settles the row; `chat`: the chat the call is kept with, so the Bot Chat's makes it the coordinator's workstream, `call` on its row; `call`: the call's own id) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title`, `goal`, `chat` or `result` isn't text; `off` (409) when the bot's workstreams are off |
 | POST | `/api/plugins/conduit_push/workstreams/call-ended` with `{chat, call?}` (a call kept with that chat ended, in any voice mode) | `{ok, bot_chat}`; `bot_chat` is true when the chat is the Bot Chat, whose held updates go 15 s later when the hold is this call's (`call`, the id its adopts named); 400 without `chat` |
 
@@ -1952,15 +1963,18 @@ details only the user can give go in one clarify call with open questions,
 which Conduit shows as a form they may leave partly blank (0.82+). A spoken
 message adds that the answer is heard: Hermes says it in words, not with
 `text_to_speech` or a sound file of its own, which a voice would read out as
-a file path; a file the user asks for still goes (0.115.1+).
+a file path; a file the user asks for still goes (0.115.1+). A typed message
+whose reply Conduit's Read replies aloud setting reads out adds the same
+about sound files, since the answer is heard as well as read (0.156.0+).
 
 - `POST /api/plugins/conduit_push/turn-surface` with
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
   answers `{"ok": true, "recorded": true}`. `text_sha256` is the SHA-256 of
   the UTF-8 text Conduit sends in `prompt.submit`. Surfaces: `iphone`,
   `ipad`, `mac`, `vision`, `watch`, `carplay`, `siri`; `input` is `typed`
-  or `spoken`, or left out when unknown (a Shortcut). Capability
-  `turn-surface`.
+  or `spoken`, or left out when unknown (a Shortcut). `"heard": true` on a
+  typed message says Conduit will read its reply aloud (0.156.0+; a plugin
+  before it ignores the key). Capability `turn-surface`.
 - The report is kept on Hermes' in-memory record of that chat (up to 8, for
   15 minutes) and taken by the turn whose message has that hash, when the
   turn came from Conduit's socket. A message that steered or redirected a
@@ -2377,7 +2391,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 - **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
   presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
   Nothing rings meanwhile: a call that would go out sends the usual push.
-  An Apple Watch call holds it too (0.155.2+): the host renews 90 seconds
+  An Apple Watch call holds it too (0.157.2+): the host renews 90 seconds
   every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
   keeps it through a rejoin or a provider's drop, and lets go when the
   Watch hangs up, the call fails on the host, or the grant ends. Two Watch calls on one
@@ -2434,7 +2448,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
 - `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
   decides". Either way the limits apply, presence holds it, and a session
   already watched keeps one watch (it takes the reason). While presence
-  holds (0.155.2+), the tool answers `in_call` at once and sets nothing up,
+  holds (0.157.2+), the tool answers `in_call` at once and sets nothing up,
   so Hermes doesn't promise a ring that won't come; a call for later, once
   something finishes, is still set up with `conduit_call_watch`.
 - **What's worth a call (0.16+):** with `rules` written (the user's own

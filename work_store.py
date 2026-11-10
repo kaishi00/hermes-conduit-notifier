@@ -51,6 +51,10 @@ POLICIES = ("off", "strict", "lookups", "open")
 # started for it; strict and open stay choices in Edit Bot > Work.
 DEFAULT_POLICY = "lookups"
 DEFAULT_MAX_RUNNING = 2
+# How many steps a Quick Things Here turn does in the Bot Chat before the
+# rest goes to a workstream (Eric 2026-11-10: "can that number be
+# configurable?"). The first is the default.
+QUICK_STEPS = (5, 10, 20)
 # What a restart does with a workstream it stopped that had nothing
 # uncertain in flight (C.7): continue it once, or only tell the coordinator.
 AFTER_RESTART = ("continue", "ask")
@@ -327,6 +331,18 @@ class Store:
 
     def set_max_running(self, value: int) -> None:
         self.set_meta("max_running", str(min(max(int(value), 1), MAX_RUNNING_LIMIT)))
+
+    def quick_steps(self) -> int:
+        try:
+            value = int(self.get_meta("quick_steps", str(QUICK_STEPS[0])))
+        except ValueError:
+            return QUICK_STEPS[0]
+        return value if value in QUICK_STEPS else QUICK_STEPS[0]
+
+    def set_quick_steps(self, value: int) -> None:
+        if value not in QUICK_STEPS:
+            raise ValueError(f"quick_steps must be one of {', '.join(str(n) for n in QUICK_STEPS)}")
+        self.set_meta("quick_steps", str(value))
 
     def after_restart(self) -> str:
         value = self.get_meta("after_restart", DEFAULT_AFTER_RESTART)
