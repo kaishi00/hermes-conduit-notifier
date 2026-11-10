@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.158.1 (2026-11-10)
+
+### Fixes
+- A reworded question no longer says "New since the last no" when you never
+  said no to it.
+
 ## 0.158.0 (2026-11-10)
 
 ### New and improved

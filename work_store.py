@@ -809,17 +809,17 @@ class Store:
                         (f"P{number}", refs[0] if refs else "", " ".join(refs[1:]), text, new, time.time()))
         return f"P{number}"
 
-    def proposal_reword(self, item: str, refs: list[str], text: str, new: str = "") -> Optional[dict]:
+    def proposal_reword(self, item: str, refs: list[str], text: str, new: Optional[str] = None) -> Optional[dict]:
         """An open question asked again with new wording (and evidence),
         about ``refs`` (the caller adds them to the ones it had), keeping
-        its workstreams and its ``new`` when none are given; None when it
-        isn't open."""
+        its workstreams when none are given and its ``new`` when that is
+        None ("" clears it); None when it isn't open."""
         with self._db() as con:
             changed = con.execute("UPDATE proposals SET ref = CASE WHEN ? THEN ? ELSE ref END, "
                                   "also = CASE WHEN ? THEN ? ELSE also END, text = ?, "
-                                  "new = CASE WHEN ? != '' THEN ? ELSE new END WHERE id = ? AND status = 'open'",
+                                  "new = CASE WHEN ? THEN ? ELSE new END WHERE id = ? AND status = 'open'",
                                   (bool(refs), refs[0] if refs else "", bool(refs), " ".join(refs[1:]), text,
-                                   new, new, item)).rowcount
+                                   new is not None, new or "", item)).rowcount
             row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None
         return dict(row) if row else None
 

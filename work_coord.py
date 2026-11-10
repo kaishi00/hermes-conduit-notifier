@@ -456,7 +456,7 @@ def proposals_lines(store: work_store.Store, ago: Callable[[float], str]) -> lis
     lines = []
     for row in rows:
         refs = work_store.proposal_refs(row)
-        about = f" (about {' and '.join(refs)})" if refs else ""
+        about = f" (about {_listed(refs)})" if refs else ""
         text = _short(row["text"], PROPOSAL_CHARS)
         if row.get("new"):
             text += f"» New since the last no: «{_short(row['new'], PROPOSAL_CHARS)}"
@@ -500,6 +500,13 @@ SCHEMA = {
 _PROPOSAL = re.compile(r"P[1-9][0-9]{0,5}")
 
 
+def _listed(refs: list[str]) -> str:
+    """W1, W2 and W3."""
+    if len(refs) < 2:
+        return "".join(refs)
+    return f"{', '.join(refs[:-1])} and {refs[-1]}"
+
+
 def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides: str = "") -> Optional[dict]:
     """Why a question about ``refs`` isn't asked now, or None: another open
     question covers some of that work, or the user said no to it in the last
@@ -508,7 +515,7 @@ def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides
     pending = store.proposal_about(refs, status="open", besides=besides)
     if pending is not None:
         return {"ok": False, "id": pending["id"], "error": "already_asked",
-                "note": f"{pending['id']} about {' and '.join(work_store.proposal_refs(pending))} is still open. "
+                "note": f"{pending['id']} about {_listed(work_store.proposal_refs(pending))} is still open. "
                         "Wait for the user's answer, or call again with replaces "
                         f"{pending['id']} to reword it with what's new."}
     # A no stands for a day unless something new came up.
@@ -570,7 +577,11 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
         refusal = _asked_before(store, added, new, besides=replaces)
         if refusal is not None:
             return refusal
-        done = store.proposal_reword(replaces, had + added if added else [], text, new)
+        # "New since the last no" only on a question about work the user said no
+        # to: kept, or replaced when there's more, and cleared otherwise.
+        declined = store.proposal_about(had + added, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+        done = store.proposal_reword(replaces, had + added if added else [], text,
+                                     (new or None) if declined is not None else "")
         if done is None:
             return {"ok": False, "id": replaces, "error": "no_such_proposal",
                     "note": f"There's no open {replaces}. Your note lists the open ones."}
@@ -581,7 +592,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
         return refusal
     declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
     made = store.proposal_add(refs, text, new if declined is not None else "")
-    covers = f" It covers {' and '.join(refs)}; their answer is for each." if len(refs) > 1 else ""
+    covers = f" It covers {_listed(refs)}; their answer is for each." if len(refs) > 1 else ""
     return {"ok": True, "id": made, "note": f"Kept as {made}.{covers} Ask the user in your reply, with the "
                                             "evidence; until they answer, don't do what you asked about. When "
                                             f"they answer, call work_propose with id {made} and their answer."}

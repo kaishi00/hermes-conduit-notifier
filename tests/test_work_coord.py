@@ -119,6 +119,37 @@ def test_a_registry_from_before_the_ledger_reads_as_empty(on, hermes):
     assert "Your work" in work.digest(BOT_CHAT)
 
 
+
+def test_a_question_from_before_related_work_reads_as_one_workstreams_and_migrates(on, hermes, home):
+    # A 0.157 board: proposals without also or new.
+    on.set_max_running(3)
+    start()
+    start("Invoice count", "Count the invoices sent in March.")
+    start("Shed photos", "Tidy the garden shed photos.")
+    with sqlite3.connect(on.path) as con:
+        con.execute("DROP TABLE proposals")
+        con.execute("CREATE TABLE proposals (id TEXT PRIMARY KEY, ref TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, "
+                    "status TEXT NOT NULL DEFAULT 'open', answer TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, "
+                    "answered_at REAL NOT NULL DEFAULT 0)")
+        con.execute("INSERT INTO proposals (id, ref, text, created_at) VALUES ('P1', 'W1', 'Move W1 to v2?', ?)",
+                    (time.time(),))
+    assert work.work_store.proposal_refs(on.proposals()[0]) == ["W1"]
+    assert "- P1 (about W1), asked just now" in work.digest(BOT_CHAT)
+    woken(home)
+    assert call("work_propose", {"text": "Stop W1?", "ref": "W1"})["error"] == "already_asked"
+    # The first write adds the columns, and the old question takes in related work.
+    widened = call("work_propose", {"text": "Move W1, W2 and W3 to v2?", "replaces": "P1", "refs": ["W2", "W3"],
+                                    "new": "Not declined, so not shown."})
+    assert widened["ok"]
+    note = work.digest(BOT_CHAT)
+    assert "- P1 (about W1, W2 and W3), asked just now, no answer yet: «Move W1, W2 and W3 to v2?»" in note
+    assert "New since the last no" not in note  # never declined
+    # A "new" a 0.158.0 reword saved on a question never declined is cleared by the next reword.
+    with sqlite3.connect(on.path) as con:
+        con.execute("UPDATE proposals SET new = 'stale' WHERE id = 'P1'")
+    assert call("work_propose", {"text": "Move all three to v2?", "replaces": "P1"})["ok"]
+    assert "New since the last no" not in work.digest(BOT_CHAT)
+
 # The note's size ------------------------------------------------------------------
 
 def test_the_board_gives_way_before_the_note_outgrows_hermes_limit(on, hermes):
