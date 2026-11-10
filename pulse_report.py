@@ -121,7 +121,7 @@ BARS = {
               "something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up they'd want.",
     "balanced": "Include what the user would want a heads-up on: a commitment or promise coming due or sitting "
                 "undone, something Hermes said it would do and hasn't, a date that needs preparing for, a follow-up "
-                "they'd want. When unsure, include the one or two most useful.",
+                "they'd want. When unsure, leave it out: a few things worth reading beat many that aren't.",
     "eager": "The user wants to be nudged: bring up the most useful things they could act on, even small ones: "
              "commitments and promises open or coming due, things Hermes said it would do, dates ahead, loose ends "
              "worth closing, follow-ups. Say nothing is worth it only when there is truly nothing.",

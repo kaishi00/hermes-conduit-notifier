@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.157.7 (2026-11-10)
+
+### New and improved
+- Fewer, better Pulse cards: a report or look ahead brings up only what fits a
+  card type (a date, something due, a job's runs, a promise, a status, steps).
+  What fits none stays out, unless you asked to be reminded of it. When Pulse
+  is unsure whether something is worth your time, it leaves it out.
+
 ## 0.157.6 (2026-11-10)
 
 ### Fixes

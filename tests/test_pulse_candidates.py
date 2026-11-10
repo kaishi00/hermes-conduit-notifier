@@ -98,7 +98,7 @@ def test_the_list_call_fences_its_context_and_names_the_bar():
     fence = re.search(r"<<<context (\w+)\n", seen["text"]).group(1)
     assert seen["text"].endswith(f"context {fence}>>>") and fence not in context.text
     assert seen["text"].startswith(f"Pulse report list. It covers {SINCE} onward.")
-    assert report.BARS["gentle"] in seen["instructions"] and "At most 5 in all." in seen["instructions"]
+    assert report.BARS["gentle"] in seen["instructions"] and "At most 5 in all, and none is fine. When unsure, leave it out." in seen["instructions"]
     assert ", ".join(report.FOUND_KINDS) in seen["instructions"] and "deadline" not in seen["instructions"]
     # The user's note to Pulse closes the instructions, when there is one.
     assert report.NOTE_TITLE not in seen["instructions"]
@@ -494,7 +494,8 @@ def deliver(live, text, reply):
 
 FOUND = {"kind": "follow-up", "bring_up": True, "value": 4, "skip": "", "actionable": True,
          "line": "Look at the flaky deploy (you asked in Deploy)",
-         "why": "You asked about it in Deploy and nothing has been done since.", "source": "chat", "chat": "c1", "area": "work"}
+         "why": "You asked about it in Deploy and nothing has been done since.", "source": "chat", "chat": "c1", "area": "work",
+         "shape": "promise", "facts": {"said": "look at the flaky deploy"}}
 
 
 @pytest.mark.parametrize("slot", [None, {"provider": "openrouter", "model": "google/gemini-flash"}])
@@ -523,6 +524,7 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
     live.llm.replies.append({
         "remembered": [{"ref": item_id, "bring_up": True, "value": 3, "skip": "", "actionable": True,
                         "line": "Renew your passport before the trip (you said so in Deploy)",
+                        "shape": "due", "facts": {"due": "2026-10-30"},
                         "why": "You promised it in Deploy and the trip is in three days."}],
         "found": [FOUND, {**FOUND, "kind": "fact", "bring_up": False, "value": 1, "skip": "minor",
                           "line": "Your sister is Ana"}]})
@@ -701,7 +703,8 @@ def test_typed_ratings_of_a_list_report_still_name_its_remembered_picks(reportin
     item_id = commitment(live, due="2026-10-30", due_at=now + 3 * 86400)
     live.store.set("memory", True)
     live.llm.replies.append({"remembered": [{"ref": item_id, "bring_up": True, "value": 3, "skip": "",
-                                             "line": "Renew your passport"}], "found": []})
+                                             "line": "Renew your passport", "shape": "due",
+                                             "facts": {"due": "2026-10-30"}}], "found": []})
     listed(live, now)
     pulse.tick(now + 1)
     [sent] = live.sent()
@@ -1072,6 +1075,28 @@ def test_candidates_command_brings_one_up(live, monkeypatch, capsys):
 
 
 
+def test_what_fits_no_card_type_stays_out_unless_asked_for_or_a_floor(live):
+    # Eric, 2026-11-10: fewer cards worth reading beat showing what fits no type.
+    now = time.time()
+    picks = pulse.pulse_picks
+
+    def pick(**entry):
+        made, why = picks.parse({"line": "x", **entry})
+        return picks.dumps({**made, **({"dropped": why} if why else {})})  # as with_pick keeps it
+
+    rows = [candidate(text="Backup is failing", pick=pick(shape="status", facts={"label": "Backup", "state": "fail"})),
+            candidate(text="You like tea", pick=pick()),
+            candidate(text="Call the bank, as you asked", pick=pick(), asked=True),
+            candidate(text="A bad date", pick=pick(shape="date", facts={"day": "soon"})),
+            candidate(text="Send the deck", kind="commitment", pick=pick(), due_at=now + 3600)]  # a floor
+    candidates.decide(live.store, rows, now=now)
+    assert [(row["decision"], row["skip"]) for row in rows] == [
+        (candidates.SURFACED, ""), (candidates.SKIPPED, candidates.SHAPELESS), (candidates.SURFACED, ""),
+        (candidates.SKIPPED, candidates.SHAPELESS), (candidates.SURFACED, "")]
+    [day] = live.store.get(picks.PICK_COUNTS).values()
+    assert day["left_out:plain"] == 2 and day["left_out:plain:bad_day"] == 1
+
+
 def test_decide_lets_a_new_incident_through_when_the_same_list_closes_its_card(live):
     now = time.time()
     [old] = live.store.add_cards([{"kind": store.NOTICED, "item_id": None, "level": "screen", "title": "Audit failed",
@@ -1079,7 +1104,9 @@ def test_decide_lets_a_new_incident_through_when_the_same_list_closes_its_card(l
                                    "subject": "job:default:41", "topic": "other"}])
     picks = pulse.pulse_picks
     again = candidate(text="Audit failed again", subject="job:default:41",
-                      pick=picks.dumps(picks.parse({"line": "Audit failed again", "subject": "job:default:41"})[0]))
+                      pick=picks.dumps(picks.parse({
+                          "line": "Audit failed again", "subject": "job:default:41", "shape": "status",
+                          "facts": {"label": "Audit", "state": "fail"}})[0]))
     closing = candidate(text="Audit recovered", subject="job:default:41", pick=picks.dumps(picks.parse(
         {"line": "Audit recovered", "subject": "job:default:41", "incident": {"close": f"pc_{old}"}})[0]))
     rows = [again, closing]

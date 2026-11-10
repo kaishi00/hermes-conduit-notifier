@@ -277,7 +277,8 @@ BIRTHDAY = _event("e_kwan", title="Kwan Cheung Ho’s Birthday", all_day=True, s
                   end="2026-10-25T00:00:00+01:00", location=None, lat=None, lon=None, notes=None, url=None,
                   attendees=[], availability="free")
 SAID = {"kind": "date", "bring_up": True, "value": 4, "skip": "", "why": "It's on your calendar.",
-        "due": "2026-10-24", "ref": None, "source": "calendar", "area": "social"}
+        "due": "2026-10-24", "ref": None, "source": "calendar", "area": "social",
+        "shape": "date", "facts": {"day": "2026-10-24", "what": "birthday", "whose": "Kwan"}}
 
 
 def test_the_look_ahead_keys_its_calendar_and_brings_an_entry_up_once(live):
