@@ -811,8 +811,9 @@ class Store:
 
     def proposal_reword(self, item: str, refs: list[str], text: str, new: str = "") -> Optional[dict]:
         """An open question asked again with new wording (and evidence),
-        keeping its workstreams and its ``new`` when none are given; None
-        when it isn't open."""
+        about ``refs`` (the caller adds them to the ones it had), keeping
+        its workstreams and its ``new`` when none are given; None when it
+        isn't open."""
         with self._db() as con:
             changed = con.execute("UPDATE proposals SET ref = CASE WHEN ? THEN ? ELSE ref END, "
                                   "also = CASE WHEN ? THEN ? ELSE also END, text = ?, "
@@ -822,13 +823,22 @@ class Store:
             row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None
         return dict(row) if row else None
 
-    def proposal_about(self, refs: list[str], *, status: str, since: float = 0.0) -> Optional[dict]:
-        """The newest question in ``status`` about any of ``refs``: open ones
-        whenever asked, answered ones answered since then."""
+    def proposal(self, item: str) -> Optional[dict]:
+        """One question by its id, answered or not."""
+        if not self.path.is_file():
+            return None
+        rows = self._read("SELECT * FROM proposals WHERE id = ?", (item,))
+        return rows[0] if rows else None
+
+    def proposal_about(self, refs: list[str], *, status: str, since: float = 0.0,
+                       besides: str = "") -> Optional[dict]:
+        """The newest question in ``status`` about any of ``refs``, other than
+        ``besides``: open ones whenever asked, answered ones answered since
+        then."""
         if not refs or not self.path.is_file():
             return None
         rows = self._read("SELECT * FROM proposals WHERE status = ? AND (status = 'open' OR answered_at >= ?) "
-                          "ORDER BY created_at DESC", (status, since))
+                          "AND id != ? ORDER BY created_at DESC", (status, since, besides))
         wanted = set(refs)
         return next((row for row in rows if wanted & set(proposal_refs(row))), None)
 

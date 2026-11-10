@@ -368,6 +368,10 @@ def test_one_question_per_workstream_a_no_stands_and_one_question_covers_related
     note = work.digest(BOT_CHAT)
     assert "- P1 (about W1 and W2), asked just now, no answer yet: «Move W1 and W2 to v2: v1 is gone" in note
     assert call("work_propose", {"text": "x", "replaces": "P9"})["error"] == "no_such_proposal"
+    # Rewording can't fold in work another open question covers, and keeps the work it had.
+    folded = call("work_propose", {"text": "Move all three.", "replaces": "P1", "refs": ["W3"]})
+    assert folded["error"] == "already_asked" and folded["id"] == "P2"
+    assert "- P1 (about W1 and W2)" in work.digest(BOT_CHAT)
     # The user's one answer covers both; a no stands for the day unless something new came up.
     asked(home, "No, leave both on v1")
     assert call("work_propose", {"id": "P1", "answer": "declined"})["status"] == "declined"
@@ -376,6 +380,12 @@ def test_one_question_per_workstream_a_no_stands_and_one_question_covers_related
     retried = call("work_propose", {"text": "Move W1 to v2 after all?", "ref": "W1",
                                     "new": "The v1 shutdown moved up to tonight."})
     assert retried["ok"] and retried["id"] == "P3"
+    # Rewording P2 to take in W2, declined today, needs what's new too; adding it keeps W3.
+    widened = call("work_propose", {"text": "Pause W3 and W2?", "replaces": "P2", "refs": ["W2"]})
+    assert widened["error"] == "declined" and widened["id"] == "P1"
+    widened = call("work_propose", {"text": "Pause W3 and W2?", "replaces": "P2", "refs": ["W2"],
+                                    "new": "W2's API key expires tonight."})
+    assert widened["ok"] and "- P2 (about W3 and W2)" in work.digest(BOT_CHAT)
     note = work.digest(BOT_CHAT)
     assert "- P3 (about W1), asked just now, no answer yet: «Move W1 to v2 after all?» New since the last no: " \
            "«The v1 shutdown moved up to tonight.»" in note

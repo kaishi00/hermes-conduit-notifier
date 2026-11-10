@@ -500,6 +500,26 @@ SCHEMA = {
 _PROPOSAL = re.compile(r"P[1-9][0-9]{0,5}")
 
 
+def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides: str = "") -> Optional[dict]:
+    """Why a question about ``refs`` isn't asked now, or None: another open
+    question covers some of that work, or the user said no to it in the last
+    day and nothing new came up."""
+    # One open question per workstream: a second would ask the user twice.
+    pending = store.proposal_about(refs, status="open", besides=besides)
+    if pending is not None:
+        return {"ok": False, "id": pending["id"], "error": "already_asked",
+                "note": f"{pending['id']} about {' and '.join(work_store.proposal_refs(pending))} is still open. "
+                        "Wait for the user's answer, or call again with replaces "
+                        f"{pending['id']} to reword it with what's new."}
+    # A no stands for a day unless something new came up.
+    declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+    if declined is not None and not new:
+        return {"ok": False, "id": declined["id"], "error": "declined",
+                "note": f"The user declined {declined['id']} about this work. Ask again only with what came "
+                        "up since, in new, and say it to them; otherwise leave it."}
+    return None
+
+
 def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) -> dict:
     wanted = str(args.get("id") or "").strip().upper()
     answer = str(args.get("answer") or "").strip().lower()
@@ -539,25 +559,27 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
     if replaces:
         if not _PROPOSAL.fullmatch(replaces):
             return {"ok": False, "error": "missing", "note": "replaces is the open question's id (P1)."}
-        done = store.proposal_reword(replaces, refs, text, new)
+        asked = store.proposal(replaces)
+        if asked is None or asked["status"] != "open":
+            return {"ok": False, "id": replaces, "error": "no_such_proposal",
+                    "note": f"There's no open {replaces}. Your note lists the open ones."}
+        # A reworded question keeps the work it covered; work it adds is held
+        # to the same rules as a new question's.
+        had = work_store.proposal_refs(asked)
+        added = [ref for ref in refs if ref not in had]
+        refusal = _asked_before(store, added, new, besides=replaces)
+        if refusal is not None:
+            return refusal
+        done = store.proposal_reword(replaces, had + added if added else [], text, new)
         if done is None:
             return {"ok": False, "id": replaces, "error": "no_such_proposal",
                     "note": f"There's no open {replaces}. Your note lists the open ones."}
         return {"ok": True, "id": replaces, "note": f"{replaces} now reads as you wrote it. Tell the user what "
                                                     "changed in your reply; it's still one question."}
-    # One open question per workstream: a second would ask the user twice.
-    pending = store.proposal_about(refs, status="open")
-    if pending is not None:
-        return {"ok": False, "id": pending["id"], "error": "already_asked",
-                "note": f"{pending['id']} about {' and '.join(work_store.proposal_refs(pending))} is still open. "
-                        "Wait for the user's answer, or call again with replaces "
-                        f"{pending['id']} to reword it with what's new."}
-    # A no stands for a day unless something new came up.
+    refusal = _asked_before(store, refs, new)
+    if refusal is not None:
+        return refusal
     declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
-    if declined is not None and not new:
-        return {"ok": False, "id": declined["id"], "error": "declined",
-                "note": f"The user declined {declined['id']} about this work. Ask again only with what came "
-                        "up since, in new, and say it to them; otherwise leave it."}
     made = store.proposal_add(refs, text, new if declined is not None else "")
     covers = f" It covers {' and '.join(refs)}; their answer is for each." if len(refs) > 1 else ""
     return {"ok": True, "id": made, "note": f"Kept as {made}.{covers} Ask the user in your reply, with the "
