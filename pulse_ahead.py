@@ -361,7 +361,7 @@ def _due_words(value: Any) -> str:
 
 
 def _event_line(event: dict, key: str = "") -> str:
-    """"- v1 Sat 8 Nov, all day, to Sun 16 Nov: Kyoto", in the phone's local time."""
+    """"- v1 Sat 8 Nov, all day, to Sun 16 Nov: Kyoto (Work calendar)", in the phone's local time."""
     title = _clip(event.get("title"), 100) or "Untitled"
     start, end = _moment(event.get("start")), _moment(event.get("end"))
     key = f"{key} " if key else ""

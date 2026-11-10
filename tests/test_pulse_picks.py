@@ -97,6 +97,13 @@ def test_a_calendar_entry_loses_the_button_however_it_is_named_or_kept():
     row = pulse.candidates.with_pick({"ref": "event:abc:2026-11-17", "bring_up": True, "text": "Duty Day Tuesday"},
                                      {"line": "Duty Day Tuesday", "actions": [block, done]})
     assert picks.loads(row["pick"])["actions"] == [done]
+    # ...filtered before the two-button cap, as by its key, so its Done stays.
+    row = pulse.candidates.with_pick({"ref": "event:abc:2026-11-17", "bring_up": True, "text": "Duty Day Tuesday"},
+                                     {"line": "Duty Day Tuesday", "actions": [block, check, done]})
+    assert picks.loads(row["pick"])["actions"] == [done]
+    # It has its own alerts: no reminder for it either.
+    remind = {"label": "Remind me 1h before", "does": "ask", "say": "Remind me an hour before Duty Day"}
+    assert picks.off_calendar([remind, done]) == [done]
     other = pulse.candidates.with_pick({"ref": "", "bring_up": True, "text": "Plan the week"},
                                        {"line": "Plan the week", "actions": [block, done]})
     assert picks.loads(other["pick"])["actions"] == [block, done]
