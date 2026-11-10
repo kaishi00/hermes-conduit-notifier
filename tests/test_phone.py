@@ -1995,6 +1995,26 @@ def test_a_run_needs_a_listed_shortcut_and_its_result_comes_back(store, iphone):
     assert store.change_outcome(change["id"])["result"] == "Lights at 20%\nTV on"
 
 
+def test_a_too_long_shortcut_name_is_left_out_not_the_whole_list(store, iphone):
+    batch = _batch(sharing=_sharing(shortcuts=True),
+                   shortcuts=[{"name": "x" * (phone.MAX_SHORTCUT_NAME_CHARS + 1)}, {"name": "Log water"}])
+    store.ingest(iphone.seal(batch))
+    with store.reader("shortcuts") as (db, device):
+        assert store.shortcuts(db, device["id"])[0] == [{"name": "Log water"}]
+
+
+def test_what_shortcuts_gave_back_fits_one_exchange_together(store, iphone):
+    store.ingest(iphone.seal(_shortcut_batch()))
+    runs = [store.add_change("run_shortcut", {"shortcut": "Log water"}) for _ in range(5)]
+    iphone.changes(store)
+    long = "y" * phone.MAX_RESULT_CHARS
+    iphone.changes(store, [{"id": run["id"], "outcome": "applied", "result": long} for run in runs],
+                   call_id="call-00000002")
+    given = [store.change_outcome(run["id"]).get("result") or "" for run in runs]
+    assert sum(map(len, given)) == phone.MAX_RESULTS_TEXT_CHARS
+    assert given[0] == long and given[-1] == ""
+
+
 def test_running_without_asking_needs_shortcuts_and_turning_them_off_refuses_a_waiting_run(store, iphone):
     store.ingest(iphone.seal(_batch(sharing=_sharing(shortcuts_auto=True), shortcuts=SHORTCUTS)))
     with pytest.raises(phone.PhoneError):

@@ -183,6 +183,9 @@ MAX_SHORTCUT_NOTE_CHARS = 200
 MAX_SHORTCUT_INPUT_CHARS = 4000
 # A shortcut's text, as it gave it back.
 MAX_RESULT_CHARS = 4000
+# What every shortcut in one exchange gave back, together, so a sealed body
+# stays under the exchange's 64 KiB cap. The phone trims to the same.
+MAX_RESULTS_TEXT_CHARS = 16_000
 # A run waits for the user to open Conduit at most this long: later, what it
 # was for has usually passed.
 SHORTCUT_TTL_S = 3600
@@ -2143,6 +2146,7 @@ def _parse_results(value: Any) -> list[dict[str, Any]]:
     if len(results) > MAX_RESULTS:
         raise PhoneError("too_large", f"At most {MAX_RESULTS} results per exchange", status=413)
     parsed = []
+    budget = MAX_RESULTS_TEXT_CHARS
     for index, result in enumerate(results):
         field = f"results[{index}]"
         if not isinstance(result, dict):
@@ -2154,11 +2158,15 @@ def _parse_results(value: Any) -> list[dict[str, Any]]:
         if outcome is None:
             raise PhoneError("malformed", f"{field}.outcome is required")
         item_id = result.get("item_id")
+        given = clean_notes(result.get("result"), f"{field}.result", MAX_RESULT_CHARS)
+        if given is not None:
+            given = given[:budget].strip() or None
+            budget -= len(given or "")
         parsed.append({"id": change_id, "outcome": outcome,
                        "item_id": None if item_id is None else _item_id(item_id, f"{field}.item_id"),
                        "note": clean_text(result.get("note"), f"{field}.note", MAX_NOTE_CHARS, cap=True),
                        # What a shortcut gave back; other changes have none.
-                       "result": clean_notes(result.get("result"), f"{field}.result", MAX_RESULT_CHARS)})
+                       "result": given})
     return parsed
 
 
@@ -2443,7 +2451,11 @@ def _parse_shortcuts(value: Any) -> list[dict[str, Any]]:
         field = f"shortcuts[{index}]"
         if not isinstance(item, dict):
             raise PhoneError("malformed", f"{field} must be an object")
-        name = clean_text(item.get("name"), f"{field}.name", MAX_SHORTCUT_NAME_CHARS)
+        raw = item.get("name")
+        if isinstance(raw, str) and len(raw.strip()) > MAX_SHORTCUT_NAME_CHARS:
+            # Too long to run by name: that one is left out, not the list.
+            continue
+        name = clean_text(raw, f"{field}.name", MAX_SHORTCUT_NAME_CHARS)
         if not name:
             raise PhoneError("malformed", f"{field}.name is required")
         if name.casefold() in seen:
