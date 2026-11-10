@@ -2035,6 +2035,32 @@ def test_different_numbers_and_shared_folders_alone_arent_related(on, hermes, tm
         "api-status.md", "export.py"}
 
 
+def test_folders_of_one_repository_prose_and_file_endings_arent_related(on, hermes, tmp_path, request):
+    on.set_max_running(6)
+    trees = request.getfixturevalue("trees")
+    two = tmp_path / "two"
+    two.mkdir()
+    # Review of #675: both folders are in one repository.
+    front, back = trees.root / "frontend", trees.root / "backend"
+    front.mkdir(), back.mkdir()
+    assert start("Front ports", "Move the port into frontend/settings.py.", cwd=str(front), new=True)["ok"]
+    assert start("Back hosts", "Read the host from backend/settings.py.", cwd=str(back))["ok"]
+    assert start("Front colors", "Add a color to settings.py.", cwd=str(front))["error"] == "similar_work"
+    assert on.get("W1").repo == on.get("W2").repo == str(trees.root)
+    assert start("Root lint", "Lint settings.py everywhere.", cwd=str(trees.root))["error"] == "similar_work"
+    theirs = store_mod.Work(ref="W9", kind="workstream", title="T", status="running", repo="C:\\repo", cwd="C:\\repo\\backend")
+    assert work._apart(on, "C:\\repo\\frontend", "C:\\repo", theirs) and not work._apart(on, "C:\\repo", "C:\\repo", theirs)
+    assert work._files("Fix C:\\repo\\a.c and src\\Export.py.") == {"a.c", "export.py"}
+    assert "auth" in work._task_words("Fix auth/callback.py.") and "callback" not in work._task_words("Fix auth/callback.py.")
+    assert work._task_words("Inspect /srv/company/monorepo/frontend/view.py") == {"inspect", "frontend"}
+    # A workstream in a worktree of its own is still in its repository (DeepSeek on #679).
+    assert start("Parser", "Rewrite the tokens in parser.py.", cwd=str(trees.root / "src"), worktree=True, new=True)["ok"]
+    assert start("Parser errors", "Report the line in parser.py.", cwd=str(trees.root / "src"))["error"] == "similar_work"
+    assert work._files("Run it at 10 a.m. in the U.S. office, then fix src/a.c.") == {"a.c"}
+    assert start("Config", "Tidy the unused imports in config.py.", cwd=str(two), new=True)["ok"]
+    assert start("Export", "Tidy the unused imports in export.py.")["ok"]
+
+
 def test_the_note_says_what_each_workstream_covers(on, hermes):
     start("Auth callback bug", "The sign-in redirect loops after the provider calls back. Fix it in auth/callback.py.")
     on.event_add("W1", "changed", "worker", "Edited src/session/cookies.py so the session cookie survives the redirect.")

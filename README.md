@@ -1471,8 +1471,9 @@ question or a small task doesn't start a workstream. Change it in Conduit
 - The Bot Chat's note says what each open workstream covers: its task in a
   few words, the folder it works in, and the files its instructions name or
   it reported changing. `work_start` holds a new task against that before it
-  starts anything: a title that is nearly the same (work of the last ten
-  minutes), a file both name, or tasks that share most of their words (work
+  starts anything: a title that is nearly the same (work that is
+  running, or of the last ten minutes), a file both name (not when the two
+  are known to be in different repositories or folders), or tasks that share most of their words (work
   that is running or settled in the last six hours). A match is refused with
   the workstreams and why (`similar_work`), so the Bot Chat sends the work
   there with `work_send`; `new: true` starts it anyway.
