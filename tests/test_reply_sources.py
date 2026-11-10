@@ -345,6 +345,42 @@ def test_a_scripts_failed_tool_run_sends_no_failure_push(turn, monkeypatch):
     assert [event["type"] for event in pushed] == ["turn.failed"]
 
 
+def test_a_scripts_run_ends_no_lock_screen_progress(turn, monkeypatch):
+    _no_hermes_sources(monkeypatch)
+    ended = []
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_ended", lambda *args: ended.append(args))
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")
+    assert turn("cli") == [] and ended == []
+    monkeypatch.delenv("HERMES_SESSION_SOURCE")
+    assert turn("cli") == ["response.ready"] and ended == [("s-1", "done")]
+
+
+def test_a_push_a_scripts_run_wrote_with_conduit_notify_still_goes(turn, monkeypatch):
+    _no_hermes_sources(monkeypatch)
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")
+    written = plugin.notify_tool.Headline("Backup done", "All 3 disks copied.")
+    monkeypatch.setattr(plugin.notify_tool, "take", lambda *args, **kwargs: written)
+    assert turn("cli") == ["response.ready"]
+    monkeypatch.setattr(plugin.notify_tool, "take", lambda *args, **kwargs: None)
+    assert turn("cli") == []
+
+
+def test_a_scripts_background_task_sends_no_push(turn, monkeypatch):
+    _no_hermes_sources(monkeypatch)
+    pushed = []
+    monkeypatch.setattr(plugin, "enqueue", pushed.append)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")
+    plugin._pre_llm_call(session_id="script-1", turn_id="t-1", user_message="step 3", platform="cli")
+    # The task finishes after the turn, where Hermes may describe the child: the parent decides.
+    monkeypatch.delenv("HERMES_SESSION_SOURCE")
+    plugin._subagent_stop(child_session_id="child-1", parent_session_id="script-1", child_status="completed")
+    assert pushed == []
+    plugin._pre_llm_call(session_id="chat-1", turn_id="t-2", user_message="hi", platform="cli")
+    plugin._subagent_stop(child_session_id="child-2", parent_session_id="chat-1", child_status="completed")
+    assert [event["type"] for event in pushed] == ["background_task.finished"]
+
+
 @pytest.mark.parametrize("source, expected", [
     ("tool", []), ("oneshot", []), ("kanban", []), ("cli", ["response.ready"]), ("tui", ["response.ready"]),
 ])

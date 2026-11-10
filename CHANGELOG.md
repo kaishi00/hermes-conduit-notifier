@@ -17,8 +17,9 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 - A script's `hermes chat --source tool` run, a one-shot `hermes chat -q`
-  and a Kanban worker no longer send a reply or failure notification or
-  show Lock Screen progress. Their answers go to whoever ran them.
+  and a Kanban worker no longer send a reply, failure or background-task
+  notification or show Lock Screen progress. Their answers go to whoever
+  ran them; one they write with `conduit_notify` still comes.
 
 ## 0.153.3 (2026-11-10)
 
