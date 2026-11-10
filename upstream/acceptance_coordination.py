@@ -283,8 +283,9 @@ class Run:
         last, since = -1, time.monotonic()
         while time.monotonic() < deadline:
             working = [w.ref for w in self.store.list(limit=-1) if w.kind == "workstream" and w.status in RUNNING]
-            seen = len(self.frames)
-            if seen != last or await self.chat_running():
+            running = await self.chat_running()
+            seen = sum(1 for frame in self.frames if "method" in frame)  # events, not the replies to this poll
+            if seen != last or running:
                 last, since = seen, time.monotonic()
             if not working and time.monotonic() - since >= settle * SCALE:
                 return
