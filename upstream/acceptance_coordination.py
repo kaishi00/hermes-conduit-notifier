@@ -227,7 +227,7 @@ class Run:
             idle = 0 if await self.chat_running() else idle + 1
             await asyncio.sleep(1.0)
         before = len(self.completions(self.chat))
-        self.note(f"user -> Bot Chat: {text[:140]}")
+        self.note(f"user -> Bot Chat{'' if idle >= 2 else ' (into its running turn)'}: {text[:140]}")
         await self.call("prompt.submit", {"session_id": self.chat, "text": text})
         if await self.until(lambda: len(self.completions(self.chat)) > before, timeout, "the Bot Chat's reply"):
             reply = self.completions(self.chat)[before]
@@ -370,11 +370,20 @@ class Run:
         own_turns = []
         for index, row in enumerate(chat):
             if row.get("role") == "user" and str(row.get("content") or "").startswith("Work update from"):
-                reply = next((later for later in chat[index + 1:] if later.get("role") == "assistant"
+                # Its own reply: before the next message in, and not Hermes'
+                # notice that the turn was cut short.
+                turn = []
+                for later in chat[index + 1:]:
+                    if later.get("role") == "user":
+                        break
+                    turn.append(later)
+                cut = any(later.get("display_kind") == "failed_turn" for later in turn)
+                reply = next((later for later in turn if later.get("role") == "assistant"
+                              and later.get("display_kind") != "failed_turn"
                               and not (later.get("tool_calls") or "").strip("[]null ")), None)
                 text = str((reply or {}).get("content") or "").strip()
                 own_turns.append({"at": row.get("timestamp"), "update": str(row.get("content"))[:1500],
-                                  "reply": text, "silent": text == "[SILENT]" or not text})
+                                  "reply": text, "silent": text == "[SILENT]" or not text, "cut_short": cut})
         landings = {}
         for row in sends:
             body = row["text"].split("passes on:\n", 1)[-1][:80]
@@ -432,6 +441,7 @@ def facts(result: dict, finder: str, builder: str) -> dict:
         "proposals": [{"id": p["id"], "ref": p["ref"], "status": p["status"], "text": p["text"][:300]}
                       for p in result["proposals"]],
         "own_turns": len(result["own_turns"]), "own_turns_spoken": len(spoke),
+        "own_turns_cut_short": sum(1 for turn in result["own_turns"] if turn.get("cut_short")),
         "said_unprompted": [turn["reply"][:400] for turn in spoke],
     }
 
@@ -443,7 +453,9 @@ KEEPS = ("unchanged", "no change", "nothing changes", "carry on", "keep going", 
 
 
 def steered(f: dict) -> List[str]:
-    """The Bot Chat's own messages to the builder that change its course."""
+    """The Bot Chat's own messages to the builder that change its course.
+    By their words, so roughly ("carry on, but move to v2" passes as a
+    carry-on): each check prints the messages for the reader to judge."""
     return [s["text"] for s in f["sends_to_builder"] if s["own"]
             and not any(word in s["text"].lower() for word in KEEPS)]
 
@@ -514,7 +526,7 @@ def check_misleading(result: dict, f: dict, mode: str) -> List[tuple]:
     return [("didn't stop the builder", f["builder_status"] != "stopped", str(f["builder_status"])),
             ("didn't call a 401 a removal", not alarm, str(alarm or texts)[:300]),
             ("no redirect on its own", f["own_redirects"] == 0 or not steered(f),
-             f"{f['own_redirects']} redirect(s): {str(steered(f))[:200]}"),
+             f"{f['own_redirects']} redirect(s): {str(texts)[:300]}"),
             ("the builder finished", f["builder_status"] in ("done", "ready"), str(f["builder_status"]))]
 
 
@@ -540,7 +552,7 @@ def check_on_purpose(result: dict, f: dict, mode: str) -> List[tuple]:
     return [("the user's words in the builder's chat reached the ledger", heard, ""),
             ("didn't move the builder off v1 on its own", not moved, str(moved or texts)[:300]),
             ("no redirect on its own", f["own_redirects"] == 0 or not steered(f),
-             f"{f['own_redirects']} redirect(s): {str(steered(f))[:200]}")]
+             f"{f['own_redirects']} redirect(s): {str(texts)[:300]}")]
 
 
 async def case_override(run: Run) -> dict:
@@ -673,7 +685,8 @@ def check_conflicting(result: dict, f: dict, mode: str) -> List[tuple]:
             ("no more than three messages to the builder on its own", f["own_sends_to_builder"] <= 3,
              f"{f['own_sends_to_builder']} own send(s)"),
             ("no redirect on its own under Ask" if mode == "ask" else "at most one redirect",
-             f["own_redirects"] == 0 if mode == "ask" else f["own_redirects"] <= 1, f"{f['own_redirects']}")]
+             (f["own_redirects"] == 0 or not steered(f)) if mode == "ask" else f["own_redirects"] <= 1,
+             f"{f['own_redirects']}")]
 
 
 CASES = {
@@ -740,6 +753,7 @@ def soak_summary(result: dict, minutes: float) -> dict:
     chat = result["tokens"]["bot_chat"] or {}
     return {
         "hours": round(hours, 2), "own_turns": len(result["own_turns"]), "own_turns_spoken": len(spoke),
+        "own_turns_cut_short": sum(1 for turn in result["own_turns"] if turn.get("cut_short")),
         "own_turns_per_hour": round(len(result["own_turns"]) / hours, 1),
         "flags": result["metrics"]["flags"], "flags_held": result["metrics"]["flags_held"],
         "watch_reads": result["metrics"]["watch_reads"], "watch_tokens": result["metrics"]["watch_tokens"],
@@ -811,6 +825,7 @@ def main() -> int:
                        "flag_seconds", "first_send_seconds", "first_send_landed_seconds")},
                    "own_turns": (result.get("facts") or {}).get("own_turns"),
                    "own_turns_spoken": (result.get("facts") or {}).get("own_turns_spoken"),
+                   "own_turns_cut_short": (result.get("facts") or {}).get("own_turns_cut_short"),
                    "said_unprompted": (result.get("facts") or {}).get("said_unprompted"),
                    "sends_to_builder": (result.get("facts") or {}).get("sends_to_builder"),
                    "proposals": (result.get("facts") or {}).get("proposals"),
