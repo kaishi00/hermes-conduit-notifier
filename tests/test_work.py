@@ -3423,7 +3423,7 @@ def _hermes_approvals(home, mode):
 def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
     settings = work.app_settings(home)
     assert settings == {"ok": True, "policy": "lookups", "policies": ["off", "strict", "lookups", "open"],
-                        "max_running": 2, "max_running_limit": 6,
+                        "max_running": 4, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
                         "workstream_model": None, "coordination": "ask",
                         "coordinations": ["off", "ask", "auto"], "quick_steps": 5,

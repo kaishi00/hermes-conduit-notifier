@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.157.9 (2026-11-10)
+
+### New and improved
+- A bot runs up to 4 workstreams at once by default, up from 2. A bot you've
+  already set keeps its number; change it in Edit Bot > Work.
+
 ## 0.157.8 (2026-11-10)
 
 ### Fixes
