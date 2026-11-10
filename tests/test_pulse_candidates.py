@@ -1097,6 +1097,27 @@ def test_what_fits_no_card_type_stays_out_unless_asked_for_or_a_floor(live):
     assert day["left_out:plain"] == 2 and day["left_out:plain:bad_day"] == 1
 
 
+def test_a_plain_pick_stays_in_when_asked_for_in_memory_or_about_an_open_card_and_never_beats_its_shaped_double(live):
+    now = time.time()
+    picks = pulse.pulse_picks
+    [old] = live.store.add_cards([{"kind": store.NOTICED, "item_id": None, "level": "screen", "title": "Audit failed",
+                                   "news": "Audit failed", "why": "", "created_at": now - 3600,
+                                   "subject": "job:default:41", "topic": "other"}])
+    plain = lambda **entry: picks.dumps(picks.parse({"line": "x", **entry})[0])
+    watch = candidate(text="The price dropped", kind="watch", origin=candidates.MEMORY, item_id=1, pick=plain())
+    closing = candidate(text="Audit recovered", subject="job:default:41",
+                        pick=plain(subject="job:default:41", incident={"close": f"pc_{old}"}))
+    # Two about one calendar entry: the plain one valued higher, the shaped one kept.
+    loose = candidate(text="Dentist soon", ref="event:v1", value=5, pick=plain())
+    shaped = candidate(text="Dentist on Friday", ref="event:v1", value=4,
+                       pick=plain(shape="status", facts={"label": "Dentist", "state": "warn"}))
+    rows = [watch, closing, loose, shaped]
+    candidates.decide(live.store, rows, now=now)
+    assert [(row["decision"], row["skip"]) for row in rows] == [
+        (candidates.SURFACED, ""), (candidates.SURFACED, ""), (candidates.SKIPPED, candidates.SHAPELESS),
+        (candidates.SURFACED, "")]
+
+
 def test_decide_lets_a_new_incident_through_when_the_same_list_closes_its_card(live):
     now = time.time()
     [old] = live.store.add_cards([{"kind": store.NOTICED, "item_id": None, "level": "screen", "title": "Audit failed",
