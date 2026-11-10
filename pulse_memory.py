@@ -707,7 +707,7 @@ def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo, remembered: Sequenc
 
 # A run -----------------------------------------------------------------------------
 
-# Closed once (0.153.6): items an older build kept from a subagent's run,
+# Closed once per profile (0.153.8): items an older build kept from a subagent's run,
 # whose "user" was the parent agent's brief (hermes._subagent).
 SUBAGENT_SWEPT = "subagent_items_swept"
 SUBAGENT_CLOSED_BY = "pulse: read from a subagent's run, not the user"

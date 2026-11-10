@@ -374,6 +374,34 @@ def test_a_wake_hermes_refused_isnt_the_plugins_own_turn_later(bots, hermes, mon
     turns.start_turn(NAHIDA_CHAT)
 
 
+def test_a_wake_whose_submit_timed_out_still_counts_as_the_plugins_own_turn(bots, hermes, monkeypatch):
+    # notifier#659: the submit's thread runs on past the 45 s wait and can
+    # still queue the turn, so the mark stays for it.
+    def late(params):
+        raise broker_mod.BrokerError("Hermes didn't answer in time", timed_out=True)
+
+    monkeypatch.setattr(hermes, "prompt_submit", late, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "What's the capital of Sumeru?"})
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    turns = sys.modules["conduit_push.turn_surface"]
+    try:
+        turns.start_turn(NAHIDA_CHAT, params["text"])
+        assert turns.woken(NAHIDA_CHAT)
+    finally:
+        turns._wakes.pop(params["text"], None)
+        turns.start_turn(NAHIDA_CHAT)
+
+
+def test_a_broker_call_that_gives_up_waiting_says_it_timed_out():
+    with pytest.raises(broker_mod.BrokerError) as raised:
+        broker_mod._on_own_thread(lambda: time.sleep(0.5), timeout=0.05)
+    assert raised.value.timed_out
+    with pytest.raises(broker_mod.BrokerError) as refused:
+        broker_mod._on_own_thread(lambda: (_ for _ in ()).throw(broker_mod.BrokerError("busy")))
+    assert not refused.value.timed_out
+
+
 def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, hermes, monkeypatch):
     asked = call("work_ask", {"bot": "nahida", "text": "What's the capital of Sumeru?"})
     assert asked["ok"] and asked["ref"] == "A1" and asked["bot"] == "Nahida"
@@ -1678,6 +1706,17 @@ def test_a_lookalike_is_found_among_old_running_work(on, hermes):
 def test_a_nested_or_unreadable_bridge_is_held(on, hermes, args):
     assert work.tool_block(BOT_CHAT, "tool_call", args)["action"] == "block"
     assert work.tool_block(OTHER_CHAT, "tool_call", args) is None
+
+
+def test_a_bridged_calls_unreadable_arguments_are_refused_with_the_parsers_words(on, hermes):
+    # notifier#656: Hermes refuses it anyway; here the model learns why
+    # rather than a check reading it as no arguments.
+    args = {"calls": [{"name": "conduit_show", "arguments": '{"title": "Options", "cards": [}'}]}
+    for chat in (BOT_CHAT, OTHER_CHAT):
+        block = work.tool_block(chat, "tool_call", args)
+        assert block["action"] == "block"
+        assert "calls[0].arguments is JSON text that couldn't be read" in block["message"]
+    assert work.tool_block(OTHER_CHAT, "tool_call", {"calls": [{"name": "web_search", "arguments": ""}]}) is None
 
 
 def test_a_stopped_or_interrupted_turn_without_words_drops_the_old_report(on, hermes):
@@ -5916,6 +5955,26 @@ def test_reported_options_keep_an_interrupted_turns_cards_and_every_option(on, h
     decisions = cards[-1]["review"]["decisions"]
     assert [len(d["options"]) for d in decisions] == [4, 3]
     assert decisions[1]["title"].endswith("(more)")
+
+
+def test_eight_reported_options_split_evenly_and_a_long_titles_second_half_says_more(on, hermes, tmp_path,
+                                                                                    monkeypatch):
+    # notifier#650: [4, 4] for eight, and "(more)" kept on an 80-character title.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    pages = [tmp_path / f"concept-{n}.html" for n in range(1, 9)]
+    for page in pages:
+        page.write_text("<h1>Hi</h1>")
+    long_title = " ".join(["Website"] * 12)[:80]
+    start(long_title)
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_started(WORKER)
+    work.turn_ended(WORKER, "Ready: " + ", ".join(str(page) for page in pages))
+    work.turn_finished(WORKER, failed=False, interrupted=False)
+    work.flush_wakes()
+    decisions = work.shown_board(BOT_CHAT, "W1")[0]["cards"][-1]["review"]["decisions"]
+    assert [len(d["options"]) for d in decisions] == [4, 4]
+    assert decisions[1]["title"].endswith(" (more)") and decisions[0]["title"] != decisions[1]["title"]
+    assert len(decisions[1]["title"]) <= 80
 
 
 def test_only_the_shows_own_answer_counts_as_cards(on, hermes):
