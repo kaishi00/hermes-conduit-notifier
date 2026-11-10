@@ -49,9 +49,12 @@ UNAVAILABLE_NO_API = ("Bot workstreams run in the Hermes dashboard, next to the 
 
 
 class BrokerError(Exception):
-    def __init__(self, message: str, code: Any = None) -> None:
+    def __init__(self, message: str, code: Any = None, timed_out: bool = False) -> None:
         super().__init__(message)
         self.code = code
+        # The call gave up waiting while its thread ran on: what it asked
+        # Hermes for may still happen.
+        self.timed_out = timed_out
 
     @property
     def not_owned(self) -> bool:
@@ -161,7 +164,7 @@ def _on_own_thread(work: Callable[[], Any], timeout: float = CALL_TIMEOUT_S) -> 
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        raise BrokerError("Hermes didn't answer in time")
+        raise BrokerError("Hermes didn't answer in time", timed_out=True)
     if failed:
         raise failed[0]
     return out[0] if out else None
@@ -453,6 +456,14 @@ class Broker:
         try:
             status = str(self._unbound("prompt.submit", {"session_id": runtime_id, "text": text,
                                                          "display_kind": "hidden", "queued": True}).get("status") or "")
+        except BrokerError as error:
+            # A submit that timed out may still queue the turn (its thread
+            # runs on): the mark stays so that turn counts as the plugin's,
+            # as gateway_chats keeps its surface line (notifier#659). It
+            # goes only when the send is known not to have gone out.
+            if not error.timed_out:
+                turn_surface.discard_wake(text, mark)
+            raise
         except BaseException:
             turn_surface.discard_wake(text, mark)
             raise

@@ -102,6 +102,8 @@ QUERY_BLOCK = "web_search needs a query of up to 400 characters."
 TURN_CAP_BLOCK = "That's the most look-ups a Pulse turn gets: write the message with what you have."
 DAILY_CAP_BLOCK = "Pulse has used today's {label} look-ups: write the message without it."
 BRIDGE_BLOCK = "Pulse turns call tools directly: call {tool} itself instead of through tool_call."
+ARGUMENTS_BLOCK = ("That tool_call's {where} is JSON text that couldn't be read ({error}), so nothing ran. "
+                   "Pass arguments as an object, not as a string, and check that every {{ and [ closes.")
 
 
 @dataclass(frozen=True)
@@ -203,7 +205,12 @@ def _texts(value: Any) -> list[str]:
 
 def _bridged(args: Any, turn: Turn, uses_where: Optional[Callable[[dict], bool]]) -> Verdict:
     """A tool_call Hermes couldn't unwrap: every call in it must be allowed,
-    and all of them count."""
+    and all of them count. One whose arguments are text that won't parse
+    gets the parser's words, as Hermes would answer it, rather than a
+    refusal of the empty arguments it reads as (notifier#656)."""
+    broken = unreadable_arguments(args)
+    if broken is not None:
+        return Verdict(False, ARGUMENTS_BLOCK.format(where=broken[0], error=broken[1]))
     calls = called(args)
     if not calls:
         return Verdict(False, NOT_ALLOWED.format(what="tool_call", uses=uses(turn)))
@@ -268,6 +275,43 @@ def unreadable_calls(args: Any) -> str | None:
         return "nested too deeply"
     except ValueError as error:
         return str(error)
+    return None
+
+
+def unreadable_arguments(args: Any) -> tuple[str, str] | None:
+    """Where a call's arguments, given as JSON text, can't be read and the
+    parser's words (``("calls[1].arguments", "Expecting ...")``), as Hermes
+    reads them (tools/tool_search_validation.normalize_tool_call_entries):
+    each entry of ``calls`` when it's there, else the single ``arguments``
+    (or ``args``, which ``called`` also reads).
+    Blank text is no arguments, as there. None when every one reads, or when
+    ``calls`` itself doesn't (``unreadable_calls``)."""
+    if not isinstance(args, dict):
+        return None
+    calls = args.get("calls")
+    if calls is not None:
+        if isinstance(calls, str):
+            try:
+                calls = json.loads(calls)
+            except (ValueError, RecursionError):
+                return None
+        if isinstance(calls, dict):
+            calls = [calls]
+        entries = [(f"calls[{place}].arguments", entry) for place, entry in enumerate(calls)] \
+            if isinstance(calls, list) else []
+    else:
+        entries = [("arguments", args)]
+    for where, entry in entries:
+        # "args" too, as ``called`` reads it, so neither spelling is read as {}.
+        arguments = entry.get("arguments", entry.get("args")) if isinstance(entry, dict) else None
+        if not isinstance(arguments, str) or not arguments.strip():
+            continue
+        try:
+            json.loads(arguments)
+        except RecursionError:
+            return where, "nested too deeply"
+        except ValueError as error:
+            return where, str(error)
     return None
 
 
