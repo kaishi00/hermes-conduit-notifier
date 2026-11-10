@@ -378,6 +378,7 @@ def test_the_pick_rules_ask_for_a_named_first_step_and_no_repeated_detail():
     assert "never the line said again" in rules and 'never a bare "Do it"' in rules
     assert '"whose": a person\'s name' in rules
     assert "under 15 words" in rules and 'use it rather than "status"' in rules
+    assert "find out what's wrong and fix it" in rules  # issue 2082: a problem gets a fix, not a status question
 
 
 def test_a_short_detail_that_adds_a_word_is_kept():
