@@ -221,11 +221,16 @@ def _sent_as(sent: tuple[Any, Any], text: str) -> bool:
     whole, digest = sent
     if not isinstance(whole, str) or not whole:
         return False
+    # Hermes strips the text it hands a provider as the last message, so the
+    # ask then holds the attempt's text without the whitespace around it. A
+    # digest is of the stripped text (pulse_store.text_digest), or of the
+    # whole one for an attempt stored before 0.153.4: once that one is cut,
+    # the stripped ask matches it with the newline its text ended with put back.
     if not isinstance(digest, str) or not digest:
-        return whole in text
-    if _digest(whole) == digest and len(whole) >= QUOTABLE:
-        return whole in text
-    return _digest(text) == digest or _digest(text.strip()) == digest
+        return whole.strip() in text
+    if digest in (_digest(whole), _digest(whole.strip())) and len(whole) >= QUOTABLE:
+        return whole.strip() in text
+    return digest in (_digest(text), _digest(text.strip()), _digest(text + "\n"))
 
 
 def _digest(text: str) -> str:
@@ -374,6 +379,11 @@ def _on_turn_start(original: Callable[..., Any]) -> Callable[..., Any]:
         message = kwargs.get("message", args[1] if len(args) > 1 else None)
         if _pulse_ask(self, message):
             return None
+        # A turn after a Pulse ask has it as the person's last message (Hermes
+        # 0.23 passes it for a provider to redo the prefetch queued after it).
+        # Pulse queued none, so the provider gets what a first turn gets.
+        if _pulse_ask(self, kwargs.get("previous_message")):
+            kwargs = {**kwargs, "previous_message": ""}
         return original(self, *args, **kwargs)
     return _guard(original, on_turn_start)
 
