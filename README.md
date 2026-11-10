@@ -2402,8 +2402,9 @@ and the dashboard routes under one file lock, so they survive restarts:
   An Apple Watch call holds it too (0.158.2+): the host renews 90 seconds
   every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
   keeps it through a rejoin or a provider's drop, and lets go when the
-  Watch hangs up, the call fails on the host, or the grant ends. Two Watch calls on one
-  profile share it: it goes only when the last one ends.
+  Watch hangs up (after a drop too), the call fails on the host, a rejoin
+  is refused, or the grant ends. Two Watch calls on one profile share it:
+  it goes only when the last one ends (0.158.3+).
 - **Declined and missed calls (0.15+):** when you decline a call, or it
   rings out, reaches a phone that was offline or is silenced by Do Not
   Disturb, Conduit reports it here with the call's id, session ids, kind,

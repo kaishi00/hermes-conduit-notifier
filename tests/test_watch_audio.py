@@ -899,9 +899,66 @@ def test_the_host_sets_presence_only_for_a_paired_profile(tmp_path, monkeypatch)
     api.watch_audio._watch_call_presence_now(90)
     assert not (tmp_path / "conduit-calls.json").exists()
     monkeypatch.setattr(api.core, "_load_pairing_state", lambda path: {"credential": "x"})
+    api.watch_audio._claim_watch_presence(None, object())
     api.watch_audio._watch_call_presence_now(90)
     store = api.hermes_calls._calls_store().CallStore(tmp_path)
     assert store.in_call() is True
+
+
+def test_a_release_never_clears_a_presence_another_watch_call_claimed(tmp_path, monkeypatch):
+    monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_load_pairing_state", lambda path: {"credential": "x"})
+    store = api.hermes_calls._calls_store().CallStore(tmp_path)
+    api.watch_audio._watch_call_presence_now(90, "work")
+    assert store.in_call() is False, "a renewal nobody claims (it landed after the release) writes nothing"
+    # Another bridge claimed it after this release was decided.
+    api.watch_audio._claim_watch_presence("work", object())
+    api.watch_audio._watch_call_presence_now(90, "work")
+    api.watch_audio._watch_call_presence_now(0, "work")
+    assert store.in_call() is True
+    monkeypatch.setattr(api.watch_audio, "_watch_presence_holders", {})
+    api.watch_audio._watch_call_presence_now(0, "work")
+    assert store.in_call() is False
+
+
+def test_a_refused_rejoin_after_a_drop_lets_go_of_the_presence():
+    async def scenario():
+        held = []
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            held.append(hold_s)
+        bridge.presence = presence
+        bridge.presence_held = True
+        await bridge._end_session("watch_rejoined")
+        assert held == [] and bridge.presence_held, "a rejoin keeps it"
+        await bridge._end_session("refused")
+        assert held == [0] and not bridge.presence_held
+
+    _run(scenario())
+
+
+def test_the_grants_end_waits_for_a_write_in_flight_before_letting_go():
+    async def scenario():
+        held = []
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            held.append(hold_s)
+
+        async def slow_renewal():
+            await asyncio.sleep(0.05)
+            held.append(api.watch_audio.WATCH_AUDIO_PRESENCE_S)
+        bridge.presence = presence
+        bridge.presence_held = True
+        bridge.stop_requested.set()
+        task = asyncio.ensure_future(slow_renewal())
+        bridge.holders.add(task)
+        task.add_done_callback(bridge.holders.discard)
+        await bridge._main()
+        assert held == [api.watch_audio.WATCH_AUDIO_PRESENCE_S, 0], "the release lands last"
+
+    _run(scenario())
 
 
 def test_the_watch_leaving_ends_the_session_without_writing_to_its_stream(monkeypatch):
