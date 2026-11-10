@@ -2049,7 +2049,12 @@ def test_folders_of_one_repository_prose_and_file_endings_arent_related(on, herm
     assert on.get("W1").repo == on.get("W2").repo == str(trees.root)
     assert start("Root lint", "Lint settings.py everywhere.", cwd=str(trees.root))["error"] == "similar_work"
     theirs = store_mod.Work(ref="W9", kind="workstream", title="T", status="running", repo="C:\\repo", cwd="C:\\repo\\backend")
-    assert work._apart("C:\\repo\\frontend", "C:\\repo", theirs) and not work._apart("C:\\repo", "C:\\repo", theirs)
+    assert work._apart(on, "C:\\repo\\frontend", "C:\\repo", theirs) and not work._apart(on, "C:\\repo", "C:\\repo", theirs)
+    assert work._files("Fix C:\\repo\\a.c and src\\Export.py.") == {"a.c", "export.py"}
+    assert "auth" in work._task_words("Fix auth/callback.py.") and "callback" not in work._task_words("Fix auth/callback.py.")
+    # A workstream in a worktree of its own is still in its repository (DeepSeek on #679).
+    assert start("Parser", "Rewrite the tokens in parser.py.", cwd=str(trees.root / "src"), worktree=True, new=True)["ok"]
+    assert start("Parser errors", "Report the line in parser.py.", cwd=str(trees.root / "src"))["error"] == "similar_work"
     assert work._files("Run it at 10 a.m. in the U.S. office, then fix src/a.c.") == {"a.c"}
     assert start("Config", "Tidy the unused imports in config.py.", cwd=str(two), new=True)["ok"]
     assert start("Export", "Tidy the unused imports in export.py.")["ok"]

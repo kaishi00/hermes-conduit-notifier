@@ -5366,7 +5366,7 @@ def _files(text: Any) -> set[str]:
     """The file names a text mentions (export.py, docs/api-status.md as
     api-status.md), lowercased."""
     names = set()
-    for found in _FILE.findall(str(text or "")):
+    for found in _FILE.findall(str(text or "").replace("\\", "/")):
         name = found.rsplit("/", 1)[-1].lower()
         # "a.m" and "u.s" are prose; a path says a one-letter name is a file.
         prose = "/" not in found and all(len(part) == 1 for part in name.split("."))
@@ -5379,24 +5379,35 @@ def _files(text: Any) -> set[str]:
 def _task_words(*texts: Any) -> set[str]:
     """A task's words with its file names left out: "py" and "md" would
     otherwise tie tasks on different files."""
-    return set().union(*(_words(_FILE.sub(" ", str(text or ""))) for text in texts)) - _GENERIC
+    def folders(found: Any) -> str:  # auth/callback.py keeps "auth"
+        return found.group(0).rpartition("/")[0] + " "
+
+    return set().union(*(_words(_FILE.sub(folders, str(text or "").replace("\\", "/"))) for text in texts)) - _GENERIC
 
 
-def _apart(cwd: str, here: str, work: work_store.Work) -> bool:
+def _flat(path: Any) -> str:
+    """A folder's path as it compares: a Windows host's the same way."""
+    return str(path or "").replace("\\", "/").rstrip("/")
+
+
+def _apart(store: work_store.Store, cwd: str, here: str, work: work_store.Work) -> bool:
     """Whether a new task in cwd (repository here) is known to be somewhere
     else than a workstream: another repository, or folders of one
-    repository that don't hold each other."""
-    def flat(path: str) -> str:  # a Windows host's paths compare the same way
-        return (path or "").replace("\\", "/").rstrip("/")
-
-    here, folder = flat(here), flat(_folder(work))
+    repository that don't hold each other. A workstream in a worktree says
+    its repository, not its folder."""
+    here, folder = _flat(here), _flat(_folder(work))
     if not here or not folder:
         return False
     if here != folder:
         return True
-    mine, theirs = flat(cwd), flat(work.cwd)
+    mine, theirs = _flat(cwd), _flat(work.cwd)
     if not (mine + "/").startswith(here + "/") or not (theirs + "/").startswith(here + "/"):
-        return False  # a worktree elsewhere says nothing about the folder
+        return False
+    try:
+        if store.get_meta(_WORKTREE + work.ref):
+            return False
+    except Exception:  # noqa: BLE001 — unknown, so not known to be apart
+        return False
     return not ((mine + "/").startswith(theirs + "/") or (theirs + "/").startswith(mine + "/"))
 
 
@@ -5458,7 +5469,8 @@ def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -
             found.append((0, -work.updated_at, work, "its title is nearly the same"))
             continue
         # config.py in another repository, or another part of this one, is another file.
-        both = [] if _apart(cwd, here, work) else sorted((files - _EVERYWHERE) & set(_work_files(store, work)))
+        apart = _apart(store, cwd, here, work)
+        both = [] if apart else sorted((files - _EVERYWHERE) & set(_work_files(store, work)))
         if both:
             found.append((1, -work.updated_at, work, "it works on " + ", ".join(both[:3])))
             continue
@@ -5467,7 +5479,7 @@ def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -
         numbers = {word for word in task if any(ch.isdigit() for ch in word)}
         if numbers and not numbers & theirs and {word for word in theirs if any(ch.isdigit() for ch in word)}:
             continue  # different ports, issues or versions: different tasks
-        same_place = bool(here and here == _folder(work) and not _apart(cwd, here, work))
+        same_place = bool(here and _flat(here) == _flat(_folder(work)) and not apart)
         need = RELATED_WORDS_HERE if same_place else RELATED_WORDS
         if len(shared) >= need and len(shared) / max(1, min(len(task), len(theirs))) >= RELATED_SHARE:
             words = ", ".join(sorted(shared, key=lambda word: (-len(word), word))[:4])
