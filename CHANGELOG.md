@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.158.0 (2026-11-10)
+
+### New and improved
+- Under Ask Me First a bot asks you about a workstream once: while that
+  question is open it won't ask again, and after a no it waits a day unless
+  something new came up, which it tells you. A decision that touches several
+  workstreams is one question, and your answer covers each.
+
 ## 0.157.9 (2026-11-10)
 
 ### New and improved
