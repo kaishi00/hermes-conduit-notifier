@@ -227,7 +227,7 @@ class Run:
             idle = 0 if await self.chat_running() else idle + 1
             await asyncio.sleep(1.0)
         before = len(self.completions(self.chat))
-        self.note(f"user -> Bot Chat{'' if idle >= 2 else ' (into its running turn)'}: {text[:140]}")
+        self.note(f"user -> Bot Chat{'' if idle else ' (into its running turn)'}: {text[:140]}")
         await self.call("prompt.submit", {"session_id": self.chat, "text": text})
         if await self.until(lambda: len(self.completions(self.chat)) > before, timeout, "the Bot Chat's reply"):
             reply = self.completions(self.chat)[before]
@@ -372,10 +372,13 @@ class Run:
             if row.get("role") == "user" and str(row.get("content") or "").startswith("Work update from"):
                 # Its own reply: before the next message in, and not Hermes'
                 # notice that the turn was cut short.
+                # (An update queued into the same turn shares its reply.)
                 turn = []
                 for later in chat[index + 1:]:
                     if later.get("role") == "user":
-                        break
+                        if turn or not str(later.get("content") or "").startswith("Work update from"):
+                            break
+                        continue
                     turn.append(later)
                 cut = any(later.get("display_kind") == "failed_turn" for later in turn)
                 reply = next((later for later in turn if later.get("role") == "assistant"
@@ -686,7 +689,8 @@ def check_conflicting(result: dict, f: dict, mode: str) -> List[tuple]:
              f"{f['own_sends_to_builder']} own send(s)"),
             ("no redirect on its own under Ask" if mode == "ask" else "at most one redirect",
              (f["own_redirects"] == 0 or not steered(f)) if mode == "ask" else f["own_redirects"] <= 1,
-             f"{f['own_redirects']}")]
+             f"{f['own_redirects']} redirect(s): "
+             f"{str([s['text'] for s in f['sends_to_builder'] if s['own']])[:300]}")]
 
 
 CASES = {
