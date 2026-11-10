@@ -66,12 +66,12 @@ CLOSE = "close"
 # the report, the look ahead, a follow-up and the brief.
 PICK_RULES = """Each thing you bring up is a pick:
 {{"line": "...", "detail": "...", "subject": "#41", "incident": {{"card": "new"}}, "shape": "plain", "facts": {{}}, "actions": [{{"label": "...", "does": "ask", "say": "..."}}]}}
-- "line": the headline, written to the user, at most one sentence. "detail": at most one more sentence, or "".
+- "line": the headline, written to the user, at most one sentence, short (under 15 words). "detail": one more sentence that adds what the line doesn't say (what to do, a number, a name), or "", never the line said again. The card draws the shape's facts under them, so neither needs to repeat them.
 - "subject": the key of what it's about, as the context gives it: a remembered thing (#41), a reminder (r2), a calendar entry (v1), a scheduled job (j3); "" when it has none.
 - "incident": {{"card": "new"}} for something new. When a card under "What Pulse brought up lately" is still open and this is more about that same occurrence (another failed run, a new step), {{"card": "pc_1834"}} with that card's id updates it. When that occurrence is over (the job recovered, it arrived), {{"close": "pc_1834"}} closes it. Something that happened again after it was over is new, not an update.
 - "shape" and its "facts", only what the context states, else "plain" with {{}}:
-  "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}}; "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (oldest first, at most 10); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}}; "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0).
-- "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". [] when there's nothing to do."""
+  "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}} ("whose": a person's name, or "" for the user's own); "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day; "noticed": the earlier day it first came up, left out when that's the due day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (a scheduled job's recent runs, oldest first, at most 10: use it rather than "status" when the context shows its runs); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}} ("label": the thing in two to four words, like "Nightly backup"); "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0).
+- "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". Give the one most useful step first, named for what it does ("Verify ID", "Plan the day"), never a bare "Do it". [] when there's nothing to do."""
 
 
 def card_id_text(card_id: int) -> str:
@@ -116,6 +116,37 @@ def _day(value: Any, clock: bool = False) -> str:
     return ""
 
 
+# Words in a date's "whose" that name nobody (the user themselves).
+NOBODY = frozenset({"", "your", "you", "yours", "my", "me", "mine", "our", "ours", "we", "user", "the user",
+                    "their", "theirs", "his", "her", "hers"})
+_STOP = frozenset("a an and are as at be both by for from has have in is it its of on or so that the their this "
+                  "to was were will with you your".split())
+
+
+def _stems(text: str) -> list[str]:
+    return [word[:5] for word in re.findall(r"[a-z0-9]+", text.lower()) if word not in _STOP]
+
+
+def repeats(detail: str, line: str) -> bool:
+    """Whether ``detail`` mostly says ``line`` again: at least
+    REPEAT_SHARE of its words (stop words aside, compared by their first
+    five letters) are in the line. One with fewer than SHORT_DETAIL words
+    repeats only when every one of them is in the line, so a short detail
+    that adds a word ("today", a name) is kept."""
+    words, said = _stems(detail), set(_stems(line))
+    if not words:
+        return False
+    # A short detail that adds one word ("today", a name) still says something.
+    if len(words) < SHORT_DETAIL:
+        return all(word in said for word in words)
+    return sum(word in said for word in words) / len(words) >= REPEAT_SHARE
+
+
+REPEAT_SHARE = 0.6
+# Fewer words than this (stop words aside): dropped only when every one is in the line.
+SHORT_DETAIL = 5
+
+
 def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional[dict], str]:
     """``facts`` checked for ``shape``: (the facts kept, "") or (None, why
     they don't hold up)."""
@@ -127,14 +158,17 @@ def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional
         day = _day(facts.get("day"))
         if not day:
             return None, "bad_day"
+        whose = _text(facts.get("whose"), FACT_LIMIT)
+        # "your" or "the user" names nobody: the tile shows only a name.
         return {"day": day, "what": _text(facts.get("what"), FACT_LIMIT),
-                "whose": _text(facts.get("whose"), FACT_LIMIT)}, ""
+                "whose": "" if re.sub(r"['’]s$", "", whose.lower().strip(" .")) in NOBODY else whose}, ""
     if shape == "due":
         due = _day(facts.get("due"), clock=True)
         if not due:
             return None, "bad_due"
         noticed = _day(facts.get("noticed"))
-        return {"due": due, **({"noticed": noticed} if noticed and noticed <= due[:10] else {})}, ""
+        # Noticed the day it's due, a bar from it to the due day says nothing.
+        return {"due": due, **({"noticed": noticed} if noticed and noticed < due[:10] else {})}, ""
     if shape == "runs":
         results = facts.get("results")
         if not isinstance(results, list) or not results or any(r not in RUN_RESULTS for r in results):
@@ -238,7 +272,8 @@ def parse(entry: Any, *, drawn_types: Sequence[str] = (), line: str = "") -> tup
         why = "unknown_shape"
     kind, card = incident(entry.get("incident"))
     pick: dict[str, Any] = {
-        "line": words, "detail": _text(entry.get("detail"), DETAIL_LIMIT), "shape": shape, "facts": facts,
+        "line": words, "detail": "" if repeats(detail := _text(entry.get("detail"), DETAIL_LIMIT), words) else detail,
+        "shape": shape, "facts": facts,
         "actions": _actions(entry.get("actions")), "incident": {"card": NEW} if kind == NEW else
         ({"card": card_id_text(card)} if kind == UPDATE else {"close": card_id_text(card)})}
     subject = entry.get("subject")

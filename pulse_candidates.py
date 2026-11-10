@@ -123,7 +123,7 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 - "asked" (found only): true when the user asked to be reminded of it.
 - "source" (found only): chat, calendar, reminders, notes, jobs or tools; "chat": the key of the chat it came from, when it did; "reminder": the key of the open reminder it is about (like r2), when it is one; "event": the key of the calendar entry it is about (like v1), when it is one; "area": one of {areas}.
 - "job" (found only): the key of the scheduled job it is about (like j3), when it is one.
-- Every entry with "bring_up": true is also a pick, with "detail", "incident", "shape", "facts" and "actions" as below (its "line" is the pick's line, and a remembered item's subject is the item itself; a found entry's "subject" is its reminder, event or job key, or ""). Leave those out when "bring_up" is false.
+- Every entry with a "line" is also a pick, "bring_up" true or not (what Pulse has learned can still bring one up), with "detail", "incident", "shape", "facts" and "actions" as below (its "line" is the pick's line, and a remembered item's subject is the item itself; a found entry's "subject" is its reminder, event or job key, or ""). Leave those out only when it has no "line".
 - "after" (found, kind "next" only): the #number under "Done since the last report", or the key under "Events that ended since the last report" (like e1), that it follows.
 
 A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen.
@@ -311,10 +311,12 @@ def subject_of(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None,
 
 def with_pick(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None, drawn: Sequence[str] = (),
               shown: Optional[dict[int, dict]] = None) -> dict:
-    """``row`` with its subject and, when the model brings it up, its pick
-    (pulse_picks.parse, its words the row's), as the journal keeps them."""
+    """``row`` with its subject and, when the model brings it up or wrote it
+    a line, its pick (pulse_picks.parse, its words the row's), as the
+    journal keeps them: what learning brings up that the model didn't is
+    drawn from its pick too."""
     row["subject"] = subject_of(row, entry, jobs=jobs, shown=shown)
-    if row.get("bring_up"):
+    if row.get("bring_up") or pulse_picks.clip(entry.get("line"), pulse_picks.LINE_LIMIT):
         pick, why = pulse_picks.parse(entry, drawn_types=drawn, line=str(row.get("text") or ""))
         if pick is not None:
             pick["line"] = pulse_picks.clip(str(row.get("text") or ""), pulse_picks.LINE_LIMIT) or pick["line"]

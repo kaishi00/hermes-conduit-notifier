@@ -138,6 +138,8 @@ The plugin currently emits notifications for:
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
 - room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.105+, relay 0.21+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them. In a room this Hermes hosts, a turn's reply, failure, finished background task and approval open the room, titled with its name, not the bot's hidden chat there (plugin 0.150.1+), and a lead's pick of who answers sends nothing.
 
+A turn in a session Hermes doesn't list as a conversation sends no reply, failure or background-task notification and shows no Lock Screen progress (plugin 0.153.7+): a script's `hermes chat --source tool`, a one-shot `hermes chat -q` or `-z`, and a Kanban worker. Their answers go to whoever ran them, and Conduit's chat lists hide those sessions. An approval or question from one still notifies, and so do a call you asked for and a notification the run wrote with `conduit_notify`.
+
 A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. A Hermes Desktop directive reads the same way (plugin 0.120.4+): a page shown with `::preview{file="…"}` as its file, and a Desktop plugin's card, such as hermes-rich-ui's `::richui{id="…"}`, as `🗂 hermes-rich-ui card`. Code in a reply's fenced block stays as written.
 
 ### Cron runs (plugin 0.33+)
@@ -2086,7 +2088,9 @@ added (Hindsight) then spent dollars a day on the Pulse chat alone
 from the provider: for a Pulse turn there's no save, no recall and no turn
 count, and the chat's end and its compaction hand the provider the chat with
 Pulse's turns (each ask and its reply) left out. What you write in the Pulse
-chat yourself is saved and recalled as in any chat. A turn counts as Pulse's
+chat yourself is saved and recalled as in any chat, and the turn after a
+Pulse turn doesn't hand the provider Pulse's ask as your last message
+(plugin 0.153.4+, notifier #652). A turn counts as Pulse's
 when it holds the whole text Pulse sent from this profile (its store,
 `conduit-pulse.db`, says), so quoting a Pulse tag doesn't make your message
 Pulse's. If that store can't be read, the turn goes to the provider as
@@ -2331,7 +2335,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 - **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
   presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
   Nothing rings meanwhile: a call that would go out sends the usual push.
-  An Apple Watch call holds it too (0.153.2+): the host renews 90 seconds
+  An Apple Watch call holds it too (0.153.8+): the host renews 90 seconds
   every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
   keeps it through a rejoin, and lets go when the Watch hangs up or the
   grant ends.
@@ -2387,7 +2391,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
 - `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
   decides". Either way the limits apply, presence holds it, and a session
   already watched keeps one watch (it takes the reason). While presence
-  holds (0.153.2+), the tool answers `in_call` at once and sets nothing up,
+  holds (0.153.8+), the tool answers `in_call` at once and sets nothing up,
   so Hermes doesn't promise a ring that won't come.
 - **What's worth a call (0.16+):** with `rules` written (the user's own
   words, such as "only if production is down"), a call Hermes decides on

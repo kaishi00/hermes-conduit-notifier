@@ -323,20 +323,44 @@ MAX_TURN_ENTRIES = 256
 # whichever client has the chat open, Hermes Desktop or a browser, though no
 # client sent it. Only a turn whose message is one of them counts, never one
 # that merely reads like one.
-WAKE_TTL_S = 600.0
-_wakes: "OrderedDict[str, float]" = OrderedDict()
+WAKE_TTL_S = 6 * 3600.0  # queued behind the chat's running turn, which may be long
+_wakes: "OrderedDict[str, list[float]]" = OrderedDict()
 _woken: "OrderedDict[str, bool]" = OrderedDict()
 
 
-def expect_wake(text: Any, clock: Callable[[], float] = time.monotonic) -> None:
-    """The plugin is about to send ``text`` as its own hidden turn."""
+MAX_WAKE_SENDS = 32  # per text; past it the oldest sending's turn counts as any other
+
+
+def expect_wake(text: Any, clock: Callable[[], float] = time.monotonic) -> Optional[float]:
+    """The plugin is about to send ``text`` as its own hidden turn. Returns
+    the sending's mark, for discard_wake when the send doesn't go out."""
     if not isinstance(text, str) or not text.strip():
-        return
+        return None
+    key = text.strip()
     with _turn_entries_lock:
-        _wakes.pop(text.strip(), None)
-        _wakes[text.strip()] = clock()
+        # The same text may go to two chats (one question asked of two
+        # bots): each sending waits for a turn of its own. A sending past
+        # the window will never count, so it goes now.
+        now = clock()
+        sent = [at for at in _wakes.pop(key, []) if 0 <= now - at <= WAKE_TTL_S]
+        _wakes[key] = [*sent, now][-MAX_WAKE_SENDS:]
         while len(_wakes) > MAX_TURN_ENTRIES:
             _wakes.popitem(last=False)
+        return now
+
+
+def discard_wake(text: Any, at: Optional[float]) -> None:
+    """A sending expect_wake recorded didn't go out (refused or failed): no
+    turn will answer it, so a turn with that text later isn't the plugin's."""
+    if not isinstance(text, str) or at is None:
+        return
+    key = text.strip()
+    with _turn_entries_lock:
+        sent = _wakes.get(key)
+        if sent and at in sent:
+            sent.remove(at)
+            if not sent:
+                del _wakes[key]
 
 
 def start_turn(session_id: Any, user_message: Any = None, clock: Callable[[], float] = time.monotonic) -> None:
@@ -348,8 +372,15 @@ def start_turn(session_id: Any, user_message: Any = None, clock: Callable[[], fl
         return
     with _turn_entries_lock:
         _woken.pop(session_id, None)
-        sent = _wakes.pop(user_message.strip(), None) if isinstance(user_message, str) else None
-        if sent is not None and 0 <= clock() - sent <= WAKE_TTL_S:
+        key = user_message.strip() if isinstance(user_message, str) else None
+        now = clock()
+        times = [at for at in _wakes.get(key, []) if 0 <= now - at <= WAKE_TTL_S] if key else []
+        if key in _wakes:
+            del _wakes[key]
+        sent = times.pop(0) if times else None
+        if times:
+            _wakes[key] = times
+        if sent is not None:
             _woken[session_id] = True
             while len(_woken) > MAX_TURN_ENTRIES:
                 _woken.popitem(last=False)

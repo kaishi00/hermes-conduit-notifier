@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.153.2 (2026-11-09)
+## 0.153.8 (2026-11-10)
 
 ### Fixes
 - During an Apple Watch call, Hermes could still try to phone you and say
@@ -21,6 +21,67 @@ checks it). The format is fixed, because Conduit reads it:
   declined it and could lose its microphone until you tapped. A Watch call
   now counts as being in a call, as a phone call does: nothing rings over
   it, and Hermes is told at once that you're already talking.
+
+## 0.153.7 (2026-11-10)
+
+### Fixes
+- A script's `hermes chat --source tool` run, a one-shot `hermes chat -q`
+  and a Kanban worker no longer send a reply, failure or background-task
+  notification or show Lock Screen progress. Their answers go to whoever
+  ran them; one they write with `conduit_notify` still comes.
+
+## 0.153.6 (2026-11-10)
+
+### Fixes
+- A bot whose tool call carries arguments that aren't valid JSON is told
+  what's wrong with them, instead of being refused as if it had asked for
+  nothing.
+- A workstream's update that Hermes took too long to accept still counts
+  as Conduit's own turn, so its review card isn't refused when only the
+  desktop app has the Bot Chat open.
+- A review of seven or eight options from a workstream with a long name
+  keeps "(more)" on its second half, so the two halves read differently.
+
+## 0.153.5 (2026-11-10)
+
+### Fixes
+- A message a Bot Chat sends to a workstream is no longer sent a second time
+  after a restart when Hermes had saved it joined to another message, such
+  as your own words sent at the same moment.
+
+## 0.153.4 (2026-11-10)
+
+### Fixes
+- On a Hermes newer than 0.23.0, your first message after a Pulse report no
+  longer hands the report to your memory provider as your last message.
+
+## 0.153.3 (2026-11-10)
+
+### Fixes
+- A Pulse card keeps a short sentence that adds one word to its headline,
+  such as "today" or a name, instead of dropping it as a repeat.
+- A Pulse date card no longer says whose day it is as "The user's".
+
+## 0.153.2 (2026-11-10)
+
+### Fixes
+- Pulse cards that Pulse's learning brings up on its own get the same
+  headline, facts and buttons as the rest, instead of plain text.
+- Pulse cards no longer repeat their headline in the sentence under it,
+  draw a due bar that starts and ends on the same day, or show "your"
+  where a date names whose it is.
+
+### New and improved
+- Pulse asks for shorter headlines, a named first step instead of a bare
+  "Do it", and a job's run history when it has one.
+
+## 0.153.1 (2026-11-09)
+
+### Fixes
+- A workstream's update that waits behind a long turn still shows its cards
+  in the chat when it starts, even if only Desktop has the chat open then.
+- Two identical workstream updates sent close together each count as the
+  plugin's own, not just the first.
 
 ## 0.153.0 (2026-11-09)
 

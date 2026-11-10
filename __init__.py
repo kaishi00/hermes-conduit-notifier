@@ -6,6 +6,7 @@ import contextvars
 import functools
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -483,6 +484,55 @@ def _is_room_turn(session_id: Any) -> bool:
         return False
 
 
+# Hermes' sessions that aren't conversations: a script's `hermes chat
+# --source tool`, a one-shot `chat -q`/`-z`, a Kanban worker. Conduit's chat
+# lists and search hide them (SessionSource.hermesInternalSources), and
+# nobody is in them to tap a push, so their turns send no reply, failure or
+# background-task push and show no Lock Screen progress (notifier#660, Eric
+# 2026-11-10). Approvals, questions, a call the user asked for and a push the
+# turn wrote with conduit_notify still go.
+AUTOMATION_SOURCES = frozenset({"tool", "oneshot", "kanban"})
+_automation_sessions: dict[str, None] = {}
+_automation_lock = threading.Lock()
+
+
+def _automation_turn(platform: Any = None) -> bool:
+    """Whether this turn runs in one of AUTOMATION_SOURCES' sessions. A
+    Hermes that can't say counts as a conversation, so the push goes."""
+    try:
+        # A one-shot turn the gateway runs for `chat -q` carries the fact on
+        # the turn, not in the session's source.
+        from gateway.session_finite import finite_turn_required
+        if finite_turn_required() is True:
+            return True
+    except Exception:  # noqa: BLE001 — an older Hermes: the source below decides
+        pass
+    try:
+        from agent.session_source import session_source_for
+        source = session_source_for(platform if isinstance(platform, str) and platform else None)
+    except Exception:  # noqa: BLE001 — an older Hermes sets the variable itself
+        source = os.environ.get("HERMES_SESSION_SOURCE", "")
+    return isinstance(source, str) and source.strip().lower() in AUTOMATION_SOURCES
+
+
+def _note_automation_session(session_id: str) -> None:
+    """Remembers a session _automation_turn quieted, for a background task
+    its turn started that finishes later (_subagent_stop), when the hook may
+    run where Hermes describes the child."""
+    if not session_id:
+        return
+    with _automation_lock:
+        _automation_sessions.pop(session_id, None)
+        _automation_sessions[session_id] = None
+        while len(_automation_sessions) > MAX_TURN_STARTS:
+            del _automation_sessions[next(iter(_automation_sessions))]
+
+
+def _automation_session(session_id: str) -> bool:
+    with _automation_lock:
+        return session_id in _automation_sessions
+
+
 def _member_room_turn(session_id: str) -> bool:
     """Whether this is a turn of one of this Hermes' agents in a room someone
     else hosts (room_rules.py): the room shows it on its home's side, and the
@@ -534,18 +584,21 @@ def _post_llm_call(**kwargs: Any) -> None:
     # A workstream's turn tells its coordinator (work_tool), whose reply is
     # the one push.
     workstream = _work_turn_ended(session_id, response)
+    # A script's, one-shot's or Kanban worker's turn is quiet, unless it
+    # wrote its push with conduit_notify (taken whatever happens, so it never
+    # rides a later turn's reply).
+    automation = _automation_turn(kwargs.get("platform"))
+    headline = notify_tool.take(session_id, kwargs.get("turn_id"))
     # Hermes' line for a turn its compaction ended before the model ran
     # (compaction_skip) is no news either.
     quiet = (workstream or is_silent_response(response) or compaction_skip.notice(response) == compaction_skip.SKIPPED_DETAIL
              or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
-             or _member_room_turn(session_id) or _lead_routing(kwargs.get("turn_id")))
+             or _member_room_turn(session_id) or _lead_routing(kwargs.get("turn_id"))
+             or (automation and not headline))
     # A turn in a room this Hermes hosts opens the room, under its name.
     room = None if quiet or pulse_turn else _home_room(session_id)
     chat_title = "" if quiet or pulse_turn else (room and room[1]) or _session_title(session_id)
-    # What the turn wrote for its push with conduit_notify, taken whatever
-    # happens so it never rides a later turn's reply.
-    headline = notify_tool.take(session_id, kwargs.get("turn_id"))
     # Worked out whether or not a push goes: it learns which job a run's
     # chat belongs to, for a background task that reports later.
     slot = _slot(session_id, kwargs.get("task_id"), headline.key if headline and not pulse_turn else "",
@@ -588,14 +641,14 @@ def _post_llm_call(**kwargs: Any) -> None:
     turn_id = kwargs.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id:
         _finish_ready(session_id, ready, send)
-        if not pulse_turn and not workstream:
+        if not pulse_turn and not workstream and not automation:
             _hold_unnamed_end(session_id)
         return
     key = (session_id, turn_id)
     # A Hermes that never reports the turn's end still gets its reply out,
     # and its Live Activity ended (a Pulse turn never started one).
     timer = _later(READY_GRACE_S, lambda: _turn_end_missed(session_id, turn_id,
-                                                           live=not pulse_turn and not workstream))
+                                                           live=not pulse_turn and not workstream and not automation))
     with _pending_lock:
         earlier = _pending_ready.pop(key, None)
         _pending_ready[key] = (ready, send, timer)
@@ -902,9 +955,10 @@ def _on_session_end(**kwargs: Any) -> None:
     _quietly(room_asks.ended, lambda: PresentStore(get_hermes_home()), session_id, answered)
     _quietly(_room_work_ended, session_id, answered)
     _quietly(_link_asks_ended, session_id, answered)
-    if not pulse_turn and (not workstream or _has_live_turn(session_id)):
-        # A Pulse turn or a workstream's never started a Live Activity, so there is none to end, unless
-        # its start couldn't tell it was one (the work registry unreadable, or its id not yet recorded).
+    automation = _automation_turn(kwargs.get("platform"))
+    if not pulse_turn and ((not workstream and not automation) or _has_live_turn(session_id)):
+        # A Pulse turn, a workstream's or a script's never started a Live Activity, so there is none to end,
+        # unless its start couldn't tell it was one (the work registry unreadable, or its id not yet recorded).
         _quietly(live_activity.reporter.turn_ended, session_id,
                  "done" if answered else "stopped" if kwargs.get("interrupted") else "failed")
     if answered:
@@ -935,10 +989,12 @@ def _on_session_end(**kwargs: Any) -> None:
         # call the user asked for on it still rings.
         calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
-    if cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id) or routing:
+    if (cron_runs.quiet(session_id, kwargs.get("task_id")) or _member_room_turn(session_id) or routing
+            or automation):
         # A muted cron job's failed run, an agent's in a room someone else
-        # hosts (where it shows), or a room lead's routing pick (the lead
-        # then takes the message itself): no push and no automatic alert call. A call
+        # hosts (where it shows), a room lead's routing pick (the lead
+        # then takes the message itself), or a script's or Kanban worker's
+        # run (_automation_turn): no push and no automatic alert call. A call
         # the user asked for on this job (a watch) still rings.
         calls.turn_ended(session_id, "failed", profile=_profile, fallback=None)
         return
@@ -1134,7 +1190,7 @@ def _subagent_stop(**kwargs: Any) -> None:
     # turn that started the task.
     slot, job = _started_slot(parent, kwargs.get("parent_turn_id"))
     if (_inside_parent_turn(parent, kwargs.get("parent_turn_id")) or _is_child_session(parent)
-            or cron_runs.quiet(parent, None) or (job and cron_runs.muted(job))):
+            or cron_runs.quiet(parent, None) or (job and cron_runs.muted(job)) or _automation_session(parent)):
         return
     status = _text(kwargs.get("child_status")) or "finished"
     # Hermes reports "completed" (else "failed", "timeout", "error"). Only a
@@ -1229,7 +1285,9 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
         # doesn't; one that starts after its row settled (a follow-up queued
         # behind the last turn) puts it back to running.
-        if not _work_turn_started(session_id):
+        if _automation_turn(kwargs.get("platform")):
+            _note_automation_session(session_id)
+        elif not _work_turn_started(session_id):
             _quietly(live_activity.reporter.turn_started, session_id)
         # A voice chat archived when its call ended is in use again (#1124).
         try:
