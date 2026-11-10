@@ -658,6 +658,8 @@ def test_start_offers_lookalikes_first(on, hermes):
 
 
 def test_start_stops_at_the_bots_running_limit(on, hermes):
+    assert on.max_running() == 4, "the default (Eric 2026-11-10)"
+    on.set_max_running(2)
     start("One thing")
     start("Second matter", "Count the invoices sent in March.")
     answer = start("Third question", "Tidy the garden shed photos.")
@@ -1543,6 +1545,7 @@ def test_a_start_waits_for_the_sweep(on, hermes, monkeypatch):
 
 
 def test_a_send_to_idle_work_keeps_to_the_running_limit(on, hermes):
+    on.set_max_running(2)
     start("One thing")
     start("Second matter", "Count the invoices sent in March.")
     on.update("W1", status="done")
