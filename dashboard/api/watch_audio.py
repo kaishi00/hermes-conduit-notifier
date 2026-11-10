@@ -537,6 +537,8 @@ class _WatchAudioSession:
         self.profile = bridge.grant.profile
         self.stopping = asyncio.Event()
         self.reason = "ended"
+        # A WatchAudioFailure's code, when one ended the session.
+        self.failure_code: Optional[str] = None
         # When the provider was sent the oldest event it hasn't answered, and its type.
         self.owed_since: Optional[float] = None
         self.owed_event = ""
@@ -1090,7 +1092,7 @@ def _session_releases_presence(session: Any) -> bool:
     if session.reason not in WATCH_AUDIO_PRESENCE_RELEASED:
         return False
     return not (session.reason == "error"
-                and getattr(session, "failure_code", None) in WATCH_AUDIO_PRESENCE_KEPT_FAILURES)
+                and session.failure_code in WATCH_AUDIO_PRESENCE_KEPT_FAILURES)
 # The bridges holding each profile's call presence. The presence is one
 # deadline per profile, so a bridge lets go of it (writes 0) only as its last
 # holder: one Watch call's end never clears another's that's still running.

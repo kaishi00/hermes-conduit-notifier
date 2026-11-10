@@ -805,6 +805,9 @@ def test_an_unreachable_provider_keeps_the_presence_and_a_failure_lets_go(monkey
     async def scenario(code):
         class FailingCode(EchoSession):
             async def run(self):
+                # Mid-call: the hold is written before the provider fails.
+                await self.bridge.control(self.stream, {"type": "started", "engine": self.engine})
+                await _until(lambda: held)
                 raise api.watch_audio.WatchAudioFailure(code, "no")
 
         monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", FailingCode)
@@ -820,7 +823,8 @@ def test_an_unreachable_provider_keeps_the_presence_and_a_failure_lets_go(monkey
         watch = Watch()
         await bridge._handle(watch.hello())
         await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
-        await _until(lambda: bridge.session is None and len(socket.sent) == 2)
+        await _until(lambda: bridge.session is None and len(socket.sent) == 3)
+        assert held[0] == api.watch_audio.WATCH_AUDIO_PRESENCE_S
         return held, bridge
 
     for code in ("unreachable", "rate_limited"):
@@ -858,6 +862,33 @@ def test_a_write_slower_than_the_wait_is_undone_after_the_release(monkeypatch):
         await asyncio.sleep(0.2)
         assert held[-1] == 0 and held.count(0) == 2, "released, then the late write undone"
         assert bridge.slots.used == 0
+
+    _run(scenario())
+
+
+def test_a_newer_session_on_the_stream_gets_no_ended_for_the_one_before(monkeypatch):
+    class Replaced(EchoSession):
+        async def run(self):
+            # A newer session took this stream before this one's cleanup.
+            self.bridge.session = types.SimpleNamespace(stream=self.stream)
+            self.reason = "restarted"
+
+    monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", Replaced)
+
+    async def scenario():
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            pass
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        task = bridge.session_task
+        await asyncio.gather(task, return_exceptions=True)
+        assert socket.sent == [], "no ended for the replaced session"
+        assert bridge.presence_held, "the newer session keeps the presence"
 
     _run(scenario())
 
