@@ -1080,6 +1080,17 @@ async def _watch_call_presence(profile: Optional[str], hold_s: int) -> None:
 # restart) keeps it for the Watch's next start on the grant; unrenewed, it
 # runs out on its own, and the grant's end lets go of it anyway.
 WATCH_AUDIO_PRESENCE_RELEASED = frozenset({"ended", "error", "refused"})
+# A failure with one of these codes is a drop the Watch can start again
+# from (the provider unreachable or rate-limited for a moment), so it keeps
+# the presence like any other drop; every other failure lets go.
+WATCH_AUDIO_PRESENCE_KEPT_FAILURES = frozenset({"unreachable", "rate_limited"})
+
+
+def _session_releases_presence(session: Any) -> bool:
+    if session.reason not in WATCH_AUDIO_PRESENCE_RELEASED:
+        return False
+    return not (session.reason == "error"
+                and getattr(session, "failure_code", None) in WATCH_AUDIO_PRESENCE_KEPT_FAILURES)
 # The bridges holding each profile's call presence. The presence is one
 # deadline per profile, so a bridge lets go of it (writes 0) only as its last
 # holder: one Watch call's end never clears another's that's still running.
@@ -1328,7 +1339,12 @@ class _WatchAudioBridge:
             return
         kind = request.get("type")
         if kind == "end":
-            await self._end_session("ended")
+            if self.session is None:
+                # The user hung up after the provider ended the call or a
+                # drop: nothing runs, so let go of the presence it kept.
+                await self._release_presence()
+            else:
+                await self._end_session("ended")
         elif kind == "start":
             await self._start(stream, request)
 
@@ -1353,10 +1369,6 @@ class _WatchAudioBridge:
         finishes here; one that lands after the release (a write slower than
         the session's wait for it) is undone at once. Never raises: a call
         goes on without it (Hermes' calls then ring over it)."""
-        if not self.presence_held:
-            self.presence_held = True
-            self.presence_profile = session.profile
-            _claim_watch_presence(session.profile, self)
         while not stop.is_set():
             try:
                 await self.presence(session.profile, WATCH_AUDIO_PRESENCE_S)
@@ -1387,11 +1399,18 @@ class _WatchAudioBridge:
 
     async def _run_session(self, session: _WatchAudioSession) -> None:
         stop_holding = asyncio.Event()
+        # Claimed here, before the holder's first write can start, so a
+        # session that fails at once still lets go.
+        if not self.presence_held:
+            self.presence_held = True
+            self.presence_profile = session.profile
+            _claim_watch_presence(session.profile, self)
         holding = asyncio.ensure_future(self._hold_presence(session, stop_holding))
         try:
             await session.run()
         except WatchAudioFailure as exc:
             session.reason = "error"
+            session.failure_code = exc.code
             await self.control(session.stream, {"type": "error", "code": exc.code, "message": str(exc)})
         except asyncio.CancelledError:
             session.reason = session.reason if session.stopping.is_set() else "cancelled"
@@ -1412,11 +1431,14 @@ class _WatchAudioBridge:
                 # undoes it if the release below went first.
                 await asyncio.wait({holding}, timeout=WATCH_AUDIO_STOP_TIMEOUT_S)
             finally:
-                if session.reason in WATCH_AUDIO_PRESENCE_RELEASED and self.session is None:
+                if _session_releases_presence(session) and self.session is None:
                     # The user hung up, or the call failed for good.
                     await self._release_presence()
-            with contextlib.suppress(Exception):
-                await self.control(session.stream, {"type": "ended", "engine": session.engine, "reason": session.reason})
+            # A newer session already started on this stream gets no
+            # "ended" for the one before.
+            if self.session is None or self.session.stream is not session.stream:
+                with contextlib.suppress(Exception):
+                    await self.control(session.stream, {"type": "ended", "engine": session.engine, "reason": session.reason})
 
     async def _end_session(self, reason: str) -> None:
         session, task = self.session, self.session_task

@@ -793,8 +793,42 @@ def test_a_provider_drop_keeps_the_presence_for_the_next_start(monkeypatch):
         await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
         await _until(lambda: bridge.session is None and len(socket.sent) == 2)
         assert 0 not in held and bridge.presence_held, "the Watch may start again: kept"
+        # The user hangs up with nothing running: let go.
+        await bridge._handle(watch.control({"type": "end"}))
+        await _until(lambda: 0 in held)
+        assert not bridge.presence_held
 
     _run(scenario())
+
+
+def test_an_unreachable_provider_keeps_the_presence_and_a_failure_lets_go(monkeypatch):
+    async def scenario(code):
+        class FailingCode(EchoSession):
+            async def run(self):
+                raise api.watch_audio.WatchAudioFailure(code, "no")
+
+        monkeypatch.setitem(api.watch_local_live._WATCH_AUDIO_SESSIONS, "grok", FailingCode)
+        # Each call alone: a kept hold from the call before would hold on.
+        monkeypatch.setattr(api.watch_audio, "_watch_presence_holders", {})
+        held = []
+        bridge = _bridge()
+
+        async def presence(profile, hold_s):
+            held.append(hold_s)
+        bridge.presence = presence
+        socket = await _attach(bridge)
+        watch = Watch()
+        await bridge._handle(watch.hello())
+        await bridge._handle(watch.control({"type": "start", "engine": "grok"}))
+        await _until(lambda: bridge.session is None and len(socket.sent) == 2)
+        return held, bridge
+
+    for code in ("unreachable", "rate_limited"):
+        held, bridge = _run(scenario(code))
+        assert 0 not in held and bridge.presence_held, code
+    for code in ("unavailable", "failed", "busy", "refused"):
+        held, bridge = _run(scenario(code))
+        assert held[-1] == 0 and not bridge.presence_held, code
 
 
 def test_a_write_slower_than_the_wait_is_undone_after_the_release(monkeypatch):
