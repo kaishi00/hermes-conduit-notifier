@@ -19,6 +19,7 @@ lets a workstream's tools do.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import sqlite3
@@ -58,9 +59,13 @@ _STEER_OPEN = re.compile(r"\[OUT-OF-BAND USER MESSAGE[^\]\n]*\]")
 _STEER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
 _SUMMARIES = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:")
 _WAKE_STARTS = "Work update from "
-# A work update that carries another bot's ask: answering it, with a
-# workstream when it takes one, is what that turn is for.
-_ASK_IN_WAKE = "Answer an ask from another bot"
+# The work updates that carried another bot's ask (their outbox rows):
+# answering it, with a workstream when it takes one, is what that turn is
+# for. Kept by the plugin as it sends one, never read from the update's
+# words, which hold what workers reported.
+_ASK_WAKES = "ask_wakes"
+_ASK_WAKES_KEPT = 20
+_ASK_WAKE_AGE_S = 6 * 3600.0
 
 ASK_FIRST_START = ("The user asked to be asked first (Edit Bot > Work > Coordination: Ask), and they didn't start "
                    "this turn, so nothing was started. Tell them what you'd start and why, record it with "
@@ -119,14 +124,39 @@ def mode(store: work_store.Store) -> str:
         return "off"
 
 
-def self_started(home: Path, session_id: Any) -> bool:
+def ask_wake_sent(store: work_store.Store, item: str) -> None:
+    """Notes that this work update (its outbox row) carried another bot's ask."""
+    try:
+        kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
+    except ValueError:
+        kept = []
+    kept = [name for name in kept if isinstance(name, str)][-(_ASK_WAKES_KEPT - 1):] + [item]
+    store.set_meta(_ASK_WAKES, json.dumps(kept))
+
+
+def _carries_ask(store: Optional[work_store.Store], content: str) -> bool:
+    """Whether this saved message holds a work update the plugin sent with
+    another bot's ask in it, whole."""
+    if store is None:
+        return False
+    try:
+        kept = set(json.loads(store.get_meta(_ASK_WAKES) or "[]"))
+        rows = store.outbox_rows("", "wake") if kept else []
+    except (ValueError, TypeError, sqlite3.Error):
+        return False
+    since = time.time() - _ASK_WAKE_AGE_S
+    return any(row["id"] in kept and row["created_at"] >= since and row["text"] and row["text"] in content
+               for row in rows)
+
+
+def self_started(home: Path, session_id: Any, store: Optional[work_store.Store] = None) -> bool:
     """Whether the Bot Chat's turn under way was started by the plugin (a
     work update), not by the user. Hermes stores a turn's prompt before any
     tool runs, so the newest user row is this turn's: hidden, or a work
     update stored without its mark. The user's own steer into such a turn
     makes it theirs, and an update that carries another bot's ask is that
-    bot's to have answered. Unreadable: the user's, so their own instruction is
-    never refused."""
+    bot's to have answered (``store`` knows which the plugin sent).
+    Unreadable: the user's, so their own instruction is never refused."""
     path = Path(home) / "state.db"
     if not session_id or not path.exists():
         return False
@@ -147,9 +177,11 @@ def self_started(home: Path, session_id: Any) -> bool:
     if not row:
         return False
     content = row[0] if isinstance(row[0], str) else ""
-    if row[1] == "steer" or _ASK_IN_WAKE in content:
+    if row[1] == "steer":
         return False
-    return row[1] is not None or content.startswith(_WAKE_STARTS)
+    if row[1] is None and not content.startswith(_WAKE_STARTS):
+        return False
+    return not _carries_ask(store, content)
 
 
 def _short(value: Any, limit: int) -> str:
@@ -305,8 +337,7 @@ def board(home: Path, store: work_store.Store, works: list[work_store.Work], ago
             continue
         delivered = store.outbox_states(work.ref) if events else {}
         lines = [(event["at"], _event_line(event, ago, delivered, work, store)) for event in events]
-        # The user's words and the newest of each kind first: an old send is what goes.
-        lines = sorted(lines, key=lambda pair: pair[0])[-BOARD_EVENTS_PER_WORK:]
+        lines = _newest_of_each(events, lines)
         if lines:
             drawn[work.ref] = lines
     total = sum(len(line) for lines in drawn.values() for _, line in lines)
@@ -323,6 +354,23 @@ def board(home: Path, store: work_store.Store, works: list[work_store.Work], ago
     return out
 
 
+def _newest_of_each(events: list[dict], lines: list[tuple[float, str]]) -> list[tuple[float, str]]:
+    """The lines a workstream's board keeps: the user's newest words and the
+    newest of each kind first, then the newest of the rest, in the order
+    they happened. An old send is what goes."""
+    keep: list[int] = []
+    for kind in ("user", "found", "assumes", "changed", "sent"):
+        last = max((index for index, event in enumerate(events) if event["kind"] == kind), default=None)
+        if last is not None:
+            keep.append(last)
+    for index in range(len(events) - 1, -1, -1):
+        if len(keep) >= BOARD_EVENTS_PER_WORK:
+            break
+        if index not in keep:
+            keep.append(index)
+    return [lines[index] for index in sorted(keep[:BOARD_EVENTS_PER_WORK])]
+
+
 def _event_line(event: dict, ago: Callable[[float], str], states: dict, work: work_store.Work,
                 store: work_store.Store) -> str:
     text = _short(event["text"], EVENT_CHARS)
@@ -334,6 +382,9 @@ def _event_line(event: dict, ago: Callable[[float], str], states: dict, work: wo
         item = event["source"].split(":")[1] if event["source"].startswith("outbox:") else ""
         state = states.get(item) or {}
         how = event.get("detail") or ""
+        if not item:
+            # Taken as the answer to its question: nothing to wait for in its chat.
+            return f"  · you sent, {when}: «{text}»" + (f" ({how})" if how else "")
         if state.get("delivered_at"):
             worked = work.updated_at > state["delivered_at"] or work.turn_at > state["delivered_at"]
             arrived = "it's in its chat" + (", and it has worked since" if worked else "")
@@ -396,7 +447,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
             return {"ok": False, "error": "missing", "note": "Give the proposal's id (P1) with the answer."}
         if answer not in ("approved", "declined"):
             return {"ok": False, "error": "missing", "note": "answer is approved or declined."}
-        if self_started(home, session_id):
+        if self_started(home, session_id, store):
             # Only the user's own message answers one: a work update's turn can't approve for them.
             return {"ok": False, "id": wanted, "error": "not_the_user",
                     "note": f"The user didn't write this turn's message, so {wanted} stays open. Record their "

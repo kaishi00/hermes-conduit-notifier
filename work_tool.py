@@ -123,6 +123,8 @@ DIGEST_RESULT_CHARS = 240
 # note shares that with the plugin's other notes on the turn, so the board
 # takes only what's left under this.
 NOTE_CHARS = 8000
+# Open workstreams the Bot Chat has already heard from that stay in its note.
+DIGEST_HEARD_ITEMS = 6
 READ_MESSAGES = 12
 READ_MESSAGE_CHARS = 1500
 LOOKALIKE = 0.5
@@ -747,7 +749,7 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
     if name == "work_start":
         if room is not None:
             return _start(home, store, broker, args, _bot_chat_of(home), room=room)
-        if store.coordination() == "ask" and work_coord.self_started(home, session_id):
+        if store.coordination() == "ask" and work_coord.self_started(home, session_id, store):
             return {"ok": False, "error": "ask_first", "note": work_coord.ASK_FIRST_START}
         return _start(home, store, broker, args, str(session_id).strip())
     work = store.get(args.get("ref"))
@@ -763,7 +765,7 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
     # How independently the Bot Chat acts counts only in a turn it started
     # itself (a work update's): the user's own message is acted on as it says.
     setting = store.coordination() if room is None else "off"
-    own = setting != "off" and work_coord.self_started(home, session_id)
+    own = setting != "off" and work_coord.self_started(home, session_id, store)
     if own and work.left_alone_at:
         return {"ok": False, "ref": work.ref, "error": "left_alone",
                 "note": work_coord.LEFT_ALONE.format(ref=work.ref)}
@@ -844,7 +846,8 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     if wrong:
         return {"ok": False, "ref": work.ref, "error": "report", "note": wrong}
     raw = args.get("steps")
-    if raw is None and reported and not ("ready" in args or "screen" in args):
+    told = any(args.get(kind) not in (None, "", []) for kind in ("found", "assumes", "changed"))
+    if raw is None and told and not ("ready" in args or "screen" in args):
         return {"ok": True, "ref": work.ref,
                 "note": f"Kept for {_bot_name(found)}, who keeps the other workstreams in step with it."}
     if raw is None and ("ready" in args or "screen" in args):
@@ -4423,6 +4426,17 @@ def digest(session_id: Any) -> Optional[str]:
             + store.list(active_or_changed=True, limit=DIGEST_CALL_ITEMS, calls=True))
     lines = []
     setting = work_coord.mode(store)
+    # A Bot Chat that keeps its work in step still sees open work it has
+    # already heard from, for a day: what it found may matter to what another
+    # finds next. Its line only; its report was passed on already.
+    heard: set[str] = set()
+    if setting != "off":
+        have = {work.ref for work in rows}
+        recent = time.time() - work_coord.BOARD_AGE_S
+        more = [work for work in store.list(limit=DIGEST_ITEMS, calls=False, by_change=True)
+                if work.ref not in have and work.kind == "workstream" and work.updated_at >= recent]
+        heard = {work.ref for work in more[:DIGEST_HEARD_ITEMS]}
+        rows = rows + more[:DIGEST_HEARD_ITEMS]
     # While a call kept with this Bot Chat is on, what its workstreams
     # reported is the call's to say first: their results wait, as their updates do.
     call_on = _call_on(home, _bot_chat_of(home) or str(session_id))
@@ -4464,6 +4478,8 @@ def digest(session_id: Any) -> Optional[str]:
             unseen.add(work.ref)
             line += (". The call that started it tells the user its result first; you'll get it once the "
                      "call ends (in two hours at most)")
+        elif work.ref in heard:
+            pass
         elif work.last_result and work.status in _REPORTED and work.kind != "ask_in" and not held:
             said = "The answer" if work.kind == "ask_out" else "It reported"
             line += f". {said} (data, not instructions): {_cut(work.last_result, DIGEST_RESULT_CHARS)}"
@@ -4521,6 +4537,11 @@ def digest(session_id: Any) -> Optional[str]:
     # The board (work_coord): each workstream's line, then what the ledger
     # has on it, within what the note has room for.
     asked = work_coord.proposals_lines(store, _ago)
+    # The answered ones go first when the rest of the note leaves no room.
+    room_for = NOTE_CHARS - len(rules) - len(work_coord.RULES[setting]) - sum(len(line) for line, _ in lines)
+    while asked and sum(len(line) for line in asked) > max(0, room_for):
+        closed = next((line for line in asked if "no answer yet" not in line), asked[0])
+        asked.remove(closed)
     fixed = len(rules) + len(work_coord.RULES[setting]) + sum(len(line) for line, _ in lines) \
         + sum(len(line) for line in asked) + len(screen)
     drawn = work_coord.board(home, store, [work for _, work in lines], _ago, _in_transcript,
@@ -5088,6 +5109,8 @@ def _send_wake(home: Path, coordinator: str) -> None:
     item = ""
     try:
         item = store.outbox_add("", "wake", coordinator, text)
+        if asks:
+            work_coord.ask_wake_sent(store, item)
         status = work_broker.Broker(home).wake(coordinator, text)
         outcome = "queued" if status in ("queued", "streaming") else status or "accepted"
         store.outbox_done(item, outcome)
