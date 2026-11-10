@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.153.4 (2026-11-10)
+
+### Fixes
+- On a Hermes newer than 0.23.0, your first message after a Pulse report no
+  longer hands the report to your memory provider as your last message.
+
 ## 0.153.3 (2026-11-10)
 
 ### Fixes
