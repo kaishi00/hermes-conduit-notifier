@@ -168,8 +168,9 @@ def text_for(context_text: str, note: str = "") -> Callable[[str], str]:
 
 def summary_line(reply: str) -> str:
     """The brief's first line, for its push (cut to ``SUMMARY_LIMIT`` if the
-    reply ran on): the rest is for its card."""
-    return _clip(next((text for text in reply.splitlines() if text.strip()), ""), SUMMARY_LIMIT)
+    reply ran on, and without the context's markers): the rest is for its
+    card."""
+    return _clip(_shown(next((text for text in reply.splitlines() if text.strip()), "")), SUMMARY_LIMIT)
 
 
 # The headings NOTE asks for, each with the key its lines go under in the
@@ -177,12 +178,13 @@ def summary_line(reply: str) -> str:
 HEADINGS = {"today": "today", "still open": "open"}
 _HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)?([A-Za-z ]+?)(?:\*\*)?\s*:?\s*(?:\*\*)?\s*$")
 _ITEM = re.compile(r"^\s*[-*\u2022]\s+(.*\S)")
-# The context's own markers a reply can copy (report.remembered_lines): a
-# remembered item's "#481" leading the line, or after its last sentence, and
-# its "[interest]" kind anywhere. Other numbers ("issue #2059") stay.
-_KIND = re.compile(r"\[(?:%s)\]\s*" % "|".join(
-    ("commitment", "promise", "intention", "interest", "fact", "watch", "deadline", "date", "reminder")))
-_LEADING_REF = re.compile(r"^#\d+(?:\s+|$)")
+# The context's own markers a reply can copy: an item's "[interest]" kind
+# anywhere, with the "#481" just before it (report.remembered_lines, the
+# related lines of pulse_places), a "#481:" leading a later line
+# (report.later_lines), and a "#481" after the last sentence. Other numbers
+# ("issue #2059", "#1 priority") stay.
+_KIND = re.compile(r"(?:#\d+\s*)?\[(?:%s)\]\s*" % "|".join(map(re.escape, report.KINDS)))
+_LEADING_REF = re.compile(r"^#\d+\s*:\s*")
 _TRAILING_REF = re.compile(r"(?:(?<=[.!?)\]])\s+|^)#\d+$")
 
 

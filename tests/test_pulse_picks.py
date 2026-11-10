@@ -54,6 +54,20 @@ def test_actions_without_what_they_need_are_left_out():
     assert actions == [{"label": "Retry", "does": "ask", "say": "Run the audit again"}]
 
 
+def test_a_calendar_entry_gets_no_button_to_put_it_on_the_calendar():
+    # Eric's brief, 2026-11-10: "Block calendar time" on a Duty Day read from his calendar.
+    entry = {"line": "Duty Day on Tuesday 17 November", "subject": "v1", "shape": "date",
+             "facts": {"day": "2026-11-17", "what": "Duty Day", "whose": ""},
+             "actions": [{"label": "Block calendar time", "does": "ask", "say": "Block the day for work"},
+                         {"label": "Done", "does": "done"}]}
+    pick, _ = picks.parse(entry)
+    assert pick["actions"] == [{"label": "Done", "does": "done"}]
+    # Something remembered (not read from the calendar) may still offer it.
+    kept, _ = picks.parse({**entry, "subject": "#41"})
+    assert kept["actions"][0]["label"] == "Block calendar time"
+    assert "never offer to add it" in picks.PICK_RULES
+
+
 def test_drawn_bodies_only_for_apps_that_draw_them():
     entry = {"line": "Rain at 4", "shape": "drawn",
              "facts": {"body": {"type": "weather", "title": "Rain", "location": "Paris"}}}
@@ -150,10 +164,16 @@ def test_the_brief_is_laid_out_from_its_parts():
 def test_the_brief_drops_the_contexts_item_markers():
     # Eric's brief, 2026-11-10: the reply copied an item's line from the context.
     reply = ("Two duty days ahead.\nStill open:\n- [interest] Verify commit b8a4ba59 correctly closes GitHub issues "
-             "#2059 and #2062. #481\n- #12 [promise] Send the deck (due Friday)\n- Track order #4 by phone\n- #481")
+             "#2059 and #2062. #481\n- #12 [promise] Send the deck (due Friday)\n- Track order #4 by phone\n- #481\n"
+             "- #77: Dan said the venue moved\n- Lunch with Dan: #31 [follow-up] Ask about the lease\n"
+             "- #1 priority: call the bank")
     assert pulse.brief.look(reply, held=0)["facts"]["open"] == [
         "Verify commit b8a4ba59 correctly closes GitHub issues #2059 and #2062.",
-        "Send the deck (due Friday)", "Track order #4 by phone"]
+        "Send the deck (due Friday)", "Track order #4 by phone", "Dan said the venue moved",
+        "Lunch with Dan: Ask about the lease", "#1 priority: call the bank"]
+    copied = "**#9 [next]** Renew the passport\n- Pay rent"
+    assert pulse.brief.summary_line(copied) == "Renew the passport"
+    assert pulse.brief.look(copied, held=0)["line"] == "Renew the passport"
     assert "never copy an item's" in pulse.brief.NOTE
 
 
