@@ -216,8 +216,11 @@ def test_more_lines_than_one_read_takes_are_read_oldest_first_and_the_rest_next(
     monkeypatch.setattr(watch, "noticed", lambda home, ref, **_: again.append(ref))
     for number in (1, 2, 3):
         call("work_progress", {"found": f"finding {number}"}, session_id=WORKER)
-    helper = Helper()
     again.clear()
+    with pytest.raises(RuntimeError):  # a read that failed asks for no other: the next report brings one
+        watch.check(home, ask=Helper(RuntimeError("no model")))
+    assert again == []
+    helper = Helper()
     assert watch.check(home, ask=helper) is None and again == [""]
     assert "«finding 1»" in helper.read[0].split("The open workstreams:")[0]
     assert "«finding 3»" not in helper.read[0].split("The open workstreams:")[0]

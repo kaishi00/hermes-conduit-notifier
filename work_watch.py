@@ -191,18 +191,21 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
     if not fresh:
         return None
     last = fresh[-1]["id"]
-    if len(fresh) >= NEW_EVENTS:
-        noticed(home, "")  # more came than one read takes: the rest get the next one
+    more = len(fresh) >= NEW_EVENTS  # more came than one read takes: the rest get the next one
     new = [event for event in fresh if event["ref"] in works]
     opened = [work for work in works.values() if work.active or work.updated_at >= now - work_coord.BOARD_AGE_S]
     opened = sorted(opened, key=lambda work: (not work.active, -work.updated_at))[:OPEN_WORK]
     sources = {event["ref"] for event in new}
     if not new or not any(work.ref not in sources for work in opened) and len(sources) < 2:
         store.set_meta(_CURSOR, str(last))  # nothing else it could matter to
+        if more:
+            noticed(home, "")
         return None
     flags = store.ledger(since=now - 3600.0, kinds=("flag",), limit=FLAGS_COUNTED)
     parsed, tokens = (ask or _ask)(INSTRUCTIONS, _page(store, new, opened, works, flags, now))
     store.set_meta(_CURSOR, str(last))
+    if more:  # only once this read went through: a failed one waits for the next report
+        noticed(home, "")
     parsed = parsed if isinstance(parsed, dict) else {}
     why = work_coord._short(parsed.get("why"), WHY_CHARS)
     between = []
@@ -225,7 +228,9 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
     read = [event for event in new if event["ref"] in (source, *others)][-READ_LINES:]
     for ref in others:  # the other side's newest line, when it reported before this read
         if not any(event["ref"] == ref for event in read):
-            read = store.events(ref, since=now - work_coord.BOARD_AGE_S, kinds=KINDS, limit=1) + read
+            had = [event for event in store.events(ref, since=now - work_coord.BOARD_AGE_S, kinds=KINDS,
+                                                   limit=WORK_LINES + len(new)) if event["id"] <= last]
+            read = had[-1:] + read  # one the helper was shown, not one that came as it answered
     kept = store.event_add(source, "flag", "watch", why, source="events:" + ",".join(str(event["id"]) for event in read),
                            key=f"flag:{last}", detail=json.dumps({"with": others, "woke": woke}))
     if not kept:
