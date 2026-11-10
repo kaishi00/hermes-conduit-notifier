@@ -213,8 +213,18 @@ class Run:
                 and (f.get("params") or {}).get("session_id") == runtime]
 
     async def chat_running(self) -> bool:
-        info = (await self.call("session.info", {"session_id": self.chat})).get("result") or {}
-        return bool(info.get("running"))
+        """Whether the Bot Chat is in a turn, by the events this socket got:
+        Hermes has no call that says so (session.info is only an event), and
+        asking for one answered an error that read as "not running" (test
+        host, 2026-11-10)."""
+        for frame in reversed(self.frames):
+            params = frame.get("params") or {}
+            if frame.get("method") == "event" and params.get("session_id") == self.chat:
+                if params.get("type") == "message.start":
+                    return True
+                if params.get("type") == "message.complete":
+                    return False
+        return False
 
     async def say(self, text: str, timeout: float = 240) -> str:
         """The user writes in the Bot Chat; its reply. A patient user: they
