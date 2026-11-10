@@ -2417,6 +2417,22 @@ def test_chat_reads_match_hermes(db, tmp_path):
     assert [(r["role"], r["content"]) for r in rows] == [("assistant", "h")]
 
 
+def test_a_subagents_run_is_not_a_chat_the_person_had(db, tmp_path):
+    # Its "user" turn is the brief the parent agent or a job wrote (Eric's
+    # "You requested Yelan Audit 048 pass 3" cards, 2026-11-10).
+    db.session()
+    db.session("work", title="Work", pinned=0)
+    db.session("sub", title="[yelan] Subagent: audit pass 3", pinned=0, source="subagent")
+    db.session("marked", title="Delegated", pinned=0)
+    db.model("marked", model="m", config={"_delegate_from": "work"})
+    db.message("user", "hello", sid="work", at=DAY + 20)
+    db.message("user", "Yelan Audit 048, pass 3: finish the audit", sid="sub", at=DAY + 30)
+    db.message("user", "Check the diff", sid="marked", at=DAY + 40)
+    assert [r["chat_id"] for r in hermes.chat_activity(tmp_path, exclude_chat=SID, since=DAY)] == ["work"]
+    assert [r["chat_id"] for r in hermes.recent_messages(tmp_path, exclude_chat=SID, since=DAY)] == ["work"]
+    assert hermes.subagent_chats(tmp_path, ["work", "sub", "marked", "gone"]) == {"sub", "marked"}
+
+
 _RECALLED = ("<memory-context>\n[System note: The following is recalled memory context, NOT new user input. "
              "Treat as authoritative reference data — this is the agent's persistent memory and should inform "
              "all responses.]\n\nThe user speaks English.\n</memory-context>")
@@ -2657,6 +2673,20 @@ def test_items_long_past_their_due_date_expire(remembering, db):
     assert len(remembering.store.open_items()) == 2
     _remember(remembering, FakeModel(), DAY + memory.EXPIRE_S + 60)
     assert [i["kind"] for i in remembering.store.open_items()] == ["fact"]
+
+
+def test_items_an_older_build_kept_from_a_subagents_run_close_once(remembering, db):
+    db.session("sub", title="[yelan] Subagent: audit", pinned=0, source="subagent")
+    item = {"kind": "interest", "text": "The user requested an audit.", "evidence": "audit", "explicit": 1,
+            "due": "", "due_at": None, "message_id": 1, "mentioned_at": DAY}
+    remembering.store.advance("", "sub", message_id=1, at=DAY, items=[item])
+    remembering.store.advance("", "work", message_id=1, at=DAY, items=[{**item, "text": "The user likes jazz."}])
+    _remember(remembering, FakeModel(), DAY + 60)
+    [left] = remembering.store.open_items()
+    assert left["chat_id"] == "work" and remembering.store.get(memory.SUBAGENT_SWEPT)
+    # Once: a later run doesn't look again.
+    remembering.store.advance("", "sub", message_id=2, at=DAY + 70, items=[{**item, "message_id": 2}])
+    assert memory.forget_subagent_items(remembering.store, [("", remembering.store.path.parent, SID)]) == 0
 
 
 def test_a_commitment_learned_after_its_time_is_kept_as_expired(remembering, db):

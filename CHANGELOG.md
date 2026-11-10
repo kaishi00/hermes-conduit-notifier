@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.153.6 (2026-11-10)
+
+### Fixes
+- Pulse no longer reads a subagent's chat as if you wrote it, so a task a
+  bot handed to a subagent no longer comes up as "You requested…". What it
+  already learned that way is forgotten once.
+
 ## 0.153.5 (2026-11-10)
 
 ### Fixes

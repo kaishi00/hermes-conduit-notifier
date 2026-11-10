@@ -219,10 +219,15 @@ def _workstreams(home: Path) -> str:
 _NOT_WORK = ("s.id NOT IN (WITH RECURSIVE work(id) AS (SELECT value FROM json_each(?) "
              "UNION SELECT c.id FROM sessions c JOIN work ON c.parent_session_id = work.id) SELECT id FROM work)")
 
+# A subagent's run (tools/delegate_tool): its "user" turn is the brief the
+# parent agent or a job wrote, never the person (as room_memory reads it).
+_NOT_SUBAGENT = ("lower(COALESCE(s.source, '')) != 'subagent' AND COALESCE(json_extract(CASE WHEN "
+                 "json_valid(s.model_config) THEN s.model_config ELSE '{}' END, '$._delegate_from'), '') = ''")
+
 # The chats a person had: every session but ``excluded`` (the home chat's
-# whole compression chain), cron runs, hidden chats and a bot's workstreams;
-# only their visible user and assistant rows. Takes the home chat's id
-# twice, then the workstreams.
+# whole compression chain), cron runs, subagent runs, hidden chats and a
+# bot's workstreams; only their visible user and assistant rows. Takes the
+# home chat's id twice, then the workstreams.
 _EXCLUDED = (
     "WITH RECURSIVE up(id, parent) AS (SELECT id, parent_session_id FROM sessions WHERE id = ? "
     "UNION SELECT s.id, s.parent_session_id FROM sessions s JOIN up ON s.id = up.parent), "
@@ -231,13 +236,21 @@ _EXCLUDED = (
 _PERSON_ROWS = (
     "m.role IN ('user', 'assistant') AND m.active = 1 AND m.display_kind IS NULL "
     "AND (s.source IS NULL OR s.source != 'cron') AND s.hidden = 0 AND s.id NOT IN (SELECT id FROM excluded) "
-    "AND " + _NOT_WORK)
+    "AND " + _NOT_SUBAGENT + " AND " + _NOT_WORK)
+
+
+def subagent_chats(home: Path, chat_ids: Iterable[str]) -> set[str]:
+    """Which of ``chat_ids`` are a subagent's runs (``_NOT_SUBAGENT``)."""
+    ids = json.dumps(sorted({chat for chat in chat_ids if chat}))
+    rows = _run(home, "SELECT s.id FROM sessions s WHERE s.id IN (SELECT value FROM json_each(?)) AND NOT ("
+                + _NOT_SUBAGENT + ")", (ids,))
+    return {row["id"] for row in rows}
 
 
 def recent_messages(home: Path, *, exclude_chat: str, since: float, max_chars: int = 2000,
                     limit: int = 3000) -> list[sqlite3.Row]:
     """User and assistant rows since ``since`` in the chats a person had:
-    not any part of ``exclude_chat``'s compression chain, not cron runs, hidden
+    not any part of ``exclude_chat``'s compression chain, not cron or subagent runs, hidden
     chats, a bot's workstreams or hidden rows. The newest ``limit``, each cut to ``max_chars``,
     oldest first, with the chat's id and title."""
     return _run(home, (

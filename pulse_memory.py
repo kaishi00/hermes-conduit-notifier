@@ -707,6 +707,37 @@ def _parse(parsed: dict, chunk: Sequence[Any], zone: tzinfo, remembered: Sequenc
 
 # A run -----------------------------------------------------------------------------
 
+# Closed once (0.153.6): items an older build kept from a subagent's run,
+# whose "user" was the parent agent's brief (hermes._NOT_SUBAGENT).
+SUBAGENT_SWEPT = "subagent_items_swept"
+SUBAGENT_CLOSED_BY = "pulse: read from a subagent's run, not the user"
+
+
+def forget_subagent_items(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]]) -> int:
+    """Closes the open items read from a subagent's run in any of
+    ``sources``, once every profile could be read; returns how many."""
+    if pulse_store.get(SUBAGENT_SWEPT):
+        return 0
+    closed, readable = 0, True
+    items = pulse_store.open_items()
+    for profile, home, _ in sources:
+        mine = [item for item in items if item["profile"] == profile]
+        if not mine:
+            continue
+        try:
+            runs = hermes.subagent_chats(home, [item["chat_id"] for item in mine])
+        except hermes.HermesUnreadable:
+            readable = False
+            continue
+        for item in mine:
+            if item["chat_id"] in runs and pulse_store.close_item(item["id"], status="cancelled",
+                                                                 closed_by=SUBAGENT_CLOSED_BY):
+                closed += 1
+    if readable:
+        pulse_store.set(SUBAGENT_SWEPT, True)
+    return closed
+
+
 def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]], llm: Llm, *, zone: tzinfo,
         now: float, still_leader: Callable[[], bool] = lambda: True, budget: float = float("inf"),
         reads: str = "all", done: Optional[dict[str, int]] = None) -> dict[str, int]:
@@ -724,6 +755,7 @@ def run(pulse_store: store.PulseStore, sources: Sequence[tuple[str, Path, str]],
         done.setdefault(key, 0)
     calls = 0
     pulse_store.expire_items(due_before=now - EXPIRE_S, now=now)
+    forget_subagent_items(pulse_store, sources)
     pulse_store.prune_claims(now - pulse_claims.KEEP_S)
     handoffs = handoff_texts(pulse_store)
     backfill = active_backfill(pulse_store)
