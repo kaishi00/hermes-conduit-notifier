@@ -1662,7 +1662,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   question rather than waiting behind it. Only a Bot Chat turn your own
   message started, written after the question came, passes one on, so the bot never answers it alone, and
   what a group room says never does.
-- Up to 2 run at once per bot (`--max-running`). The registry is
+- Up to 4 run at once per bot by default (plugin 0.157.9+; 2 before), 1 to 6
+  in Edit Bot > Work or with `--max-running`; a bot with a saved number keeps it. The registry is
   `<profile>/conduit/workstreams.db`, with a journal of each workstream's
   tool steps and an outbox of every turn sent into a chat.
 - After a restart, a clean one or a crash, work that was running is marked
