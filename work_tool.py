@@ -3847,7 +3847,8 @@ def _ledger_turn_end(home: Path, store: work_store.Store, work: work_store.Work,
                         source=f"session:{work.session_id}")
         if work_coord.mode(store) == "off":
             return ""
-        work_coord.read_user_words(home, store, work)
+        if work_coord.read_user_words(home, store, work) and _watched(work):
+            work_watch.noticed(home, work.ref)  # what they wrote while it ran may change other work
         wrote = began is not None and store.events(work.ref, since=began - 1.0, kinds=("user",), limit=1)
     except Exception:  # noqa: BLE001 — the turn's end is settled all the same
         logger.debug("conduit_push: couldn't keep a turn's end in the ledger", exc_info=True)

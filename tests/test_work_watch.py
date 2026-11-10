@@ -254,3 +254,20 @@ def test_flags_kept_without_a_turn_dont_reopen_the_hours_allowance(on, hermes, h
         call("work_progress", {"found": f"finding {number}"}, session_id=WORKER)
         flag = watch.check(home, ask=Helper(FLAG))
         assert flag["woke"] is (number == 0)
+
+
+def test_a_long_report_keeps_the_line_the_flag_is_about(on, hermes, home, told):
+    two(on)
+    call("work_progress", {"found": ["GET /v1/users now returns 410 Gone", "the docs say v2", "v2 needs a token",
+                                     "the token is in the vault"]}, session_id=WORKER)
+    assert watch.check(home, ask=Helper(FLAG))["woke"]
+    assert "«GET /v1/users now returns 410 Gone»" in batched()[-1]
+
+
+def test_what_the_user_wrote_while_it_ran_is_read_when_the_turn_ends(on, hermes, home, told, monkeypatch):
+    two(on)
+    seen = []
+    monkeypatch.setattr(watch, "noticed", lambda home, ref, **_: seen.append(ref))
+    monkeypatch.setattr(work.work_coord, "read_user_words", lambda home, store, item: 1)
+    work._ledger_turn_end(home, on, on.get("W1"), "done", failed=False, began=time.time())
+    assert seen == ["W1"]

@@ -68,7 +68,7 @@ INSTRUCTIONS = (
 FLAG_LINE = ("- A helper model that reads your workstreams' reports as they come thinks {source} and {others} "
              "may affect each other: «{why}» (its read, for you to check, not a finding). What it read: {read}.")
 CAP_LINE = ("The helper that reads your workstreams as they work flagged {count} more {things} in the last hour "
-            "than it may start a turn for ({limit} an hour); they're on the board below. Tell the user their "
+            "than it may start a turn for ({limit} an hour); they're on the board above. Tell the user their "
             "workstreams have been this busy with each other, and what you make of it.")
 
 _ctx: Any = None
@@ -225,7 +225,9 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
     if not flagged:
         return None
     woke = sum(1 for flag in flags if _detail(flag).get("woke")) < FLAGS_PER_HOUR
-    read = [event for event in new if event["ref"] in (source, *others)][-READ_LINES:]
+    named = [event for event in new if event["ref"] in (source, *others)]
+    first = next(event for event in named if event["ref"] == source)  # what the flag is about stays
+    read = [first] + [event for event in named[-(READ_LINES - 1):] if event is not first]
     for ref in others:  # the other side's newest line, when it reported before this read
         if not any(event["ref"] == ref for event in read):
             had = [event for event in store.events(ref, since=now - work_coord.BOARD_AGE_S, kinds=KINDS,
