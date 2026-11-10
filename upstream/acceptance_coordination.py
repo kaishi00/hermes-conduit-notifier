@@ -219,11 +219,17 @@ class Run:
         host, 2026-11-10)."""
         for frame in reversed(self.frames):
             params = frame.get("params") or {}
-            if frame.get("method") == "event" and params.get("session_id") == self.chat:
-                if params.get("type") == "message.start":
-                    return True
-                if params.get("type") == "message.complete":
-                    return False
+            if frame.get("method") != "event" or params.get("session_id") != self.chat:
+                continue
+            kind, payload = params.get("type"), params.get("payload")
+            if kind == "message.start":
+                return True
+            if kind == "message.complete":
+                return False
+            # Every turn's end sends session.info with running false, also the
+            # two paths that send no message.complete; mid-turn ones carry true.
+            if kind == "session.info" and isinstance(payload, dict) and isinstance(payload.get("running"), bool):
+                return payload["running"]
         return False
 
     async def say(self, text: str, timeout: float = 240) -> str:
