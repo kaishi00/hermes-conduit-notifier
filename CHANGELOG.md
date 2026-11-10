@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.157.2 (2026-11-10)
+
+### Fixes
+- The morning brief's lines no longer show Pulse's own markers, like
+  "[interest]" or "#481", in front of or after what they say.
+
 ## 0.157.1 (2026-11-10)
 
 ### Fixes
