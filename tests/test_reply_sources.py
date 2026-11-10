@@ -355,6 +355,23 @@ def test_a_scripts_run_ends_no_lock_screen_progress(turn, monkeypatch):
     assert turn("cli") == ["response.ready"] and ended == [("s-1", "done")]
 
 
+def test_a_scripts_turn_hermes_never_ends_sends_no_lock_screen_end(turn, monkeypatch):
+    _no_hermes_sources(monkeypatch)
+    ended, timers = [], []
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_ended", lambda *args: ended.append(args))
+    monkeypatch.setattr(plugin, "_later", lambda delay, action: timers.append(action) or None)
+    monkeypatch.setattr(plugin, "enqueue", lambda event: None)
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")
+    # No turn id: no end is held for later.
+    plugin._post_llm_call(session_id="s-1", assistant_response="Done.", platform="cli")
+    assert "s-1" not in plugin._unnamed_ends
+    # A turn id and no end reported: the grace timer settles the reply and ends nothing.
+    plugin._post_llm_call(session_id="s-1", turn_id="t-9", assistant_response="Done.", platform="cli")
+    for action in timers:
+        action()
+    assert ended == [] and ("s-1", "t-9") not in plugin._pending_ready
+
+
 def test_a_push_a_scripts_run_wrote_with_conduit_notify_still_goes(turn, monkeypatch):
     _no_hermes_sources(monkeypatch)
     monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")

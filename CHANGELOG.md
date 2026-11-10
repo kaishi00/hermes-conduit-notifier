@@ -13,13 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.153.5 (2026-11-10)
+## 0.153.6 (2026-11-10)
 
 ### Fixes
 - A script's `hermes chat --source tool` run, a one-shot `hermes chat -q`
   and a Kanban worker no longer send a reply, failure or background-task
   notification or show Lock Screen progress. Their answers go to whoever
   ran them; one they write with `conduit_notify` still comes.
+
+## 0.153.5 (2026-11-10)
+
+### Fixes
+- A message a Bot Chat sends to a workstream is no longer sent a second time
+  after a restart when Hermes had saved it joined to another message, such
+  as your own words sent at the same moment.
 
 ## 0.153.4 (2026-11-10)
 
