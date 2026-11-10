@@ -464,8 +464,9 @@ def builder_task(url: str, folder: Path, extra: str = "", wait: int = 60) -> str
     return (f"Build {folder}/export.py, a script that saves the records from GET {url} to {folder}/out.csv. Go in "
             "this order, and do not skip the waits (they stand in for a slow build): 1) report with work_progress "
             f"(assumes: the API you build on, with its URL); 2) run sleep {wait}; 3) write the script; 4) run "
-            f"sleep {wait}; 5) run the script and say what happened. If a message reaches you while you work, take "
-            f"it into account.{extra}")
+            f"sleep {wait}; 5) run the script and say what happened. Write the file with your file tool, never "
+            "through a shell heredoc (that waits for an approval nobody is here to give). If a message reaches "
+            f"you while you work, take it into account.{extra}")
 
 
 async def case_dependency(run: Run) -> dict:
