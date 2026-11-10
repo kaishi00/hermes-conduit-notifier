@@ -5379,8 +5379,8 @@ def _files(text: Any) -> set[str]:
 def _task_words(*texts: Any) -> set[str]:
     """A task's words with its file names left out: "py" and "md" would
     otherwise tie tasks on different files."""
-    def folders(found: Any) -> str:  # auth/callback.py keeps "auth"
-        return found.group(0).rpartition("/")[0] + " "
+    def folders(found: Any) -> str:  # auth/callback.py keeps "auth", a long path only its last folder
+        return found.group(0).rpartition("/")[0].rpartition("/")[2] + " "
 
     return set().union(*(_words(_FILE.sub(folders, str(text or "").replace("\\", "/"))) for text in texts)) - _GENERIC
 

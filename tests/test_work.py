@@ -2052,6 +2052,7 @@ def test_folders_of_one_repository_prose_and_file_endings_arent_related(on, herm
     assert work._apart(on, "C:\\repo\\frontend", "C:\\repo", theirs) and not work._apart(on, "C:\\repo", "C:\\repo", theirs)
     assert work._files("Fix C:\\repo\\a.c and src\\Export.py.") == {"a.c", "export.py"}
     assert "auth" in work._task_words("Fix auth/callback.py.") and "callback" not in work._task_words("Fix auth/callback.py.")
+    assert work._task_words("Inspect /srv/company/monorepo/frontend/view.py") == {"inspect", "frontend"}
     # A workstream in a worktree of its own is still in its repository (DeepSeek on #679).
     assert start("Parser", "Rewrite the tokens in parser.py.", cwd=str(trees.root / "src"), worktree=True, new=True)["ok"]
     assert start("Parser errors", "Report the line in parser.py.", cwd=str(trees.root / "src"))["error"] == "similar_work"
