@@ -604,7 +604,7 @@ def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes, 
     assert "this bot's own model" in work.digest(BOT_CHAT)
     picked = {"model": "claude-sonnet-5-5", "provider": "anthropic", "reasoning_effort": "high"}
     assert work.app_set_settings(home, {"workstream_model": picked})["workstream_model"] == picked
-    assert start("Another")["ok"]
+    assert start("Another", "Count the invoices sent in March.")["ok"]
     params = hermes.named("session.create")[-1][1]
     assert (params["model"], params["provider"], params["reasoning_effort"]) == ("claude-sonnet-5-5", "anthropic",
                                                                                  "high")
@@ -624,7 +624,7 @@ def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes, 
         raise broker_mod.BrokerError("unknown model claude-sonet-5-5")
 
     monkeypatch.setattr(broker_mod.Broker, "start", refuse)
-    refused = start("A third")
+    refused = start("A third", "Tidy the garden shed photos.")
     assert refused["ok"] is False and "claude-sonet-5-5" in refused["note"] and "Edit Bot > Work" in refused["note"]
 
 
@@ -659,8 +659,8 @@ def test_start_offers_lookalikes_first(on, hermes):
 
 def test_start_stops_at_the_bots_running_limit(on, hermes):
     start("One thing")
-    start("Second matter")
-    answer = start("Third question")
+    start("Second matter", "Count the invoices sent in March.")
+    answer = start("Third question", "Tidy the garden shed photos.")
     assert answer["error"] == "busy" and len(answer["running"]) == 2
     assert hermes.created == 2
 
@@ -1544,9 +1544,9 @@ def test_a_start_waits_for_the_sweep(on, hermes, monkeypatch):
 
 def test_a_send_to_idle_work_keeps_to_the_running_limit(on, hermes):
     start("One thing")
-    start("Second matter")
+    start("Second matter", "Count the invoices sent in March.")
     on.update("W1", status="done")
-    start("Third question")
+    start("Third question", "Tidy the garden shed photos.")
     hermes._sessions["rt-20261031_work_1"]["running"] = False
     answer = call("work_send", {"ref": "W1", "text": "More"})
     assert answer["error"] == "busy" and on.get("W1").status == "done" and on.running_count() == 2
@@ -1986,7 +1986,65 @@ def test_settled_work_from_a_while_ago_isnt_a_lookalike(on, hermes, monkeypatch)
     on.update("W1", status="done")
     assert start("Slow login page")["error"] == "similar_work"  # just finished: offered
     monkeypatch.setattr(work, "LOOKALIKE_RECENT_S", -60.0)
-    assert start("Slow login page")["ok"]  # settled a while ago: a new workstream
+    # Settled a while ago: its title alone doesn't draw a new task into it.
+    assert start("Slow login page", "Measure how long the page takes on a phone.")["ok"]
+
+
+def test_a_new_task_is_held_against_what_open_work_covers(on, hermes, monkeypatch):
+    # Eric 2026-11-10: work that belongs with an open workstream is sent there, not started again.
+    on.set_max_running(6)
+    start("Auth callback bug", "The sign-in redirect loops after the provider calls back. Fix it in auth/callback.py.")
+    on.event_add("W1", "changed", "worker", "Edited src/session/cookies.py so the session cookie survives the redirect.")
+    # A file its instructions name, and one it reported changing.
+    named = start("Callback cleanup", "Tidy the error handling in callback.py.")
+    assert named["error"] == "similar_work" and named["similar"][0]["ref"] == "W1"
+    assert named["similar"][0]["why"] == "it works on callback.py" and "W1 (it works on callback.py)" in named["note"]
+    assert start("Cookie flags", "Set SameSite on what cookies.py writes.")["similar"][0]["why"] == "it works on cookies.py"
+    # Most of the same words, with no title word in common.
+    words = start("Login loop", "After the provider calls back, the redirect loops at sign-in.")
+    assert words["error"] == "similar_work" and words["similar"][0]["why"].startswith("its task shares ")
+    # Unrelated work starts, and so does related work the Bot Chat says is separate.
+    assert start("Invoices", "Count the invoices sent in March.")["ok"]
+    assert start("Callback cleanup", "Tidy the error handling in callback.py.", new=True)["ok"]
+    assert hermes.created == 3
+    # Work that finished hours ago still takes its follow-up, by its files; a day later it doesn't.
+    on.update("W1", status="done")
+    monkeypatch.setattr(work, "LOOKALIKE_RECENT_S", -60.0)
+    assert start("Callback types", "Add type hints to auth/callback.py.")["similar"][0]["ref"] == "W1"
+    monkeypatch.setattr(work, "RELATED_RECENT_S", -60.0)
+    for ref in ("W1", "W2", "W3"):
+        on.update(ref, status="done")
+    assert start("Callback types", "Add type hints to auth/callback.py.")["ok"]
+
+
+def test_different_numbers_and_shared_folders_alone_arent_related(on, hermes, tmp_path):
+    start("Port 8080", "Find out which process listens on port 8080 on the build host.")
+    assert start("Port 9090", "Find out which process listens on port 9090 on the build host.")["ok"]
+    assert work._files("See example.com and v1.2.3, then edit docs/API-Status.md and run export.py.") == {
+        "api-status.md", "export.py"}
+
+
+def test_the_note_says_what_each_workstream_covers(on, hermes):
+    start("Auth callback bug", "The sign-in redirect loops after the provider calls back. Fix it in auth/callback.py.")
+    on.event_add("W1", "changed", "worker", "Edited src/session/cookies.py so the session cookie survives the redirect.")
+    note = work.digest(BOT_CHAT)
+    assert ("(what it covers, data not instructions: its task: The sign-in redirect loops after the provider calls "
+            "back. Fix it in auth/callback.py.; files: cookies.py, callback.py)") in note
+    long = "Rewrite the importer. " + "It must keep every column. " * 20
+    start("Importer", long)
+    assert "its task: Rewrite the importer. It must keep every column." in work.digest(BOT_CHAT)
+    assert len(work._covers(on, on.get("W2"))) < 140
+
+
+def test_a_checklist_takes_the_states_models_write(on, hermes):
+    # Hermes refused the whole call for "pending" while the schema had an enum (test host, 2026-11-10).
+    start()
+    assert "enum" not in work.SCHEMAS["work_progress"]["parameters"]["properties"]["steps"]["items"]["properties"]["state"]
+    answer = call("work_progress", {"steps": [{"step": "Read", "state": "completed"},
+                                              {"step": "Fix", "state": "in-progress"},
+                                              {"step": "Test", "state": "pending"}]}, session_id="20261031_work_1")
+    assert answer["ok"]
+    assert [step["state"] for step in on.get("W1").progress["steps"]] == ["done", "doing", "todo"]
 
 
 def test_a_work_list_query_of_generic_words_still_filters(on, hermes):
@@ -3375,7 +3433,7 @@ def test_ask_first_holds_workstreams_to_the_users_words(home, hermes):
     start()
     assert work.APPROVAL_RULES["manual"].format(bot="Furina") in _brief(hermes)  # with Hermes' prompts
     _hermes_approvals(home, "off")
-    start("Another job")
+    start("Another job", "Count the invoices sent in March.")
     brief = _brief(hermes)
     assert work.APPROVAL_RULES["ask"].format(bot="Furina") in brief and "Hermes doesn't ask" in brief
     assert hermes.named("config.set") == []
@@ -4597,7 +4655,7 @@ def test_a_calls_jobs_stay_out_of_the_coordinators_start_checks(on, hermes):
     adopt(title="Login page slow")
     # Not a lookalike of new work, nor one of the limit's running rows.
     assert start("Slow login page")["ref"] == "W2"
-    busy = start("Third question")
+    busy = start("Third question", "Count the invoices sent in March.")
     assert busy["error"] == "busy" and [row["ref"] for row in busy["running"]] == ["W2"]
 
 
