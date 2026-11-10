@@ -1574,7 +1574,12 @@ question or a small task doesn't start a workstream. Change it in Conduit
   interrupting it); `auto` lets her do those on her own and tell you in a
   line; `off` is the Bot Chat as it was, passing reports on. When you write
   to her, she acts on your message under any setting. What she asks you and
-  what you answer is kept with `work_propose`, so she doesn't ask twice. A
+  what you answer is kept with `work_propose`, so she doesn't ask twice:
+  while a question about a workstream is open, the plugin refuses another
+  about it (she can reword the open one with new evidence), a no stands for a
+  day unless she tells you what came up since, and one decision that covers
+  several workstreams is one question, your answer covering each (plugin
+  0.158.0+). A
   workstream you set to Leave alone (its card in Conduit) gets nothing from
   her and isn't stopped by her in a turn you didn't start. Past eight
   messages to one workstream in an hour from such turns, the next is refused

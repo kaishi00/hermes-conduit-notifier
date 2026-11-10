@@ -455,8 +455,11 @@ def proposals_lines(store: work_store.Store, ago: Callable[[float], str]) -> lis
         return []
     lines = []
     for row in rows:
-        about = f" (about {row['ref']})" if row["ref"] else ""
+        refs = work_store.proposal_refs(row)
+        about = f" (about {' and '.join(refs)})" if refs else ""
         text = _short(row["text"], PROPOSAL_CHARS)
+        if row.get("new"):
+            text += f"» New since the last no: «{_short(row['new'], PROPOSAL_CHARS)}"
         if row["status"] == "open":
             lines.append(f"- {row['id']}{about}, asked {ago(row['created_at'])}, no answer yet: «{text}»")
             continue
@@ -474,12 +477,21 @@ SCHEMA = {
     "name": "work_propose",
     "description": ("Keep what you asked the user about their workstreams, and what they answered. When you ask "
                     "them before changing, starting or stopping work, call it with text (what you propose and "
-                    "why) and the ref it's about: you get an id (P1), and ask them in your reply. When they "
-                    "answer, call it with that id and answer approved or declined, then act on a yes. Open and "
-                    "declined ones stay on your board, so you don't ask twice."),
+                    "why) and the workstreams it's about: you get an id (P1), and ask them in your reply. One "
+                    "decision that covers several workstreams is one question naming them all (refs), and their "
+                    "answer covers each. While a question about a workstream is open, a new one about it is "
+                    "refused: wait for their answer, or call with replaces to reword the open one when new "
+                    "evidence came. After they decline one, a question about the same work within a day needs "
+                    "new: what came up since. When they answer, call it with the id and answer approved or "
+                    "declined, then act on a yes. Open and declined ones stay on your board."),
     "parameters": {"type": "object", "properties": {
         "text": {"type": "string", "description": "What you propose, with the evidence, in a line or two."},
         "ref": {"type": "string", "description": "The workstream it's about (W1), if one."},
+        "refs": {"type": "array", "items": {"type": "string"},
+                 "description": "Every workstream one decision covers (W1, W3), when it's more than one."},
+        "replaces": {"type": "string", "description": "An open question (P1) this rewords, with new evidence."},
+        "new": {"type": "string", "description": "What came up since the user declined a question about this "
+                                                 "work, when you ask about it again."},
         "id": {"type": "string", "description": "The proposal the user answered (P1)."},
         "answer": {"type": "string", "enum": ["approved", "declined"]},
         "note": {"type": "string", "description": "What the user said, in their words, if it adds anything."}},
@@ -512,13 +524,45 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
     text = _short(args.get("text"), PROPOSAL_CHARS)
     if not text:
         return {"ok": False, "error": "missing", "note": "Say what you propose in text, or give id and answer."}
-    ref = work_store.normalize_ref(args.get("ref"))
-    if args.get("ref") and (not ref or store.get(ref) is None):
-        return {"ok": False, "error": "no_such_work", "note": f"There's no {args.get('ref')} in this bot's work."}
-    made = store.proposal_add(ref, text)
-    return {"ok": True, "id": made, "note": f"Kept as {made}. Ask the user in your reply, with the evidence; "
-                                            "until they answer, don't do what you asked about. When they "
-                                            f"answer, call work_propose with id {made} and their answer."}
+    given = args.get("refs") if isinstance(args.get("refs"), list) else []
+    refs: list[str] = []
+    for raw in [args.get("ref"), *given]:
+        if raw in (None, ""):
+            continue
+        ref = work_store.normalize_ref(raw)
+        if not ref or store.get(ref) is None:
+            return {"ok": False, "error": "no_such_work", "note": f"There's no {raw} in this bot's work."}
+        if ref not in refs:
+            refs.append(ref)
+    new = _short(args.get("new"), PROPOSAL_CHARS)
+    replaces = str(args.get("replaces") or "").strip().upper()
+    if replaces:
+        if not _PROPOSAL.fullmatch(replaces):
+            return {"ok": False, "error": "missing", "note": "replaces is the open question's id (P1)."}
+        done = store.proposal_reword(replaces, refs, text, new)
+        if done is None:
+            return {"ok": False, "id": replaces, "error": "no_such_proposal",
+                    "note": f"There's no open {replaces}. Your note lists the open ones."}
+        return {"ok": True, "id": replaces, "note": f"{replaces} now reads as you wrote it. Tell the user what "
+                                                    "changed in your reply; it's still one question."}
+    # One open question per workstream: a second would ask the user twice.
+    pending = store.proposal_about(refs, status="open")
+    if pending is not None:
+        return {"ok": False, "id": pending["id"], "error": "already_asked",
+                "note": f"{pending['id']} about {' and '.join(work_store.proposal_refs(pending))} is still open. "
+                        "Wait for the user's answer, or call again with replaces "
+                        f"{pending['id']} to reword it with what's new."}
+    # A no stands for a day unless something new came up.
+    declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
+    if declined is not None and not new:
+        return {"ok": False, "id": declined["id"], "error": "declined",
+                "note": f"The user declined {declined['id']} about this work. Ask again only with what came "
+                        "up since, in new, and say it to them; otherwise leave it."}
+    made = store.proposal_add(refs, text, new if declined is not None else "")
+    covers = f" It covers {' and '.join(refs)}; their answer is for each." if len(refs) > 1 else ""
+    return {"ok": True, "id": made, "note": f"Kept as {made}.{covers} Ask the user in your reply, with the "
+                                            "evidence; until they answer, don't do what you asked about. When "
+                                            f"they answer, call work_propose with id {made} and their answer."}
 
 
 # The Work panel's coordination list
@@ -575,7 +619,10 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
                          "why": [line(known_event) for known_event in before[-APP_WHY_ITEMS:]]})
         items.append(item)
     for row in store.proposals(since=since, limit=PROPOSALS_SHOWN):
-        items.append({"id": row["id"], "kind": "proposal", "ref": row["ref"], "title": titles.get(row["ref"], ""),
+        refs = work_store.proposal_refs(row)
+        # Older apps read ref and title: the first workstream, and every title.
+        items.append({"id": row["id"], "kind": "proposal", "ref": row["ref"], "refs": refs,
+                      "title": " · ".join(title for title in (titles.get(ref, "") for ref in refs) if title),
                       "at": row["created_at"], "text": row["text"], "status": row["status"],
                       "answer": row["answer"], "answered_at": row["answered_at"], "why": []})
     return sorted(items, key=lambda item: -item["at"])[:APP_ITEMS]
