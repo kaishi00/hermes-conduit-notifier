@@ -213,8 +213,24 @@ class Run:
                 and (f.get("params") or {}).get("session_id") == runtime]
 
     async def chat_running(self) -> bool:
-        info = (await self.call("session.info", {"session_id": self.chat})).get("result") or {}
-        return bool(info.get("running"))
+        """Whether the Bot Chat is in a turn, by the events this socket got:
+        the dashboard's TUI gateway has no call that says so (session.info is
+        only an event there), and asking for one answered an error that read
+        as "not running" (test host, 2026-11-10)."""
+        for frame in reversed(self.frames):
+            params = frame.get("params") or {}
+            if frame.get("method") != "event" or params.get("session_id") != self.chat:
+                continue
+            kind, payload = params.get("type"), params.get("payload")
+            if kind == "message.start":
+                return True
+            if kind in ("message.complete", "error"):
+                return False
+            # Every turn's end sends session.info with running false, also the
+            # two paths that send no message.complete; mid-turn ones carry true.
+            if kind == "session.info" and isinstance(payload, dict) and isinstance(payload.get("running"), bool):
+                return payload["running"]
+        return False
 
     async def say(self, text: str, timeout: float = 240) -> str:
         """The user writes in the Bot Chat; its reply. A patient user: they
@@ -224,8 +240,10 @@ class Run:
         deadline = time.monotonic() + 300 * SCALE
         idle = 0
         while idle < 2 and time.monotonic() < deadline:
-            idle = 0 if await self.chat_running() else idle + 1
+            # The look comes after the wait, so nothing sits between the last
+            # one and the message going in.
             await asyncio.sleep(1.0)
+            idle = 0 if await self.chat_running() else idle + 1
         before = len(self.completions(self.chat))
         self.note(f"user -> Bot Chat{'' if idle else ' (into its running turn)'}: {text[:140]}")
         await self.call("prompt.submit", {"session_id": self.chat, "text": text})
