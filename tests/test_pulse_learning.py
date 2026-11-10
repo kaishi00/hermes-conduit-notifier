@@ -1515,6 +1515,30 @@ def test_a_report_card_carries_its_reason_and_one_written_without_a_list_has_non
     assert feed[with_why]["why"] and feed[plain]["why"] == ""
 
 
+def test_a_report_line_that_comes_up_with_no_pick_is_counted_plain(live):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    pick = pulse.pulse_picks
+    now = time.time()
+    drawn = pick.dumps({"line": "Dentist Friday at 9", "detail": "", "shape": "date",
+                        "facts": {"day": "2026-11-13", "what": "Dentist", "whose": ""}, "actions": [],
+                        "incident": {"card": "new"}})
+    learning.add_noticed_cards(
+        live.store, turn=SimpleNamespace(session_id=SID, reply_id=7),
+        lines=[("date", "Dentist Friday at 9", None), ("fact", "Ana is in town", None)], chat_id=SID,
+        chat_title="Pulse", shown={}, kinds=followup.report.KINDS, item_chat_title=lambda item: "", now=now,
+        looks=[drawn, ""])
+    day = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
+    counts = live.store.get(pick.PICK_COUNTS)[day]
+    assert counts["plain:no_pick"] == 1 and counts["shape:date"] == 1
+    # A report with no picks at all (one an older build listed) counts none.
+    learning.add_noticed_cards(
+        live.store, turn=SimpleNamespace(session_id=SID, reply_id=8), lines=[("fact", "Bo is back", None)],
+        chat_id=SID, chat_title="Pulse", shown={}, kinds=followup.report.KINDS, item_chat_title=lambda item: "",
+        now=now + 1)
+    assert live.store.get(pick.PICK_COUNTS)[day]["plain:no_pick"] == 1
+
+
 def test_a_report_card_keeps_what_learning_did_and_how_it_came_up(live):
     """Each card keeps the biggest part learning played in bringing it up,
     for its Why? (none for one learning played no part in), and its place

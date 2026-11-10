@@ -132,10 +132,17 @@ def repeats(detail: str, line: str) -> bool:
     REPEAT_SHARE of its words (stop words aside, compared by their first
     five letters) are in the line."""
     words, said = _stems(detail), set(_stems(line))
-    return bool(words) and sum(word in said for word in words) / len(words) >= REPEAT_SHARE
+    if not words:
+        return False
+    # A short detail that adds one word ("today", a name) still says something.
+    if len(words) < SHORT_DETAIL:
+        return all(word in said for word in words)
+    return sum(word in said for word in words) / len(words) >= REPEAT_SHARE
 
 
 REPEAT_SHARE = 0.6
+# Fewer words than this (stop words aside): dropped only when every one is in the line.
+SHORT_DETAIL = 5
 
 
 def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional[dict], str]:
@@ -152,7 +159,7 @@ def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional
         whose = _text(facts.get("whose"), FACT_LIMIT)
         # "your" or "the user" names nobody: the tile shows only a name.
         return {"day": day, "what": _text(facts.get("what"), FACT_LIMIT),
-                "whose": "" if whose.lower().strip(" .'’s") in NOBODY else whose}, ""
+                "whose": "" if re.sub(r"['’]s$", "", whose.lower().strip(" .")) in NOBODY else whose}, ""
     if shape == "due":
         due = _day(facts.get("due"), clock=True)
         if not due:
