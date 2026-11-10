@@ -2944,6 +2944,13 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
     if name == "tool_call":
         from . import pulse_tools
 
+        # Arguments text that won't parse: Hermes refuses the call anyway,
+        # so it's refused here with the parser's words, before any check
+        # reads it as no arguments (notifier#656).
+        broken = pulse_tools.unreadable_arguments(args)
+        if broken is not None:
+            return {"action": "block",
+                    "message": pulse_tools.ARGUMENTS_BLOCK.format(where=broken[0], error=broken[1])}
         calls = pulse_tools.called(args)
     names = [called for called, _ in calls]
     linked = _linked_worker_block(session_id, home, name, names)
@@ -3595,7 +3602,9 @@ def _keep_options(store: work_store.Store, work: work_store.Work, files: list[st
     # A decision holds six options: seven or eight (OPTIONS_MAX) go in two
     # halves rather than out of sight, each with the two a decision needs.
     half = len(options) if len(options) <= 6 else (len(options) + 1) // 2
-    decisions = [{"title": title if not at else _cut(f"{title} (more)", 80), "options": options[at:at + half]}
+    # The second half's title keeps its "(more)" however long the first's.
+    more = " (more)"
+    decisions = [{"title": title if not at else _cut(title, 80 - len(more)) + more, "options": options[at:at + half]}
                  for at in range(0, len(options), half)]
     card = {"type": "review", "title": title, "review": {"for": work.ref, "decisions": decisions}}
     kept = _shown(store, work.ref)

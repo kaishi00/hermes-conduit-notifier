@@ -196,6 +196,25 @@ def test_the_bridge_lists_tools_and_each_call_through_it_is_checked():
         assert not check("tool_call", args).allowed
 
 
+def test_a_bridged_calls_unreadable_arguments_text_gets_the_parsers_words():
+    # notifier#656: read as {} before, so the action check refused it with
+    # nothing about the broken JSON.
+    broken = {"calls": [{"name": "conduit_calendar", "arguments": {"action": "events"}},
+                        {"name": "conduit_contacts", "arguments": '{"action": "people"'}]}
+    verdict = check("tool_call", broken)
+    assert not verdict.allowed
+    assert verdict.message.startswith("That tool_call's calls[1].arguments is JSON text that couldn't be read (")
+    assert tools.unreadable_arguments({"name": "conduit_phone", "arguments": "{"})[0] == "arguments"
+    assert tools.unreadable_arguments({"name": "conduit_maps", "args": "{"})[0] == "arguments"
+    assert tools.unreadable_arguments(bridged(("conduit_contacts", '{"action": "people"'), as_text=True))[0] == \
+        "calls[0].arguments"
+    # Blank text is no arguments, as Hermes reads it; readable text and objects pass.
+    for fine in ({"calls": [{"name": "conduit_phone", "arguments": "  "}]},
+                 {"name": "conduit_phone", "arguments": json.dumps({"action": "alarms"})},
+                 bridged(("conduit_calendar", {"action": "events"})), {"calls": "not json"}, "text", {}):
+        assert tools.unreadable_arguments(fine) is None
+
+
 def test_calls_through_the_bridge_count_toward_the_caps():
     four = bridged(*[("conduit_calendar", {"action": "events"})] * 4)
     assert check("tool_call", four, tools.Turn("report", calls=2)).allowed

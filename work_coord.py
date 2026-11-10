@@ -40,7 +40,7 @@ BOARD_CHARS = 3200
 BOARD_EVENTS_PER_WORK = 5
 BOARD_AGE_S = 24 * 3600.0
 PROPOSAL_CHARS = 300
-PROPOSALS_SHOWN = 6
+PROPOSALS_SHOWN = 12  # open ones first; work_propose is told they stay
 PROPOSAL_CLOSED_AGE_S = 24 * 3600.0
 REPORT_ITEMS = 4
 # Messages to one workstream in an hour from turns the Bot Chat started
@@ -222,7 +222,7 @@ def reports(args: dict) -> bool:
     """Whether the call gave anything to report: a line with words in it."""
     for kind in ("found", "assumes", "changed"):
         raw = args.get(kind)
-        if any(isinstance(item, str) and item.strip() for item in (raw if isinstance(raw, list) else [raw])):
+        if any(isinstance(item, str) and item.strip() for item in (raw if isinstance(raw, list) else [raw])[:REPORT_ITEMS]):
             return True
     return False
 

@@ -130,7 +130,9 @@ def _stems(text: str) -> list[str]:
 def repeats(detail: str, line: str) -> bool:
     """Whether ``detail`` mostly says ``line`` again: at least
     REPEAT_SHARE of its words (stop words aside, compared by their first
-    five letters) are in the line."""
+    five letters) are in the line. One with fewer than SHORT_DETAIL words
+    repeats only when every one of them is in the line, so a short detail
+    that adds a word ("today", a name) is kept."""
     words, said = _stems(detail), set(_stems(line))
     if not words:
         return False
