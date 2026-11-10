@@ -577,9 +577,11 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
         refusal = _asked_before(store, added, new, besides=replaces)
         if refusal is not None:
             return refusal
-        # "New since the last no" only on a question about work the user said no to.
+        # "New since the last no" only on a question about work the user said no
+        # to: kept, or replaced when there's more, and cleared otherwise.
         declined = store.proposal_about(had + added, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
-        done = store.proposal_reword(replaces, had + added if added else [], text, new if declined is not None else "")
+        done = store.proposal_reword(replaces, had + added if added else [], text,
+                                     (new or None) if declined is not None else "")
         if done is None:
             return {"ok": False, "id": replaces, "error": "no_such_proposal",
                     "note": f"There's no open {replaces}. Your note lists the open ones."}

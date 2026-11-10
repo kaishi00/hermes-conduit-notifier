@@ -144,6 +144,11 @@ def test_a_question_from_before_related_work_reads_as_one_workstreams_and_migrat
     note = work.digest(BOT_CHAT)
     assert "- P1 (about W1, W2 and W3), asked just now, no answer yet: «Move W1, W2 and W3 to v2?»" in note
     assert "New since the last no" not in note  # never declined
+    # A "new" a 0.158.0 reword saved on a question never declined is cleared by the next reword.
+    with sqlite3.connect(on.path) as con:
+        con.execute("UPDATE proposals SET new = 'stale' WHERE id = 'P1'")
+    assert call("work_propose", {"text": "Move all three to v2?", "replaces": "P1"})["ok"]
+    assert "New since the last no" not in work.digest(BOT_CHAT)
 
 # The note's size ------------------------------------------------------------------
 
