@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.155.1 (2026-11-10)
+
+### Fixes
+- What you write in a workstream's chat while it works is read by the helper
+  when its turn ends. Without the update it waited for the next report.
+- The Bot Chat's note about a connection between two workstreams always
+  quotes the report it is about, also when that report had many lines.
+- Coordination on the Work panel shows whether an older message arrived,
+  also after many later messages to the same workstream.
+
 ## 0.155.0 (2026-11-10)
 
 ### New and improved

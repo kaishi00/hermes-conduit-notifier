@@ -701,6 +701,15 @@ class Store:
                           "ORDER BY created_at DESC LIMIT 50", (ref,))
         return {row["id"]: row for row in rows}
 
+    def outbox_states_of(self, ids: list[str]) -> dict[str, dict]:
+        """The same for the sends with these ids, however many came since."""
+        ids = [item for item in dict.fromkeys(ids) if item][:500]
+        if not ids:
+            return {}
+        rows = self._read("SELECT id, outcome, accepted_at, delivered_at FROM outbox WHERE kind = 'send' AND id IN "
+                          f"({', '.join('?' for _ in ids)})", tuple(ids))
+        return {row["id"]: row for row in rows}
+
     def own_sends_since(self, ref: str, since: float) -> int:
         rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE ref = ? AND kind = 'send' AND own = 1 AND "
                           "accepted_at > 0 AND created_at >= ?", (ref, since))

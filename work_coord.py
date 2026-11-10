@@ -546,8 +546,10 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
                 "text": event["text"], "at": event["at"]}
 
     items: list[dict] = []
-    states: dict[str, dict] = {}
-    for event in store.ledger(since=since, kinds=("flag", "sent"), limit=200):
+    listed = store.ledger(since=since, kinds=("flag", "sent"), limit=200)
+    states = store.outbox_states_of([event["source"].split(":")[1] for event in listed
+                                     if event["kind"] == "sent" and event["source"].count(":") >= 2])
+    for event in listed:
         item = {"id": f"E{event['id']}", "kind": event["kind"], "ref": event["ref"],
                 "title": titles.get(event["ref"], ""), "at": event["at"], "text": event["text"]}
         if event["kind"] == "flag":
@@ -562,9 +564,7 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
             parts = event["source"].split(":")
             if len(parts) < 3 or parts[0] != "outbox" or parts[2] != "own":
                 continue  # sent in a turn the user started: theirs, not coordination
-            if event["ref"] not in states:
-                states[event["ref"]] = store.outbox_states(event["ref"])
-            state = states[event["ref"]].get(parts[1]) or {}
+            state = states.get(parts[1]) or {}
             before = [known_event for known_event in known
                       if event["at"] - APP_WHY_BEFORE_S <= known_event["at"] <= event["at"]]
             item.update({"how": event["detail"],
