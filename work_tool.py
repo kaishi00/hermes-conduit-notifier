@@ -5386,12 +5386,15 @@ def _apart(cwd: str, here: str, work: work_store.Work) -> bool:
     """Whether a new task in cwd (repository here) is known to be somewhere
     else than a workstream: another repository, or folders of one
     repository that don't hold each other."""
-    folder = _folder(work)
+    def flat(path: str) -> str:  # a Windows host's paths compare the same way
+        return (path or "").replace("\\", "/").rstrip("/")
+
+    here, folder = flat(here), flat(_folder(work))
     if not here or not folder:
         return False
     if here != folder:
         return True
-    mine, theirs = cwd.rstrip("/"), (work.cwd or "").rstrip("/")
+    mine, theirs = flat(cwd), flat(work.cwd)
     if not (mine + "/").startswith(here + "/") or not (theirs + "/").startswith(here + "/"):
         return False  # a worktree elsewhere says nothing about the folder
     return not ((mine + "/").startswith(theirs + "/") or (theirs + "/").startswith(mine + "/"))
