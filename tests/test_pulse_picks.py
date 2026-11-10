@@ -386,6 +386,8 @@ def test_a_short_detail_that_adds_a_word_is_kept():
         assert pick["detail"] == detail
     same, _ = picks.parse({"line": "Pay the rent today", "detail": "Pay the rent."})
     assert same["detail"] == ""
-    for whose, kept in (("Kwan's", "Kwan's"), ("Sue", "Sue"), ("yours", ""), ("Hers.", "")):
+    # "The user's" tells the possessive rule apart from the old strip (notifier#663).
+    for whose, kept in (("Kwan's", "Kwan's"), ("Sue", "Sue"), ("yours", ""), ("Hers.", ""),
+                        ("The user's", ""), ("The user\u2019s", "")):
         date, _ = picks.parse({"line": "A day", "shape": "date", "facts": {"day": "2026-11-11", "whose": whose}})
         assert date["facts"]["whose"] == kept
