@@ -69,6 +69,7 @@ _NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on i
          "reply: give it a few words at most. What's under \"Related to today's events\" is what Pulse remembers that "
          "shares a name or a word with one of today's events: where it helps with that event, say it with the event "
          "in a few words (\"lunch with Dan at 1: he started the new job on Monday\"), and leave out the rest. "
+         "Write each line in your own words for the user: never copy an item's \"#481\" number or its \"[interest]\" kind. "
          "When nothing is outstanding, say so in the one sentence and stop. " + ledger.UNSET_RULE
          + " Never say something hasn't happened or started because nothing here shows it: this message doesn't hold everything the chats said. "
          "Only pass on what the message says")
@@ -167,8 +168,9 @@ def text_for(context_text: str, note: str = "") -> Callable[[str], str]:
 
 def summary_line(reply: str) -> str:
     """The brief's first line, for its push (cut to ``SUMMARY_LIMIT`` if the
-    reply ran on): the rest is for its card."""
-    return _clip(next((text for text in reply.splitlines() if text.strip()), ""), SUMMARY_LIMIT)
+    reply ran on, and without the context's markers): the rest is for its
+    card."""
+    return _clip(_shown(next((text for text in reply.splitlines() if text.strip()), "")), SUMMARY_LIMIT)
 
 
 # The headings NOTE asks for, each with the key its lines go under in the
@@ -176,6 +178,22 @@ def summary_line(reply: str) -> str:
 HEADINGS = {"today": "today", "still open": "open"}
 _HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)?([A-Za-z ]+?)(?:\*\*)?\s*:?\s*(?:\*\*)?\s*$")
 _ITEM = re.compile(r"^\s*[-*\u2022]\s+(.*\S)")
+# The context's own markers a reply can copy: an item's "[interest]" kind
+# anywhere, with the "#481" just before it (report.remembered_lines, the
+# related lines of pulse_places), a "#481:" leading a later line
+# (report.later_lines), and a "#481" after the last sentence. Other numbers
+# ("issue #2059", "#1 priority") stay.
+_KIND = re.compile(r"(?:#\d+\s*)?\[(?:%s)\]\s*" % "|".join(map(re.escape, report.KINDS)))
+_LEADING_REF = re.compile(r"^#\d+\s*:\s*")
+_TRAILING_REF = re.compile(r"(?:(?<=[.!?)\]])\s+|^)#\d+$")
+
+
+def _shown(text: str) -> str:
+    """A brief line as the phone shows it: no context markers or bold."""
+    text = re.sub(r"\s+", " ", _KIND.sub("", text.replace("**", ""))).strip()
+    return _TRAILING_REF.sub("", _LEADING_REF.sub("", text)).strip()
+
+
 MAX_LINES = 8
 
 
@@ -190,15 +208,26 @@ def look(reply: str, held: int) -> dict:
         item = _ITEM.match(text)
         if item:
             if sum(map(len, groups.values())) < MAX_LINES:
-                groups[current].append(_clip(item.group(1).replace("**", ""), LINE_LIMIT))
+                shown = _shown(item.group(1))
+                if shown:
+                    groups[current].append(_clip(shown, LINE_LIMIT))
             continue
         heading = _HEADING.match(text)
         if heading and heading.group(1).strip().lower() in HEADINGS:
             current = HEADINGS[heading.group(1).strip().lower()]
     counts = {key: len(lines) for key, lines in groups.items()}
     counts["held"] = max(0, int(held))
-    return {"shape": picks.BRIEF, "line": summary_line(reply), "detail": "", "actions": [],
-            "facts": {"summary": summary_line(reply), "counts": counts, **groups}}
+    summary = summary_line(reply)
+    return {"shape": picks.BRIEF, "line": summary, "detail": "", "actions": [],
+            "facts": {"summary": summary, "counts": counts, **groups}}
+
+
+# The brief's slot and attempt a process claimed to send, and when
+# ([slot, attempt, at]): of the processes that reach the brief's time
+# together, one sends it. A claim lapses after CLAIM_S, so one whose
+# process died before recording its attempt doesn't cost the day's brief.
+CLAIM = "brief_claim"
+CLAIM_S = 300.0
 
 
 def next_attempt(pulse_store: store.PulseStore, now: float, zone: Any, time_value: Any) -> Optional[tuple[str, int]]:

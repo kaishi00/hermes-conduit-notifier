@@ -66,12 +66,12 @@ CLOSE = "close"
 # the report, the look ahead, a follow-up and the brief.
 PICK_RULES = """Each thing you bring up is a pick:
 {{"line": "...", "detail": "...", "subject": "#41", "incident": {{"card": "new"}}, "shape": "plain", "facts": {{}}, "actions": [{{"label": "...", "does": "ask", "say": "..."}}]}}
-- "line": the headline, written to the user, at most one sentence, short (under 15 words). "detail": one more sentence that adds what the line doesn't say (what to do, a number, a name), or "", never the line said again. The card draws the shape's facts under them, so neither needs to repeat them.
+- "line": the headline, written to the user, at most one sentence, short (under 15 words), saying the thing itself, never a reason or advice the context doesn't give ("so you can plan around it"). "detail": one more sentence that adds what the line doesn't say (what to do, a number, a name), or "", never the line said again. The card draws the shape's facts under them, so neither needs to repeat them.
 - "subject": the key of what it's about, as the context gives it: a remembered thing (#41), a reminder (r2), a calendar entry (v1), a scheduled job (j3); "" when it has none.
 - "incident": {{"card": "new"}} for something new. When a card under "What Pulse brought up lately" is still open and this is more about that same occurrence (another failed run, a new step), {{"card": "pc_1834"}} with that card's id updates it. When that occurrence is over (the job recovered, it arrived), {{"close": "pc_1834"}} closes it. Something that happened again after it was over is new, not an update.
 - "shape" and its "facts", only what the context states, else "plain" with {{}}:
-  "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}} ("whose": a person's name, or "" for the user's own); "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day; "noticed": the earlier day it first came up, left out when that's the due day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (a scheduled job's recent runs, oldest first, at most 10: use it rather than "status" when the context shows its runs); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}} ("label": the thing in two to four words, like "Nightly backup"); "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0).
-- "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". Give the one most useful step first, named for what it does ("Verify ID", "Plan the day"), never a bare "Do it". For something that went wrong (a failing job, an error, a "warn" or "fail" status), that first step is an "ask" whose "say" has Hermes find out what's wrong and fix it, never only ask how it stands. [] when there's nothing to do."""
+  "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}} ("whose": a person's name, or "" for the user's own); "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day; "noticed": the earlier day it first came up, left out when that's the due day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (a scheduled job's recent runs, oldest first, at most 10: use it rather than "status" when the context shows its runs); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}} ("label": the thing in two to four words, like "Nightly backup"); "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0). Pick the shape the facts support: a next step after something done is "steps" (what's done, then what's next); something the user or Hermes said they'd do, or the user asked to be reminded of, with no day, is "promise" in the words they said; something that went wrong is "status" or "runs". Never make up a fact to fit a shape.
+- "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". Give the one most useful step first, named for what it does ("Verify ID", "Plan the day"), never a bare "Do it". For something that went wrong (a failing job, an error, a "warn" or "fail" status), that first step is an "ask" whose "say" has Hermes find out what's wrong and fix it, never only ask how it stands. A calendar entry is already on the user's calendar, with its own alerts: never offer to add it, block time for it, remind about it or check it again; give a step only for preparation the context names, else just "done". An entry on a holiday calendar for another country ("Holidays in Japan") isn't a day off the user keeps. Every step is one Hermes can actually take: it can't change the Conduit app or what its cards can show. [] when there's nothing to do."""
 
 
 def card_id_text(card_id: int) -> str:
@@ -215,6 +215,40 @@ def _url(value: Any) -> str:
     return url
 
 
+# A calendar entry's key as the model gives it (pulse_report.phone_context)
+# and as a card keeps it (pulse_candidates.EVENT), and the button words
+# that would put it on, or check it against, the calendar it came from.
+# Moving or cancelling it is a real step and stays.
+_CALENDAR_SUBJECT = re.compile(r"v\d+")
+CALENDAR_CARD_SUBJECT = "event:"
+_ONTO_CALENDAR = re.compile(r"\b(?:calendar|schedule|remind\w*)\b|\bblock\b.*\btime\b", re.IGNORECASE)
+_KEEPS_STEP = re.compile(r"\b(?:reschedul\w*|cancel\w*|mov(?:e|es|ed|ing)|shift\w*)\b", re.IGNORECASE)
+
+
+def _onto_calendar(action: Mapping[str, Any]) -> bool:
+    if action.get("does") == OPEN:  # a link to the entry only shows it
+        return False
+    words = " ".join(str(action.get(key) or "") for key in ("label", "say"))
+    return bool(_ONTO_CALENDAR.search(words)) and not _KEEPS_STEP.search(words)
+
+
+def from_calendar(subject: Any, event: Any = "") -> bool:
+    """Whether a pick or card is about a calendar entry: by the model's key
+    ("v1", as its subject or event) or by a card's "event:" subject."""
+    for key in (subject, event):
+        key = str(key or "").strip().lower()
+        if _CALENDAR_SUBJECT.fullmatch(key) or key.startswith(CALENDAR_CARD_SUBJECT):
+            return True
+    return False
+
+
+def off_calendar(actions: Any) -> list:
+    """``actions`` without a button to put a calendar entry on the calendar
+    it was read from."""
+    return [action for action in actions if not (isinstance(action, Mapping) and _onto_calendar(action))] \
+        if isinstance(actions, list) else []
+
+
 def _actions(value: Any) -> list[dict]:
     """The buttons that hold up, at most MAX_ACTIONS, one each of what they do."""
     out: list[dict] = []
@@ -274,7 +308,10 @@ def parse(entry: Any, *, drawn_types: Sequence[str] = (), line: str = "") -> tup
     pick: dict[str, Any] = {
         "line": words, "detail": "" if repeats(detail := _text(entry.get("detail"), DETAIL_LIMIT), words) else detail,
         "shape": shape, "facts": facts,
-        "actions": _actions(entry.get("actions")), "incident": {"card": NEW} if kind == NEW else
+        # A calendar entry's buttons lose the calendar ones before the cap, so
+        # a step after them still fits.
+        "actions": _actions(off_calendar(entry.get("actions")) if from_calendar(entry.get("subject"), entry.get("event"))
+                            else entry.get("actions")), "incident": {"card": NEW} if kind == NEW else
         ({"card": card_id_text(card)} if kind == UPDATE else {"close": card_id_text(card)})}
     subject = entry.get("subject")
     if isinstance(subject, str) and subject.strip():
@@ -328,9 +365,11 @@ def look(card: Mapping[str, Any]) -> dict:
     pick = loads(card.get("look"))
     if pick is None:
         return {"shape": PLAIN, "facts": {}, "actions": []}
+    actions = pick.get("actions") if isinstance(pick.get("actions"), list) else []
     return {"shape": pick.get("shape") if pick.get("shape") in SHAPES + (BRIEF,) else PLAIN,
             "facts": pick.get("facts") if isinstance(pick.get("facts"), dict) else {},
-            "actions": pick.get("actions") if isinstance(pick.get("actions"), list) else [],
+            # A card kept from before calendar entries lost the button loses it too.
+            "actions": off_calendar(actions) if from_calendar(card.get("subject"), pick.get("subject")) else actions,
             "line": str(pick.get("line") or ""), "detail": str(pick.get("detail") or "")}
 
 
@@ -431,6 +470,8 @@ def updated_card(card: Mapping[str, Any], pick: Mapping[str, Any], subject: str 
         merged["facts"] = merged_facts(str(pick.get("shape")), old["facts"], pick.get("facts") or {})
     if not merged.get("actions") and isinstance(old.get("actions"), list):
         merged["actions"] = old["actions"]
+    if from_calendar(subject or card.get("subject"), pick.get("subject")):
+        merged["actions"] = off_calendar(merged.get("actions"))
     merged["incident"] = {"card": card_id_text(int(card["id"]))}
     columns = {"news": news(merged), "look": dumps(merged)}
     if subject and not card.get("subject"):

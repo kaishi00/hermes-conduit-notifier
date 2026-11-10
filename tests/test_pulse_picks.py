@@ -54,6 +54,61 @@ def test_actions_without_what_they_need_are_left_out():
     assert actions == [{"label": "Retry", "does": "ask", "say": "Run the audit again"}]
 
 
+def test_a_calendar_entry_gets_no_button_to_put_it_on_the_calendar():
+    # Eric's brief, 2026-11-10: "Block calendar time" on a Duty Day read from his calendar.
+    entry = {"line": "Duty Day on Tuesday 17 November", "subject": "v1", "shape": "date",
+             "facts": {"day": "2026-11-17", "what": "Duty Day", "whose": ""},
+             "actions": [{"label": "Block calendar time", "does": "ask", "say": "Block the day for work"},
+                         {"label": "Done", "does": "done"}]}
+    pick, _ = picks.parse(entry)
+    assert pick["actions"] == [{"label": "Done", "does": "done"}]
+    # Something remembered (not read from the calendar) may still offer it.
+    kept, _ = picks.parse({**entry, "subject": "#41"})
+    assert kept["actions"][0]["label"] == "Block calendar time"
+    assert "never offer to add it" in picks.PICK_RULES
+    assert "never a reason or advice the context doesn't give" in picks.PICK_RULES
+
+
+def test_a_calendar_entry_loses_the_button_however_it_is_named_or_kept():
+    block = {"label": "Block calendar time", "does": "ask", "say": "Block the day for work"}
+    check = {"label": "Check work schedule", "does": "ask", "say": "Look over my schedule that week"}
+    move = {"label": "Reschedule it", "does": "ask", "say": "Move it on my calendar to Friday"}
+    done = {"label": "Done", "does": "done"}
+    # Named by the found entry's "event" key, not its subject.
+    pick, _ = picks.parse({"line": "Duty Day on Tuesday", "event": "v2", "actions": [block, done]})
+    assert pick["actions"] == [done]
+    assert picks.off_calendar([check, move, done, {"label": "Put it on my schedule", "does": "later"}]) == [move, done]
+    # A card stored before this change, and an update whose buttons all went.
+    old = {"id": 7, "subject": "event:abc:2026-11-17",
+           "look": picks.dumps({"line": "Duty Day", "shape": "plain", "facts": {}, "actions": [block, done]})}
+    assert picks.look(old)["actions"] == [done]
+    update, _ = picks.parse({"line": "Duty Day moved", "subject": "v1", "actions": [block]})
+    assert update["actions"] == []
+    assert picks.loads(picks.updated_card(old, update)["look"])["actions"] == [done]
+    # A card about something else keeps what it had.
+    assert picks.look({**old, "subject": "item:41"})["actions"] == [block, done]
+    # Moving it and a link to it stay; a Done after two dropped buttons still fits.
+    move_it = {"label": "Move it", "does": "ask", "say": "Move Duty Day on my calendar to Friday"}
+    open_it = {"label": "Open in Calendar", "does": "open", "url": "https://calendar.example/e/1"}
+    assert picks.off_calendar([move_it, open_it]) == [move_it, open_it]
+    three, _ = picks.parse({"line": "Duty Day", "subject": "v1", "actions": [block, check, done]})
+    assert three["actions"] == [done]
+    # Matched to the calendar by its title: the row's subject is the entry, not the model's key.
+    row = pulse.candidates.with_pick({"ref": "event:abc:2026-11-17", "bring_up": True, "text": "Duty Day Tuesday"},
+                                     {"line": "Duty Day Tuesday", "actions": [block, done]})
+    assert picks.loads(row["pick"])["actions"] == [done]
+    # ...filtered before the two-button cap, as by its key, so its Done stays.
+    row = pulse.candidates.with_pick({"ref": "event:abc:2026-11-17", "bring_up": True, "text": "Duty Day Tuesday"},
+                                     {"line": "Duty Day Tuesday", "actions": [block, check, done]})
+    assert picks.loads(row["pick"])["actions"] == [done]
+    # It has its own alerts: no reminder for it either.
+    remind = {"label": "Remind me 1h before", "does": "ask", "say": "Remind me an hour before Duty Day"}
+    assert picks.off_calendar([remind, done]) == [done]
+    other = pulse.candidates.with_pick({"ref": "", "bring_up": True, "text": "Plan the week"},
+                                       {"line": "Plan the week", "actions": [block, done]})
+    assert picks.loads(other["pick"])["actions"] == [block, done]
+
+
 def test_drawn_bodies_only_for_apps_that_draw_them():
     entry = {"line": "Rain at 4", "shape": "drawn",
              "facts": {"body": {"type": "weather", "title": "Rain", "location": "Paris"}}}
@@ -145,6 +200,22 @@ def test_the_brief_is_laid_out_from_its_parts():
     assert picks.look({"look": picks.dumps(look)})["shape"] == picks.BRIEF
     # Lines under no heading are still open.
     assert pulse.brief.look("Quiet.\n- One thing", held=0)["facts"]["open"] == ["One thing"]
+
+
+def test_the_brief_drops_the_contexts_item_markers():
+    # Eric's brief, 2026-11-10: the reply copied an item's line from the context.
+    reply = ("Two duty days ahead.\nStill open:\n- [interest] Verify commit b8a4ba59 correctly closes GitHub issues "
+             "#2059 and #2062. #481\n- #12 [promise] Send the deck (due Friday)\n- Track order #4 by phone\n- #481\n"
+             "- #77: Dan said the venue moved\n- Lunch with Dan: #31 [follow-up] Ask about the lease\n"
+             "- #1 priority: call the bank")
+    assert pulse.brief.look(reply, held=0)["facts"]["open"] == [
+        "Verify commit b8a4ba59 correctly closes GitHub issues #2059 and #2062.",
+        "Send the deck (due Friday)", "Track order #4 by phone", "Dan said the venue moved",
+        "Lunch with Dan: Ask about the lease", "#1 priority: call the bank"]
+    copied = "**#9 [next]** Renew the passport\n- Pay rent"
+    assert pulse.brief.summary_line(copied) == "Renew the passport"
+    assert pulse.brief.look(copied, held=0)["line"] == "Renew the passport"
+    assert "never copy an item's" in pulse.brief.NOTE
 
 
 def test_the_feed_adds_looks_only_for_apps_that_ask(tmp_path):

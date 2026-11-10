@@ -5366,12 +5366,49 @@ def _files(text: Any) -> set[str]:
     """The file names a text mentions (export.py, docs/api-status.md as
     api-status.md), lowercased."""
     names = set()
-    for found in _FILE.findall(str(text or "")):
+    for found in _FILE.findall(str(text or "").replace("\\", "/")):
         name = found.rsplit("/", 1)[-1].lower()
+        # "a.m" and "u.s" are prose; a path says a one-letter name is a file.
+        prose = "/" not in found and all(len(part) == 1 for part in name.split("."))
         if (name not in _NOT_FILES and name.rsplit(".", 1)[-1] not in _NOT_FILES
-                and not name.replace(".", "").isdigit()):
+                and not name.replace(".", "").isdigit() and not prose):
             names.add(name)
     return names
+
+
+def _task_words(*texts: Any) -> set[str]:
+    """A task's words with its file names left out: "py" and "md" would
+    otherwise tie tasks on different files."""
+    def folders(found: Any) -> str:  # auth/callback.py keeps "auth", a long path only its last folder
+        return found.group(0).rpartition("/")[0].rpartition("/")[2] + " "
+
+    return set().union(*(_words(_FILE.sub(folders, str(text or "").replace("\\", "/"))) for text in texts)) - _GENERIC
+
+
+def _flat(path: Any) -> str:
+    """A folder's path as it compares: a Windows host's the same way."""
+    return str(path or "").replace("\\", "/").rstrip("/")
+
+
+def _apart(store: work_store.Store, cwd: str, here: str, work: work_store.Work) -> bool:
+    """Whether a new task in cwd (repository here) is known to be somewhere
+    else than a workstream: another repository, or folders of one
+    repository that don't hold each other. A workstream in a worktree says
+    its repository, not its folder."""
+    here, folder = _flat(here), _flat(_folder(work))
+    if not here or not folder:
+        return False
+    if here != folder:
+        return True
+    mine, theirs = _flat(cwd), _flat(work.cwd)
+    if not (mine + "/").startswith(here + "/") or not (theirs + "/").startswith(here + "/"):
+        return False
+    try:
+        if store.get_meta(_WORKTREE + work.ref):
+            return False
+    except Exception:  # noqa: BLE001 — unknown, so not known to be apart
+        return False
+    return not ((mine + "/").startswith(theirs + "/") or (theirs + "/").startswith(mine + "/"))
 
 
 def _work_files(store: work_store.Store, work: work_store.Work) -> list[str]:
@@ -5412,13 +5449,13 @@ def _covers(store: work_store.Store, work: work_store.Work) -> str:
 
 def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -> list[tuple[work_store.Work, str]]:
     """The bot's open workstreams a new task looks like or belongs with,
-    each with why, the surest first: the same title words (work of the last
-    LOOKALIKE_RECENT_S), a file both name (unless they are known to be in
+    each with why, the surest first: the same title words (work that is
+    running, or of the last LOOKALIKE_RECENT_S), a file both name (unless they are known to be in
     different folders), or tasks that share most of their words (fewer when
     both are in one folder)."""
     now = time.time()
     mine = _words(title) - _GENERIC
-    task = (_words(title) | _words(instructions)) - _GENERIC
+    task = _task_words(title, instructions)
     files = _files(title) | _files(instructions)
     here = (work_trees.repo_root(cwd) or cwd).rstrip("/") if cwd else ""
     open_work = {work.ref: work for work in store.list(active_only=True, limit=500)}
@@ -5431,18 +5468,18 @@ def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -
         if fresh and _similar(mine, _words(work.title) - _GENERIC):
             found.append((0, -work.updated_at, work, "its title is nearly the same"))
             continue
-        folder = _folder(work)
-        # config.py in another repository is another file.
-        both = [] if here and folder and here != folder else sorted((files - _EVERYWHERE) & set(_work_files(store, work)))
+        # config.py in another repository, or another part of this one, is another file.
+        apart = _apart(store, cwd, here, work)
+        both = [] if apart else sorted((files - _EVERYWHERE) & set(_work_files(store, work)))
         if both:
             found.append((1, -work.updated_at, work, "it works on " + ", ".join(both[:3])))
             continue
-        theirs = (_words(work.title) | _words(work.goal)) - _GENERIC
+        theirs = _task_words(work.title, work.goal)
         shared = task & theirs
         numbers = {word for word in task if any(ch.isdigit() for ch in word)}
         if numbers and not numbers & theirs and {word for word in theirs if any(ch.isdigit() for ch in word)}:
             continue  # different ports, issues or versions: different tasks
-        same_place = bool(here and here == folder)
+        same_place = bool(here and _flat(here) == _flat(_folder(work)) and not apart)
         need = RELATED_WORDS_HERE if same_place else RELATED_WORDS
         if len(shared) >= need and len(shared) / max(1, min(len(task), len(theirs))) >= RELATED_SHARE:
             words = ", ".join(sorted(shared, key=lambda word: (-len(word), word))[:4])

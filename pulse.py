@@ -1262,6 +1262,15 @@ def _maybe_brief(pulse_store: store.PulseStore, home: Path, now: float) -> bool:
     if chat is None:
         return False
     item_id, attempt = planned
+    # Claimed in one write before the slow part: each process hosting a
+    # profile can reach the brief's time together, and only one sends it.
+    # A claim whose attempt never got recorded (its process died) lapses.
+    held = pulse_store.get(brief.CLAIM)
+    if (isinstance(held, list) and len(held) == 3 and held[:2] == [slot, attempt]
+            and isinstance(held[2], (int, float)) and now - held[2] < brief.CLAIM_S):
+        return False
+    if not pulse_store.swap(brief.CLAIM, held, [slot, attempt, now]):
+        return False
     cards = pulse_store.held_cards(brief.MAX_CARDS)
     context = brief.context(home, pulse_store, cards, home_chat_id=chat.chat_id, now=now, zone=zone)
     pulse_store.set(brief.PENDING, {"item_id": item_id, "ids": [card["id"] for card in cards]})

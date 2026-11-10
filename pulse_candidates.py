@@ -68,6 +68,12 @@ TEXT_LIMIT = 600
 # A candidate's reason (why now, where it came from), the card's Why?.
 WHY_LIMIT = 300
 SKIPS = ("done", "covered", "raised", "rated", "minor")
+# Left out by ``decide``, not the model: its pick fits no card type.
+SHAPELESS = "shapeless"
+# The remembered kind the user asked Pulse for (tell me when...): it comes up
+# even as plain words. Something to be reminded of is kept as a commitment,
+# which draws as a promise in the words said, or as due by its day.
+ASKED_KINDS = ("watch",)
 SOURCES = ("chat", "calendar", "reminders", "notes", "jobs", "tools")
 AREAS = ("work", "personal", "health", "home", "money", "social", "travel", "other")
 # The model call's room: what it reads (about the report turn's), and its answer.
@@ -112,7 +118,7 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 {{"kind": "date", "bring_up": true, "value": 4, "skip": "", "actionable": true, "line": "...", "why": "...", "due": "2026-10-27T14:00", "asked": false, "source": "chat", "chat": "c2", "area": "work"}}
 {{"kind": "reminder", "bring_up": true, "value": 3, "skip": "", "actionable": true, "line": "...", "why": "...", "due": "2026-10-28T09:00", "asked": true, "source": "reminders", "reminder": "r2", "area": "personal"}}
 
-- "bring_up": true when it belongs in this report. {bar} At most {limit} in all.
+- "bring_up": true when it belongs in this report. {bar} At most {limit} in all, and none is fine. When unsure, leave it out. One that fits no shape but "plain" comes up only when the user asked to be reminded of it, or when it updates or closes a card: give it the shape its facts support, never one they don't.
 - "value": how useful hearing it now would be, from 1 (not at all) to 5 (they'd want it now).
 - "skip": when it should stay out, why, in one word: "done" (already done, in any chat or cron run, marked (done) in what Pulse brought up lately, or later work moved past it), "covered" (their calendar, reminders, Hermes's scheduled jobs or something running in the background cover it; a job marked failing covers nothing), "raised" (Pulse brought it up lately and nothing about it changed), "rated" (the user rated it "no" before) or "minor"; otherwise "".
 - "actionable": whether the user could do something about it.
@@ -126,7 +132,9 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 - Every entry with a "line" is also a pick, "bring_up" true or not (what Pulse has learned can still bring one up), with "detail", "incident", "shape", "facts" and "actions" as below (its "line" is the pick's line, and a remembered item's subject is the item itself; a found entry's "subject" is its reminder, event or job key, or ""). Leave those out only when it has no "line".
 - "after" (found, kind "next" only): the #number under "Done since the last report", or the key under "Events that ended since the last report" (like e1), that it follows.
 
-A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen.
+A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen. One whose error only tells Hermes what to do instead ("use work_start") is Hermes's to handle, not the user's: "minor".
+
+Some things stay out as "minor", however true: what only says back what the user asked for or decided (a task they just started, a choice they made), a remembered fact or intention with nothing to do about it now, a watch whose condition hasn't happened ("revisit if a CVE lands"), and Hermes saying what it's about to do next while it works ("I'll start by …").
 
 """ + ledger.UNSET_RULE + """
 
@@ -317,6 +325,10 @@ def with_pick(row: dict, entry: dict, *, jobs: Optional[dict[str, str]] = None, 
     drawn from its pick too."""
     row["subject"] = subject_of(row, entry, jobs=jobs, shown=shown)
     if row.get("bring_up") or pulse_picks.clip(entry.get("line"), pulse_picks.LINE_LIMIT):
+        if pulse_picks.from_calendar(row["subject"]) and isinstance(entry.get("actions"), list):
+            # Matched to a calendar entry by its title too, not only its key:
+            # its buttons are filtered before the cap, as parse does by key.
+            entry = {**entry, "actions": pulse_picks.off_calendar(entry["actions"])}
         pick, why = pulse_picks.parse(entry, drawn_types=drawn, line=str(row.get("text") or ""))
         if pick is not None:
             pick["line"] = pulse_picks.clip(str(row.get("text") or ""), pulse_picks.LINE_LIMIT) or pick["line"]
@@ -625,6 +637,20 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
             continue
         if ref in away or (ref in recent and not due_again(row, recent[ref], now)):
             row["skip"] = "raised"  # moving a reminder isn't news, nor a calendar entry coming closer
+    # What fits no card type stays out (Eric, 2026-11-10: a shape's facts are
+    # checked, and the cards that read as noise were the plain ones), unless
+    # the user asked for it (a found one marked asked, a remembered watch),
+    # it's a floor, or it updates or closes a card on purpose.
+    # Before once_each, so a plain one never takes its shaped double's place.
+    for row in rows:
+        if (row.get("decision") or row.get("skip") or id(row) in deliberate or row.get("asked") is True
+                or (row["origin"] == MEMORY and row["kind"] in ASKED_KINDS) or floor(row, now)):
+            continue
+        pick = pulse_picks.loads(row.get("pick"))
+        if pick is not None and pick.get("shape") == pulse_picks.PLAIN:
+            row["skip"] = SHAPELESS
+            failed = str((pick or {}).get("dropped") or "")
+            pulse_picks.count(pulse_store, now, ["left_out:plain"] + ([f"left_out:plain:{failed}"] if failed else []))
     once_each(rows)
     for row in still_open(pulse_store, [row for row in rows if id(row) not in deliberate], now, closing):
         if not row.get("skip"):

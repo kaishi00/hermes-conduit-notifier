@@ -196,7 +196,8 @@ def test_a_report_keeps_its_words_home_when_its_picks_cant_be_read_for_its_copy(
                       words="I need to order Ana's gift")
     live.store.set("memory", True)
     live.llm.replies.append({"remembered": [{"ref": gift, "bring_up": True, "value": 3, "skip": "", "actionable": True,
-                                             "line": "Order Ana's gift before Friday", "why": "You said so in Deploy."}],
+                                             "line": "Order Ana's gift before Friday", "why": "You said so in Deploy.",
+                                             "shape": "due", "facts": {"due": "2026-10-30"}}],
                              "found": []})
     listed(live, now)
     pulse.tick(now + 1)

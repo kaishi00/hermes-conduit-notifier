@@ -1471,8 +1471,9 @@ question or a small task doesn't start a workstream. Change it in Conduit
 - The Bot Chat's note says what each open workstream covers: its task in a
   few words, the folder it works in, and the files its instructions name or
   it reported changing. `work_start` holds a new task against that before it
-  starts anything: a title that is nearly the same (work of the last ten
-  minutes), a file both name, or tasks that share most of their words (work
+  starts anything: a title that is nearly the same (work that is
+  running, or of the last ten minutes), a file both name (not when the two
+  are known to be in different repositories or folders), or tasks that share most of their words (work
   that is running or settled in the last six hours). A match is refused with
   the workstreams and why (`similar_work`), so the Bot Chat sends the work
   there with `work_send`; `new: true` starts it anyway.
@@ -1573,7 +1574,12 @@ question or a small task doesn't start a workstream. Change it in Conduit
   interrupting it); `auto` lets her do those on her own and tell you in a
   line; `off` is the Bot Chat as it was, passing reports on. When you write
   to her, she acts on your message under any setting. What she asks you and
-  what you answer is kept with `work_propose`, so she doesn't ask twice. A
+  what you answer is kept with `work_propose`, so she doesn't ask twice:
+  while a question about a workstream is open, the plugin refuses another
+  about it (she can reword the open one with new evidence), a no stands for a
+  day unless she tells you what came up since, and one decision that covers
+  several workstreams is one question, your answer covering each (plugin
+  0.158.0+). A
   workstream you set to Leave alone (its card in Conduit) gets nothing from
   her and isn't stopped by her in a turn you didn't start. Past eight
   messages to one workstream in an hour from such turns, the next is refused
@@ -1588,8 +1594,9 @@ question or a small task doesn't start a workstream. Change it in Conduit
   work update while the first is still running. The helper only points: it
   never messages a workstream, and what the Bot Chat does about it follows
   your Coordination setting. It is one of Hermes' helper models ("Conduit
-  work watch" under Models), the bot's own model until you pick another;
-  a small fast one is enough. It reads only when a bot has more than one
+  work watch" under Models, or Watch Model under Coordination in Conduit's
+  Edit Bot > Work), the bot's own model until you pick another; a small
+  fast one is enough. It reads only when a bot has more than one
   open workstream and Coordination isn't off, and may start twelve such
   turns an hour; past that a flag is kept on the board and her next turn
   says so. Conduit's Work panel lists what she did to keep the work in step
@@ -1660,7 +1667,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   question rather than waiting behind it. Only a Bot Chat turn your own
   message started, written after the question came, passes one on, so the bot never answers it alone, and
   what a group room says never does.
-- Up to 2 run at once per bot (`--max-running`). The registry is
+- Up to 4 run at once per bot by default (plugin 0.157.9+; 2 before), 1 to 6
+  in Edit Bot > Work or with `--max-running`; a bot with a saved number keeps it. The registry is
   `<profile>/conduit/workstreams.db`, with a journal of each workstream's
   tool steps and an outbox of every turn sent into a chat.
 - After a restart, a clean one or a crash, work that was running is marked
@@ -2391,7 +2399,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 - **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
   presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
   Nothing rings meanwhile: a call that would go out sends the usual push.
-  An Apple Watch call holds it too (0.157.2+): the host renews 90 seconds
+  An Apple Watch call holds it too (0.158.2+): the host renews 90 seconds
   every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
   keeps it through a rejoin or a provider's drop, and lets go when the
   Watch hangs up, the call fails on the host, or the grant ends. Two Watch calls on one
@@ -2448,7 +2456,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
 - `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
   decides". Either way the limits apply, presence holds it, and a session
   already watched keeps one watch (it takes the reason). While presence
-  holds (0.157.2+), the tool answers `in_call` at once and sets nothing up,
+  holds (0.158.2+), the tool answers `in_call` at once and sets nothing up,
   so Hermes doesn't promise a ring that won't come; a call for later, once
   something finishes, is still set up with `conduit_call_watch`.
 - **What's worth a call (0.16+):** with `rules` written (the user's own

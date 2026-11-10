@@ -58,7 +58,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     work.add_argument("--policy", choices=["lookups", "open", "strict"], default=None,
                       help="for on: what the coordinator does itself: quick things, any tool for a few steps a "
                            "turn (lookups, the default), everything (open), or only coordinating (strict)")
-    work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 2)")
+    work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 4)")
     work.add_argument("--after-restart", choices=["continue", "ask"], default=None,
                       help="for on: a workstream a restart cut off with nothing uncertain in flight is continued "
                            "once (continue, the default) or left for the coordinator to ask about (ask)")

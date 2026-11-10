@@ -425,7 +425,7 @@ DONE = {"id": 12, "kind": "commitment", "profile": "nahida", "chat_id": "trip", 
 DENTIST = {"id": "e_dentist", "title": "Dentist"}
 NEXT = {"kind": "next", "bring_up": True, "value": 4, "skip": "", "actionable": True,
         "line": "Book a hotel in Lisbon for the 12th to the 15th", "why": "You booked the flights; no hotel yet.",
-        "source": "chat", "area": "personal"}
+        "source": "chat", "area": "personal", "shape": "steps", "facts": {"names": ["Flights", "Hotel"], "at": 1}}
 
 
 @pytest.mark.parametrize("after, ref", [("#12", "after:item:12"), ("12", "after:item:12"), (12, "after:item:12"),

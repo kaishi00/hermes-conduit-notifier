@@ -50,7 +50,9 @@ POLICIES = ("off", "strict", "lookups", "open")
 # 2026-11-03): a quick ask answered in the Bot Chat beats a workstream
 # started for it; strict and open stay choices in Edit Bot > Work.
 DEFAULT_POLICY = "lookups"
-DEFAULT_MAX_RUNNING = 2
+# Four at once (Eric 2026-11-10, raised from 2 after six ran cleanly in the
+# two-hour coordination run); a bot with a saved number keeps it.
+DEFAULT_MAX_RUNNING = 4
 # How many steps a Quick Things Here turn does in the Bot Chat before the
 # rest goes to a workstream (Eric 2026-11-10: "can that number be
 # configurable?"). The first is the default.
@@ -185,6 +187,10 @@ _ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL 
 # The same for the outbox: when a send showed in its target's saved messages,
 # and whether a turn the Bot Chat started itself sent it (work_coord).
 _ADDED_OUTBOX_COLUMNS = (("delivered_at", "REAL NOT NULL DEFAULT 0"), ("own", "INTEGER NOT NULL DEFAULT 0"))
+# A question about several workstreams names the rest in ``also`` (space
+# apart), ``ref`` keeping the first for older apps; ``new`` is what a
+# question asked again after a decline says came up since (Eric 2026-11-10).
+_ADDED_PROPOSAL_COLUMNS = (("also", "TEXT NOT NULL DEFAULT ''"), ("new", "TEXT NOT NULL DEFAULT ''"))
 # Who can start a job of their own that's kept here too (M5): a call's
 # job runs as the call says, never under the coordinator's limit.
 CALL_VIA = ("phone", "watch")
@@ -790,15 +796,51 @@ class Store:
 
     # What the Bot Chat asked the user (work_propose)
 
-    def proposal_add(self, ref: str, text: str) -> str:
+    def proposal_add(self, refs: Any, text: str, new: str = "") -> str:
+        """A question the Bot Chat asked the user, about the workstreams in
+        ``refs`` (one ref, or a list; the first is ``ref``)."""
+        refs = [refs] if isinstance(refs, str) else list(refs or ())
         with self._db() as con:
             row = con.execute("SELECT value FROM meta WHERE key = 'next_P'").fetchone()
             number = int(row["value"]) if row else 1
             con.execute("INSERT INTO meta (key, value) VALUES ('next_P', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
                         (str(number + 1), str(number + 1)))
-            con.execute("INSERT INTO proposals (id, ref, text, created_at) VALUES (?, ?, ?, ?)",
-                        (f"P{number}", ref, text, time.time()))
+            con.execute("INSERT INTO proposals (id, ref, also, text, new, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (f"P{number}", refs[0] if refs else "", " ".join(refs[1:]), text, new, time.time()))
         return f"P{number}"
+
+    def proposal_reword(self, item: str, refs: list[str], text: str, new: Optional[str] = None) -> Optional[dict]:
+        """An open question asked again with new wording (and evidence),
+        about ``refs`` (the caller adds them to the ones it had), keeping
+        its workstreams when none are given and its ``new`` when that is
+        None ("" clears it); None when it isn't open."""
+        with self._db() as con:
+            changed = con.execute("UPDATE proposals SET ref = CASE WHEN ? THEN ? ELSE ref END, "
+                                  "also = CASE WHEN ? THEN ? ELSE also END, text = ?, "
+                                  "new = CASE WHEN ? THEN ? ELSE new END WHERE id = ? AND status = 'open'",
+                                  (bool(refs), refs[0] if refs else "", bool(refs), " ".join(refs[1:]), text,
+                                   new is not None, new or "", item)).rowcount
+            row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None
+        return dict(row) if row else None
+
+    def proposal(self, item: str) -> Optional[dict]:
+        """One question by its id, answered or not."""
+        if not self.path.is_file():
+            return None
+        rows = self._read("SELECT * FROM proposals WHERE id = ?", (item,))
+        return rows[0] if rows else None
+
+    def proposal_about(self, refs: list[str], *, status: str, since: float = 0.0,
+                       besides: str = "") -> Optional[dict]:
+        """The newest question in ``status`` about any of ``refs``, other than
+        ``besides``: open ones whenever asked, answered ones answered since
+        then."""
+        if not refs or not self.path.is_file():
+            return None
+        rows = self._read("SELECT * FROM proposals WHERE status = ? AND (status = 'open' OR answered_at >= ?) "
+                          "AND id != ? ORDER BY created_at DESC", (status, since, besides))
+        wanted = set(refs)
+        return next((row for row in rows if wanted & set(proposal_refs(row))), None)
 
     def proposal_answer(self, item: str, status: str, answer: str = "") -> Optional[dict]:
         """The user's answer to an open proposal; None when it isn't open."""
@@ -841,11 +883,17 @@ class Store:
 def _add_columns(con: sqlite3.Connection) -> None:
     """A registry from before a column was added gets it (a write opens the
     file this way first, so reads after any write see it)."""
-    for table, added in (("work", _ADDED_COLUMNS), ("outbox", _ADDED_OUTBOX_COLUMNS)):
+    for table, added in (("work", _ADDED_COLUMNS), ("outbox", _ADDED_OUTBOX_COLUMNS),
+                         ("proposals", _ADDED_PROPOSAL_COLUMNS)):
         have = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
         for name, definition in added:
             if name not in have:
                 con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def proposal_refs(row: dict) -> list[str]:
+    """The workstreams a question is about, first one first."""
+    return [ref for ref in [row.get("ref") or "", *str(row.get("also") or "").split()] if ref]
 
 
 def normalize_ref(value: Any) -> str:

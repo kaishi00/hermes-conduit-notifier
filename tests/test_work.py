@@ -658,6 +658,8 @@ def test_start_offers_lookalikes_first(on, hermes):
 
 
 def test_start_stops_at_the_bots_running_limit(on, hermes):
+    assert on.max_running() == 4, "the default (Eric 2026-11-10)"
+    on.set_max_running(2)
     start("One thing")
     start("Second matter", "Count the invoices sent in March.")
     answer = start("Third question", "Tidy the garden shed photos.")
@@ -1543,6 +1545,7 @@ def test_a_start_waits_for_the_sweep(on, hermes, monkeypatch):
 
 
 def test_a_send_to_idle_work_keeps_to_the_running_limit(on, hermes):
+    on.set_max_running(2)
     start("One thing")
     start("Second matter", "Count the invoices sent in March.")
     on.update("W1", status="done")
@@ -2033,6 +2036,32 @@ def test_different_numbers_and_shared_folders_alone_arent_related(on, hermes, tm
     assert work._files("Odd cases, e.g. empty ones, i.e. none.") == set()
     assert work._files("See example.com and v1.2.3, then edit docs/API-Status.md and run export.py.") == {
         "api-status.md", "export.py"}
+
+
+def test_folders_of_one_repository_prose_and_file_endings_arent_related(on, hermes, tmp_path, request):
+    on.set_max_running(6)
+    trees = request.getfixturevalue("trees")
+    two = tmp_path / "two"
+    two.mkdir()
+    # Review of #675: both folders are in one repository.
+    front, back = trees.root / "frontend", trees.root / "backend"
+    front.mkdir(), back.mkdir()
+    assert start("Front ports", "Move the port into frontend/settings.py.", cwd=str(front), new=True)["ok"]
+    assert start("Back hosts", "Read the host from backend/settings.py.", cwd=str(back))["ok"]
+    assert start("Front colors", "Add a color to settings.py.", cwd=str(front))["error"] == "similar_work"
+    assert on.get("W1").repo == on.get("W2").repo == str(trees.root)
+    assert start("Root lint", "Lint settings.py everywhere.", cwd=str(trees.root))["error"] == "similar_work"
+    theirs = store_mod.Work(ref="W9", kind="workstream", title="T", status="running", repo="C:\\repo", cwd="C:\\repo\\backend")
+    assert work._apart(on, "C:\\repo\\frontend", "C:\\repo", theirs) and not work._apart(on, "C:\\repo", "C:\\repo", theirs)
+    assert work._files("Fix C:\\repo\\a.c and src\\Export.py.") == {"a.c", "export.py"}
+    assert "auth" in work._task_words("Fix auth/callback.py.") and "callback" not in work._task_words("Fix auth/callback.py.")
+    assert work._task_words("Inspect /srv/company/monorepo/frontend/view.py") == {"inspect", "frontend"}
+    # A workstream in a worktree of its own is still in its repository (DeepSeek on #679).
+    assert start("Parser", "Rewrite the tokens in parser.py.", cwd=str(trees.root / "src"), worktree=True, new=True)["ok"]
+    assert start("Parser errors", "Report the line in parser.py.", cwd=str(trees.root / "src"))["error"] == "similar_work"
+    assert work._files("Run it at 10 a.m. in the U.S. office, then fix src/a.c.") == {"a.c"}
+    assert start("Config", "Tidy the unused imports in config.py.", cwd=str(two), new=True)["ok"]
+    assert start("Export", "Tidy the unused imports in export.py.")["ok"]
 
 
 def test_the_note_says_what_each_workstream_covers(on, hermes):
@@ -3397,7 +3426,7 @@ def _hermes_approvals(home, mode):
 def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
     settings = work.app_settings(home)
     assert settings == {"ok": True, "policy": "lookups", "policies": ["off", "strict", "lookups", "open"],
-                        "max_running": 2, "max_running_limit": 6,
+                        "max_running": 4, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
                         "workstream_model": None, "coordination": "ask",
                         "coordinations": ["off", "ask", "auto"], "quick_steps": 5,

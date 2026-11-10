@@ -213,8 +213,24 @@ class Run:
                 and (f.get("params") or {}).get("session_id") == runtime]
 
     async def chat_running(self) -> bool:
-        info = (await self.call("session.info", {"session_id": self.chat})).get("result") or {}
-        return bool(info.get("running"))
+        """Whether the Bot Chat is in a turn, by the events this socket got:
+        the dashboard's TUI gateway has no call that says so (session.info is
+        only an event there), and asking for one answered an error that read
+        as "not running" (test host, 2026-11-10)."""
+        for frame in reversed(self.frames):
+            params = frame.get("params") or {}
+            if frame.get("method") != "event" or params.get("session_id") != self.chat:
+                continue
+            kind, payload = params.get("type"), params.get("payload")
+            if kind == "message.start":
+                return True
+            if kind in ("message.complete", "error"):
+                return False
+            # Every turn's end sends session.info with running false, also the
+            # two paths that send no message.complete; mid-turn ones carry true.
+            if kind == "session.info" and isinstance(payload, dict) and isinstance(payload.get("running"), bool):
+                return payload["running"]
+        return False
 
     async def say(self, text: str, timeout: float = 240) -> str:
         """The user writes in the Bot Chat; its reply. A patient user: they
@@ -224,8 +240,10 @@ class Run:
         deadline = time.monotonic() + 300 * SCALE
         idle = 0
         while idle < 2 and time.monotonic() < deadline:
-            idle = 0 if await self.chat_running() else idle + 1
+            # The look comes after the wait, so nothing sits between the last
+            # one and the message going in.
             await asyncio.sleep(1.0)
+            idle = 0 if await self.chat_running() else idle + 1
         before = len(self.completions(self.chat))
         self.note(f"user -> Bot Chat{'' if idle else ' (into its running turn)'}: {text[:140]}")
         await self.call("prompt.submit", {"session_id": self.chat, "text": text})
@@ -273,14 +291,19 @@ class Run:
         return self.ref(title)
 
     async def quiet(self, timeout: float = 600, settle: float = 25) -> None:
-        """Until every workstream has stopped working and the Bot Chat has
-        said nothing new for a while."""
+        """Until every workstream has stopped working, the Bot Chat is in
+        no turn and it has said nothing new for a while. A work update's
+        turn can sit in one model call for longer than the settle time with
+        no frame, and ending the run there stops it: Hermes then writes its
+        failed-turn notice, which read as a turn cut short (test host,
+        2026-11-10)."""
         deadline = time.monotonic() + timeout * SCALE
         last, since = -1, time.monotonic()
         while time.monotonic() < deadline:
             working = [w.ref for w in self.store.list(limit=-1) if w.kind == "workstream" and w.status in RUNNING]
-            seen = len(self.frames)
-            if seen != last:
+            running = await self.chat_running()
+            seen = sum(1 for frame in self.frames if "method" in frame)  # events, not the replies to this poll
+            if seen != last or running:
                 last, since = seen, time.monotonic()
             if not working and time.monotonic() - since >= settle * SCALE:
                 return

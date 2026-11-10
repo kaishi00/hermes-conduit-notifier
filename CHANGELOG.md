@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.157.2 (2026-11-10)
+## 0.158.2 (2026-11-10)
 
 ### Fixes
 - During an Apple Watch call, Hermes could still try to phone you and say
@@ -21,6 +21,101 @@ checks it). The format is fixed, because Conduit reads it:
   declined it and could lose its microphone until you tapped. A Watch call
   now counts as being in a call, as a phone call does: nothing rings over
   it, and Hermes is told at once that you're already talking.
+
+## 0.158.1 (2026-11-10)
+
+### Fixes
+- A reworded question no longer says "New since the last no" when you never
+  said no to it.
+
+## 0.158.0 (2026-11-10)
+
+### New and improved
+- Under Ask Me First a bot asks you about a workstream once: while that
+  question is open it won't ask again, and after a no it waits a day unless
+  something new came up, which it tells you. A decision that touches several
+  workstreams is one question, and your answer covers each.
+
+## 0.157.9 (2026-11-10)
+
+### New and improved
+- A bot runs up to 4 workstreams at once by default, up from 2. A bot you've
+  already set keeps its number; change it in Edit Bot > Work.
+
+## 0.157.8 (2026-11-10)
+
+### Fixes
+- Pulse: something you asked Pulse to watch for still comes up when it fits no
+  card type, a reminder you asked for is drawn in your own words, and a card
+  isn't lost when Pulse found the same thing twice and only one of the two fit
+  a type.
+
+## 0.157.7 (2026-11-10)
+
+### New and improved
+- Fewer, better Pulse cards: a report or look ahead brings up only what fits a
+  card type (a date, something due, a job's runs, a promise, a status, steps).
+  What fits none stays out, unless you asked to be reminded of it. When Pulse
+  is unsure whether something is worth your time, it leaves it out.
+
+## 0.157.6 (2026-11-10)
+
+### Fixes
+- A card about a calendar entry no longer offers a reminder for it, since the
+  entry has its own alerts.
+- A card matched to a calendar entry by its name could lose its Done button
+  when the buttons it shouldn't have were dropped.
+
+## 0.157.5 (2026-11-10)
+
+### Fixes
+- One morning brief a day: when several profiles share a host, each one's
+  process could send its own at the brief's time, up to four at once.
+- Pulse no longer brings up what only says back what you asked for or
+  decided, a remembered fact with nothing to do about it now, a watch whose
+  condition hasn't happened, or Hermes saying what it's about to do next
+  while it works. A tool error that only tells Hermes what to do instead
+  stays Hermes's.
+- Calendar entries show which calendar they're on, and a holiday from
+  another country's holiday calendar isn't treated as yours. Cards about a
+  calendar entry don't offer a reminder for it, and no card offers a step
+  Hermes can't take, like changing the app.
+- A card held for a place no longer reads the place into what it's about.
+- On a calendar card, Move it and Open in Calendar stay, and a Done after a
+  dropped button still fits.
+
+## 0.157.4 (2026-11-10)
+
+### Fixes
+- A card about something on your calendar also loses an "add to calendar",
+  "block time" or "check your schedule" button when Pulse matched it to the
+  entry by name, when the card is updated, and on cards you already have.
+  Moving or cancelling the entry is still offered.
+
+## 0.157.3 (2026-11-10)
+
+### Fixes
+- The morning brief also drops the follow-up, other and next tags, an item
+  number copied from its related or later lines, and markers in its opening
+  line, which is the brief's push. A line starting with a real number, such
+  as "#1 priority", keeps it.
+- A card about something on your calendar no longer offers to add it to the
+  calendar or block time for it, and its headline says the thing without
+  made-up advice.
+
+## 0.157.2 (2026-11-10)
+
+### Fixes
+- The morning brief's lines no longer show Pulse's own markers, like
+  "[interest]" or "#481", in front of or after what they say.
+
+## 0.157.1 (2026-11-10)
+
+### Fixes
+- A new task is no longer taken for part of an open workstream because both
+  say "a.m." or name files of the same kind, or because each names a
+  config.py in a different folder of one project. Without the update the
+  Bot Chat could send it into the wrong workstream.
 
 ## 0.157.0 (2026-11-10)
 

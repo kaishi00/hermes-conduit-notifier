@@ -250,9 +250,10 @@ def test_the_model_words_the_dates_and_adds_what_needs_getting_ready_for(live):
         {"ref": "D1", "bring_up": False, "skip": "done", "line": "Your anniversary is next Wednesday."}],
         "ahead": [
         {"kind": "date", "bring_up": True, "value": 4, "line": "Kyoto starts Saturday 24 October: time to pack.",
-         "why": "Your calendar has Kyoto from Saturday.", "due": "2026-10-24", "source": "calendar", "area": "travel"},
+         "why": "Your calendar has Kyoto from Saturday.", "due": "2026-10-24", "source": "calendar", "area": "travel",
+         "shape": "date", "facts": {"day": "2026-10-24", "what": "Kyoto"}},
         {"kind": "commitment", "bring_up": True, "value": 4, "line": "Pick up the suit before Kyoto.",
-         "why": "You said you would.", "ref": f"#{suit}"},
+         "why": "You said you would.", "ref": f"#{suit}", "shape": "due", "facts": {"due": "2026-10-23"}},
         {"kind": "other", "bring_up": True, "value": 4, "line": ""}]})
     done = look(live, now, model)
     [(instructions, text)] = model.asked
@@ -261,8 +262,8 @@ def test_the_model_words_the_dates_and_adds_what_needs_getting_ready_for(live):
             'October 2016", 1 Sep 2026): Wednesday 21 October, in 7 days (10 years).') in text
     assert ("D2 [birthday] Sam's birthday (wife, one of the people the user picked in Conduit): Wednesday 28 "
             "October, in 14 days (turning 40). Bring it up today: two weeks ahead.") in text
-    assert re.search(r"\n- v\d+ Sat 24 Oct, all day, to Sat 31 Oct: Kyoto\n", text)
-    assert re.search(r"\n- v\d+ Fri 16 Oct 15:00: Dentist\n", text)
+    assert re.search(r"\n- v\d+ Sat 24 Oct, all day, to Sat 31 Oct: Kyoto \(\w+ calendar\)\n", text)
+    assert re.search(r"\n- v\d+ Fri 16 Oct 15:00: Dentist \(\w+ calendar\)\n", text)
     assert "- r1 Buy milk (due Thu 15 Oct 09:00)" in text and "File taxes" not in text  # due after the two weeks
     assert f"#{suit} [commitment] The user will pick up the suit before the trip. (due 2026-10-23)" in text
     assert f"#{wedding} " not in text.split("## What Pulse remembers")[-1]  # the dates' own section has it

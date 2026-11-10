@@ -121,7 +121,7 @@ A date or an "ahead" entry may instead wait for the user to pass a kind of shop:
 # Added to INSTRUCTIONS: each entry brought up is a pick (pulse_picks).
 PICKS_RULE = """
 
-Every entry with "bring_up": true is also a pick, with "detail", "shape", "facts" and "actions" as below (its "line" is the pick's line). Every look-ahead pick is new: give no "incident". Leave those out when "bring_up" is false.
+Every entry with "bring_up": true is also a pick, with "detail", "shape", "facts" and "actions" as below (its "line" is the pick's line). Every look-ahead pick is new: give no "incident". Leave those out when "bring_up" is false. An "ahead" entry that fits no shape but "plain" comes up only when the user asked to be told of it (a remembered watch): give it the shape its facts support, never one they don't.
 
 """
 PLACES_TITLE = "## Saved places (what may wait for the user to get to or leave one)"
@@ -361,7 +361,7 @@ def _due_words(value: Any) -> str:
 
 
 def _event_line(event: dict, key: str = "") -> str:
-    """"- v1 Sat 8 Nov, all day, to Sun 16 Nov: Kyoto", in the phone's local time."""
+    """"- v1 Sat 8 Nov, all day, to Sun 16 Nov: Kyoto (Work calendar)", in the phone's local time."""
     title = _clip(event.get("title"), 100) or "Untitled"
     start, end = _moment(event.get("start")), _moment(event.get("end"))
     key = f"{key} " if key else ""
@@ -374,7 +374,8 @@ def _event_line(event: dict, key: str = "") -> str:
         last = (end - timedelta(seconds=1)).date() if all_day else end.date()
         if last > start.date():
             when += f", to {last:%a} {last.day} {last:%b}"
-    return f"- {key}{when}: {title}"
+    calendar = _clip(event.get("calendar"), 60)
+    return f"- {key}{when}: {title}" + (f" ({calendar} calendar)" if calendar else "")
 
 
 def _remembered(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> list[dict]:
