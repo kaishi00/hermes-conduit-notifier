@@ -71,7 +71,7 @@ PICK_RULES = """Each thing you bring up is a pick:
 - "incident": {{"card": "new"}} for something new. When a card under "What Pulse brought up lately" is still open and this is more about that same occurrence (another failed run, a new step), {{"card": "pc_1834"}} with that card's id updates it. When that occurrence is over (the job recovered, it arrived), {{"close": "pc_1834"}} closes it. Something that happened again after it was over is new, not an update.
 - "shape" and its "facts", only what the context states, else "plain" with {{}}:
   "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}} ("whose": a person's name, or "" for the user's own); "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day; "noticed": the earlier day it first came up, left out when that's the due day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (a scheduled job's recent runs, oldest first, at most 10: use it rather than "status" when the context shows its runs); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}} ("label": the thing in two to four words, like "Nightly backup"); "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0).
-- "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". Give the one most useful step first, named for what it does ("Verify ID", "Plan the day"), never a bare "Do it". For something that went wrong (a failing job, an error, a "warn" or "fail" status), that first step is an "ask" whose "say" has Hermes find out what's wrong and fix it, never only ask how it stands. A calendar entry is already on the user's calendar: never offer to add it, block time for it or check it again; give a step only for preparation the context names, else just "done". [] when there's nothing to do."""
+- "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". Give the one most useful step first, named for what it does ("Verify ID", "Plan the day"), never a bare "Do it". For something that went wrong (a failing job, an error, a "warn" or "fail" status), that first step is an "ask" whose "say" has Hermes find out what's wrong and fix it, never only ask how it stands. A calendar entry is already on the user's calendar, with its own alerts: never offer to add it, block time for it, remind about it or check it again; give a step only for preparation the context names, else just "done". An entry on a holiday calendar for another country ("Holidays in Japan") isn't a day off the user keeps. Every step is one Hermes can actually take: it can't change the Conduit app or what its cards can show. [] when there's nothing to do."""
 
 
 def card_id_text(card_id: int) -> str:
@@ -222,10 +222,12 @@ def _url(value: Any) -> str:
 _CALENDAR_SUBJECT = re.compile(r"v\d+")
 CALENDAR_CARD_SUBJECT = "event:"
 _ONTO_CALENDAR = re.compile(r"\b(?:calendar|schedule)\b|\bblock\b.*\btime\b", re.IGNORECASE)
-_KEEPS_STEP = re.compile(r"\b(?:reschedul\w*|cancel\w*)\b", re.IGNORECASE)
+_KEEPS_STEP = re.compile(r"\b(?:reschedul\w*|cancel\w*|mov(?:e|es|ed|ing)|shift\w*)\b", re.IGNORECASE)
 
 
 def _onto_calendar(action: Mapping[str, Any]) -> bool:
+    if action.get("does") == OPEN:  # a link to the entry only shows it
+        return False
     words = " ".join(str(action.get(key) or "") for key in ("label", "say"))
     return bool(_ONTO_CALENDAR.search(words)) and not _KEEPS_STEP.search(words)
 
@@ -306,14 +308,14 @@ def parse(entry: Any, *, drawn_types: Sequence[str] = (), line: str = "") -> tup
     pick: dict[str, Any] = {
         "line": words, "detail": "" if repeats(detail := _text(entry.get("detail"), DETAIL_LIMIT), words) else detail,
         "shape": shape, "facts": facts,
-        "actions": _actions(entry.get("actions")), "incident": {"card": NEW} if kind == NEW else
+        # A calendar entry's buttons lose the calendar ones before the cap, so
+        # a step after them still fits.
+        "actions": _actions(off_calendar(entry.get("actions")) if from_calendar(entry.get("subject"), entry.get("event"))
+                            else entry.get("actions")), "incident": {"card": NEW} if kind == NEW else
         ({"card": card_id_text(card)} if kind == UPDATE else {"close": card_id_text(card)})}
     subject = entry.get("subject")
     if isinstance(subject, str) and subject.strip():
         pick["subject"] = subject.strip()[:40]
-    if from_calendar(subject, entry.get("event")):
-        # It came from the calendar: a button to put it there again is noise.
-        pick["actions"] = off_calendar(pick["actions"])
     return pick, why
 
 

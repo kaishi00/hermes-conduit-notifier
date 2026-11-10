@@ -491,6 +491,27 @@ def test_the_brief_comes_every_morning_with_nothing_held_but_not_before_its_time
     assert len(live.sent()) == 1  # once a day
 
 
+def test_one_brief_when_several_processes_reach_its_time_together(live, monkeypatch):
+    # Eric's host, 6 Nov: each profile's process sent the brief at 05:00, four in one second.
+    brief_due_now(live)
+    claimed = []
+    real_swap = live.store.swap
+
+    def swap(key, old, new):  # another process claims the slot between this one's read and write
+        if key == pulse.brief.CLAIM and not claimed:
+            claimed.append(new)
+            real_swap(key, old, new)
+        return real_swap(key, old, new)
+    monkeypatch.setattr(live.store, "swap", swap)
+    assert not pulse._maybe_brief(live.store, live.home, time.time()) and live.store.in_flight() == []
+    monkeypatch.undo()
+    assert not pulse._maybe_brief(live.store, live.home, time.time())  # its claim stands for this slot
+    assert live.store.in_flight() == []
+    # A claim whose process died before recording its attempt lapses.
+    assert pulse._maybe_brief(live.store, live.home, time.time() + pulse.brief.CLAIM_S + 1)
+    assert len(live.store.attempts_since(pulse.brief.BRIEF, 0)) == 1
+
+
 def test_a_brief_with_nothing_kept_still_reads_the_calendar(live, monkeypatch):
     live.store.set("memory", True)
     monkeypatch.setattr(pulse.report, "phone_context",

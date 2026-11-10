@@ -87,6 +87,19 @@ def test_a_calendar_entry_loses_the_button_however_it_is_named_or_kept():
     assert picks.loads(picks.updated_card(old, update)["look"])["actions"] == [done]
     # A card about something else keeps what it had.
     assert picks.look({**old, "subject": "item:41"})["actions"] == [block, done]
+    # Moving it and a link to it stay; a Done after two dropped buttons still fits.
+    move_it = {"label": "Move it", "does": "ask", "say": "Move Duty Day on my calendar to Friday"}
+    open_it = {"label": "Open in Calendar", "does": "open", "url": "https://calendar.example/e/1"}
+    assert picks.off_calendar([move_it, open_it]) == [move_it, open_it]
+    three, _ = picks.parse({"line": "Duty Day", "subject": "v1", "actions": [block, check, done]})
+    assert three["actions"] == [done]
+    # Matched to the calendar by its title: the row's subject is the entry, not the model's key.
+    row = pulse.candidates.with_pick({"ref": "event:abc:2026-11-17", "bring_up": True, "text": "Duty Day Tuesday"},
+                                     {"line": "Duty Day Tuesday", "actions": [block, done]})
+    assert picks.loads(row["pick"])["actions"] == [done]
+    other = pulse.candidates.with_pick({"ref": "", "bring_up": True, "text": "Plan the week"},
+                                       {"line": "Plan the week", "actions": [block, done]})
+    assert picks.loads(other["pick"])["actions"] == [block, done]
 
 
 def test_drawn_bodies_only_for_apps_that_draw_them():

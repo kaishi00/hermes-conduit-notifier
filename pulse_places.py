@@ -546,7 +546,8 @@ _PICK_NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up
               "held something for when the user got to or left a place, and they just did. Tell the user in one or "
               "two short, friendly sentences, starting with where they are so it makes sense on its own "
               "(\"Leaving work: ...\"). The held words are from the day it was held: count any \"in N days\" from "
-              "then. Only pass on what the message says")
+              "then. The place is only why it comes up now, never part of what the held thing is about. Only pass on "
+              "what the message says, with no advice of your own")
 # While Pulse looks things up first, pulse_tools.look_note follows PICK_LOOK_NOTE.
 PICK_NOTE, PICK_LOOK_NOTE = _PICK_NOTE + ". Don't use any tools.", _PICK_NOTE + " and what you look up about it."
 

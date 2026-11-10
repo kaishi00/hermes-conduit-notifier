@@ -126,7 +126,9 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 - Every entry with a "line" is also a pick, "bring_up" true or not (what Pulse has learned can still bring one up), with "detail", "incident", "shape", "facts" and "actions" as below (its "line" is the pick's line, and a remembered item's subject is the item itself; a found entry's "subject" is its reminder, event or job key, or ""). Leave those out only when it has no "line".
 - "after" (found, kind "next" only): the #number under "Done since the last report", or the key under "Events that ended since the last report" (like e1), that it follows.
 
-A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen.
+A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen. One whose error only tells Hermes what to do instead ("use work_start") is Hermes's to handle, not the user's: "minor".
+
+Some things stay out as "minor", however true: what only says back what the user asked for or decided (a task they just started, a choice they made), a remembered fact or intention with nothing to do about it now, a watch whose condition hasn't happened ("revisit if a CVE lands"), and Hermes saying what it's about to do next while it works ("I'll start by …").
 
 """ + ledger.UNSET_RULE + """
 
