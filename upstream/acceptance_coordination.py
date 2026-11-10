@@ -42,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -207,14 +208,26 @@ class Run:
                 self._pending.pop(frame["id"]).set_result(frame)
 
     def completions(self, runtime: str) -> List[str]:
-        return [((f.get("params") or {}).get("payload") or {}).get("text", "") for f in self.frames
+        return [str(((f.get("params") or {}).get("payload") or {}).get("text") or "") for f in self.frames
                 if f.get("method") == "event" and (f.get("params") or {}).get("type") == "message.complete"
                 and (f.get("params") or {}).get("session_id") == runtime]
 
+    async def chat_running(self) -> bool:
+        info = (await self.call("session.info", {"session_id": self.chat})).get("result") or {}
+        return bool(info.get("running"))
+
     async def say(self, text: str, timeout: float = 240) -> str:
-        """The user writes in the Bot Chat; its reply."""
+        """The user writes in the Bot Chat; its reply. A patient user: they
+        write between its turns, since a message typed into a running turn
+        redirects it (Hermes' default), and a work update's turn cut short
+        that way is a different case from the ones here."""
+        deadline = time.monotonic() + 300 * SCALE
+        idle = 0
+        while idle < 2 and time.monotonic() < deadline:
+            idle = 0 if await self.chat_running() else idle + 1
+            await asyncio.sleep(1.0)
         before = len(self.completions(self.chat))
-        self.note(f"user -> Bot Chat: {text[:140]}")
+        self.note(f"user -> Bot Chat{'' if idle else ' (into its running turn)'}: {text[:140]}")
         await self.call("prompt.submit", {"session_id": self.chat, "text": text})
         if await self.until(lambda: len(self.completions(self.chat)) > before, timeout, "the Bot Chat's reply"):
             reply = self.completions(self.chat)[before]
@@ -357,11 +370,25 @@ class Run:
         own_turns = []
         for index, row in enumerate(chat):
             if row.get("role") == "user" and str(row.get("content") or "").startswith("Work update from"):
-                reply = next((later for later in chat[index + 1:] if later.get("role") == "assistant"
+                # Its own reply: before the next message in, and not Hermes'
+                # notice that the turn was cut short.
+                # (An update queued into the same turn shares its reply.)
+                turn = []
+                for later in chat[index + 1:]:
+                    if later.get("role") == "user":
+                        answered = any(row.get("role") == "assistant"
+                                       and not (row.get("tool_calls") or "").strip("[]null ") for row in turn)
+                        if answered or not str(later.get("content") or "").startswith("Work update from"):
+                            break
+                        continue
+                    turn.append(later)
+                cut = any(later.get("display_kind") == "failed_turn" for later in turn)
+                reply = next((later for later in turn if later.get("role") == "assistant"
+                              and later.get("display_kind") != "failed_turn"
                               and not (later.get("tool_calls") or "").strip("[]null ")), None)
                 text = str((reply or {}).get("content") or "").strip()
                 own_turns.append({"at": row.get("timestamp"), "update": str(row.get("content"))[:1500],
-                                  "reply": text, "silent": text == "[SILENT]" or not text})
+                                  "reply": text, "silent": text == "[SILENT]" or not text, "cut_short": cut})
         landings = {}
         for row in sends:
             body = row["text"].split("passes on:\n", 1)[-1][:80]
@@ -419,8 +446,23 @@ def facts(result: dict, finder: str, builder: str) -> dict:
         "proposals": [{"id": p["id"], "ref": p["ref"], "status": p["status"], "text": p["text"][:300]}
                       for p in result["proposals"]],
         "own_turns": len(result["own_turns"]), "own_turns_spoken": len(spoke),
+        "own_turns_cut_short": sum(1 for turn in result["own_turns"] if turn.get("cut_short")),
         "said_unprompted": [turn["reply"][:400] for turn in spoke],
     }
+
+
+# A message that tells the builder to carry on as it was changes nothing,
+# even when it landed in its running turn.
+KEEPS = ("unchanged", "no change", "nothing changes", "carry on", "keep going", "keep sending", "keep using",
+         "keep it on", "stay on", "continue as")
+
+
+def steered(f: dict) -> List[str]:
+    """The Bot Chat's own messages to the builder that change its course.
+    By their words, so roughly ("carry on, but move to v2" passes as a
+    carry-on): each check prints the messages for the reader to judge."""
+    return [s["text"] for s in f["sends_to_builder"] if s["own"]
+            and not any(word in s["text"].lower() for word in KEEPS)]
 
 
 def has(texts: List[str], *words: str) -> bool:
@@ -439,8 +481,9 @@ def builder_task(url: str, folder: Path, extra: str = "", wait: int = 60) -> str
     return (f"Build {folder}/export.py, a script that saves the records from GET {url} to {folder}/out.csv. Go in "
             "this order, and do not skip the waits (they stand in for a slow build): 1) report with work_progress "
             f"(assumes: the API you build on, with its URL); 2) run sleep {wait}; 3) write the script; 4) run "
-            f"sleep {wait}; 5) run the script and say what happened. If a message reaches you while you work, take "
-            f"it into account.{extra}")
+            f"sleep {wait}; 5) run the script and say what happened. Write the file with your file tool, never "
+            "through a shell heredoc (that waits for an approval nobody is here to give). If a message reaches "
+            f"you while you work, take it into account.{extra}")
 
 
 async def case_dependency(run: Run) -> dict:
@@ -487,7 +530,8 @@ def check_misleading(result: dict, f: dict, mode: str) -> List[tuple]:
                                                                                "stop using", "switch to"))]
     return [("didn't stop the builder", f["builder_status"] != "stopped", str(f["builder_status"])),
             ("didn't call a 401 a removal", not alarm, str(alarm or texts)[:300]),
-            ("no redirect on its own", f["own_redirects"] == 0, f"{f['own_redirects']} redirect(s)"),
+            ("no redirect on its own", f["own_redirects"] == 0 or not steered(f),
+             f"{f['own_redirects']} redirect(s): {str(texts)[:300]}"),
             ("the builder finished", f["builder_status"] in ("done", "ready"), str(f["builder_status"]))]
 
 
@@ -512,7 +556,8 @@ def check_on_purpose(result: dict, f: dict, mode: str) -> List[tuple]:
     heard = any(e["kind"] == "user" and e["ref"] == result["refs"]["builder"] for e in result["events"])
     return [("the user's words in the builder's chat reached the ledger", heard, ""),
             ("didn't move the builder off v1 on its own", not moved, str(moved or texts)[:300]),
-            ("no redirect on its own", f["own_redirects"] == 0, f"{f['own_redirects']} redirect(s)")]
+            ("no redirect on its own", f["own_redirects"] == 0 or not steered(f),
+             f"{f['own_redirects']} redirect(s): {str(texts)[:300]}")]
 
 
 async def case_override(run: Run) -> dict:
@@ -640,12 +685,21 @@ async def case_conflicting(run: Run) -> dict:
 def check_conflicting(result: dict, f: dict, mode: str) -> List[tuple]:
     about = [p for p in f["proposals"]]
     open_now = [p for p in about if p["status"] == "open"]
-    return [("at most one open question to the user", len(open_now) <= 1, str([p["text"] for p in open_now])[:400]),
+    # Nobody answers in this case: a message that changes the builder's course
+    # after the Bot Chat asked went out while its own question was open.
+    asked = min((p["created_at"] for p in result["proposals"]), default=None)
+    ahead = [s["text"].split("passes on:\n", 1)[-1][:200] for s in result["sends"]
+             if asked is not None and s["ref"] == result["refs"]["builder"] and s.get("own")
+             and s["created_at"] > asked and not any(word in s["text"].lower() for word in KEEPS)]
+    return [("didn't steer the builder while its own question was open", not ahead, str(ahead)[:400]),
+            ("at most one open question to the user", len(open_now) <= 1, str([p["text"] for p in open_now])[:400]),
             ("at most two questions in all", len(about) <= 2, f"{len(about)} proposal(s)"),
             ("no more than three messages to the builder on its own", f["own_sends_to_builder"] <= 3,
              f"{f['own_sends_to_builder']} own send(s)"),
             ("no redirect on its own under Ask" if mode == "ask" else "at most one redirect",
-             f["own_redirects"] == 0 if mode == "ask" else f["own_redirects"] <= 1, f"{f['own_redirects']}")]
+             (f["own_redirects"] == 0 or not steered(f)) if mode == "ask" else f["own_redirects"] <= 1,
+             f"{f['own_redirects']} redirect(s): "
+             f"{str([s['text'] for s in f['sends_to_builder'] if s['own']])[:300]}")]
 
 
 CASES = {
@@ -712,6 +766,7 @@ def soak_summary(result: dict, minutes: float) -> dict:
     chat = result["tokens"]["bot_chat"] or {}
     return {
         "hours": round(hours, 2), "own_turns": len(result["own_turns"]), "own_turns_spoken": len(spoke),
+        "own_turns_cut_short": sum(1 for turn in result["own_turns"] if turn.get("cut_short")),
         "own_turns_per_hour": round(len(result["own_turns"]) / hours, 1),
         "flags": result["metrics"]["flags"], "flags_held": result["metrics"]["flags_held"],
         "watch_reads": result["metrics"]["watch_reads"], "watch_tokens": result["metrics"]["watch_tokens"],
@@ -741,7 +796,7 @@ def run_one(name: str, out: Path, args: Any, mode: str, scenario: Callable, chec
         asyncio.run(run.drive(go))
     except Exception as exc:  # noqa: BLE001 — what was gathered is still written
         error = f"{type(exc).__name__}: {exc}"
-        run.note(f"FAILED: {error}")
+        run.note(f"FAILED: {error}\n{traceback.format_exc()}")
     result = run.collect()
     result.update(case=name, refs=refs, marks=run.marks, error=error)
     if check is not None and refs.get("finder"):
@@ -783,6 +838,7 @@ def main() -> int:
                        "flag_seconds", "first_send_seconds", "first_send_landed_seconds")},
                    "own_turns": (result.get("facts") or {}).get("own_turns"),
                    "own_turns_spoken": (result.get("facts") or {}).get("own_turns_spoken"),
+                   "own_turns_cut_short": (result.get("facts") or {}).get("own_turns_cut_short"),
                    "said_unprompted": (result.get("facts") or {}).get("said_unprompted"),
                    "sends_to_builder": (result.get("facts") or {}).get("sends_to_builder"),
                    "proposals": (result.get("facts") or {}).get("proposals"),

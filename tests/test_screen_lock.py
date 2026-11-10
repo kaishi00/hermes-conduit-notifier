@@ -206,7 +206,7 @@ def test_the_brief_says_how_to_ask_for_the_user_on_the_screen(on, hermes, monkey
     (_, params, _), = [entry for entry in hermes.named("prompt.submit")][:1]
     assert "call work_progress with screen set to what they need to do there" in params["text"]
     monkeypatch.setattr(work, "screen_possible", lambda: False)
-    start(title="Other")
+    assert start("Other", "Count the invoices sent in March.")["ok"]
     last = hermes.named("prompt.submit")[-1][1]["text"]
     assert "work_progress with screen" not in last
 
