@@ -11,7 +11,8 @@ The probe loads the plugin as Hermes does, gives Hermes' own MemoryManager
 a provider that records what reaches it, and runs a Pulse turn and a turn
 of the user's through Hermes' own turn code (the prefetch before the model
 and the sync after it), then the session's end and its pre-compress
-summary. Only the user's turn may arrive.
+summary. Only the user's turn may arrive, and without the Pulse ask before
+it as the person's last message (notifier #652).
 """
 
 from __future__ import annotations
@@ -55,7 +56,8 @@ class Recording(MemoryProvider):
     def queue_prefetch(self, query, *, session_id=""): seen.append(["queue_prefetch", query[:20]])
     def sync_turn(self, user_content, assistant_content, *, session_id="", **kwargs):
         seen.append(["sync_turn", user_content[:20], [m.get("content", "")[:20] for m in kwargs.get("messages") or []]])
-    def on_turn_start(self, turn_number, message, **kwargs): seen.append(["on_turn_start", message[:20]])
+    def on_turn_start(self, turn_number, message, **kwargs):
+        seen.append(["on_turn_start", message[:20], kwargs.get("previous_message", "")[:20]])
     def on_session_end(self, messages): seen.append(["on_session_end", [m["content"][:20] for m in messages]])
     def on_pre_compress(self, messages):
         seen.append(["on_pre_compress", [m["content"][:20] for m in messages]]); return ""
@@ -71,8 +73,15 @@ agent = types.SimpleNamespace(_memory_manager=memory, session_id="sess_pulse", _
 user = "why is the dentist on Thursday?"
 chat = [{"role": "user", "content": ask}, {"role": "assistant", "content": "Three cards."},
         {"role": "user", "content": user}, {"role": "assistant", "content": "It moved."}]
-for text, reply, messages in ((ask, "Three cards.", chat[:2]), (user, "It moved.", chat)):
-    turn_context._memory_turn_start_and_prefetch(agent, text)
+# A newer Hermes also hands the provider the person's last message, which
+# after a Pulse ask is that ask (notifier #652); an older one doesn't.
+with_previous = hasattr(turn_context, "_previous_user_message_text")
+for text, reply, messages, history in ((ask, "Three cards.", chat[:2], []), (user, "It moved.", chat, chat[:2])):
+    if with_previous:
+        previous = turn_context._previous_user_message_text(history)
+        turn_context._memory_turn_start_and_prefetch(agent, text, None, previous)
+    else:
+        turn_context._memory_turn_start_and_prefetch(agent, text)
     AIAgent._sync_external_memory_for_turn(agent, original_user_message=text, final_response=reply,
                                            interrupted=False, messages=messages)
     memory.flush_pending(timeout=30)
@@ -97,7 +106,7 @@ def _run(tmp_path: Path) -> Any:
 def test_a_pulse_turn_never_reaches_the_memory_provider(tmp_path: Path) -> None:
     user = "why is the dentist o"
     assert _run(tmp_path) == [
-        ["on_turn_start", user],
+        ["on_turn_start", user, ""],
         ["prefetch", user],
         ["sync_turn", user, [user, "It moved."]],
         ["queue_prefetch", user],

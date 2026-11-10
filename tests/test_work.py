@@ -3149,9 +3149,11 @@ def test_a_longer_message_that_starts_the_same_is_not_this_one(on, home):
     import sqlite3
 
     _chat_db(home, [(WORKER_1, "user", "Bot passes on:\nUse staging. Do not deploy.", None),
+                    (WORKER_1, "user", "Bot passes on:\nStop.\nOnly if the API breaks.", None),
                     (WORKER_1, "user", "First\n\nBot passes on:\nSecond.\n\nThird", None)])
     assert not work._in_transcript(home, WORKER_1, "Bot passes on:\nUse staging.")
     assert work._in_transcript(home, WORKER_1, "Bot passes on:\nUse staging. Do not deploy.")
+    assert not work._in_transcript(home, WORKER_1, "Bot passes on:\nStop.")
     assert work._in_transcript(home, WORKER_1, "Bot passes on:\nSecond.")
     assert not work._in_transcript(home, WORKER_1, "Second")
     with sqlite3.connect(home / "state.db") as con:

@@ -2710,7 +2710,7 @@ def _in_transcript(home: Path, session_id: str, text: str) -> bool:
     try:
         active = "AND active = 1 " if any(row[1] == "active" for row in db.execute("PRAGMA table_info(messages)")) else ""
         rows = db.execute(f"SELECT content FROM messages WHERE session_id = ? AND role = 'user' {active}"
-                          "AND instr(content, ?) > 0 ORDER BY rowid DESC LIMIT 50", (session_id, text)).fetchall()
+                          "AND instr(content, ?) > 0 ORDER BY rowid DESC LIMIT 500", (session_id, text)).fetchall()
     except sqlite3.Error:
         return False
     finally:
@@ -2719,15 +2719,19 @@ def _in_transcript(home: Path, session_id: str, text: str) -> bool:
 
 
 def _whole_part(content, text: str) -> bool:
-    """Whether the message is a whole part of this saved row: on lines of
-    its own, not the start of a longer message that begins with the same
-    words."""
+    """Whether the message is a whole part of this saved row, not the start
+    of a longer message that begins with the same words. Queued messages
+    are joined by a blank line, so there the part ends at one or at the
+    row's end; what's steered in is joined line to line inside Hermes'
+    wrapper, so there a line's end is enough."""
     if not isinstance(content, str):
         return False
+    steered = content.startswith("[OUT-OF-BAND")
     at = content.find(text)
     while at >= 0:
         end = at + len(text)
-        if (at == 0 or content[at - 1] == "\n") and (end == len(content) or content[end] == "\n"):
+        after = content[end:end + 2]
+        if (at == 0 or content[at - 1] == "\n") and (not after or after == "\n\n" or (steered and after[0] == "\n")):
             return True
         at = content.find(text, at + 1)
     return False

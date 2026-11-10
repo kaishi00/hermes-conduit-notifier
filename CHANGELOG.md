@@ -20,6 +20,12 @@ checks it). The format is fixed, because Conduit reads it:
   after a restart when Hermes had saved it joined to another message, such
   as your own words sent at the same moment.
 
+## 0.153.4 (2026-11-10)
+
+### Fixes
+- On a Hermes newer than 0.23.0, your first message after a Pulse report no
+  longer hands the report to your memory provider as your last message.
+
 ## 0.153.3 (2026-11-10)
 
 ### Fixes
