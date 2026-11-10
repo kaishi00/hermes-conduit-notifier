@@ -376,7 +376,9 @@ class Run:
                 turn = []
                 for later in chat[index + 1:]:
                     if later.get("role") == "user":
-                        if turn or not str(later.get("content") or "").startswith("Work update from"):
+                        answered = any(row.get("role") == "assistant"
+                                       and not (row.get("tool_calls") or "").strip("[]null ") for row in turn)
+                        if answered or not str(later.get("content") or "").startswith("Work update from"):
                             break
                         continue
                     turn.append(later)

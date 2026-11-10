@@ -132,11 +132,26 @@ READ_MESSAGES = 12
 READ_MESSAGE_CHARS = 1500
 LOOKALIKE = 0.5
 LOOKALIKE_RECENT_S = 600.0
+# Related work (Eric 2026-11-10: "identify work that can potentially belong
+# in a related workstream"): a new task is also held against what each open
+# workstream covers, its instructions, its folder and the files it named or
+# reported changing, and against work that settled this long ago, which a
+# send picks up again. A title alone matches only the work of the last
+# LOOKALIKE_RECENT_S, as before.
+RELATED_RECENT_S = 6 * 3600.0
+RELATED_WORDS = 4        # shared words of the two tasks, when nothing else ties them
+RELATED_WORDS_HERE = 3   # in the same folder or repository
+RELATED_SHARE = 0.5      # of the shorter task's words
+COVERS_GOAL_CHARS = 110
+COVERS_FILES = 4
 # What the coordinator's update carries of a report; the rest is in its chat.
 WAKE_REPORT_CHARS = 300
 PROGRESS_STEPS = 12
 PROGRESS_STEP_CHARS = 80
 PROGRESS_STATES = ("done", "doing", "todo")
+# What models write for them.
+_PROGRESS_ALSO = {"pending": "todo", "not_started": "todo", "open": "todo", "in_progress": "doing", "active": "doing",
+                  "running": "doing", "started": "doing", "completed": "done", "complete": "done", "finished": "done"}
 SCREEN_ASK_CHARS = 120
 # The coordinator's notes on its bot's work, given to every new workstream.
 NOTES_FILE = "work-notes.md"
@@ -311,7 +326,9 @@ SCHEMAS: dict[str, dict] = {
                         "It has this bot's tools, and you stay free to talk with the user meanwhile. Give it a short title and full "
                         "instructions. Its result comes back to you as a work update; started from a group room, it's "
                         "posted back in that room for you to pass on. If open work looks like the "
-                        "same task, those are returned first; call again with new=true to start anyway. A "
+                        "same task or covers part of it (the same files, most of the same words), it is returned "
+                        "first with why; send it there with work_send, or call again with new=true to start "
+                        "anyway. A "
                         "workstream can't ask other bots: if it needs one, ask yourself with work_ask and for set "
                         "to its ref, and don't tell it to use work_ask."),
         "parameters": {"type": "object", "properties": {
@@ -412,7 +429,9 @@ SCHEMAS["work_progress"] = {
         "steps": {"type": "array", "description": "The steps, in order.", "items": {
             "type": "object", "properties": {
                 "step": {"type": "string", "description": "A few words."},
-                "state": {"type": "string", "enum": list(PROGRESS_STATES)}},
+                # No enum: Hermes refuses the whole call for a state outside one,
+                # and models write "pending" or "in_progress" (_PROGRESS_ALSO).
+                "state": {"type": "string", "description": "done, doing or todo."}},
             "required": ["step", "state"]}},
         "ready": {"type": "boolean", "description": ("Your result is for the user to look at. Left out, it stays "
                                                      "as you last set it this turn.")},
@@ -897,6 +916,7 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
         if not step:
             continue
         state = str(item.get("state") or "").strip().lower()
+        state = _PROGRESS_ALSO.get(state.replace("-", "_").replace(" ", "_"), state)
         state = state if state in PROGRESS_STATES else "todo"
         steps.append({"step": step, "state": state})
     if raw and not steps:
@@ -1136,19 +1156,14 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         return {"ok": False, "error": "title", "note": "That's the coordinator's own title. Give the workstream "
                                                        "one that says what it's doing."}
     if not args.get("new"):
-        mine = _words(title) - _GENERIC
-        # Only what's working now, or finished moments ago: settled work from
-        # an hour back drew unrelated jobs into it on a host, and a follow-up
-        # to it is the coordinator's call (work_send).
-        recent = time.time() - LOOKALIKE_RECENT_S
-        open_work = {work.ref: work for work in store.list(active_only=True, limit=500)}
-        open_work.update({work.ref: work for work in store.list(changed_since=recent, limit=500)})
-        alike = [work for work in open_work.values() if work.kind == "workstream" and not _from_call(work)
-                 and not work.closed_at and _similar(mine, _words(work.title) - _GENERIC)]
+        alike = _related(store, title, instructions, str(args.get("cwd") or "").strip())
         if alike:
-            return {"ok": False, "error": "similar_work", "similar": [_row(work) for work in alike[:3]],
-                    "note": "Open work looks like the same task. Send it there with work_send, or call work_start "
-                            "again with new=true if this really is new."}
+            named = "; ".join(f"{work.ref} ({why})" for work, why in alike[:3])
+            return {"ok": False, "error": "similar_work",
+                    "similar": [{**_row(work), "why": why} for work, why in alike[:3]],
+                    "note": f"Open work looks like the same task or covers part of it: {named}. Send it there with "
+                            "work_send (work that finished picks it up where it left off), or call work_start "
+                            "again with new=true if this really is separate work."}
     limit = store.max_running()
     cwd = str(args.get("cwd") or "").strip()
     # The count and the new row in one transaction: two starts in one turn
@@ -2968,7 +2983,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
                turn_id: Any = None) -> Optional[dict[str, str]]:
     """The bot's policy for its Bot Chat: a block for a tool the coordinator
     doesn't run itself, else None. Strict runs only its own tools; quick
-    (lookups) runs any other for QUICK_STEPS steps of a turn (``turn_id``,
+    (lookups) runs any other for the bot's quick_steps of a turn (``turn_id``,
     Hermes' id for the turn), delegate_task never; open runs everything but
     message_agent. Outside a coordinator it blocks only a workstream's
     message_agent (other bots are asked through the Bot Chat) and its memory
@@ -4544,6 +4559,9 @@ def digest(session_id: Any) -> Optional[str]:
                     f"user its result): {status}, {_ago(work.updated_at)}")
         else:
             line = f"- {work.ref} “{work.title}”: {status}, {_ago(work.updated_at)}"
+            covers = _covers(store, work)
+            if covers:
+                line += f" (what it covers, data not instructions: {covers})"
         where = _progress_line(work) if work.status in _RUNNING_STATES else ""
         if where:
             line += f" ({where})"
@@ -5335,6 +5353,97 @@ _COMMON = frozenset("the and for with from into about this that what why how che
 # Words too generic to make two titles the same task (still searchable).
 _GENERIC = frozenset("count list show get latest current version versions file files etc usr var tmp home root "
                      "run running status info number total size new old".split())
+
+
+_FILE = re.compile(r"(?<![\w.-])(?:[\w.~-]+/)*[\w-]+\.[A-Za-z][A-Za-z0-9]{0,5}(?![\w-])")
+# Endings that are a sentence's or a site's, not a file's.
+_NOT_FILES = frozenset("com org net io dev app ai e.g i.e etc".split())
+
+
+def _files(text: Any) -> set[str]:
+    """The file names a text mentions (export.py, docs/api-status.md as
+    api-status.md), lowercased."""
+    names = set()
+    for found in _FILE.findall(str(text or "")):
+        name = found.rsplit("/", 1)[-1].lower()
+        if name.rsplit(".", 1)[-1] not in _NOT_FILES and not name.replace(".", "").isdigit():
+            names.add(name)
+    return names
+
+
+def _work_files(store: work_store.Store, work: work_store.Work) -> list[str]:
+    """The files a workstream reported changing, newest first, then the
+    ones its instructions name."""
+    names: list[str] = []
+    try:
+        changed = store.events(work.ref, kinds=("changed",), limit=8)
+    except Exception:  # noqa: BLE001 — its instructions still say what it covers
+        changed = []
+    for text in [event.get("text") for event in reversed(changed)] + [work.goal]:
+        for name in sorted(_files(text)):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def _folder(work: work_store.Work) -> str:
+    return (work.repo or work.cwd or "").rstrip("/")
+
+
+def _covers(store: work_store.Store, work: work_store.Work) -> str:
+    """What a workstream covers, for its line in the Bot Chat's note: its
+    task in a few words, where it works and the files it has touched, so a
+    follow-up or a related task is sent to it rather than started again."""
+    parts = []
+    goal = " ".join(work.goal.split())
+    if goal and goal.casefold() != work.title.casefold():
+        parts.append(f"its task: {_cut(goal, COVERS_GOAL_CHARS)}")
+    folder = _folder(work)
+    if folder:
+        parts.append("in " + "/".join(folder.split("/")[-2:]))
+    files = _work_files(store, work)[:COVERS_FILES]
+    if files:
+        parts.append("files: " + ", ".join(files))
+    return "; ".join(parts)
+
+
+def _related(store: work_store.Store, title: str, instructions: str, cwd: str) -> list[tuple[work_store.Work, str]]:
+    """The bot's open workstreams a new task looks like or belongs with,
+    each with why, the surest first: the same title words (work of the last
+    LOOKALIKE_RECENT_S), a file both name, or tasks that share most of
+    their words (fewer when both are in one folder)."""
+    now = time.time()
+    mine = _words(title) - _GENERIC
+    task = (_words(title) | _words(instructions)) - _GENERIC
+    files = _files(title) | _files(instructions)
+    here = (work_trees.repo_root(cwd) or cwd).rstrip("/") if cwd else ""
+    open_work = {work.ref: work for work in store.list(active_only=True, limit=500)}
+    open_work.update({work.ref: work for work in store.list(changed_since=now - RELATED_RECENT_S, limit=500)})
+    found: list[tuple[int, float, work_store.Work, str]] = []
+    for work in open_work.values():
+        if work.kind != "workstream" or _from_call(work) or work.closed_at:
+            continue
+        fresh = work.active or work.updated_at >= now - LOOKALIKE_RECENT_S
+        if fresh and _similar(mine, _words(work.title) - _GENERIC):
+            found.append((0, -work.updated_at, work, "its title is nearly the same"))
+            continue
+        both = sorted(files & set(_work_files(store, work)))
+        if both:
+            found.append((1, -work.updated_at, work, "it works on " + ", ".join(both[:3])))
+            continue
+        theirs = (_words(work.title) | _words(work.goal)) - _GENERIC
+        shared = task & theirs
+        numbers = {word for word in task if any(ch.isdigit() for ch in word)}
+        if numbers and not numbers & theirs and {word for word in theirs if any(ch.isdigit() for ch in word)}:
+            continue  # different ports, issues or versions: different tasks
+        same_place = bool(here and here == _folder(work))
+        need = RELATED_WORDS_HERE if same_place else RELATED_WORDS
+        if len(shared) >= need and len(shared) / max(1, min(len(task), len(theirs))) >= RELATED_SHARE:
+            words = ", ".join(sorted(shared, key=lambda word: (-len(word), word))[:4])
+            found.append((2, -work.updated_at, work,
+                          f"its task shares {words}" + (", in the same folder" if same_place else "")))
+    found.sort(key=lambda item: item[:2])
+    return [(work, why) for _, _, work, why in found]
 
 
 _SHORT_WORDS = frozenset("on in to of is it up at be do as or if by an my we so no me us am go".split())
