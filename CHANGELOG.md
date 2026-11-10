@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.159.0 (2026-11-10)
+
+### New and improved
+- Hermes can run the Shortcuts you list for it in Conduit (Calendar & phone),
+  by name, with text to hand them, and gets back what the shortcut returns.
+  A run asks you first unless you let Hermes run them without asking, and
+  happens when Conduit is open, since iOS runs shortcuts in the Shortcuts app.
+  Needs a Conduit update too.
+
 ## 0.158.3 (2026-11-10)
 
 ### Fixes
