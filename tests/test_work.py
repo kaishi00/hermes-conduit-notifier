@@ -155,6 +155,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_title_cache", {})
     monkeypatch.setattr(work, "_is_child", lambda session_id: False)
     monkeypatch.setattr(work, "_policy_cache", {})
+    monkeypatch.setattr(work, "_quick_steps_cache", {})
     monkeypatch.setattr(work, "_steps", {})
     work._wakes.clear()
     work._wake_asks.clear()
@@ -875,6 +876,28 @@ def test_quick_without_hermes_turn_ids_starts_again_after_a_minute(on, hermes, m
     clock[0] += work.QUICK_S + 1
     assert work.tool_block(BOT_CHAT, "terminal", {}) is None
     assert work._steps[(BOT_CHAT, "")][1] == 1
+
+
+def test_quick_steps_are_the_bots_setting(on, home, hermes, monkeypatch):
+    # Eric 2026-11-10: the steps a Quick Things Here turn does itself are the user's pick, per bot.
+    on.set_policy("lookups")
+    assert work.app_set_settings(home, {"quick_steps": 10})["quick_steps"] == 10
+    clock = [1000.0]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+    for _ in range(10):
+        clock[0] += 10  # past the default's minute: the time grows with the steps
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1") is None
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t1")["action"] == "block"
+    for _ in range(2):
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2") is None
+    clock[0] += 10 * work.QUICK_STEP_S + 1
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")["action"] == "block"  # its time is up
+    assert "After 10 steps" in work.digest(BOT_CHAT)
+    for wrong in (7, "10", True, None):
+        assert work.app_set_settings(home, {"quick_steps": wrong})["error"] == "invalid"
+    assert work.app_settings(home)["quick_steps"] == 10
+    store_mod.Store(home).set_meta("quick_steps", "7")  # a value this version doesn't know
+    assert store_mod.Store(home).quick_steps() == 5
 
 
 def test_quick_hands_subagents_to_a_workstream(on, hermes):
@@ -3308,7 +3331,8 @@ def test_the_settings_read_as_edit_bot_shows_them(home, hermes):
                         "max_running": 2, "max_running_limit": 6,
                         "after_restart": "continue", "workstream_approvals": "chats", "chat_approvals": "manual",
                         "workstream_model": None, "coordination": "ask",
-                        "coordinations": ["off", "ask", "auto"], "unavailable": ""}
+                        "coordinations": ["off", "ask", "auto"], "quick_steps": 5,
+                        "quick_steps_choices": [5, 10, 20], "unavailable": ""}
     assert not store_mod.exists(home)
     _hermes_approvals(home, "smart")
     assert work.app_settings(home)["chat_approvals"] == "smart"

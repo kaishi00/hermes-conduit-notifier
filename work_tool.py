@@ -93,8 +93,11 @@ BACKGROUND = frozenset({"delegate_task"})
 # and the rest goes to a workstream. The plugin judges how long the work is
 # rather than which tool it uses, so a quick ask never lands where the user
 # isn't (Eric 2026-11-08, notifier issue 619: "Step budget, writes allowed").
-QUICK_STEPS = 5
-QUICK_S = 60.0
+# The user picks the steps per bot (work_store.QUICK_STEPS; Eric 2026-11-10),
+# and the time grows with them: QUICK_STEP_S for each.
+QUICK_STEPS = work_store.QUICK_STEPS[0]
+QUICK_STEP_S = 12.0
+QUICK_S = QUICK_STEPS * QUICK_STEP_S
 # The turns whose steps are counted, kept this long after their first step.
 _STEP_TURNS = 64
 _STEP_KEEP_S = 1800.0
@@ -457,6 +460,7 @@ POLICY_CACHE_S = 2.0
 TITLE_CACHE_S = 10.0
 _title_cache: dict[tuple[str, str], tuple[float, str]] = {}
 _policy_cache: dict[str, tuple[float, str]] = {}
+_quick_steps_cache: dict[str, tuple[float, int]] = {}
 
 
 # Registration
@@ -560,6 +564,22 @@ def policy(home: Optional[Path] = None) -> str:
                        exc_info=True)
         return "strict"
     _policy_cache[key] = (now, value)
+    return value
+
+
+def quick_steps(home: Path) -> int:
+    """The steps this bot's Quick Things Here turn does in the Bot Chat
+    (work_store.QUICK_STEPS; the default when it can't be read)."""
+    key = str(home)
+    now = time.monotonic()
+    hit = _quick_steps_cache.get(key)
+    if hit and now - hit[0] < POLICY_CACHE_S:
+        return hit[1]
+    try:
+        value = work_store.Store(home).quick_steps() if work_store.exists(home) else QUICK_STEPS
+    except Exception:  # noqa: BLE001 — unreadable: the default, read again next time
+        return QUICK_STEPS
+    _quick_steps_cache[key] = (now, value)
     return value
 
 
@@ -3043,7 +3063,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
             return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
         steps.append(called)
     if steps:
-        left = _take_steps(session_id, turn_id, len(steps))
+        left = _take_steps(session_id, turn_id, len(steps), quick_steps(home))
         if left is not None:
             if len(steps) > 1 and left > 0:
                 return {"action": "block", "message": STEP_BATCH_BLOCK.format(count=len(steps), left=left)}
@@ -3059,25 +3079,26 @@ _steps_lock = threading.Lock()
 _last_take = threading.local()
 
 
-def _take_steps(session_id: Any, turn_id: Any, count: int) -> Optional[int]:
+def _take_steps(session_id: Any, turn_id: Any, count: int, most: int = QUICK_STEPS) -> Optional[int]:
     """Counts ``count`` more steps in the Bot Chat's turn if its budget
-    holds them (QUICK_STEPS, taken within QUICK_S of the first) and answers
-    None; else takes none and answers how many steps are left (0 once its
-    time is up): the rest is a workstream's. A Hermes that names no turn
-    gets a fresh budget once QUICK_S has passed, so its next turn isn't
-    charged for the last one's steps."""
+    holds them (``most``, the bot's setting, taken within QUICK_STEP_S each
+    of the first) and answers None; else takes none and answers how many
+    steps are left (0 once its time is up): the rest is a workstream's. A
+    Hermes that names no turn gets a fresh budget once that time has
+    passed, so its next turn isn't charged for the last one's steps."""
+    seconds = most * QUICK_STEP_S
     key = (str(session_id or ""), str(turn_id or ""))
     now = time.monotonic()
     with _steps_lock:
         for stale in [key for key, (first, _) in _steps.items() if now - first > _STEP_KEEP_S]:
             del _steps[stale]
         first, taken = _steps.get(key, (now, 0))
-        if not taken or (not turn_id and now - first > QUICK_S):
+        if not taken or (not turn_id and now - first > seconds):
             first, taken = now, 0  # the clock starts at a step that runs
-        if taken and now - first > QUICK_S:
+        if taken and now - first > seconds:
             return 0
-        if taken + count > QUICK_STEPS:
-            return max(QUICK_STEPS - taken, 0)
+        if taken + count > most:
+            return max(most - taken, 0)
         _steps[key] = (first, taken + count)
         while len(_steps) > _STEP_TURNS:
             del _steps[next(iter(_steps))]
@@ -3976,7 +3997,10 @@ APP_CHECK_DEFAULT = "Find out whether your last step took effect and report back
 def app_settings(home: Path) -> dict:
     """The bot's work settings as Edit Bot > Work shows them: ``policy``
     (off, strict, lookups or open; ``policies`` lists them, so an app
-    offers only what this plugin takes), ``max_running`` (with ``max_running_limit``),
+    offers only what this plugin takes), ``quick_steps`` (how many steps a
+    lookups turn does in the Bot Chat; ``quick_steps_choices`` lists what
+    this plugin takes), ``coordination`` (off, ask or auto;
+    ``coordinations``), ``max_running`` (with ``max_running_limit``),
     ``after_restart`` (continue or ask), ``workstream_approvals`` (chats,
     ask or off), the bot's own approval mode in Hermes (``chat_approvals``),
     ``workstream_model``, the model new workstreams start on (None: the
@@ -3989,18 +4013,20 @@ def app_settings(home: Path) -> dict:
             "workstream_approvals": workstream_approvals(home), "chat_approvals": approval_mode(home),
             "workstream_model": store.workstream_model() or None,
             "coordination": store.coordination(), "coordinations": list(work_store.COORDINATION),
+            "quick_steps": store.quick_steps(), "quick_steps_choices": list(work_store.QUICK_STEPS),
             "unavailable": work_broker.unavailable_reason() or ""}
 
 
 def app_set_settings(home: Path, body: Optional[dict]) -> dict:
     """The user's change from Edit Bot > Work: any of ``policy``,
-    ``max_running``, ``after_restart``, ``workstream_approvals`` and
-    ``workstream_model`` (null for the bot's own), each
+    ``quick_steps``, ``coordination``, ``max_running``, ``after_restart``,
+    ``workstream_approvals`` and ``workstream_model`` (null for the bot's own), each
     checked before any is kept. Turning workstreams off stops nothing that
     is running. The answer is the settings as they are now."""
     home = Path(home)
     body = body if isinstance(body, dict) else {}
-    known = ("policy", "max_running", "after_restart", "workstream_approvals", "workstream_model", "coordination")
+    known = ("policy", "max_running", "after_restart", "workstream_approvals", "workstream_model", "coordination",
+             "quick_steps")
     if not any(key in body for key in known):
         return {"ok": False, "error": "missing", "note": f"Send one of {', '.join(known)}."}
     choices = {"policy": work_store.POLICIES, "after_restart": work_store.AFTER_RESTART,
@@ -4014,6 +4040,10 @@ def app_set_settings(home: Path, body: Optional[dict]) -> dict:
                                   or not 1 <= running <= work_store.MAX_RUNNING_LIMIT):
         return {"ok": False, "error": "invalid",
                 "note": f"max_running is a whole number from 1 to {work_store.MAX_RUNNING_LIMIT}."}
+    steps = body.get("quick_steps")
+    if "quick_steps" in body and (isinstance(steps, bool) or steps not in work_store.QUICK_STEPS):
+        return {"ok": False, "error": "invalid",
+                "note": f"quick_steps is one of {', '.join(str(n) for n in work_store.QUICK_STEPS)}."}
     picked = body.get("workstream_model")
     if "workstream_model" in body and picked is not None and not _model_pick_ok(picked):
         return {"ok": False, "error": "invalid",
@@ -4036,6 +4066,9 @@ def app_set_settings(home: Path, body: Optional[dict]) -> dict:
         store.set_workstream_model(picked)
     if "coordination" in body:
         store.set_coordination(body["coordination"])
+    if "quick_steps" in body:
+        store.set_quick_steps(steps)
+        _quick_steps_cache.pop(str(home), None)
     return app_settings(home)
 
 
@@ -4549,8 +4582,8 @@ def digest(session_id: Any) -> Optional[str]:
                    "the user's health, location and inbox, places and directions) or a small task of a step or "
                    "two. Hand a workstream (work_start) work that takes longer: several steps, long commands, "
                    "or changes to the user's code or files beyond a quick edit; send follow-ups to the one "
-                   "that's on it (work_send with its ref). After a few steps in one turn the rest goes to a "
-                   "workstream anyway, so start one as soon as you can tell a task is long. ")
+                   f"that's on it (work_send with its ref). After {quick_steps(home)} steps in one turn the rest "
+                   "goes to a workstream anyway, so start one as soon as you can tell a task is long. ")
     elif mode == "open":
         routing = ("You coordinate this bot's work, and the user wants you to do it here: use your tools in this "
                    "turn. Start a workstream (work_start) only for a long task the user shouldn't wait on in "
