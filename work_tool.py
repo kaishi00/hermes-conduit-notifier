@@ -60,7 +60,7 @@ from typing import Any, Callable, Optional
 import uuid
 from urllib.parse import quote, unquote
 
-from . import room_rules, room_work, screen_lock, work_broker, work_coord, work_store, work_trees
+from . import room_rules, room_work, screen_lock, work_broker, work_coord, work_store, work_trees, work_watch
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -489,6 +489,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
                 ctx.register_tool(**tool)
         except Exception:  # noqa: BLE001
             logger.warning("conduit_push: could not register %s", name, exc_info=True)
+    work_watch.register(ctx, tell=_watch_tell, ago=_ago, watched=_watched)
     start_recovery(_pinned_home)
 
 
@@ -843,6 +844,9 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     # What it found, relies on or changed, for the coordinator (work_coord):
     # kept as it comes, with or without a checklist.
     reported, wrong = work_coord.report(work_store.Store(found), work, args, session_id)
+    if reported and _watched(work):
+        # Read against the bot's other work while this one carries on (work_watch).
+        work_watch.noticed(found, work.ref)
     if wrong:
         return {"ok": False, "ref": work.ref, "error": "report", "note": wrong}
     raw = args.get("steps")
@@ -926,6 +930,21 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     if reported:
         note += f" What you reported is kept for {_bot_name(found)}."
     return {"ok": True, "ref": work.ref, "note": note}
+
+
+def _watched(work: work_store.Work) -> bool:
+    """A workstream the Bot Chat coordinates: not a call's job, nor work a
+    group room started, which report elsewhere."""
+    return work.kind == "workstream" and bool(work.coordinator) and not _in_room(work) and not _from_call(work)
+
+
+def _watch_tell(home: Path, ref: str, line: str) -> None:
+    """The watch's flag about a workstream, for its Bot Chat's next work
+    update (a hidden turn)."""
+    work = work_store.Store(home).get(ref)
+    target = (work.coordinator if work is not None else "") or _bot_chat_of(home)
+    if target:
+        _queue_wake(home, target, line)
 
 
 def _progress_line(work: work_store.Work) -> str:
@@ -3673,6 +3692,10 @@ def _turn_started(session_id: Any) -> bool:
     if work_store.Store(home).get_meta(_CHECK + work.ref):
         work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
+    if _watched(work):
+        # The user may have started it by writing in its chat: their words
+        # are read into the ledger, and against the bot's other work.
+        work_watch.noticed(home, work.ref, words=True)
     # The user writing in its chat after a resolve removed its worktree:
     # back before the turn's first tool runs there.
     _worktree_back(work_store.Store(home), work.ref)
@@ -4022,7 +4045,9 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     active work first, then the rest by when it last changed, each with
     what the user can do with it, and the counts the Work strip shows.
     ``resolved``: the Resolved list instead, last resolved first, a page at
-    a time (``before``: resolved before that time)."""
+    a time (``before``: resolved before that time). The open list also has
+    ``coordination``: its ``mode`` and, when it's on, ``items``, what the Bot
+    Chat did to keep the work in step over the last day (work_coord.app_items)."""
     home = Path(home)
     mode = policy(home)
     out = {"policy": mode, "bot": _bot_name(home), "bot_chat": _bot_chat_of(home), "work": [],
@@ -4078,6 +4103,15 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     if mode != "off" and not work_broker.unavailable_reason() and any(work.status == "needs_you" for work in rows):
         broker = work_broker.Broker(home)
     out["work"] = [_app_row(store, work, on=mode != "off", broker=broker, screen=screen) for work in rows]
+    # What the Bot Chat did to keep the work in step, with why (work_coord).
+    setting = work_coord.mode(store)
+    out["coordination"] = {"mode": setting, "items": []}
+    if mode != "off" and setting != "off":
+        try:
+            titles = {work.ref: work.title for work in store.list(limit=-1, include_closed=True)}
+            out["coordination"]["items"] = work_coord.app_items(store, titles)
+        except Exception:  # noqa: BLE001 — the panel still shows the work
+            logger.debug("conduit_push: couldn't read the coordination list", exc_info=True)
     return out
 
 
@@ -4568,6 +4602,13 @@ def digest(session_id: Any) -> Optional[str]:
     out.extend(drawn.get("", []))
     body = "\n".join(out) if out else "- none open"
     proposals = ("\nWhat you asked the user (work_propose):\n" + "\n".join(asked)) if asked else ""
+    try:
+        capped = work_watch.cap_line(store)
+    except Exception:  # noqa: BLE001 — the board has the flags all the same
+        logger.debug("conduit_push: couldn't read the watch's held flags", exc_info=True)
+        capped = ""
+    if capped:
+        proposals += "\n" + capped
     return (f"Bot workstreams.\n{rules}\n{work_coord.RULES[setting]}\nYour work (each line's age is how fresh "
             f"it is):\n{body}{proposals}" + (f"\n{screen}" if screen else ""))
 
@@ -5212,6 +5253,7 @@ def stop() -> None:
             timer.cancel()
     for timer in grace:
         timer.cancel()
+    work_watch.stop()
 
 
 def flush_wakes() -> None:

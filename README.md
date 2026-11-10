@@ -1570,6 +1570,24 @@ question or a small task doesn't start a workstream. Change it in Conduit
   and she tells you. None of this changes what Hermes lets a workstream's
   tools do: approvals, dangerous-command rules and `/yolo` stay as you set
   them.
+- While workstreams work, a helper model reads what they report (plugin
+  0.155+). A work update only comes when a turn ends; in between, each new
+  line in the ledger (a worker's `found`, `assumes` or `changed`, or what you
+  wrote in a workstream's chat) is read against the bot's other open work,
+  and when it could matter to another workstream the Bot Chat is told in a
+  work update while the first is still running. The helper only points: it
+  never messages a workstream, and what the Bot Chat does about it follows
+  your Coordination setting. It is one of Hermes' helper models ("Conduit
+  work watch" under Models), the bot's own model until you pick another;
+  a small fast one is enough. It reads only when a bot has more than one
+  open workstream and Coordination isn't off, and may start twelve such
+  turns an hour; past that a flag is kept on the board and her next turn
+  says so. Conduit's Work panel lists what she did to keep the work in step
+  over the last day (what the helper flagged, what she sent on her own and
+  whether it arrived, what she asked you), each with the lines behind it.
+  `hermes -p <bot> conduit-push work status` prints the day's counts: reads
+  and their tokens, flags, work update turns, and messages with how far
+  each got.
 - What the Bot Chat does itself is decided by how long the work runs, not by
   which tool it uses. Under every setting it keeps its own tools: the work
   tools, `memory` and the memory provider's, and what shows you something or
@@ -2359,7 +2377,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 - **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
   presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
   Nothing rings meanwhile: a call that would go out sends the usual push.
-  An Apple Watch call holds it too (0.154.1+): the host renews 90 seconds
+  An Apple Watch call holds it too (0.155.2+): the host renews 90 seconds
   every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
   keeps it through a rejoin, and lets go when the Watch hangs up, the call
   ends or fails on the host, or the grant ends. Two Watch calls on one
@@ -2416,7 +2434,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
 - `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
   decides". Either way the limits apply, presence holds it, and a session
   already watched keeps one watch (it takes the reason). While presence
-  holds (0.154.1+), the tool answers `in_call` at once and sets nothing up,
+  holds (0.155.2+), the tool answers `in_call` at once and sets nothing up,
   so Hermes doesn't promise a ring that won't come; a call for later, once
   something finishes, is still set up with `conduit_call_watch`.
 - **What's worth a call (0.16+):** with `rules` written (the user's own

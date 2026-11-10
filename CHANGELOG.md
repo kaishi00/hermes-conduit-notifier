@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.154.1 (2026-11-10)
+## 0.155.2 (2026-11-10)
 
 ### Fixes
 - During an Apple Watch call, Hermes could still try to phone you and say
@@ -21,6 +21,19 @@ checks it). The format is fixed, because Conduit reads it:
   declined it and could lose its microphone until you tapped. A Watch call
   now counts as being in a call, as a phone call does: nothing rings over
   it, and Hermes is told at once that you're already talking.
+
+## 0.155.0 (2026-11-10)
+
+### New and improved
+- While workstreams work, a helper model reads what they report. When one
+  workstream's finding could matter to another, the Bot Chat hears of it
+  while the first is still running, not only when a turn ends, and acts as
+  your Coordination setting says. The helper never messages a workstream.
+  It is "Conduit work watch" among Hermes' helper models: the bot's own
+  model until you pick another, and a small fast one is enough.
+- Conduit's Work panel can list what the Bot Chat did to keep the work in
+  step over the last day, each with the lines behind it (with a Conduit
+  build that shows it).
 
 ## 0.154.0 (2026-11-10)
 

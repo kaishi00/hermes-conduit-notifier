@@ -111,6 +111,11 @@ hold the update, a README example included.
   upstream fixes it, then fails so the workaround gets another look.
 - Tests check where a request landed (which profile's settings it used), not
   only that it was answered.
+- `upstream/acceptance_coordination.py` is not a test: it runs the
+  coordination cases (a Bot Chat keeping its workstreams in step) against a
+  host's real models, in a throwaway Hermes home, and writes what happened
+  for a person to read. Run it on a test host after changing the watch, the
+  board or the coordination rules; its docstring has the command.
 
 To run them locally (Linux or macOS, about a minute):
 

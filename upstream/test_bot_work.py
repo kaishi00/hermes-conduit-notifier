@@ -121,8 +121,13 @@ def _responder(fake: Any, profile: str):
         asked = re.search(r'work_reply \{"ref": "(A\d+)"', user)
         if "Work update from" in user and "asks you" in user and asked:
             return _call(fake, tools, "work_reply", {"ref": asked.group(1), "text": f"ANSWER-FROM-{profile}"})
+        if "Work update from your workstreams" in user and "A helper model that reads" in user:
+            return fake.Text(f"FLAG-SEEN on {profile}")
         if "Work update from your workstreams" in user:
             return fake.Text(f"WAKE-SEEN on {profile}")
+        if "PLEASE BEGIN OTHER" in user:
+            return _call(fake, tools, "work_start", {"title": f"Billing export on {profile}",
+                                                     "instructions": "WORKER-TASK: move the export"})
         if "PLEASE ASK" in user:
             return _call(fake, tools, "work_ask", {"bot": "second", "text": "ASK-TASK: what's two and two?"})
         if "PLEASE START" in user:
@@ -131,6 +136,16 @@ def _responder(fake: Any, profile: str):
         if "PLEASE RUN" in user:
             return fake.ToolCall("terminal", {"command": "echo coordinator-ran-this"})
         return fake.Text(f"plain answer on {profile}")
+    return respond
+
+
+def _helper(fake: Any, profile: str):
+    """Hermes' helper calls (no tools): the watch's read (work_watch) flags
+    the two workstreams; the rest get the fake's own stock answer."""
+    def respond(record: Dict[str, Any]) -> Any:
+        if "You watch one assistant's workstreams" in json.dumps(record["body"]):
+            return fake.Text(json.dumps({"flag": True, "between": ["W1", "W2"], "why": f"WATCH-WHY-{profile}"}))
+        return fake.Text("Fake summary of the earlier conversation.")
     return respond
 
 
@@ -273,7 +288,8 @@ def _run_dashboard(tmp: Path, isolation: str, script: List[tuple],
                                                                       target_is_directory=True)
     servers = {}
     for profile in PROFILES:
-        server = fake.FakeLLMServer(_responder(fake, profile), default_text=f"default {profile}")
+        server = fake.FakeLLMServer(_responder(fake, profile), default_text=f"default {profile}",
+                                    aux=_helper(fake, profile))
         server.start()
         servers[profile] = server
         _write_profile(home if profile == "launch" else home / "profiles" / profile, server.base_url, profile,
@@ -375,6 +391,42 @@ def test_what_a_workstream_reports_reaches_its_coordinators_board(coordinated: R
     seen = "\n".join(_text_of(m) for m in wakes[0]["messages"] if m.get("role") == "user")
     assert "it found" in seen and f"FOUND-BY-{profile}" in seen, seen[-3000:]
     assert "exactly [SILENT]" in seen
+
+
+@pytest.fixture(scope="module")
+def watched(tmp_path_factory: pytest.TempPathFactory) -> Run:
+    script = []
+    for profile in PROFILES:
+        script += [(profile, "chat", "PLEASE START a workstream", "WAKE-SEEN"),
+                   (profile, "chat", "PLEASE BEGIN OTHER work", "FLAG-SEEN")]
+    return _run_dashboard(tmp_path_factory.mktemp("bot-work-watch"), "", script)
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_the_watch_reads_a_report_on_its_bots_model_and_tells_the_bot_chat(watched: Run, profile: str) -> None:
+    """The watch (work_watch): a second workstream's report is read against
+    the first by a helper model call, made off the turn's thread, that lands
+    on that bot's own model; its flag is kept in that bot's ledger and
+    reaches its Bot Chat as a work update. No workstream hears from it."""
+    store = _work_store().Store(watched.profile_home(profile))
+    # One read when the two reports came a moment apart, two when they didn't.
+    flags = store.ledger(kinds=("flag",))
+    assert flags and {(flag["who"], flag["text"]) for flag in flags} == {("watch", f"WATCH-WHY-{profile}")}, \
+        store.ledger(limit=50)
+    assert {flag["ref"] for flag in flags} <= {"W1", "W2"}
+    reads = [body for body in _requests(watched, profile) if "You watch one assistant's workstreams" in json.dumps(body)]
+    assert len(reads) == len(store.ledger(kinds=("watch",))) >= 1, len(reads)
+    assert f"FOUND-BY-{profile}" in json.dumps(reads[0]) and "Billing export on" in json.dumps(reads[0])
+    other = "second" if profile == "launch" else "launch"
+    assert f"FOUND-BY-{other}" not in json.dumps(reads)
+    assert not any("You watch one assistant's workstreams" in json.dumps(body) and f"FOUND-BY-{profile}" in json.dumps(body)
+                   for body in _requests(watched, other))
+    assert any(t.startswith("FLAG-SEEN") for t in watched.completions(watched.chats[profile]))
+    told = [m for m in watched.messages(profile, watched.stored[profile])
+            if m.get("role") == "user" and "A helper model that reads" in (m.get("content") or "")]
+    assert told and f"WATCH-WHY-{profile}" in told[0]["content"], told
+    assert all(m.get("display_kind") == "hidden" for m in told if "display_kind" in m)
+    assert store.outbox_rows("W1", "send") == [] and store.outbox_rows("W2", "send") == []
 
 
 def test_no_workstream_events_reach_the_apps_socket(coordinated: Run) -> None:
