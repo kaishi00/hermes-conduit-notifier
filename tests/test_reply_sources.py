@@ -310,6 +310,65 @@ def test_failures_still_push_from_a_muted_source(turn, monkeypatch):
     assert [event["type"] for event in pushed] == ["turn.failed"]
 
 
+# --- Sessions that aren't conversations (notifier#660) ------------------------
+
+
+def _no_hermes_sources(monkeypatch):
+    for name in ("agent.session_source", "gateway.session_finite"):
+        monkeypatch.setitem(sys.modules, name, None)
+
+
+def test_a_scripts_tool_run_sends_no_push_or_lock_screen_progress(turn, monkeypatch):
+    # `hermes chat --oneshot --source tool` on a Hermes whose helpers can't be read: its variable says.
+    _no_hermes_sources(monkeypatch)
+    started = []
+    monkeypatch.setattr(plugin.live_activity.reporter, "turn_started", started.append)
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")
+    plugin._pre_llm_call(session_id="s-1", turn_id="t-1", user_message="step 3", platform="cli")
+    assert turn("cli") == [] and started == []
+    # An ordinary terminal chat still notifies and shows its progress.
+    monkeypatch.delenv("HERMES_SESSION_SOURCE")
+    plugin._pre_llm_call(session_id="s-1", turn_id="t-1", user_message="hi", platform="cli")
+    assert turn("cli") == ["response.ready"] and started == ["s-1"]
+
+
+def test_a_scripts_failed_tool_run_sends_no_failure_push(turn, monkeypatch):
+    _no_hermes_sources(monkeypatch)
+    pushed = []
+    monkeypatch.setattr(plugin, "enqueue", pushed.append)
+    monkeypatch.setattr(plugin.cron_runs, "quiet", lambda *args: False)
+    monkeypatch.setenv("HERMES_SESSION_SOURCE", "tool")
+    plugin._on_session_end(session_id="s-1", turn_id="t-1", completed=False, interrupted=False, platform="cli")
+    assert pushed == []
+    monkeypatch.delenv("HERMES_SESSION_SOURCE")
+    plugin._on_session_end(session_id="s-1", turn_id="t-2", completed=False, interrupted=False, platform="cli")
+    assert [event["type"] for event in pushed] == ["turn.failed"]
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("tool", []), ("oneshot", []), ("kanban", []), ("cli", ["response.ready"]), ("tui", ["response.ready"]),
+])
+def test_hermes_session_source_decides(turn, monkeypatch, source, expected):
+    monkeypatch.setitem(sys.modules, "gateway.session_finite", None)
+    module = types.ModuleType("agent.session_source")
+    seen = []
+    module.session_source_for = lambda platform: seen.append(platform) or source
+    monkeypatch.setitem(sys.modules, "agent.session_source", module)
+    assert turn("cli") == expected
+    assert seen and set(seen) == {"cli"}
+
+
+def test_a_one_shot_turn_the_gateway_runs_is_quiet(turn, monkeypatch):
+    # The gateway's worker for `chat -q` binds the fact on the turn; the session's source reads as a chat's.
+    monkeypatch.setitem(sys.modules, "agent.session_source", None)
+    module = types.ModuleType("gateway.session_finite")
+    module.finite_turn_required = lambda: True
+    monkeypatch.setitem(sys.modules, "gateway.session_finite", module)
+    assert turn("local") == []
+    module.finite_turn_required = lambda: None
+    assert turn("local") == ["response.ready"]
+
+
 # --- Routes ------------------------------------------------------------------
 
 

@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.153.5 (2026-11-10)
+
+### Fixes
+- A script's `hermes chat --source tool` run, a one-shot `hermes chat -q`
+  and a Kanban worker no longer send a reply or failure notification or
+  show Lock Screen progress. Their answers go to whoever ran them.
+
 ## 0.153.3 (2026-11-10)
 
 ### Fixes
