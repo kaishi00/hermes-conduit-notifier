@@ -153,6 +153,33 @@ def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
         assert surfaces.FORM_HINT not in surfaces.line(surface, "typed")
 
 
+def test_a_typed_message_read_aloud_hears_that_the_answer_is_heard():
+    # Conduit's Read replies aloud reads the reply (notifier issue 674): no
+    # sound file of the agent's own under it; the form stays a screen's.
+    line = surfaces.line("iphone", "typed", heard=True)
+    assert surfaces.HEARD_HINT in line and surfaces.FORM_HINT in line
+    assert "text_to_speech" in surfaces.HEARD_HINT and "asks for is still fine" in surfaces.HEARD_HINT
+    assert surfaces.HEARD_HINT not in surfaces.line("iphone", "typed")
+    # A spoken message already says it, once.
+    spoken = surfaces.line("iphone", "spoken", heard=True)
+    assert surfaces.SPOKEN_HINT in spoken and surfaces.HEARD_HINT not in spoken
+
+
+def test_a_report_keeps_whether_its_reply_is_heard():
+    session = {}
+    surfaces.record(session, surfaces.parse({**_report("iphone", entry="typed"), "heard": True}), clock=lambda: 1.0)
+    assert surfaces.take(session, "hi", clock=lambda: 2.0) == ("iphone", "typed", True)
+    # Left out, as from a Conduit before it: not heard.
+    surfaces.record(session, surfaces.parse(_report("iphone", entry="typed")), clock=lambda: 1.0)
+    assert surfaces.take(session, "hi", clock=lambda: 2.0) == ("iphone", "typed", False)
+
+
+def test_the_turn_of_a_message_read_aloud_says_so(gateway, client):
+    response = client.post(f"{BASE}/turn-surface", json={**_report("iphone", "Plan my day", "typed"), "heard": True})
+    assert response.status_code == 200
+    assert surfaces.HEARD_HINT in gateway.turn(CONDUIT, "Plan my day")
+
+
 @pytest.mark.parametrize("body", [
     None, [], {}, {"session_id": "rt-1", "surface": "iphone"},
     {**_report("iphone"), "session_id": ""}, {**_report("iphone"), "session_id": "x" * 201},
@@ -161,6 +188,7 @@ def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
     {**_report("iphone"), "input": "sung"}, {**_report("iphone"), "input": ["typed"]},
     {**_report("iphone"), "input": {}}, {**_report("iphone"), "text_sha256": "ABC"},
     {**_report("iphone"), "text_sha256": surfaces.text_sha256("hi").upper()},
+    {**_report("iphone"), "heard": "yes"}, {**_report("iphone"), "heard": 1},
 ])
 def test_a_body_that_isnt_one_is_refused(body):
     with pytest.raises(ValueError):
@@ -171,7 +199,7 @@ def test_a_kept_report_goes_stale():
     session = {}
     surfaces.record(session, surfaces.parse(_report("carplay", entry="spoken")), clock=lambda: 100.0)
     assert surfaces.take({surfaces.KEY: dict(session[surfaces.KEY])}, "hi",
-                         clock=lambda: 100.0 + surfaces.FRESH_S) == ("carplay", "spoken")
+                         clock=lambda: 100.0 + surfaces.FRESH_S) == ("carplay", "spoken", False)
     assert surfaces.take(session, "hi", clock=lambda: 101.0 + surfaces.FRESH_S) is None
     assert session[surfaces.KEY] == {}
 
@@ -182,14 +210,14 @@ def test_a_chat_keeps_a_few_reports_and_drops_the_oldest():
         surfaces.record(session, surfaces.parse(_report("ipad", text=f"m{index}")), clock=lambda: 1.0)
     assert len(session[surfaces.KEY]) == surfaces.MAX_KEPT
     assert surfaces.take(session, "m0", clock=lambda: 2.0) is None
-    assert surfaces.take(session, f"m{surfaces.MAX_KEPT}", clock=lambda: 2.0) == ("ipad", None)
+    assert surfaces.take(session, f"m{surfaces.MAX_KEPT}", clock=lambda: 2.0) == ("ipad", None, False)
 
 
 def test_a_message_sent_with_images_matches_its_text_parts():
     session = {}
     surfaces.record(session, surfaces.parse(_report("iphone", text="what is this?", entry="typed")))
     parts = [{"type": "text", "text": "what is this?"}, {"type": "image_url", "image_url": {"url": "data:"}}]
-    assert surfaces.take(session, parts) == ("iphone", "typed")
+    assert surfaces.take(session, parts) == ("iphone", "typed", False)
 
 
 # --- Route and hook -------------------------------------------------------------
@@ -351,7 +379,7 @@ def test_a_discard_holds_its_text_for_a_while_only():
     # Past the hold, a report of the same words counts again.
     later = clock[0] + surfaces.DISCARD_HOLD_S + 1.0
     surfaces.record(session, report, lambda: later)
-    assert surfaces.take(session, "yes", lambda: later) == ("iphone", "typed")
+    assert surfaces.take(session, "yes", lambda: later) == ("iphone", "typed", False)
 
 
 def test_on_the_listener_a_report_landing_after_its_discard_is_dropped(gateway, client, monkeypatch):

@@ -13,18 +13,30 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.156.0 (2026-11-10)
+## 0.157.0 (2026-11-10)
 
 ### Fixes
 - A Bot Chat that asked you a question about a workstream waits for your
   answer. Without the update it could ask and then redirect the workstream
   anyway.
+- A workstream's checklist is kept when it marks a step "pending" or
+  "in progress". Without the update Hermes refused the whole report.
 
 ### New and improved
+- The Bot Chat sees what each workstream covers: its task, its folder and
+  the files it touched. A new task that belongs with one, by its files or
+  most of its words, is sent there and not started a second time, also when
+  that work finished a few hours ago.
 - Quick Things Here: you choose how many steps the Bot Chat does itself in
   one turn before the rest goes to a workstream: 5 (as before), 10 or 20,
   per bot, in Edit Bot > Work (with a Conduit build that shows it). The
   time it may take grows with the steps.
+
+## 0.156.0 (2026-11-10)
+
+### New and improved
+- With Read replies aloud on in Conduit, Hermes knows a typed message's
+  answer will be heard too, so it doesn't send a sound file of its own.
 
 ## 0.155.2 (2026-11-10)
 
