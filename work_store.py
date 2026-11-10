@@ -747,15 +747,17 @@ class Store:
         return list(reversed(rows))
 
     def ledger(self, *, after_id: int = 0, since: float = 0.0, kinds: Optional[tuple[str, ...]] = None,
-               limit: int = 50) -> list[dict]:
-        """The newest events of every workstream of the bot, oldest first:
+               limit: int = 50, oldest: bool = False) -> list[dict]:
+        """The newest events of every workstream of the bot (with ``oldest``
+        the first of them, for a reader working through them), oldest first:
         those after an event (``after_id``) or a time (``since``)."""
         where, args = "id > ? AND at >= ?", [after_id, since]
         if kinds:
             where += f" AND kind IN ({', '.join('?' for _ in kinds)})"
             args.extend(kinds)
-        rows = self._read(f"SELECT * FROM events WHERE {where} ORDER BY id DESC LIMIT ?", (*args, limit))
-        return list(reversed(rows))
+        order = "ASC" if oldest else "DESC"
+        rows = self._read(f"SELECT * FROM events WHERE {where} ORDER BY id {order} LIMIT ?", (*args, limit))
+        return rows if oldest else list(reversed(rows))
 
     def sends_since(self, since: float, *, kind: str = "send") -> list[dict]:
         """The outbox rows of one kind written since then, oldest first."""

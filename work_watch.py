@@ -38,6 +38,7 @@ TASK_DESCRIPTION = ("Reads what a bot's workstreams report while they work and t
 # Reports a moment apart are read together.
 BATCH_S = 4.0
 NEW_EVENTS = 12
+FLAGS_COUNTED = 500  # an hour's, to count the turns they started
 NEW_AGE_S = 3600.0
 OPEN_WORK = 12
 WORK_LINES = 6
@@ -74,15 +75,20 @@ _ctx: Any = None
 _task = False
 _tell: Optional[Callable[[Path, str, str], None]] = None
 _ago: Callable[[float], str] = lambda when: ""
+_watched: Callable[[Any], bool] = lambda work: work.kind == "workstream"
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 
 
-def register(ctx: Any, *, tell: Callable[[Path, str, str], None], ago: Callable[[float], str]) -> None:
+def register(ctx: Any, *, tell: Callable[[Path, str, str], None], ago: Callable[[float], str],
+             watched: Optional[Callable[[Any], bool]] = None) -> None:
     """``tell(home, ref, line)`` queues a line for the Bot Chat that
-    coordinates that workstream."""
-    global _ctx, _task, _tell, _ago
+    coordinates that workstream; ``watched(work)`` says which workstreams
+    a Bot Chat coordinates (not a room's, nor a call's)."""
+    global _ctx, _task, _tell, _ago, _watched
     _ctx, _tell, _ago = ctx, tell, ago
+    if watched is not None:
+        _watched = watched
     try:
         ctx.register_auxiliary_task(TASK, display_name=TASK_NAME, description=TASK_DESCRIPTION)
         _task = True
@@ -173,7 +179,7 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
     if work_coord.mode(store) == "off":
         return None
     now = time.time()
-    works = {work.ref: work for work in store.list(limit=-1, calls=False) if work.kind == "workstream"}
+    works = {work.ref: work for work in store.list(limit=-1, calls=False) if _watched(work)}
     for ref in words:
         if ref in works:
             work_coord.read_user_words(home, store, works[ref])
@@ -181,10 +187,12 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
         cursor = int(store.get_meta(_CURSOR) or 0)
     except ValueError:
         cursor = 0
-    fresh = store.ledger(after_id=cursor, since=now - NEW_AGE_S, kinds=KINDS, limit=NEW_EVENTS)
+    fresh = store.ledger(after_id=cursor, since=now - NEW_AGE_S, kinds=KINDS, limit=NEW_EVENTS, oldest=True)
     if not fresh:
         return None
     last = fresh[-1]["id"]
+    if len(fresh) >= NEW_EVENTS:
+        noticed(home, "")  # more came than one read takes: the rest get the next one
     new = [event for event in fresh if event["ref"] in works]
     opened = [work for work in works.values() if work.active or work.updated_at >= now - work_coord.BOARD_AGE_S]
     opened = sorted(opened, key=lambda work: (not work.active, -work.updated_at))[:OPEN_WORK]
@@ -192,7 +200,7 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
     if not new or not any(work.ref not in sources for work in opened) and len(sources) < 2:
         store.set_meta(_CURSOR, str(last))  # nothing else it could matter to
         return None
-    flags = store.ledger(since=now - 3600.0, kinds=("flag",), limit=40)
+    flags = store.ledger(since=now - 3600.0, kinds=("flag",), limit=FLAGS_COUNTED)
     parsed, tokens = (ask or _ask)(INSTRUCTIONS, _page(store, new, opened, works, flags, now))
     store.set_meta(_CURSOR, str(last))
     parsed = parsed if isinstance(parsed, dict) else {}
@@ -202,9 +210,11 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
         ref = work_store.normalize_ref(name)
         if ref in works and ref not in between:
             between.append(ref)
-    source = next((event["ref"] for event in new if event["ref"] in between), new[-1]["ref"])
+    # A flag names what reported and what it touches: an answer with either
+    # missing isn't completed for the helper.
+    source = next((event["ref"] for event in new if event["ref"] in between), "")
     others = [ref for ref in between if ref != source][:3]
-    flagged = parsed.get("flag") is True and bool(why) and bool(others)
+    flagged = parsed.get("flag") is True and bool(why) and bool(source) and bool(others)
     store.event_add("", "watch", "watch", "", source="events:" + ",".join(str(event["id"]) for event in new),
                     detail=json.dumps({"tokens": tokens, "flag": flagged}))
     logger.info("conduit_push: work watch read %d line(s) of %s: %s (%d tokens)", len(new), ", ".join(sorted(sources)),
@@ -213,6 +223,9 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
         return None
     woke = sum(1 for flag in flags if _detail(flag).get("woke")) < FLAGS_PER_HOUR
     read = [event for event in new if event["ref"] in (source, *others)][-READ_LINES:]
+    for ref in others:  # the other side's newest line, when it reported before this read
+        if not any(event["ref"] == ref for event in read):
+            read = store.events(ref, since=now - work_coord.BOARD_AGE_S, kinds=KINDS, limit=1) + read
     kept = store.event_add(source, "flag", "watch", why, source="events:" + ",".join(str(event["id"]) for event in read),
                            key=f"flag:{last}", detail=json.dumps({"with": others, "woke": woke}))
     if not kept:
@@ -270,7 +283,7 @@ def cap_line(store: work_store.Store) -> str:
         said = float(store.get_meta(_CAP_SAID) or 0)
     except ValueError:
         said = 0.0
-    held = [flag for flag in store.ledger(since=max(time.time() - 3600.0, said), kinds=("flag",), limit=40)
+    held = [flag for flag in store.ledger(since=max(time.time() - 3600.0, said), kinds=("flag",), limit=FLAGS_COUNTED)
             if not _detail(flag).get("woke") and flag["at"] > said]
     if not held:
         return ""

@@ -88,6 +88,7 @@ def test_nothing_to_flag_starts_no_turn_and_is_counted(on, hermes, home, told):
 
 @pytest.mark.parametrize("answer", [
     {"flag": True, "between": ["W1"], "why": "it matters"},  # to nothing else
+    {"flag": True, "between": ["W2"], "why": "it matters"},  # not what reported
     {"flag": True, "between": ["W1", "W9"], "why": "it matters"},  # no such work
     {"flag": True, "between": ["W1", "W2"], "why": ""},
     {"flag": "yes", "between": ["W1", "W2"], "why": "it matters"},
@@ -206,3 +207,47 @@ def test_the_work_panel_lists_what_coordination_did_and_why(on, hermes, home, to
     on.set_coordination("off")
     assert work.app_list(home)["coordination"] == {"mode": "off", "items": []}
     assert json.dumps(listed)  # plain data for the route
+
+
+def test_more_lines_than_one_read_takes_are_read_oldest_first_and_the_rest_next(on, hermes, home, told, monkeypatch):
+    two(on)
+    monkeypatch.setattr(watch, "NEW_EVENTS", 2)
+    again = []
+    monkeypatch.setattr(watch, "noticed", lambda home, ref, **_: again.append(ref))
+    for number in (1, 2, 3):
+        call("work_progress", {"found": f"finding {number}"}, session_id=WORKER)
+    helper = Helper()
+    again.clear()
+    assert watch.check(home, ask=helper) is None and again == [""]
+    assert "«finding 1»" in helper.read[0].split("The open workstreams:")[0]
+    assert "«finding 3»" not in helper.read[0].split("The open workstreams:")[0]
+    assert watch.check(home, ask=helper) is None and again == [""]
+    assert "«finding 3»" in helper.read[1].split("The open workstreams:")[0]
+
+
+def test_work_no_bot_chat_coordinates_is_neither_read_nor_shown(on, hermes, home, told, monkeypatch):
+    two(on)
+    monkeypatch.setattr(watch, "_watched", lambda work: work.ref != "W2")
+    call("work_progress", {"found": "the v1 users API is gone"}, session_id=WORKER)
+    call("work_progress", {"assumes": "the v1 users API stays"}, session_id=WORKER_2)
+    helper = Helper(FLAG)
+    assert watch.check(home, ask=helper) is None and helper.read == []
+
+
+def test_the_flag_keeps_the_other_sides_earlier_line(on, hermes, home, told):
+    two(on)
+    call("work_progress", {"assumes": "the v1 users API stays"}, session_id=WORKER_2)
+    assert watch.check(home, ask=Helper()) is None
+    call("work_progress", {"found": "GET /v1/users now returns 410 Gone"}, session_id=WORKER)
+    assert watch.check(home, ask=Helper(FLAG))["woke"]
+    line = batched()[-1]
+    assert "W2 relies on, just now: «the v1 users API stays»" in line and "W1 found" in line
+
+
+def test_flags_kept_without_a_turn_dont_reopen_the_hours_allowance(on, hermes, home, told, monkeypatch):
+    two(on)
+    monkeypatch.setattr(watch, "FLAGS_PER_HOUR", 1)
+    for number in range(45):
+        call("work_progress", {"found": f"finding {number}"}, session_id=WORKER)
+        flag = watch.check(home, ask=Helper(FLAG))
+        assert flag["woke"] is (number == 0)

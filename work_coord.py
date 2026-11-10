@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # other note of this plugin.
 EVENT_CHARS = 220
 BOARD_CHARS = 3200
-BOARD_EVENTS_PER_WORK = 5
+BOARD_EVENTS_PER_WORK = 6  # room for the newest of each kind
 BOARD_AGE_S = 24 * 3600.0
 PROPOSAL_CHARS = 300
 PROPOSALS_SHOWN = 12  # open ones first; work_propose is told they stay

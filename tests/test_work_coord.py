@@ -272,6 +272,11 @@ def test_the_board_keeps_the_users_words_and_each_kind_before_old_sends(on, herm
     assert "«Keep the CSV format»" in note and "«the export stays CSV»" in note
     assert note.count("· you sent") == coord.BOARD_EVENTS_PER_WORK - 2 and "«Check 7»" in note
     assert "(taken as the answer to its question)" in note and "not in its chat yet" not in note
+    # With every kind on the board, the newest send still has its line.
+    for kind in ("found", "changed"):
+        on.event_add("W1", kind, "worker", f"a {kind} line", at=time.time() - 300)
+    on.event_add("W1", "flag", "watch", "W1 and W2 touch", at=time.time() - 300, detail='{"with": ["W2"]}')
+    assert "«Check 7»" in work.digest(BOT_CHAT)
 
 
 def test_open_work_the_bot_chat_already_heard_from_stays_on_its_board(on, hermes):

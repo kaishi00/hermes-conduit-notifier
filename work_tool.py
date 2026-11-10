@@ -489,7 +489,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
                 ctx.register_tool(**tool)
         except Exception:  # noqa: BLE001
             logger.warning("conduit_push: could not register %s", name, exc_info=True)
-    work_watch.register(ctx, tell=_watch_tell, ago=_ago)
+    work_watch.register(ctx, tell=_watch_tell, ago=_ago, watched=_watched)
     start_recovery(_pinned_home)
 
 
