@@ -377,3 +377,15 @@ def test_the_pick_rules_ask_for_a_named_first_step_and_no_repeated_detail():
     rules = picks.rules(())
     assert "never the line said again" in rules and 'never a bare "Do it"' in rules
     assert '"whose": a person\'s name' in rules
+    assert "under 15 words" in rules and 'use it rather than "status"' in rules
+
+
+def test_a_short_detail_that_adds_a_word_is_kept():
+    for line, detail in (("Pay the rent", "Pay the rent today."), ("Send the report", "Send the report to Sam.")):
+        pick, _ = picks.parse({"line": line, "detail": detail})
+        assert pick["detail"] == detail
+    same, _ = picks.parse({"line": "Pay the rent today", "detail": "Pay the rent."})
+    assert same["detail"] == ""
+    for whose, kept in (("Kwan's", "Kwan's"), ("Sue", "Sue"), ("yours", ""), ("Hers.", "")):
+        date, _ = picks.parse({"line": "A day", "shape": "date", "facts": {"day": "2026-11-11", "whose": whose}})
+        assert date["facts"]["whose"] == kept

@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.153.3 (2026-11-10)
+
+### Fixes
+- A Pulse card keeps a short sentence that adds one word to its headline,
+  such as "today" or a name, instead of dropping it as a repeat.
+
 ## 0.153.2 (2026-11-10)
 
 ### Fixes
