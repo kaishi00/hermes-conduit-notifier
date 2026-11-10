@@ -224,12 +224,13 @@ def _sent_as(sent: tuple[Any, Any], text: str) -> bool:
     # Hermes strips the text it hands a provider as the last message, so the
     # ask then holds the attempt's text without the whitespace around it. A
     # digest is of the stripped text (pulse_store.text_digest), or of the
-    # whole one for an attempt stored before 0.153.4.
+    # whole one for an attempt stored before 0.153.4: once that one is cut,
+    # the stripped ask matches it with the newline its text ended with put back.
     if not isinstance(digest, str) or not digest:
         return whole.strip() in text
     if digest in (_digest(whole), _digest(whole.strip())) and len(whole) >= QUOTABLE:
         return whole.strip() in text
-    return digest in (_digest(text), _digest(text.strip()))
+    return digest in (_digest(text), _digest(text.strip()), _digest(text + "\n"))
 
 
 def _digest(text: str) -> str:

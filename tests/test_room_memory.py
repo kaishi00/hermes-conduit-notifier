@@ -1,5 +1,6 @@
 """Group room turns and Pulse's own turns stay out of the memory provider."""
 import importlib.util
+import hashlib
 import json
 import logging
 import sqlite3
@@ -549,6 +550,10 @@ def test_a_finished_report_cut_to_its_first_line_is_still_told_from_a_user_quoti
     quoted = f"{heading}\nWhat did the second card mean?"
     # Hermes hands a provider the last message stripped (#652): REPORT ends in a newline.
     assert ask != ask.strip()
+    assert guard.pulse_asks(tmp_path, [ask, ask.strip(), quoted, heading]) == [True, True, False, False]
+    # An attempt stored before 0.153.4 has the digest of its whole text, newline included.
+    with sqlite3.connect(tmp_path / store.DB_NAME) as conn:
+        conn.execute("UPDATE attempts SET text_sha=?", (hashlib.sha256(ask.encode()).hexdigest(),))
     assert guard.pulse_asks(tmp_path, [ask, ask.strip(), quoted, heading]) == [True, True, False, False]
     chat = [{"role": "user", "content": ask}, {"role": "assistant", "content": "Three cards."},
             {"role": "user", "content": quoted}, {"role": "assistant", "content": "The dentist."}]
