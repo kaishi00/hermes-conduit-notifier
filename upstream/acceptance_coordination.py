@@ -273,14 +273,19 @@ class Run:
         return self.ref(title)
 
     async def quiet(self, timeout: float = 600, settle: float = 25) -> None:
-        """Until every workstream has stopped working and the Bot Chat has
-        said nothing new for a while."""
+        """Until every workstream has stopped working, the Bot Chat is in
+        no turn and it has said nothing new for a while. A work update's
+        turn can sit in one model call for longer than the settle time with
+        no frame, and ending the run there stops it: Hermes then writes its
+        failed-turn notice, which read as a turn cut short (test host,
+        2026-11-10)."""
         deadline = time.monotonic() + timeout * SCALE
         last, since = -1, time.monotonic()
         while time.monotonic() < deadline:
             working = [w.ref for w in self.store.list(limit=-1) if w.kind == "workstream" and w.status in RUNNING]
-            seen = len(self.frames)
-            if seen != last:
+            running = await self.chat_running()
+            seen = sum(1 for frame in self.frames if "method" in frame)  # events, not the replies to this poll
+            if seen != last or running:
                 last, since = seen, time.monotonic()
             if not working and time.monotonic() - since >= settle * SCALE:
                 return
