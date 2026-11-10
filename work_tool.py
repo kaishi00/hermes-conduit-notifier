@@ -862,6 +862,7 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
                 "note": 'Give steps as a list, like [{"step": "Read the logs", "state": "done"}]. '
                         + ("What you reported was kept; the checklist wasn't changed." if told
                            else "Nothing was changed.")}
+    unchanged = "What you reported was kept; nothing else was changed." if told else "Nothing was changed."
     steps = []
     for item in raw:
         if isinstance(item, str):
@@ -887,15 +888,14 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
         flag = {"true": True, "false": False, "yes": True, "no": False}.get(flag.strip().lower(), flag)
     if flag is not None and not isinstance(flag, bool):
         return {"ok": False, "ref": work.ref, "error": "ready",
-                "note": "ready takes true or false. Nothing was changed."}
+                "note": f"ready takes true or false. {unchanged}"}
     asked = args.get("screen")
     if asked is not None and not isinstance(asked, str):
         return {"ok": False, "ref": work.ref, "error": "screen",
-                "note": "screen takes a few words of what the user needs to do there. Nothing was changed."}
+                "note": f"screen takes a few words of what the user needs to do there. {unchanged}"}
     if asked and not screen_possible():
         return {"ok": False, "ref": work.ref, "error": "screen",
-                "note": "This bot has no screen on its host, so ask the user in your reply instead. Nothing was "
-                        "changed."}
+                "note": f"This bot has no screen on its host, so ask the user in your reply instead. {unchanged}"}
     progress = {"steps": steps, "ready": flag if flag is not None else bool((work.progress or {}).get("ready"))}
     kept = work.progress or {}
     if asked is not None:
@@ -1790,8 +1790,10 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
                 "note": f"{work.ref} never got a chat, so there's nothing to send to. work_start it again, with new=true if it says similar work is open."}
     how = args.get("how") if args.get("how") in ("auto", "add", "after") else "auto"
     # Under Ask, a turn the user didn't start doesn't interrupt running work:
-    # its words are added to the turn instead, and the answer says so.
-    softened = ask_first and how == "auto" and work.status in _RUNNING_STATES
+    # its words are added to the turn instead, and the answer says so. Asked
+    # for whatever the row says: the user may have started a turn in its chat
+    # since the row was read, and idle work starts a turn with them all the same.
+    softened = ask_first and how == "auto"
     if softened:
         how = "add"
     bot = _bot_name(home)
@@ -1809,7 +1811,7 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     since = _users_message_at(home, coordinator) if quoted else 0.0
     sent = _deliver(store, broker, work, words, how, answer=text if quoted and since else "", since=since,
                     own=own, said=text)
-    if softened and sent.get("ok"):
+    if softened and sent.get("outcome") in ("steered", "queued"):
         sent["note"] += work_coord.ADDED_NOT_REDIRECTED
     return sent
 
@@ -4556,7 +4558,8 @@ def digest(session_id: Any) -> Optional[str]:
         asked.remove(closed)
     fixed = len(rules) + len(work_coord.RULES[setting]) + sum(len(line) for line, _ in lines) \
         + sum(len(line) for line in asked) + len(screen)
-    drawn = work_coord.board(home, store, [work for _, work in lines], _ago, _in_transcript,
+    # Not a workstream whose result waits for its call to end: what it found waits with it.
+    drawn = work_coord.board(home, store, [work for _, work in lines if work.ref not in unseen], _ago, _in_transcript,
                              budget=max(0, min(work_coord.BOARD_CHARS, NOTE_CHARS - fixed)))
     out = []
     for line, work in lines:

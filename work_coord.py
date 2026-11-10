@@ -233,13 +233,16 @@ def report(store: work_store.Store, work: work_store.Work, args: dict, session_i
     kept twice. How many were new, and what to say back when something was
     wrong with them."""
     kept = 0
-    for kind in ("found", "assumes", "changed"):
+    given: list[tuple[str, list]] = []
+    for kind in ("found", "assumes", "changed"):  # all read before any is kept
         raw = args.get(kind)
         if raw is None or raw == "":
             continue
         items = raw if isinstance(raw, list) else [raw]
         if not all(isinstance(item, str) for item in items):
-            return kept, f"{kind} takes a line of text, or a list of lines. The checklist was kept."
+            return 0, f"{kind} takes a line of text, or a list of lines. Nothing was kept, and the checklist is as it was."
+        given.append((kind, items))
+    for kind, items in given:
         for item in items[:REPORT_ITEMS]:
             text = _short(item, work_store.EVENT_CHARS)
             if not text:

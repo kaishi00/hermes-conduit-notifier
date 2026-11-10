@@ -358,3 +358,53 @@ def test_the_note_says_how_the_user_set_coordination(on, hermes, setting, words)
     on.set_coordination(setting)
     note = work.digest(BOT_CHAT)
     assert words in note and coord.RULES[setting] in note
+
+
+def test_under_ask_a_turn_the_user_just_started_isnt_interrupted(on, hermes, home):
+    """The row says the work is idle, but the user started a turn in its
+    chat since: the Bot Chat's own words are added to that turn."""
+    start()
+    on.update("W1", status="done")
+    assert hermes._sessions[f"rt-{WORKER}"]["running"]  # live in Hermes all the same
+    woken(home)
+    sent = call("work_send", {"ref": "W1", "text": "W2 found v1 returns 410; check before you go on."})
+    assert sent["ok"] and sent["outcome"] == "steered" and "without interrupting" in sent["note"]
+    assert not hermes.named("session.redirect")
+
+
+def test_under_ask_idle_work_starts_a_turn_with_what_was_sent(on, hermes, home):
+    start()
+    on.update("W1", status="done")
+    hermes._sessions[f"rt-{WORKER}"]["running"] = False
+    woken(home)
+    sent = call("work_send", {"ref": "W1", "text": "W2 found v1 returns 410; check before you go on."})
+    assert sent["ok"] and sent["outcome"] == "started" and "without interrupting" not in sent["note"]
+
+
+def test_a_report_with_a_wrong_part_keeps_none_of_it_and_says_so(on, hermes):
+    start()
+    out = call("work_progress", {"found": "v1 returns 410", "assumes": 42}, session_id=WORKER)
+    assert out["error"] == "report" and "Nothing was kept" in out["note"] and on.events("W1") == []
+    out = call("work_progress", {"found": "v1 returns 410", "ready": "maybe",
+                                 "steps": [{"step": "Read", "state": "done"}]}, session_id=WORKER)
+    assert out["error"] == "ready" and "What you reported was kept; nothing else was changed." in out["note"]
+    assert [event["text"] for event in on.events("W1")] == ["v1 returns 410"] and on.get("W1").progress == {}
+
+
+def test_lines_past_the_ones_kept_arent_called_kept(on, hermes):
+    start()
+    out = call("work_progress", {"found": ["", "", "", "", "v1 returns 410"]}, session_id=WORKER)
+    assert "Kept for" not in out.get("note", "") and on.events("W1") == []
+    out = call("work_progress", {"found": ["", "v1 returns 410"]}, session_id=WORKER)
+    assert out["ok"] and "Kept for" in out["note"]
+
+
+def test_what_a_calls_workstream_found_waits_with_its_result(on, hermes, home, monkeypatch):
+    start()
+    call("work_progress", {"found": "the v1 API returns 410"}, session_id=WORKER)
+    assert "· it found" in work.digest(BOT_CHAT)
+    on.update("W1", status="done", last_result="All done.")
+    monkeypatch.setattr(work, "_call_on", lambda *args, **kwargs: True)
+    monkeypatch.setattr(work, "_call_of", lambda row: "call-1")
+    note = work.digest(BOT_CHAT)
+    assert "you'll get it once the" in note and "· it found" not in note
