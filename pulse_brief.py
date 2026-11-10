@@ -69,6 +69,7 @@ _NOTE = ("This turn was started by Pulse, the part of Hermes that speaks up on i
          "reply: give it a few words at most. What's under \"Related to today's events\" is what Pulse remembers that "
          "shares a name or a word with one of today's events: where it helps with that event, say it with the event "
          "in a few words (\"lunch with Dan at 1: he started the new job on Monday\"), and leave out the rest. "
+         "Write each line in your own words for the user: never copy an item's \"#481\" number or its \"[interest]\" kind. "
          "When nothing is outstanding, say so in the one sentence and stop. " + ledger.UNSET_RULE
          + " Never say something hasn't happened or started because nothing here shows it: this message doesn't hold everything the chats said. "
          "Only pass on what the message says")
@@ -176,6 +177,21 @@ def summary_line(reply: str) -> str:
 HEADINGS = {"today": "today", "still open": "open"}
 _HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)?([A-Za-z ]+?)(?:\*\*)?\s*:?\s*(?:\*\*)?\s*$")
 _ITEM = re.compile(r"^\s*[-*\u2022]\s+(.*\S)")
+# The context's own markers a reply can copy (report.remembered_lines): a
+# remembered item's "#481" leading the line, or after its last sentence, and
+# its "[interest]" kind anywhere. Other numbers ("issue #2059") stay.
+_KIND = re.compile(r"\[(?:%s)\]\s*" % "|".join(
+    ("commitment", "promise", "intention", "interest", "fact", "watch", "deadline", "date", "reminder")))
+_LEADING_REF = re.compile(r"^#\d+(?:\s+|$)")
+_TRAILING_REF = re.compile(r"(?:(?<=[.!?)\]])\s+|^)#\d+$")
+
+
+def _shown(text: str) -> str:
+    """A brief line as the phone shows it: no context markers or bold."""
+    text = re.sub(r"\s+", " ", _KIND.sub("", text.replace("**", ""))).strip()
+    return _TRAILING_REF.sub("", _LEADING_REF.sub("", text)).strip()
+
+
 MAX_LINES = 8
 
 
@@ -190,7 +206,9 @@ def look(reply: str, held: int) -> dict:
         item = _ITEM.match(text)
         if item:
             if sum(map(len, groups.values())) < MAX_LINES:
-                groups[current].append(_clip(item.group(1).replace("**", ""), LINE_LIMIT))
+                shown = _shown(item.group(1))
+                if shown:
+                    groups[current].append(_clip(shown, LINE_LIMIT))
             continue
         heading = _HEADING.match(text)
         if heading and heading.group(1).strip().lower() in HEADINGS:

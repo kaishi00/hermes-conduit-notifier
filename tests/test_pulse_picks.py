@@ -147,6 +147,16 @@ def test_the_brief_is_laid_out_from_its_parts():
     assert pulse.brief.look("Quiet.\n- One thing", held=0)["facts"]["open"] == ["One thing"]
 
 
+def test_the_brief_drops_the_contexts_item_markers():
+    # Eric's brief, 2026-11-10: the reply copied an item's line from the context.
+    reply = ("Two duty days ahead.\nStill open:\n- [interest] Verify commit b8a4ba59 correctly closes GitHub issues "
+             "#2059 and #2062. #481\n- #12 [promise] Send the deck (due Friday)\n- Track order #4 by phone\n- #481")
+    assert pulse.brief.look(reply, held=0)["facts"]["open"] == [
+        "Verify commit b8a4ba59 correctly closes GitHub issues #2059 and #2062.",
+        "Send the deck (due Friday)", "Track order #4 by phone"]
+    assert "never copy an item's" in pulse.brief.NOTE
+
+
 def test_the_feed_adds_looks_only_for_apps_that_ask(tmp_path):
     pulse_store = fresh(tmp_path)
     look = {"line": "Relay is up", "shape": "status", "facts": {"label": "Relay", "state": "ok"}, "actions": []}
