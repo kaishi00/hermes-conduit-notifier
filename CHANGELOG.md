@@ -16,9 +16,10 @@ checks it). The format is fixed, because Conduit reads it:
 ## 0.157.8 (2026-11-10)
 
 ### Fixes
-- Pulse: a reminder or a watch you asked for still comes up when it fits no
-  card type, and a card isn't lost when Pulse found the same thing twice and
-  only one of the two fit a type.
+- Pulse: something you asked Pulse to watch for still comes up when it fits no
+  card type, a reminder you asked for is drawn in your own words, and a card
+  isn't lost when Pulse found the same thing twice and only one of the two fit
+  a type.
 
 ## 0.157.7 (2026-11-10)
 

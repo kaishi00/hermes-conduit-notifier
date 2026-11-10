@@ -121,7 +121,7 @@ A date or an "ahead" entry may instead wait for the user to pass a kind of shop:
 # Added to INSTRUCTIONS: each entry brought up is a pick (pulse_picks).
 PICKS_RULE = """
 
-Every entry with "bring_up": true is also a pick, with "detail", "shape", "facts" and "actions" as below (its "line" is the pick's line). Every look-ahead pick is new: give no "incident". Leave those out when "bring_up" is false. An "ahead" entry that fits no shape but "plain" stays out: give it the shape its facts support, never one they don't.
+Every entry with "bring_up": true is also a pick, with "detail", "shape", "facts" and "actions" as below (its "line" is the pick's line). Every look-ahead pick is new: give no "incident". Leave those out when "bring_up" is false. An "ahead" entry that fits no shape but "plain" comes up only when the user asked to be told of it (a remembered watch): give it the shape its facts support, never one they don't.
 
 """
 PLACES_TITLE = "## Saved places (what may wait for the user to get to or leave one)"

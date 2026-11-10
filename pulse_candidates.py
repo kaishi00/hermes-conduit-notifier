@@ -70,8 +70,10 @@ WHY_LIMIT = 300
 SKIPS = ("done", "covered", "raised", "rated", "minor")
 # Left out by ``decide``, not the model: its pick fits no card type.
 SHAPELESS = "shapeless"
-# Remembered kinds the user asked Pulse for: they come up even as plain words.
-ASKED_KINDS = ("reminder", "watch")
+# The remembered kind the user asked Pulse for (tell me when...): it comes up
+# even as plain words. Something to be reminded of is kept as a commitment,
+# which draws as a promise in the words said, or as due by its day.
+ASKED_KINDS = ("watch",)
 SOURCES = ("chat", "calendar", "reminders", "notes", "jobs", "tools")
 AREAS = ("work", "personal", "health", "home", "money", "social", "travel", "other")
 # The model call's room: what it reads (about the report turn's), and its answer.
@@ -637,8 +639,8 @@ def decide(pulse_store: store.PulseStore, rows: list[dict], *, now: float, limit
             row["skip"] = "raised"  # moving a reminder isn't news, nor a calendar entry coming closer
     # What fits no card type stays out (Eric, 2026-11-10: a shape's facts are
     # checked, and the cards that read as noise were the plain ones), unless
-    # the user asked for it (a found one marked asked, a remembered reminder
-    # or watch), it's a floor, or it updates or closes a card on purpose.
+    # the user asked for it (a found one marked asked, a remembered watch),
+    # it's a floor, or it updates or closes a card on purpose.
     # Before once_each, so a plain one never takes its shaped double's place.
     for row in rows:
         if (row.get("decision") or row.get("skip") or id(row) in deliberate or row.get("asked") is True
