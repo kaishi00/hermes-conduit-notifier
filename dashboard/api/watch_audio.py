@@ -1074,10 +1074,12 @@ async def _watch_call_presence(profile: Optional[str], hold_s: int) -> None:
     await core._run_scoped(profile, lambda: _watch_call_presence_now(hold_s))
 
 
-# A session that ends for one of these keeps the presence, for the Watch's
-# rejoin or the next start on the same grant; any other end (a hang-up, the
-# provider ending the call, a failed start or session) lets go of it.
-WATCH_AUDIO_PRESENCE_KEPT = frozenset({"watch_left", "watch_rejoined", "host_offline", "restarted", "cancelled"})
+# A session that ends for one of these lets go of the presence: the user hung
+# up, the session failed on the host (a failed start included), or a rejoin
+# was refused. Any other end (the Watch or the provider dropping, a rejoin, a
+# restart) keeps it for the Watch's next start on the grant; unrenewed, it
+# runs out on its own, and the grant's end lets go of it anyway.
+WATCH_AUDIO_PRESENCE_RELEASED = frozenset({"ended", "error", "refused"})
 # The bridges holding each profile's call presence. The presence is one
 # deadline per profile, so a bridge lets go of it (writes 0) only as its last
 # holder: one Watch call's end never clears another's that's still running.
@@ -1088,6 +1090,11 @@ _watch_presence_holders_lock = threading.Lock()
 def _claim_watch_presence(profile: Optional[str], owner: object) -> None:
     with _watch_presence_holders_lock:
         _watch_presence_holders.setdefault(profile, set()).add(owner)
+
+
+def _watch_presence_free(profile: Optional[str]) -> bool:
+    with _watch_presence_holders_lock:
+        return not _watch_presence_holders.get(profile)
 
 
 def _drop_watch_presence(profile: Optional[str], owner: object) -> bool:
@@ -1342,9 +1349,10 @@ class _WatchAudioBridge:
 
     async def _hold_presence(self, session: _WatchAudioSession, stop: asyncio.Event) -> None:
         """Renews the user's call presence while ``session`` runs, until
-        ``stop``. It's stopped, not cancelled, so a write in flight lands
-        before the release that follows. Never raises: a call goes on
-        without it (Hermes' calls then ring over it)."""
+        ``stop``. It's stopped, never cancelled, so a write in flight always
+        finishes here; one that lands after the release (a write slower than
+        the session's wait for it) is undone at once. Never raises: a call
+        goes on without it (Hermes' calls then ring over it)."""
         if not self.presence_held:
             self.presence_held = True
             self.presence_profile = session.profile
@@ -1354,6 +1362,11 @@ class _WatchAudioBridge:
                 await self.presence(session.profile, WATCH_AUDIO_PRESENCE_S)
             except Exception as exc:  # noqa: BLE001 — retried at the next renewal
                 logger.info("A Watch call couldn't hold the user's call presence: %s", type(exc).__name__)
+            if stop.is_set() and not self.presence_held and _watch_presence_free(session.profile):
+                # Released while this write was in flight: let go again.
+                with contextlib.suppress(Exception):
+                    await self.presence(session.profile, 0)
+                return
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop.wait(), WATCH_AUDIO_PRESENCE_RENEW_S)
 
@@ -1390,18 +1403,18 @@ class _WatchAudioBridge:
                                                 "message": f"The Watch call failed on the host ({type(exc).__name__})"})
         finally:
             stop_holding.set()
-            try:
-                await asyncio.wait_for(asyncio.shield(holding), WATCH_AUDIO_STOP_TIMEOUT_S)
-            except Exception:  # noqa: BLE001 — a stuck write (a timeout); the release follows anyway
-                holding.cancel()
-                await asyncio.gather(holding, return_exceptions=True)
             self.slots.release()
             if self.session is session:
                 self.session = None
                 self.session_task = None
-            if session.reason not in WATCH_AUDIO_PRESENCE_KEPT and self.session is None:
-                # The user hung up, or the call ended or failed for good.
-                await self._release_presence()
+            try:
+                # Not cancelled: a stuck write finishes in the holder, which
+                # undoes it if the release below went first.
+                await asyncio.wait({holding}, timeout=WATCH_AUDIO_STOP_TIMEOUT_S)
+            finally:
+                if session.reason in WATCH_AUDIO_PRESENCE_RELEASED and self.session is None:
+                    # The user hung up, or the call failed for good.
+                    await self._release_presence()
             with contextlib.suppress(Exception):
                 await self.control(session.stream, {"type": "ended", "engine": session.engine, "reason": session.reason})
 
