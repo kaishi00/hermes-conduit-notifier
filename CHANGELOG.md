@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.155.2 (2026-11-10)
+
+### Fixes
+- A Pulse card about something that went wrong offers to fix it. Without the
+  update its button could only ask how it stands.
+
 ## 0.155.1 (2026-11-10)
 
 ### Fixes
