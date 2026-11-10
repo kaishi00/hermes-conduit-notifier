@@ -4595,7 +4595,7 @@ def digest(session_id: Any) -> Optional[str]:
     if mode == "lookups":
         # Said first and plainly: a model reading "anything that needs tools"
         # first handed the weather to a workstream. The plugin hands on what
-        # runs past QUICK_STEPS, so the note says how to tell long work.
+        # runs past the bot's quick_steps, so the note says how to tell long work.
         routing = ("You coordinate this bot's work. Do quick things yourself, in this turn, with any of your tools: "
                    "a question a lookup or two settles (the weather, news and other current facts, past chats, "
                    "the user's health, location and inbox, places and directions) or a small task of a step or "
