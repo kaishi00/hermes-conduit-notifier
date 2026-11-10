@@ -2691,19 +2691,24 @@ def _asked_in(home: Path, session_id: str) -> Optional[bool]:
 
 
 def _in_transcript(home: Path, session_id: str, text: str) -> bool:
-    """Whether Hermes stored this message in the session (queued or run)."""
+    """Whether this message is in the session's transcript, as its own
+    message or inside one: Hermes joins what's steered into a turn into one
+    row, in its own wrapper, and what's queued behind a turn into one
+    message (seen on v0.23.0). The copy Hermes keeps of a message while it
+    waits in the queue is inactive, and isn't the turn that ran with it."""
     import sqlite3
 
     path = Path(home) / "state.db"
-    if not path.exists():
+    if not path.exists() or not text:
         return False
     try:
         db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
     except sqlite3.Error:
         return False
     try:
-        row = db.execute("SELECT 1 FROM messages WHERE session_id = ? AND role = 'user' AND content = ? LIMIT 1",
-                         (session_id, text)).fetchone()
+        active = "AND active = 1 " if any(row[1] == "active" for row in db.execute("PRAGMA table_info(messages)")) else ""
+        row = db.execute(f"SELECT 1 FROM messages WHERE session_id = ? AND role = 'user' {active}"
+                         "AND instr(content, ?) > 0 LIMIT 1", (session_id, text)).fetchone()
     except sqlite3.Error:
         return False
     finally:
