@@ -2379,8 +2379,8 @@ and the dashboard routes under one file lock, so they survive restarts:
   Nothing rings meanwhile: a call that would go out sends the usual push.
   An Apple Watch call holds it too (0.155.2+): the host renews 90 seconds
   every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
-  keeps it through a rejoin, and lets go when the Watch hangs up, the call
-  ends or fails on the host, or the grant ends. Two Watch calls on one
+  keeps it through a rejoin or a provider's drop, and lets go when the
+  Watch hangs up, the call fails on the host, or the grant ends. Two Watch calls on one
   profile share it: it goes only when the last one ends.
 - **Declined and missed calls (0.15+):** when you decline a call, or it
   rings out, reaches a phone that was offline or is silenced by Do Not
