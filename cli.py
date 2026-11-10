@@ -503,6 +503,14 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
              f"approvals: {store.workstream_approvals()}; workstream model: "
              f"{store.workstream_model().get('model') or OWN_MODEL}; coordination: {store.coordination()})"
              if mode != "off" else ""))
+    if action == "status" and mode != "off" and store.coordination() != "off":
+        from . import work_watch
+
+        day = work_watch.metrics(store, time.time() - 24 * 3600.0)
+        print(f"  coordination, last 24 h: the watch read {day['watch_reads']} time(s) ({day['watch_tokens']} tokens) "
+              f"and flagged {day['flags']} ({day['flags_held']} kept without a turn); {day['hidden_turns']} work "
+              f"update turn(s); {day['sent']} message(s) sent to workstreams ({day['sent_own']} on its own): "
+              f"{day['delivered']} in their chats, {day['waiting']} not yet, {day['not_arrived']} didn't arrive")
     if action == "status":
         for work in store.list(include_closed=False, limit=20):
             print(f"  {work.ref}  {work.status:<11} {_printable(work.title)}")

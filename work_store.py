@@ -746,6 +746,21 @@ class Store:
         rows = self._read(f"SELECT * FROM events WHERE {where} ORDER BY id DESC LIMIT ?", (*args, limit))
         return list(reversed(rows))
 
+    def ledger(self, *, after_id: int = 0, since: float = 0.0, kinds: Optional[tuple[str, ...]] = None,
+               limit: int = 50) -> list[dict]:
+        """The newest events of every workstream of the bot, oldest first:
+        those after an event (``after_id``) or a time (``since``)."""
+        where, args = "id > ? AND at >= ?", [after_id, since]
+        if kinds:
+            where += f" AND kind IN ({', '.join('?' for _ in kinds)})"
+            args.extend(kinds)
+        rows = self._read(f"SELECT * FROM events WHERE {where} ORDER BY id DESC LIMIT ?", (*args, limit))
+        return list(reversed(rows))
+
+    def sends_since(self, since: float, *, kind: str = "send") -> list[dict]:
+        """The outbox rows of one kind written since then, oldest first."""
+        return self._read("SELECT * FROM outbox WHERE kind = ? AND created_at >= ? ORDER BY created_at", (kind, since))
+
     # What the Bot Chat asked the user (work_propose)
 
     def proposal_add(self, ref: str, text: str) -> str:
