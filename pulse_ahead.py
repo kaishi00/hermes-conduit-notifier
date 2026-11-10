@@ -374,7 +374,8 @@ def _event_line(event: dict, key: str = "") -> str:
         last = (end - timedelta(seconds=1)).date() if all_day else end.date()
         if last > start.date():
             when += f", to {last:%a} {last.day} {last:%b}"
-    return f"- {key}{when}: {title}"
+    calendar = _clip(event.get("calendar"), 60)
+    return f"- {key}{when}: {title}" + (f" ({calendar} calendar)" if calendar else "")
 
 
 def _remembered(pulse_store: store.PulseStore, zone: tzinfo, now: float) -> list[dict]:

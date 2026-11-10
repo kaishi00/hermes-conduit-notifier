@@ -222,6 +222,14 @@ def look(reply: str, held: int) -> dict:
             "facts": {"summary": summary, "counts": counts, **groups}}
 
 
+# The brief's slot and attempt a process claimed to send, and when
+# ([slot, attempt, at]): of the processes that reach the brief's time
+# together, one sends it. A claim lapses after CLAIM_S, so one whose
+# process died before recording its attempt doesn't cost the day's brief.
+CLAIM = "brief_claim"
+CLAIM_S = 300.0
+
+
 def next_attempt(pulse_store: store.PulseStore, now: float, zone: Any, time_value: Any) -> Optional[tuple[str, int]]:
     """The item id and attempt number of the brief to send now, or None:
     not yet time, already sent today, one on its way, or out of tries."""

@@ -144,7 +144,7 @@ Return a JSON object {"items": [...], "closed": [...], "claims": [...]}, at most
 Each item has:
 - "kind", one of:
   - "commitment": the user said they will do something, or asked to be reminded of something. Only from the user's own lines.
-  - "promise": Hermes said it will do something later or come back to something. Only from Hermes's lines. Work Hermes finished in the conversation is not a promise.
+  - "promise": Hermes said it will do something later or come back to something. Only from Hermes's lines. Work Hermes finished in the conversation is not a promise, and neither is Hermes saying what it's about to do next while it works ("I'll start by reading the files", "then writing the findings").
   - "intention": the user wants to start, stop or change something, with no date. Only from the user's own lines.
   - "interest": something the user is thinking about or considering. Only from the user's own lines.
   - "fact": something about the user or the people in their life that will still be true next month, such as a birthday, an anniversary, a relationship, a preference, a dislike. Not the state of a task, a system, an inbox, a build or a review, and not what happened in this conversation.

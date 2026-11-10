@@ -13,6 +13,24 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.157.5 (2026-11-10)
+
+### Fixes
+- One morning brief a day: when several profiles share a host, each one's
+  process could send its own at the brief's time, up to four at once.
+- Pulse no longer brings up what only says back what you asked for or
+  decided, a remembered fact with nothing to do about it now, a watch whose
+  condition hasn't happened, or Hermes saying what it's about to do next
+  while it works. A tool error that only tells Hermes what to do instead
+  stays Hermes's.
+- Calendar entries show which calendar they're on, and a holiday from
+  another country's holiday calendar isn't treated as yours. Cards about a
+  calendar entry don't offer a reminder for it, and no card offers a step
+  Hermes can't take, like changing the app.
+- A card held for a place no longer reads the place into what it's about.
+- On a calendar card, Move it and Open in Calendar stay, and a Done after a
+  dropped button still fits.
+
 ## 0.157.4 (2026-11-10)
 
 ### Fixes
