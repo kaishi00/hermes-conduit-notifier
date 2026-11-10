@@ -149,39 +149,66 @@ def _carries_ask(store: Optional[work_store.Store], content: str) -> bool:
                for row in rows)
 
 
-def self_started(home: Path, session_id: Any, store: Optional[work_store.Store] = None) -> bool:
-    """Whether the Bot Chat's turn under way was started by the plugin (a
-    work update), not by the user. Hermes stores a turn's prompt before any
-    tool runs, so the newest user row is this turn's: hidden, or a work
-    update stored without its mark. The user's own steer into such a turn
-    makes it theirs, and an update that carries another bot's ask is that
-    bot's to have answered (``store`` knows which the plugin sent).
-    Unreadable: the user's, so their own instruction is never refused."""
+def _turn_prompts(home: Path, session_id: Any) -> Optional[list[tuple[str, Any]]]:
+    """The prompts of the turn under way in this chat, each with its
+    display kind: the user rows since the last reply that ended a turn (an
+    assistant row with no tool calls). Hermes stores a turn's prompt before
+    any tool runs, and keeps a prompt queued at a busy chat in the running
+    turn's rows, so there can be more than one. None when it can't be read."""
     path = Path(home) / "state.db"
     if not session_id or not path.exists():
-        return False
+        return None
     try:
         db = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1.0)
     except sqlite3.Error:
-        return False
+        return None
     try:
         columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
         active = " AND active = 1" if "active" in columns else ""
         kind = "display_kind" if "display_kind" in columns else "NULL"
-        row = db.execute(f"SELECT content, {kind} FROM messages WHERE session_id = ? AND role = 'user'{active} "
-                         "ORDER BY id DESC LIMIT 1", (str(session_id),)).fetchone()
+        calls = "tool_calls" if "tool_calls" in columns else "NULL"
+        rows = db.execute(f"SELECT role, content, {kind}, {calls} FROM messages WHERE session_id = ?{active} "
+                          "AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT 60",
+                          (str(session_id),)).fetchall()
     except sqlite3.Error:
-        return False
+        return None
     finally:
         db.close()
-    if not row:
+    prompts: list[tuple[str, Any]] = []
+    for role, content, shown, tool_calls in rows:
+        if role == "assistant":
+            if "tool_calls" in columns and tool_calls in (None, "", "[]", "null"):
+                break  # the reply that ended the turn before
+            continue
+        prompts.append((content if isinstance(content, str) else "", shown))
+        if "tool_calls" not in columns:
+            break  # no telling where the turn began: its newest prompt
+    return prompts
+
+
+def _users_own(prompt: tuple[str, Any]) -> bool:
+    content, shown = prompt
+    return shown == "steer" or (shown is None and not content.startswith(_WAKE_STARTS))
+
+
+def user_wrote(home: Path, session_id: Any) -> bool:
+    """Whether the user wrote a message of the Bot Chat's turn under way.
+    Unreadable: yes, so their own answer is never refused."""
+    prompts = _turn_prompts(home, session_id)
+    return prompts is None or not prompts or any(_users_own(prompt) for prompt in prompts)
+
+
+def self_started(home: Path, session_id: Any, store: Optional[work_store.Store] = None) -> bool:
+    """Whether the Bot Chat's turn under way was started by the plugin (a
+    work update: hidden, or stored without its mark), not by the user. A
+    message of the user's own in the turn, typed first or sent into it,
+    makes it theirs, and an update that carries another bot's ask is that
+    bot's to have answered (``store`` knows which the plugin sent).
+    Unreadable: the user's, so their own instruction is never refused."""
+    prompts = _turn_prompts(home, session_id)
+    if not prompts or any(_users_own(prompt) for prompt in prompts):
         return False
-    content = row[0] if isinstance(row[0], str) else ""
-    if row[1] == "steer":
-        return False
-    if row[1] is None and not content.startswith(_WAKE_STARTS):
-        return False
-    return not _carries_ask(store, content)
+    return not any(_carries_ask(store, content) for content, _ in prompts)
 
 
 def _short(value: Any, limit: int) -> str:
@@ -447,8 +474,9 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
             return {"ok": False, "error": "missing", "note": "Give the proposal's id (P1) with the answer."}
         if answer not in ("approved", "declined"):
             return {"ok": False, "error": "missing", "note": "answer is approved or declined."}
-        if self_started(home, session_id, store):
-            # Only the user's own message answers one: a work update's turn can't approve for them.
+        if not user_wrote(home, session_id):
+            # Only the user's own message answers one: a work update's turn
+            # can't approve for them, nor can one that carries another bot's ask.
             return {"ok": False, "id": wanted, "error": "not_the_user",
                     "note": f"The user didn't write this turn's message, so {wanted} stays open. Record their "
                             "answer when they give it."}

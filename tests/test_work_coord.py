@@ -222,6 +222,29 @@ def test_an_update_that_carries_another_bots_ask_starts_work_for_it(on, hermes, 
     assert start("Weather", "Look up the weather.")["error"] == "ask_first"  # not one the plugin sent
     coord.ask_wake_sent(on, on.outbox_add("", "wake", BOT_CHAT, text))
     assert start("Weather", "Look up the weather.")["ok"]
+    # Answering the ask isn't the user's go-ahead: their open proposal stays theirs to answer.
+    made = call("work_propose", {"text": "Stop W1: the API it ports to is gone."})["id"]
+    assert call("work_propose", {"id": made, "answer": "approved"})["error"] == "not_the_user"
+
+
+def test_a_turn_is_the_users_when_any_of_its_messages_is(on, hermes, home):
+    """Hermes keeps a prompt queued at a busy chat in the running turn's
+    rows: a work update queued into the user's turn doesn't make it the
+    plugin's, and the reply that ended the turn before is where a turn starts."""
+    _chat_db(home, [(BOT_CHAT, "user", "Start a look at the weather", None),
+                    (BOT_CHAT, "user", UPDATE, "hidden")])
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
+    assert not coord.self_started(home, BOT_CHAT, on) and coord.user_wrote(home, BOT_CHAT)
+    assert start("Weather", "Look up the weather.")["ok"]
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', 'On it.', NULL)",
+                    (BOT_CHAT,))
+        con.execute("INSERT INTO messages (session_id, role, content, display_kind) VALUES (?, 'user', ?, 'hidden')",
+                    (BOT_CHAT, UPDATE))
+        con.execute("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
+                    (BOT_CHAT, '[{"id": "c1"}]'))
+    assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
 
 
 def test_a_report_said_again_is_taken_and_kept_once(on, hermes):

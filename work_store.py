@@ -771,8 +771,8 @@ class Store:
     def proposals(self, *, since: float = 0.0, limit: int = 20) -> list[dict]:
         """The open ones, and those answered since then, oldest first."""
         rows = self._read("SELECT * FROM proposals WHERE status = 'open' OR answered_at >= ? "
-                          "ORDER BY created_at DESC LIMIT ?", (since, limit))
-        return list(reversed(rows))
+                          "ORDER BY status = 'open' DESC, created_at DESC LIMIT ?", (since, limit))
+        return sorted(rows, key=lambda row: row["created_at"])
 
     def outbox_done(self, item: str, outcome: str) -> None:
         with self._db() as con:

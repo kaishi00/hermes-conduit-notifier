@@ -859,8 +859,9 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
             raw = None
     if not isinstance(raw, list):
         return {"ok": False, "ref": work.ref, "error": "missing",
-                "note": 'Give steps as a list, like [{"step": "Read the logs", "state": "done"}]. Nothing was '
-                        "changed."}
+                "note": 'Give steps as a list, like [{"step": "Read the logs", "state": "done"}]. '
+                        + ("What you reported was kept; the checklist wasn't changed." if told
+                           else "Nothing was changed.")}
     steps = []
     for item in raw:
         if isinstance(item, str):
@@ -876,7 +877,8 @@ def _progress(home: Path, args: dict, session_id: Any) -> dict:
     if raw and not steps:
         return {"ok": False, "ref": work.ref, "error": "missing",
                 "note": 'None of those steps had any words, so the checklist was kept as it was. Give each one '
-                        'like {"step": "Read the logs", "state": "done"}.'}
+                        'like {"step": "Read the logs", "state": "done"}.'
+                        + (" What you reported was kept." if told else "")}
     dropped = max(len(steps) - PROGRESS_STEPS, 0)
     steps = steps[:PROGRESS_STEPS]
     # Left out, the mark stays as it was this turn (a turn's start clears it).
