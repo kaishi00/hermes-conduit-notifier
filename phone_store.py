@@ -24,6 +24,9 @@ What arrives (designs/phone-v1-contract.md, section 2):
   with what it's for in the user's words, replaced whole when sent. A run is
   a change (``run_shortcut``) the phone carries out in the Shortcuts app; the
   text the shortcut gives back comes with its outcome (``result``).
+* contact changes (0.160.0): Hermes asks to add a contact, or change or delete
+  a picked person's (``add_contact``, ``update_contact``, ``delete_contact``),
+  when the user lets it (``contacts_edit``); the phone always asks first.
 
 The sharing the phone reports in every batch is enforced here again, so a
 phone bug can't store more than the user chose: no notes, attendees or URLs
@@ -120,7 +123,10 @@ CALENDAR_CHANGE_KINDS = ("add_event", "update_event", "delete_event", "add_remin
 _DISPLAY_ONLY_KINDS = ("delete_event", "complete_reminder", "delete_reminder")
 ALARM_CHANGE_KINDS = ("set_alarm", "set_timer", "cancel_alarm")
 SHORTCUT_CHANGE_KINDS = ("run_shortcut",)
-CHANGE_KINDS = CALENDAR_CHANGE_KINDS + ALARM_CHANGE_KINDS + SHORTCUT_CHANGE_KINDS
+CONTACT_CHANGE_KINDS = ("add_contact", "update_contact", "delete_contact")
+CHANGE_KINDS = CALENDAR_CHANGE_KINDS + ALARM_CHANGE_KINDS + SHORTCUT_CHANGE_KINDS + CONTACT_CHANGE_KINDS
+# What a contact change may set. phones and emails replace the lists whole.
+CONTACT_FIELDS = ("given_name", "family_name", "nickname", "organization", "relation", "phones", "emails", "birthday")
 OUTCOMES = ("applied", "edited", "dismissed", "failed", "expired")
 # Set by the host, never by the phone: the phone was set up again (a new key)
 # before it fetched the change, so it will never see it.
@@ -1307,7 +1313,7 @@ def _change_view(row: tuple[Any, ...]) -> dict[str, Any]:
                              "state": {"pending": "waiting"}.get(row[9], row[9])}
     if fields.get("title"):
         entry["title"] = fields["title"]
-    for key in ("label", "at", "time", "repeats", "seconds", "shortcut", "input"):
+    for key in ("label", "at", "time", "repeats", "seconds", "shortcut", "input", "name"):
         if fields.get(key):
             entry[key] = fields[key]
     if target:
@@ -1479,6 +1485,8 @@ def shares(sharing: dict[str, Any], need: str) -> bool:
         return calendar in ("full", "write_only") or sharing.get("reminders") is True
     if need in ("status", "focus", "alarms", "contacts", "shortcuts"):
         return sharing.get(need) is True
+    if need == "contacts_edit":
+        return sharing.get("contacts") is True and sharing.get("contacts_edit") is True
     if need == "phone":
         return sharing.get("status") is True or sharing.get("focus") is True
     if need == "phone_tool":
@@ -1494,6 +1502,7 @@ _NEED_WORDS = {"events": "their calendar", "events_write": "adding to their cale
                "reminders_write": "changes to their reminders",
                "calendars": "calendars or reminders", "status": "phone status", "focus": "Focus",
                "phone": "phone status or Focus", "alarms": "alarms and timers", "contacts": "contacts",
+               "contacts_edit": "changes to their contacts",
                "shortcuts": "Shortcuts to run", "phone_tool": "phone status, Focus, alarms or Shortcuts",
                "any": "anything"}
 
@@ -1593,7 +1602,7 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
         raise PhoneError("malformed", f"sharing.calendar must be one of {', '.join(CALENDAR_SHARING)}")
     sharing: dict[str, Any] = {"calendar": calendar}
     for field in ("reminders", "details", "attendee_emails", "status", "focus", "auto_add", "alarms", "contacts",
-                  "shortcuts", "shortcuts_auto", *READ_ONLY_SHARING):
+                  "shortcuts", "shortcuts_auto", "contacts_edit", *READ_ONLY_SHARING):
         sharing[field] = bool(_bool(value.get(field), f"sharing.{field}", False))
     # Add-only and read-only leaves nothing; read-only reminders need reminders.
     if sharing["calendar"] == "write_only" and sharing["calendar_read_only"]:
@@ -1604,6 +1613,8 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     sharing["attendee_emails"] = sharing["attendee_emails"] and sharing["details"]
     # Running without asking is part of letting Hermes run them.
     sharing["shortcuts_auto"] = sharing["shortcuts_auto"] and sharing["shortcuts"]
+    # Changing contacts is part of sharing them.
+    sharing["contacts_edit"] = sharing["contacts_edit"] and sharing["contacts"]
     sharing["past_days"] = _whole(value.get("past_days"), "sharing.past_days", 0, MAX_WINDOW_DAYS)
     sharing["future_days"] = _whole(value.get("future_days"), "sharing.future_days", 0, MAX_WINDOW_DAYS)
     return sharing
@@ -2278,6 +2289,8 @@ def _checked(db: sqlite3.Connection, device_id: str, kind: str, fields: dict[str
         return (*_check_alarm_change(db, device_id, kind, fields, target, now), None)
     if kind in SHORTCUT_CHANGE_KINDS:
         return (*_check_shortcut_change(db, device_id, fields, target), None)
+    if kind in CONTACT_CHANGE_KINDS:
+        return (*_check_contact_change(db, device_id, kind, fields, target), None)
     return _check_change(db, device_id, kind, fields, target)
 
 
@@ -2357,6 +2370,8 @@ def change_need(kind: str) -> str:
         return "alarms"
     if kind in SHORTCUT_CHANGE_KINDS:
         return "shortcuts"
+    if kind in CONTACT_CHANGE_KINDS:
+        return "contacts_edit"
     return "reminders_write"
 
 
@@ -2438,6 +2453,59 @@ def _check_shortcut_change(db: sqlite3.Connection, device_id: str, fields: dict[
     if text:
         clean["input"] = text
     return None, clean, f"Run {match['name']}"
+
+
+def _check_contact_change(db: sqlite3.Connection, device_id: str, kind: str, fields: dict[str, Any],
+                          target: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any], str]:
+    """(target, fields, summary) for adding, changing or deleting a contact,
+    or PhoneError. Only a picked person can be changed or deleted, by the id
+    action people gives; the phone applies it to that person's contact card.
+    ``name`` in the fields is the person's name as shared, for the card."""
+    existing: dict[str, Any] | None = None
+    clean_target: dict[str, Any] | None = None
+    if kind == "add_contact":
+        if target:
+            raise PhoneError("malformed", "add_contact takes no target")
+    else:
+        if sorted(set(target) - {"contact_id"}):
+            raise PhoneError("malformed", "target is {contact_id}")
+        contact_id = _item_id(target.get("contact_id"), "contact_id")
+        row = db.execute("SELECT name FROM contacts WHERE device=? AND id=?", (device_id, contact_id)).fetchone()
+        if row is None:
+            raise PhoneError("unknown_contact", "No picked person has that id; find them with action people first")
+        existing = {"name": row[0]}
+        clean_target = {"contact_id": contact_id}
+    if kind == "delete_contact":
+        if fields:
+            raise PhoneError("malformed", "delete_contact takes no fields")
+        return clean_target, {"name": existing["name"]}, f"Delete {existing['name']}"
+    unknown = sorted(set(fields) - set(CONTACT_FIELDS))
+    if unknown:
+        names = ", ".join(json.dumps(name)[1:-1] for name in unknown[:5])
+        raise PhoneError("malformed", f"Unknown fields for {kind}: {names}. Known: {', '.join(CONTACT_FIELDS)}")
+    clean: dict[str, Any] = {}
+    for key in ("given_name", "family_name", "nickname", "organization"):
+        value = clean_text(fields.get(key), key, MAX_NAME_CHARS)
+        if value:
+            clean[key] = value
+    relation = clean_text(fields.get("relation"), "relation", MAX_RELATION_CHARS)
+    if relation:
+        clean["relation"] = relation
+    for key, inner in (("phones", "number"), ("emails", "address")):
+        if fields.get(key) is not None:
+            clean[key] = _contact_values(fields.get(key), key, inner)
+    birthday = _birthday(fields.get("birthday"), "birthday")
+    if birthday:
+        clean["birthday"] = birthday
+    if not clean:
+        raise PhoneError("malformed", f"{kind} needs at least one of {', '.join(CONTACT_FIELDS)}")
+    if kind == "add_contact":
+        name = " ".join(part for part in (clean.get("given_name"), clean.get("family_name")) if part)
+        name = name or clean.get("organization") or ""
+        if not name:
+            raise PhoneError("malformed", "add_contact needs given_name, family_name or organization")
+        return None, {**clean, "name": name}, f"Add {name}"
+    return clean_target, {**clean, "name": existing["name"]}, f"Change {existing['name']}"
 
 
 def _parse_shortcuts(value: Any) -> list[dict[str, Any]]:

@@ -3337,6 +3337,12 @@ whether notes and attendees are included (off by default).
   edits made in Contacts arrive, and Conduit flags a person it can't read
   while the host keeps their last copy.
 
+- **Contact changes (plugin 0.160+).** When the user also lets Hermes change
+  contacts, `conduit_contacts` gains `add` (a new contact, who joins the
+  picked people), `update` (a picked person's card, by `contact_id`; `phones`
+  and `emails` replace the lists whole) and `delete`. Each is a pending change
+  the phone always asks about, never added without asking.
+
 - **Shortcuts (plugin 0.159+).** When the user lets Hermes run Shortcuts, they
   list the ones it may run in Conduit, by name, each with what it's for in
   their words. `conduit_phone` gains `shortcuts` (that list) and

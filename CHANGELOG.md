@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.160.0 (2026-11-10)
+
+### New and improved
+- Hermes can ask to add a contact, or change or delete one of the people you
+  picked for it, when you let it in Conduit (Calendar & phone > People).
+  Conduit always asks you first. Needs a Conduit update too.
+
 ## 0.159.0 (2026-11-10)
 
 ### New and improved
