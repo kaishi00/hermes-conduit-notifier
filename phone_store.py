@@ -1398,14 +1398,30 @@ class PhoneStore:
                 # (Japanese, Chinese) is matched anywhere in it.
                 haystack = " ".join([*map(str, labels), row[5] or "", row[6] or "", row[2]]).casefold()
                 tokens = set(re.findall(r"\w+", haystack))
-                score = sum(1 for word in words if word in tokens
-                            or (len(word) > 3 and word.endswith("s") and word[:-1] in tokens)
+                score = sum(1 for word in words if not tokens.isdisjoint(_word_forms(word))
                             or (not word.isascii() and word in haystack))
                 if not score:
                     continue
             scored.append((score, row[9], {key: value for key, value in entry.items() if value not in (None, [], False)}))
         scored.sort(key=lambda item: (-item[0], -item[1]))
         return [item[2] for item in scored[:limit]], len(scored)
+
+
+def _word_forms(word: str) -> set[str]:
+    """A search word and its plain English singular and plural, so
+    "umbrella" finds "umbrellas", "beaches" finds "beach" and "ponies"
+    finds "pony"."""
+    forms = {word, word + "s", word + "es"}
+    if len(word) > 3:
+        if word.endswith("ies"):
+            forms.add(word[:-3] + "y")
+        elif word.endswith("es"):
+            forms.update((word[:-2], word[:-1]))
+        elif word.endswith("s"):
+            forms.add(word[:-1])
+        elif word.endswith("y"):
+            forms.add(word[:-1] + "ies")
+    return forms
 
 
 # --- Rows and views -------------------------------------------------------------------

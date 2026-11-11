@@ -2147,7 +2147,7 @@ PHOTOS = [
     {"id": "ph_beach", "at": "2026-08-02T18:30:00+01:00", "kind": "photo", "favorite": True,
      "labels": ["beach", "sunset", "sky", "Beach"], "place": "Brighton", "w": 4032, "h": 3024},
     {"id": "ph_receipt", "at": "2026-10-10T12:05:00+01:00", "kind": "photo",
-     "labels": ["receipt", "document"], "text": "Hardware Co. Total 23.40", "place": "London"},
+     "labels": ["receipt", "document"], "text": "Hardware Co. 2 umbrellas Total 23.40", "place": "London"},
     {"id": "ph_shot", "at": "2026-10-12T09:00:00+01:00", "kind": "screenshot", "labels": ["text"],
      "text": "Boarding pass LHR"},
     {"id": "ph_dog", "at": "2026-10-13T08:00:00+01:00", "labels": ["dog", "beach"], "place": "Brighton"},
@@ -2187,6 +2187,10 @@ def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, ipho
     assert _search(store, query="bea") == ([], 0)
     assert [photo["id"] for photo in _search(store, query="beach beach beach dog")[0]] == ["ph_dog", "ph_beach"]
     assert _search(store, query="!!! 🐶") == ([], 0)
+    # Singular finds plural and back.
+    assert [photo["id"] for photo in _search(store, query="beaches")[0]] == ["ph_dog", "ph_beach"]
+    assert [photo["id"] for photo in _search(store, query="umbrella")[0]] == ["ph_receipt"]
+    assert [photo["id"] for photo in _search(store, query="passes")[0]] == ["ph_shot"]
     assert store.status(DEVICE)["device"]["counts"]["photos"] == 4
     # A diff deletes and upserts; a bad photo is left out, not the batch.
     store.ingest(iphone.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={
