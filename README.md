@@ -1464,6 +1464,15 @@ question or a small task doesn't start a workstream. Change it in Conduit
   can't be posted goes to the Bot Chat. Asks between bots, answers and notes
   stay the Bot Chat's, and a room with other people's agents in it starts no
   work.
+- A workstream that hands part of its work to Hermes' delegate agents
+  (`delegate_task`) keeps working while they run (plugin 0.163.1+). Hermes
+  runs them in the background and gives the workstream their results as its
+  next turn, so the turn that started them ends first: the workstream stays
+  running, `work_list` says it's waiting for them (`waiting_for`), Conduit's
+  card says so too, and the Bot Chat hears it finished only when the turn
+  with their results ends. If no such turn starts within two minutes of the
+  last agent ending, it settles with what it had said. A turn that failed or
+  was stopped isn't held.
 - A workstream can read the bot's other workstreams with `work_list` and
   `work_read` (read only, and not the asks between bots), so it can use what
   another found or made without the coordinator passing it on. It can't send

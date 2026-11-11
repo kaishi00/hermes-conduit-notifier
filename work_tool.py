@@ -471,6 +471,22 @@ _RUNNING_STATES = ("starting", "running", "needs_you")
 _replies: dict[str, str] = {}
 # A call's grace timers (call_ended), cancelled when the plugin unloads.
 _call_grace: set = set()
+# The delegate agents each workstream started that still run, by (home, ref):
+# Hermes runs a chat's delegate_task in the background and gives the chat
+# their results as a new turn, so the turn that started them ends first.
+_agents: dict[tuple[str, str], set[str]] = {}
+# A workstream whose turn ended while its agents ran: (home, ref) -> that
+# turn's reply and when it began. It stays running until the turn their
+# results start ends (app issue 2142), or settles with this (_settle_held).
+_held: dict[tuple[str, str], tuple[str, Optional[float]]] = {}
+# The timers that settle a held workstream no turn came for.
+_held_timers: dict[tuple[str, str], Any] = {}
+# A workstream stopped while its agents ran -> when its last one ended (0
+# while they run). The turns their results start are stopped too (_turn_started).
+_stopped_agents: dict[tuple[str, str], float] = {}
+# How long after its last agent ends a held workstream waits for the turn
+# Hermes starts with their results before it settles with what it had said.
+HELD_SETTLE_S = 120.0
 # This copy's profile home, as it was when Hermes registered the plugin: each
 # profile loads its own copy, so this names its bot whatever thread asks.
 _pinned_home: Optional[Path] = None
@@ -844,6 +860,16 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
     store.update(work.ref, status="stopped")
     with _wake_lock:
         _redirecting.discard((str(home), work.ref))
+        _held.pop((str(home), work.ref), None)  # a stop is its end, whatever its agents bring
+        waiting = _held_timers.pop((str(home), work.ref), None)
+        if _agents.get((str(home), work.ref)):
+            # Hermes stops them with a running turn only: the turns their
+            # results start find the row stopped and are stopped too.
+            if len(_stopped_agents) > 512:
+                _stopped_agents.clear()
+            _stopped_agents[(str(home), work.ref)] = 0.0
+    if waiting is not None:
+        waiting.cancel()
     try:
         stopped = broker.stop(work.session_id)
     except Exception as error:  # noqa: BLE001 — a stop that didn't happen leaves it as it was
@@ -1038,6 +1064,13 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
             row["result"] = "held: the call that started it tells the user first; you'll get it once the call ends (in two hours at most)"
         else:
             row["result"] = _cut(work.last_result, result_chars)
+    if work.kind == "workstream" and work.status in _RUNNING_STATES:
+        here = _home()
+        waits = awaited_agents(here, work.ref) if here is not None else 0
+        if waits:
+            # Its own turn has ended: Hermes gives it their results as its next.
+            row["waiting_for"] = (f"{waits} background agent{'' if waits == 1 else 's'} it started; it carries on "
+                                  "by itself when they finish")
     steps = (work.progress or {}).get("steps")
     if steps:
         # The workstream's own words: data, as its report is.
@@ -1905,6 +1938,8 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
                 "note": f"{work.ref} was waiting on the user's answer to its question: this answered it, "
                         "and it carries on."}
     store.set_meta(_STOPPED_START + work.ref, "")  # sent words start it again
+    with _wake_lock:
+        _stopped_agents.pop((str(home), work.ref), None)
     item = store.outbox_add(work.ref, kind, work.session_id, words, own=own)
     # Marked running first: a turn that ends before the send returns then
     # settles the row, and nothing after the send puts it back. Idle work
@@ -3695,6 +3730,20 @@ def _stopped_before_its_turn(home: Path, work: work_store.Work) -> bool:
     return time.time() - at < _STOPPED_START_S
 
 
+def _stopped_with_agents(home: Path, ref: str) -> bool:
+    """True for a turn of a workstream that was stopped while its agents
+    ran: one their results started, while they run and just after."""
+    key = (str(home), ref)
+    with _wake_lock:
+        ended = _stopped_agents.get(key)
+        if ended is None:
+            return False
+        if _agents.get(key) or (ended and time.time() - ended < HELD_SETTLE_S):
+            return True
+        del _stopped_agents[key]  # long over: this turn is the user's words
+        return False
+
+
 def _stop_late_turn(home: Path, session_id: str) -> None:
     """Off the hook's thread: the turn is still beginning."""
     try:
@@ -3723,6 +3772,12 @@ def _turn_started(session_id: Any) -> bool:
         # By its workstream, not its session: a mid-turn compaction moves the
         # session the turn ends under.
         _turn_began[_began_key(home, work.ref)] = began
+        # The turn its agents' results started (or the user's words): its own
+        # end settles the row.
+        _held.pop((str(home), work.ref), None)
+        waiting = _held_timers.pop((str(home), work.ref), None)
+    if waiting is not None:
+        waiting.cancel()
     # On disk too: after a restart, the steps since then are the turn it stopped.
     work_store.Store(home).update(work.ref, turn_at=began)
     if work_store.Store(home).get_meta(_CHECK + work.ref):
@@ -3735,9 +3790,10 @@ def _turn_started(session_id: Any) -> bool:
     # The user writing in its chat after a resolve removed its worktree:
     # back before the turn's first tool runs there.
     _worktree_back(work_store.Store(home), work.ref)
-    if work.status == "stopped" and _stopped_before_its_turn(home, work):
+    if work.status == "stopped" and (_stopped_before_its_turn(home, work) or _stopped_with_agents(home, work.ref)):
         # The user stopped this start before its brief's turn began: that
         # turn is the start's, so it's stopped too, and the row stays stopped.
+        # The same for a turn the results of a stopped workstream's agents start.
         threading.Thread(target=_stop_late_turn, args=(home, str(session_id)),
                          name="conduit-work-stop", daemon=True).start()
         return True
@@ -3822,12 +3878,27 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         # itself. It stays interrupted, its slot free.
         store.update(work.ref, status="interrupted", last_result=text, only_if=_SETTLES)
         return True
+    with _wake_lock:
+        began = _turn_began.pop(_began_key(home, work.ref), None)
+        # Agents it started still run, and Hermes gives it their results as a
+        # new turn: it isn't finished, so its row stays running and its
+        # coordinator hears nothing until that turn ends.
+        holds = not failed and bool(_agents.get((str(home), work.ref)))
+        if holds:
+            _held[(str(home), work.ref)] = (text, began)
+    if holds:
+        return True
+    _settle(home, store, work, text, failed=failed, interrupted=interrupted, began=began)
+    return True
+
+
+def _settle(home: Path, store: work_store.Store, work: work_store.Work, text: str, *, failed: bool,
+            interrupted: bool, began: Optional[float]) -> None:
+    """Settles a workstream whose turn ended with ``text``, and tells its coordinator."""
     link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
     tail = f" {link}" if link else ""
     current = store.get(work.ref) or work  # its checklist may have changed during the turn
     marked = current.progress or {}
-    with _wake_lock:
-        began = _turn_began.pop(_began_key(home, work.ref), None)
     # No start recorded (the turn began before the plugin loaded): an old
     # mark can't be told from this turn's, so it isn't taken.
     ready = bool(marked.get("ready")) and began is not None and float(marked.get("ready_at") or 0) >= began
@@ -3860,7 +3931,7 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         now = store.get(work.ref)
         if now is not None and now.status == "stopped":
             _stopped_report(home, store, now, text, failed=failed, interrupted=interrupted)
-        return True
+        return
     # A turn that ended on its own: a later restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
     if not work.closed_at and (work.coordinator or _in_room(work)):
@@ -3869,7 +3940,113 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         _report(home, work, line, kind="call" if _call_of(work) else "work", bot_chat_extra=options)
         if shown:
             _shown_named(store, work.ref, shown_turn)
-    return True
+
+
+def agent_started(child: Any, parent: Any) -> None:
+    """A chat started a delegate agent (subagent_start): one a workstream
+    started is counted as its own, so its turn's end waits for it."""
+    if not (isinstance(child, str) and child and isinstance(parent, str) and parent):
+        return
+    home, work = _workstream(parent)
+    if home is None or work is None:
+        return
+    with _wake_lock:
+        if len(_agents) > 512:
+            # Never a held workstream's: it would read as finished while its agents run.
+            for stale in [owner for owner in _agents if owner not in _held][:256]:
+                del _agents[stale]
+        _agents.setdefault((str(home), work.ref), set()).add(child)
+
+
+def agent_stopped(child: Any, parent: Any = None) -> None:
+    """A delegate agent ended (subagent_stop). When it was the last one a
+    held workstream waited for, Hermes starts that workstream's next turn
+    with their results, and its end settles the row; if none starts (their
+    results weren't delivered), it settles with what it had said."""
+    if not (isinstance(child, str) and child):
+        return  # no agent named: none is known to have ended
+    key = None
+    with _wake_lock:
+        for owner, children in _agents.items():
+            if child in children:
+                key = owner
+                break
+    if key is None and isinstance(parent, str) and parent:
+        # Hermes may report the id the agent ended under, which a compaction
+        # moved from the one it started with: one of its workstream's then.
+        home, work = _workstream(parent)
+        if home is not None and work is not None:
+            key = (str(home), work.ref)
+    if key is None:
+        return
+    with _wake_lock:
+        children = _agents.get(key)
+        if not children:
+            return
+        if child in children:
+            children.discard(child)
+        else:
+            children.pop()
+        if children:
+            return
+        del _agents[key]
+        if key in _stopped_agents:
+            _stopped_agents[key] = time.time()  # their results' turn may still come
+        if key not in _held:
+            return
+        timer = threading.Timer(HELD_SETTLE_S, _settle_held, args=(key,))
+        timer.daemon = True
+        earlier = _held_timers.pop(key, None)
+        _held_timers[key] = timer
+    if earlier is not None:
+        earlier.cancel()
+    timer.start()
+
+
+def _settle_held(key: tuple[str, str], again: bool = True) -> None:
+    """No turn came for a held workstream after its last agent ended: it's
+    done, with the reply its last turn gave."""
+    began_key = _began_key(Path(key[0]), key[1])
+    with _wake_lock:
+        _held_timers.pop(key, None)
+        held = _held.pop(key, None)
+        # A turn of it runs (its start clears the hold, and may be doing so now): its end settles the row.
+        if held is None or began_key in _turn_began:
+            return
+    try:
+        home = Path(key[0])
+        store = work_store.Store(home)
+        work = store.get(key[1])
+        if work is None or work.status not in _SETTLES:
+            return  # stopped or settled meanwhile
+        _settle(home, store, work, held[0], failed=False, interrupted=False, began=held[1])
+        with _wake_lock:
+            raced = began_key in _turn_began
+        if raced:
+            # A turn began while this settled it: the row is that turn's again, so its end isn't skipped as
+            # already settled and the coordinator hears what the agents brought.
+            store.update(key[1], status="running", closed_at=0.0, resolved_by="", error="",
+                         only_if=("done", "ready"))
+    except Exception:  # noqa: BLE001 — a timer's thread: nothing to raise into
+        logger.warning("conduit_push: couldn't settle a workstream after its agents ended", exc_info=True)
+        if not again:
+            return
+        # Once more, so a busy registry doesn't leave the row working with nothing left to settle it.
+        retry = threading.Timer(HELD_SETTLE_S, _settle_held, args=(key, False))
+        retry.daemon = True
+        with _wake_lock:
+            if began_key in _turn_began or key in _held:
+                return
+            _held[key] = held
+            _held_timers[key] = retry
+        retry.start()
+
+
+def awaited_agents(home: Path, ref: str) -> int:
+    """How many delegate agents a workstream waits for: those it started
+    that still run, once its own turn has ended."""
+    with _wake_lock:
+        return len(_agents.get((str(home), ref)) or ()) if (str(home), ref) in _held else 0
 
 
 def _ledger_turn_end(home: Path, store: work_store.Store, work: work_store.Work, text: str, *, failed: bool,
@@ -4189,6 +4366,9 @@ def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
             step = open_steps[-1]
             row["step"] = _shown_tool(step["tool"]) + (f": {step['summary']}" if step["summary"] else "")
     row["uncertain"] = _app_uncertain(store, work)
+    # Its own turn has ended and this many delegate agents it started still
+    # run: its card says it waits for them (app issue 2142).
+    row["agents"] = awaited_agents(store.home, work.ref) if work.status in _RUNNING_STATES else 0
     tree = _worktree_of(store, work.ref)
     # Its own branch, for the user to merge (M4); "" when it has none.
     row["branch"] = str(tree.get("branch") or "") if tree else ""
@@ -5290,6 +5470,11 @@ def stop() -> None:
         _turn_began.clear()
         _replies.clear()
         _redirecting.clear()
+        _agents.clear()
+        _held.clear()
+        _stopped_agents.clear()
+        held_timers = list(_held_timers.values())
+        _held_timers.clear()
         _screen_watchers.clear()
         _screen_generation[0] += 1
     with _ask_lock:
@@ -5307,6 +5492,8 @@ def stop() -> None:
         if timer is not None:
             timer.cancel()
     for timer in grace:
+        timer.cancel()
+    for timer in held_timers:
         timer.cancel()
     work_watch.stop()
 

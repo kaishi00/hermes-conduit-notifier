@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.163.1 (2026-11-11)
+
+### Fixes
+- A workstream that handed part of its work to background agents was
+  reported as finished as soon as it started them, and again when they came
+  back. It now stays working until their results are in, and its card in
+  Conduit says how many agents it's waiting for.
+  Stopping it while it waits keeps it stopped when their results arrive.
+
 ## 0.163.0 (2026-11-11)
 
 ### New and improved

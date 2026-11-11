@@ -1155,6 +1155,8 @@ def _subagent_start(**kwargs: Any) -> None:
     if child:
         with _children_lock:
             _child_sessions.add(child)
+    # One a workstream started keeps it working past its own turn's end.
+    _quietly(work_tool.agent_started, child, _text(kwargs.get("parent_session_id")))
 
 
 def _subagent_stop(**kwargs: Any) -> None:
@@ -1181,6 +1183,7 @@ def _subagent_stop(**kwargs: Any) -> None:
             for learned in [key for key, root in _compacted_children.items() if root == reported]:
                 del _compacted_children[learned]
     parent = _text(kwargs.get("parent_session_id"))
+    _quietly(work_tool.agent_stopped, reported if child else "", parent)
     # A subagent that ends inside the turn that started it (delegate_task
     # waits for it) is part of that turn's reply: only one that outlives it,
     # a background task, notifies. Nor does a nested one, or a muted cron job's.
