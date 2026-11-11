@@ -2191,6 +2191,8 @@ def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, ipho
     assert [photo["id"] for photo in _search(store, query="beaches")[0]] == ["ph_dog", "ph_beach"]
     assert [photo["id"] for photo in _search(store, query="umbrella")[0]] == ["ph_receipt"]
     assert [photo["id"] for photo in _search(store, query="passes")[0]] == ["ph_shot"]
+    assert phone._word_forms("movies") >= {"movie", "movy"}
+    assert "flies" in phone._word_forms("fly") and "pony" in phone._word_forms("ponies")
     # Text without spaces is searched inside, for any word.
     store.ingest(iphone.seal(_photo_batch("batch-0001b", sent_at="2026-10-14T08:00:10+01:00", photos={
         "upsert": [{"id": "ph_tokyo", "at": "2026-10-01T07:00:00+01:00", "text": "東京タワー合計2024円"}]})))

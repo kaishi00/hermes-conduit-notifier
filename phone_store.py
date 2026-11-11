@@ -1421,18 +1421,18 @@ _UNSPACED_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\
 
 def _word_forms(word: str) -> set[str]:
     """A search word and its plain English singular and plural, so
-    "umbrella" finds "umbrellas", "beaches" finds "beach" and "ponies"
-    finds "pony"."""
+    "umbrella" finds "umbrellas", "beaches" finds "beach", "ponies" finds
+    "pony", "movies" finds "movie" and "fly" finds "flies"."""
     forms = {word, word + "s", word + "es"}
+    if word.endswith("y") and len(word) > 2:
+        forms.add(word[:-1] + "ies")
     if len(word) > 3:
         if word.endswith("ies"):
-            forms.add(word[:-3] + "y")
+            forms.update((word[:-3] + "y", word[:-1]))
         elif word.endswith("es"):
             forms.update((word[:-2], word[:-1]))
         elif word.endswith("s"):
             forms.add(word[:-1])
-        elif word.endswith("y"):
-            forms.add(word[:-1] + "ies")
     return forms
 
 
