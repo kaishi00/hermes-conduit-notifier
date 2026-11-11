@@ -86,6 +86,9 @@ _REFERENCE_LINE_RE = re.compile(
 # note (cron_bot_chat.HEADER, kept equal by tests/test_cron_bot_chat.py): a
 # user row, whose `@image:`/`@file:` lines are files the run delivered.
 CRON_NOTE_PREFIX = '[Cron job "'
+# Its whole first line, so a message that only starts like one isn't read
+# as a report.
+_CRON_NOTE_HEADER_RE = re.compile(r'\[Cron job ".*" report: shown in the chat, no reply asked for\]$', re.MULTILINE)
 _MD_LINK_RE = re.compile(r"(!?)\[([^\]\n]{0,300})\]\((https?://[^\s)<>]+)\)")
 _BARE_URL_RE = re.compile(r"(?<![(\[<\"'=])\bhttps?://[^\s<>\"'`)\]]+")
 _FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
@@ -202,7 +205,7 @@ def assistant_items(text: str) -> Iterable[tuple]:
 
 
 def user_items(text: str) -> Iterable[tuple]:
-    if text and text.startswith(CRON_NOTE_PREFIX):
+    if text and text.startswith(CRON_NOTE_PREFIX) and _CRON_NOTE_HEADER_RE.match(text):
         # A cron report's files are the run's deliveries, as its MEDIA tags
         # were in Hermes' own turn (issue 581), never files the user sent.
         for match in _REFERENCE_LINE_RE.finditer(_prose(text[:MAX_SCAN_CHARS])):
