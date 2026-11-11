@@ -1419,6 +1419,13 @@ class PhoneStore:
 _UNSPACED_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f\U00020000-\U0003134f]")
 
 
+_VES_PLURALS = {singular: plural for singular, plural in (
+    ("leaf", "leaves"), ("loaf", "loaves"), ("knife", "knives"), ("wife", "wives"), ("life", "lives"),
+    ("half", "halves"), ("shelf", "shelves"), ("wolf", "wolves"), ("calf", "calves"), ("thief", "thieves"),
+    ("elf", "elves"), ("self", "selves"), ("scarf", "scarves"), ("hoof", "hooves"), ("sheaf", "sheaves"),
+)}
+
+
 def _word_forms(word: str) -> set[str]:
     """A search word and its plain English singular and plural, so
     "umbrella" finds "umbrellas", "beaches" finds "beach", "ponies" finds
@@ -1427,15 +1434,15 @@ def _word_forms(word: str) -> set[str]:
     forms = {word, word + "s", word + "es"}
     if word.endswith("y") and len(word) > 2:
         forms.add(word[:-1] + "ies")
-    if word.endswith("fe"):
-        forms.add(word[:-2] + "ves")
-    elif word.endswith("f"):
-        forms.add(word[:-1] + "ves")
+    # Only the nouns that really take -ves, so "cafe" doesn't find "caves".
+    if word in _VES_PLURALS:
+        forms.add(_VES_PLURALS[word])
     if len(word) > 3:
         if word.endswith("ies"):
             forms.update((word[:-3] + "y", word[:-1]))
         elif word.endswith("ves"):
-            forms.update((word[:-3] + "f", word[:-3] + "fe", word[:-1]))
+            forms.update(singular for singular, plural in _VES_PLURALS.items() if plural == word)
+            forms.add(word[:-1])
         elif word.endswith("es"):
             forms.update((word[:-2], word[:-1]))
         elif word.endswith("s"):
