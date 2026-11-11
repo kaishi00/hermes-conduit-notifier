@@ -259,6 +259,22 @@ def test_the_router_follows_what_was_learned_within_floors_and_ceilings():
     assert rows[0]["factor"] and '"scope": "place"' in rows[0]["factor"]
 
 
+def test_learning_never_sends_what_the_model_called_useless_or_wrote_no_line_for():
+    # Thumbs up on everything (Eric's host, 2026-11-11): five remembered facts
+    # the model valued 1 and wrote no line for went out as pushes, in memory's words.
+    liked = prefs.learn([_thumb(n, DAY - n * 3600, 1.0, "calm") for n in range(60)], DAY)
+    assert prefs.score(liked, prefs.attributes("fact", prefs.place("", "calm"), prefs.UNDATED), value=1,
+                       picked=False) >= prefs.SURFACE_AT
+    pick = candidates.pulse_picks.dumps({"line": "Your warranty ends Friday", "shape": "plain"})
+    rows = [candidate(origin="memory", item_id=1, kind="fact", chat_id="calm", value=1, bring_up=False),
+            candidate(origin="memory", item_id=2, kind="fact", chat_id="calm", value=1, bring_up=False, pick=pick),
+            candidate(chat_id="calm", value=5, bring_up=False),
+            candidate(chat_id="calm", value=2, bring_up=False, pick=pick), candidate(chat_id="calm", value=3)]
+    candidates.route(rows, now=DAY, learned=liked)
+    assert [row["decision"] for row in rows] == [candidates.NOT_PICKED] * 3 + [candidates.SURFACED] * 2
+    assert not rows[0]["level"] and rows[0]["score"] >= prefs.SURFACE_AT
+
+
 def test_floors_come_up_past_the_five():
     rows = [candidate(value=4) for _ in range(6)]
     # Overdue promises from the chat the user turned down, the model's least valued: last in line.

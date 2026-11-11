@@ -1019,3 +1019,9 @@ def test_a_failing_env_lookup_is_a_reason_not_a_500(client, api_key, openai, mon
     status = client.get(f"{BASE}/gpt-live/status")
     assert status.status_code == 200 and status.json()["api"]["available"] is False
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 503
+
+
+def test_a_block_whose_note_is_the_first_line_goes_whole():
+    briefing = "[You share memory with the user's Hermes agent.]\n<hermes_memory>\n" + "Likes tea.\n" * 50 + "\n</hermes_memory>\n[Rules.]"
+    text, changed = api.gpt_live._clip_block(briefing, "hermes_memory", 10_000)
+    assert changed and text == "\n[Rules.]"

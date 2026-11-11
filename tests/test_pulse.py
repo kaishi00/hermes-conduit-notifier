@@ -2211,8 +2211,13 @@ def test_each_kind_comes_from_its_own_speaker():
         raw("commitment", "I'll renew the lease"), raw("commitment", "Kept for you to purge"),
         raw("promise", "I'll renew the lease"), raw("fact", "my sister is called Ana"),
         raw("fact", "the rollback tag")]}), chunk, UTC)
-    # Hermes's words aren't the user's commitment, nor the user's Hermes's promise
-    assert [(i["kind"], i["message_id"]) for i in items] == [("commitment", 1), ("fact", 1), ("fact", 2)]
+    # Hermes's words aren't the user's commitment, nor the user's Hermes's promise,
+    # nor a fact about the user (what Hermes read while doing a job, Eric's host 2026-11-11)
+    assert [(i["kind"], i["message_id"]) for i in items] == [("commitment", 1), ("fact", 1)]
+    assert "is that job's instructions, not the user telling Hermes about themselves" in memory.INSTRUCTIONS
+    assert "never what Hermes read in their mail, messages, files or accounts" in memory.INSTRUCTIONS
+    # Asked to remember what Hermes read out, the model is told which line a fact must come from
+    assert "then its evidence is the user's line asking" in memory.INSTRUCTIONS
 
 
 def test_only_a_do_it_cards_reminder_sent_after_it_counts_as_handed_on(live):

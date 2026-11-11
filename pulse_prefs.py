@@ -97,6 +97,7 @@ LIMIT = 4.0
 # point of the model's value guess above or below 3, plus PICK when the
 # model picked it (a follow-up check that decided to tell counts as a pick).
 # At SURFACE_AT it comes up: with nothing learned, exactly the model's picks.
+# One the model didn't pick comes up only when pulse_candidates.wanted.
 VALUE_STEP = 0.5
 PICK = 2.5
 SURFACE_AT = 1.25

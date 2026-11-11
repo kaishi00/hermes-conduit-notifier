@@ -642,7 +642,7 @@ def _clip_block(briefing: str, tag: str, over_bytes: int) -> tuple:
         note = briefing.rfind("\n", 0, start)
         intro = briefing[note + 1:start] if note >= 0 else ""
         names_it = ("memory" if tag == "hermes_memory" else "personality") in intro.lower()
-        cut_from = note if intro.startswith("[") and intro.endswith("]") and names_it else start
+        cut_from = max(note, 0) if intro.startswith("[") and intro.endswith("]") and names_it else start
         return briefing[:cut_from] + briefing[end + len(closing):], True
     kept = encoded[:keep].decode("utf-8", "ignore")
     line = kept.rfind("\n")
