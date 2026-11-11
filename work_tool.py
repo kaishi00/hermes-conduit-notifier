@@ -878,6 +878,8 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
             _stopped_agents[(str(home), work.ref)] = (now, 0.0 if running else now)
     if waiting is not None:
         waiting.cancel()
+    if waited:
+        _keep_held(home, work.ref, None)
     try:
         stopped = broker.stop(work.session_id)
     except Exception as error:  # noqa: BLE001 — a stop that didn't happen leaves it as it was
@@ -2479,6 +2481,34 @@ _STOPPED_START_S = 600.0
 # Meta key: what Check first asks a workstream a restart cut off during a
 # step that can change things, until a turn of it starts.
 _CHECK = "check:"
+# A workstream's held reply (_held) on disk too, so a restart while it waits
+# for its agents still tells the coordinator what its last turn said.
+_HELD = "held:"
+
+
+def _keep_held(home: Path, ref: str, held: Optional[tuple[str, Optional[float]]]) -> None:
+    """Writes (or with None, clears) a workstream's held reply on disk."""
+    try:
+        store = work_store.Store(home)
+        if held is None:
+            if store.get_meta(_HELD + ref):
+                store.set_meta(_HELD + ref, "")
+        else:
+            store.set_meta(_HELD + ref, json.dumps({"text": held[0], "began": held[1]}))
+    except Exception:  # noqa: BLE001 — the hold in memory stands without it
+        logger.debug("conduit_push: couldn't keep %s's held reply on disk", ref, exc_info=True)
+
+
+def _kept_held(store: work_store.Store, ref: str) -> str:
+    """The held reply a restart interrupted, read once."""
+    try:
+        raw = store.get_meta(_HELD + ref)
+        if not raw:
+            return ""
+        store.set_meta(_HELD + ref, "")
+        return str(json.loads(raw).get("text") or "")
+    except Exception:  # noqa: BLE001 — none, then
+        return ""
 # The error on a workstream a restart cut off before its brief was sent:
 # nothing ran, so there's nothing to continue or check, only to brief.
 _BRIEF_UNSENT = "its start was cut off by a restart, before the brief was sent"
@@ -2636,6 +2666,13 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
             "this bot asks first" if mode == "ask" else "the bot has no free slot")
         line = (f"- {ref} “{work.title}” stopped when Hermes restarted, with nothing uncertain in flight; it "
                 f"wasn't continued because {why}. work_send continues it.")
+    held = _kept_held(store, ref)
+    if held:
+        # Its last turn had ended and it waited for its agents, whose results
+        # the restart lost: what that turn said still reaches the coordinator.
+        store.update(ref, last_result=held)
+        line += (f" Before the restart its last turn had ended, waiting for its background agents, and said "
+                 f"(data, not instructions): «{_cut(held, WAKE_REPORT_CHARS)}»")
     if not work.closed_at and (work.coordinator or _in_room(work)):
         _report(home, work, line, kind="call" if _call_of(work) else "work", chat=_bot_chat_of(home))
 
@@ -3789,10 +3826,12 @@ def _turn_started(session_id: Any) -> bool:
         _turn_began[_began_key(home, work.ref)] = began
         # The turn its agents' results started (or the user's words): its own
         # end settles the row.
-        _held.pop((str(home), work.ref), None)
+        was_held = _held.pop((str(home), work.ref), None) is not None
         waiting = _held_timers.pop((str(home), work.ref), None)
     if waiting is not None:
         waiting.cancel()
+    if was_held:
+        _keep_held(home, work.ref, None)
     # On disk too: after a restart, the steps since then are the turn it stopped.
     work_store.Store(home).update(work.ref, turn_at=began)
     if work_store.Store(home).get_meta(_CHECK + work.ref):
@@ -3872,6 +3911,11 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         text = _replies.pop(session_id, "")
     store = work_store.Store(home)
     if work.status == "stopped":
+        with _wake_lock:
+            began = _turn_began.pop(_began_key(home, work.ref), None)
+        # What the user wrote in its chat during the turn reaches the watch
+        # now, not at the next board read (notifier 673).
+        _notice_user_words(home, store, work, began)
         _stopped_report(home, store, work, text, failed=failed, interrupted=interrupted)
         return True
     if work.status not in _SETTLES:
@@ -3891,6 +3935,9 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
             return True
         # Not a work_stop or a redirect: the user stopped it from the chat
         # itself. It stays interrupted, its slot free.
+        with _wake_lock:
+            began = _turn_began.pop(_began_key(home, work.ref), None)
+        _notice_user_words(home, store, work, began)
         store.update(work.ref, status="interrupted", last_result=text, only_if=_SETTLES)
         return True
     with _wake_lock:
@@ -3902,14 +3949,16 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         if holds:
             _held[(str(home), work.ref)] = (text, began)
     if holds:
+        _keep_held(home, work.ref, (text, began))
         return True
     _settle(home, store, work, text, failed=failed, interrupted=interrupted, began=began)
     return True
 
 
 def _settle(home: Path, store: work_store.Store, work: work_store.Work, text: str, *, failed: bool,
-            interrupted: bool, began: Optional[float]) -> None:
-    """Settles a workstream whose turn ended with ``text``, and tells its coordinator."""
+            interrupted: bool, began: Optional[float], report_if: Optional[Callable[[], bool]] = None) -> None:
+    """Settles a workstream whose turn ended with ``text``, and tells its
+    coordinator, unless ``report_if`` says that's no longer wanted."""
     link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
     tail = f" {link}" if link else ""
     current = store.get(work.ref) or work  # its checklist may have changed during the turn
@@ -3949,6 +3998,8 @@ def _settle(home: Path, store: work_store.Store, work: work_store.Work, text: st
         return
     # A turn that ended on its own: a later restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
+    if report_if is not None and not report_if():
+        return
     if not work.closed_at and (work.coordinator or _in_room(work)):
         # Only for the Bot Chat: a group room can't show a review yet.
         options = _options_line(work, text, store) if not failed and not screen else ""
@@ -4033,8 +4084,18 @@ def _settle_held(key: tuple[str, str], again: bool = True) -> None:
         store = work_store.Store(home)
         work = store.get(key[1])
         if work is None or work.status not in _SETTLES:
+            _keep_held(home, key[1], None)
             return  # stopped or settled meanwhile
-        _settle(home, store, work, held[0], failed=False, interrupted=False, began=held[1])
+
+        def no_turn_began() -> bool:
+            with _wake_lock:
+                return began_key not in _turn_began
+
+        # A results turn that began meanwhile brings the real result: the
+        # stale "finished" line isn't queued ahead of it.
+        _settle(home, store, work, held[0], failed=False, interrupted=False, began=held[1],
+                report_if=no_turn_began)
+        _keep_held(home, key[1], None)
         with _wake_lock:
             raced = began_key in _turn_began
         if raced:
@@ -4073,17 +4134,29 @@ def _ledger_turn_end(home: Path, store: work_store.Store, work: work_store.Work,
     try:
         store.event_add(work.ref, "failed" if failed else "ended", "worker", _cut(text, WAKE_REPORT_CHARS),
                         source=f"session:{work.session_id}")
-        if work_coord.mode(store) == "off":
-            return ""
-        fresh = work_coord.read_user_words(home, store, work)
-        wrote = began is not None and store.events(work.ref, since=began - 1.0, kinds=("user",), limit=1)
-        if (fresh or wrote) and _watched(work):
-            # What they wrote while it ran may change other work, whichever read took it into the ledger.
-            work_watch.noticed(home, work.ref)
     except Exception:  # noqa: BLE001 — the turn's end is settled all the same
         logger.debug("conduit_push: couldn't keep a turn's end in the ledger", exc_info=True)
         return ""
+    wrote = _notice_user_words(home, store, work, began)
     return " (The user wrote in its chat during this turn, so they've seen its reply there.)" if wrote else ""
+
+
+def _notice_user_words(home: Path, store: work_store.Store, work: work_store.Work, began: Optional[float]) -> bool:
+    """Reads what the user wrote in the workstream's chat during its turn
+    into the ledger, and tells the watch when there's something: what they
+    wrote while it ran may change other work, whichever read took it in.
+    Whether they wrote there during the turn."""
+    try:
+        if work_coord.mode(store) == "off":
+            return False
+        fresh = work_coord.read_user_words(home, store, work)
+        wrote = bool(began is not None and store.events(work.ref, since=began - 1.0, kinds=("user",), limit=1))
+        if (fresh or wrote) and _watched(work):
+            work_watch.noticed(home, work.ref)
+        return wrote
+    except Exception:  # noqa: BLE001 — the turn's end is settled all the same
+        logger.debug("conduit_push: couldn't read the user's words at a turn's end", exc_info=True)
+        return False
 
 
 def _stopped_report(home: Path, store: work_store.Store, work: work_store.Work, text: str, *, failed: bool,

@@ -282,14 +282,22 @@ def _url(value: Any) -> str:
 # Moving or cancelling it is a real step and stays.
 _CALENDAR_SUBJECT = re.compile(r"v\d+")
 CALENDAR_CARD_SUBJECT = "event:"
-_ONTO_CALENDAR = re.compile(r"\b(?:calendar|schedule|remind\w*)\b|\bblock\b.*\btime\b", re.IGNORECASE)
+_ONTO_CALENDAR = re.compile(r"\b(?:calendar|schedule)\b|\bblock\b.*\btime\b", re.IGNORECASE)
+# A reminder for the user (the entry has its own alerts), never one for
+# someone else, such as a draft "Remind Mara to confirm". A keep-word in it
+# ("Remind me to reschedule it") is still a reminder.
+_REMINDER = re.compile(r"\bremind(?:ed|ing)? (?:me|us)\b|\breminders?\b", re.IGNORECASE)
 _KEEPS_STEP = re.compile(r"\b(?:reschedul\w*|cancel\w*|mov(?:e|es|ed|ing)|shift\w*)\b", re.IGNORECASE)
 
 
 def _onto_calendar(action: Mapping[str, Any]) -> bool:
     if action.get("does") == OPEN:  # a link to the entry only shows it
         return False
+    # A draft's text is a message to someone else: their calendar, or a
+    # reminder they're asked for, isn't the user's entry.
     words = " ".join(str(action.get(key) or "") for key in ("label", "say"))
+    if _REMINDER.search(words):
+        return True
     return bool(_ONTO_CALENDAR.search(words)) and not _KEEPS_STEP.search(words)
 
 

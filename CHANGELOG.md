@@ -13,6 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.2 (2026-11-11)
+
+### Fixes
+- A workstream waiting for its background agents when Hermes restarted lost
+  what its last turn said; the Bot Chat now hears it.
+- A workstream whose agents' results arrived just as its two-minute wait ran
+  out could tell the Bot Chat it had finished before the real result.
+- Photo search didn't match full-width and half-width text, such as カフェ
+  typed against ｶﾌｪ in a picture, or full-width digits.
+- A calendar card could lose a draft that asks someone else to be reminded,
+  and keep a "Remind me to reschedule" button the calendar already covers.
+- The Bot Chat's board could show an older send as not arrived after many
+  later sends.
+
 ## 0.164.1 (2026-11-11)
 
 ### Fixes

@@ -205,10 +205,13 @@ def assistant_items(text: str) -> Iterable[tuple]:
 
 
 def user_items(text: str) -> Iterable[tuple]:
-    if text and text.startswith(CRON_NOTE_PREFIX) and _CRON_NOTE_HEADER_RE.match(text):
+    # Clipped once, so a huge one-line row that looks like a note's header
+    # is matched only as far as the scan reads.
+    text = (text or "")[:MAX_SCAN_CHARS]
+    if text.startswith(CRON_NOTE_PREFIX) and _CRON_NOTE_HEADER_RE.match(text):
         # A cron report's files are the run's deliveries, as its MEDIA tags
         # were in Hermes' own turn (issue 581), never files the user sent.
-        for match in _REFERENCE_LINE_RE.finditer(_prose(text[:MAX_SCAN_CHARS])):
+        for match in _REFERENCE_LINE_RE.finditer(_prose(text)):
             path = _unquote(match.group("path"))
             if _is_local_path(path):
                 yield ("delivered", kind_for(path), path, "")
@@ -216,7 +219,7 @@ def user_items(text: str) -> Iterable[tuple]:
     if not text or "@file:" not in text:
         return
     # A reference shown in a code block is an example, not an attachment.
-    for match in _FILE_REF_RE.finditer(_prose(text[:MAX_SCAN_CHARS])):
+    for match in _FILE_REF_RE.finditer(_prose(text)):
         path = _unquote(match.group("path"))
         if _is_local_path(path):
             yield ("attached", kind_for(path), path, "")

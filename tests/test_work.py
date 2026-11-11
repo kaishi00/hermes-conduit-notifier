@@ -863,6 +863,19 @@ def test_a_results_turn_that_starts_as_the_hold_runs_out_still_reports(on, herme
     work._settle_held(key)
     assert on.get("W1").status == "running"
     monkeypatch.setattr(work, "_settle", settle)
+    # Begun before the fallback's report went: the stale "finished" line isn't queued (app issue 2206).
+    work._turn_began.clear()
+    work._held[key] = held
+    turn_end = work._ledger_turn_end
+
+    def start_during(*args, **kwargs):
+        work._turn_began[work._began_key(on.home, "W1")] = 1.0
+        return turn_end(*args, **kwargs)
+    monkeypatch.setattr(work, "_ledger_turn_end", start_during)
+    before = len(batched())
+    work._settle_held(key)
+    monkeypatch.setattr(work, "_ledger_turn_end", turn_end)
+    assert on.get("W1").status == "running" and len(batched()) == before
     work.turn_ended("20261031_work_1", "The resolver times out on IPv6.")
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     assert on.get("W1").status == "done" and on.get("W1").last_result.startswith("The resolver times out")
@@ -3318,6 +3331,24 @@ def test_a_clean_restart_is_recovered_like_a_crash(on, hermes, monkeypatch):
     call("work_list")
     sent, = submitted_to(hermes, WORKER_1)
     assert "Hermes restarted" in sent["text"]
+
+
+def test_a_restart_while_a_workstream_waits_for_its_agents_keeps_what_it_said(on, hermes, monkeypatch):
+    # App issue 2206: the held reply is on disk, so the coordinator still hears it.
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_started(WORKER_1)
+    work.agent_started("child-1", WORKER_1)
+    work.turn_ended(WORKER_1, "An agent is checking the resolver.")
+    work.turn_finished(WORKER_1, failed=False, interrupted=False)
+    assert on.get_meta("held:W1")
+    restart(hermes, monkeypatch)
+    call("work_list")
+    work.flush_wakes()
+    wake = submitted_to(hermes, BOT_CHAT)[-1]
+    assert "waiting for its background agents" in wake["text"] and "checking the resolver" in wake["text"]
+    assert on.get("W1").last_result == "An agent is checking the resolver."
+    assert not on.get_meta("held:W1")
 
 
 def test_a_change_a_clean_restart_cut_off_waits_for_the_user(on, hermes, monkeypatch):

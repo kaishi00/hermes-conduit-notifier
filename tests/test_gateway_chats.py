@@ -299,6 +299,18 @@ def test_an_authority_chats_report_is_taken_by_its_turn_only():
     assert turn_surface.note(False, "hello", session_id="auth-1") is None
 
 
+def test_a_typed_message_read_aloud_keeps_its_heard_hint_on_the_authority():
+    # notifier 678: the listener's store keeps `heard`, so a typed message
+    # whose reply Conduit reads aloud still tells the model not to speak it.
+    report = turn_surface.Report("auth-3", turn_surface.text_sha256("hello"), "iphone", "typed", heard=True)
+    turn_surface.record_for_authority(report)
+    line = turn_surface.note(False, "hello", session_id="auth-3")
+    assert line and turn_surface.HEARD_HINT in line
+    plain = turn_surface.Report("auth-4", turn_surface.text_sha256("hello"), "iphone", "typed")
+    turn_surface.record_for_authority(plain)
+    assert turn_surface.HEARD_HINT not in (turn_surface.note(False, "hello", session_id="auth-4") or "")
+
+
 def test_pulse_sends_on_the_authority_with_its_model(monkeypatch):
     calls = []
 

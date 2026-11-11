@@ -227,7 +227,7 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
     woke = sum(1 for flag in flags if _detail(flag).get("woke")) < FLAGS_PER_HOUR
     named = [event for event in new if event["ref"] in (source, *others)]
     first = next(event for event in named if event["ref"] == source)  # what the flag is about stays
-    read = [first] + [event for event in named[-(READ_LINES - 1):] if event is not first]
+    read = [first] + [event for event in named if event is not first][-(READ_LINES - 1):]
     for ref in others:  # the other side's newest line, when it reported before this read
         if not any(event["ref"] == ref for event in read):
             had = [event for event in store.events(ref, since=now - work_coord.BOARD_AGE_S, kinds=KINDS,

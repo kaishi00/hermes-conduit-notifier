@@ -376,7 +376,9 @@ def board(home: Path, store: work_store.Store, works: list[work_store.Work], ago
         except sqlite3.Error:
             logger.debug("conduit_push: couldn't read a workstream's ledger", exc_info=True)
             continue
-        delivered = store.outbox_states(work.ref) if events else {}
+        # By the board's own sends, however many came since (as app_items reads them).
+        delivered = store.outbox_states_of([event["source"].split(":")[1] for event in events
+                                            if event["kind"] == "sent" and event["source"].startswith("outbox:")])
         lines = [(event["at"], _event_line(event, ago, delivered, work, store)) for event in events]
         lines = _newest_of_each(events, lines)
         if lines:

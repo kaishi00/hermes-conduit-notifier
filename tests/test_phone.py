@@ -2195,6 +2195,7 @@ def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, ipho
     assert "flies" in phone._word_forms("fly") and "pony" in phone._word_forms("ponies")
     assert "leaves" in phone._word_forms("leaf") and "leaf" in phone._word_forms("leaves")
     assert "knives" in phone._word_forms("knife") and "knife" in phone._word_forms("knives")
+    assert "dwarves" in phone._word_forms("dwarf") and "wharf" in phone._word_forms("wharves")
     assert "caves" not in phone._word_forms("cafe") and "cafe" not in phone._word_forms("caves")
     # Text without spaces is searched inside, for any word.
     store.ingest(iphone.seal(_photo_batch("batch-0001b", sent_at="2026-10-14T08:00:10+01:00", photos={
@@ -2209,6 +2210,17 @@ def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, ipho
     assert _search(store, query="ｶ") == ([], 0)
     assert _search(store, query="京") == ([], 0)
     assert [photo["id"] for photo in _search(store, query="x")[0]] == ["ph_cafe"]
+    # Full-width and half-width forms match either way (NFKC): what a
+    # Japanese IME types finds half-width text, and full-width digits match.
+    assert [photo["id"] for photo in _search(store, query="カフェ")[0]] == ["ph_cafe"]
+    assert [photo["id"] for photo in _search(store, query="ＡＢＣ")[0]] == ["ph_cafe"]
+    assert [photo["id"] for photo in _search(store, query="２０２４")[0]] == ["ph_tokyo"]
+    store.ingest(iphone.seal(_photo_batch("batch-0001f", sent_at="2026-10-14T08:00:16+01:00", photos={
+        "upsert": [{"id": "ph_wide", "at": "2026-10-02T08:00:00+01:00", "text": "ラーメン　２０２５"}]})))
+    assert [photo["id"] for photo in _search(store, query="ﾗｰﾒﾝ")[0]] == ["ph_wide"]
+    assert [photo["id"] for photo in _search(store, query="2025")[0]] == ["ph_wide"]
+    store.ingest(iphone.seal(_photo_batch("batch-0001g", sent_at="2026-10-14T08:00:17+01:00", photos={
+        "delete": ["ph_wide"]})))
     store.ingest(iphone.seal(_photo_batch("batch-0001e", sent_at="2026-10-14T08:00:18+01:00", photos={
         "delete": ["ph_cafe"]})))
     store.ingest(iphone.seal(_photo_batch("batch-0001c", sent_at="2026-10-14T08:00:20+01:00", photos={

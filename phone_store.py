@@ -74,6 +74,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -1377,7 +1378,9 @@ class PhoneStore:
         the text in the picture, the place and the kind (screenshot); a
         photo with more of them ranks higher, and one with none is left out.
         ``start``/``end``: when it was taken, epoch seconds, end excluded."""
-        words = list(dict.fromkeys(re.findall(r"\w+", query.casefold()))) if query else []
+        # Full-width and half-width forms (what a Japanese IME types against
+        # text a photo shows, digits included) read as one: NFKC on both sides.
+        words = list(dict.fromkeys(re.findall(r"\w+", _folded(query)))) if query else []
         if query and query.strip() and not words:
             # Only punctuation or emoji: nothing can match it.
             return [], 0
@@ -1400,7 +1403,7 @@ class PhoneStore:
             if words:
                 # Whole words, so "cat" doesn't find "category"; a singular
                 # finds its plural and back.
-                haystack = " ".join([*map(str, labels), row[5] or "", row[6] or "", row[2]]).casefold()
+                haystack = _folded(" ".join([*map(str, labels), row[5] or "", row[6] or "", row[2]]))
                 tokens = set(re.findall(r"\w+", haystack))
                 # Text without spaces between words (Japanese, Chinese) is
                 # one token: any word, a number or name included, is
@@ -1423,7 +1426,14 @@ _VES_PLURALS = {singular: plural for singular, plural in (
     ("leaf", "leaves"), ("loaf", "loaves"), ("knife", "knives"), ("wife", "wives"), ("life", "lives"),
     ("half", "halves"), ("shelf", "shelves"), ("wolf", "wolves"), ("calf", "calves"), ("thief", "thieves"),
     ("elf", "elves"), ("self", "selves"), ("scarf", "scarves"), ("hoof", "hooves"), ("sheaf", "sheaves"),
+    ("dwarf", "dwarves"), ("wharf", "wharves"),
 )}
+
+
+def _folded(text: str) -> str:
+    """Text as photo search compares it: NFKC, so full-width ``カフェ`` and
+    ``２０２４`` match half-width ``ｶﾌｪ`` and ``2024``, then casefolded."""
+    return unicodedata.normalize("NFKC", text).casefold()
 
 
 def _word_forms(word: str) -> set[str]:
