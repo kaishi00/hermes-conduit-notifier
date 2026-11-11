@@ -764,6 +764,8 @@ def test_a_turn_that_ends_while_its_agents_run_stays_working(on, hermes, monkeyp
     listed, = call("work_list")["work"]
     assert listed["status"] == "running" and listed["waiting_for"].startswith("2 background agents it started")
 
+    work.agent_stopped("", "20261031_work_1")  # a stop that names no agent ends none
+    assert work.app_list(on.home)["work"][0]["agents"] == 2
     work.agent_stopped("child-1")
     assert work.app_list(on.home)["work"][0]["agents"] == 1
     work.agent_stopped("child-2")

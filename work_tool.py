@@ -858,6 +858,9 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
     with _wake_lock:
         _redirecting.discard((str(home), work.ref))
         _held.pop((str(home), work.ref), None)  # a stop is its end, whatever its agents bring
+        waiting = _held_timers.pop((str(home), work.ref), None)
+    if waiting is not None:
+        waiting.cancel()
     try:
         stopped = broker.stop(work.session_id)
     except Exception as error:  # noqa: BLE001 — a stop that didn't happen leaves it as it was
@@ -3923,7 +3926,9 @@ def agent_started(child: Any, parent: Any) -> None:
         return
     with _wake_lock:
         if len(_agents) > 512:
-            _agents.clear()
+            # Never a held workstream's: it would read as finished while its agents run.
+            for stale in [owner for owner in _agents if owner not in _held][:256]:
+                del _agents[stale]
         _agents.setdefault((str(home), work.ref), set()).add(child)
 
 
@@ -3932,6 +3937,8 @@ def agent_stopped(child: Any, parent: Any = None) -> None:
     held workstream waited for, Hermes starts that workstream's next turn
     with their results, and its end settles the row; if none starts (their
     results weren't delivered), it settles with what it had said."""
+    if not (isinstance(child, str) and child):
+        return  # no agent named: none is known to have ended
     key = None
     with _wake_lock:
         for owner, children in _agents.items():
