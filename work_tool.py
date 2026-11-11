@@ -4095,7 +4095,11 @@ def _settle_held(key: tuple[str, str], again: bool = True) -> None:
         # stale "finished" line isn't queued ahead of it.
         _settle(home, store, work, held[0], failed=False, interrupted=False, began=held[1],
                 report_if=no_turn_began)
-        _keep_held(home, key[1], None)
+        with _wake_lock:
+            # A newer turn may already be holding a reply of its own: that one stays on disk.
+            newer = key in _held
+        if not newer:
+            _keep_held(home, key[1], None)
         with _wake_lock:
             raced = began_key in _turn_began
         if raced:

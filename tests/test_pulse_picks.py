@@ -109,7 +109,8 @@ def test_a_calendar_entry_loses_the_button_however_it_is_named_or_kept():
     later = {"label": "Remind me to reschedule it", "does": "ask", "say": "Remind me tomorrow to reschedule"}
     set_one = {"label": "Set a reminder", "does": "ask", "say": "An hour before"}
     nudge = {"label": "Remind Mara to confirm", "does": "draft", "text": "Hi Mara, still on for lunch?"}
-    assert picks.off_calendar([later, set_one, nudge, done]) == [nudge, done]
+    noun = {"label": "Send Mara a reminder", "does": "draft", "text": "Hi Mara, lunch Friday?"}
+    assert picks.off_calendar([later, set_one, nudge, noun, done]) == [nudge, noun, done]
     other = pulse.candidates.with_pick({"ref": "", "bring_up": True, "text": "Plan the week"},
                                        {"line": "Plan the week", "actions": [block, done]})
     assert picks.loads(other["pick"])["actions"] == [block, done]

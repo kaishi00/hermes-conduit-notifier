@@ -296,7 +296,8 @@ def _onto_calendar(action: Mapping[str, Any]) -> bool:
     # A draft's text is a message to someone else: their calendar, or a
     # reminder they're asked for, isn't the user's entry.
     words = " ".join(str(action.get(key) or "") for key in ("label", "say"))
-    if _REMINDER.search(words):
+    # A draft is a message to someone else: "Send Mara a reminder" is theirs.
+    if action.get("does") != DRAFT and _REMINDER.search(words):
         return True
     return bool(_ONTO_CALENDAR.search(words)) and not _KEEPS_STEP.search(words)
 
