@@ -501,7 +501,11 @@ def test_number_waiting_and_found_facts_must_hold_up():
     for facts, why in (({"label": "Balance", "value": "about a lot"}, "bad_number"),
                        ({"label": "", "value": 3}, "bad_number"),
                        ({"label": "Balance", "value": True}, "bad_number"),
-                       ({"label": "Balance", "value": float("nan")}, "bad_number")):
+                       ({"label": "Balance", "value": float("nan")}, "bad_number"),
+                       # A decimal comma could be read two ways: no number, not a wrong one.
+                       ({"label": "Balance", "value": "1.204,50"}, "bad_number"),
+                       ({"label": "Balance", "value": "12,5"}, "bad_number"),
+                       ({"label": "Balance", "value": 10 ** 400}, "bad_number")):
         pick, said = picks.parse({"line": "x", "shape": "number", "facts": facts}, drawn_types=drawn)
         assert pick["shape"] == "plain" and said == why
     # What it doesn't give is left out, never guessed.
@@ -509,6 +513,12 @@ def test_number_waiting_and_found_facts_must_hold_up():
                            "facts": {"label": "Rent", "value": "1,204.50", "unit": "$ a month",
                                      "was": "n/a", "better": "sideways"}}, drawn_types=drawn)
     assert pick["facts"] == {"label": "Rent", "value": 1204.5, "unit": "$ a month"}
+    # An update's newer value doesn't keep the "was" of the value before it.
+    assert picks.merged_facts("number", {"label": "Disk", "value": 91, "unit": "%", "was": 78, "limit": 90},
+                              {"label": "Disk", "value": 95, "unit": ""}) == {
+        "label": "Disk", "value": 95, "unit": "%", "limit": 90}
+    assert picks.merged_facts("number", {"label": "Disk", "value": 91, "was": 78},
+                              {"label": "Disk", "value": 95, "was": 91})["was"] == 91
     for facts in ({"person": "Dana"}, {"what": "the lease"}):
         pick, why = picks.parse({"line": "x", "shape": "waiting", "facts": facts}, drawn_types=drawn)
         assert pick["shape"] == "plain" and why == "bad_waiting"

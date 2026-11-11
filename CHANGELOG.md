@@ -21,6 +21,7 @@ checks it). The format is fixed, because Conduit reads it:
   waiting on (who owes you a reply or a thing, and since when), and what
   something you asked Hermes to watch for turned up. Conduit shows them once
   every Conduit you use can draw them.
+
 ## 0.161.3 (2026-11-11)
 
 ### Fixes

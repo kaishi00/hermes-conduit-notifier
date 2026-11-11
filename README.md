@@ -3699,8 +3699,11 @@ keeps it.
 - **Cards as picks** (plugin 0.150+). Every report, look ahead and
   follow-up card is a checked pick: a headline, at most one more sentence,
   a shape with its facts (`date`, `due`, `runs`, `promise`, `status`,
-  `steps`, `drawn` for a Conduit card body, or `plain`) and at most two
-  actions (`ask` with words for the chat's composer, `open` with a link,
+  `steps`, `drawn` for a Conduit card body, or `plain`; from 0.162, once
+  every Conduit you use says `pulse-more-shapes`, also `number` for a value
+  that changed, `waiting` for someone who owes you a reply or a thing, and
+  `found` for what something you asked Pulse to watch for turned up) and at
+  most two actions (`ask` with words for the chat's composer, `open` with a link,
   `draft` with a message, `done`, `later`). Facts that don't hold up draw
   plain. Each pick names its subject (a remembered item, reminder, calendar
   entry or scheduled job) and its incident: a new card, an update to an open

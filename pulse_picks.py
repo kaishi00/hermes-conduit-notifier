@@ -159,17 +159,27 @@ REPEAT_SHARE = 0.6
 SHORT_DETAIL = 5
 
 
+_PLAIN_NUMBER = re.compile(r"[+-]?(\d+|\d{1,3}(,\d{3})+)(\.\d+)?")
+
+
 def _number(value: Any) -> Optional[float | int]:
     """A finite number, or a string that's only one ("91", "1,204.5"), as
-    an int when it's whole; None otherwise."""
+    an int when it's whole; None otherwise. A comma is read only as a
+    thousands mark between groups of three: "1.204,50" could be 1204.5 or
+    1.2045, so it's no number here rather than a wrong one."""
     if isinstance(value, bool):
         return None
     if isinstance(value, str):
-        try:
-            value = float(value.strip().replace(",", ""))
-        except ValueError:
+        if not _PLAIN_NUMBER.fullmatch(value.strip()):
             return None
-    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        value = float(value.strip().replace(",", ""))
+    if not isinstance(value, (int, float)):
+        return None
+    try:
+        # A whole number too big for a float is no number a card can show.
+        if not math.isfinite(float(value)):
+            return None
+    except OverflowError:
         return None
     return int(value) if float(value).is_integer() and abs(value) < 1e15 else float(value)
 
@@ -381,7 +391,10 @@ def news(pick: Mapping[str, Any]) -> str:
 def merged_facts(shape: str, old: Mapping[str, Any], new: Mapping[str, Any]) -> dict:
     """An update's facts on top of the card's: a run history grows (the
     newer results after what the card had, at most MAX_RUNS), anything else
-    takes the newer facts."""
+    takes the newer facts. A number's "was" goes with the value it was
+    given for: a newer value that says nothing of what it was before
+    doesn't keep the older card's, and it keeps the card's unit when it
+    names none."""
     if shape == "runs" and isinstance(old.get("results"), list) and isinstance(new.get("results"), list):
         mine, theirs = list(old["results"]), list(new["results"])
         # The model sees the whole recent history each time: what it gives
@@ -392,6 +405,12 @@ def merged_facts(shape: str, old: Mapping[str, Any], new: Mapping[str, Any]) -> 
                 overlap = size
                 break
         return {**old, **new, "results": (mine + theirs[overlap:])[-MAX_RUNS:]}
+    if shape == NUMBER:
+        if "value" in new and "was" not in new:
+            old = {key: value for key, value in old.items() if key != "was"}
+        # The same thing keeps its unit when the newer facts name none.
+        if not new.get("unit") and old.get("unit"):
+            new = {key: value for key, value in new.items() if key != "unit"}
     return {**old, **new}
 
 

@@ -137,7 +137,8 @@ ROUTE_CAPABILITIES = (
     # Pulse cards come from structured picks (pulse_picks): GET
     # /pulse/feed?looks=1 gives each card "look" ({shape, facts, actions,
     # line, detail}; shape one of date, due, runs, promise, status,
-    # steps, drawn, plain), "card_ref" ("pc_<id>"), "subject" and
+    # steps, drawn, plain, and number, waiting, found once every Conduit
+    # says "pulse-more-shapes"), "card_ref" ("pc_<id>"), "subject" and
     # "updated_at"; an action that "ask"s leaves its "say" in the chat's
     # composer. The morning brief's parts come in its "look" (shape "brief").
     "pulse_looks",
