@@ -769,7 +769,7 @@ def _pending(store: PhoneStore) -> dict[str, Any]:
                     "offered_at when first, not that it arrived: only one of the outcomes below means the phone "
                     "has it). applied / "
                     "edited (the user changed it first; see note) / dismissed / failed (see note) / expired "
-                    "(a week without an answer, an hour for a shortcut run) / lost (the phone was set up again before it got it: tell the "
+                    "(a week without an answer, an hour for a shortcut run, a day for a photo) / lost (the phone was set up again before it got it: tell the "
                     "user and offer to ask again)." if changes else "No changes asked for recently."}
 
 

@@ -798,8 +798,11 @@ class PhoneStore:
             except sqlite3.DatabaseError:
                 return
             try:
-                sharing = {row[0]: _decode(row[1], None) or {}
-                           for row in connection.execute("SELECT id, sharing FROM devices")}
+                # A phone set up again has no sharing until its first batch;
+                # what it shared before decides meanwhile, so re-pairing
+                # doesn't lose the pictures it already sent.
+                sharing = {row[0]: _decode(row[1] if row[1] is not None else row[2], None) or {}
+                           for row in connection.execute("SELECT id, sharing, prior_sharing FROM devices")}
             except sqlite3.DatabaseError:
                 # A file mid-upgrade or broken: keep everything until a read works.
                 return
@@ -1369,7 +1372,10 @@ class PhoneStore:
         the text in the picture, the place and the kind (screenshot); a
         photo with more of them ranks higher, and one with none is left out.
         ``start``/``end``: when it was taken, epoch seconds, end excluded."""
-        words = [word for word in re.findall(r"\w+", query.casefold())] if query else []
+        words = list(dict.fromkeys(re.findall(r"\w+", query.casefold()))) if query else []
+        if query and query.strip() and not words:
+            # Only punctuation or emoji: nothing can match it.
+            return [], 0
         sql = "SELECT id, at_local, kind, favorite, labels, text, place, width, height, at_utc FROM photos WHERE device=?"
         params: list[Any] = [device]
         if start is not None:
@@ -1387,9 +1393,14 @@ class PhoneStore:
                      "text": row[5], "place": row[6], "width": row[7], "height": row[8]}
             score = 0
             if words:
+                # Whole words, so "cat" doesn't find "category", and a plural
+                # finds the singular. Text without spaces between words
+                # (Japanese, Chinese) is matched anywhere in it.
                 haystack = " ".join([*map(str, labels), row[5] or "", row[6] or "", row[2]]).casefold()
-                score = sum(1 for word in words if word in haystack
-                            or (len(word) > 3 and word.endswith("s") and word[:-1] in haystack))
+                tokens = set(re.findall(r"\w+", haystack))
+                score = sum(1 for word in words if word in tokens
+                            or (len(word) > 3 and word.endswith("s") and word[:-1] in tokens)
+                            or (not word.isascii() and word in haystack))
                 if not score:
                     continue
             scored.append((score, row[9], {key: value for key, value in entry.items() if value not in (None, [], False)}))
@@ -1836,6 +1847,9 @@ def _forget_unshared(db: sqlite3.Connection, device_id: str, sharing: dict[str, 
         db.execute("UPDATE devices SET shortcuts=NULL, shortcuts_at=NULL WHERE id=?", (device_id,))
     if not sharing["photos"]:
         db.execute("DELETE FROM photos WHERE device=?", (device_id,))
+        # Asks for a photo keep when and where it was taken, and a sent
+        # one's path: forget those too (the sweep deletes the files).
+        db.execute("UPDATE changes SET fields='{}', result=NULL WHERE device=? AND kind='send_photo'", (device_id,))
 
 
 def _narrowed(stored: Any, sharing: dict[str, Any]) -> dict[str, Any]:
