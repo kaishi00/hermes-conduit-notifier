@@ -54,6 +54,19 @@ router = core.router
 # speech-to-text or TTS is not enough on its own.
 
 GPT_LIVE_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
+# Codex's GA Live endpoint (Conduit issue 2236). ChatGPT moves accounts to it
+# one at a time: for a moved account the URL above refuses with "GA Live
+# requests must use /backend-api/codex/live/sessions", while others still use
+# it. So the plugin tries the old URL first and, only on that refusal, starts
+# the call here. A GA session speaks the GA Live events (as the API key's
+# does) and replaces the request's instructions with its own, so the answer
+# says `events: "ga"` and `briefing_applied: false`, and Conduit sends the
+# briefing with session.instructions.append once the call starts.
+GPT_LIVE_GA_URL = "https://chatgpt.com/backend-api/codex/live/sessions"
+_GPT_LIVE_GA_REFUSAL = "/backend-api/codex/live/sessions"
+# Enough of a refusal's body to find that sentence. It's never logged or
+# passed on: it could echo account details.
+GPT_LIVE_MAX_ERROR_BYTES = 4096
 GPT_LIVE_DEFAULT_MODEL = "gpt-live-1-codex"
 GPT_LIVE_DEFAULT_VOICE = "cove"
 GPT_LIVE_TIMEOUT_S = 30.0
@@ -354,6 +367,21 @@ def gpt_live_session_config(history: Optional[list], live: Dict[str, Any]) -> Di
     return config
 
 
+def gpt_live_ga_session_config(history: Optional[list], live: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``session`` object for Codex's GA endpoint: the public GA API's shape
+    (seeded history as ``input``) with the subscription's model and voice."""
+    model, voice = _gpt_live_model_voice(live)
+    config: Dict[str, Any] = {
+        "model": model,
+        "instructions": _gpt_live_instructions(live),
+        "audio": {"output": {"voice": voice}},
+        "delegation": {"type": "client"},
+    }
+    if history:
+        config["input"] = history
+    return config
+
+
 class _GPTLiveAnsweredError(core.TokenError):
     """OpenAI answered 2xx but its answer couldn't be read: a session may have started."""
 
@@ -377,10 +405,15 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
                 raise failed("GPT-Live returned an invalid WebRTC answer. ")
             return response.status, answer.decode("utf-8", "replace"), response.headers.get("Location", "")
     except urllib.error.HTTPError as exc:
-        # The body can echo account details; only the status goes back to Conduit.
+        # The body can echo account details: only the status goes back to Conduit, and the
+        # caller only looks for the GA refusal in it.
         status = exc.code
+        try:
+            detail = exc.read(GPT_LIVE_MAX_ERROR_BYTES).decode("utf-8", "replace")
+        except Exception:
+            detail = ""
         exc.close()
-        return status, "", ""
+        return status, detail, ""
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         # http.client.HTTPException covers a chunked body cut off mid-read (IncompleteRead).
         if answered:
@@ -399,13 +432,17 @@ def _valid_answer(sdp: Any, call_id: Any) -> bool:
             and isinstance(call_id, str) and _GPT_LIVE_CALL_ID.fullmatch(call_id) is not None)
 
 
-def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..., tuple]) -> Dict[str, Any]:
+def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..., tuple],
+                             ga_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     token, account = _codex_credentials()
-    status, answer, location = post(GPT_LIVE_URL, {
+    headers = {
         "Authorization": f"Bearer {token}",
         "ChatGPT-Account-Id": account,
         "OpenAI-Alpha": "quicksilver=v2",
-    }, {"sdp": sdp, "session": config})
+    }
+    status, answer, location = post(GPT_LIVE_URL, headers, {"sdp": sdp, "session": config})
+    if 400 <= status < 500 and _GPT_LIVE_GA_REFUSAL in answer:
+        return _plugin_gpt_live_ga_session(sdp, ga_config if ga_config is not None else config, post, headers)
     if not 200 <= status < 300:
         logger.warning("GPT-Live session was rejected: HTTP %s", status)
         raise core.TokenError(502, f"GPT-Live session was rejected (HTTP {status}); check the Codex sign-in "
@@ -414,6 +451,37 @@ def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..
     if not _valid_answer(answer, call_id):
         raise core.TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
     return {"auth": "subscription", "session": {"id": call_id}, "transport": {"type": "webrtc", "sdp": answer}}
+
+
+def _plugin_gpt_live_ga_session(sdp: str, config: Dict[str, Any], post: Callable[..., tuple],
+                                headers: Dict[str, str]) -> Dict[str, Any]:
+    """The call on Codex's GA endpoint, for an account the old URL turned away."""
+    logger.info("GPT-Live: this account is on Codex's GA endpoint")
+    status, text, location = post(GPT_LIVE_GA_URL, headers,
+                                  {"session": config, "transport": {"type": "webrtc", "sdp": sdp}})
+    if not 200 <= status < 300:
+        logger.warning("GPT-Live GA session was rejected: HTTP %s", status)
+        raise core.TokenError(502, f"GPT-Live session was rejected (HTTP {status}); check the Codex sign-in "
+                              "and the account's voice access. " + GPT_LIVE_NO_FALLBACK)
+    # The public GA API answers JSON with the session and its SDP; an answer that is the SDP
+    # itself, with the call in Location, as the old endpoint's, is read too.
+    if text.startswith("v=0"):
+        answer_sdp, session_id = text, urllib.parse.urlparse(location).path.rstrip("/").rsplit("/", 1)[-1]
+    else:
+        try:
+            answer = json.loads(text)
+        except ValueError:
+            answer = None
+        session = answer.get("session") if isinstance(answer, dict) else None
+        transport = answer.get("transport") if isinstance(answer, dict) else None
+        session_id = session.get("id") if isinstance(session, dict) else None
+        answer_sdp = transport.get("sdp") if isinstance(transport, dict) else None
+    if (not isinstance(answer_sdp, str) or not answer_sdp.startswith("v=0")
+            or not isinstance(session_id, str) or not session_id or len(session_id) > GPT_LIVE_API_SESSION_ID_MAX
+            or not session_id.isprintable()):
+        raise _GPTLiveAnsweredError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
+    return {"auth": "subscription", "session": {"id": session_id}, "transport": {"type": "webrtc", "sdp": answer_sdp},
+            "events": "ga"}
 
 
 def _clean_billing(billing: Any) -> str:
@@ -785,9 +853,17 @@ def create_gpt_live_session(
                 "briefing_applied": seeded is not None and _items_carry_briefing(config, seeded["content"][0]["text"]),
                 "briefing_clipped": briefing_clipped, "greeting_applied": False}
     config = gpt_live_session_config(items or None, live)
+    # Codex's GA endpoint drops the request's instructions, and whether it reads seeded items
+    # is unverified, so it gets the history alone: Conduit appends the briefing as
+    # instructions once the call starts (Conduit issue 2236).
+    ga_config = gpt_live_ga_session_config(_seeded_items(history, None)[0] or None, live)
+    result = _plugin_gpt_live_session(sdp, config, post or _post_sdp, ga_config)
+    if result.get("events") == "ga":
+        return {**result, "source": "plugin", "voice": applied_voice,
+                "briefing_applied": False, "briefing_clipped": False, "greeting_applied": False}
     # briefing_applied is True only when the briefing is in the session's items; when its rules
     # alone didn't fit, False has Conduit send it as context after the start, as for any host.
-    return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice,
+    return {**result, "source": "plugin", "voice": applied_voice,
             "briefing_applied": briefing_seeded, "briefing_clipped": briefing_clipped, "greeting_applied": False}
 
 

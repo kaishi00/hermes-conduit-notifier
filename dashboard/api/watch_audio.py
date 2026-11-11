@@ -59,7 +59,9 @@ router = core.router
 # and {"type": "end"}. Host to Watch: "started" (engine, model, voice,
 # input_rate, output_rate; for GPT-Live also briefing_applied and
 # greeting_applied: always false now, so the Watch opens a greeting or a call
-# from Hermes with its own turn (notifier #541); for Local Live session_id, the call's chat, and
+# from Hermes with its own turn (notifier #541), and events "ga" for a session
+# on Codex's GA endpoint, whose events the Watch then speaks, appending the
+# briefing itself (Conduit issue 2236); for Local Live session_id, the call's chat, and
 # resumed), "ended" (reason) and
 # "error" (code, message). The Watch waits for "started" before it sends
 # audio or events. It owns the conversation, as the phone does: it speaks each
@@ -800,6 +802,8 @@ class _GptLiveWatchSession(_WatchAudioSession):
             "input_rate": GPT_LIVE_WATCH_INPUT_RATE, "output_rate": GPT_LIVE_WATCH_OUTPUT_RATE,
             "briefing_applied": bool(answer.get("briefing_applied")),
             "greeting_applied": bool(answer.get("greeting_applied")),
+            # Codex's GA endpoint: the Watch speaks the GA events and appends the briefing.
+            **({"events": "ga"} if answer.get("events") == "ga" else {}),
         })
         # What came while "started" was on its way, in order, then live.
         while self.held:

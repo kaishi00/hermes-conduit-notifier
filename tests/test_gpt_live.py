@@ -1025,3 +1025,76 @@ def test_a_block_whose_note_is_the_first_line_goes_whole():
     briefing = "[You share memory with the user's Hermes agent.]\n<hermes_memory>\n" + "Likes tea.\n" * 50 + "\n</hermes_memory>\n[Rules.]"
     text, changed = api.gpt_live._clip_block(briefing, "hermes_memory", 10_000)
     assert changed and text == "\n[Rules.]"
+
+
+# --- Codex's GA endpoint (Conduit issue 2236) --------------------------------
+
+GA_REFUSAL = ('{"detail":"GA Live requests must use /backend-api/codex/live/sessions"}')
+
+
+def _ga_openai(monkeypatch, ga_status=201, ga_answer=None):
+    calls = []
+
+    def post(url, headers, body):
+        calls.append((url, headers, body))
+        if url == api.gpt_live.GPT_LIVE_URL:
+            return 400, GA_REFUSAL, ""
+        answer = ga_answer if ga_answer is not None else json.dumps(
+            {"session": {"id": "sess_ga1"}, "transport": {"type": "webrtc", "sdp": ANSWER}})
+        return ga_status, answer, ""
+
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", post)
+    return calls
+
+
+def test_an_account_on_the_ga_endpoint_gets_its_call_there_with_ga_events(client, monkeypatch):
+    calls = _ga_openai(monkeypatch)
+    history = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+    response = client.post(f"{BASE}/gpt-live/session",
+                           json={"sdp": OFFER, "briefing": "[Conduit rules]", "history": history})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["events"] == "ga"
+    assert body["session"] == {"id": "sess_ga1"} and body["transport"] == {"type": "webrtc", "sdp": ANSWER}
+    # The GA session drops the request's instructions: Conduit appends the briefing itself.
+    assert body["briefing_applied"] is False and body["briefing_clipped"] is False
+    assert [url for url, _, _ in calls] == [api.gpt_live.GPT_LIVE_URL, api.gpt_live.GPT_LIVE_GA_URL]
+    _, headers, ga_body = calls[1]
+    assert headers["Authorization"] == f"Bearer {GOOD_TOKEN}" and headers["ChatGPT-Account-Id"] == "acct-1"
+    assert ga_body["transport"] == {"type": "webrtc", "sdp": OFFER}
+    assert ga_body["session"]["input"] == history, "The history alone, no briefing item"
+    assert "initial_items" not in ga_body["session"]
+    assert "[Conduit rules]" not in json.dumps(ga_body)
+    assert "GA Live requests" not in response.text
+
+
+def test_the_ga_endpoint_answering_with_the_sdp_itself_is_read_too(client, monkeypatch):
+    def post(url, headers, body):
+        if url == api.gpt_live.GPT_LIVE_URL:
+            return 400, GA_REFUSAL, ""
+        return 201, ANSWER, "/backend-api/codex/live/sessions/sess_ga2"
+
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", post)
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
+    assert body["events"] == "ga" and body["session"] == {"id": "sess_ga2"}
+
+
+@pytest.mark.parametrize("status,answer", [(403, ""), (201, "<html>"), (201, '{"session":{},"transport":{}}')])
+def test_a_ga_failure_is_a_502_and_never_another_path(client, monkeypatch, status, answer):
+    calls = _ga_openai(monkeypatch, ga_status=status, ga_answer=answer)
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER})
+    assert response.status_code == 502
+    assert "No API fallback" in response.json()["detail"]
+    assert len(calls) == 2
+
+
+def test_another_refusal_from_the_old_url_never_tries_the_ga_endpoint(client, openai):
+    openai.reply.update(status=400, answer='{"detail":"bad request"}', location="")
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER})
+    assert response.status_code == 502
+    assert [url for url, _, _ in openai.calls] == [api.gpt_live.GPT_LIVE_URL]
+
+
+def test_an_account_still_on_the_old_endpoint_reports_no_events(client, openai):
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
+    assert "events" not in body
