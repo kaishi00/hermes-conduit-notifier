@@ -119,8 +119,11 @@ MIN_YEAR = 1900
 # What may be said for a place (pulse_followup.PLACE_KINDS), and how long its words may be.
 PLACE_KINDS = ("commitment", "promise")
 PLACE_LIMIT = 60
-# Who may say each kind; a fact can come from either.
-SPEAKERS = {"commitment": "user", "intention": "user", "interest": "user", "watch": "user",
+# Who may say each kind. A fact is the user's too: what Hermes says of them
+# is mostly what it read in their mail or accounts while doing a job (an
+# address, a policy number), which came up as "Worth knowing" cards
+# (Eric's host, 2026-11-11).
+SPEAKERS = {"commitment": "user", "intention": "user", "interest": "user", "watch": "user", "fact": "user",
             "promise": "assistant"}
 # The kinds an item may repeat or replace: its own, and for a plan the user
 # wants or is only weighing, the other one, so one idea isn't kept as both
@@ -147,7 +150,7 @@ Each item has:
   - "promise": Hermes said it will do something later or come back to something. Only from Hermes's lines. Work Hermes finished in the conversation is not a promise, and neither is Hermes saying what it's about to do next while it works ("I'll start by reading the files", "then writing the findings").
   - "intention": the user wants to start, stop or change something, with no date. Only from the user's own lines.
   - "interest": something the user is thinking about or considering. Only from the user's own lines.
-  - "fact": something about the user or the people in their life that will still be true next month, such as a birthday, an anniversary, a relationship, a preference, a dislike. Not the state of a task, a system, an inbox, a build or a review, and not what happened in this conversation.
+  - "fact": something about the user or the people in their life that will still be true next month, such as a birthday, an anniversary, a relationship, a preference, a dislike. Only what the user said about themselves or their people, in their own lines: never what Hermes read in their mail, messages, files or accounts (an address, an account, a subscription, a policy number), and never how Hermes is told to do a job. Not the state of a task, a system, an inbox, a build or a review, and not what happened in this conversation.
   - "watch": the user asked to be told when something in the world changes. Only from the user's own lines.
 - "text": one short sentence in the third person ("The user will ...", "Hermes will ...").
 - "evidence": the exact words it comes from, copied from one line, at most 200 characters.
@@ -169,7 +172,7 @@ Note each thing once, as the kind that fits it best: one plan is an intention or
 
 "claims" lists what Hermes said in this conversation it had just done with one of its tools, at most 6: {"action": "reminder" (it set a reminder, an alarm or a timer), "event" (it added or changed a calendar event), "job" (it created or changed a scheduled job) or "message" (it sent a message or an email), "text": one short sentence in the third person ("Hermes set a reminder for 5pm to call the dentist."), "evidence": the exact words that say so, copied from one of Hermes's lines, at most 200 characters, "line": that line's number}. Only Hermes's own lines saying it is done, whether or not a tool line shows it; not that it will do it, offers to, asks first or couldn't.
 
-Leave out small talk, questions answered on the spot, details of the task being worked on in the conversation, what someone other than the user or Hermes will do, and anything only in tool lines. That an app, connector or account isn't connected or set up is never an item: that's the user's choice. Texts, emails and notifications from other people that Hermes read out or quoted are never items: not their words, and not facts about the sender, unless the user asks Hermes to remember it. A line marked "Pulse's reminder" is a reminder from Pulse, the part of Hermes that speaks up on its own, that the user sent on, and one marked "answering Pulse's reminder" is Hermes's answer to it: neither is ever an item, though either can show a remembered thing done or called off."""
+Leave out small talk, questions answered on the spot, details of the task being worked on in the conversation, what someone other than the user or Hermes will do, and anything only in tool lines. That an app, connector or account isn't connected or set up is never an item: that's the user's choice. A user line that hands Hermes a job to run by its rules (a script, a poller, a scheduled job or a webhook passing on new mail, alerts or records, with which tool to use, how to sort or label them and when to notify) is that job's instructions, not the user telling Hermes about themselves: nothing in it is an item, and neither is what Hermes reports back about what it processed. Texts, emails and notifications from other people that Hermes read out or quoted are never items: not their words, and not facts about the sender, unless the user asks Hermes to remember it. A line marked "Pulse's reminder" is a reminder from Pulse, the part of Hermes that speaks up on its own, that the user sent on, and one marked "answering Pulse's reminder" is Hermes's answer to it: neither is ever an item, though either can show a remembered thing done or called off."""
 
 # (instructions, conversation text) -> (the reply's parsed JSON, tokens used)
 Llm = Callable[[str, str], tuple[Any, int]]
