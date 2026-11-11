@@ -911,6 +911,25 @@ def test_a_failed_or_stopped_turn_isnt_held_for_its_agents(on, hermes, monkeypat
     assert work.turn_started("20261031_work_2")
     assert on.get("W2").status == "running" and stops == ["20261031_work_2"]
 
+    # Stopped after its last agent ended, before their results' turn: stopped too.
+    assert start("Third matter", "List the suppliers we paid twice.")["ref"] == "W3"
+    work.agent_started("child-3", "20261031_work_3")
+    work.turn_ended("20261031_work_3", "An agent is on it.")
+    work.turn_finished("20261031_work_3", failed=False, interrupted=False)
+    work.agent_stopped("child-3")
+    assert call("work_stop", {"ref": "W3"})["ok"] and (str(on.home), "W3") not in work._held_timers
+    assert work.turn_started("20261031_work_3")
+    for thread in threading.enumerate():
+        if thread.name == "conduit-work-stop":
+            thread.join(2)
+    assert stops[-1] == "20261031_work_3" and on.get("W3").status == "stopped"
+    # The stop doesn't outlast its window: an agent whose end never came doesn't keep the chat shut.
+    key = (str(on.home), "W3")
+    work._stopped_agents[key] = (time.time() - work.STOPPED_AGENTS_S - 1, 0.0)
+    work._agents[key] = {"lost"}
+    assert work.turn_started("20261031_work_3")
+    assert on.get("W3").status == "running" and key not in work._stopped_agents
+
 
 def test_the_subagent_hooks_count_a_workstreams_agents(on, hermes, monkeypatch):
     start()
