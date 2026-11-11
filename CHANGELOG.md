@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.161.1 (2026-11-11)
+
+### Fixes
+- A scheduled job's report shown in a Bot Chat showed a picture or file it
+  made as a file path. Hermes Desktop now shows the picture or the file
+  itself; Conduit does too once it's updated.
+
 ## 0.161.0 (2026-11-11)
 
 ### New and improved
