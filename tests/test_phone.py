@@ -2091,6 +2091,8 @@ def test_contact_changes_need_the_user_to_allow_them_and_a_picked_person(store, 
     with pytest.raises(phone.PhoneError) as raised:
         store.add_change("update_contact", {"nickname": "S"}, {"contact_id": "p_nobody"})
     assert raised.value.code == "unknown_contact"
+    # The note names the phone that allows edits, so the lookup can go there.
+    assert f"device {iphone.device_id}" in str(raised.value) and "people" in str(raised.value)
     changed = store.add_change("update_contact", {"emails": []}, {"contact_id": "p_sam"})
     assert changed["summary"] == "Change Sam Taylor"
     deleted = store.add_change("delete_contact", None, {"contact_id": "p_alex"})
@@ -2125,6 +2127,9 @@ def test_the_contacts_tool_asks_the_phone_to_add_change_and_delete(home):
     stray = json.loads(tool.handle_contacts({"action": "delete", "contact_id": "p_sam", "nickname": "x"},
                                             profile="work"))
     assert stray["ok"] is False and "nickname" in stray["note"]
+    queried = json.loads(tool.handle_contacts({"action": "update", "contact_id": "p_sam", "query": "Sam",
+                                               "nickname": "Sammy"}, profile="work"))
+    assert queried["ok"] is False and "query" in queried["note"], "query is people's alone"
     assert json.loads(tool.handle_contacts({"action": "add", "contact_id": "p_sam", "given_name": "x"},
                                            profile="work"))["ok"] is False
     # People still reads; voice keeps only people.
