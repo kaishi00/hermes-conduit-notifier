@@ -294,6 +294,19 @@ def test_what_the_user_wrote_reaches_the_watch_when_a_stopped_turn_ends(on, herm
     assert seen == ["W1"]
 
 
+def test_what_the_user_wrote_reaches_the_watch_when_they_stop_the_turn_from_its_chat(on, hermes, home, told,
+                                                                                  monkeypatch):
+    # Interrupted with no work_stop and no redirect: the user stopped it in its own chat.
+    two(on)
+    seen = []
+    monkeypatch.setattr(watch, "noticed", lambda home, ref, **_: seen.append(ref))
+    monkeypatch.setattr(work.work_coord, "read_user_words", lambda home, store, item: 1)
+    assert on.get("W1").status in work._SETTLES
+    work._turn_finished(on.get("W1").session_id, failed=False, interrupted=True)
+    assert seen == ["W1"]
+    assert on.get("W1").status == "interrupted"
+
+
 def test_an_older_own_send_keeps_its_state_after_many_later_sends(on, hermes, home):
     start()
     first = on.outbox_add("W1", "send", WORKER, "Use /v2/users", own=True)

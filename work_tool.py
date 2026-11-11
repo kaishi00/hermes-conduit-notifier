@@ -3826,12 +3826,13 @@ def _turn_started(session_id: Any) -> bool:
         _turn_began[_began_key(home, work.ref)] = began
         # The turn its agents' results started (or the user's words): its own
         # end settles the row.
-        was_held = _held.pop((str(home), work.ref), None) is not None
+        _held.pop((str(home), work.ref), None)
         waiting = _held_timers.pop((str(home), work.ref), None)
     if waiting is not None:
         waiting.cancel()
-    if was_held:
-        _keep_held(home, work.ref, None)
+    # Whether or not this process held it: a hold a reload left on disk
+    # (stop() clears only memory) is over once a turn starts.
+    _keep_held(home, work.ref, None)
     # On disk too: after a restart, the steps since then are the turn it stopped.
     work_store.Store(home).update(work.ref, turn_at=began)
     if work_store.Store(home).get_meta(_CHECK + work.ref):
