@@ -2193,6 +2193,8 @@ def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, ipho
     assert [photo["id"] for photo in _search(store, query="passes")[0]] == ["ph_shot"]
     assert phone._word_forms("movies") >= {"movie", "movy"}
     assert "flies" in phone._word_forms("fly") and "pony" in phone._word_forms("ponies")
+    assert "leaves" in phone._word_forms("leaf") and "leaf" in phone._word_forms("leaves")
+    assert "knives" in phone._word_forms("knife") and "knife" in phone._word_forms("knives")
     # Text without spaces is searched inside, for any word.
     store.ingest(iphone.seal(_photo_batch("batch-0001b", sent_at="2026-10-14T08:00:10+01:00", photos={
         "upsert": [{"id": "ph_tokyo", "at": "2026-10-01T07:00:00+01:00", "text": "東京タワー合計2024円"}]})))
@@ -2372,6 +2374,15 @@ def test_a_fast_clock_on_a_phone_set_up_again_keeps_its_sent_photos(tmp_path):
     assert error.value.code == "clock_skew"
     assert path.exists()
     assert store.change_outcome(change["id"])["result"] == str(path)
+
+
+def test_narrowing_a_batch_that_names_no_window_keeps_none():
+    sharing = phone._parse_sharing(_sharing())
+    sharing["past_days"] = sharing["future_days"] = None
+    narrowed = phone._narrowed({**sharing, "past_days": 7, "future_days": 30}, sharing)
+    assert narrowed["past_days"] is None and narrowed["future_days"] is None
+    sharing["past_days"] = 14
+    assert phone._narrowed({**sharing, "past_days": 7}, sharing)["past_days"] == 7
 
 
 def test_a_dismissed_photo_never_arrives(store, iphone):

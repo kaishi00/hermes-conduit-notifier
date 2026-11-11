@@ -1407,7 +1407,7 @@ class PhoneStore:
                 # looked for inside it.
                 unspaced = [token for token in tokens if _UNSPACED_SCRIPT.search(token)]
                 score = sum(1 for word in words if not tokens.isdisjoint(_word_forms(word))
-                            or any(word in token for token in unspaced))
+                            or (len(word) > 1 and any(word in token for token in unspaced)))
                 if not score:
                     continue
             scored.append((score, row[9], {key: value for key, value in entry.items() if value not in (None, [], False)}))
@@ -1416,19 +1416,26 @@ class PhoneStore:
 
 
 # Kana, CJK ideographs and Hangul: scripts written without spaces between words.
-_UNSPACED_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+_UNSPACED_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff66-\uff9f\U00020000-\U0003134f]")
 
 
 def _word_forms(word: str) -> set[str]:
     """A search word and its plain English singular and plural, so
     "umbrella" finds "umbrellas", "beaches" finds "beach", "ponies" finds
-    "pony", "movies" finds "movie" and "fly" finds "flies"."""
+    "pony", "movies" finds "movie", "fly" finds "flies" and "leaf" finds
+    "leaves"."""
     forms = {word, word + "s", word + "es"}
     if word.endswith("y") and len(word) > 2:
         forms.add(word[:-1] + "ies")
+    if word.endswith("fe"):
+        forms.add(word[:-2] + "ves")
+    elif word.endswith("f"):
+        forms.add(word[:-1] + "ves")
     if len(word) > 3:
         if word.endswith("ies"):
             forms.update((word[:-3] + "y", word[:-1]))
+        elif word.endswith("ves"):
+            forms.update((word[:-3] + "f", word[:-3] + "fe", word[:-1]))
         elif word.endswith("es"):
             forms.update((word[:-2], word[:-1]))
         elif word.endswith("s"):
@@ -1900,7 +1907,11 @@ def _narrowed(stored: Any, sharing: dict[str, Any]) -> dict[str, Any]:
             narrowed[field] = value and stored.get(field) is True
         elif field in ("past_days", "future_days"):
             kept = stored.get(field)
-            narrowed[field] = min(value, kept) if isinstance(kept, int) and not isinstance(kept, bool) else 0
+            if not isinstance(kept, int) or isinstance(kept, bool):
+                narrowed[field] = 0
+            elif isinstance(value, int):
+                narrowed[field] = min(value, kept)
+            # A batch that names no window keeps saying none.
     return narrowed
 
 
