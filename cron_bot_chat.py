@@ -29,8 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .cron_store import CronStore
-from .events import _FENCE, _MEDIA_TAG, _TRAILING
-from .room_files_link import _quoted
+from .events import _FENCE, _MEDIA_DIRECTIVE, _MEDIA_TAG, _TRAILING
 
 logger = logging.getLogger(__name__)
 
@@ -68,33 +67,50 @@ _installed: Optional[tuple[Any, Callable[..., Any], Callable[..., Any]]] = None
 _IMAGE_REFERENCE = frozenset("png jpg jpeg gif webp heic heif bmp svg tif tiff".split())
 
 
+def _quoted(path: str) -> str:
+    """A path as Hermes' format_reference_value quotes one: with the first
+    quote mark it lacks when it holds a space, a bracket or a quote mark."""
+    if not re.search(r"[\s\[\](){}<>'\"`]", path):
+        return path
+    quote = next(mark for mark in "`\"'" if mark not in path)
+    return quote + path + quote
+
+
+# What may stand before a whole-line tag and stays: indentation, and a list
+# item's or a quote's marker.
+_LINE_LEAD = re.compile(r"^(\s*(?:(?:[-*+]|\d{1,9}[.)]|>)\s+)?)")
+
+
 def reference_tags(text: str) -> str:
     """A report's whole-line MEDIA tags as the references its viewers
     render: an image as an `@image:` attachment, any other file as a
-    `@file:` chip. A line with more than one tag, or a path holding a quote
-    mark, stays as written; a tag inside prose stays prose, and
-    one in fenced code stays code, as events reads them."""
+    `@file:` chip, after a list or quote marker the line had. A line with
+    more than one tag, or a path holding all three quote marks, stays as
+    written; a tag inside prose stays prose, and one in fenced code stays
+    code, as events reads them. Hermes' delivery directives
+    (`[[as_document]]`) go, as media_free drops them."""
     if "MEDIA:" not in text:
         return text
     lines, fenced = [], False
     for line in text.splitlines():
         if _FENCE.match(line):
             fenced = not fenced
-        stripped = line.strip()
-        match = (_MEDIA_TAG.fullmatch(stripped)
-                 if not fenced and not _FENCE.match(line) and stripped.count("MEDIA:") == 1 else None)
+        lead = _LINE_LEAD.match(line).group(1)
+        body = _MEDIA_DIRECTIVE.sub("", line[len(lead):]).strip()
+        match = (_MEDIA_TAG.fullmatch(body)
+                 if not fenced and not _FENCE.match(line) and body.count("MEDIA:") == 1 else None)
         if match is None:
             lines.append(line)
             continue
         path = match.group("path").strip().strip("`\"'").rstrip(_TRAILING + "~")
-        if not path or any(mark in path for mark in "`\"'"):
+        if not path or all(mark in path for mark in "`\"'"):
             lines.append(line)
             continue
         name = re.split(r"[/\\]", path.rstrip("/\\"))[-1]
         image = "." in name and name.rsplit(".", 1)[1].lower() in _IMAGE_REFERENCE
         # Quoted as Hermes quotes a reference (format_reference_value), so a
-        # bracket or space doesn't end it early.
-        lines.append(f"{'@image' if image else '@file'}:{_quoted(path)}")
+        # bracket, quote mark or space doesn't end it early.
+        lines.append(f"{lead}{'@image' if image else '@file'}:{_quoted(path)}")
     return "\n".join(lines)
 
 

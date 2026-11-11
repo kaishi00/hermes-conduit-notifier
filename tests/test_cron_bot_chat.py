@@ -273,3 +273,18 @@ def test_a_path_with_brackets_is_quoted_so_its_reference_holds(hermes):
     assert hermes.delivery.deliver(dict(JOB), 'MEDIA:"/tmp/old(1).png"', "") is None
     (_home, _chat, text, _diagnostic), = hermes.notes
     assert text.endswith("@image:`/tmp/old(1).png`")
+
+
+def test_markers_directives_and_quote_marks_keep_the_reference_whole():
+    report = ("- MEDIA:/cards/a.png\n"
+              "  > MEDIA:/cards/b.pdf\n"
+              "1. MEDIA:/tmp/report.pdf[[as_document]]\n"
+              "MEDIA:\"/tmp/Bob's photo.png\"\n"
+              "MEDIA:/tmp/old<1>.png")
+    assert cron_bot_chat.reference_tags(report).splitlines() == [
+        "- @image:/cards/a.png",
+        "  > @file:/cards/b.pdf",
+        "1. @file:/tmp/report.pdf",
+        "@image:`/tmp/Bob's photo.png`",
+        "@image:`/tmp/old<1>.png`",
+    ]
