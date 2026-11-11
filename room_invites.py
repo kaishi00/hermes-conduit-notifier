@@ -1016,6 +1016,8 @@ class Rooms:
         self.flush()
         self.looks.send_looks()
         self.flush()
+        # Work news for linked agents that came too soon after the last, once it may be posted (room_work_news).
+        self.news.pass_once()
         # Notes in the private chats of the rooms elsewhere your agents only listen in (room_chats).
         self.notes.pass_once()
         # The room files other homes carried here age out (room_files_link).

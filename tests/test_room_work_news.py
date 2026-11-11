@@ -89,18 +89,36 @@ def test_a_body_that_isnt_one_is_dropped(news, body):
     assert news.delivered == []
 
 
-def test_notices_for_one_agent_are_spaced(news):
+def test_notices_for_one_agent_are_spaced_and_a_close_one_waits(news):
     room_id = _started(news)
     ask(news, "laifu", room_id)
     ask(news, "laifu", room_id)
-    assert len(news.delivered) == 1, "a second within the minute isn't posted"
-    news.clock.now += news_module.GAP_S
     ask(news, "laifu", room_id)
+    assert len(news.delivered) == 1, "the next within the minute waits"
+    news.clock.now += news_module.GAP_S - 1
+    news.furina.pass_once()
+    assert len(news.delivered) == 1
+    news.clock.now += 1
+    news.furina.pass_once()
+    assert len(news.delivered) == 2, "the ones that waited are posted once, when it may"
+    news.clock.now += news_module.GAP_S
+    news.furina.pass_once()
     assert len(news.delivered) == 2
     for _ in range(news_module.PER_HOUR * 2):
         news.clock.now += news_module.GAP_S
         ask(news, "laifu", room_id)
     assert len(news.delivered) == news_module.PER_HOUR
+
+
+def test_a_waiting_notice_isnt_posted_once_its_agent_left(news):
+    room_id = _started(news)
+    ask(news, "laifu", room_id)
+    ask(news, "laifu", room_id)
+    with news.furina.store.update() as state:
+        state["drafts"][room_id]["members"][1]["status"] = "left"
+    news.clock.now += news_module.GAP_S
+    news.furina.pass_once()
+    assert len(news.delivered) == 1
 
 
 def test_a_bot_that_isnt_in_the_room_asks_nothing(news):

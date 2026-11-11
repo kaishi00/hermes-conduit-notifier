@@ -66,7 +66,9 @@ def ask_home(root: Any, room_id: str, profile: str, rooms: Any = None) -> Option
 
 class News:
     """The home's side: the notices it posts for linked agents in the rooms ``rooms`` (room_invites.Rooms)
-    hosts. ``deliver`` is room_work.post's (Hermes' room delivery)."""
+    hosts. ``deliver`` is room_work.post's (Hermes' room delivery). A notice that comes too soon after the
+    last one for its agent waits, one per agent, and the rooms loop posts it once it may (``pass_once``), so
+    news that follows a start's within the minute still wakes the agent."""
 
     def __init__(self, rooms: Any, *, deliver: Optional[Callable[..., Optional[str]]] = None,
                  clock: Callable[[], float] = time.time) -> None:
@@ -74,6 +76,8 @@ class News:
         self.deliver = deliver
         self.clock = clock
         self._posted: dict[tuple[str, str], list[float]] = {}
+        # Each agent's notice still to post: the message id it came under.
+        self._waiting: dict[tuple[str, str], str] = {}
 
     def on_news(self, received: room_links.Received) -> None:
         body = received.body
@@ -82,29 +86,50 @@ class News:
             logger.info("Linked Rooms dropped a room.work_news from Link %s that isn't one", received.link_id)
             return
         room_id, member_id = body["room_id"], body["member_id"]
-        draft = self.rooms.store.read()["drafts"].get(room_id)
-        member = None
-        if draft is not None and draft["status"] == "started":
-            member = next((each for each in draft.get("members") or () if each["member_id"] == member_id
-                           and each["link"] == received.link_id and each.get("status", "in") == "in"), None)
-        if member is None:
+        if self._member(room_id, member_id, received.link_id) is None:
             logger.info("Linked Rooms dropped a room.work_news from Link %s for an agent it hasn't in room %s",
                         received.link_id, room_id)
             return
-        now = float(self.clock())
-        key = (room_id, member_id)
         with _lock:
-            times = [at for at in self._posted.get(key, ()) if now - at < HOUR_S]
-            if (times and now - times[-1] < GAP_S) or len(times) >= PER_HOUR:
-                self._posted[key] = times
-                logger.info("Linked Rooms didn't post work news for %s in room %s: one went just now",
-                            member["handle"], room_id)
-                return
-            self._posted[key] = [*times, now]
+            self._waiting[(room_id, member_id)] = f"{received.link_id}:{received.message_id}"
+        self.pass_once()
+
+    def pass_once(self) -> None:
+        """Posts each waiting notice whose agent may have one now, still in its room."""
+        with _lock:
+            waiting = dict(self._waiting)
+        now = float(self.clock())
+        for key, tag in waiting.items():
+            link_id, _, message_id = tag.partition(":")
+            with _lock:
+                times = self._posted[key] = [at for at in self._posted.get(key, ()) if now - at < HOUR_S]
+                if (times and now - times[-1] < GAP_S) or len(times) >= PER_HOUR:
+                    continue  # waits for the next pass that may
+                if self._waiting.get(key) != tag:
+                    continue  # a newer one took its place
+                del self._waiting[key]
+                times.append(now)
+            self._post(key, link_id, message_id)
+
+    def _member(self, room_id: str, member_id: str, link_id: str) -> Optional[tuple[dict, dict]]:
+        """The started draft and the agent of Link ``link_id`` in it, while it's in the room."""
+        draft = self.rooms.store.read()["drafts"].get(room_id)
+        if draft is None or draft["status"] != "started":
+            return None
+        member = next((each for each in draft.get("members") or () if each["member_id"] == member_id
+                       and each["link"] == link_id and each.get("status", "in") == "in"), None)
+        return None if member is None else (draft, member)
+
+    def _post(self, key: tuple[str, str], link_id: str, message_id: str) -> None:
+        room_id, member_id = key
+        found = self._member(room_id, member_id, link_id)
+        if found is None:
+            return  # it left, or the room ended, meanwhile
+        draft, member = found
         # Posted from a profile of this installation's own in the room: Hermes posts to the store that serves it.
         profiles = [each["profile"] for each in draft["members"] if each["link"] is None and each.get("profile")]
         error = room_work.post({"room": room_id, "handle": member["handle"], "linked": True},
-                               bot=member["display_name"], key=f"news-{received.message_id}"[:100], lines=[],
+                               bot=member["display_name"], key=f"news-{message_id}"[:100], lines=[],
                                profiles=profiles, deliver=self.deliver)
         if error is not None:
             logger.info("Linked Rooms couldn't post work news for %s in room %s (%s)", member["handle"], room_id,
