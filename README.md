@@ -3706,6 +3706,12 @@ keeps it.
   comes back again. Feed cards carry `back` (`unsent` or `not_done`, empty
   for a card never back) and `back_acted_at`, and `hermes conduit-push
   pulse cards` marks them.
+- **Do it in a bot's chat** (plugin 0.164+). A card from no chat opens a
+  new chat on Do it, or the Bot Chat of the bot picked in Conduit's
+  Settings > Pulse, or for one card from a long press on Do it. Conduit
+  names that chat in `POST /pulse/acted` (`"chat": {"profile": ..., "id":
+  ...}`, capability `pulse_acted_chat`), and Pulse's check after Do it
+  reads it there, in the bot's profile.
 - **Cards as picks** (plugin 0.150+). Every report, look ahead and
   follow-up card is a checked pick: a headline, at most one more sentence,
   a shape with its facts (`date`, `due`, `runs`, `promise`, `status`,

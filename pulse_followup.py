@@ -591,18 +591,38 @@ Return a JSON object {"done": ..., "why": ...}:
 - "why": one short sentence saying what in the material led to that."""
 
 
-def act(pulse_store: store.PulseStore, card_id: Any, *, now: float) -> bool:
+def act_chat(value: Any) -> Optional[tuple[str, str]]:
+    """The chat the app says Do it used, {"profile": p, "id": s}, as
+    (profile, chat id); None for anything else. The profile is "" for the
+    default one."""
+    if not isinstance(value, dict):
+        return None
+    profile, chat_id = value.get("profile", ""), value.get("id")
+    if profile is None:
+        profile = ""
+    if not isinstance(profile, str) or not isinstance(chat_id, str):
+        return None
+    profile, chat_id = profile.strip(), chat_id.strip()
+    if not chat_id or len(chat_id) > 200 or len(profile) > 200:
+        return None
+    return profile, chat_id
+
+
+def act(pulse_store: store.PulseStore, card_id: Any, *, now: float,
+        chat: Optional[tuple[str, str]] = None) -> bool:
     """Do it on a card: a read of its chat once the chat has answered; False
-    for a card already done."""
+    for a card already done. ``chat``: the chat Do it used for a card from
+    no chat, when the app names one (a bot's Bot Chat), read in place of
+    looking for a new chat by its subject."""
     card = learning.action_card(pulse_store, card_id)
     if pulse_store.done_marks([card["id"]]):
         return False
-    pulse_store.act_on_card(card["id"], now=now, check_at=now + ACT_FIRST_S)
+    pulse_store.act_on_card(card["id"], now=now, check_at=now + ACT_FIRST_S, chat=chat)
     return True
 
 
 def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
-                 now: float) -> tuple[str, float, bool, bool]:
+                 now: float, chat: Optional[tuple[str, str]] = None) -> tuple[str, float, bool, bool]:
     """What an act check reads, when the chat last moved, whether Hermes
     has answered since Do it, and whether other chats said something on the
     same subject since (it may have been done there instead). A report item
@@ -611,7 +631,11 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
     when that chat can't be named now or has moved on: Do it opened a new
     chat, found with the other chats by its subject, since the reminder Do it
     leaves in it shares the card's words. So did a card from a Kanban task's
-    worker, which Hermes won't reopen as a chat (``worker_tasks``)."""
+    worker, which Hermes won't reopen as a chat (``worker_tasks``).
+    ``chat``: (profile, chat id) of the chat the app says Do it used for
+    such a card (a bot's Bot Chat, in the bot's profile), read as the card's
+    own chat; one in a profile that's gone falls back to the search by
+    subject."""
     where = home_for(home, card["profile"])
     if where is None:
         raise ChatUnreadable(f"no profile named {card['profile']!r} any more")
@@ -622,9 +646,15 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
     # carries the card's words, so the later section finds it).
     worker = not from_report and card["chat_id"] != home_chat and bool(worker_tasks(home, [card]))
     own = "" if from_report or worker or card["chat_id"] == home_chat else card["chat_id"]
+    read_in, named = where, False
+    if not own and chat is not None:
+        # The chat the app opened for it: a bot's Bot Chat, in its profile.
+        chat_home = where if chat[0] in ("", card["profile"]) else home_for(home, chat[0])
+        if chat_home is not None:
+            read_in, own, named = chat_home, chat[1], True
     try:
         # Through the chat's compression chain, like a follow-up check.
-        rows = [row for row in hermes.chain_messages(where, chat_id=own, after_id=0,
+        rows = [row for row in hermes.chain_messages(read_in, chat_id=own, after_id=0,
                                                      max_chars=PER_MESSAGE, limit=CHAT_ROWS)
                 if float(row["timestamp"] or 0) >= acted_at - 60.0] if own else []
     except hermes.HermesUnreadable as error:
@@ -637,13 +667,15 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
     said = (said or "Nothing.") if own else (
         "It came from a Kanban task's worker, which can't be reopened as a chat, so Do it opened a new one: "
         "look for it below." if worker else "It came from no chat, so Do it opened a new one: look for it below.")
+    if named:
+        said = "It came from no chat, so Do it opened the chat they picked for it.\n" + said
     parts = [f"Now: {_local(now, zone)}", f"Pulse reminded them of: {_clip(card['title'], 300)}",
              f"What Pulse said: {_clip(card['news'], NEWS_LIMIT)}", "## Said in that chat since Do it\n" + said]
     if earlier:
         parts.append(EARLIER_TITLE.format(chat="that chat") + "\n" + earlier)
     try:
         later = evidence.later_section(where, f"{card['title']} {card['news']}", after=acted_at - 60.0,
-                                       exclude=(card["chat_id"], home_chat), zone=zone)
+                                       exclude=(card["chat_id"], home_chat, own), zone=zone)
     except hermes.HermesUnreadable:
         later = ""
     if later:
@@ -670,7 +702,9 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
         back = functools.partial(come_back, pulse_store, card, row, zone=zone, now=now)
         text = ""
         try:
-            text, last, answered, elsewhere = act_material(home, card, row["acted_at"], zone=zone, now=now)
+            text, last, answered, elsewhere = act_material(home, card, row["acted_at"], zone=zone, now=now,
+                                                           chat=(row.get("chat_profile") or "", row["chat_id"])
+                                                           if row.get("chat_id") else None)
             # How far Do it got, for what Pulse learns (pulse_prefs): something
             # was sent once the chat answered (or, for a card from no chat,
             # once the chat Do it opened turned up).

@@ -258,16 +258,17 @@ async def post_pulse_dismiss(request: Request, response: Response) -> Dict[str, 
 
 @router.post("/pulse/acted")
 async def post_pulse_acted(request: Request, response: Response) -> Dict[str, Any]:
-    """{"card": n}: Do it on a follow-up or report item card. Pulse reads
-    the chat Do it opened once it has answered (for a report item from no
-    chat or a card from a Kanban task's worker, the other chats on its
-    subject) and marks the card done if it got
+    """{"card": n, "chat"?: {"profile": p, "id": s}}: Do it on a follow-up
+    or report item card. Pulse reads the chat Do it opened once it has
+    answered (for a report item from no chat or a card from a Kanban task's
+    worker, the chat the app names, such as a bot's Bot Chat, and the other
+    chats on its subject) and marks the card done if it got
     done: {"booked": bool}."""
     response.headers["Cache-Control"] = "no-store"
     body = await core._read_json_body(request, PULSE_MAX_BODY_BYTES)
     body = body if isinstance(body, dict) else {}
     return await _pulse_route("acted", lambda control, store, home: {"booked": control.acted(
-        store, body.get("card"))}, reads_only=True)
+        store, body.get("card"), chat=body.get("chat"))}, reads_only=True)
 
 
 @router.get("/pulse/learned")

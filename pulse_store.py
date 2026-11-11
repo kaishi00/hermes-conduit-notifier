@@ -566,7 +566,10 @@ _ADDED_COLUMNS = (("cards", "topic", "TEXT NOT NULL DEFAULT ''"), ("cards", "bri
                   ("attempts", "text_sha", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "look", "TEXT NOT NULL DEFAULT ''"), ("cards", "subject", "TEXT NOT NULL DEFAULT ''"),
                   ("cards", "updated_at", "REAL"), ("candidates", "pick", "TEXT NOT NULL DEFAULT ''"),
-                  ("candidates", "subject", "TEXT NOT NULL DEFAULT ''"), ("followups", "pick", "TEXT NOT NULL DEFAULT ''"))
+                  ("candidates", "subject", "TEXT NOT NULL DEFAULT ''"), ("followups", "pick", "TEXT NOT NULL DEFAULT ''"),
+                  # The chat Do it used for a card from no chat, when the app named one
+                  # (a bot's Bot Chat, in the bot's profile): the act check reads it.
+                  ("card_acts", "chat_profile", "TEXT"), ("card_acts", "chat_id", "TEXT NOT NULL DEFAULT ''"))
 # What report cards said for Why? before a candidate's reason did (an item's card,
 # never shown; a whole report's card), and the setting that says a store has
 # cleared them.
@@ -1871,16 +1874,22 @@ class PulseStore:
                                 f"WHERE card_id IN ({','.join('?' * len(ids))})", tuple(ids)).fetchall()
         return {int(row["card_id"]): {"done_at": float(row["done_at"]), "done_by": row["done_by"]} for row in rows}
 
-    def act_on_card(self, card_id: int, *, now: float, check_at: float) -> None:
+    def act_on_card(self, card_id: int, *, now: float, check_at: float,
+                    chat: Optional[tuple[str, str]] = None) -> None:
         """Do it on a card: a check of its chat at ``check_at`` (a second Do it
         starts over), and its signal, opened (one that got further keeps
-        how far it got)."""
+        how far it got). ``chat``: (profile, chat id) of the chat Do it used
+        for a card from no chat, when the app named one."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.execute("INSERT INTO card_acts(card_id, acted_at, check_at) VALUES(?,?,?) "
+                profile, chat_id = chat if chat else (None, "")
+                conn.execute("INSERT INTO card_acts(card_id, acted_at, check_at, chat_profile, chat_id) "
+                             "VALUES(?,?,?,?,?) "
                              "ON CONFLICT(card_id) DO UPDATE SET acted_at=excluded.acted_at, "
-                             "check_at=excluded.check_at, checks=0, outcome='', why=''", (card_id, now, check_at))
+                             "check_at=excluded.check_at, checks=0, outcome='', why='', "
+                             "chat_profile=excluded.chat_profile, chat_id=excluded.chat_id",
+                             (card_id, now, check_at, profile, chat_id))
                 _put_signal(conn, card_id, prefs.ACT, at=now, useful=1.0, weight=prefs.ACT_OPENED)
                 conn.execute("COMMIT")
             except BaseException:

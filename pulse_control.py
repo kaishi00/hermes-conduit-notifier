@@ -542,11 +542,13 @@ def dismiss(pulse_store: Any, card_id: Any, dismissed: Any = True, now: Optional
     return _learning(lambda: pulse_learning.dismiss(pulse_store, card_id, dismissed, now=now, rest_until=rest_until))
 
 
-def acted(pulse_store: Any, card_id: Any, now: Optional[float] = None) -> bool:
+def acted(pulse_store: Any, card_id: Any, now: Optional[float] = None, chat: Any = None) -> bool:
     """Do it on a follow-up or report item card: Pulse reads the chat Do it
     opened once it has answered and marks the card done if it got done;
-    whether a check was booked."""
-    return _learning(lambda: pulse_followup.act(pulse_store, card_id, now=time.time() if now is None else now))
+    whether a check was booked. ``chat``: {"profile", "id"} of the chat Do
+    it used for a card from no chat (a bot's Bot Chat), when the app names one."""
+    return _learning(lambda: pulse_followup.act(pulse_store, card_id, now=time.time() if now is None else now,
+                                                chat=pulse_followup.act_chat(chat)))
 
 
 def learned(pulse_store: Any, home: Optional[Path] = None, now: Optional[float] = None) -> dict[str, Any]:
