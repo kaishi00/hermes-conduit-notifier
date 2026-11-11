@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from . import (client, room_bridge, room_choices, room_copies, room_files_link, room_identity, room_join, room_links,
-               room_looks, room_posts, room_start, session_titles)
+               room_looks, room_posts, room_start, room_work_news, session_titles)
 from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
 GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
 KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS, *room_looks.KINDS,
-         *room_files_link.KINDS)
+         *room_files_link.KINDS, *room_work_news.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -151,6 +151,7 @@ class Rooms:
         self.posts = room_posts.Posts(self, hermes=poster)
         self.looks = room_looks.Looks(self)
         self.files = room_files_link.Files(self)
+        self.news = room_work_news.News(self, clock=clock)
         self._notes: Any = None
 
     # --- The home's drafts ---------------------------------------------------------
@@ -426,7 +427,8 @@ class Rooms:
                    room_copies.COPIED: self.copies.on_copied, room_posts.POST: self.posts.on_post,
                    room_posts.POSTED: self.posts.on_posted, room_looks.LOOKS: self.looks.on_looks,
                    room_files_link.CHUNK: self.files.on_chunk,
-                   room_files_link.GOT: self.files.on_got}.get(received.kind)
+                   room_files_link.GOT: self.files.on_got,
+                   room_work_news.NEWS: self.news.on_news}.get(received.kind)
         if handler is not None:
             handler(received)
 
@@ -1014,6 +1016,8 @@ class Rooms:
         self.flush()
         self.looks.send_looks()
         self.flush()
+        # Work news for linked agents that came too soon after the last, once it may be posted (room_work_news).
+        self.news.pass_once()
         # Notes in the private chats of the rooms elsewhere your agents only listen in (room_chats).
         self.notes.pass_once()
         # The room files other homes carried here age out (room_files_link).

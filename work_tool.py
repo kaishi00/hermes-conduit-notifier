@@ -5926,8 +5926,10 @@ def _act_on_answer(home: Path, store: work_store.Store, present: Any, prompt_id:
     return shown
 
 
-def _tell_room(home: Path, room: room_work.Room, line: str) -> None:
-    """A line for the bot's next turn in the room, privately, with a post that wakes it where it's hosted here."""
+def _tell_room(home: Path, room: room_work.Room, line: str, wake: bool = True) -> None:
+    """A line for the bot's next turn in the room, privately, with a post that wakes it: here where it's hosted
+    here, else asked of the room's home over the Link (room_work_news). ``wake`` False: the line waits for the
+    bot's next turn there."""
     store = work_store.Store(home)
     try:
         store.outbox_add("", "line_linked", room.room_id, room_rules.scrub(line))
@@ -5944,6 +5946,12 @@ def _tell_room(home: Path, room: room_work.Room, line: str) -> None:
         except (OSError, sqlite3.Error):
             item = ""
         _post_linked(home, room, key, line, item)
+    elif room.side == "member" and wake:
+        from . import room_identity, room_work_news
+
+        error = room_work_news.ask_home(room_identity.root_home(home), room.room_id, work_broker.profile_of(home))
+        if error is not None:
+            logger.info("conduit_push: a Linked Room's home wasn't asked to post work news (%s)", error)
 
 
 def _post_linked(home: Path, room: room_work.Room, key: str, line: str, item: str = "") -> None:
@@ -6084,7 +6092,8 @@ def _report_linked(home: Path, work: work_store.Work, line: str, kind: str, chat
     if error is not None and "Run work is off" not in error:
         logger.info("conduit_push: %s's news for its Linked Room isn't posted (%s)", work.ref, error)
     _tell_room(home, room_work.Room(room_id=room.room_id, session_id=room.session_id,
-                                    handle=handle if error is None else "", linked=True, side=room.side), line)
+                                    handle=handle if error is None else "", linked=True, side=room.side), line,
+               wake=error is None)
 
 
 # --- Reviews a workstream made ----------------------------------------------------

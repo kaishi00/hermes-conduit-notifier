@@ -5725,14 +5725,27 @@ def test_a_linked_rooms_bot_chat_copy_carries_the_review_line(on, hermes, linked
     assert framed and "review card" not in framed[0], "the room's bot can't show a review"
 
 
-def test_a_member_side_room_hears_its_work_without_a_post(on, hermes, linked):
+def test_a_member_side_room_asks_its_home_to_wake_the_bot(on, hermes, linked, monkeypatch):
+    from conduit_push import room_work_news
+
+    asked = []
+    monkeypatch.setattr(room_work_news, "ask_home", lambda root, room_id, profile: asked.append(room_id))
     linked["turn"] = room_rules.RoomTurn(room_id="room-9", side="member", with_others=True, session_id=ROOM_CHAT)
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     answer(on.home, "confirmed")
     work.check_asks(on.home)
     assert on.get("W1").reply_to["side"] == "member"
-    assert linked["posted"] == []
+    assert linked["posted"] == [], "nothing is posted from here into a room another installation hosts"
+    assert asked == ["room-9"], "its home is asked to post the notice instead"
     assert any("started W1" in line for line in work.frame_room(on.home, "room-9", ROOM_CHAT))
+    asked.clear()
+    _finish(on.get("W1").session_id, "The shade map.")
+    assert asked == ["room-9"], "its report wakes the bot there too"
+    # Run work turned off meanwhile: the report waits for the bot's next turn there, unasked.
+    asked.clear()
+    linked["choices"] = room_rules.RoomChoices(run_work=False)
+    _finish(on.get("W1").session_id, "The toilets too.")
+    assert asked == []
 
 
 def test_linked_work_never_saves_to_memory_or_messages_anyone(on, hermes, linked):
