@@ -420,10 +420,30 @@ def test_one_question_per_workstream_a_no_stands_and_one_question_covers_related
     note = work.digest(BOT_CHAT)
     assert "- P3 (about W1), asked just now, no answer yet: «Move W1 to v2 after all?» New since the last no: " \
            "«The v1 shutdown moved up to tonight.»" in note
+    # Rewording it without new keeps what was new; a different new replaces it (notifier 693).
+    assert call("work_propose", {"text": "Move W1 to v2 tonight?", "replaces": "P3"})["ok"]
+    assert "«Move W1 to v2 tonight?» New since the last no: «The v1 shutdown moved up to tonight.»" \
+        in work.digest(BOT_CHAT)
+    assert call("work_propose", {"text": "Move W1 to v2 tonight?", "replaces": "P3",
+                                 "new": "Staging already fails."})["ok"]
+    note = work.digest(BOT_CHAT)
+    assert "New since the last no: «Staging already fails.»" in note and "moved up to tonight" not in note
     # The Work panel names every workstream a question covers; older apps read ref and title.
     item, = [item for item in work.work_coord.app_items(on, {"W1": "Login bug", "W2": "Invoice count"})
              if item["id"] == "P1"]
     assert item["ref"] == "W1" and item["refs"] == ["W1", "W2"] and item["title"] == "Login bug · Invoice count"
+
+
+def test_a_question_about_three_workstreams_names_all_three(on, hermes, home):
+    on.set_max_running(3)
+    start()
+    start("Invoice count", "Count the invoices sent in March.")
+    start("Shed photos", "Tidy the garden shed photos.")
+    woken(home)
+    made = call("work_propose", {"text": "Pause all three for the night?", "refs": ["W1", "W2", "W3"]})
+    assert "It covers W1, W2 and W3" in made["note"]
+    again = call("work_propose", {"text": "Pause W2?", "ref": "W2"})
+    assert again["error"] == "already_asked" and "P1 about W1, W2 and W3 is still open" in again["note"]
 
 
 # What the user and the worker are told --------------------------------------------
