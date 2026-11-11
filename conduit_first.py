@@ -57,6 +57,7 @@ def _shared() -> list[str]:
         (location_tool.available, "their location (conduit_location)"),
         (phone_tool.phone_available, "the phone's status and Focus (conduit_phone)"),
         (phone_tool.contacts_available, "the people they picked (conduit_contacts)"),
+        (phone_tool.photos_available, "their photos (conduit_photos)"),
     )
     shared = []
     for available, what in checks:

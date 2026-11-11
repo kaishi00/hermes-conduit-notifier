@@ -160,6 +160,9 @@ ROUTE_CAPABILITIES = (
     # sharing.contacts_edit and the add_contact, update_contact and
     # delete_contact changes.
     "phone-contact-edits",
+    # sharing.photos, a batch's "photos" ({full, upsert, delete}) and
+    # "photo_files" (a picture the user said yes to), and the send_photo change.
+    "phone-photos",
     "location-sync",
     "location-locate",
     # sharing.other_profiles: the host's other profiles paired with the
