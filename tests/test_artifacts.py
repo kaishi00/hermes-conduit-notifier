@@ -905,3 +905,16 @@ def test_a_cron_reports_files_are_its_deliveries(tmp_path, monkeypatch):
         ("delivered", "document", "/var/mit leer.pdf"),
         ("delivered", "image", "/cards/quiz.png"),
     ]
+
+
+def test_a_cron_report_with_only_a_picture_lists_it(tmp_path, monkeypatch):
+    # A report whose one file is a picture has no @file: line: the query
+    # still reads it, and a message that only starts like a report doesn't
+    # list its pictures as deliveries.
+    _no_gateway(monkeypatch)
+    note = '[Cron job "Cam" report: shown in the chat, no reply asked for]\n\n@image:/cam/now.jpg'
+    lookalike = '[Cron job "Cam" was late]\n@image:/root/uploads/mine.png'
+    conn = _db(tmp_path, [("s1", "user", note), ("s1", "user", lookalike)])
+    assert [(i["source"], i["kind"], i["path"]) for i in _list(conn)["items"]] == [
+        ("delivered", "image", "/cam/now.jpg"),
+    ]

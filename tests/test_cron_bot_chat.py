@@ -266,6 +266,8 @@ def test_the_artifacts_list_knows_the_note_by_its_header():
     artifacts = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(artifacts)
     assert cron_bot_chat.HEADER.format(name="x").startswith(artifacts.CRON_NOTE_PREFIX)
+    for name in ("x", 'say "hi"', ""):
+        assert artifacts._CRON_NOTE_HEADER_RE.match(cron_bot_chat.HEADER.format(name=name) + "\n\nreport")
 
 
 def test_a_path_with_brackets_is_quoted_so_its_reference_holds(hermes):
