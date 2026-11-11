@@ -269,7 +269,8 @@ text), at most 2,000 lines of at most 160 characters, each only letters,
 digits, spaces and `()._,:;+=<>/#%[]-`. A user who sees a chat jump or stop
 responding sends the trace on its own from Settings > Connection >
 Diagnostics & logs (kind `chat`), and the trace says what saved it: `jump`,
-`stall`, `storm`, `rebuild` or `manual`. The relay answers a post whose trace it kept with `"trace": true`, so the app deletes its copy only then. A post holds at most 1,000,000
+`stall`, `storm`, `rebuild`, `blank` (rows on screen that no cell drew, relay 0.27+) or
+`manual`. The relay answers a post whose trace it kept with `"trace": true`, so the app deletes its copy only then. A post holds at most 1,000,000
 characters, and the relay keeps only the diagnostic keys it names
 (metadata codes, exception type and name, stack frames, 512 levels of a
 stack), at most 600,000 bytes of them, with the trace, so the folder stays under about 1 GB. The relay keeps each as a file under

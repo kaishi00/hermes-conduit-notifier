@@ -88,6 +88,7 @@ test('a chat trace comes alone or with a crash, in the characters the app writes
   assert.match(chat.signature, /^[0-9a-f]{16}$/);
   assert.equal(validateReport(chatPost({ trace: trace('jump', ['-1.000 other']) })).signature, chat.signature, 'traces group by what saved them');
   assert.notEqual(validateReport(chatPost({ trace: trace('stall') })).signature, chat.signature);
+  assert.equal(validateReport(chatPost({ trace: trace('blank') })).trace.reason, 'blank', 'the blank watch saves its own trace');
   assert.throws(() => validateReport(chatPost({ trace: undefined })), /invalid_trace/, 'a chat report is its trace');
   assert.throws(() => validateReport(chatPost({ trace: trace('typed') })), /invalid_trace/);
   assert.throws(() => validateReport(chatPost({ trace: trace('jump', []) })), /invalid_trace/);
