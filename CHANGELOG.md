@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.162.0 (2026-11-11)
+
+### New and improved
+- Pulse has two more card types: a number that changed (a price drop, a disk
+  filling up, with what it was before and any limit), and someone you're
+  waiting on (who owes you a reply or a thing, and since when). Conduit shows
+  them once every Conduit you use can draw them.
+
 ## 0.161.1 (2026-11-11)
 
 ### Fixes

@@ -28,6 +28,7 @@ in a list.
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import date, datetime, timezone
 from typing import Any, Collection, Iterable, Mapping, Optional, Sequence
@@ -36,7 +37,14 @@ from . import card_schema
 
 PLAIN = "plain"
 DRAWN = "drawn"
-SHAPES = ("date", "due", "runs", "promise", "status", "steps", DRAWN, PLAIN)
+NUMBER = "number"
+WAITING = "waiting"
+# Shapes a pick may take only once every Conduit that draws cards draws
+# them (NUMBER_WAITING_FEATURE, through drawn_types): an older app would
+# show them as plain words, which is what Pulse leaves out (Eric,
+# 2026-11-11: Number and Waiting on, for what fit no card type).
+GATED_SHAPES = (NUMBER, WAITING)
+SHAPES = ("date", "due", "runs", "promise", "status", "steps", NUMBER, WAITING, DRAWN, PLAIN)
 # The morning brief's own look (pulse_brief.look): made in code from its
 # reply, never a shape the model picks.
 BRIEF = "brief"
@@ -51,6 +59,8 @@ FACT_LIMIT = 120
 MAX_RUNS = 10
 MAX_STEPS = 6
 STATES = ("ok", "warn", "fail")
+UNIT_LIMIT = 12
+BETTER = ("up", "down")
 RUN_RESULTS = ("ok", "fail")
 # What a drawn body may be: the chat's cards that show something, never a
 # question, a form or a live card (a Pulse card's buttons are its actions).
@@ -147,11 +157,28 @@ REPEAT_SHARE = 0.6
 SHORT_DETAIL = 5
 
 
+def _number(value: Any) -> Optional[float | int]:
+    """A finite number, or a string that's only one ("91", "1,204.5"), as
+    an int when it's whole; None otherwise."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        try:
+            value = float(value.strip().replace(",", ""))
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return int(value) if float(value).is_integer() and abs(value) < 1e15 else float(value)
+
+
 def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional[dict], str]:
     """``facts`` checked for ``shape``: (the facts kept, "") or (None, why
     they don't hold up)."""
     if shape == PLAIN:
         return {}, ""
+    if shape in GATED_SHAPES and shape not in drawn_types:
+        return None, "shape_not_drawn"
     if not isinstance(facts, dict):
         return None, "no_facts"
     if shape == "date":
@@ -191,6 +218,23 @@ def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional
                 or not isinstance(at, int) or isinstance(at, bool) or not 0 <= at < len(names)):
             return None, "bad_steps"
         return {"names": [_text(n, 40) for n in names], "at": at}, ""
+    if shape == NUMBER:
+        label, value = _text(facts.get("label"), FACT_LIMIT), _number(facts.get("value"))
+        if not label or value is None:
+            return None, "bad_number"
+        kept: dict[str, Any] = {"label": label, "value": value, "unit": _text(facts.get("unit"), UNIT_LIMIT)}
+        for key in ("was", "limit"):
+            if (number := _number(facts.get(key))) is not None:
+                kept[key] = number
+        if facts.get("better") in BETTER:
+            kept["better"] = facts["better"]
+        return kept, ""
+    if shape == WAITING:
+        person, what = _text(facts.get("person"), FACT_LIMIT), _text(facts.get("what"), FACT_LIMIT)
+        if not person or not what:
+            return None, "bad_waiting"
+        since = _day(facts.get("since"))
+        return {"person": person, "what": what, **({"since": since} if since else {})}, ""
     if shape == DRAWN:
         body = facts.get("body")
         kind = body.get("type") if isinstance(body, dict) else None
@@ -501,10 +545,16 @@ def count(pulse_store: Any, now: float, keys: Sequence[str]) -> None:
 LOOKS_FEATURE = "pulse-looks"
 
 
+# What a Conduit that draws the "number" and "waiting" shapes says (2.4.x).
+NUMBER_WAITING_FEATURE = "pulse-number-waiting"
+
+
 def drawn_types(home: Any) -> tuple[str, ...]:
-    """The chat card types a "drawn" pick may use: none until every Conduit
-    that draws cards draws Pulse looks, then those whose feature every one
-    of them has (as conduit_show leaves out what one can't draw)."""
+    """What every Conduit that draws cards can draw beyond the first shapes:
+    the chat card types a "drawn" pick may use, then GATED_SHAPES. None
+    until every one draws Pulse looks; then the card types whose feature
+    every one of them has (as conduit_show leaves out what one can't draw),
+    and the gated shapes once every one says NUMBER_WAITING_FEATURE."""
     try:
         from .present_store import PresentStore
         present = PresentStore(home)
@@ -512,17 +562,30 @@ def drawn_types(home: Any) -> tuple[str, ...]:
             return ()
         hidden = {kind for feature, kinds in card_schema.FEATURE_TYPES.items()
                   if not present.has_feature_everywhere(feature) for kind in kinds}
+        shapes = GATED_SHAPES if present.has_feature_everywhere(NUMBER_WAITING_FEATURE) else ()
     except Exception:  # noqa: BLE001 - nothing drawn when it can't tell
         return ()
-    return tuple(kind for kind in DRAWN_TYPES if kind not in hidden)
+    return tuple(kind for kind in DRAWN_TYPES if kind not in hidden) + shapes
 
 
 def rules(drawn: Sequence[str]) -> str:
     """PICK_RULES for a prompt, with the "drawn" shape when there are card
     types to draw it with."""
     text = PICK_RULES.replace("{{", "{").replace("}}", "}")
-    if drawn:
+    if NUMBER in drawn:
+        text += ("\n- \"number\" {\"label\": \"Disk on nas-01\", \"value\": 91, \"unit\": \"%\", \"was\": 78, \"limit\": 90, "
+                 "\"better\": \"down\"}: a measured value the context states, when the news is the number itself (a price, "
+                 "a balance, how full something is); \"was\": the earlier value it gives, \"limit\": a threshold it names, "
+                 "\"better\": \"up\" or \"down\" when which way is good is plain; leave out what it doesn't give. Use it "
+                 "rather than \"status\" when there's a number to show.")
+    if WAITING in drawn:
+        text += ("\n- \"waiting\" {\"person\": \"Dana\", \"what\": \"the signed lease\", \"since\": \"YYYY-MM-DD\"}: someone "
+                 "owes the user a reply or a thing (who, what, and the day they were asked or said they'd send it, "
+                 "left out when the context doesn't give it). It's the other side of \"promise\", which is what the user "
+                 "or Hermes said they'd do.")
+    cards = [kind for kind in drawn if kind not in GATED_SHAPES]
+    if cards:
         text += ("\n- \"drawn\" {\"body\": a card} when none of those shapes fits and a chart, weather, steps, stats, "
                  "a table or another card shows it better than words: the body is one conduit_show card of type "
-                 + ", ".join(drawn) + ", with no buttons.")
+                 + ", ".join(cards) + ", with no buttons.")
     return text
