@@ -796,15 +796,7 @@ class _GptLiveWatchSession(_WatchAudioSession):
         raise WatchAudioFailure("unreachable", "GPT-Live's audio connection didn't come up from the Hermes host")
 
     async def _started(self, helper: _GptLiveHelper) -> None:
-        answer = self.answer
-        await self.bridge.control(self.stream, {
-            "type": "started", "engine": self.engine, "voice": answer.get("voice"),
-            "input_rate": GPT_LIVE_WATCH_INPUT_RATE, "output_rate": GPT_LIVE_WATCH_OUTPUT_RATE,
-            "briefing_applied": bool(answer.get("briefing_applied")),
-            "greeting_applied": bool(answer.get("greeting_applied")),
-            # Codex's GA endpoint: the Watch speaks the GA events and appends the briefing.
-            **({"events": "ga"} if answer.get("events") == "ga" else {}),
-        })
+        await self.bridge.control(self.stream, _gpt_live_started(self.engine, self.answer))
         # What came while "started" was on its way, in order, then live.
         while self.held:
             kind, plain = self.held.pop(0)
@@ -820,6 +812,18 @@ class _GptLiveWatchSession(_WatchAudioSession):
         helper = self.helper
         if helper is not None and self.live:
             await helper.write("E", data)
+
+
+def _gpt_live_started(engine: str, answer: Dict[str, Any]) -> Dict[str, Any]:
+    """The "started" control for a GPT-Live session the host started."""
+    return {
+        "type": "started", "engine": engine, "voice": answer.get("voice"),
+        "input_rate": GPT_LIVE_WATCH_INPUT_RATE, "output_rate": GPT_LIVE_WATCH_OUTPUT_RATE,
+        "briefing_applied": bool(answer.get("briefing_applied")),
+        "greeting_applied": bool(answer.get("greeting_applied")),
+        # Codex's GA endpoint: the Watch speaks the GA events and appends the briefing.
+        **({"events": "ga"} if answer.get("events") == "ga" else {}),
+    }
 
 
 class _WatchAudioPacer:

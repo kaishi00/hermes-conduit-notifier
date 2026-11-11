@@ -80,7 +80,9 @@ GPT_LIVE_WORKERS = 2
 GPT_LIVE_MAX_BODY_BYTES = 640 * 1024
 GPT_LIVE_MAX_HISTORY_ITEMS = 40
 GPT_LIVE_MAX_ANSWER_BYTES = 64 * 1024
-# Bounds how long Conduit waits (a 504), above the socket timeout. It can't
+# Bounds how long Conduit waits (a 504), above the socket timeout. An account
+# on Codex's GA endpoint takes two exchanges (the old URL's refusal, then the GA
+# URL), so its start can hold a worker for two socket timeouts. It can't
 # interrupt a Hermes call already running on a worker (a token refresh, the
 # upstream exchange), so a Hermes call that never returns holds its worker
 # until the process restarts. Status has its own pool: a stuck session never
@@ -369,7 +371,9 @@ def gpt_live_session_config(history: Optional[list], live: Dict[str, Any]) -> Di
 
 def gpt_live_ga_session_config(history: Optional[list], live: Dict[str, Any]) -> Dict[str, Any]:
     """The ``session`` object for Codex's GA endpoint: the public GA API's shape
-    (seeded history as ``input``) with the subscription's model and voice."""
+    (seeded history as ``input``) with the subscription's model and voice. The
+    instructions still go, in case GA ever reads them; Conduit appends its
+    briefing either way."""
     model, voice = _gpt_live_model_voice(live)
     config: Dict[str, Any] = {
         "model": model,

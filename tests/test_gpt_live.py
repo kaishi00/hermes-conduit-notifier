@@ -1098,3 +1098,38 @@ def test_another_refusal_from_the_old_url_never_tries_the_ga_endpoint(client, op
 def test_an_account_still_on_the_old_endpoint_reports_no_events(client, openai):
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
     assert "events" not in body
+
+
+class _Refusal:
+    """An opener whose old-URL answer is an HTTP error carrying ``body``, and whose
+    GA-URL answer is a GA session."""
+
+    def __init__(self, body):
+        self.body = body
+        self.urls = []
+
+    def open(self, request, timeout=None):
+        import io
+        self.urls.append(request.full_url)
+        if request.full_url == api.gpt_live.GPT_LIVE_URL:
+            raise api.gpt_live.urllib.error.HTTPError(request.full_url, 400, "Bad Request", {}, io.BytesIO(self.body))
+        return _Answered200(lambda _size: json.dumps(
+            {"session": {"id": "sess_ga3"}, "transport": {"type": "webrtc", "sdp": ANSWER}}).encode())
+
+
+def test_the_real_transport_finds_the_ga_refusal_in_the_error_body(client, monkeypatch):
+    opener = _Refusal(GA_REFUSAL.encode())
+    monkeypatch.setattr(api.gemini_qwen_live, "_opener", opener)
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", REAL_POST_SDP)
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).json()
+    assert body["events"] == "ga" and body["session"] == {"id": "sess_ga3"}
+    assert opener.urls == [api.gpt_live.GPT_LIVE_URL, api.gpt_live.GPT_LIVE_GA_URL]
+
+
+def test_a_refusal_naming_the_ga_path_past_the_read_cap_stays_a_502(client, monkeypatch):
+    padding = b" " * api.gpt_live.GPT_LIVE_MAX_ERROR_BYTES
+    opener = _Refusal(padding + GA_REFUSAL.encode())
+    monkeypatch.setattr(api.gemini_qwen_live, "_opener", opener)
+    monkeypatch.setattr(api.gpt_live, "_post_sdp", REAL_POST_SDP)
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 502
+    assert opener.urls == [api.gpt_live.GPT_LIVE_URL]
