@@ -2274,6 +2274,44 @@ def test_a_sent_photo_is_kept_a_week_and_goes_with_a_wipe(tmp_path, monkeypatch)
     assert not path.exists() and not store.photos_dir(DEVICE).exists()
 
 
+def test_a_sent_photo_goes_without_another_upload_and_a_late_one_never_lands(tmp_path):
+    now = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: now[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_photo_batch()))
+
+    def send(batch_id, sent_at, change):
+        return store.ingest(handset.seal(_photo_batch(batch_id, sent_at=sent_at, photos={}, files=[
+            {"change_id": change["id"], "data": base64.b64encode(JPEG).decode()}])))
+
+    # Past its day, though nothing marked it expired yet: the picture isn't taken.
+    late = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    now[0] += phone.PHOTO_TTL_S + 1
+    answer = send("batch-0002", "2026-10-15T08:01:00+01:00", late)
+    assert "photos_sent" not in answer and store.change_outcome(late["id"])["state"] == "expired"
+    assert not store.photos_dir(DEVICE).exists() or not any(store.photos_dir(DEVICE).iterdir())
+
+    # A week on with no upload since: the phone's status check sweeps it.
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    send("batch-0003", "2026-10-15T08:02:00+01:00", change)
+    path = Path(store.change_outcome(change["id"])["result"])
+    os.utime(path, (now[0] - phone.PHOTO_KEPT_S - 1,) * 2)
+    now[0] += 5
+    store.status(DEVICE)
+    assert not path.exists()
+
+    # A batch refused for its clock that turns Photos off still takes the pictures.
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    send("batch-0004", "2026-10-15T08:03:00+01:00", change)
+    path = Path(store.change_outcome(change["id"])["result"])
+    with pytest.raises(phone.PhoneError) as error:
+        store.ingest(handset.seal(_batch("batch-0005", sent_at="2026-10-15T09:00:00+01:00",
+                                         sharing=_sharing(photos=False))))
+    assert error.value.code == "clock_skew"
+    assert not path.exists()
+
+
 def test_a_dismissed_photo_never_arrives(store, iphone):
     store.ingest(iphone.seal(_photo_batch()))
     change = store.add_change("send_photo", None, {"photo_id": "ph_receipt"})

@@ -310,6 +310,12 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool], profile: Callable[[],
             ctx.register_skill(SKILL_NAME, skill_path)
         except Exception:  # noqa: BLE001
             logger.warning("conduit_push: could not register the %s skill", SKILL_NAME, exc_info=True)
+    # Sent pictures go after a week even when the phone stops syncing:
+    # each load sweeps them too (status checks and photo reads do as well).
+    try:
+        _store().sweep_sent_photos()
+    except Exception:  # noqa: BLE001 — never holds up the plugin's load
+        logger.warning("conduit_push: couldn't sweep sent photos", exc_info=True)
 
 
 def _store() -> PhoneStore:
@@ -417,6 +423,7 @@ def handle_photos(args: Any, *, session_id: Any = None, is_child: Callable[[Any]
         refused = _guard(session_id, is_child)
         if refused:
             return _answer(**refused)
+        _store().sweep_sent_photos()
         return _answer(**_photos(args if isinstance(args, dict) else {}, session_id=session_id, profile=profile))
     except PhoneError as error:
         return _answer(ok=False, error=error.code, note=_error_note(error))

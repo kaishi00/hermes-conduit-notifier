@@ -36,6 +36,7 @@ provides_tools:
   - conduit_maps
   - conduit_calendar
   - conduit_phone
+  - conduit_photos
   - conduit_contacts
   - conduit_room
   - conduit_ask_owner

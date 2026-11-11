@@ -726,9 +726,11 @@ class PhoneStore:
                 result["pending"] = db.execute("SELECT COUNT(*) FROM changes WHERE device=? AND state='pending'",
                                                (device_id,)).fetchone()[0]
                 generation = _meta(db, "generation")
+        # After the commit, so a refused batch that turned Photos off still
+        # takes the pictures with it.
+        self._sweep_photo_files(now)
         if skewed is not None:
             raise skewed
-        self._sweep_photo_files(now)
         return {**result, "generation": generation}
 
     # Photos the user said yes to ----------------------------------------------------
@@ -768,18 +770,41 @@ class PhoneStore:
             saved.append(item["change_id"])
         return saved
 
+    def sweep_sent_photos(self) -> None:
+        """The week's limit on sent pictures, for callers that don't upload:
+        the phone's status checks, Hermes' photo reads and each plugin load,
+        so pictures go on time even when the phone stops syncing."""
+        try:
+            self._sweep_photo_files(int(self.clock()))
+        except Exception:  # noqa: BLE001 — housekeeping never fails its caller
+            logger.warning("conduit phone: couldn't sweep sent photos", exc_info=True)
+
     def _sweep_photo_files(self, now: int) -> None:
         """Forgets sent pictures after PHOTO_KEPT_S, and all of a device's
-        once it no longer shares photos (or is gone). Never fails a batch."""
+        once it no longer shares photos (or is gone). Never fails a batch.
+        Under the writers' lock, so sharing turned back on (and a picture
+        saved) between reading it and deleting can't lose the new picture."""
         root = self.photos_dir()
         if not root.is_dir():
             return
-        try:
-            with self._read() as db:
-                sharing = {} if db is None else {
-                    row[0]: _decode(row[1], None) or {} for row in db.execute("SELECT id, sharing FROM devices")}
-        except (sqlite3.DatabaseError, PhoneError):
-            return
+        with self._locked():
+            self._sweep_photo_files_locked(root, now)
+
+    def _sweep_photo_files_locked(self, root: Path, now: int) -> None:
+        sharing: dict[str, Any] = {}
+        if self.path.exists():
+            try:
+                connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
+            except sqlite3.DatabaseError:
+                return
+            try:
+                sharing = {row[0]: _decode(row[1], None) or {}
+                           for row in connection.execute("SELECT id, sharing FROM devices")}
+            except sqlite3.DatabaseError:
+                # A file mid-upgrade or broken: keep everything until a read works.
+                return
+            finally:
+                connection.close()
         try:
             for folder in root.iterdir():
                 if not folder.is_dir() or folder.is_symlink():
@@ -1062,6 +1087,7 @@ class PhoneStore:
         # puts it first.
         if stamp is not None and stamp < now:
             self._touch(device_id, answer["device"]["kid"], now)
+            self.sweep_sent_photos()
         return answer
 
     def _touch(self, device_id: str, kid: str, now: int) -> None:
@@ -1935,7 +1961,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         # A picture the user said yes to is kept even from a late batch, while
         # the newer sharing still lets Hermes have photos.
         allowed = not stale or shares(_decode(stored[5], None) or {}, "photos")
-        counts["photo_files"] = _waiting_photo_files(db, device_id, photo_files) if allowed else []
+        counts["photo_files"] = _waiting_photo_files(db, device_id, photo_files, now) if allowed else []
     if stale:
         # An older batch (a retry that arrived late) never undoes a newer
         # one: it neither widens nor narrows what the newer one said is
@@ -2046,14 +2072,15 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
 
 
 def _waiting_photo_files(db: sqlite3.Connection, device_id: str,
-                         files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                         files: list[dict[str, Any]], now: int) -> list[dict[str, Any]]:
     """The pictures that answer a send_photo of this device still waiting,
-    with the photo each one is; any other is left out (answered already, or
-    another device's)."""
+    with the photo each one is; any other is left out (answered already,
+    past its day though not yet marked expired, or another device's)."""
     waiting = []
     for item in files:
         row = db.execute("SELECT target FROM changes WHERE id=? AND device=? AND kind='send_photo'"
-                         " AND state IN ('pending', 'lost')", (item["change_id"], device_id)).fetchone()
+                         " AND state IN ('pending', 'lost') AND expires_at>?",
+                         (item["change_id"], device_id, now)).fetchone()
         if row is not None:
             target = _decode(row[0], {})
             waiting.append({**item, "photo_id": target.get("photo_id") if isinstance(target, dict) else None})
