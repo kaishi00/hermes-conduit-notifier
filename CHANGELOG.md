@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.4 (2026-11-11)
+
+### Fixes
+- GPT-Live on a ChatGPT plan ignored Conduit's briefing, so the voice didn't
+  know your name, your agent's personality or Conduit's rules. It now gets
+  them, fitted to what the plan allows: a long memory is shortened rather than
+  the call losing the briefing.
+
 ## 0.164.3 (2026-11-11)
 
 ### Fixes
