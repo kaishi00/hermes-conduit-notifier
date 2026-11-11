@@ -565,7 +565,7 @@ _TITLES = {
     "add_contact": "Hermes wants to add a contact",
     "update_contact": "Hermes wants to change a contact",
     "delete_contact": "Hermes wants to delete a contact",
-    "send_photo": "Hermes asks for a photo",
+    "send_photo": "Hermes wants to see a photo",
 }
 _AUTO_TITLES = {"add_event": "Hermes is adding an event", "add_reminder": "Hermes is adding a reminder",
                 "set_alarm": "Hermes is setting an alarm", "set_timer": "Hermes is starting a timer",
