@@ -108,7 +108,8 @@ def test_session_uses_the_codex_sign_in_and_keeps_it_on_the_host(client, openai)
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
-        "ok": True, "auth": "subscription", "source": "plugin", "voice": "cove", "briefing_applied": False, "greeting_applied": False,
+        "ok": True, "auth": "subscription", "source": "plugin", "voice": "cove", "briefing_applied": False,
+        "briefing_clipped": False, "greeting_applied": False,
         "session": {"id": "rtc_abc123"}, "transport": {"type": "webrtc", "sdp": ANSWER},
     }
     url, headers, body = openai.calls[0]
@@ -148,11 +149,25 @@ def test_session_voice_from_conduit_overrides_the_configured_voice(client, herme
     assert openai.calls[1][2]["session"]["audio"] == {"output": {"voice": "ember"}}
 
 
-def test_session_briefing_joins_the_instructions_instead_of_context_appends(client, hermes, openai):
+def _developer_text(session):
+    first = (session.get("initial_items") or [{}])[0]
+    if first.get("role") != "developer":
+        return None
+    return first["content"][0]["text"]
+
+
+def test_session_briefing_is_the_first_seeded_item_not_the_instructions(client, hermes, openai):
+    """gpt-live-1-codex ignores the session's instructions and reads a developer
+    message in initial_items (notifier#719), ahead of the history."""
     hermes.config = {"voice": {"gpt_live": {"instructions": "Speak French."}}}
-    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "  [Conduit rules] "}).json()
-    assert body["briefing_applied"] is True
-    assert openai.calls[0][2]["session"]["instructions"].endswith("Speak French.\n\n[Conduit rules]\n\n" + api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
+    history = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "  [Conduit rules] ", "history": history}).json()
+    assert body["briefing_applied"] is True and body["briefing_clipped"] is False
+    session = openai.calls[0][2]["session"]
+    assert session["initial_items"] == [{"type": "message", "role": "developer",
+                                         "content": [{"type": "input_text", "text": "[Conduit rules]"}]}, *history]
+    assert "[Conduit rules]" not in session["instructions"]
+    assert session["instructions"].endswith("Speak French.\n\n" + api.gpt_live.GPT_LIVE_WAIT_FOR_USER)
 
 
 def test_session_never_asks_the_model_to_speak_first(client, hermes, openai):
@@ -169,9 +184,10 @@ def test_session_never_asks_the_model_to_speak_first(client, hermes, openai):
         openai.calls.clear()
         body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, **request}).json()
         assert body["greeting_applied"] is False, f"Conduit opens {request} with its own turn"
-        instructions = openai.calls[0][2]["session"]["instructions"]
-        assert "Opening policy" not in instructions, "no policy that keeps the model from answering Conduit's turn"
-        assert instructions.endswith(request.get("briefing") or "Speak French.")
+        session = openai.calls[0][2]["session"]
+        assert "Opening policy" not in session["instructions"], "no policy that keeps the model from answering Conduit's turn"
+        assert session["instructions"].endswith("Speak French.")
+        assert _developer_text(session) == request.get("briefing")
 
     openai.calls.clear()
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "call_opening": False}).json()
@@ -197,11 +213,132 @@ def test_session_rejects_a_bad_greeting(client, openai, greeting):
 
 def test_session_takes_a_briefing_with_a_long_memory(client, openai):
     """A 44 KB briefing (rules, persona and a long memory) went over the old 32 KB
-    limit and ended every call (kaishi00/hermes-conduit#1077)."""
+    limit and ended every call (kaishi00/hermes-conduit#1077). It's taken, and
+    its memory is cut to fit Codex's seeded-items budget (notifier#719)."""
     briefing = "[Conduit rules]\n<hermes_memory>\n" + "Likes tea.\n" * 4_000 + "</hermes_memory>"
     assert len(briefing) > 40_000
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": briefing}).json()
-    assert body["briefing_applied"] is True
+    assert body["briefing_applied"] is True and body["briefing_clipped"] is True
+    text = _developer_text(openai.calls[0][2]["session"])
+    assert text.startswith("[Conduit rules]\n<hermes_memory>\nLikes tea.\n") and text.endswith("\n[…]\n</hermes_memory>")
+
+
+# --- One budget for what a subscription session is seeded with (notifier#719) -----
+#
+# Every earlier size bug was a limit guessed in another unit (Conduit issue 1077's
+# 32 K characters, the 500-token context append, then Codex's 8,192 tokens). These
+# hold the plugin to the one budget for whatever any Conduit sends.
+
+RULES = "[Conduit voice app rules. " + "Delegate real work to the client. " * 300 + "]"
+TAIL = "\n[This call's chat: Paris trip.]\n[Language: speak German.]"
+
+
+def _briefing(persona="", memory="", rules=RULES, tail=TAIL):
+    text = rules
+    if persona:
+        text += "\n[Speak with the personality of the user's Hermes agent below.]\n<hermes_persona>\n" + persona + "\n</hermes_persona>"
+    if memory:
+        text += "\n[You share memory with the user's Hermes agent.]\n<hermes_memory>\n" + memory + "\n</hermes_memory>"
+    return text + tail
+
+
+def _turn(role, text):
+    kind = "input_text" if role == "user" else "output_text"
+    return {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}
+
+
+LONG = "Zebra Quimby likes tea. 😀 \"quoted\"\n" * 800
+# Conduit clips each seeded turn to 1,200 characters (issue 1983); these are non-ASCII and escape-heavy.
+WORST_HISTORY = [_turn("user" if i % 2 else "assistant", "ü\n\"" * 400) for i in range(api.gpt_live.GPT_LIVE_MAX_HISTORY_ITEMS)]
+
+
+@pytest.mark.parametrize("upstream", [False, True], ids=["plugin", "hermes"])
+@pytest.mark.parametrize("history", [None, WORST_HISTORY[-6:], WORST_HISTORY], ids=["no-history", "chat-seed", "worst-history"])
+@pytest.mark.parametrize("briefing", [
+    None,
+    _briefing(),
+    _briefing(persona=LONG[:4_000], memory=LONG[:8_000]),
+    _briefing(persona=LONG[:20_000], memory=LONG),
+    _briefing(memory=LONG),
+    _briefing(persona="温和而简洁。" * 1_000, memory="用户喜欢喝茶，住在东京。🍵\n" * 1_500),
+    ("😀" * api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS),
+], ids=["none", "rules", "typical", "long-persona-and-memory", "long-memory", "cjk-and-emoji", "at-the-request-limit"])
+def test_seeded_items_never_exceed_the_codex_budget(client, openai, monkeypatch, upstream, history, briefing):
+    calls = []
+    if upstream:
+        # A Hermes that seeds the items it's given, so the exchanged config is what's checked.
+        voice_live = _upstream(monkeypatch, calls)
+        voice_live.build_session_config = lambda history=None, *, live=None: (
+            {"session": {"initial_items": history}} if history else {"session": {}})
+    request = {"sdp": OFFER, "history": history, "briefing": briefing}
+    body = client.post(f"{BASE}/gpt-live/session", json={k: v for k, v in request.items() if v is not None}).json()
+    session = calls[-1][2]["session"] if upstream else openai.calls[0][2]["session"]
+    items = session.get("initial_items") or []
+    # Counted on the wire, as posted (non-ASCII escaped), independently of the plugin's estimator.
+    assert len(json.dumps(items)) / 4 <= api.gpt_live.CODEX_ITEMS_BUDGET_TOKENS
+    assert api.gpt_live.CODEX_ITEMS_BUDGET_TOKENS < api.gpt_live.CODEX_ITEMS_MAX_TOKENS
+    seeded = items[0]["content"][0]["text"] if items and items[0]["role"] == "developer" else None
+    if (briefing and "<hermes_" in briefing) or briefing == _briefing():
+        # The rules, the call's own blocks and the language rule always go whole.
+        assert seeded is not None and seeded.startswith(RULES) and seeded.endswith(TAIL)
+        assert body["briefing_applied"] is True
+    # What's kept of the history is its newest turns, in order, never a gap.
+    kept = items[1:] if seeded is not None else items
+    assert kept == (history or [])[len(history or []) - len(kept):]
+    if history == WORST_HISTORY[-6:] and briefing != "😀" * api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS:
+        assert kept, "a chat's seed keeps its newest turns"
+    if seeded is None:
+        assert body["briefing_applied"] is False, "Conduit sends what didn't fit as context"
+        assert body["briefing_clipped"] is False, "nothing in the session was cut"
+
+
+def test_memory_is_cut_before_the_persona_and_both_are_marked():
+    persona, memory = "Warm and brief.\n" * 200, "Zebra Quimby likes tea.\n" * 2_000
+    items, applied, clipped = api.gpt_live._seeded_items(None, _briefing(persona=persona, memory=memory))
+    text = items[0]["content"][0]["text"]
+    assert applied and clipped
+    assert persona.strip() in text, "the persona stays whole while cutting memory is enough"
+    assert "\n[…]\n</hermes_memory>" in text
+
+    items, applied, clipped = api.gpt_live._seeded_items(None, _briefing(persona="Warm. " * 20_000, memory=memory))
+    text = items[0]["content"][0]["text"]
+    assert applied and clipped
+    assert "<hermes_memory>" not in text and "[You share memory" not in text, "too little memory left: the block and its note go"
+    assert "\n[…]\n</hermes_persona>" in text and text.startswith(RULES) and text.endswith(TAIL)
+
+
+def test_a_briefing_whose_rules_alone_dont_fit_is_left_to_conduit():
+    history = [_turn("user", "hi")]
+    rules = "[Conduit rules. " + "x" * (api.gpt_live.CODEX_ITEMS_MAX_TOKENS * 4) + "]"
+    items, applied, clipped = api.gpt_live._seeded_items(history, _briefing(rules=rules, memory="Likes tea. " * 500))
+    assert items == history and applied is False and clipped is False, "dropped, not reported as cut"
+
+
+def test_a_bracketed_line_that_doesnt_name_the_block_stays():
+    briefing = "[Conduit rules.]\n[Keep it short.]\n<hermes_memory>\n" + "Likes tea.\n" * 50 + "\n</hermes_memory>"
+    text, changed = api.gpt_live._clip_block(briefing, "hermes_memory", 10_000)
+    assert changed and text == "[Conduit rules.]\n[Keep it short.]"
+
+
+def test_history_keeps_its_newest_items_within_its_share():
+    history = [_turn("user", f"{i} " + "words " * 200) for i in range(40)]
+    items, applied, _ = api.gpt_live._seeded_items(history, _briefing())
+    assert applied and items[-1] == history[-1]
+    assert api.gpt_live._estimated_tokens(items[1:]) <= api.gpt_live.CODEX_HISTORY_MAX_TOKENS
+    assert items[1:] == history[-(len(items) - 1):], "oldest turns go first, in order"
+    alone, applied, _ = api.gpt_live._seeded_items(history, None)
+    assert not applied and len(alone) > len(items) - 1, "without a briefing the history has the whole budget"
+
+
+def test_the_api_path_keeps_the_briefing_in_its_instructions(client, hermes, openai):
+    """The public API's gpt-live-1 reads its instructions: that path is unchanged."""
+    hermes.config = {"voice": {"gpt_live": {"conduit_api_billing": True, "api_key": "sk-test"}}}
+    openai.reply.update({"status": 200, "answer": json.dumps({"session": {"id": "s1"}, "transport": {"type": "webrtc", "sdp": ANSWER}}),
+                         "location": None})
+    response = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]", "billing": "api"})
+    assert response.status_code == 200, response.text
+    session = openai.calls[0][2]["session"]
+    assert "[Conduit rules]" in session["instructions"]
 
 
 @pytest.mark.parametrize("briefing", [5, "x" * (api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS + 1), "😀" * (api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS + 1)])
@@ -318,7 +455,8 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
     _upstream(monkeypatch, calls)
     hermes.config = {"voice": {"gpt_live": {"auth": "api", "subscription_voice": "ember"}}}
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "history": [{"type": "message"}]}).json()
-    assert body == {"ok": True, "auth": "subscription", "source": "hermes", "voice": "ember", "briefing_applied": False, "greeting_applied": False,
+    assert body == {"ok": True, "auth": "subscription", "source": "hermes", "voice": "ember", "briefing_applied": False,
+                    "briefing_clipped": False, "greeting_applied": False,
                     "session": {"id": "rtc_up"}, "transport": {"type": "webrtc", "sdp": ANSWER}}
     # Subscription is forced even when the desktop's own setting says api.
     assert calls[0] == ("build", [{"type": "message"}], {"auth": "subscription", "subscription_voice": "ember",
@@ -332,11 +470,30 @@ def test_hands_off_to_hermes_when_it_ships_the_exchange(client, hermes, openai, 
 
 
 def test_hermes_path_reports_the_briefing_only_when_its_config_carries_it(client, openai, monkeypatch):
-    _upstream(monkeypatch, [])
+    calls = []
+    _upstream(monkeypatch, calls)
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]"}).json()
     assert body["briefing_applied"] is False, "Hermes dropped it, so Conduit must still send it"
-    _upstream(monkeypatch, [], built=lambda live: {"session": {"instructions": live["instructions"],
+    # Hermes is handed the briefing as the first seeded item, not in the instructions.
+    assert calls[0][1] == [api.gpt_live._briefing_item("[Conduit rules]")]
+    assert "[Conduit rules]" not in calls[0][2].get("instructions", "")
+    _upstream(monkeypatch, [], built=lambda live: {"session": {"instructions": live.get("instructions", ""),
                                                                "audio": {"output": {"voice": "Marin"}}}})
+    body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]"}).json()
+    assert body["briefing_applied"] is False, "a config without the item doesn't carry it"
+    seeded = {}
+
+    def built(live):
+        return {"session": {"initial_items": seeded["items"], "audio": {"output": {"voice": "Marin"}}}}
+
+    voice_live = _upstream(monkeypatch, [], built=built)
+    original = voice_live.build_session_config
+
+    def build_session_config(history=None, *, live=None):
+        seeded["items"] = history
+        return original(history, live=live)
+
+    voice_live.build_session_config = build_session_config
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "[Conduit rules]"}).json()
     assert body["briefing_applied"] is True
     assert body["voice"] == "marin"
@@ -353,7 +510,8 @@ def test_hermes_path_leaves_the_opening_to_conduit(client, openai, monkeypatch):
     calls.clear()
     body = client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "briefing": "About this call", "call_opening": True}).json()
     assert body["greeting_applied"] is False
-    assert calls[0][0] == "build" and calls[0][2]["instructions"].endswith("About this call")
+    assert calls[0][0] == "build" and calls[0][1] == [api.gpt_live._briefing_item("About this call")]
+    assert "instructions" not in calls[0][2]
 
 
 @pytest.mark.parametrize("audio", ["loud", {"output": "x"}, {"output": {"voice": "bad voice!"}}])
@@ -861,3 +1019,9 @@ def test_a_failing_env_lookup_is_a_reason_not_a_500(client, api_key, openai, mon
     status = client.get(f"{BASE}/gpt-live/status")
     assert status.status_code == 200 and status.json()["api"]["available"] is False
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER, "billing": "api"}).status_code == 503
+
+
+def test_a_block_whose_note_is_the_first_line_goes_whole():
+    briefing = "[You share memory with the user's Hermes agent.]\n<hermes_memory>\n" + "Likes tea.\n" * 50 + "\n</hermes_memory>\n[Rules.]"
+    text, changed = api.gpt_live._clip_block(briefing, "hermes_memory", 10_000)
+    assert changed and text == "\n[Rules.]"

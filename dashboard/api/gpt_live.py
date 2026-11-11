@@ -589,6 +589,110 @@ def _clean_briefing(briefing: Any) -> Optional[str]:
     return briefing or None
 
 
+# --- What a subscription session is seeded with ---------------------------------
+#
+# gpt-live-1-codex doesn't read the session's `instructions` (notifier#719):
+# the only place it takes Conduit's briefing is a developer message in the
+# seeded items, the same `initial_items` that carry the history. Codex allows
+# those items 8,192 estimated tokens in all, and every size limit before this
+# one was a guess in another unit (the app's 32 K characters, the request's
+# 64 K, a 500-token context append) that a long memory went past (Conduit
+# issue 1077, then notifier#719). So this budget is the one source of truth:
+# `_seeded_items` is the only thing that builds a subscription session's
+# items, on the plugin's exchange and Hermes' alike, and whatever Conduit (the
+# iPhone, the Watch or an older build) sends, it fits it here.
+CODEX_ITEMS_MAX_TOKENS = 8192
+# Codex estimates; the margin keeps a slightly different count under its cap.
+CODEX_ITEMS_MARGIN_TOKENS = 512
+CODEX_ITEMS_BUDGET_TOKENS = CODEX_ITEMS_MAX_TOKENS - CODEX_ITEMS_MARGIN_TOKENS
+# The newest history the briefing can't push out: the app seeds at most 6,000
+# characters of a chat's turns (issue 1983), about 1,600 tokens as items.
+CODEX_HISTORY_MAX_TOKENS = 2048
+_CLIP_MARKER = "\n[…]"
+
+
+def _estimated_tokens(items: list) -> int:
+    """Codex's estimate is about 4 bytes a token. The items are counted as the
+    plugin posts them (json.dumps' defaults: keys, escapes, and every non-ASCII
+    character as a 6- or 12-byte \\u escape), which is at or above the UTF-8
+    bytes of the text and at or above a tokenizer's count for CJK and emoji."""
+    return -(-len(json.dumps(items).encode("ascii")) // 4)
+
+
+def _briefing_item(text: str) -> Dict[str, Any]:
+    return {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}
+
+
+def _clip_block(briefing: str, tag: str, over_bytes: int) -> tuple:
+    """(briefing with the body of its <tag> block shortened by at least
+    over_bytes, at a line break when there is one and marked as cut, or
+    dropped with the block when too little is left; whether it changed).
+    The app's own clip does the same at its limit."""
+    opening, closing = f"\n<{tag}>\n", f"\n</{tag}>"
+    start = briefing.find(opening)
+    end = briefing.find(closing, start + len(opening)) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return briefing, False
+    body = briefing[start + len(opening):end].removesuffix(_CLIP_MARKER)
+    encoded = body.encode("utf-8")
+    keep = len(encoded) - over_bytes - len(_CLIP_MARKER.encode("utf-8"))
+    if keep <= 200:
+        # The block goes, with the one-line bracketed note just before it that introduces it
+        # (the app always sends one). A bracketed line that doesn't name the block stays.
+        note = briefing.rfind("\n", 0, start)
+        intro = briefing[note + 1:start]  # the first line when note is -1
+        names_it = ("memory" if tag == "hermes_memory" else "personality") in intro.lower()
+        cut_from = max(note, 0) if intro.startswith("[") and intro.endswith("]") and names_it else start
+        return briefing[:cut_from] + briefing[end + len(closing):], True
+    kept = encoded[:keep].decode("utf-8", "ignore")
+    line = kept.rfind("\n")
+    if line > len(kept) // 2:
+        kept = kept[:line]
+    return briefing[:start + len(opening)] + kept + _CLIP_MARKER + briefing[end:], True
+
+
+def _seeded_items(history: Optional[list], briefing: Optional[str]) -> tuple:
+    """(the session's seeded items, whether the briefing is in them, whether it
+    was clipped), within CODEX_ITEMS_BUDGET_TOKENS.
+
+    The briefing goes first, as a developer message. History keeps its newest
+    items within CODEX_HISTORY_MAX_TOKENS (the whole budget without a
+    briefing); then what Hermes remembers is cut,
+    then the persona, so Conduit's rules, the call's own blocks and the
+    language rule always go whole. A briefing whose rules alone don't fit is
+    left out (and reported so), and Conduit sends it as context instead, as
+    it does for any host that doesn't take one."""
+    kept: list = []
+    history_room = CODEX_HISTORY_MAX_TOKENS if briefing else CODEX_ITEMS_BUDGET_TOKENS
+    for item in reversed(history or []):
+        if _estimated_tokens([item, *kept]) > history_room:
+            break
+        kept.insert(0, item)
+    if not briefing:
+        return kept, False, False
+    text, clipped = briefing, False
+    for tag in ("hermes_memory", "hermes_persona"):
+        while True:
+            over = _estimated_tokens([_briefing_item(text), *kept]) - CODEX_ITEMS_BUDGET_TOKENS
+            if over <= 0:
+                return [_briefing_item(text), *kept], True, clipped
+            text, changed = _clip_block(text, tag, over * 4)
+            if not changed:
+                break
+            clipped = True
+    return kept, False, False
+
+
+def _items_carry_briefing(config: Any, briefing: Optional[str]) -> bool:
+    """True only when the built config's seeded items open with the briefing
+    item, so Conduit never drops a briefing Hermes left out."""
+    if not briefing:
+        return False
+    session = _built_session(config)
+    items = session.get("initial_items", session.get("input"))
+    return isinstance(items, list) and bool(items) and items[0] == _briefing_item(briefing)
+
+
 def _built_session(config: Any) -> Dict[str, Any]:
     """The session block of a Hermes-built config, which may or may not wrap it in "session"."""
     if not isinstance(config, dict):
@@ -604,15 +708,6 @@ def _built_voice(config: Any) -> Optional[str]:
     if not isinstance(voice, str) or _GPT_LIVE_VOICE.fullmatch(voice.strip().lower()) is None:
         return None
     return voice.strip().lower()
-
-
-def _built_has_instructions(config: Any, text: Optional[str]) -> bool:
-    """True only when Hermes' config really carries the text (the briefing), so
-    Conduit never drops it unsent."""
-    if not text:
-        return False
-    instructions = _built_session(config).get("instructions")
-    return isinstance(instructions, str) and text in instructions
 
 
 def create_gpt_live_session(
@@ -640,9 +735,11 @@ def create_gpt_live_session(
     live = {**_gpt_live_settings(), "auth": billing}
     if voice:
         live["voice" if billing == "api" else "subscription_voice"] = voice
-    if briefing:
-        # Part of the session's instructions, so the model has it before the first word:
-        # sent as context appends after the call starts, it answers each chunk out loud.
+    if briefing and billing == "api":
+        # Part of the session's instructions, which the public API's model reads, so it has
+        # it before the first word: sent as context appends after the call starts, it answers
+        # each chunk out loud. The subscription's model doesn't read them: its briefing is a
+        # seeded item (_seeded_items).
         extra = str(live.get("instructions") or "").strip()
         live["instructions"] = f"{extra}\n\n{briefing}" if extra else briefing
     # A call that opens with the model talking (a greeting, or a call Hermes
@@ -660,10 +757,13 @@ def create_gpt_live_session(
                                      briefing_applied=bool(briefing), greeting_applied=False)
     # Echoed back so Conduit can tell a host that applied the chosen voice from one that ignored it.
     applied_voice = _gpt_live_model_voice(live)[1]
+    items, briefing_seeded, briefing_clipped = _seeded_items(history, briefing)
+    seeded = items[0] if briefing_seeded else None
     upstream = _upstream_voice_live()
     if upstream is not None:
         try:
-            config = upstream.build_session_config(history, live=live)
+            # Hermes seeds the items it's given, the briefing first among them.
+            config = upstream.build_session_config(items or None, live=live)
             result = upstream._create_subscription_session(sdp, config)
         except Exception as exc:
             # Only the type is logged: Hermes' text could quote a provider response.
@@ -681,11 +781,14 @@ def create_gpt_live_session(
         # Only the fields Conduit reads: nothing else Hermes returns leaves the host.
         return {"auth": "subscription", "session": {"id": session["id"]},
                 "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes",
-                "voice": applied_voice, "briefing_applied": _built_has_instructions(config, briefing),
-                "greeting_applied": False}
-    config = gpt_live_session_config(history, live)
+                "voice": applied_voice,
+                "briefing_applied": seeded is not None and _items_carry_briefing(config, seeded["content"][0]["text"]),
+                "briefing_clipped": briefing_clipped, "greeting_applied": False}
+    config = gpt_live_session_config(items or None, live)
+    # briefing_applied is True only when the briefing is in the session's items; when its rules
+    # alone didn't fit, False has Conduit send it as context after the start, as for any host.
     return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice,
-            "briefing_applied": bool(briefing), "greeting_applied": False}
+            "briefing_applied": briefing_seeded, "briefing_clipped": briefing_clipped, "greeting_applied": False}
 
 
 @router.get("/gpt-live/status")
