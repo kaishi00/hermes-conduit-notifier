@@ -76,15 +76,16 @@ def _quoted(path: str) -> str:
     return quote + path + quote
 
 
-# What may stand before a whole-line tag and stays: indentation, and a list
-# item's or a quote's marker.
-_LINE_LEAD = re.compile(r"^(\s*(?:(?:[-*+]|\d{1,9}[.)]|>)\s+)?)")
+# What may stand before a whole-line tag: indentation and a list item's
+# marker. They go, so the reference is a line of its own, the one a user row
+# lifts into its attachments. A quoted line (`>`) is an example and stays.
+_LINE_LEAD = re.compile(r"^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?")
 
 
 def reference_tags(text: str) -> str:
     """A report's whole-line MEDIA tags as the references its viewers
     render: an image as an `@image:` attachment, any other file as a
-    `@file:` chip, after a list or quote marker the line had. A line with
+    `@file:` chip, on a line of its own without a list marker. A line with
     more than one tag, or a path holding all three quote marks, stays as
     written; a tag inside prose stays prose, and one in fenced code stays
     code, as events reads them. Hermes' delivery directives
@@ -95,8 +96,7 @@ def reference_tags(text: str) -> str:
     for line in text.splitlines():
         if _FENCE.match(line):
             fenced = not fenced
-        lead = _LINE_LEAD.match(line).group(1)
-        body = _MEDIA_DIRECTIVE.sub("", line[len(lead):]).strip()
+        body = _MEDIA_DIRECTIVE.sub("", line[_LINE_LEAD.match(line).end():]).strip()
         match = (_MEDIA_TAG.fullmatch(body)
                  if not fenced and not _FENCE.match(line) and body.count("MEDIA:") == 1 else None)
         if match is None:
@@ -110,7 +110,7 @@ def reference_tags(text: str) -> str:
         image = "." in name and name.rsplit(".", 1)[1].lower() in _IMAGE_REFERENCE
         # Quoted as Hermes quotes a reference (format_reference_value), so a
         # bracket, quote mark or space doesn't end it early.
-        lines.append(f"{lead}{'@image' if image else '@file'}:{_quoted(path)}")
+        lines.append(f"{'@image' if image else '@file'}:{_quoted(path)}")
     return "\n".join(lines)
 
 

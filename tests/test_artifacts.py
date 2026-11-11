@@ -897,7 +897,7 @@ def test_a_cron_reports_files_are_its_deliveries(tmp_path, monkeypatch):
     # run's deliveries, pictures too, and an example in code stays out.
     _no_gateway(monkeypatch)
     note = ('[Cron job "Quiz" report: shown in the chat, no reply asked for]\n\n'
-            "@image:/cards/quiz.png\nQuiz: kapott?\n- @file:`/var/mit leer.pdf`\n"
+            "@image:/cards/quiz.png\nQuiz: kapott?\n@file:`/var/mit leer.pdf`\n"
             "See @image:/inline.png here.\n```\n@image:/example.png\n```")
     conn = _db(tmp_path, [("s1", "user", note), ("s1", "user", "@image:/root/uploads/selfie.png\nhi")])
     items = _list(conn)["items"]

@@ -81,7 +81,7 @@ _PREVIEW_RE = re.compile(r"(?:^|(?<=\s))::preview\{([^{}\n]{0,1024})\}")
 _PREVIEW_FILE_RE = re.compile(r"""\bfile=(?:"([^"]*)"|'([^']*)')""")
 _FILE_REF_RE = re.compile(r"""@file:(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|[^\s`"'<>]+)""")
 _REFERENCE_LINE_RE = re.compile(
-    r"""^[^\S\n]*(?:(?:[-*+]|\d{1,9}[.)]|>)[^\S\n]+)?@(?:image|file):(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|[^\s`"'<>]+)[^\S\n]*$""", re.MULTILINE)
+    r"""^[^\S\n]*@(?:image|file):(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|[^\s`"'<>]+)[^\S\n]*$""", re.MULTILINE)
 # The first words of a cron report the plugin wrote into a Bot Chat as a
 # note (cron_bot_chat.HEADER, kept equal by tests/test_cron_bot_chat.py): a
 # user row, whose `@image:`/`@file:` lines are files the run delivered.

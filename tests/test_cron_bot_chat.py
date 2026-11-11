@@ -282,9 +282,9 @@ def test_markers_directives_and_quote_marks_keep_the_reference_whole():
               "MEDIA:\"/tmp/Bob's photo.png\"\n"
               "MEDIA:/tmp/old<1>.png")
     assert cron_bot_chat.reference_tags(report).splitlines() == [
-        "- @image:/cards/a.png",
-        "  > @file:/cards/b.pdf",
-        "1. @file:/tmp/report.pdf",
+        "@image:/cards/a.png",
+        "  > MEDIA:/cards/b.pdf",  # a quoted line is an example
+        "@file:/tmp/report.pdf",
         "@image:`/tmp/Bob's photo.png`",
         "@image:`/tmp/old<1>.png`",
     ]
