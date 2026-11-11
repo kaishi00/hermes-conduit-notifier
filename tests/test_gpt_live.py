@@ -248,7 +248,8 @@ def _turn(role, text):
 
 
 LONG = "Zebra Quimby likes tea. 😀 \"quoted\"\n" * 800
-WORST_HISTORY = [_turn("user" if i % 2 else "assistant", "ü\n\"" * 1_200) for i in range(api.gpt_live.GPT_LIVE_MAX_HISTORY_ITEMS)]
+# Conduit clips each seeded turn to 1,200 characters (issue 1983); these are non-ASCII and escape-heavy.
+WORST_HISTORY = [_turn("user" if i % 2 else "assistant", "ü\n\"" * 400) for i in range(api.gpt_live.GPT_LIVE_MAX_HISTORY_ITEMS)]
 
 
 @pytest.mark.parametrize("upstream", [False, True], ids=["plugin", "hermes"])
@@ -259,29 +260,36 @@ WORST_HISTORY = [_turn("user" if i % 2 else "assistant", "ü\n\"" * 1_200) for i
     _briefing(persona=LONG[:4_000], memory=LONG[:8_000]),
     _briefing(persona=LONG[:20_000], memory=LONG),
     _briefing(memory=LONG),
+    _briefing(persona="温和而简洁。" * 1_000, memory="用户喜欢喝茶，住在东京。🍵\n" * 1_500),
     ("😀" * api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS),
-], ids=["none", "rules", "typical", "long-persona-and-memory", "long-memory", "at-the-request-limit"])
+], ids=["none", "rules", "typical", "long-persona-and-memory", "long-memory", "cjk-and-emoji", "at-the-request-limit"])
 def test_seeded_items_never_exceed_the_codex_budget(client, openai, monkeypatch, upstream, history, briefing):
     calls = []
     if upstream:
-        _upstream(monkeypatch, calls, built=lambda live: {})
+        # A Hermes that seeds the items it's given, so the exchanged config is what's checked.
+        voice_live = _upstream(monkeypatch, calls)
+        voice_live.build_session_config = lambda history=None, *, live=None: (
+            {"session": {"initial_items": history}} if history else {"session": {}})
     request = {"sdp": OFFER, "history": history, "briefing": briefing}
     body = client.post(f"{BASE}/gpt-live/session", json={k: v for k, v in request.items() if v is not None}).json()
-    items = calls[0][1] if upstream else openai.calls[0][2]["session"].get("initial_items")
-    items = items or []
-    assert api.gpt_live._estimated_tokens(items) <= api.gpt_live.CODEX_ITEMS_BUDGET_TOKENS
+    session = calls[-1][2]["session"] if upstream else openai.calls[0][2]["session"]
+    items = session.get("initial_items") or []
+    # Counted on the wire, as posted (non-ASCII escaped), independently of the plugin's estimator.
+    assert len(json.dumps(items)) / 4 <= api.gpt_live.CODEX_ITEMS_BUDGET_TOKENS
     assert api.gpt_live.CODEX_ITEMS_BUDGET_TOKENS < api.gpt_live.CODEX_ITEMS_MAX_TOKENS
     seeded = items[0]["content"][0]["text"] if items and items[0]["role"] == "developer" else None
-    if briefing and "<hermes_" in briefing or briefing == _briefing():
+    if (briefing and "<hermes_" in briefing) or briefing == _briefing():
         # The rules, the call's own blocks and the language rule always go whole.
         assert seeded is not None and seeded.startswith(RULES) and seeded.endswith(TAIL)
-        if not upstream:
-            assert body["briefing_applied"] is True
-    if history:
-        # The newest turns always stay.
-        assert items[-1] == history[-1]
-    if not upstream and seeded is None:
+        assert body["briefing_applied"] is True
+    # What's kept of the history is its newest turns, in order, never a gap.
+    kept = items[1:] if seeded is not None else items
+    assert kept == (history or [])[len(history or []) - len(kept):]
+    if history == WORST_HISTORY[-6:] and briefing != "😀" * api.gpt_live.GPT_LIVE_MAX_BRIEFING_CHARS:
+        assert kept, "a chat's seed keeps its newest turns"
+    if seeded is None:
         assert body["briefing_applied"] is False, "Conduit sends what didn't fit as context"
+        assert body["briefing_clipped"] is False, "nothing in the session was cut"
 
 
 def test_memory_is_cut_before_the_persona_and_both_are_marked():
@@ -302,8 +310,14 @@ def test_memory_is_cut_before_the_persona_and_both_are_marked():
 def test_a_briefing_whose_rules_alone_dont_fit_is_left_to_conduit():
     history = [_turn("user", "hi")]
     rules = "[Conduit rules. " + "x" * (api.gpt_live.CODEX_ITEMS_MAX_TOKENS * 4) + "]"
-    items, applied, clipped = api.gpt_live._seeded_items(history, _briefing(rules=rules, memory="Likes tea."))
-    assert items == history and applied is False and clipped is False
+    items, applied, clipped = api.gpt_live._seeded_items(history, _briefing(rules=rules, memory="Likes tea. " * 500))
+    assert items == history and applied is False and clipped is False, "dropped, not reported as cut"
+
+
+def test_a_bracketed_line_that_doesnt_name_the_block_stays():
+    briefing = "[Conduit rules.]\n[Keep it short.]\n<hermes_memory>\n" + "Likes tea.\n" * 50 + "\n</hermes_memory>"
+    text, changed = api.gpt_live._clip_block(briefing, "hermes_memory", 10_000)
+    assert changed and text == "[Conduit rules.]\n[Keep it short.]"
 
 
 def test_history_keeps_its_newest_items_within_its_share():

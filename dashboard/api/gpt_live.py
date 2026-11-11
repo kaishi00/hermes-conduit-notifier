@@ -612,9 +612,11 @@ _CLIP_MARKER = "\n[…]"
 
 
 def _estimated_tokens(items: list) -> int:
-    """Codex's estimate is about 4 bytes a token; counting the items as JSON
-    (escapes and keys included) keeps ours at or above it."""
-    return -(-len(json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) // 4)
+    """Codex's estimate is about 4 bytes a token. The items are counted as the
+    plugin posts them (json.dumps' defaults: keys, escapes, and every non-ASCII
+    character as a 6- or 12-byte \\u escape), which is at or above the UTF-8
+    bytes of the text and at or above a tokenizer's count for CJK and emoji."""
+    return -(-len(json.dumps(items).encode("ascii")) // 4)
 
 
 def _briefing_item(text: str) -> Dict[str, Any]:
@@ -635,10 +637,12 @@ def _clip_block(briefing: str, tag: str, over_bytes: int) -> tuple:
     encoded = body.encode("utf-8")
     keep = len(encoded) - over_bytes - len(_CLIP_MARKER.encode("utf-8"))
     if keep <= 200:
-        # The block goes, with the one-line bracketed note just before it that introduces it.
+        # The block goes, with the one-line bracketed note just before it that introduces it
+        # (the app always sends one). A bracketed line that doesn't name the block stays.
         note = briefing.rfind("\n", 0, start)
         intro = briefing[note + 1:start] if note >= 0 else ""
-        cut_from = note if intro.startswith("[") and intro.endswith("]") else start
+        names_it = ("memory" if tag == "hermes_memory" else "personality") in intro.lower()
+        cut_from = note if intro.startswith("[") and intro.endswith("]") and names_it else start
         return briefing[:cut_from] + briefing[end + len(closing):], True
     kept = encoded[:keep].decode("utf-8", "ignore")
     line = kept.rfind("\n")
