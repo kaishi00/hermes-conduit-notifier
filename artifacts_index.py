@@ -80,6 +80,12 @@ _MEDIA_RE = re.compile(
 _PREVIEW_RE = re.compile(r"(?:^|(?<=\s))::preview\{([^{}\n]{0,1024})\}")
 _PREVIEW_FILE_RE = re.compile(r"""\bfile=(?:"([^"]*)"|'([^']*)')""")
 _FILE_REF_RE = re.compile(r"""@file:(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|[^\s`"'<>]+)""")
+_REFERENCE_LINE_RE = re.compile(
+    r"""^[^\S\n]*@(?:image|file):(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|[^\s`"'<>]+)[^\S\n]*$""", re.MULTILINE)
+# The first words of a cron report the plugin wrote into a Bot Chat as a
+# note (cron_bot_chat.HEADER, kept equal by tests/test_cron_bot_chat.py): a
+# user row, whose `@image:`/`@file:` lines are files the run delivered.
+CRON_NOTE_PREFIX = '[Cron job "'
 _MD_LINK_RE = re.compile(r"(!?)\[([^\]\n]{0,300})\]\((https?://[^\s)<>]+)\)")
 _BARE_URL_RE = re.compile(r"(?<![(\[<\"'=])\bhttps?://[^\s<>\"'`)\]]+")
 _FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
@@ -196,6 +202,14 @@ def assistant_items(text: str) -> Iterable[tuple]:
 
 
 def user_items(text: str) -> Iterable[tuple]:
+    if text and text.startswith(CRON_NOTE_PREFIX):
+        # A cron report's files are the run's deliveries, as its MEDIA tags
+        # were in Hermes' own turn (issue 581), never files the user sent.
+        for match in _REFERENCE_LINE_RE.finditer(_prose(text[:MAX_SCAN_CHARS])):
+            path = _unquote(match.group("path"))
+            if _is_local_path(path):
+                yield ("delivered", kind_for(path), path, "")
+        return
     if not text or "@file:" not in text:
         return
     # A reference shown in a code block is an example, not an attachment.
@@ -340,7 +354,7 @@ def _candidate_sql(columns: set) -> str:
     parts = [
         "(m.role = 'assistant' AND (m.content LIKE '%MEDIA:%' OR m.content LIKE '%::preview%'"
         " OR m.content LIKE '%http%'))",
-        "(m.role = 'user' AND m.content LIKE '%@file:%')",
+        "(m.role = 'user' AND (m.content LIKE '%@file:%' OR m.content LIKE '[Cron job \"%@image:%'))",
         # Every key in _PRODUCER_KEYS has one of these in it.
         "(m.role = 'tool' AND (m.content LIKE '%path%' OR m.content LIKE '%_file%'"
         " OR m.content LIKE '%saved_to%' OR m.content LIKE '%files_%' OR m.content LIKE '%\"image\"%'))",

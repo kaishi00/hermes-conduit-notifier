@@ -21,6 +21,12 @@ checks it). The format is fixed, because Conduit reads it:
   waiting on (who owes you a reply or a thing, and since when), and what
   something you asked Hermes to watch for turned up. Conduit shows them once
   every Conduit you use can draw them.
+## 0.161.3 (2026-11-11)
+
+### Fixes
+- A scheduled job's report shown in a Bot Chat showed a picture or file it
+  made as a file path. Hermes Desktop now shows the picture or the file
+  itself; Conduit does too once it's updated.
 
 ## 0.161.2 (2026-11-11)
 
