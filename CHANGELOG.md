@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.161.2 (2026-11-11)
+
+### Fixes
+- A photo search for one thing missed photos whose text named several
+  ("umbrella" didn't find "2 umbrellas"), and "beaches" or "ponies" found
+  nothing.
+- A number or name inside Japanese or Chinese text in a photo wasn't found.
+- If your iPhone's clock ran fast right after you set it up with Conduit
+  again, the photos it had already sent to Hermes were deleted.
+
 ## 0.161.1 (2026-11-11)
 
 ### Fixes
