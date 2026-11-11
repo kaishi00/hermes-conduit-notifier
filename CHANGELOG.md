@@ -21,6 +21,9 @@ checks it). The format is fixed, because Conduit reads it:
   until the room next talks to it. Its Hermes asks the room's host to post a
   short notice that mentions it; what the work said never leaves your Hermes.
   Both hosts need this version.
+- Settings > Multiplayer can show which tools rooms actually use (web
+  search, pictures, X search, past chats) apart from those only a Custom
+  room uses, and which tools rooms never run, such as changing skills.
 
 ## 0.162.0 (2026-11-11)
 

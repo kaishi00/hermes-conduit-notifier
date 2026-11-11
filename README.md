@@ -4372,7 +4372,10 @@ capability:
   uses the API server's), `address` is where the API server runs, or will
   once set up, and `error` why it isn't running while the gateway is, such
   as its port being taken. `choices` are the toolsets the ceiling can name
-  (`{"id", "label", "description"}`), `mcp_servers` the MCP servers it names
+  (`{"id", "label", "description", "lookup", "never"}`: `lookup` when a
+  room's Look things up or Search my past chats uses it, so it's used
+  without Custom, and `never` the tools of it rooms never run, such as
+  `skill_manage`; plugin 0.163+), `mcp_servers` the MCP servers it names
   and `mcp_choices` the profile's enabled ones it can (`{"id"}`, plugin
   0.125+; an older plugin has neither), and `policy` is the profile's room
   policy as Hermes reads it now (`enabled_toolsets`, `approval_mode`,
