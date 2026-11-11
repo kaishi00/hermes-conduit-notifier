@@ -36,8 +36,8 @@ export const REPORTS_PER_ADDRESS_PER_HOUR = 10;
 export const REPORTS_PER_DAY = 500;
 export const KINDS = new Set(['crash', 'hang', 'chat']);
 // What saved a trace: the app's watchers (a jump, a stall, a layout storm,
-// a blank screen rebuilt) or the user's own send.
-export const TRACE_REASONS = new Set(['jump', 'stall', 'storm', 'rebuild', 'manual']);
+// a blank screen rebuilt, rows on screen no cell drew) or the user's own send.
+export const TRACE_REASONS = new Set(['jump', 'stall', 'storm', 'rebuild', 'blank', 'manual']);
 
 const ID_PATTERN = /^\d{13}-[0-9a-f]{12}$/;
 const FIELD_PATTERN = /^[\p{L}\p{N} ()._,:+-]{1,64}$/u;
