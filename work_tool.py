@@ -3752,6 +3752,10 @@ def _stopped_with_agents(home: Path, ref: str) -> bool:
                 (not ended and _agents.get(key)) or (ended and now - ended < HELD_SETTLE_S)):
             return True
         del _stopped_agents[key]  # long over: this turn is the user's words
+        if not ended:
+            # Agents whose end never came in all that time: not waited for
+            # again, or this turn's end would be held with nothing to settle it.
+            _agents.pop(key, None)
         return False
 
 

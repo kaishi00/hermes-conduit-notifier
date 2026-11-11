@@ -929,6 +929,10 @@ def test_a_failed_or_stopped_turn_isnt_held_for_its_agents(on, hermes, monkeypat
     work._agents[key] = {"lost"}
     assert work.turn_started("20261031_work_3")
     assert on.get("W3").status == "running" and key not in work._stopped_agents
+    assert key not in work._agents
+    work.turn_ended("20261031_work_3", "Two suppliers were paid twice.")
+    work.turn_finished("20261031_work_3", failed=False, interrupted=False)
+    assert on.get("W3").status == "done" and key not in work._held
 
 
 def test_the_subagent_hooks_count_a_workstreams_agents(on, hermes, monkeypatch):
