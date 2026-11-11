@@ -1926,6 +1926,8 @@ def test_voice_lists_alarms_and_contacts_reads_once_shared(client):
     tools = {item["name"]: item for item in client.http.get(f"{BASE}/voice-tools").json()["tools"]}
     assert tools["conduit_phone"]["parameters"]["properties"]["action"]["enum"] == ["alarms"]
     assert set(tools["conduit_contacts"]["parameters"]["properties"]) == {"action", "query"}
+    # A call only reads people; adding or changing contacts is the text tool's.
+    assert tools["conduit_contacts"]["parameters"]["properties"]["action"]["enum"] == ["people"]
     assert tools["conduit_contacts"]["key"] == "phone"
     alarms = _voice_read(client, handset, "conduit_phone", {"action": "alarms"})
     assert [alarm["id"] for alarm in alarms["alarms"]] == ["a_wake", "a_pasta"]
