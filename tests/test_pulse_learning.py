@@ -1391,6 +1391,30 @@ def test_do_it_on_a_card_from_no_chat_reads_the_bot_chat_the_app_names(live):
     assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
 
 
+def test_do_it_on_a_bots_card_reads_the_chat_the_app_names_in_pulses_own_profile(live):
+    """"" names the profile Pulse runs in, not the card's: a card from no chat
+    in a bot's report, sent to a chat of Pulse's own profile, is read there."""
+    bot_home = live.home / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, FIXTURE_SCHEMA)
+    bot.session("bot-report", title="Pulse", pinned=0)
+    news = "The dentist is Friday at 9 (calendar)."
+    card_id = live.store.add_card({"kind": "noticed", "level": "screen", "topic": "date", "title": news,
+                                   "news": news, "profile": "nahida", "chat_id": "bot-report", "message_id": 1,
+                                   "created_at": time.time()})
+    live.db.session(sid="picked", title="Bot Chat", pinned=0)
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at, chat={"profile": "", "id": "picked"}) is True
+    live.db.message("user", "Pulse reminded me: The dentist is Friday at 9.", sid="picked", at=acted_at + 5)
+    live.db.message("assistant", "Set a reminder for the dentist on Friday.", sid="picked", at=acted_at + 30)
+    said = llm_saying(done=True, why="the reminder is set")
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    [text] = said.calls
+    said_there = text.split("## Said in that chat since Do it")[1].split("\n## ")[0]
+    assert "Set a reminder for the dentist" in said_there and "the chat they picked" in said_there
+    assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+
+
 def test_do_it_names_only_a_chat_it_can_read(live):
     assert followup.act_chat({"profile": "nahida", "id": " b1 "}) == ("nahida", "b1")
     assert followup.act_chat({"id": "b1"}) == ("", "b1")
