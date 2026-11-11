@@ -802,6 +802,42 @@ def test_a_held_workstream_settles_with_what_it_said_when_no_turn_comes(on, herm
     assert len([line for line in batched() if "W1" in line]) <= 1
 
 
+def test_a_results_turn_that_starts_as_the_hold_runs_out_still_reports(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    monkeypatch.setattr(work, "HELD_SETTLE_S", 3600)
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1")
+    work.turn_ended("20261031_work_1", "An agent is checking the resolver.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.agent_stopped("child-1")
+    key = (str(on.home), "W1")
+    work._held_timers[key].cancel()
+    # The turn with the results has begun when the fallback runs: it settles nothing.
+    held = work._held[key]
+    assert work.turn_started("20261031_work_1")
+    work._held[key] = held  # as if the fallback had taken the hold just before the start cleared it
+    work._settle_held(key)
+    assert on.get("W1").status == "running" and not batched()
+
+    # Or it begins while the fallback is settling the row: the row is the turn's again.
+    work._turn_began.clear()
+    work._held[key] = held
+    settle = work._settle
+
+    def settle_then_start(*args, **kwargs):
+        settle(*args, **kwargs)
+        work._turn_began[work._began_key(on.home, "W1")] = 1.0
+    monkeypatch.setattr(work, "_settle", settle_then_start)
+    work._settle_held(key)
+    assert on.get("W1").status == "running"
+    monkeypatch.setattr(work, "_settle", settle)
+    work.turn_ended("20261031_work_1", "The resolver times out on IPv6.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").status == "done" and on.get("W1").last_result.startswith("The resolver times out")
+    assert any("IPv6" in line for line in batched())
+
+
 def test_agents_that_end_inside_the_turn_change_nothing(on, hermes):
     start()
     hermes.live(BOT_CHAT, transport=object())

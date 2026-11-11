@@ -3971,11 +3971,13 @@ def agent_stopped(child: Any, parent: Any = None) -> None:
 def _settle_held(key: tuple[str, str]) -> None:
     """No turn came for a held workstream after its last agent ended: it's
     done, with the reply its last turn gave."""
+    began_key = _began_key(Path(key[0]), key[1])
     with _wake_lock:
         _held_timers.pop(key, None)
         held = _held.pop(key, None)
-    if held is None:
-        return
+        # A turn of it runs (its start clears the hold, and may be doing so now): its end settles the row.
+        if held is None or began_key in _turn_began:
+            return
     try:
         home = Path(key[0])
         store = work_store.Store(home)
@@ -3983,6 +3985,13 @@ def _settle_held(key: tuple[str, str]) -> None:
         if work is None or work.status not in _SETTLES:
             return  # stopped or settled meanwhile
         _settle(home, store, work, held[0], failed=False, interrupted=False, began=held[1])
+        with _wake_lock:
+            raced = began_key in _turn_began
+        if raced:
+            # A turn began while this settled it: the row is that turn's again, so its end isn't skipped as
+            # already settled and the coordinator hears what the agents brought.
+            store.update(key[1], status="running", closed_at=0.0, resolved_by="", error="",
+                         only_if=("done", "ready"))
     except Exception:  # noqa: BLE001 — a timer's thread: nothing to raise into
         logger.warning("conduit_push: couldn't settle a workstream after its agents ended", exc_info=True)
 
