@@ -20,6 +20,7 @@ checks it). The format is fixed, because Conduit reads it:
   reported as finished as soon as it started them, and again when they came
   back. It now stays working until their results are in, and its card in
   Conduit says how many agents it's waiting for.
+  Stopping it while it waits keeps it stopped when their results arrive.
 
 ## 0.163.0 (2026-11-11)
 

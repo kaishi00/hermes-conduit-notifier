@@ -481,6 +481,9 @@ _agents: dict[tuple[str, str], set[str]] = {}
 _held: dict[tuple[str, str], tuple[str, Optional[float]]] = {}
 # The timers that settle a held workstream no turn came for.
 _held_timers: dict[tuple[str, str], Any] = {}
+# A workstream stopped while its agents ran -> when its last one ended (0
+# while they run). The turns their results start are stopped too (_turn_started).
+_stopped_agents: dict[tuple[str, str], float] = {}
 # How long after its last agent ends a held workstream waits for the turn
 # Hermes starts with their results before it settles with what it had said.
 HELD_SETTLE_S = 120.0
@@ -859,6 +862,12 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
         _redirecting.discard((str(home), work.ref))
         _held.pop((str(home), work.ref), None)  # a stop is its end, whatever its agents bring
         waiting = _held_timers.pop((str(home), work.ref), None)
+        if _agents.get((str(home), work.ref)):
+            # Hermes stops them with a running turn only: the turns their
+            # results start find the row stopped and are stopped too.
+            if len(_stopped_agents) > 512:
+                _stopped_agents.clear()
+            _stopped_agents[(str(home), work.ref)] = 0.0
     if waiting is not None:
         waiting.cancel()
     try:
@@ -1929,6 +1938,8 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
                 "note": f"{work.ref} was waiting on the user's answer to its question: this answered it, "
                         "and it carries on."}
     store.set_meta(_STOPPED_START + work.ref, "")  # sent words start it again
+    with _wake_lock:
+        _stopped_agents.pop((str(home), work.ref), None)
     item = store.outbox_add(work.ref, kind, work.session_id, words, own=own)
     # Marked running first: a turn that ends before the send returns then
     # settles the row, and nothing after the send puts it back. Idle work
@@ -3719,6 +3730,20 @@ def _stopped_before_its_turn(home: Path, work: work_store.Work) -> bool:
     return time.time() - at < _STOPPED_START_S
 
 
+def _stopped_with_agents(home: Path, ref: str) -> bool:
+    """True for a turn of a workstream that was stopped while its agents
+    ran: one their results started, while they run and just after."""
+    key = (str(home), ref)
+    with _wake_lock:
+        ended = _stopped_agents.get(key)
+        if ended is None:
+            return False
+        if _agents.get(key) or (ended and time.time() - ended < HELD_SETTLE_S):
+            return True
+        del _stopped_agents[key]  # long over: this turn is the user's words
+        return False
+
+
 def _stop_late_turn(home: Path, session_id: str) -> None:
     """Off the hook's thread: the turn is still beginning."""
     try:
@@ -3765,9 +3790,10 @@ def _turn_started(session_id: Any) -> bool:
     # The user writing in its chat after a resolve removed its worktree:
     # back before the turn's first tool runs there.
     _worktree_back(work_store.Store(home), work.ref)
-    if work.status == "stopped" and _stopped_before_its_turn(home, work):
+    if work.status == "stopped" and (_stopped_before_its_turn(home, work) or _stopped_with_agents(home, work.ref)):
         # The user stopped this start before its brief's turn began: that
         # turn is the start's, so it's stopped too, and the row stays stopped.
+        # The same for a turn the results of a stopped workstream's agents start.
         threading.Thread(target=_stop_late_turn, args=(home, str(session_id)),
                          name="conduit-work-stop", daemon=True).start()
         return True
@@ -3964,6 +3990,8 @@ def agent_stopped(child: Any, parent: Any = None) -> None:
         if children:
             return
         del _agents[key]
+        if key in _stopped_agents:
+            _stopped_agents[key] = time.time()  # their results' turn may still come
         if key not in _held:
             return
         timer = threading.Timer(HELD_SETTLE_S, _settle_held, args=(key,))
@@ -3975,7 +4003,7 @@ def agent_stopped(child: Any, parent: Any = None) -> None:
     timer.start()
 
 
-def _settle_held(key: tuple[str, str]) -> None:
+def _settle_held(key: tuple[str, str], again: bool = True) -> None:
     """No turn came for a held workstream after its last agent ended: it's
     done, with the reply its last turn gave."""
     began_key = _began_key(Path(key[0]), key[1])
@@ -4001,6 +4029,17 @@ def _settle_held(key: tuple[str, str]) -> None:
                          only_if=("done", "ready"))
     except Exception:  # noqa: BLE001 — a timer's thread: nothing to raise into
         logger.warning("conduit_push: couldn't settle a workstream after its agents ended", exc_info=True)
+        if not again:
+            return
+        # Once more, so a busy registry doesn't leave the row working with nothing left to settle it.
+        retry = threading.Timer(HELD_SETTLE_S, _settle_held, args=(key, False))
+        retry.daemon = True
+        with _wake_lock:
+            if began_key in _turn_began or key in _held:
+                return
+            _held[key] = held
+            _held_timers[key] = retry
+        retry.start()
 
 
 def awaited_agents(home: Path, ref: str) -> int:
@@ -5433,6 +5472,7 @@ def stop() -> None:
         _redirecting.clear()
         _agents.clear()
         _held.clear()
+        _stopped_agents.clear()
         held_timers = list(_held_timers.values())
         _held_timers.clear()
         _screen_watchers.clear()

@@ -2,6 +2,7 @@
 designs/bot-mode-coordinator): a bot's Bot Chat coordinates work sessions
 of its own, names them by ref only, and keeps to its policy."""
 import contextvars
+import threading
 import json
 import re
 import pathlib
@@ -168,6 +169,7 @@ def hermes(home, monkeypatch):
     work._shutting_down.clear()
     work._agents.clear()
     work._held.clear()
+    work._stopped_agents.clear()
     for timer in list(work._held_timers.values()):
         timer.cancel()
     work._held_timers.clear()
@@ -804,6 +806,33 @@ def test_a_held_workstream_settles_with_what_it_said_when_no_turn_comes(on, herm
     assert len([line for line in batched() if "W1" in line]) <= 1
 
 
+def test_a_fallback_that_fails_is_tried_once_more(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1")
+    work.turn_ended("20261031_work_1", "An agent is on it.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    work.agent_stopped("child-1")
+    key = (str(on.home), "W1")
+    work._held_timers[key].cancel()
+    settle = work._settle
+
+    def busy(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(work, "_settle", busy)
+    work._settle_held(key)
+    assert on.get("W1").status == "running" and key in work._held
+    work._held_timers[key].cancel()
+    work._settle_held(key, False)
+    assert key not in work._held and key not in work._held_timers  # once more only
+    work._held[key] = ("An agent is on it.", None)
+    monkeypatch.setattr(work, "_settle", settle)
+    work._settle_held(key)
+    assert on.get("W1").status == "done"
+
+
 def test_a_results_turn_that_starts_as_the_hold_runs_out_still_reports(on, hermes, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
     monkeypatch.setattr(work, "HELD_SETTLE_S", 3600)
@@ -851,7 +880,7 @@ def test_agents_that_end_inside_the_turn_change_nothing(on, hermes):
     assert on.get("W1").status == "done" and not work._held
 
 
-def test_a_failed_or_stopped_turn_isnt_held_for_its_agents(on, hermes):
+def test_a_failed_or_stopped_turn_isnt_held_for_its_agents(on, hermes, monkeypatch):
     start()
     hermes.live(BOT_CHAT, transport=object())
     work.agent_started("child-1", "20261031_work_1")
@@ -867,6 +896,20 @@ def test_a_failed_or_stopped_turn_isnt_held_for_its_agents(on, hermes):
     assert call("work_stop", {"ref": "W2"})["ok"]
     assert on.get("W2").status == "stopped" and (str(on.home), "W2") not in work._held
     assert all(row["agents"] == 0 for row in work.app_list(on.home)["work"])
+    # Its agents run on, and Hermes starts a turn with their results: stopped too.
+    stops = []
+    monkeypatch.setattr(work, "_stop_late_turn", lambda home, session: stops.append(session))
+    work.agent_stopped("child-2")
+    assert work.turn_started("20261031_work_2")
+    for thread in threading.enumerate():
+        if thread.name == "conduit-work-stop":
+            thread.join(2)
+    assert stops == ["20261031_work_2"] and on.get("W2").status == "stopped"
+    # Words sent to it start it again.
+    assert call("work_send", {"ref": "W2", "text": "Carry on with April too."})["ok"]
+    assert not work._stopped_agents
+    assert work.turn_started("20261031_work_2")
+    assert on.get("W2").status == "running" and stops == ["20261031_work_2"]
 
 
 def test_the_subagent_hooks_count_a_workstreams_agents(on, hermes, monkeypatch):
