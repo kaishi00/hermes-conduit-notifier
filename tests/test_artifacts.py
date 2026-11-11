@@ -889,3 +889,19 @@ def test_the_resolve_route_finds_a_link_in_the_terminal_folder(tmp_path, monkeyp
     client = _resolve_client(tmp_path, monkeypatch, [("s1", "assistant", "Wrote `notes/todo.md`.")])
     body = client.get(f"{BASE}/workspace/resolve", params={"path": "notes/todo.md", "session_id": "s1"}).json()
     assert body == {"ok": True, "path": str(work / "notes" / "todo.md"), "via": "folder"}
+
+
+def test_a_cron_reports_files_are_its_deliveries(tmp_path, monkeypatch):
+    # The plugin writes a cron report into a Bot Chat as a user row whose
+    # delivered files are @image:/@file: lines (issue 581): they list as the
+    # run's deliveries, pictures too, and an example in code stays out.
+    _no_gateway(monkeypatch)
+    note = ('[Cron job "Quiz" report: shown in the chat, no reply asked for]\n\n'
+            "@image:/cards/quiz.png\nQuiz: kapott?\n@file:`/var/mit leer.pdf`\n"
+            "See @image:/inline.png here.\n```\n@image:/example.png\n```")
+    conn = _db(tmp_path, [("s1", "user", note), ("s1", "user", "@image:/root/uploads/selfie.png\nhi")])
+    items = _list(conn)["items"]
+    assert sorted((i["source"], i["kind"], i["path"]) for i in items) == [
+        ("delivered", "document", "/var/mit leer.pdf"),
+        ("delivered", "image", "/cards/quiz.png"),
+    ]

@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 
 from .cron_store import CronStore
 from .events import _FENCE, _MEDIA_TAG, _TRAILING
+from .room_files_link import _quoted
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +71,8 @@ _IMAGE_REFERENCE = frozenset("png jpg jpeg gif webp heic heif bmp svg tif tiff".
 def reference_tags(text: str) -> str:
     """A report's whole-line MEDIA tags as the references its viewers
     render: an image as an `@image:` attachment, any other file as a
-    `@file:` chip. A line with more than one tag, or a path that can't be
-    quoted safely, stays as written; a tag inside prose stays prose, and
+    `@file:` chip. A line with more than one tag, or a path holding a quote
+    mark, stays as written; a tag inside prose stays prose, and
     one in fenced code stays code, as events reads them."""
     if "MEDIA:" not in text:
         return text
@@ -91,8 +92,9 @@ def reference_tags(text: str) -> str:
             continue
         name = re.split(r"[/\\]", path.rstrip("/\\"))[-1]
         image = "." in name and name.rsplit(".", 1)[1].lower() in _IMAGE_REFERENCE
-        token = path if not re.search(r"\s", path) else f"`{path}`"
-        lines.append(f"{'@image' if image else '@file'}:{token}")
+        # Quoted as Hermes quotes a reference (format_reference_value), so a
+        # bracket or space doesn't end it early.
+        lines.append(f"{'@image' if image else '@file'}:{_quoted(path)}")
     return "\n".join(lines)
 
 

@@ -257,3 +257,19 @@ def test_the_image_references_keep_artifacts_index_extensions():
     artifacts = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(artifacts)
     assert cron_bot_chat._IMAGE_REFERENCE == frozenset(artifacts._IMAGE)
+
+
+def test_the_artifacts_list_knows_the_note_by_its_header():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("artifacts_index_581_header", ROOT / "artifacts_index.py")
+    artifacts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(artifacts)
+    assert cron_bot_chat.HEADER.format(name="x").startswith(artifacts.CRON_NOTE_PREFIX)
+
+
+def test_a_path_with_brackets_is_quoted_so_its_reference_holds(hermes):
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), 'MEDIA:"/tmp/old(1).png"', "") is None
+    (_home, _chat, text, _diagnostic), = hermes.notes
+    assert text.endswith("@image:`/tmp/old(1).png`")
