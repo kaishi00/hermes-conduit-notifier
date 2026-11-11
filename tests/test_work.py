@@ -166,6 +166,11 @@ def hermes(home, monkeypatch):
     work._replies.clear()
     work._redirecting.clear()
     work._shutting_down.clear()
+    work._agents.clear()
+    work._held.clear()
+    for timer in list(work._held_timers.values()):
+        timer.cancel()
+    work._held_timers.clear()
     return fake
 
 
@@ -736,6 +741,106 @@ def test_a_finished_turn_takes_the_result_and_wakes_the_bot_chat(on, hermes):
     assert params["session_id"] == f"rt-{BOT_CHAT}" and params["display_kind"] == "hidden" and params["queued"]
     assert "W1" in params["text"] and "slow DNS" in params["text"] and "not instructions" in params["text"]
     assert transport is None
+
+
+# A workstream that hands part of its work to delegate agents: Hermes runs them in the background and gives it
+# their results as a new turn, so its own turn ends while they work (app issue 2142).
+
+def test_a_turn_that_ends_while_its_agents_run_stays_working(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1")
+    work.agent_started("child-2", "20261031_work_1")
+    work.agent_started("nested", "child-1")  # a child's own child isn't the workstream's
+    assert work.turn_ended("20261031_work_1", "Two agents are on it; I'll report when they're back.")
+    assert work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    row = on.get("W1")
+    assert row.status == "running" and not row.last_result
+    assert not batched(), "its Bot Chat isn't told it finished"
+    shown, = work.app_list(on.home)["work"]
+    assert shown["status"] == "running" and shown["agents"] == 2 and "stop" in shown["actions"]
+    assert work.app_list(on.home)["counts"]["working"] == 1
+    listed, = call("work_list")["work"]
+    assert listed["status"] == "running" and listed["waiting_for"].startswith("2 background agents it started")
+
+    work.agent_stopped("child-1")
+    assert work.app_list(on.home)["work"][0]["agents"] == 1
+    work.agent_stopped("child-2")
+    assert not work._held_timers or all(not timer.finished.is_set() for timer in work._held_timers.values())
+    # Hermes starts its next turn with their results: that turn's end is the workstream's.
+    assert work.turn_started("20261031_work_1")
+    assert not work._held and not work._held_timers
+    assert work.app_list(on.home)["work"][0]["agents"] == 0
+    assert work.turn_ended("20261031_work_1", "Both agree: the DNS lookup is slow.")
+    assert work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    row = on.get("W1")
+    assert row.status == "done" and row.last_result.startswith("Both agree")
+    line, = [line for line in batched() if "W1" in line]
+    assert "finished" in line and "Both agree" in line and "report when they're back" not in line
+
+
+def test_a_held_workstream_settles_with_what_it_said_when_no_turn_comes(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    monkeypatch.setattr(work, "HELD_SETTLE_S", 3600)  # run by hand below, never by its timer
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1")
+    work.turn_ended("20261031_work_1", "An agent is checking the resolver.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    # The id it ends under may not be the one it started with (a compaction): its workstream still counts it.
+    work.agent_stopped("child-1-compacted", "20261031_work_1")
+    key = (str(on.home), "W1")
+    timer = work._held_timers[key]
+    timer.cancel()
+    assert on.get("W1").status == "running", "Hermes has a moment to start the turn with the results"
+    work._settle_held(key)
+    row = on.get("W1")
+    assert row.status == "done" and row.last_result == "An agent is checking the resolver."
+    assert any("W1" in line and "finished" in line for line in batched())
+    work._settle_held(key)  # once
+    assert len([line for line in batched() if "W1" in line]) <= 1
+
+
+def test_agents_that_end_inside_the_turn_change_nothing(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1")
+    work.agent_stopped("child-1")
+    work.agent_started("elsewhere", OTHER_CHAT)  # another chat's agent
+    work.turn_ended("20261031_work_1", "Done.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert on.get("W1").status == "done" and not work._held
+
+
+def test_a_failed_or_stopped_turn_isnt_held_for_its_agents(on, hermes):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1")
+    work.turn_ended("20261031_work_1", "The provider refused the request.")
+    work.turn_finished("20261031_work_1", failed=True, interrupted=False)
+    assert on.get("W1").status == "failed"
+
+    assert start("Second matter", "Count the invoices sent in March.")["ref"] == "W2"
+    work.agent_started("child-2", "20261031_work_2")
+    work.turn_ended("20261031_work_2", "An agent is on it.")
+    work.turn_finished("20261031_work_2", failed=False, interrupted=False)
+    assert on.get("W2").status == "running"
+    assert call("work_stop", {"ref": "W2"})["ok"]
+    assert on.get("W2").status == "stopped" and (str(on.home), "W2") not in work._held
+    assert all(row["agents"] == 0 for row in work.app_list(on.home)["work"])
+
+
+def test_the_subagent_hooks_count_a_workstreams_agents(on, hermes, monkeypatch):
+    start()
+    monkeypatch.setattr(plugin, "enqueue", lambda *args, **kwargs: None)
+    plugin._subagent_start(child_session_id="child-1", parent_session_id="20261031_work_1")
+    assert work._agents == {(str(on.home), "W1"): {"child-1"}}
+    work.turn_ended("20261031_work_1", "An agent is on it.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    assert work.app_list(on.home)["work"][0]["agents"] == 1
+    plugin._subagent_stop(child_session_id="child-1", parent_session_id="20261031_work_1", child_status="completed")
+    assert not work._agents and (str(on.home), "W1") in work._held_timers
 
 
 def test_other_sessions_turns_are_not_workstreams(on, hermes):
