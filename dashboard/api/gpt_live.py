@@ -640,7 +640,7 @@ def _clip_block(briefing: str, tag: str, over_bytes: int) -> tuple:
         # The block goes, with the one-line bracketed note just before it that introduces it
         # (the app always sends one). A bracketed line that doesn't name the block stays.
         note = briefing.rfind("\n", 0, start)
-        intro = briefing[note + 1:start] if note >= 0 else ""
+        intro = briefing[note + 1:start]  # the first line when note is -1
         names_it = ("memory" if tag == "hermes_memory" else "personality") in intro.lower()
         cut_from = max(note, 0) if intro.startswith("[") and intro.endswith("]") and names_it else start
         return briefing[:cut_from] + briefing[end + len(closing):], True
