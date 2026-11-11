@@ -22,6 +22,13 @@ checks it). The format is fixed, because Conduit reads it:
   something you asked Hermes to watch for turned up. Conduit shows them once
   every Conduit you use can draw them.
 
+## 0.161.4 (2026-11-11)
+
+### Fixes
+- A photo search for "leaves" or "knives" missed photos that said "leaf" or
+  "knife", half-width katakana text wasn't searched inside, and one-letter
+  searches matched inside any Chinese, Japanese or Korean text.
+
 ## 0.161.3 (2026-11-11)
 
 ### Fixes

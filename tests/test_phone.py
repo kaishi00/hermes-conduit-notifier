@@ -2193,11 +2193,24 @@ def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, ipho
     assert [photo["id"] for photo in _search(store, query="passes")[0]] == ["ph_shot"]
     assert phone._word_forms("movies") >= {"movie", "movy"}
     assert "flies" in phone._word_forms("fly") and "pony" in phone._word_forms("ponies")
+    assert "leaves" in phone._word_forms("leaf") and "leaf" in phone._word_forms("leaves")
+    assert "knives" in phone._word_forms("knife") and "knife" in phone._word_forms("knives")
+    assert "caves" not in phone._word_forms("cafe") and "cafe" not in phone._word_forms("caves")
     # Text without spaces is searched inside, for any word.
     store.ingest(iphone.seal(_photo_batch("batch-0001b", sent_at="2026-10-14T08:00:10+01:00", photos={
         "upsert": [{"id": "ph_tokyo", "at": "2026-10-01T07:00:00+01:00", "text": "東京タワー合計2024円"}]})))
     assert [photo["id"] for photo in _search(store, query="タワー")[0]] == ["ph_tokyo"]
     assert [photo["id"] for photo in _search(store, query="2024")[0]] == ["ph_tokyo"]
+    # Half-width katakana too; one letter is only found as a word of its own.
+    store.ingest(iphone.seal(_photo_batch("batch-0001d", sent_at="2026-10-14T08:00:15+01:00", photos={
+        "upsert": [{"id": "ph_cafe", "at": "2026-10-02T07:00:00+01:00", "text": "ｶﾌｪABC x"}]})))
+    assert [photo["id"] for photo in _search(store, query="ｶﾌｪ")[0]] == ["ph_cafe"]
+    assert [photo["id"] for photo in _search(store, query="abc")[0]] == ["ph_cafe"]
+    assert _search(store, query="ｶ") == ([], 0)
+    assert _search(store, query="京") == ([], 0)
+    assert [photo["id"] for photo in _search(store, query="x")[0]] == ["ph_cafe"]
+    store.ingest(iphone.seal(_photo_batch("batch-0001e", sent_at="2026-10-14T08:00:18+01:00", photos={
+        "delete": ["ph_cafe"]})))
     store.ingest(iphone.seal(_photo_batch("batch-0001c", sent_at="2026-10-14T08:00:20+01:00", photos={
         "delete": ["ph_tokyo"]})))
     assert store.status(DEVICE)["device"]["counts"]["photos"] == 4
@@ -2372,6 +2385,15 @@ def test_a_fast_clock_on_a_phone_set_up_again_keeps_its_sent_photos(tmp_path):
     assert error.value.code == "clock_skew"
     assert path.exists()
     assert store.change_outcome(change["id"])["result"] == str(path)
+
+
+def test_narrowing_a_batch_that_names_no_window_keeps_none():
+    sharing = phone._parse_sharing(_sharing())
+    sharing["past_days"] = sharing["future_days"] = None
+    narrowed = phone._narrowed({**sharing, "past_days": 7, "future_days": 30}, sharing)
+    assert narrowed["past_days"] is None and narrowed["future_days"] is None
+    sharing["past_days"] = 14
+    assert phone._narrowed({**sharing, "past_days": 7}, sharing)["past_days"] == 7
 
 
 def test_a_dismissed_photo_never_arrives(store, iphone):
