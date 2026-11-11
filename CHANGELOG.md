@@ -13,12 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.161.3 (2026-11-11)
+## 0.161.4 (2026-11-11)
 
 ### Fixes
 - A photo search for "leaves" or "knives" missed photos that said "leaf" or
   "knife", half-width katakana text wasn't searched inside, and one-letter
   searches matched inside any Chinese, Japanese or Korean text.
+
+## 0.161.3 (2026-11-11)
+
+### Fixes
+- A scheduled job's report shown in a Bot Chat showed a picture or file it
+  made as a file path. Hermes Desktop now shows the picture or the file
+  itself; Conduit does too once it's updated.
 
 ## 0.161.2 (2026-11-11)
 
