@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.0 (2026-11-11)
+
+### New and improved
+- Do it on a Pulse card that came from no chat can open a bot's Bot Chat
+  instead of a new chat (pick the bot in Conduit's Settings > Pulse, or
+  long-press Do it). Pulse then checks that Bot Chat to see whether the
+  thing got done.
+
 ## 0.163.2 (2026-11-11)
 
 ### Fixes

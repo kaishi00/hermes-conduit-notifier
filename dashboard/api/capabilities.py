@@ -68,6 +68,9 @@ ROUTE_CAPABILITIES = (
     "pulse_nudge",
     "pulse_done",
     "pulse_acted",
+    # /pulse/acted takes "chat": the chat Do it used for a card from no chat
+    # (a bot's Bot Chat), which the Do it check reads.
+    "pulse_acted_chat",
     # POST /pulse/dismiss, cards' "brief" and "dismissed_at", Pulse push labels with a count.
     "pulse_dismiss",
     # The morning brief at PUT /pulse's brief_time comes every day with what's still open.
