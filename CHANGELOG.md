@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.1 (2026-11-11)
+
+### Fixes
+- After Do it in a Bot Chat of the default profile on a card from another
+  profile, Pulse looked for that chat in the wrong profile and could think
+  nothing was sent.
+
 ## 0.164.0 (2026-11-11)
 
 ### New and improved
