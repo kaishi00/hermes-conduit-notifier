@@ -109,7 +109,11 @@ class News:
                     continue  # a newer one took its place
                 del self._waiting[key]
                 times.append(now)
-            self._post(key, link_id, message_id)
+            if not self._post(key, link_id, message_id):
+                # Not posted: it doesn't use up the agent's notices (the next news tries again).
+                with _lock:
+                    if now in self._posted.get(key, ()):
+                        self._posted[key].remove(now)
 
     def _member(self, room_id: str, member_id: str, link_id: str) -> Optional[tuple[dict, dict]]:
         """The started draft and the agent of Link ``link_id`` in it, while it's in the room."""
@@ -120,11 +124,12 @@ class News:
                        and each["link"] == link_id and each.get("status", "in") == "in"), None)
         return None if member is None else (draft, member)
 
-    def _post(self, key: tuple[str, str], link_id: str, message_id: str) -> None:
+    def _post(self, key: tuple[str, str], link_id: str, message_id: str) -> bool:
+        """Whether the notice was posted."""
         room_id, member_id = key
         found = self._member(room_id, member_id, link_id)
         if found is None:
-            return  # it left, or the room ended, meanwhile
+            return False  # it left, or the room ended, meanwhile
         draft, member = found
         # Posted from a profile of this installation's own in the room: Hermes posts to the store that serves it.
         profiles = [each["profile"] for each in draft["members"] if each["link"] is None and each.get("profile")]
@@ -134,3 +139,4 @@ class News:
         if error is not None:
             logger.info("Linked Rooms couldn't post work news for %s in room %s (%s)", member["handle"], room_id,
                         error)
+        return error is None

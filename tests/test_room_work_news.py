@@ -134,3 +134,7 @@ def test_a_home_without_room_delivery_says_so_in_the_log(news, caplog):
     news.refuse = "no live Group Chat"
     ask(news, "laifu", room_id)
     assert "couldn't post work news" in caplog.text
+    # A notice that wasn't posted doesn't use up the agent's: the next one goes at once.
+    news.refuse = None
+    ask(news, "laifu", room_id)
+    assert len(news.delivered) == 2
