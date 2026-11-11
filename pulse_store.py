@@ -1879,7 +1879,8 @@ class PulseStore:
         """Do it on a card: a check of its chat at ``check_at`` (a second Do it
         starts over), and its signal, opened (one that got further keeps
         how far it got). ``chat``: (profile, chat id) of the chat Do it used
-        for a card from no chat, when the app named one."""
+        for a card from no chat, when the app named one; a second Do it
+        without one goes back to the search by subject."""
         with _lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
