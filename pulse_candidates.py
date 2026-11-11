@@ -129,7 +129,7 @@ Return a JSON object {{"remembered": [...], "found": [...]}}.
 - "asked" (found only): true when the user asked to be reminded of it.
 - "source" (found only): chat, calendar, reminders, notes, jobs or tools; "chat": the key of the chat it came from, when it did; "reminder": the key of the open reminder it is about (like r2), when it is one; "event": the key of the calendar entry it is about (like v1), when it is one; "area": one of {areas}.
 - "job" (found only): the key of the scheduled job it is about (like j3), when it is one.
-- Every entry with a "line" is also a pick, "bring_up" true or not (what Pulse has learned can still bring one up), with "detail", "incident", "shape", "facts" and "actions" as below (its "line" is the pick's line, and a remembered item's subject is the item itself; a found entry's "subject" is its reminder, event or job key, or ""). Leave those out only when it has no "line".
+- Every entry with a "line" is also a pick, "bring_up" true or not (what Pulse has learned can still bring up one you valued 2 or more), with "detail", "incident", "shape", "facts" and "actions" as below (its "line" is the pick's line, and a remembered item's subject is the item itself; a found entry's "subject" is its reminder, event or job key, or ""). Leave those out only when it has no "line".
 - "after" (found, kind "next" only): the #number under "Done since the last report", or the key under "Events that ended since the last report" (like e1), that it follows.
 
 A failed tool call is worth an entry only when its error says something went wrong that still matters to the user; a bare exit with no output ("exit 1, no output") is worth one only when what the command was for (a deploy, a backup, a send) plainly didn't happen. One whose error only tells Hermes what to do instead ("use work_start") is Hermes's to handle, not the user's: "minor".
@@ -1007,6 +1007,19 @@ def floor(row: dict, now: float) -> bool:
     return (row["kind"] == "commitment" or row.get("asked") is True) and abs(due - now) <= FLOOR_S
 
 
+# The least the model must value what it didn't pick for learning to bring
+# it up anyway: anything over 1, its "not at all".
+LEARNED_VALUE = 2
+
+
+def wanted(row: dict) -> bool:
+    """Whether learning may bring up a candidate the model didn't pick: the
+    model valued it LEARNED_VALUE or more and wrote the user a line for it
+    (its pick). Never a remembered item's own text, which is written about
+    the user, not to them."""
+    return (row.get("value") or 0) >= LEARNED_VALUE and pulse_picks.loads(row.get("pick")) is not None
+
+
 def route(rows: list[dict], *, limit: int = MAX_ITEMS, now: Optional[float] = None,
           learned: prefs.Learned = prefs.EMPTY, nudge: str = learning.DEFAULT_NUDGE,
           ceiling: Optional[Callable[[str], str]] = None, muted: Optional[Callable[[dict], bool]] = None,
@@ -1017,6 +1030,7 @@ def route(rows: list[dict], *, limit: int = MAX_ITEMS, now: Optional[float] = No
     SKIPPED, one whose chat has a "not relevant" rule MUTED, one whose kind
     is off OFF. The rest score (pulse_prefs.score: learning, value, pick): a
     floor or one scoring pulse_prefs.SURFACE_AT comes up at its level
+    (one the model didn't pick only when ``wanted``)
     (pulse_prefs.level, at most its kind's ``ceiling`` and the time's
     ``cap``), the loudest first, at most ``limit`` besides the floors and
     of a kind KIND_LIMITS bounds at most its limit (the rest OVER_LIMIT);
@@ -1049,6 +1063,13 @@ def route(rows: list[dict], *, limit: int = MAX_ITEMS, now: Optional[float] = No
             row["decision"] = MUTED
         elif top == "off":
             row["decision"] = OFF
+        elif not (row["bring_up"] or row["floor"] or wanted(row)):
+            # Learning brings up what the model undervalued, never what it
+            # called useless or wrote the user no line for (Eric, 2026-11-10:
+            # fewer, better cards; on his host a run of thumbs up pushed five
+            # remembered facts the model valued 1, in memory's own words,
+            # 2026-11-11).
+            row["decision"] = NOT_PICKED
         elif level != "off":
             row["level"] = prefs.quieter(level, top)
             if cap is not None and row["level"] == "push":

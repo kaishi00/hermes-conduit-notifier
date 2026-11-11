@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.4 (2026-11-11)
+
+### Fixes
+- Pulse no longer sends cards the report rated not useful or wrote nothing
+  for. After many thumbs up, things it only remembered came up as "Worth
+  knowing" pushes in memory's own words.
+- Pulse memory no longer keeps a script's or poller's instructions to Hermes,
+  or what Hermes read in your mail and accounts, as facts about you.
+
 ## 0.164.3 (2026-11-11)
 
 ### Fixes
