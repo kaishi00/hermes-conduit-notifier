@@ -798,7 +798,7 @@ _CONTACT_ARGS = ("given_name", "family_name", "nickname", "organization", "relat
 def _contact_write(store: PhoneStore, args: dict[str, Any], session_id: Any, profile: str) -> dict[str, Any]:
     action = args["action"]
     kind = CONTACT_WRITE_ACTIONS[action]
-    allowed = {"action", "device", "reason", "contact_id", "query", *(_CONTACT_ARGS if action != "delete" else ())}
+    allowed = {"action", "device", "reason", "contact_id", *(_CONTACT_ARGS if action != "delete" else ())}
     stray = sorted(key for key, value in args.items() if key not in allowed and value not in (None, "", [], {}))
     if stray:
         return {"ok": False, "error": "invalid", "note": f"{action} doesn't take {', '.join(stray)}."}

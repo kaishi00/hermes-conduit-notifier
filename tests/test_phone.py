@@ -2125,6 +2125,9 @@ def test_the_contacts_tool_asks_the_phone_to_add_change_and_delete(home):
     stray = json.loads(tool.handle_contacts({"action": "delete", "contact_id": "p_sam", "nickname": "x"},
                                             profile="work"))
     assert stray["ok"] is False and "nickname" in stray["note"]
+    queried = json.loads(tool.handle_contacts({"action": "update", "contact_id": "p_sam", "query": "Sam",
+                                               "nickname": "Sammy"}, profile="work"))
+    assert queried["ok"] is False and "query" in queried["note"], "query is people's alone"
     assert json.loads(tool.handle_contacts({"action": "add", "contact_id": "p_sam", "given_name": "x"},
                                            profile="work"))["ok"] is False
     # People still reads; voice keeps only people.

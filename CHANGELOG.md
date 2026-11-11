@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.160.1 (2026-11-11)
+
+### Fixes
+- With two phones sharing contacts, a contact change for someone picked on
+  the other phone failed without saying why; it now says which phone to use.
+
 ## 0.160.0 (2026-11-10)
 
 ### New and improved

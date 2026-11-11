@@ -22,6 +22,10 @@ kind, which calendars and lists, and how far back and ahead.
   for you to know (name, nickname, relation such as "wife", numbers,
   emails, birthday). Use it to know who "my wife" or "Sam" is; never send
   their details anywhere or into memory unless the user asks.
+  When the user lets you change contacts, it also asks the phone to add a
+  contact (`add`) or change or delete a picked person's card (`update`,
+  `delete`, by `contact_id` from `people`); the phone asks the user first,
+  and `pending` says how it went.
 
 Use these first. If the user also set up another way to their calendar
 or contacts (a CLI such as gog, another skill or an API), Conduit's copy
