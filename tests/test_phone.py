@@ -1951,3 +1951,122 @@ def test_every_change_kind_names_a_title_label_conduit_reads():
     for kind in store.CHANGE_KINDS:
         assert events._TITLE_LABEL.match(f"phone.{kind}"), kind
         assert events._TITLE_LABEL.match(f"phone.auto.{kind}"), kind
+
+
+# --- Shortcuts Hermes may run (0.159.0) -------------------------------------------
+
+SHORTCUTS = [{"name": "Movie night", "note": "Dims the lights and turns the TV on"},
+             {"name": "Log water"}, {"name": "movie NIGHT", "note": "a duplicate in another case"}]
+
+
+def _shortcut_batch(batch_id="batch-0001", sent_at="2026-10-14T08:00:00+01:00", **sharing):
+    return _batch(batch_id, sent_at=sent_at, sharing=_sharing(**{"shortcuts": True, **sharing}),
+                  shortcuts=SHORTCUTS)
+
+
+def test_shortcuts_land_once_per_name_and_are_forgotten_when_turned_off(store, iphone):
+    store.ingest(iphone.seal(_shortcut_batch()))
+    with store.reader("shortcuts") as (db, device):
+        listed, listed_at = store.shortcuts(db, device["id"])
+    assert listed == [{"name": "Movie night", "note": "Dims the lights and turns the TV on"}, {"name": "Log water"}]
+    assert listed_at == NOW
+    store.ingest(iphone.seal(_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", sharing=_sharing(),
+                                    shortcuts=SHORTCUTS)))
+    with store.reader("any") as (db, device):
+        assert store.shortcuts(db, device["id"]) == ([], None)
+
+
+def test_a_run_needs_a_listed_shortcut_and_its_result_comes_back(store, iphone):
+    store.ingest(iphone.seal(_shortcut_batch()))
+    with pytest.raises(phone.PhoneError) as raised:
+        store.add_change("run_shortcut", {"shortcut": "Unlock the door"})
+    assert raised.value.code == "unknown_shortcut"
+    change = store.add_change("run_shortcut", {"shortcut": "movie night", "input": "Dune"})
+    assert change["summary"] == "Run Movie night" and change["auto"] is False
+    # A run waits an hour, not a week.
+    assert change["expires_at"] == "2026-10-14T08:00:00Z"
+    [sent] = iphone.changes(store)
+    assert sent["kind"] == "run_shortcut" and sent["fields"] == {"shortcut": "Movie night", "input": "Dune"}
+    iphone.changes(store, [{"id": change["id"], "outcome": "applied", "result": "Lights at 20%\nTV on"}],
+                   call_id="call-00000002")
+    [outcome] = store.unreported_outcomes()
+    assert outcome["state"] == "applied" and outcome["result"] == "Lights at 20%\nTV on"
+    assert outcome["shortcut"] == "Movie night"
+    assert store.change_outcome(change["id"])["result"] == "Lights at 20%\nTV on"
+
+
+def test_a_too_long_shortcut_name_is_left_out_not_the_whole_list(store, iphone):
+    batch = _batch(sharing=_sharing(shortcuts=True),
+                   shortcuts=[{"name": "x" * (phone.MAX_SHORTCUT_NAME_CHARS + 1)},
+                              {"name": "x" * phone.MAX_SHORTCUT_NAME_CHARS + " "}, {"name": "Log water"}])
+    store.ingest(iphone.seal(batch))
+    with store.reader("shortcuts") as (db, device):
+        assert store.shortcuts(db, device["id"])[0] == [{"name": "Log water"}]
+
+
+def test_what_shortcuts_gave_back_fits_one_exchange_together(store, iphone):
+    store.ingest(iphone.seal(_shortcut_batch()))
+    runs = [store.add_change("run_shortcut", {"shortcut": "Log water"}) for _ in range(5)]
+    iphone.changes(store)
+    long = "y" * phone.MAX_RESULT_CHARS
+    iphone.changes(store, [{"id": run["id"], "outcome": "applied", "result": long} for run in runs],
+                   call_id="call-00000002")
+    given = [store.change_outcome(run["id"]).get("result") or "" for run in runs]
+    assert sum(len(text.encode()) for text in given) == phone.MAX_RESULTS_TEXT_BYTES
+    assert given[0] == long and given[-1] == ""
+    # Counted in bytes, never cutting a character in two.
+    store.ingest(iphone.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    more = [store.add_change("run_shortcut", {"shortcut": "Log water"}) for _ in range(5)]
+    iphone.changes(store, call_id="call-00000003")
+    emoji = "🎬" * phone.MAX_RESULT_CHARS
+    iphone.changes(store, [{"id": run["id"], "outcome": "applied", "result": emoji} for run in more],
+                   call_id="call-00000004")
+    given = [store.change_outcome(run["id"]).get("result") or "" for run in more]
+    assert sum(len(text.encode()) for text in given) == phone.MAX_RESULTS_TEXT_BYTES
+    assert all(set(text) <= {"🎬"} for text in given)
+
+
+def test_running_without_asking_needs_shortcuts_and_turning_them_off_refuses_a_waiting_run(store, iphone):
+    store.ingest(iphone.seal(_batch(sharing=_sharing(shortcuts_auto=True), shortcuts=SHORTCUTS)))
+    with pytest.raises(phone.PhoneError):
+        store.add_change("run_shortcut", {"shortcut": "Log water"})
+    store.ingest(iphone.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00",
+                                             shortcuts_auto=True)))
+    change = store.add_change("run_shortcut", {"shortcut": "Log water"})
+    assert change["auto"] is True
+    store.ingest(iphone.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", sharing=_sharing())))
+    assert iphone.changes(store) == []
+    assert store.changes()[0]["state"] == "failed"
+
+
+def test_a_version_3_store_gains_shortcuts_and_results(store, iphone):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("ALTER TABLE devices DROP COLUMN shortcuts")
+    db.execute("ALTER TABLE devices DROP COLUMN shortcuts_at")
+    db.execute("ALTER TABLE changes DROP COLUMN result")
+    db.execute("UPDATE meta SET value='3' WHERE key='schema'")
+    db.commit()
+    db.close()
+    assert store.status(DEVICE)["device"]["counts"]["events"] == 5
+    store.ingest(iphone.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    assert store.add_change("run_shortcut", {"shortcut": "Log water"})["summary"] == "Run Log water"
+
+
+def test_the_phone_tool_lists_and_runs_shortcuts_and_always_alerts(home):
+    store, handset = _shared(home, shortcuts=True, shortcuts_auto=True)
+    store.ingest(handset.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00",
+                                              shortcuts_auto=True)))
+    listed = json.loads(tool.handle_phone({"action": "shortcuts"}, profile="work"))
+    assert [item["name"] for item in listed["shortcuts"]] == ["Movie night", "Log water"]
+    answer = json.loads(tool.handle_phone({"action": "run_shortcut", "shortcut": "Log water", "input": "500 ml"},
+                                          profile="work"))
+    assert answer["ok"] is True and answer["status"] == "queued" and "opens Conduit" in answer["note"]
+    # Even run without asking, it needs Conduit on screen: the push alerts.
+    assert home.sent[-1]["mode"] == "alert" and home.sent[-1]["title_label"] == "phone.auto.run_shortcut"
+    stray = json.loads(tool.handle_phone({"action": "run_shortcut", "shortcut": "Log water", "label": "x"},
+                                         profile="work"))
+    assert stray["ok"] is False and "label" in stray["note"]
+    missing = json.loads(tool.handle_phone({"action": "run_shortcut", "shortcut": "Nope"}, profile="work"))
+    assert missing["ok"] is False and missing["error"] == "unknown_shortcut"

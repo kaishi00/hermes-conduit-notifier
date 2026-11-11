@@ -5,7 +5,7 @@ Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes 
 - **Notifications and calls**: approval, input, reply, failure and background-task notifications, Hermes calling you (CallKit on the phone and Watch), and Lock Screen progress while a turn runs, all delivered through the Conduit push relay in [`relay/`](relay/), end-to-end encrypted where APNs allows.
 - **Live voice**: single-use Gemini Live tokens, temporary Qwen Live credentials, GPT-Live sessions on the host's ChatGPT subscription or API key, Grok Live relayed with the host's xAI sign-in, Local Live and Classic voice through your own speech server, voice web lookups, memory and personality for voice, and saved call transcripts.
 - **Apple Watch**: short-lived grants that let a Watch call run lookups and Hermes jobs, answer what Hermes waits on in a call from Hermes, and stream GPT-Live, Grok and Local Live audio, through the relay, sealed end to end.
-- **Phone data the user opts into**: Apple Health, location, maps, calendar, reminders, Focus, phone status, contacts and alarms, sent by the phone straight to this host and sealed end to end, with the `conduit_health`, `conduit_location`, `conduit_maps`, `conduit_calendar`, `conduit_phone` and `conduit_contacts` tools for the agent, and events from the user's Shortcuts automations through `conduit_inbox`.
+- **Phone data the user opts into**: Apple Health, location, maps, calendar, reminders, Focus, phone status, contacts, alarms and the Shortcuts Hermes may run, sent by the phone straight to this host and sealed end to end, with the `conduit_health`, `conduit_location`, `conduit_maps`, `conduit_calendar`, `conduit_phone` and `conduit_contacts` tools for the agent, and events from the user's Shortcuts automations through `conduit_inbox`.
 - **Conduit extras**: rich cards and on-screen cards during calls, Artifacts and the chat's Folder, group pictures, chat takeover, cron notification settings, Conduit settings the agent can change, and one-tap pairing and updates from the app.
 
 Every route sits behind the Hermes dashboard's own auth. The plugin holds no Apple Push Notification service key and no dashboard credentials: Apple credentials stay on the push relay, so self-hosted users never need to copy a shared signing key onto their gateway, and provider keys and sign-ins never leave this host. What each party can see is in the [privacy policy](https://kaishi00.github.io/hermes-conduit-notifier/privacy/).
@@ -3337,8 +3337,19 @@ whether notes and attendees are included (off by default).
   edits made in Contacts arrive, and Conduit flags a person it can't read
   while the host keeps their last copy.
 
-Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms and
-200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
+- **Shortcuts (plugin 0.159+).** When the user lets Hermes run Shortcuts, they
+  list the ones it may run in Conduit, by name, each with what it's for in
+  their words. `conduit_phone` gains `shortcuts` (that list) and
+  `run_shortcut` (`shortcut` by name, optional `input` text), a pending
+  change like an alarm that waits an hour at most. iOS only lets an app start
+  a shortcut by opening the Shortcuts app, so the phone runs it when Conduit
+  is on screen: the user approves the card (or says yes in a voice call), or
+  it runs as soon as they open Conduit when they let Hermes run Shortcuts
+  without asking; the notification always alerts. The text the shortcut
+  gives back comes with the outcome, as `result` in `pending`.
+
+Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms,
+50 Shortcuts and 200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
 64 KiB per exchange.
 
 ## Pulse looks things up first (plugin 0.96+)

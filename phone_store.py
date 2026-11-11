@@ -20,6 +20,10 @@ What arrives (designs/phone-v1-contract.md, section 2):
   still on the phone, replaced whole when sent.
 * contacts (0.30.0): the people the user picked in Conduit, replaced whole
   when sent, deleted when the user stops sharing them.
+* shortcuts (0.159.0): the Shortcuts the user lets Hermes run, by name, each
+  with what it's for in the user's words, replaced whole when sent. A run is
+  a change (``run_shortcut``) the phone carries out in the Shortcuts app; the
+  text the shortcut gives back comes with its outcome (``result``).
 
 The sharing the phone reports in every batch is enforced here again, so a
 phone bug can't store more than the user chose: no notes, attendees or URLs
@@ -78,7 +82,8 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 FILE_NAME = "conduit-phone.sqlite3"
-SCHEMA_VERSION = 3  # 2: alarms and contacts (plugin 0.30.0); 3: last_contact, prior_sharing (0.51.9)
+SCHEMA_VERSION = 4  # 2: alarms and contacts (plugin 0.30.0); 3: last_contact, prior_sharing (0.51.9);
+# 4: shortcuts and a change's result (0.159.0)
 
 SALT = b"conduit-phone-v1"
 INFO_INGEST = b"conduit-phone-v1 ingest device-to-host"
@@ -114,7 +119,8 @@ CALENDAR_CHANGE_KINDS = ("add_event", "update_event", "delete_event", "add_remin
 # Kinds whose fields carry the item's title and time for the phone's card.
 _DISPLAY_ONLY_KINDS = ("delete_event", "complete_reminder", "delete_reminder")
 ALARM_CHANGE_KINDS = ("set_alarm", "set_timer", "cancel_alarm")
-CHANGE_KINDS = CALENDAR_CHANGE_KINDS + ALARM_CHANGE_KINDS
+SHORTCUT_CHANGE_KINDS = ("run_shortcut",)
+CHANGE_KINDS = CALENDAR_CHANGE_KINDS + ALARM_CHANGE_KINDS + SHORTCUT_CHANGE_KINDS
 OUTCOMES = ("applied", "edited", "dismissed", "failed", "expired")
 # Set by the host, never by the phone: the phone was set up again (a new key)
 # before it fetched the change, so it will never see it.
@@ -171,6 +177,19 @@ MAX_CONTACT_VALUES = 10
 MAX_RELATION_CHARS = 40
 MAX_PHONE_CHARS = 40
 MAX_VALUE_LABEL_CHARS = 30
+MAX_SHORTCUTS = 50
+MAX_SHORTCUT_NAME_CHARS = 100
+MAX_SHORTCUT_NOTE_CHARS = 200
+MAX_SHORTCUT_INPUT_CHARS = 4000
+# A shortcut's text, as it gave it back.
+MAX_RESULT_CHARS = 4000
+# What every shortcut in one exchange gave back, together, in UTF-8 bytes,
+# so a sealed body (base64, JSON escapes) stays under the exchange's 64 KiB
+# cap. The phone trims to the same.
+MAX_RESULTS_TEXT_BYTES = 16_000
+# A run waits for the user to open Conduit at most this long: later, what it
+# was for has usually passed.
+SHORTCUT_TTL_S = 3600
 # Finished changes stay this long so the agent can see how they went.
 FINISHED_KEPT_S = 30 * 24 * 3600
 MAX_WINDOW_DAYS = 400
@@ -755,10 +774,10 @@ class PhoneStore:
             for result in parsed:
                 # Only this device's own changes, and only while they wait:
                 # a repeated result (the phone retrying) changes nothing.
-                db.execute("UPDATE changes SET state=?, finished_at=?, item_id=?, note=?, reported_at=NULL"
+                db.execute("UPDATE changes SET state=?, finished_at=?, item_id=?, note=?, result=?, reported_at=NULL"
                            " WHERE id=? AND device=? AND state IN ('pending', 'lost')",
-                           (result["outcome"], now, result.get("item_id"), result.get("note"), result["id"],
-                            device_id))
+                           (result["outcome"], now, result.get("item_id"), result.get("note"), result.get("result"),
+                            result["id"], device_id))
             _refuse_unshared_changes(db, device_id, now)
             rows = db.execute(f"SELECT {_CHANGE_COLUMNS} FROM changes WHERE device=? AND state='pending'"
                               " ORDER BY created_at, rowid LIMIT ?", (device_id, MAX_CHANGES_PER_ANSWER)).fetchall()
@@ -803,12 +822,15 @@ class PhoneStore:
             elif kind in ("set_alarm", "set_timer") and sharing.get("auto_add") is True and not ask:
                 # Only the user's own phone rings: nobody else sees it.
                 auto = True
+            elif kind in SHORTCUT_CHANGE_KINDS and sharing.get("shortcuts_auto") is True and not ask:
+                auto = True
             change_id = change_id or new_change_id()  # the key: one change per id
             db.execute(
                 "INSERT INTO changes(id, device, kind, target, fields, auto, reason, session_title, created_at,"
                 " expires_at, state) VALUES(?,?,?,?,?,?,?,?,?,?, 'pending')",
                 (change_id, device_id, kind, json.dumps(clean_target) if clean_target else None,
-                 json.dumps(clean_fields), 1 if auto else 0, reason_text, title_text, now, now + CHANGE_TTL_S))
+                 json.dumps(clean_fields), 1 if auto else 0, reason_text, title_text, now,
+                 now + (SHORTCUT_TTL_S if kind in SHORTCUT_CHANGE_KINDS else CHANGE_TTL_S)))
             row = db.execute(f"SELECT {_CHANGE_COLUMNS} FROM changes WHERE id=?", (change_id,)).fetchone()
             shared = None
             calendar = None
@@ -855,13 +877,13 @@ class PhoneStore:
         with self._read() as db:
             if db is None:
                 return None
-            row = db.execute("SELECT state, note, item_id, finished_at, expires_at, kind, fields FROM changes"
+            row = db.execute("SELECT state, note, item_id, finished_at, expires_at, kind, fields, result FROM changes"
                              " WHERE id=?", (change_id,)).fetchone()
         if row is None:
             return None
         state = "expired" if row[0] == "pending" and row[4] <= now else row[0]
         return {"state": state, "note": row[1], "item_id": row[2], "finished_at": row[3], "kind": row[5],
-                "fields": _decode(row[6], {})}
+                "fields": _decode(row[6], {}), "result": row[7]}
 
     def changes(self, limit: int = 20, *, mark_reported: bool = True) -> list[dict[str, Any]]:
         """Recent changes, newest first, with their outcomes (the agent's
@@ -1170,6 +1192,14 @@ class PhoneStore:
         return {"status": _decode(row[0], None), "status_at": row[1], "focus": _decode(row[2], None),
                 "focus_at": row[3]}
 
+    def shortcuts(self, db: sqlite3.Connection, device: str) -> tuple[list[dict[str, Any]], int | None]:
+        """The Shortcuts the user lets Hermes run, and when they were sent."""
+        row = db.execute("SELECT shortcuts, shortcuts_at FROM devices WHERE id=?", (device,)).fetchone()
+        if row is None:
+            return [], None
+        listed = _decode(row[0], [])
+        return (listed if isinstance(listed, list) else []), row[1]
+
     def alarms(self, db: sqlite3.Connection, device: str) -> tuple[list[dict[str, Any]], int | None]:
         """The alarms and timers Conduit set that are still on the phone, and
         when the phone said so."""
@@ -1205,7 +1235,7 @@ _REMINDER_COLUMNS = ("id, list_id, title, due, due_all_day, priority, completed,
                      " recurring, url, notes")
 _CHANGE_COLUMNS = ", ".join(f"changes.{column}" for column in (
     "id", "kind", "target", "fields", "auto", "reason", "session_title", "created_at", "expires_at", "state",
-    "finished_at", "item_id", "note", "delivered_at", "reported_at", "device"))
+    "finished_at", "item_id", "note", "delivered_at", "reported_at", "device", "result"))
 
 
 def _calendar_view(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -1277,7 +1307,7 @@ def _change_view(row: tuple[Any, ...]) -> dict[str, Any]:
                              "state": {"pending": "waiting"}.get(row[9], row[9])}
     if fields.get("title"):
         entry["title"] = fields["title"]
-    for key in ("label", "at", "time", "repeats", "seconds"):
+    for key in ("label", "at", "time", "repeats", "seconds", "shortcut", "input"):
         if fields.get(key):
             entry[key] = fields[key]
     if target:
@@ -1299,8 +1329,10 @@ def _change_view(row: tuple[Any, ...]) -> dict[str, Any]:
             entry["note"] = row[12]
         if row[14] is None:
             entry["new"] = True
-    if len(row) > 16 and row[16]:
-        entry["device"] = row[16]
+    if row[9] != "pending" and row[16]:
+        entry["result"] = row[16]
+    if len(row) > 17 and row[17]:
+        entry["device"] = row[17]
     return entry
 
 
@@ -1334,6 +1366,16 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             db.execute("ALTER TABLE devices ADD COLUMN last_contact INTEGER")
         if "prior_sharing" not in columns:
             db.execute("ALTER TABLE devices ADD COLUMN prior_sharing TEXT")
+        version = "3"
+    if version == "3":
+        # 0.159.0: the Shortcuts Hermes may run, and what a run gave back.
+        columns = {row[1] for row in db.execute("PRAGMA table_info(devices)")}
+        if "shortcuts" not in columns:
+            db.execute("ALTER TABLE devices ADD COLUMN shortcuts TEXT")
+        if "shortcuts_at" not in columns:
+            db.execute("ALTER TABLE devices ADD COLUMN shortcuts_at INTEGER")
+        if "result" not in {row[1] for row in db.execute("PRAGMA table_info(changes)")}:
+            db.execute("ALTER TABLE changes ADD COLUMN result TEXT")
         db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
         return
     if version is not None:
@@ -1346,7 +1388,8 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             device_public BLOB NOT NULL, host_private BLOB NOT NULL, host_public BLOB NOT NULL, kid TEXT NOT NULL,
             created_at INTEGER NOT NULL, last_seen INTEGER, last_sent INTEGER, tz TEXT, sharing TEXT,
             window_from TEXT, window_to TEXT, status TEXT, status_at INTEGER, focus TEXT, focus_at INTEGER,
-            alarms TEXT, alarms_at INTEGER, last_contact INTEGER, prior_sharing TEXT);
+            alarms TEXT, alarms_at INTEGER, last_contact INTEGER, prior_sharing TEXT, shortcuts TEXT,
+            shortcuts_at INTEGER);
         CREATE TABLE IF NOT EXISTS calendars(
             device TEXT NOT NULL, id TEXT NOT NULL, title TEXT, kind TEXT NOT NULL, color TEXT, source TEXT,
             writable INTEGER NOT NULL, shared INTEGER NOT NULL, is_default INTEGER NOT NULL, position INTEGER NOT NULL,
@@ -1370,7 +1413,7 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             id TEXT PRIMARY KEY, device TEXT NOT NULL, kind TEXT NOT NULL, target TEXT, fields TEXT NOT NULL,
             auto INTEGER NOT NULL, reason TEXT, session_title TEXT, created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL, state TEXT NOT NULL, finished_at INTEGER, item_id TEXT, note TEXT,
-            delivered_at INTEGER, reported_at INTEGER);
+            delivered_at INTEGER, reported_at INTEGER, result TEXT);
         CREATE INDEX IF NOT EXISTS changes_by_device ON changes(device, state, created_at);
     """.split(";") + [_CONTACTS_TABLE]:
         if statement.strip():
@@ -1391,7 +1434,7 @@ def _drop_device_data(db: sqlite3.Connection, device_id: str, keep_changes: bool
     for table in ("events", "reminders", "calendars", "contacts") + (() if keep_changes else ("changes",)):
         db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
     db.execute("UPDATE devices SET status=NULL, status_at=NULL, focus=NULL, focus_at=NULL, alarms=NULL,"
-               " alarms_at=NULL WHERE id=?", (device_id,))
+               " alarms_at=NULL, shortcuts=NULL, shortcuts_at=NULL WHERE id=?", (device_id,))
 
 
 def _refuse_unshared_changes(db: sqlite3.Connection, device_id: str, now: int) -> None:
@@ -1434,13 +1477,14 @@ def shares(sharing: dict[str, Any], need: str) -> bool:
         return sharing.get("reminders") is True and sharing.get("reminders_read_only") is not True
     if need == "calendars":
         return calendar in ("full", "write_only") or sharing.get("reminders") is True
-    if need in ("status", "focus", "alarms", "contacts"):
+    if need in ("status", "focus", "alarms", "contacts", "shortcuts"):
         return sharing.get(need) is True
     if need == "phone":
         return sharing.get("status") is True or sharing.get("focus") is True
     if need == "phone_tool":
-        # conduit_phone: status, Focus, or the alarms Hermes can set.
-        return any(sharing.get(kind) is True for kind in ("status", "focus", "alarms"))
+        # conduit_phone: status, Focus, the alarms Hermes can set, or the
+        # Shortcuts it can run.
+        return any(sharing.get(kind) is True for kind in ("status", "focus", "alarms", "shortcuts"))
     # An unknown need is a caller's mistake: deny it rather than share.
     return need == "any"
 
@@ -1450,7 +1494,8 @@ _NEED_WORDS = {"events": "their calendar", "events_write": "adding to their cale
                "reminders_write": "changes to their reminders",
                "calendars": "calendars or reminders", "status": "phone status", "focus": "Focus",
                "phone": "phone status or Focus", "alarms": "alarms and timers", "contacts": "contacts",
-               "phone_tool": "phone status, Focus or alarms", "any": "anything"}
+               "shortcuts": "Shortcuts to run", "phone_tool": "phone status, Focus, alarms or Shortcuts",
+               "any": "anything"}
 
 
 def _read_only(sharing: dict[str, Any], need: str) -> PhoneError | None:
@@ -1548,7 +1593,7 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
         raise PhoneError("malformed", f"sharing.calendar must be one of {', '.join(CALENDAR_SHARING)}")
     sharing: dict[str, Any] = {"calendar": calendar}
     for field in ("reminders", "details", "attendee_emails", "status", "focus", "auto_add", "alarms", "contacts",
-                  *READ_ONLY_SHARING):
+                  "shortcuts", "shortcuts_auto", *READ_ONLY_SHARING):
         sharing[field] = bool(_bool(value.get(field), f"sharing.{field}", False))
     # Add-only and read-only leaves nothing; read-only reminders need reminders.
     if sharing["calendar"] == "write_only" and sharing["calendar_read_only"]:
@@ -1557,6 +1602,8 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     sharing["reminders_read_only"] = sharing["reminders_read_only"] and sharing["reminders"]
     # Emails are part of the details.
     sharing["attendee_emails"] = sharing["attendee_emails"] and sharing["details"]
+    # Running without asking is part of letting Hermes run them.
+    sharing["shortcuts_auto"] = sharing["shortcuts_auto"] and sharing["shortcuts"]
     sharing["past_days"] = _whole(value.get("past_days"), "sharing.past_days", 0, MAX_WINDOW_DAYS)
     sharing["future_days"] = _whole(value.get("future_days"), "sharing.future_days", 0, MAX_WINDOW_DAYS)
     return sharing
@@ -1592,6 +1639,8 @@ def _forget_unshared(db: sqlite3.Connection, device_id: str, sharing: dict[str, 
         db.execute("UPDATE devices SET alarms=NULL, alarms_at=NULL WHERE id=?", (device_id,))
     if not sharing["contacts"]:
         db.execute("DELETE FROM contacts WHERE device=?", (device_id,))
+    if not sharing["shortcuts"]:
+        db.execute("UPDATE devices SET shortcuts=NULL, shortcuts_at=NULL WHERE id=?", (device_id,))
 
 
 def _narrowed(stored: Any, sharing: dict[str, Any]) -> dict[str, Any]:
@@ -1643,10 +1692,11 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     event_upserts, event_deletes = _list(events.get("upsert"), "events.upsert"), _list(events.get("delete"), "events.delete")
     reminder_upserts = _list(reminders.get("upsert"), "reminders.upsert")
     reminder_deletes = _list(reminders.get("delete"), "reminders.delete")
-    alarms, contacts = batch.get("alarms"), batch.get("contacts")
+    alarms, contacts, shortcuts = batch.get("alarms"), batch.get("contacts"), batch.get("shortcuts")
     total = (len(calendars or []) + len(event_upserts) + len(event_deletes) + len(reminder_upserts)
              + len(reminder_deletes) + (len(alarms) if isinstance(alarms, list) else 0)
-             + (len(contacts) if isinstance(contacts, list) else 0))
+             + (len(contacts) if isinstance(contacts, list) else 0)
+             + (len(shortcuts) if isinstance(shortcuts, list) else 0))
     if total > MAX_ITEMS:
         raise PhoneError("too_large", f"At most {MAX_ITEMS} items per batch", status=413)
 
@@ -1689,6 +1739,7 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     focus = _parse_focus(batch.get("focus"), now) if sharing["focus"] and batch.get("focus") is not None else None
     parsed_alarms = _parse_alarms(alarms) if sharing["alarms"] and alarms is not None else None
     parsed_contacts = _parse_contacts(contacts) if sharing["contacts"] and contacts is not None else None
+    parsed_shortcuts = _parse_shortcuts(shortcuts) if sharing["shortcuts"] and shortcuts is not None else None
 
     stored = db.execute("SELECT last_sent, status_at, focus_at, window_from, window_to FROM devices WHERE id=?",
                         (device_id,)).fetchone()
@@ -1774,6 +1825,9 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     if parsed_alarms is not None:
         db.execute("UPDATE devices SET alarms=?, alarms_at=? WHERE id=?",
                    (json.dumps(parsed_alarms), sent_epoch, device_id))
+    if parsed_shortcuts is not None:
+        db.execute("UPDATE devices SET shortcuts=?, shortcuts_at=? WHERE id=?",
+                   (json.dumps(parsed_shortcuts), sent_epoch, device_id))
     if parsed_contacts is not None:
         db.execute("DELETE FROM contacts WHERE device=?", (device_id,))
         for position, person in enumerate(parsed_contacts):
@@ -2093,6 +2147,7 @@ def _parse_results(value: Any) -> list[dict[str, Any]]:
     if len(results) > MAX_RESULTS:
         raise PhoneError("too_large", f"At most {MAX_RESULTS} results per exchange", status=413)
     parsed = []
+    budget = MAX_RESULTS_TEXT_BYTES
     for index, result in enumerate(results):
         field = f"results[{index}]"
         if not isinstance(result, dict):
@@ -2104,9 +2159,15 @@ def _parse_results(value: Any) -> list[dict[str, Any]]:
         if outcome is None:
             raise PhoneError("malformed", f"{field}.outcome is required")
         item_id = result.get("item_id")
+        given = clean_notes(result.get("result"), f"{field}.result", MAX_RESULT_CHARS)
+        if given is not None:
+            given = given.encode("utf-8")[:budget].decode("utf-8", "ignore").strip() or None
+            budget -= len(given.encode("utf-8")) if given else 0
         parsed.append({"id": change_id, "outcome": outcome,
                        "item_id": None if item_id is None else _item_id(item_id, f"{field}.item_id"),
-                       "note": clean_text(result.get("note"), f"{field}.note", MAX_NOTE_CHARS, cap=True)})
+                       "note": clean_text(result.get("note"), f"{field}.note", MAX_NOTE_CHARS, cap=True),
+                       # What a shortcut gave back; other changes have none.
+                       "result": given})
     return parsed
 
 
@@ -2215,6 +2276,8 @@ def _checked(db: sqlite3.Connection, device_id: str, kind: str, fields: dict[str
     """(target, fields, summary, calendar or list id) for any change kind, or PhoneError."""
     if kind in ALARM_CHANGE_KINDS:
         return (*_check_alarm_change(db, device_id, kind, fields, target, now), None)
+    if kind in SHORTCUT_CHANGE_KINDS:
+        return (*_check_shortcut_change(db, device_id, fields, target), None)
     return _check_change(db, device_id, kind, fields, target)
 
 
@@ -2292,6 +2355,8 @@ def change_need(kind: str) -> str:
         return "events_change"
     if kind in ALARM_CHANGE_KINDS:
         return "alarms"
+    if kind in SHORTCUT_CHANGE_KINDS:
+        return "shortcuts"
     return "reminders_write"
 
 
@@ -2343,6 +2408,67 @@ def _check_alarm_change(db: sqlite3.Connection, device_id: str, kind: str, field
             clean["repeats"] = repeats or None
     clean = {key: value for key, value in clean.items() if value is not None}
     return None, clean, alarm_summary({"kind": "timer" if kind == "set_timer" else "alarm", **clean})
+
+
+def _check_shortcut_change(db: sqlite3.Connection, device_id: str, fields: dict[str, Any],
+                           target: dict[str, Any]) -> tuple[None, dict[str, Any], str]:
+    """(target, fields, summary) for a run, or PhoneError: only a shortcut
+    the user listed, by its name as they wrote it."""
+    if target:
+        raise PhoneError("malformed", "run_shortcut takes no target")
+    unknown = sorted(set(fields) - {"shortcut", "input"})
+    if unknown:
+        names = [_CONTROL.sub(" ", str(name))[:40] for name in unknown[:10]]
+        raise PhoneError("malformed", f"Unknown fields for run_shortcut: {', '.join(names)}. Known: shortcut, input")
+    asked = clean_text(fields.get("shortcut"), "shortcut", MAX_SHORTCUT_NAME_CHARS)
+    if not asked:
+        raise PhoneError("malformed", "shortcut is required: its name from action shortcuts")
+    listed = _decode(db.execute("SELECT shortcuts FROM devices WHERE id=?", (device_id,)).fetchone()[0], [])
+    listed = listed if isinstance(listed, list) else []
+    match = next((item for item in listed if isinstance(item, dict)
+                  and str(item.get("name", "")).casefold() == asked.casefold()), None)
+    if match is None:
+        raise PhoneError("unknown_shortcut", "The user hasn't let Hermes run a shortcut by that name; see action "
+                                             "shortcuts")
+    clean = {"shortcut": match["name"]}
+    text = fields.get("input")
+    if isinstance(text, str) and len(text) > MAX_SHORTCUT_INPUT_CHARS:
+        raise PhoneError("malformed", f"input must be text of at most {MAX_SHORTCUT_INPUT_CHARS} characters")
+    text = clean_notes(text, "input", MAX_SHORTCUT_INPUT_CHARS)
+    if text:
+        clean["input"] = text
+    return None, clean, f"Run {match['name']}"
+
+
+def _parse_shortcuts(value: Any) -> list[dict[str, Any]]:
+    """The Shortcuts the user lets Hermes run: a name each, unique in any
+    case, and what it's for in their words."""
+    items = _list(value, "shortcuts")
+    if len(items) > MAX_SHORTCUTS:
+        raise PhoneError("too_large", f"At most {MAX_SHORTCUTS} shortcuts", status=413)
+    parsed: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        field = f"shortcuts[{index}]"
+        if not isinstance(item, dict):
+            raise PhoneError("malformed", f"{field} must be an object")
+        raw = item.get("name")
+        if isinstance(raw, str) and len(raw) > MAX_SHORTCUT_NAME_CHARS:
+            # Too long to run by name (clean_text's own limit): that one is
+            # left out, not the list.
+            continue
+        name = clean_text(raw, f"{field}.name", MAX_SHORTCUT_NAME_CHARS)
+        if not name:
+            raise PhoneError("malformed", f"{field}.name is required")
+        if name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        entry: dict[str, Any] = {"name": name}
+        note = clean_text(item.get("note"), f"{field}.note", MAX_SHORTCUT_NOTE_CHARS, cap=True)
+        if note:
+            entry["note"] = note
+        parsed.append(entry)
+    return parsed
 
 
 def alarm_summary(item: dict[str, Any]) -> str:

@@ -120,6 +120,7 @@ def test_every_capability_names_a_served_route_family():
         "phone-sync": "/phone/",
         "phone-alarms": "/phone/",
         "phone-contacts": "/phone/",
+        "phone-shortcuts": "/phone/",
         "pairing": "/pair",
         "self-restart": "/self/restart",
         "self-update": "/self/update",
