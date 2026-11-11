@@ -852,18 +852,26 @@ def test_pulse_opens_a_desktop_hosted_chat_with_no_gateway_receipt(listener):
         db.commit()
     finally:
         db.close()
-    before = len(_told("PULSE check in"))
     status, out = listener.plugin_call(f"pulse-send?chat_id={sid}", plugin=DRIVER, timeout=180)
     assert status == 200, out
     assert out["ok"] is True, out
+    # Opening it gave it the gateway's receipt, so any later restart still finds it, and the turn
+    # and its reply landed in that chat, not in one the authority made for it.
+    def stored() -> tuple:
+        db = sqlite3.connect(listener.home / "state.db")
+        try:
+            keys = [row[0] for row in db.execute("SELECT key FROM state_meta WHERE key LIKE ?", (f"%:{sid}",))]
+            roles = [row[0] for row in db.execute(
+                "SELECT role FROM messages WHERE session_id = ? AND (role != 'user' OR content LIKE ?)",
+                (sid, "%PULSE check in%"))]
+        finally:
+            db.close()
+        return keys, roles
+
     deadline = time.monotonic() + 60
-    while len(_told("PULSE check in")) <= before:
-        assert time.monotonic() < deadline, "Pulse's turn never ran in the desktop-hosted chat"
+    keys, roles = stored()
+    while not ("user" in roles and "assistant" in roles):
+        assert time.monotonic() < deadline, f"Pulse's turn and reply never landed in the chat: {roles}"
         time.sleep(0.5)
-    # Opening it gave it the gateway's receipt, so any later restart still finds it.
-    db = sqlite3.connect(listener.home / "state.db")
-    try:
-        keys = [row[0] for row in db.execute("SELECT key FROM state_meta WHERE key LIKE ?", (f"%:{sid}",))]
-    finally:
-        db.close()
+        keys, roles = stored()
     assert keys, "the chat has no gateway receipt after Pulse opened it"
