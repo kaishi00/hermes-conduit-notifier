@@ -206,3 +206,85 @@ def test_a_failure_notice_passed_positionally_is_still_one(hermes):
     job = dict(JOB)
     assert hermes.delivery._deliver_to_bot_chat(job, "It failed.", "", True) is None
     assert job["_notification_all_targets_suppressed"] and hermes.notes == []
+
+
+def test_a_reports_whole_line_media_tag_shows_as_the_reference_its_viewers_render(hermes):
+    # The note is a user row: a raw MEDIA tag reads as the host's path there,
+    # so the report's picture comes through as the reference the chat renders
+    # (issue 581).
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "MEDIA:/cards/reminder-2026-11-05-1017.png\nQuiz: kapott?", "") is None
+    (_home, _chat, text, _diagnostic), = hermes.notes
+    assert text == HEADER + "\n\n@image:/cards/reminder-2026-11-05-1017.png\nQuiz: kapott?"
+
+
+def test_the_history_note_rewrites_media_tags_the_same_way(hermes):
+    hermes.owned = False
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "MEDIA:/cards/quiz.png", "") is None
+    (_chat, _key, text, _kind, _metadata), = hermes.written
+    assert text.endswith("@image:/cards/quiz.png") and "MEDIA:" not in text
+
+
+def test_other_files_are_chips_and_paths_are_quoted_or_left_as_written(hermes):
+    assert cron_bot_chat.install()
+    report = ("MEDIA:/var/bericht.pdf\n"
+              'MEDIA:"/var/mit leer.png"\n'
+              "MEDIA:C:\\Users\\me\\out.JPG\n"
+              'MEDIA:"/var/kaputt".png\n'
+              "MEDIA:/a/x.png und MEDIA:/b/y.png\n"
+              "Siehe MEDIA:/x.png hier.\n"
+              "```\nMEDIA:/example/in-code.png\n```")
+    assert hermes.delivery.deliver(dict(JOB), report, "") is None
+    (_home, _chat, text, _diagnostic), = hermes.notes
+    assert "@file:/var/bericht.pdf" in text
+    assert "@image:`/var/mit leer.png`" in text
+    assert "@image:C:\\Users\\me\\out.JPG" in text
+    assert 'MEDIA:"/var/kaputt".png' in text  # an unquotable path stays as written
+    assert "MEDIA:/a/x.png und MEDIA:/b/y.png" in text  # one line, two tags: as written
+    assert "Siehe MEDIA:/x.png hier." in text  # a tag inside prose stays prose
+    assert "```\nMEDIA:/example/in-code.png\n```" in text  # an example in code stays code
+
+
+def test_a_withheld_report_has_no_references_to_make():
+    assert cron_bot_chat.reference_tags(cron_bot_chat.WITHHELD) == cron_bot_chat.WITHHELD
+
+
+def test_the_image_references_keep_artifacts_index_extensions():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("artifacts_index_581", ROOT / "artifacts_index.py")
+    artifacts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(artifacts)
+    assert cron_bot_chat._IMAGE_REFERENCE == frozenset(artifacts._IMAGE)
+
+
+def test_the_artifacts_list_knows_the_note_by_its_header():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("artifacts_index_581_header", ROOT / "artifacts_index.py")
+    artifacts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(artifacts)
+    assert cron_bot_chat.HEADER.format(name="x").startswith(artifacts.CRON_NOTE_PREFIX)
+
+
+def test_a_path_with_brackets_is_quoted_so_its_reference_holds(hermes):
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), 'MEDIA:"/tmp/old(1).png"', "") is None
+    (_home, _chat, text, _diagnostic), = hermes.notes
+    assert text.endswith("@image:`/tmp/old(1).png`")
+
+
+def test_markers_directives_and_quote_marks_keep_the_reference_whole():
+    report = ("- MEDIA:/cards/a.png\n"
+              "  > MEDIA:/cards/b.pdf\n"
+              "1. MEDIA:/tmp/report.pdf[[as_document]]\n"
+              "MEDIA:\"/tmp/Bob's photo.png\"\n"
+              "MEDIA:/tmp/old<1>.png")
+    assert cron_bot_chat.reference_tags(report).splitlines() == [
+        "@image:/cards/a.png",
+        "  > MEDIA:/cards/b.pdf",  # a quoted line is an example
+        "@file:/tmp/report.pdf",
+        "@image:`/tmp/Bob's photo.png`",
+        "@image:`/tmp/old<1>.png`",
+    ]

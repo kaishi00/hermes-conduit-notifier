@@ -22,12 +22,14 @@ from __future__ import annotations
 import functools
 import importlib
 import logging
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .cron_store import CronStore
+from .events import _FENCE, _MEDIA_DIRECTIVE, _MEDIA_TAG, _TRAILING
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,65 @@ _lock = threading.Lock()
 _installed: Optional[tuple[Any, Callable[..., Any], Callable[..., Any]]] = None
 
 
+# The note is a user row of the transcript, and the chat's viewers read user
+# rows by their reference vocabulary: a whole-line `@image:` directive lifts
+# into the bubble's attachments row and a `@file:` one renders as a chip
+# (Hermes Desktop's chat-messages hydration and user-message; Conduit's
+# CronReportCard). A raw MEDIA tag is neither: there it reads as the host's
+# path, so a report's picture shows as words where Hermes' own turn delivery
+# sent the file itself (issue 581). Its whole-line tags therefore become
+# references. The image extensions are artifacts_index's, kept equal by
+# tests/test_cron_bot_chat.py.
+_IMAGE_REFERENCE = frozenset("png jpg jpeg gif webp heic heif bmp svg tif tiff".split())
+
+
+def _quoted(path: str) -> str:
+    """A path as Hermes' format_reference_value quotes one: with the first
+    quote mark it lacks when it holds a space, a bracket or a quote mark."""
+    if not re.search(r"[\s\[\](){}<>'\"`]", path):
+        return path
+    quote = next(mark for mark in "`\"'" if mark not in path)
+    return quote + path + quote
+
+
+# What may stand before a whole-line tag: indentation and a list item's
+# marker. They go, so the reference is a line of its own, the one a user row
+# lifts into its attachments. A quoted line (`>`) is an example and stays.
+_LINE_LEAD = re.compile(r"^\s*(?:(?:[-*+]|\d{1,9}[.)])\s+)?")
+
+
+def reference_tags(text: str) -> str:
+    """A report's whole-line MEDIA tags as the references its viewers
+    render: an image as an `@image:` attachment, any other file as a
+    `@file:` chip, on a line of its own without a list marker. A line with
+    more than one tag, or a path holding all three quote marks, stays as
+    written; a tag inside prose stays prose, and one in fenced code stays
+    code, as events reads them. Hermes' delivery directives
+    (`[[as_document]]`) go, as media_free drops them."""
+    if "MEDIA:" not in text:
+        return text
+    lines, fenced = [], False
+    for line in text.splitlines():
+        if _FENCE.match(line):
+            fenced = not fenced
+        body = _MEDIA_DIRECTIVE.sub("", line[_LINE_LEAD.match(line).end():]).strip()
+        match = (_MEDIA_TAG.fullmatch(body)
+                 if not fenced and not _FENCE.match(line) and body.count("MEDIA:") == 1 else None)
+        if match is None:
+            lines.append(line)
+            continue
+        path = match.group("path").strip().strip("`\"'").rstrip(_TRAILING + "~")
+        if not path or all(mark in path for mark in "`\"'"):
+            lines.append(line)
+            continue
+        name = re.split(r"[/\\]", path.rstrip("/\\"))[-1]
+        image = "." in name and name.rsplit(".", 1)[1].lower() in _IMAGE_REFERENCE
+        # Quoted as Hermes quotes a reference (format_reference_value), so a
+        # bracket, quote mark or space doesn't end it early.
+        lines.append(f"{'@image' if image else '@file'}:{_quoted(path)}")
+    return "\n".join(lines)
+
+
 def note_text(job: Any, content: Any) -> str:
     job = job if isinstance(job, dict) else {}
     name = str(job.get("name") or job.get("id") or "?")
@@ -69,7 +130,7 @@ def note_text(job: Any, content: Any) -> str:
         name = str(job.get("id") or "?")
         text = WITHHELD
     name = " ".join(name.replace('"', "'").split()) or "?"
-    return HEADER.format(name=name) + "\n\n" + text
+    return HEADER.format(name=name) + "\n\n" + reference_tags(text)
 
 
 def lets_act(job: Any) -> bool:
