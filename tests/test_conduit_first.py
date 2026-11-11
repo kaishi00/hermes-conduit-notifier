@@ -37,7 +37,8 @@ phone = _load("conduit_push.phone_tool", ROOT / "phone_tool.py")
 @pytest.fixture
 def shared(monkeypatch, tmp_path):
     """Which kinds the phone shares, by the availability check each tool uses."""
-    kinds = {"calendar": False, "health": False, "location": False, "phone": False, "contacts": False}
+    kinds = {"calendar": False, "health": False, "location": False, "phone": False, "contacts": False,
+             "photos": False}
     monkeypatch.setattr(first, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(first, "_cache", {})
     monkeypatch.setattr(phone, "calendar_available", lambda: kinds["calendar"])
@@ -45,6 +46,7 @@ def shared(monkeypatch, tmp_path):
     monkeypatch.setattr(location, "available", lambda: kinds["location"])
     monkeypatch.setattr(phone, "phone_available", lambda: kinds["phone"])
     monkeypatch.setattr(phone, "contacts_available", lambda: kinds["contacts"])
+    monkeypatch.setattr(phone, "photos_available", lambda: kinds["photos"])
     return kinds
 
 
@@ -66,7 +68,8 @@ def test_every_kind_is_listed(shared):
     for kind in shared:
         shared[kind] = True
     note = first.note()
-    for tool in ("conduit_calendar", "conduit_health", "conduit_location", "conduit_phone", "conduit_contacts"):
+    for tool in ("conduit_calendar", "conduit_health", "conduit_location", "conduit_phone", "conduit_contacts",
+                 "conduit_photos"):
         assert tool in note
     assert ", their health data (conduit_health), " in note
 

@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.161.0 (2026-11-11)
+
+### New and improved
+- Hermes can search your photos when you turn on Photos in Conduit
+  (Calendar & phone). Conduit describes each photo on your iPhone and sends
+  only that description; when Hermes wants to see one, Conduit shows it to
+  you and sends it only if you say yes. Needs a Conduit update too.
+
 ## 0.160.1 (2026-11-11)
 
 ### Fixes

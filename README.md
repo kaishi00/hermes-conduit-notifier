@@ -3344,6 +3344,16 @@ whether notes and attendees are included (off by default).
   and `emails` replace the lists whole) and `delete`. Each is a pending change
   the phone always asks about, never added without asking.
 
+- **Photos (plugin 0.161+).** When the user shares their photos, Conduit
+  describes each one on the phone (Apple's on-device labels, text found in
+  it, the town or area, when, favorite or screenshot) and sends only that,
+  for the newest 5,000. `conduit_photos` gains `search` (words, `from`/`to`,
+  `favorites`) and `send` (`photo_id`): a pending change that always asks,
+  showing the picture on a card. Only once the user says yes does the phone
+  upload it (a JPEG in the next `/phone/ingest` batch), and `pending` gives
+  the change's `result` as the picture's path on the host, for
+  `vision_analyze` or a `MEDIA:` tag. Sent pictures are kept 7 days.
+
 - **Shortcuts (plugin 0.159+).** When the user lets Hermes run Shortcuts, they
   list the ones it may run in Conduit, by name, each with what it's for in
   their words. `conduit_phone` gains `shortcuts` (that list) and

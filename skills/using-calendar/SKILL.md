@@ -1,6 +1,6 @@
 ---
 name: using-calendar
-description: How to use the calendar, reminders, Focus, phone status, alarms and contacts Conduit shares (conduit_calendar, conduit_phone, conduit_contacts): reading as of the last sync, asking the phone to add or change things, standing preferences, and keeping other people's details private.
+description: How to use the calendar, reminders, Focus, phone status, alarms, contacts and photos Conduit shares (conduit_calendar, conduit_phone, conduit_contacts, conduit_photos): reading as of the last sync, asking the phone to add or change things, standing preferences, and keeping other people's details private.
 ---
 
 # Using the user's calendar, reminders and phone
@@ -26,6 +26,12 @@ kind, which calendars and lists, and how far back and ahead.
   contact (`add`) or change or delete a picked person's card (`update`,
   `delete`, by `contact_id` from `people`); the phone asks the user first,
   and `pending` says how it went.
+- `conduit_photos` (when the user shares their photos) searches what the
+  phone says about each photo (`search`: Apple's English labels, words in
+  the picture, the place, when) and asks the phone for one (`send`, by
+  `photo_id`). The user sees it on a card and decides; once sent, `pending`
+  gives its path here, to look at with `vision_analyze`. Ask only for what
+  the user wants to see or ask about.
 
 Use these first. If the user also set up another way to their calendar
 or contacts (a CLI such as gog, another skill or an API), Conduit's copy

@@ -27,6 +27,12 @@ What arrives (designs/phone-v1-contract.md, section 2):
 * contact changes (0.160.0): Hermes asks to add a contact, or change or delete
   a picked person's (``add_contact``, ``update_contact``, ``delete_contact``),
   when the user lets it (``contacts_edit``); the phone always asks first.
+* photos (0.161.0): what the phone says about each photo in the library
+  (Apple's labels, text found in it, the place, when), made on the phone,
+  as a diff or, with ``full``, whole; the newest MAX_PHOTOS are kept. Hermes
+  asks for one (``send_photo``), the phone always asks the user, and a
+  picture they said yes to arrives in a batch's ``photo_files``: it is kept
+  beside the store for PHOTO_KEPT_S, and the change's result is its path.
 
 The sharing the phone reports in every batch is enforced here again, so a
 phone bug can't store more than the user chose: no notes, attendees or URLs
@@ -56,6 +62,8 @@ sealing.py.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
 import json
 import logging
@@ -85,8 +93,8 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 FILE_NAME = "conduit-phone.sqlite3"
-SCHEMA_VERSION = 4  # 2: alarms and contacts (plugin 0.30.0); 3: last_contact, prior_sharing (0.51.9);
-# 4: shortcuts and a change's result (0.159.0)
+SCHEMA_VERSION = 5  # 2: alarms and contacts (plugin 0.30.0); 3: last_contact, prior_sharing (0.51.9);
+# 4: shortcuts and a change's result (0.159.0); 5: photos (0.161.0)
 
 SALT = b"conduit-phone-v1"
 INFO_INGEST = b"conduit-phone-v1 ingest device-to-host"
@@ -124,7 +132,10 @@ _DISPLAY_ONLY_KINDS = ("delete_event", "complete_reminder", "delete_reminder")
 ALARM_CHANGE_KINDS = ("set_alarm", "set_timer", "cancel_alarm")
 SHORTCUT_CHANGE_KINDS = ("run_shortcut",)
 CONTACT_CHANGE_KINDS = ("add_contact", "update_contact", "delete_contact")
-CHANGE_KINDS = CALENDAR_CHANGE_KINDS + ALARM_CHANGE_KINDS + SHORTCUT_CHANGE_KINDS + CONTACT_CHANGE_KINDS
+PHOTO_CHANGE_KINDS = ("send_photo",)
+CHANGE_KINDS = (CALENDAR_CHANGE_KINDS + ALARM_CHANGE_KINDS + SHORTCUT_CHANGE_KINDS + CONTACT_CHANGE_KINDS
+                + PHOTO_CHANGE_KINDS)
+PHOTO_KINDS = ("photo", "screenshot")
 # What a contact change may set. phones and emails replace the lists whole.
 CONTACT_FIELDS = ("given_name", "family_name", "nickname", "organization", "relation", "phones", "emails", "birthday")
 OUTCOMES = ("applied", "edited", "dismissed", "failed", "expired")
@@ -196,6 +207,23 @@ MAX_RESULTS_TEXT_BYTES = 16_000
 # A run waits for the user to open Conduit at most this long: later, what it
 # was for has usually passed.
 SHORTCUT_TTL_S = 3600
+# Photos (0.161.0): what the phone says about each picture in the library,
+# made on the phone (Apple's labels, the text in it, the place), never the
+# picture itself. Only the newest MAX_PHOTOS per device are kept.
+MAX_PHOTOS = 5000
+MAX_PHOTO_LABELS = 12
+MAX_PHOTO_LABEL_CHARS = 40
+MAX_PHOTO_TEXT_CHARS = 300
+MAX_PHOTO_PIXELS = 100_000
+# A picture the user said yes to: one per batch, so its base64 inside the
+# sealed body's base64 stays under /phone/ingest's 4 MiB cap.
+MAX_PHOTO_FILES = 1
+MAX_PHOTO_FILE_BYTES = 1_500_000
+# A send waits a day for the user's answer; a sent picture is kept a week.
+PHOTO_TTL_S = 24 * 3600
+PHOTO_KEPT_S = 7 * 24 * 3600
+PHOTOS_DIR = ("conduit", "phone-photos")
+MAX_PHOTO_RESULTS = 20
 # Finished changes stay this long so the agent can see how they went.
 FINISHED_KEPT_S = 30 * 24 * 3600
 MAX_WINDOW_DAYS = 400
@@ -691,13 +719,106 @@ class PhoneStore:
                 _expire(db, now)
             else:
                 skewed = None
+                saved = self._save_photo_files(db, device_id, result.pop("photo_files", None) or [], now)
+                if saved:
+                    result["photos_sent"] = saved
                 _expire(db, now)
                 result["pending"] = db.execute("SELECT COUNT(*) FROM changes WHERE device=? AND state='pending'",
                                                (device_id,)).fetchone()[0]
                 generation = _meta(db, "generation")
+        # After the commit, so a refused batch that turned Photos off still
+        # takes the pictures with it.
+        self._sweep_photo_files(now)
         if skewed is not None:
             raise skewed
         return {**result, "generation": generation}
+
+    # Photos the user said yes to ----------------------------------------------------
+
+    def photos_dir(self, device_id: str | None = None) -> Path:
+        """Where the pictures the user sent Hermes are kept: beside the
+        store, one folder per device."""
+        folder = self.path.parent.joinpath(*PHOTOS_DIR)
+        return folder / device_id if device_id else folder
+
+    def _save_photo_files(self, db: sqlite3.Connection, device_id: str, files: list[dict[str, Any]],
+                          now: int) -> list[str]:
+        """Writes each picture (owner-only, whole or not at all) and marks its
+        send_photo applied, with the file's path as its result. Inside the
+        batch's transaction: a picture that can't be written fails the batch,
+        so the phone sends it again."""
+        saved = []
+        for item in files:
+            folder = self.photos_dir(device_id)
+            folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = folder / f"{item['change_id']}.jpg"
+            temporary = folder / f".{item['change_id']}.{secrets.token_hex(4)}.tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+            try:
+                with os.fdopen(os.open(temporary, flags, 0o600), "wb") as handle:
+                    handle.write(item["data"])
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary)
+                raise
+            db.execute("UPDATE changes SET state='applied', finished_at=?, item_id=?, note=NULL, result=?,"
+                       " reported_at=NULL WHERE id=? AND device=?",
+                       (now, item.get("photo_id"), str(path), item["change_id"], device_id))
+            saved.append(item["change_id"])
+        return saved
+
+    def sweep_sent_photos(self) -> None:
+        """The week's limit on sent pictures, for callers that don't upload:
+        the phone's status checks, Hermes' photo reads and each plugin load,
+        so pictures go on time even when the phone stops syncing."""
+        try:
+            self._sweep_photo_files(int(self.clock()))
+        except Exception:  # noqa: BLE001 — housekeeping never fails its caller
+            logger.warning("conduit phone: couldn't sweep sent photos", exc_info=True)
+
+    def _sweep_photo_files(self, now: int) -> None:
+        """Forgets sent pictures after PHOTO_KEPT_S, and all of a device's
+        once it no longer shares photos (or is gone). Never fails a batch.
+        Under the writers' lock, so sharing turned back on (and a picture
+        saved) between reading it and deleting can't lose the new picture."""
+        root = self.photos_dir()
+        if not root.is_dir():
+            return
+        with self._locked():
+            self._sweep_photo_files_locked(root, now)
+
+    def _sweep_photo_files_locked(self, root: Path, now: int) -> None:
+        sharing: dict[str, Any] = {}
+        if self.path.exists():
+            try:
+                connection = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=15)
+            except sqlite3.DatabaseError:
+                return
+            try:
+                sharing = {row[0]: _decode(row[1], None) or {}
+                           for row in connection.execute("SELECT id, sharing FROM devices")}
+            except sqlite3.DatabaseError:
+                # A file mid-upgrade or broken: keep everything until a read works.
+                return
+            finally:
+                connection.close()
+        try:
+            for folder in root.iterdir():
+                if not folder.is_dir() or folder.is_symlink():
+                    continue
+                keep = folder.name in sharing and shares(sharing[folder.name], "photos")
+                for path in folder.iterdir():
+                    with contextlib.suppress(OSError):
+                        if not keep or path.lstat().st_mtime < now - PHOTO_KEPT_S:
+                            path.unlink()
+                if not keep:
+                    with contextlib.suppress(OSError):
+                        folder.rmdir()
+        except OSError as error:
+            logger.warning("conduit phone: couldn't sweep sent photos (%s)", error)
 
     # Exchange --------------------------------------------------------------------
 
@@ -780,10 +901,13 @@ class PhoneStore:
             for result in parsed:
                 # Only this device's own changes, and only while they wait:
                 # a repeated result (the phone retrying) changes nothing.
+                # A photo is sent only by its picture (ingest's photo_files):
+                # the phone's word alone doesn't send it.
                 db.execute("UPDATE changes SET state=?, finished_at=?, item_id=?, note=?, result=?, reported_at=NULL"
-                           " WHERE id=? AND device=? AND state IN ('pending', 'lost')",
+                           " WHERE id=? AND device=? AND state IN ('pending', 'lost')"
+                           " AND NOT (kind='send_photo' AND ? IN ('applied', 'edited'))",
                            (result["outcome"], now, result.get("item_id"), result.get("note"), result.get("result"),
-                            result["id"], device_id))
+                            result["id"], device_id, result["outcome"]))
             _refuse_unshared_changes(db, device_id, now)
             rows = db.execute(f"SELECT {_CHANGE_COLUMNS} FROM changes WHERE device=? AND state='pending'"
                               " ORDER BY created_at, rowid LIMIT ?", (device_id, MAX_CHANGES_PER_ANSWER)).fetchall()
@@ -836,7 +960,8 @@ class PhoneStore:
                 " expires_at, state) VALUES(?,?,?,?,?,?,?,?,?,?, 'pending')",
                 (change_id, device_id, kind, json.dumps(clean_target) if clean_target else None,
                  json.dumps(clean_fields), 1 if auto else 0, reason_text, title_text, now,
-                 now + (SHORTCUT_TTL_S if kind in SHORTCUT_CHANGE_KINDS else CHANGE_TTL_S)))
+                 now + (SHORTCUT_TTL_S if kind in SHORTCUT_CHANGE_KINDS
+                        else PHOTO_TTL_S if kind in PHOTO_CHANGE_KINDS else CHANGE_TTL_S)))
             row = db.execute(f"SELECT {_CHANGE_COLUMNS} FROM changes WHERE id=?", (change_id,)).fetchone()
             shared = None
             calendar = None
@@ -953,6 +1078,7 @@ class PhoneStore:
                         "sharing": _decode(row[2], None),
                         "counts": {"events": count("events"), "reminders": count("reminders"),
                                    "calendars": count("calendars"), "contacts": count("contacts"),
+                                   "photos": count("photos"),
                                    "alarms": len(alarms) if isinstance(alarms, list) else 0},
                         "pending": pending,
                     }
@@ -961,6 +1087,7 @@ class PhoneStore:
         # puts it first.
         if stamp is not None and stamp < now:
             self._touch(device_id, answer["device"]["kid"], now)
+            self.sweep_sent_photos()
         return answer
 
     def _touch(self, device_id: str, kid: str, now: int) -> None:
@@ -991,10 +1118,11 @@ class PhoneStore:
         if device_id is not None and (not isinstance(device_id, str) or not _DEVICE_ID.match(device_id)):
             raise PhoneError("malformed", "device_id is malformed")
         if not self.path.exists():
+            self._sweep_photo_files(int(self.clock()))
             return {"deleted": True, "remaining_devices": 0}
         with self._write() as db:
             if device_id is None:
-                for table in ("events", "reminders", "calendars", "changes", "contacts", "devices"):
+                for table in ("events", "reminders", "calendars", "changes", "contacts", "photos", "devices"):
                     db.execute(f"DELETE FROM {table}")
             else:
                 _drop_device_data(db, device_id)
@@ -1011,6 +1139,8 @@ class PhoneStore:
                     # is already deleted, and the next wipe tries again.
                     with contextlib.suppress(OSError):
                         os.unlink(f"{self.path}{suffix}")
+        # The pictures a gone device (or one that stopped sharing them) sent.
+        self._sweep_photo_files(int(self.clock()))
         return {"deleted": True, "remaining_devices": remaining}
 
     def _device_count(self) -> int:
@@ -1231,6 +1361,41 @@ class PhoneStore:
                 break
         return found
 
+    def photos(self, db: sqlite3.Connection, device: str, *, query: str | None = None, start: int | None = None,
+               end: int | None = None, favorites: bool = False,
+               limit: int = MAX_PHOTO_RESULTS) -> tuple[list[dict[str, Any]], int]:
+        """Photos that match, best first, then newest: (the first ``limit``,
+        how many matched). ``query``'s words are looked for in the labels,
+        the text in the picture, the place and the kind (screenshot); a
+        photo with more of them ranks higher, and one with none is left out.
+        ``start``/``end``: when it was taken, epoch seconds, end excluded."""
+        words = [word for word in re.findall(r"\w+", query.casefold())] if query else []
+        sql = "SELECT id, at_local, kind, favorite, labels, text, place, width, height, at_utc FROM photos WHERE device=?"
+        params: list[Any] = [device]
+        if start is not None:
+            sql += " AND at_utc>=?"
+            params.append(start)
+        if end is not None:
+            sql += " AND at_utc<?"
+            params.append(end)
+        if favorites:
+            sql += " AND favorite=1"
+        scored = []
+        for row in db.execute(sql, params):
+            labels = _stored_list(row[4]) or []
+            entry = {"id": row[0], "taken": row[1], "kind": row[2], "favorite": bool(row[3]), "labels": labels,
+                     "text": row[5], "place": row[6], "width": row[7], "height": row[8]}
+            score = 0
+            if words:
+                haystack = " ".join([*map(str, labels), row[5] or "", row[6] or "", row[2]]).casefold()
+                score = sum(1 for word in words if word in haystack
+                            or (len(word) > 3 and word.endswith("s") and word[:-1] in haystack))
+                if not score:
+                    continue
+            scored.append((score, row[9], {key: value for key, value in entry.items() if value not in (None, [], False)}))
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [item[2] for item in scored[:limit]], len(scored)
+
 
 # --- Rows and views -------------------------------------------------------------------
 
@@ -1313,7 +1478,7 @@ def _change_view(row: tuple[Any, ...]) -> dict[str, Any]:
                              "state": {"pending": "waiting"}.get(row[9], row[9])}
     if fields.get("title"):
         entry["title"] = fields["title"]
-    for key in ("label", "at", "time", "repeats", "seconds", "shortcut", "input", "name"):
+    for key in ("label", "at", "time", "repeats", "seconds", "shortcut", "input", "name", "taken", "place"):
         if fields.get(key):
             entry[key] = fields[key]
     if target:
@@ -1382,6 +1547,11 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             db.execute("ALTER TABLE devices ADD COLUMN shortcuts_at INTEGER")
         if "result" not in {row[1] for row in db.execute("PRAGMA table_info(changes)")}:
             db.execute("ALTER TABLE changes ADD COLUMN result TEXT")
+        version = "4"
+    if version == "4":
+        # 0.161.0: what the phone says about each photo, for search.
+        for statement in _PHOTOS_TABLES:
+            db.execute(statement)
         db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
         return
     if version is not None:
@@ -1421,7 +1591,7 @@ def _migrate(db: sqlite3.Connection, now: float) -> None:
             expires_at INTEGER NOT NULL, state TEXT NOT NULL, finished_at INTEGER, item_id TEXT, note TEXT,
             delivered_at INTEGER, reported_at INTEGER, result TEXT);
         CREATE INDEX IF NOT EXISTS changes_by_device ON changes(device, state, created_at);
-    """.split(";") + [_CONTACTS_TABLE]:
+    """.split(";") + [_CONTACTS_TABLE, *_PHOTOS_TABLES]:
         if statement.strip():
             db.execute(statement)
     db.execute("INSERT OR REPLACE INTO meta VALUES('schema', ?)", (str(SCHEMA_VERSION),))
@@ -1435,9 +1605,20 @@ _CONTACTS_TABLE = """
         emails TEXT, birthday TEXT, organization TEXT, position INTEGER NOT NULL, received_at INTEGER NOT NULL,
         PRIMARY KEY(device, id))"""
 
+# labels: JSON list of Apple's English labels; text: words found in the
+# picture; place: the town or area, from the phone; at_local: the time it
+# was taken, ISO with the offset where it was taken.
+_PHOTOS_TABLES = (
+    """CREATE TABLE IF NOT EXISTS photos(
+        device TEXT NOT NULL, id TEXT NOT NULL, at_utc INTEGER NOT NULL, at_local TEXT NOT NULL, kind TEXT NOT NULL,
+        favorite INTEGER NOT NULL, labels TEXT, text TEXT, place TEXT, width INTEGER, height INTEGER,
+        received_at INTEGER NOT NULL, PRIMARY KEY(device, id))""",
+    "CREATE INDEX IF NOT EXISTS photos_by_time ON photos(device, at_utc)",
+)
+
 
 def _drop_device_data(db: sqlite3.Connection, device_id: str, keep_changes: bool = False) -> None:
-    for table in ("events", "reminders", "calendars", "contacts") + (() if keep_changes else ("changes",)):
+    for table in ("events", "reminders", "calendars", "contacts", "photos") + (() if keep_changes else ("changes",)):
         db.execute(f"DELETE FROM {table} WHERE device=?", (device_id,))
     db.execute("UPDATE devices SET status=NULL, status_at=NULL, focus=NULL, focus_at=NULL, alarms=NULL,"
                " alarms_at=NULL, shortcuts=NULL, shortcuts_at=NULL WHERE id=?", (device_id,))
@@ -1483,7 +1664,7 @@ def shares(sharing: dict[str, Any], need: str) -> bool:
         return sharing.get("reminders") is True and sharing.get("reminders_read_only") is not True
     if need == "calendars":
         return calendar in ("full", "write_only") or sharing.get("reminders") is True
-    if need in ("status", "focus", "alarms", "contacts", "shortcuts"):
+    if need in ("status", "focus", "alarms", "contacts", "shortcuts", "photos"):
         return sharing.get(need) is True
     if need == "contacts_edit":
         return sharing.get("contacts") is True and sharing.get("contacts_edit") is True
@@ -1504,6 +1685,7 @@ _NEED_WORDS = {"events": "their calendar", "events_write": "adding to their cale
                "phone": "phone status or Focus", "alarms": "alarms and timers", "contacts": "contacts",
                "contacts_edit": "changes to their contacts",
                "shortcuts": "Shortcuts to run", "phone_tool": "phone status, Focus, alarms or Shortcuts",
+               "photos": "their photos",
                "any": "anything"}
 
 
@@ -1602,7 +1784,7 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
         raise PhoneError("malformed", f"sharing.calendar must be one of {', '.join(CALENDAR_SHARING)}")
     sharing: dict[str, Any] = {"calendar": calendar}
     for field in ("reminders", "details", "attendee_emails", "status", "focus", "auto_add", "alarms", "contacts",
-                  "shortcuts", "shortcuts_auto", "contacts_edit", *READ_ONLY_SHARING):
+                  "shortcuts", "shortcuts_auto", "contacts_edit", "photos", *READ_ONLY_SHARING):
         sharing[field] = bool(_bool(value.get(field), f"sharing.{field}", False))
     # Add-only and read-only leaves nothing; read-only reminders need reminders.
     if sharing["calendar"] == "write_only" and sharing["calendar_read_only"]:
@@ -1652,6 +1834,8 @@ def _forget_unshared(db: sqlite3.Connection, device_id: str, sharing: dict[str, 
         db.execute("DELETE FROM contacts WHERE device=?", (device_id,))
     if not sharing["shortcuts"]:
         db.execute("UPDATE devices SET shortcuts=NULL, shortcuts_at=NULL WHERE id=?", (device_id,))
+    if not sharing["photos"]:
+        db.execute("DELETE FROM photos WHERE device=?", (device_id,))
 
 
 def _narrowed(stored: Any, sharing: dict[str, Any]) -> dict[str, Any]:
@@ -1704,10 +1888,13 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     reminder_upserts = _list(reminders.get("upsert"), "reminders.upsert")
     reminder_deletes = _list(reminders.get("delete"), "reminders.delete")
     alarms, contacts, shortcuts = batch.get("alarms"), batch.get("contacts"), batch.get("shortcuts")
+    photos = batch.get("photos")
+    photo_items = sum(len(photos.get(key)) for key in ("upsert", "delete")
+                      if isinstance(photos, dict) and isinstance(photos.get(key), list))
     total = (len(calendars or []) + len(event_upserts) + len(event_deletes) + len(reminder_upserts)
              + len(reminder_deletes) + (len(alarms) if isinstance(alarms, list) else 0)
              + (len(contacts) if isinstance(contacts, list) else 0)
-             + (len(shortcuts) if isinstance(shortcuts, list) else 0))
+             + (len(shortcuts) if isinstance(shortcuts, list) else 0) + photo_items)
     if total > MAX_ITEMS:
         raise PhoneError("too_large", f"At most {MAX_ITEMS} items per batch", status=413)
 
@@ -1751,9 +1938,11 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     parsed_alarms = _parse_alarms(alarms) if sharing["alarms"] and alarms is not None else None
     parsed_contacts = _parse_contacts(contacts) if sharing["contacts"] and contacts is not None else None
     parsed_shortcuts = _parse_shortcuts(shortcuts) if sharing["shortcuts"] and shortcuts is not None else None
+    parsed_photos = _parse_photos(photos, sharing)
+    photo_files = _parse_photo_files(batch.get("photo_files"), sharing)
 
-    stored = db.execute("SELECT last_sent, status_at, focus_at, window_from, window_to FROM devices WHERE id=?",
-                        (device_id,)).fetchone()
+    stored = db.execute("SELECT last_sent, status_at, focus_at, window_from, window_to, sharing FROM devices"
+                        " WHERE id=?", (device_id,)).fetchone()
     sent_epoch = sent_at.timestamp()
     # A watermark further ahead than skew allows came from before that
     # limit; it doesn't get to hold newer batches off.
@@ -1767,7 +1956,12 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
         if window is not None and (window[0].tzinfo is None or window[1].tzinfo is None or window[1] <= window[0]):
             window = None
 
-    counts = {"events": 0, "reminders": 0, "deleted": 0, "skipped_events": unusable}
+    counts: dict[str, Any] = {"events": 0, "reminders": 0, "deleted": 0, "skipped_events": unusable}
+    if photo_files:
+        # A picture the user said yes to is kept even from a late batch, while
+        # the newer sharing still lets Hermes have photos.
+        allowed = not stale or shares(_decode(stored[5], None) or {}, "photos")
+        counts["photo_files"] = _waiting_photo_files(db, device_id, photo_files, now) if allowed else []
     if stale:
         # An older batch (a retry that arrived late) never undoes a newer
         # one: it neither widens nor narrows what the newer one said is
@@ -1848,6 +2042,22 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
                         json.dumps(person["emails"]) if person.get("emails") else None,
                         person.get("birthday"), person.get("organization"), position, now))
         counts["contacts"] = len(parsed_contacts)
+    if parsed_photos is not None:
+        photos_full, photo_upserts, photo_deletes, unusable_photos = parsed_photos
+        if photos_full:
+            db.execute("DELETE FROM photos WHERE device=?", (device_id,))
+        for photo_id in photo_deletes:
+            db.execute("DELETE FROM photos WHERE device=? AND id=?", (device_id, photo_id))
+        for photo in photo_upserts:
+            db.execute("INSERT OR REPLACE INTO photos VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (device_id, photo["id"], photo["at_utc"], photo["at_local"], photo["kind"],
+                        int(photo["favorite"]), json.dumps(photo["labels"]) if photo["labels"] else None,
+                        photo["text"], photo["place"], photo["width"], photo["height"], now))
+        # Only the newest are kept.
+        db.execute("DELETE FROM photos WHERE device=? AND id NOT IN (SELECT id FROM photos WHERE device=?"
+                   " ORDER BY at_utc DESC, id LIMIT ?)", (device_id, device_id, MAX_PHOTOS))
+        counts["photos"] = len(photo_upserts)
+        counts["skipped_photos"] = unusable_photos
 
     # Latest only: an older reading never replaces a newer one.
     if status is not None and (stored[1] is None or stored[1] > now + MAX_CLOCK_SKEW_S or status["at"] >= stored[1]):
@@ -1859,6 +2069,22 @@ def _apply(db: sqlite3.Connection, device_id: str, batch: dict[str, Any], now: i
     db.execute("UPDATE devices SET last_seen=?, last_sent=?, sharing=?, tz=COALESCE(?, tz) WHERE id=?",
                (now, sent_epoch, json.dumps(sharing), tz, device_id))
     return counts
+
+
+def _waiting_photo_files(db: sqlite3.Connection, device_id: str,
+                         files: list[dict[str, Any]], now: int) -> list[dict[str, Any]]:
+    """The pictures that answer a send_photo of this device still waiting,
+    with the photo each one is; any other is left out (answered already,
+    past its day though not yet marked expired, or another device's)."""
+    waiting = []
+    for item in files:
+        row = db.execute("SELECT target FROM changes WHERE id=? AND device=? AND kind='send_photo'"
+                         " AND state IN ('pending', 'lost') AND expires_at>?",
+                         (item["change_id"], device_id, now)).fetchone()
+        if row is not None:
+            target = _decode(row[0], {})
+            waiting.append({**item, "photo_id": target.get("photo_id") if isinstance(target, dict) else None})
+    return waiting
 
 
 def _usable_ids(ids: list[Any]) -> tuple[list[str], int]:
@@ -2291,6 +2517,8 @@ def _checked(db: sqlite3.Connection, device_id: str, kind: str, fields: dict[str
         return (*_check_shortcut_change(db, device_id, fields, target), None)
     if kind in CONTACT_CHANGE_KINDS:
         return (*_check_contact_change(db, device_id, kind, fields, target), None)
+    if kind in PHOTO_CHANGE_KINDS:
+        return (*_check_photo_change(db, device_id, fields, target), None)
     return _check_change(db, device_id, kind, fields, target)
 
 
@@ -2372,6 +2600,8 @@ def change_need(kind: str) -> str:
         return "shortcuts"
     if kind in CONTACT_CHANGE_KINDS:
         return "contacts_edit"
+    if kind in PHOTO_CHANGE_KINDS:
+        return "photos"
     return "reminders_write"
 
 
@@ -2511,6 +2741,99 @@ def _check_contact_change(db: sqlite3.Connection, device_id: str, kind: str, fie
             raise PhoneError("malformed", "add_contact needs given_name, family_name or organization")
         return None, {**clean, "name": name}, f"Add {name}"
     return clean_target, {**clean, "name": existing["name"]}, f"Change {existing['name']}"
+
+
+def _check_photo_change(db: sqlite3.Connection, device_id: str, fields: dict[str, Any],
+                        target: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """(target, fields, summary) for asking the phone to send a photo, or
+    PhoneError: only one the phone listed, by the id search gives. The
+    fields are what the card shows besides the picture: when and where it
+    was taken."""
+    if fields:
+        raise PhoneError("malformed", "send_photo takes no fields")
+    if sorted(set(target) - {"photo_id"}):
+        raise PhoneError("malformed", "target is {photo_id}")
+    photo_id = _item_id(target.get("photo_id"), "photo_id")
+    row = db.execute("SELECT at_local, place FROM photos WHERE device=? AND id=?", (device_id, photo_id)).fetchone()
+    if row is None:
+        phone = db.execute("SELECT name FROM devices WHERE id=?", (device_id,)).fetchone()
+        label = phone[0] if phone and phone[0] else "that phone"
+        raise PhoneError("unknown_photo", f"No photo has that id on {label} (device {device_id}); find it with "
+                                          f"action search and device {device_id} first")
+    clean = {"taken": row[0]}
+    if row[1]:
+        clean["place"] = row[1]
+    when = format_when(row[0])
+    return {"photo_id": photo_id}, clean, "Send a photo" + (f" from {when}" if when else "") + (
+        f" in {row[1]}" if row[1] else "")
+
+
+def _parse_photos(value: Any, sharing: dict[str, Any]) -> tuple[bool, list[dict[str, Any]], list[str], int] | None:
+    """A batch's photos section, {full, upsert, delete}: (full, the photos
+    that parse, the ids to delete, how many didn't parse). None when photos
+    aren't shared or the batch has none."""
+    if value is None or not sharing["photos"]:
+        return None
+    section = _object(value, "photos") or {}
+    full = bool(_bool(section.get("full"), "photos.full", False))
+    deletes, unusable_ids = _usable_ids(_list(section.get("delete"), "photos.delete"))
+    parsed, unusable = _usable(_list(section.get("upsert"), "photos.upsert"), _parse_photo, deletes)
+    return full, parsed, deletes, unusable + unusable_ids
+
+
+def _parse_photo(value: Any, index: int) -> dict[str, Any]:
+    field = f"photos.upsert[{index}]"
+    if not isinstance(value, dict):
+        raise PhoneError("malformed", f"{field} must be an object")
+    at = parse_time(value.get("at"), f"{field}.at")
+    kind = _enum(value.get("kind"), f"{field}.kind", PHOTO_KINDS) or "photo"
+    labels: list[str] = []
+    for label in _list(value.get("labels"), f"{field}.labels")[:MAX_PHOTO_LABELS]:
+        text = clean_text(label, f"{field}.labels", MAX_PHOTO_LABEL_CHARS, cap=True)
+        if text and text.casefold() not in (seen.casefold() for seen in labels):
+            labels.append(text)
+    return {
+        "id": _item_id(value.get("id"), f"{field}.id"),
+        "at_utc": int(at.timestamp()),
+        "at_local": at.isoformat(),
+        "kind": kind,
+        "favorite": bool(_bool(value.get("favorite"), f"{field}.favorite", False)),
+        "labels": labels,
+        "text": clean_text(value.get("text"), f"{field}.text", MAX_PHOTO_TEXT_CHARS, cap=True),
+        "place": clean_text(value.get("place"), f"{field}.place", MAX_PLACE_NAME_CHARS, cap=True),
+        "width": _whole(value.get("w"), f"{field}.w", 1, MAX_PHOTO_PIXELS),
+        "height": _whole(value.get("h"), f"{field}.h", 1, MAX_PHOTO_PIXELS),
+    }
+
+
+def _parse_photo_files(value: Any, sharing: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pictures the user said yes to: [{change_id, data}], data a
+    base64 JPEG. Each must answer a send_photo of this device still
+    waiting (checked in ``_apply``)."""
+    if value is None or not sharing["photos"]:
+        return []
+    items = _list(value, "photo_files")
+    if len(items) > MAX_PHOTO_FILES:
+        raise PhoneError("too_large", f"At most {MAX_PHOTO_FILES} photo per batch", status=413)
+    parsed = []
+    for index, item in enumerate(items):
+        field = f"photo_files[{index}]"
+        if not isinstance(item, dict):
+            raise PhoneError("malformed", f"{field} must be an object")
+        change_id = item.get("change_id")
+        if not isinstance(change_id, str) or not _CHANGE_ID.match(change_id):
+            raise PhoneError("malformed", f"{field}.change_id is malformed")
+        data = item.get("data")
+        if not isinstance(data, str) or len(data) > (MAX_PHOTO_FILE_BYTES * 4) // 3 + 4:
+            raise PhoneError("too_large", f"{field}.data is at most {MAX_PHOTO_FILE_BYTES} bytes", status=413)
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error):
+            raise PhoneError("malformed", f"{field}.data isn't base64") from None
+        if not raw.startswith(b"\xff\xd8\xff") or len(raw) > MAX_PHOTO_FILE_BYTES:
+            raise PhoneError("malformed", f"{field}.data must be a JPEG of at most {MAX_PHOTO_FILE_BYTES} bytes")
+        parsed.append({"change_id": change_id, "data": raw})
+    return parsed
 
 
 def _parse_shortcuts(value: Any) -> list[dict[str, Any]]:
