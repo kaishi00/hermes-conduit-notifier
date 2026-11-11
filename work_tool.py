@@ -481,9 +481,12 @@ _agents: dict[tuple[str, str], set[str]] = {}
 _held: dict[tuple[str, str], tuple[str, Optional[float]]] = {}
 # The timers that settle a held workstream no turn came for.
 _held_timers: dict[tuple[str, str], Any] = {}
-# A workstream stopped while its agents ran -> when its last one ended (0
-# while they run). The turns their results start are stopped too (_turn_started).
-_stopped_agents: dict[tuple[str, str], float] = {}
+# A workstream stopped while it waited for its agents -> (when it was
+# stopped, when its last agent ended: 0 while they run). The turns their
+# results start are stopped too (_turn_started), for at most STOPPED_AGENTS_S
+# after the stop: an agent whose end was never reported doesn't keep it shut.
+_stopped_agents: dict[tuple[str, str], tuple[float, float]] = {}
+STOPPED_AGENTS_S = 1800.0
 # How long after its last agent ends a held workstream waits for the turn
 # Hermes starts with their results before it settles with what it had said.
 HELD_SETTLE_S = 120.0
@@ -860,14 +863,19 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
     store.update(work.ref, status="stopped")
     with _wake_lock:
         _redirecting.discard((str(home), work.ref))
-        _held.pop((str(home), work.ref), None)  # a stop is its end, whatever its agents bring
+        # A stop is its end, whatever its agents bring.
+        waited = _held.pop((str(home), work.ref), None) is not None
         waiting = _held_timers.pop((str(home), work.ref), None)
-        if _agents.get((str(home), work.ref)):
+        running = bool(_agents.get((str(home), work.ref)))
+        if running or waited:
             # Hermes stops them with a running turn only: the turns their
-            # results start find the row stopped and are stopped too.
+            # results start find the row stopped and are stopped too. Their
+            # last may have ended already, its results' turn still to come.
+            now = time.time()
             if len(_stopped_agents) > 512:
-                _stopped_agents.clear()
-            _stopped_agents[(str(home), work.ref)] = 0.0
+                for stale in [owner for owner, (at, _) in _stopped_agents.items() if now - at >= STOPPED_AGENTS_S]:
+                    del _stopped_agents[stale]
+            _stopped_agents[(str(home), work.ref)] = (now, 0.0 if running else now)
     if waiting is not None:
         waiting.cancel()
     try:
@@ -3735,12 +3743,19 @@ def _stopped_with_agents(home: Path, ref: str) -> bool:
     ran: one their results started, while they run and just after."""
     key = (str(home), ref)
     with _wake_lock:
-        ended = _stopped_agents.get(key)
-        if ended is None:
+        marked = _stopped_agents.get(key)
+        if marked is None:
             return False
-        if _agents.get(key) or (ended and time.time() - ended < HELD_SETTLE_S):
+        stopped, ended = marked
+        now = time.time()
+        if now - stopped < STOPPED_AGENTS_S and (
+                (not ended and _agents.get(key)) or (ended and now - ended < HELD_SETTLE_S)):
             return True
         del _stopped_agents[key]  # long over: this turn is the user's words
+        if not ended:
+            # Agents whose end never came in all that time: not waited for
+            # again, or this turn's end would be held with nothing to settle it.
+            _agents.pop(key, None)
         return False
 
 
@@ -3991,7 +4006,7 @@ def agent_stopped(child: Any, parent: Any = None) -> None:
             return
         del _agents[key]
         if key in _stopped_agents:
-            _stopped_agents[key] = time.time()  # their results' turn may still come
+            _stopped_agents[key] = (_stopped_agents[key][0], time.time())  # their results' turn may still come
         if key not in _held:
             return
         timer = threading.Timer(HELD_SETTLE_S, _settle_held, args=(key,))

@@ -1737,7 +1737,8 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   `screen` (`controlling` while it drives the bot's screen now, `waiting`
   while it waits for it, else ""), `screen_used_at` (when it last used it,
   which says nothing about now) and `screen_ask` (what it waits on you to do
-  on the screen, or "").
+  on the screen, or ""), and `agents`: how many background agents it started
+  that it's still waiting for, once its own turn has ended.
 - Work leaves the list when it's resolved: by you (`resolve`, refused with
   `still_running` while it's at work: stop it first) or by the bot
   (`work_close`). Nothing resolves itself. `resolved=1` lists resolved work,
