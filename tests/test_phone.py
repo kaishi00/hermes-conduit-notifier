@@ -2183,6 +2183,10 @@ def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, ipho
     start = int(datetime(2026, 10, 11, tzinfo=timezone.utc).timestamp())
     assert [photo["id"] for photo in _search(store, start=start)[0]] == ["ph_dog", "ph_shot"]
     assert _search(store, query="giraffe") == ([], 0)
+    # Whole words only; a repeated word counts once; punctuation finds nothing.
+    assert _search(store, query="bea") == ([], 0)
+    assert [photo["id"] for photo in _search(store, query="beach beach beach dog")[0]] == ["ph_dog", "ph_beach"]
+    assert _search(store, query="!!! 🐶") == ([], 0)
     assert store.status(DEVICE)["device"]["counts"]["photos"] == 4
     # A diff deletes and upserts; a bad photo is left out, not the batch.
     store.ingest(iphone.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={
@@ -2245,9 +2249,11 @@ def test_a_photo_is_sent_only_by_its_picture_once_the_user_says_yes(store, iphon
         "batch-0005", sent_at="2026-10-14T08:04:00+01:00", photos={},
         files=[{"change_id": change["id"], "data": base64.b64encode(JPEG).decode()}])))
     assert "photos_sent" not in again
-    # Photos turned off: the pictures go too.
+    # Photos turned off: the pictures go too, and when and where it was taken.
     store.ingest(iphone.seal(_batch("batch-0006", sent_at="2026-10-14T08:05:00+01:00", sharing=_sharing())))
     assert not path.exists()
+    view = next(item for item in store.changes() if item["id"] == change["id"])
+    assert "taken" not in view and "place" not in view and not view.get("result")
 
 
 def test_a_sent_photo_is_kept_a_week_and_goes_with_a_wipe(tmp_path, monkeypatch):
@@ -2309,6 +2315,29 @@ def test_a_sent_photo_goes_without_another_upload_and_a_late_one_never_lands(tmp
         store.ingest(handset.seal(_batch("batch-0005", sent_at="2026-10-15T09:00:00+01:00",
                                          sharing=_sharing(photos=False))))
     assert error.value.code == "clock_skew"
+    assert not path.exists()
+
+
+def test_setting_the_phone_up_again_keeps_the_photos_it_sent(tmp_path):
+    now = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: now[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_photo_batch()))
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    store.ingest(handset.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={},
+                                           files=[{"change_id": change["id"],
+                                                   "data": base64.b64encode(JPEG).decode()}])))
+    path = Path(store.change_outcome(change["id"])["result"])
+    # A new key: no sharing until its first batch, so what it shared before decides.
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    now[0] += 5
+    store.status(DEVICE)
+    store.sweep_sent_photos()
+    assert path.exists()
+    # Its first batch says Photos is off: now they go.
+    store.ingest(handset.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", sharing=_sharing())))
     assert not path.exists()
 
 

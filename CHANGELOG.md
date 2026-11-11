@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.161.1 (2026-11-11)
+
+### Fixes
+- Setting your iPhone up with Conduit again deleted the photos it had already
+  sent to Hermes straight away, instead of keeping them for a week.
+- Turning Photos off left when and where a requested photo was taken in
+  Hermes' list of requests. That's forgotten now too.
+- A photo search for a short word also found longer words that contain it
+  ("cat" found "category"), and a search of only punctuation or emoji listed
+  every photo.
+
 ## 0.161.0 (2026-11-11)
 
 ### New and improved
