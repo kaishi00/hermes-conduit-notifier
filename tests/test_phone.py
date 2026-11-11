@@ -2129,3 +2129,6 @@ def test_the_contacts_tool_asks_the_phone_to_add_change_and_delete(home):
                                            profile="work"))["ok"] is False
     # People still reads; voice keeps only people.
     assert json.loads(tool.handle_contacts({"action": "people"}))["ok"] is True
+    # How they went reads here too, for a user who shares only contacts.
+    pending = json.loads(tool.handle_contacts({"action": "pending"}))
+    assert pending["ok"] is True and {change["kind"] for change in pending["changes"]} >= {"add_contact", "update_contact"}
