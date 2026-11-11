@@ -30,6 +30,7 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -837,3 +838,32 @@ def test_reload_mcp_and_skills_run_in_conduits_shapes_on_the_dashboard(dashboard
                     await task
 
     asyncio.run(script())
+
+
+def test_pulse_opens_a_desktop_hosted_chat_with_no_gateway_receipt(listener):
+    """Issue 713: a Pulse chat a dashboard's own session host made (source
+    desktop, no chat id, session key or receipt) outlives that process; the
+    authority Pulse's turn reaches after the leader moves still opens it."""
+    sid = f"desktop-pulse-{uuid.uuid4().hex[:8]}"
+    db = sqlite3.connect(listener.home / "state.db")
+    try:
+        db.execute("INSERT INTO sessions (id, source, title, started_at) VALUES (?, 'desktop', 'Pulse', ?)",
+                   (sid, time.time()))
+        db.commit()
+    finally:
+        db.close()
+    before = len(_told("PULSE check in"))
+    status, out = listener.plugin_call(f"pulse-send?chat_id={sid}", plugin=DRIVER, timeout=180)
+    assert status == 200, out
+    assert out["ok"] is True, out
+    deadline = time.monotonic() + 60
+    while len(_told("PULSE check in")) <= before:
+        assert time.monotonic() < deadline, "Pulse's turn never ran in the desktop-hosted chat"
+        time.sleep(0.5)
+    # Opening it gave it the gateway's receipt, so any later restart still finds it.
+    db = sqlite3.connect(listener.home / "state.db")
+    try:
+        keys = [row[0] for row in db.execute("SELECT key FROM state_meta WHERE key LIKE ?", (f"%:{sid}",))]
+    finally:
+        db.close()
+    assert keys, "the chat has no gateway receipt after Pulse opened it"
