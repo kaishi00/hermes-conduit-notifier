@@ -400,18 +400,24 @@ def _answers(host: str, port: int) -> bool:
         return False
 
 
-def _never_used(hermes: Hermes, key: str) -> bool:
-    """Whether every tool of a toolset is one rooms never allow (memory,
-    running code, delegation, scheduled jobs). One Hermes can't list here (a
-    plugin's, from the dashboard) stays a choice."""
+# The tools a room's Look things up (and Use my data) and Search my past chats turn on: a toolset with one is a
+# lookup, which rooms use without Custom. (room_rules.LOOK_TOOLS and SEARCH_TOOL.)
+LOOKUP_TOOLS = frozenset({"web_search", "web_extract", "x_search", "vision_analyze", "session_search"})
+
+
+def _toolset_tools(hermes: Hermes, key: str) -> set[str]:
+    """A toolset's tools, or none when Hermes can't list them here (a plugin's, from the dashboard)."""
     try:
-        tools = {str(name) for name in hermes.toolset_tools(key)}
-    except Exception:  # noqa: BLE001 - unknown, so it stays
-        return False
-    return bool(tools) and tools <= room_choices.NEVER
+        return {str(name) for name in hermes.toolset_tools(key)}
+    except Exception:  # noqa: BLE001 - unknown
+        return set()
 
 
 def _choices(hermes: Hermes) -> list[dict]:
+    """The toolsets the ceiling can name, each with whether it's a ``lookup`` (one a room's Look things up or
+    Search my past chats uses; the rest run only where a room's Custom choice names their tools) and the tools
+    of it rooms ``never`` run (memory, running code, delegation, scheduled jobs, changing skills). A toolset of
+    those alone isn't one."""
     rows: list[dict] = []
     seen: set[str] = set()
     for row in hermes.toolsets():
@@ -419,10 +425,13 @@ def _choices(hermes: Hermes) -> list[dict]:
         key = str(key)
         if key in seen or key == OWN_TOOLSET or key in _ALWAYS or key in SETTINGS_ONLY or not hermes.allowed(key):
             continue
-        if _never_used(hermes, key):
+        tools = _toolset_tools(hermes, key)
+        if tools and tools <= room_choices.NEVER:
             continue
         seen.add(key)
-        rows.append({"id": key, "label": hermes.label(str(label)), "description": str(description)})
+        rows.append({"id": key, "label": hermes.label(str(label)), "description": str(description),
+                     "lookup": bool(tools & LOOKUP_TOOLS) if tools else key in DEFAULT_CEILING,
+                     "never": sorted(tools & room_choices.NEVER)})
     return rows
 
 

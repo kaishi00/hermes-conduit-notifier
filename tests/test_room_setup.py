@@ -613,7 +613,10 @@ def test_a_plugin_toolset_can_be_in_the_ceiling(hermes):
 def test_choices_are_the_toolsets_room_turns_can_have(hermes):
     choices = _state(hermes)["choices"]
     assert [choice["id"] for choice in choices] == ["web", "terminal", "vision", "x_search", "session_search", "a2a"]
-    assert choices[0] == {"id": "web", "label": "Web Search & Scraping", "description": "web_search, web_extract"}
+    assert choices[0] == {"id": "web", "label": "Web Search & Scraping", "description": "web_search, web_extract",
+                          "lookup": True, "never": []}
+    # A room's Look things up and Search my past chats use these; the rest only a Custom choice.
+    assert [choice["id"] for choice in choices if choice["lookup"]] == ["web", "vision", "x_search", "session_search"]
 
 
 def test_choices_leave_out_toolsets_rooms_never_use(hermes):
@@ -625,6 +628,8 @@ def test_choices_leave_out_toolsets_rooms_never_use(hermes):
     ids = [choice["id"] for choice in _state(hermes)["choices"]]
     assert "memory" not in ids and "code_execution" not in ids
     assert "skills" in ids and "a2a" in ids     # some tools rooms can use; tools Hermes can't list here
+    skills = next(choice for choice in _state(hermes)["choices"] if choice["id"] == "skills")
+    assert skills["never"] == ["skill_manage"] and skills["lookup"] is False
     with pytest.raises(setup.SetupError) as refused:
         _apply(hermes, ceiling=["memory"])
     assert refused.value.code == "bad_ceiling" and hermes.config_writes == []

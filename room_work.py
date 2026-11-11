@@ -135,7 +135,7 @@ def linked_room_of(session_id: Any, home: Path, profile: str) -> Room:
         raise Unreadable(f"the room's choices ({type(error).__name__})") from error
     if not choices.run_work:
         raise RunWorkOff(turn.room_id)
-    # Posted into only where it's hosted here: a member's turn hears its news privately.
+    # Posted into only where it's hosted here; a member's Hermes asks the home to post it (room_work_news).
     handle = ""
     if turn.side == "home":
         handle = handle_of(turn.room_id, home, profile)

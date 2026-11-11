@@ -1465,7 +1465,7 @@ question or a small task doesn't start a workstream. Change it in Conduit
   stay the Bot Chat's, and a room with other people's agents in it starts no
   work.
 - A workstream that hands part of its work to Hermes' delegate agents
-  (`delegate_task`) keeps working while they run (plugin 0.162.1+). Hermes
+  (`delegate_task`) keeps working while they run (plugin 0.163.1+). Hermes
   runs them in the background and gives the workstream their results as its
   next turn, so the turn that started them ends first: the workstream stays
   running, `work_list` says it's waiting for them (`waiting_for`), Conduit's
@@ -4025,8 +4025,10 @@ for rooms with none of their own:
   and a yes later starts it by itself. The room sees only its own work.
   What the work reports reaches the agent privately at the start of its next
   turn in the room (credential-shaped text removed), with a post that
-  mentions it where this Hermes hosts the room, and your Bot Chat hears it
-  too. The work itself can't write memory or skills, message anyone, hand
+  mentions it so that turn starts right away: this Hermes posts it in a room
+  it hosts, and in a room hosted elsewhere it asks the room's home over the
+  Link to post it (plugin 0.163+ on both; only the notice crosses, never
+  what the work said). Your Bot Chat hears it too. The work itself can't write memory or skills, message anyone, hand
   the task to a helper, or change Conduit's settings. Only a Conduit that shows a room's work asks
   (`room-work`) gets one.
 - **What it may share**: what helps, ask you first (the default) or nothing
@@ -4379,7 +4381,10 @@ capability:
   uses the API server's), `address` is where the API server runs, or will
   once set up, and `error` why it isn't running while the gateway is, such
   as its port being taken. `choices` are the toolsets the ceiling can name
-  (`{"id", "label", "description"}`), `mcp_servers` the MCP servers it names
+  (`{"id", "label", "description", "lookup", "never"}`: `lookup` when a
+  room's Look things up or Search my past chats uses it, so it's used
+  without Custom, and `never` the tools of it rooms never run, such as
+  `skill_manage`; plugin 0.163+), `mcp_servers` the MCP servers it names
   and `mcp_choices` the profile's enabled ones it can (`{"id"}`, plugin
   0.125+; an older plugin has neither), and `policy` is the profile's room
   policy as Hermes reads it now (`enabled_toolsets`, `approval_mode`,
