@@ -594,7 +594,7 @@ Return a JSON object {"done": ..., "why": ...}:
 def act_chat(value: Any) -> Optional[tuple[str, str]]:
     """The chat the app says Do it used, {"profile": p, "id": s}, as
     (profile, chat id); None for anything else. The profile is "" for the
-    default one."""
+    one Pulse runs in (``home_for``)."""
     if not isinstance(value, dict):
         return None
     profile, chat_id = value.get("profile", ""), value.get("id")
@@ -649,7 +649,8 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
     read_in, named = where, False
     if not own and chat is not None:
         # The chat the app opened for it: a bot's Bot Chat, in its profile.
-        chat_home = where if chat[0] in ("", card["profile"]) else home_for(home, chat[0])
+        # Its own profile, never the card's: "" is the one Pulse runs in (home_for).
+        chat_home = where if chat[0] == card["profile"] else home_for(home, chat[0])
         if chat_home is not None:
             read_in, own, named = chat_home, chat[1], True
     try:
@@ -668,7 +669,9 @@ def act_material(home: Path, card: dict, acted_at: float, *, zone: tzinfo,
         "It came from a Kanban task's worker, which can't be reopened as a chat, so Do it opened a new one: "
         "look for it below." if worker else "It came from no chat, so Do it opened a new one: look for it below.")
     if named:
-        said = "It came from no chat, so Do it opened the chat they picked for it.\n" + said
+        said = ("It came from a Kanban task's worker, which can't be reopened as a chat, so Do it opened the chat "
+                "they picked for it.\n" if worker else "It came from no chat, so Do it opened the chat they picked "
+                "for it.\n") + said
     parts = [f"Now: {_local(now, zone)}", f"Pulse reminded them of: {_clip(card['title'], 300)}",
              f"What Pulse said: {_clip(card['news'], NEWS_LIMIT)}", "## Said in that chat since Do it\n" + said]
     if earlier:

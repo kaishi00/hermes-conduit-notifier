@@ -1472,6 +1472,33 @@ def test_do_it_on_a_card_from_a_kanban_worker_reads_the_new_chat_not_the_worker(
     assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
 
 
+def test_do_it_on_a_kanban_worker_card_reads_the_bot_chat_the_app_names(live):
+    worker(live)
+    card_id = found_card(live, chat_id="worker", news="Kanban task t_c64b17a2 hasn't gone on.", topic="follow-up")
+    bot_home = live.home / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, FIXTURE_SCHEMA)
+    bot.session("bot-chat", title="Bot Chat", pinned=0)
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at, chat={"profile": "nahida", "id": "bot-chat"}) is True
+    bot.message("user", "Pulse reminded me: Kanban task t_c64b17a2 hasn't gone on.", sid="bot-chat", at=acted_at + 5)
+    bot.message("assistant", "Unblocked Kanban task t_c64b17a2.", sid="bot-chat", at=acted_at + 30)
+    said = llm_saying(done=True, why="unblocked")
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    [text] = said.calls
+    said_there = text.split("## Said in that chat since Do it")[1].split("\n## ")[0]
+    assert "a Kanban task's worker" in said_there and "the chat they picked" in said_there
+    assert "Unblocked Kanban task t_c64b17a2." in said_there and "rate limited" not in said_there
+
+
+def test_a_second_do_it_naming_no_chat_goes_back_to_the_search(live):
+    card_id = found_card(live)
+    assert control.acted(live.store, card_id, now=time.time(), chat={"profile": "nahida", "id": "bot-chat"}) is True
+    assert live.store.act(card_id)["chat_id"] == "bot-chat"
+    assert control.acted(live.store, card_id, now=time.time() + 10) is True
+    assert (live.store.act(card_id)["chat_profile"], live.store.act(card_id)["chat_id"]) == (None, "")
+
+
 def test_do_it_on_a_worker_card_whose_new_chat_never_came_gives_up_as_unsent(live):
     """As for a card from no chat: the worker's own later rows aren't Do
     it's chat, so a tap that started nothing comes back as unsent."""
