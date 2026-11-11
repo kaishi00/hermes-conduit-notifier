@@ -2191,6 +2191,13 @@ def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, ipho
     assert [photo["id"] for photo in _search(store, query="beaches")[0]] == ["ph_dog", "ph_beach"]
     assert [photo["id"] for photo in _search(store, query="umbrella")[0]] == ["ph_receipt"]
     assert [photo["id"] for photo in _search(store, query="passes")[0]] == ["ph_shot"]
+    # Text without spaces is searched inside, for any word.
+    store.ingest(iphone.seal(_photo_batch("batch-0001b", sent_at="2026-10-14T08:00:10+01:00", photos={
+        "upsert": [{"id": "ph_tokyo", "at": "2026-10-01T07:00:00+01:00", "text": "東京タワー合計2024円"}]})))
+    assert [photo["id"] for photo in _search(store, query="タワー")[0]] == ["ph_tokyo"]
+    assert [photo["id"] for photo in _search(store, query="2024")[0]] == ["ph_tokyo"]
+    store.ingest(iphone.seal(_photo_batch("batch-0001c", sent_at="2026-10-14T08:00:20+01:00", photos={
+        "delete": ["ph_tokyo"]})))
     assert store.status(DEVICE)["device"]["counts"]["photos"] == 4
     # A diff deletes and upserts; a bad photo is left out, not the batch.
     store.ingest(iphone.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={
@@ -2343,6 +2350,26 @@ def test_setting_the_phone_up_again_keeps_the_photos_it_sent(tmp_path):
     # Its first batch says Photos is off: now they go.
     store.ingest(handset.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", sharing=_sharing())))
     assert not path.exists()
+
+
+def test_a_fast_clock_on_a_phone_set_up_again_keeps_its_sent_photos(tmp_path):
+    now = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: now[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_photo_batch()))
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    store.ingest(handset.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={},
+                                           files=[{"change_id": change["id"],
+                                                   "data": base64.b64encode(JPEG).decode()}])))
+    path = Path(store.change_outcome(change["id"])["result"])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    with pytest.raises(phone.PhoneError) as error:
+        store.ingest(handset.seal(_photo_batch("batch-0003", sent_at="2026-10-14T09:00:00+01:00", photos={})))
+    assert error.value.code == "clock_skew"
+    assert path.exists()
+    assert store.change_outcome(change["id"])["result"] == str(path)
 
 
 def test_a_dismissed_photo_never_arrives(store, iphone):
