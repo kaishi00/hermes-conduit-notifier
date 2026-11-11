@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.163.0 (2026-11-11)
+
+### New and improved
+- A bot whose work finishes while it's in a Linked Room someone else hosts
+  now gets a turn there right away to pass the news on, instead of waiting
+  until the room next talks to it. Its Hermes asks the room's host to post a
+  short notice that mentions it; what the work said never leaves your Hermes.
+  Both hosts need this version.
+
 ## 0.162.0 (2026-11-11)
 
 ### New and improved

@@ -4016,8 +4016,10 @@ for rooms with none of their own:
   and a yes later starts it by itself. The room sees only its own work.
   What the work reports reaches the agent privately at the start of its next
   turn in the room (credential-shaped text removed), with a post that
-  mentions it where this Hermes hosts the room, and your Bot Chat hears it
-  too. The work itself can't write memory or skills, message anyone, hand
+  mentions it so that turn starts right away: this Hermes posts it in a room
+  it hosts, and in a room hosted elsewhere it asks the room's home over the
+  Link to post it (plugin 0.163+ on both; only the notice crosses, never
+  what the work said). Your Bot Chat hears it too. The work itself can't write memory or skills, message anyone, hand
   the task to a helper, or change Conduit's settings. Only a Conduit that shows a room's work asks
   (`room-work`) gets one.
 - **What it may share**: what helps, ask you first (the default) or nothing
