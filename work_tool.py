@@ -2596,6 +2596,8 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
                 and not _reads_only(step["tool"])]
     store.close_open_steps(ref, "interrupted")
     store.set_meta(_CHECK + ref, "")  # an earlier restart's step isn't this one's
+    # Read before a continue is sent: the turn it starts clears the disk copy.
+    held = _kept_held(store, ref)
     # A row from before turns were stamped can still have run: its steps say so.
     # A job a call started: the phone sent its prompt itself, so it may
     # have begun whether or not its first turn was seen.
@@ -2666,7 +2668,6 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
             "this bot asks first" if mode == "ask" else "the bot has no free slot")
         line = (f"- {ref} “{work.title}” stopped when Hermes restarted, with nothing uncertain in flight; it "
                 f"wasn't continued because {why}. work_send continues it.")
-    held = _kept_held(store, ref)
     if held:
         # Its last turn had ended and it waited for its agents, whose results
         # the restart lost: what that turn said still reaches the coordinator.
@@ -3826,12 +3827,13 @@ def _turn_started(session_id: Any) -> bool:
         _turn_began[_began_key(home, work.ref)] = began
         # The turn its agents' results started (or the user's words): its own
         # end settles the row.
-        was_held = _held.pop((str(home), work.ref), None) is not None
+        _held.pop((str(home), work.ref), None)
         waiting = _held_timers.pop((str(home), work.ref), None)
     if waiting is not None:
         waiting.cancel()
-    if was_held:
-        _keep_held(home, work.ref, None)
+    # Whether or not this process held it: a hold a reload left on disk
+    # (stop() clears only memory) is over once a turn starts.
+    _keep_held(home, work.ref, None)
     # On disk too: after a restart, the steps since then are the turn it stopped.
     work_store.Store(home).update(work.ref, turn_at=began)
     if work_store.Store(home).get_meta(_CHECK + work.ref):

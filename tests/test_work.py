@@ -3351,6 +3351,48 @@ def test_a_restart_while_a_workstream_waits_for_its_agents_keeps_what_it_said(on
     assert not on.get_meta("held:W1")
 
 
+def test_a_continue_whose_turn_starts_at_once_still_reports_the_held_reply(on, hermes, monkeypatch):
+    # The continue recovery sends starts a turn, and a turn's start clears the
+    # disk copy: recovery reads it before sending.
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_started(WORKER_1)
+    work.agent_started("child-1", WORKER_1)
+    work.turn_ended(WORKER_1, "An agent is checking the resolver.")
+    work.turn_finished(WORKER_1, failed=False, interrupted=False)
+    restart(hermes, monkeypatch)
+    submit = hermes.prompt_submit
+
+    def submit_and_start(params):
+        answer = submit(params)
+        if params["session_id"] == f"rt-{WORKER_1}":
+            work.turn_started(WORKER_1)
+        return answer
+
+    monkeypatch.setattr(hermes, "prompt_submit", submit_and_start)
+    call("work_list")
+    work.flush_wakes()
+    assert submitted_to(hermes, WORKER_1)  # it was continued
+    wake = submitted_to(hermes, BOT_CHAT)[-1]
+    assert "checking the resolver" in wake["text"]
+    assert not on.get_meta("held:W1")
+
+
+def test_a_held_reply_a_reload_left_on_disk_goes_when_a_turn_starts(on, hermes, monkeypatch):
+    # stop() clears only the hold in memory; the next turn's start clears the disk copy
+    # too, so a later restart never reports it as the last thing the workstream said.
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.turn_started(WORKER_1)
+    work.agent_started("child-1", WORKER_1)
+    work.turn_ended(WORKER_1, "An agent is checking the resolver.")
+    work.turn_finished(WORKER_1, failed=False, interrupted=False)
+    assert on.get_meta("held:W1")
+    work._held.clear()  # as a reload leaves it
+    work.turn_started(WORKER_1)
+    assert not on.get_meta("held:W1")
+
+
 def test_a_change_a_clean_restart_cut_off_waits_for_the_user(on, hermes, monkeypatch):
     def stop():
         work.step_ended(WORKER_1, "terminal", tool_call_id="c1", status="error")

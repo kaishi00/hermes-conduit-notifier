@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.3 (2026-11-11)
+
+### Fixes
+- After a plugin update while a workstream waited for its agents, a later
+  Hermes restart could report a reply it gave turns earlier as its last.
+
 ## 0.164.2 (2026-11-11)
 
 ### Fixes
@@ -26,6 +32,10 @@ checks it). The format is fixed, because Conduit reads it:
   and keep a "Remind me to reschedule" button the calendar already covers.
 - The Bot Chat's board could show an older send as not arrived after many
   later sends.
+- A workstream turn stopped from the Bot Chat or from its own chat left what
+  you wrote in its chat unread by the Bot Chat until its next board read.
+- The Bot Chat's quote of a flagged report could drop a line that fit.
+- A very long single-line note in a chat slowed the Artifacts list's scan.
 
 ## 0.164.1 (2026-11-11)
 
