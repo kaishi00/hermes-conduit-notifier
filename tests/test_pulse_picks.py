@@ -466,16 +466,19 @@ def test_a_short_detail_that_adds_a_word_is_kept():
         assert date["facts"]["whose"] == kept
 
 
-def test_number_and_waiting_only_for_apps_that_draw_them():
-    """Eric, 2026-11-11: a value that moved and someone owing the user
-    something get card types of their own, offered only once every Conduit
-    that draws cards draws them (an older one would show plain words)."""
+def test_number_waiting_and_found_only_for_apps_that_draw_them():
+    """Eric, 2026-11-11: a value that moved, someone owing the user
+    something and what a watch found get card types of their own, offered
+    only once every Conduit that draws cards draws them (an older one would
+    show plain words)."""
     number = {"line": "The disk on nas-01 is 91% full", "shape": "number",
               "facts": {"label": "Disk on nas-01", "value": "91", "unit": "%", "was": 78, "limit": 90,
                         "better": "down"}}
     waiting = {"line": "Dana hasn't sent the signed lease", "shape": "waiting",
                "facts": {"person": "Dana", "what": "the signed lease", "since": "2026-11-04"}}
-    for entry in (number, waiting):
+    found = {"line": "Tickets go on sale Friday", "shape": "found",
+             "facts": {"asked": "tickets for the show", "answer": "On sale Friday at 10am", "where": "Ticketmaster"}}
+    for entry in (number, waiting, found):
         pick, why = picks.parse(entry)
         assert pick["shape"] == "plain" and why == "shape_not_drawn"
     drawn = picks.GATED_SHAPES
@@ -485,13 +488,15 @@ def test_number_and_waiting_only_for_apps_that_draw_them():
     pick, why = picks.parse(waiting, drawn_types=drawn)
     assert why == "" and pick["facts"] == {"person": "Dana", "what": "the signed lease", "since": "2026-11-04"}
     assert picks.look({"look": picks.dumps(pick)})["shape"] == "waiting"
+    pick, why = picks.parse(found, drawn_types=drawn)
+    assert why == "" and pick["facts"] == found["facts"]
     rules = picks.rules(drawn)
-    assert '"number"' in rules and '"waiting"' in rules and '"drawn"' not in rules
+    assert '"number"' in rules and '"waiting"' in rules and '"found"' in rules and '"drawn"' not in rules
     assert '"number"' not in picks.rules(()) and '"waiting"' not in picks.rules(("weather",))
     assert '"drawn"' in picks.rules(("weather",) + drawn)
 
 
-def test_number_and_waiting_facts_must_hold_up():
+def test_number_waiting_and_found_facts_must_hold_up():
     drawn = picks.GATED_SHAPES
     for facts, why in (({"label": "Balance", "value": "about a lot"}, "bad_number"),
                        ({"label": "", "value": 3}, "bad_number"),
@@ -507,6 +512,11 @@ def test_number_and_waiting_facts_must_hold_up():
     for facts in ({"person": "Dana"}, {"what": "the lease"}):
         pick, why = picks.parse({"line": "x", "shape": "waiting", "facts": facts}, drawn_types=drawn)
         assert pick["shape"] == "plain" and why == "bad_waiting"
+    for missing in ("asked", "answer", "where"):
+        facts = {"asked": "a table at Nopa", "answer": "A table for two at 7", "where": "Resy"}
+        facts[missing] = " "
+        pick, why = picks.parse({"line": "x", "shape": "found", "facts": facts}, drawn_types=drawn)
+        assert pick["shape"] == "plain" and why == "bad_found"
     pick, _ = picks.parse({"line": "x", "shape": "waiting",
                            "facts": {"person": "Dana", "what": "a reply", "since": "last week"}}, drawn_types=drawn)
     assert pick["facts"] == {"person": "Dana", "what": "a reply"}
@@ -524,5 +534,5 @@ def test_the_gated_shapes_wait_for_every_drawing_conduit(monkeypatch, tmp_path):
 
     monkeypatch.setattr(importlib.import_module("conduit_push.present_store"), "PresentStore", Present)
     assert not set(picks.GATED_SHAPES) & set(picks.drawn_types(tmp_path))
-    features.add(picks.NUMBER_WAITING_FEATURE)
-    assert picks.drawn_types(tmp_path)[-2:] == picks.GATED_SHAPES
+    features.add(picks.MORE_SHAPES_FEATURE)
+    assert picks.drawn_types(tmp_path)[-3:] == picks.GATED_SHAPES

@@ -39,12 +39,14 @@ PLAIN = "plain"
 DRAWN = "drawn"
 NUMBER = "number"
 WAITING = "waiting"
+FOUND = "found"
 # Shapes a pick may take only once every Conduit that draws cards draws
-# them (NUMBER_WAITING_FEATURE, through drawn_types): an older app would
+# them (MORE_SHAPES_FEATURE, through drawn_types): an older app would
 # show them as plain words, which is what Pulse leaves out (Eric,
-# 2026-11-11: Number and Waiting on, for what fit no card type).
-GATED_SHAPES = (NUMBER, WAITING)
-SHAPES = ("date", "due", "runs", "promise", "status", "steps", NUMBER, WAITING, DRAWN, PLAIN)
+# 2026-11-11: a number that changed, someone the user is waiting on, and
+# what a watch found, for what fit no card type; three more at most).
+GATED_SHAPES = (NUMBER, WAITING, FOUND)
+SHAPES = ("date", "due", "runs", "promise", "status", "steps", NUMBER, WAITING, FOUND, DRAWN, PLAIN)
 # The morning brief's own look (pulse_brief.look): made in code from its
 # reply, never a shape the model picks.
 BRIEF = "brief"
@@ -235,6 +237,11 @@ def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional
             return None, "bad_waiting"
         since = _day(facts.get("since"))
         return {"person": person, "what": what, **({"since": since} if since else {})}, ""
+    if shape == FOUND:
+        found = {key: _text(facts.get(key), FACT_LIMIT) for key in ("asked", "answer", "where")}
+        if not all(found.values()):
+            return None, "bad_found"
+        return found, ""
     if shape == DRAWN:
         body = facts.get("body")
         kind = body.get("type") if isinstance(body, dict) else None
@@ -545,8 +552,8 @@ def count(pulse_store: Any, now: float, keys: Sequence[str]) -> None:
 LOOKS_FEATURE = "pulse-looks"
 
 
-# What a Conduit that draws the "number" and "waiting" shapes says (2.4.x).
-NUMBER_WAITING_FEATURE = "pulse-number-waiting"
+# What a Conduit that draws GATED_SHAPES says (2.4.x).
+MORE_SHAPES_FEATURE = "pulse-more-shapes"
 
 
 def drawn_types(home: Any) -> tuple[str, ...]:
@@ -554,7 +561,7 @@ def drawn_types(home: Any) -> tuple[str, ...]:
     the chat card types a "drawn" pick may use, then GATED_SHAPES. None
     until every one draws Pulse looks; then the card types whose feature
     every one of them has (as conduit_show leaves out what one can't draw),
-    and the gated shapes once every one says NUMBER_WAITING_FEATURE."""
+    and the gated shapes once every one says MORE_SHAPES_FEATURE."""
     try:
         from .present_store import PresentStore
         present = PresentStore(home)
@@ -562,7 +569,7 @@ def drawn_types(home: Any) -> tuple[str, ...]:
             return ()
         hidden = {kind for feature, kinds in card_schema.FEATURE_TYPES.items()
                   if not present.has_feature_everywhere(feature) for kind in kinds}
-        shapes = GATED_SHAPES if present.has_feature_everywhere(NUMBER_WAITING_FEATURE) else ()
+        shapes = GATED_SHAPES if present.has_feature_everywhere(MORE_SHAPES_FEATURE) else ()
     except Exception:  # noqa: BLE001 - nothing drawn when it can't tell
         return ()
     return tuple(kind for kind in DRAWN_TYPES if kind not in hidden) + shapes
@@ -583,6 +590,11 @@ def rules(drawn: Sequence[str]) -> str:
                  "owes the user a reply or a thing (who, what, and the day they were asked or said they'd send it, "
                  "left out when the context doesn't give it). It's the other side of \"promise\", which is what the user "
                  "or Hermes said they'd do.")
+    if FOUND in drawn:
+        text += ("\n- \"found\" {\"asked\": \"tickets for the Phoebe Bridgers show\", \"answer\": \"On sale Friday at 10am\", "
+                 "\"where\": \"Ticketmaster\"}: the answer to something the user asked Hermes to watch for or find out (what "
+                 "they asked for, what was found, and where it was found, each as the context gives it). Use it for a "
+                 "watch's or a question's answer that no other shape shows.")
     cards = [kind for kind in drawn if kind not in GATED_SHAPES]
     if cards:
         text += ("\n- \"drawn\" {\"body\": a card} when none of those shapes fits and a chart, weather, steps, stats, "
