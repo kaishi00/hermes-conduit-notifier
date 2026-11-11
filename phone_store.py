@@ -2472,9 +2472,12 @@ def _check_contact_change(db: sqlite3.Connection, device_id: str, kind: str, fie
         contact_id = _item_id(target.get("contact_id"), "contact_id")
         row = db.execute("SELECT name FROM contacts WHERE device=? AND id=?", (device_id, contact_id)).fetchone()
         if row is None:
-            raise PhoneError("unknown_contact", "No picked person has that id on the phone that lets Hermes change "
-                                                "contacts; find them with action people first (with that phone's "
-                                                "device, when more than one shares contacts)")
+            # Named, so the lookup can go to that phone even when another one is in use.
+            phone = db.execute("SELECT name FROM devices WHERE id=?", (device_id,)).fetchone()
+            label = phone[0] if phone and phone[0] else "that phone"
+            raise PhoneError("unknown_contact", f"No picked person has that id on {label} (device {device_id}), "
+                                                "the phone that lets Hermes change contacts; find them with action "
+                                                f"people and device {device_id} first")
         existing = {"name": row[0]}
         clean_target = {"contact_id": contact_id}
     if kind == "delete_contact":
