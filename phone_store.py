@@ -711,8 +711,13 @@ class PhoneStore:
                 except PhoneError:
                     sharing = None
                 if sharing is not None:
-                    stored = db.execute("SELECT sharing FROM devices WHERE id=?", (device_id,)).fetchone()
-                    sharing = _narrowed(_decode(stored[0], None) if stored else None, sharing)
+                    # A phone set up again has no sharing yet: what it shared
+                    # before is what a fast clock can narrow (so its sent
+                    # pictures stay, as the sweep keeps them).
+                    stored = db.execute("SELECT sharing, prior_sharing FROM devices WHERE id=?",
+                                        (device_id,)).fetchone()
+                    before = (stored[0] if stored[0] is not None else stored[1]) if stored else None
+                    sharing = _narrowed(_decode(before, None), sharing)
                     _forget_unshared(db, device_id, sharing)
                     db.execute("UPDATE devices SET sharing=? WHERE id=?", (json.dumps(sharing), device_id))
                 db.execute("UPDATE devices SET last_seen=? WHERE id=?", (now, device_id))
@@ -1393,19 +1398,42 @@ class PhoneStore:
                      "text": row[5], "place": row[6], "width": row[7], "height": row[8]}
             score = 0
             if words:
-                # Whole words, so "cat" doesn't find "category", and a plural
-                # finds the singular. Text without spaces between words
-                # (Japanese, Chinese) is matched anywhere in it.
+                # Whole words, so "cat" doesn't find "category"; a singular
+                # finds its plural and back.
                 haystack = " ".join([*map(str, labels), row[5] or "", row[6] or "", row[2]]).casefold()
                 tokens = set(re.findall(r"\w+", haystack))
-                score = sum(1 for word in words if word in tokens
-                            or (len(word) > 3 and word.endswith("s") and word[:-1] in tokens)
-                            or (not word.isascii() and word in haystack))
+                # Text without spaces between words (Japanese, Chinese) is
+                # one token: any word, a number or name included, is
+                # looked for inside it.
+                unspaced = [token for token in tokens if _UNSPACED_SCRIPT.search(token)]
+                score = sum(1 for word in words if not tokens.isdisjoint(_word_forms(word))
+                            or any(word in token for token in unspaced))
                 if not score:
                     continue
             scored.append((score, row[9], {key: value for key, value in entry.items() if value not in (None, [], False)}))
         scored.sort(key=lambda item: (-item[0], -item[1]))
         return [item[2] for item in scored[:limit]], len(scored)
+
+
+# Kana, CJK ideographs and Hangul: scripts written without spaces between words.
+_UNSPACED_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+
+
+def _word_forms(word: str) -> set[str]:
+    """A search word and its plain English singular and plural, so
+    "umbrella" finds "umbrellas", "beaches" finds "beach", "ponies" finds
+    "pony", "movies" finds "movie" and "fly" finds "flies"."""
+    forms = {word, word + "s", word + "es"}
+    if word.endswith("y") and len(word) > 2:
+        forms.add(word[:-1] + "ies")
+    if len(word) > 3:
+        if word.endswith("ies"):
+            forms.update((word[:-3] + "y", word[:-1]))
+        elif word.endswith("es"):
+            forms.update((word[:-2], word[:-1]))
+        elif word.endswith("s"):
+            forms.add(word[:-1])
+    return forms
 
 
 # --- Rows and views -------------------------------------------------------------------
