@@ -962,6 +962,7 @@ def test_work_stop_on_an_interrupted_workstream_with_agents_leaves_it_stopped(on
     hermes.live(BOT_CHAT, transport=object())
     work.agent_started("child-1", "20261031_work_1", "sa-1")
     on.update("W1", status="interrupted")
+    hermes._sessions["rt-20261031_work_1"]["running"] = False  # its turn stopped from its chat
     interrupted = fake_registry(monkeypatch)
     stopped = call("work_stop", {"ref": "W1"})
     assert stopped["ok"] and stopped["status"] == "stopped" and "background agent" in stopped["note"]
