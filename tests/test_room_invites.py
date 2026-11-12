@@ -14,6 +14,7 @@ import dataclasses
 import fcntl
 import hashlib
 import hmac
+import importlib
 import importlib.util
 import itertools
 import json
@@ -2896,8 +2897,13 @@ def test_a_room_with_someone_just_me_starts_and_sends_them_its_pages(rooms):
 
 def test_someone_just_me_leaves_and_their_pages_stop(rooms):
     room_id = _started_with_mona_just_me(rooms)
+    # In it with no agents, they post in it: the owner's room rules hold for the host's agents' turns.
+    room_rules = importlib.import_module(f"{invites_module.__package__}.room_rules")
+    assert room_rules._just_me_in(room_id, rooms.tmp_path / "furina")
 
     shown = rooms.mona.leave("link2", room_id)
+
+    assert not room_rules._just_me_in(room_id, rooms.tmp_path / "furina")
 
     assert shown["status"] == "left"
     assert rooms.wire.bodies("room.person", "link2")[-1] == {"v": 1, "room_id": room_id, "in": False}

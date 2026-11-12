@@ -822,9 +822,12 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
                    "without the owner's room rules", room_id, exc_info=False)
         return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), False
     others = _others(members)
-    # A room without other people's agents is read again, so one that joins counts.
-    return RoomTurn(room_id=room_id, side="home", with_others=bool(others), session_id=session_id,
-                    others=others), bool(others)
+    # Someone in it with none of their agents ("Just me", room_invites.PERSON) posts in it too: the owner's
+    # room rules hold for them as for another person's agent.
+    with_others = bool(others) or _just_me_in(room_id, home)
+    # A room without other people is read again, so one who joins counts.
+    return RoomTurn(room_id=room_id, side="home", with_others=with_others, session_id=session_id,
+                    others=others), with_others
 
 
 def _lineage(path: Path, session_id: str) -> tuple[list[tuple[str, str]], str]:
@@ -1052,6 +1055,18 @@ def _gone(people: Optional[Mapping[str, Any]]) -> set[str]:
 def _named(handle: str, owners: Mapping[Optional[str], str]) -> str:
     owner = owners.get(handle.casefold())
     return f"@{handle} ({owner}'s)" if owner else f"@{handle}"
+
+
+def _just_me_in(room_id: str, home: Path) -> bool:
+    """Whether a started room this Hermes hosts has someone in it with no agents ("Just me"). A rooms.json that
+    can't be read counts as someone being there, so the owner's rules hold rather than lapse."""
+    from . import room_copies, room_identity, room_invites  # room_invites imports far more than the rules need
+    try:
+        draft = room_invites.Store(room_identity.root_home(home)).read()["drafts"].get(room_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: couldn't read rooms.json for room %s", room_id, exc_info=True)
+        return True
+    return draft is not None and draft.get("status") == "started" and bool(room_copies.just_me(draft))
 
 
 def _others(members: Optional[list[Any]]) -> tuple[str, ...]:
