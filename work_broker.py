@@ -58,8 +58,8 @@ RUNNING_NOW = frozenset({"streaming", "started"})
 UNAVAILABLE_HOST = ("Bot workstreams need the Hermes dashboard to run this bot's plugins in its own process. This "
                     "Hermes runs plugins in a separate plugin host (plugins.isolation: host), where there is no "
                     "session API to start work from, so they're off here.")
-UNAVAILABLE_NO_API = ("Bot workstreams run in the Hermes dashboard, next to the chats Conduit opens. This Hermes "
-                      "process has no session API, so they're off here.")
+UNAVAILABLE_NO_API = ("Bot workstreams run next to the chats Conduit opens. This Hermes process has no session "
+                      "API, so they're off here.")
 
 
 class BrokerError(Exception):

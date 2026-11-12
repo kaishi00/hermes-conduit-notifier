@@ -5651,7 +5651,7 @@ def _send_wake(home: Path, coordinator: str) -> None:
         if asks:
             work_coord.ask_wake_sent(store, item)
         status = work_broker.Broker(home).wake(coordinator, text)
-        outcome = "queued" if status in ("queued", "streaming") else status or "accepted"
+        outcome = "queued" if status in ("queued", "streaming", "started") else status or "accepted"
         store.outbox_done(item, outcome)
         for line_item in items:
             # As the wake went: a line it never delivered isn't marked delivered.

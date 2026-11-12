@@ -698,6 +698,10 @@ class _AuthorityChats:
             return
         try:
             turn_surface = _sibling("turn_surface")
+            if surface not in turn_surface.SURFACES:
+                # The work broker's turns are from no screen: a report no
+                # turn would take would only crowd out real ones.
+                return
             turn_surface.record_for_authority(turn_surface.Report(
                 session_id, turn_surface.text_sha256(text), surface, getattr(transport, "conduit_input", None)))
         except Exception:  # noqa: BLE001 — no line for that turn
