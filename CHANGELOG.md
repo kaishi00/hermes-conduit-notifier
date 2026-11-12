@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.9 (2026-11-12)
+
+### Fixes
+- In a room with other people's agents, tapping Share on your agent's ask
+  more than 30 seconds after it asked seemed to do nothing: your agent only
+  heard your answer when someone next spoke in the room. Your answer now
+  starts its turn right away, so it shares (or says it can't) on its own.
+
 ## 0.164.8 (2026-11-12)
 
 ### Fixes

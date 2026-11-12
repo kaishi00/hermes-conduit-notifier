@@ -6030,6 +6030,79 @@ def test_a_member_side_room_asks_its_home_to_wake_the_bot(on, hermes, linked, mo
     assert asked == []
 
 
+def ask_owner(home, question="Mona asks whether you're free Saturday", share="Free all Saturday."):
+    """Ask me first's tool in ROOM_CHAT, past its wait, watched as the plugin watches it (here, on ``home``)."""
+    def wake(prompt_id, turn):
+        work.watch_share_ask(home, prompt_id, room_id=turn.room_id, session_id=turn.session_id, side=turn.side)
+
+    return json.loads(room_asks_mod.handle({"question": question, "share": share}, session_id=ROOM_CHAT,
+                                           store=present_mod.PresentStore(home), push=lambda event: None,
+                                           sleep=lambda seconds: None, wake=wake))
+
+
+@pytest.fixture
+def ask_first(linked, monkeypatch):
+    linked["choices"] = room_rules.RoomChoices(share="ask")
+    monkeypatch.setattr(room_asks_mod, "WAIT_S", 0)
+    return linked
+
+
+def test_a_late_share_wakes_the_bot_in_the_room_once(on, hermes, ask_first):
+    asked = ask_owner(on.home)
+    assert asked["status"] == "waiting" and "starts with their answer" in asked["note"]
+    assert work.check_asks(on.home) is True and ask_first["posted"] == [], "nothing until the owner answers"
+    answer(on.home, "confirmed")
+    assert work.check_asks(on.home) is False
+    posted, = ask_first["posted"]
+    assert posted["text"] == room_work.LINKED_POST.format(handle="Furina")
+    assert "Free all Saturday." not in posted["text"], "what it shares is never posted for it"
+    framed = room_asks_mod.frame(present_mod.PresentStore(on.home), "room-1", ROOM_CHAT)
+    assert any("said yes" in line and "Free all Saturday." in line for line in framed)
+    work.check_asks(on.home)
+    assert len(ask_first["posted"]) == 1, "woken once"
+
+
+def test_a_no_wakes_the_bot_too_but_an_ask_heard_or_run_out_doesnt(on, hermes, ask_first, monkeypatch):
+    ask_owner(on.home)
+    answer(on.home, "declined")
+    work.check_asks(on.home)
+    assert len(ask_first["posted"]) == 1, "the room hears it can't be shared"
+    # A turn that heard the answer before the watcher looked: nothing to wake it for.
+    ask_owner(on.home, question="Mona asks where you are")
+    answer(on.home, "confirmed")
+    store = present_mod.PresentStore(on.home)
+    store.mark_heard([prompt["id"] for prompt in store.room_answers("room-1")])
+    work.check_asks(on.home)
+    assert len(ask_first["posted"]) == 1
+    # Ran out unanswered: its next turn hears that, and nothing wakes it.
+    ask_owner(on.home, question="Mona asks what you think")
+    real = present_mod.PresentStore.room_ask
+    monkeypatch.setattr(present_mod.PresentStore, "room_ask",
+                        lambda self, prompt_id: {**real(self, prompt_id), "status": "expired"})
+    assert work.check_asks(on.home) is False and len(ask_first["posted"]) == 1
+
+
+def test_a_late_share_in_a_room_hosted_elsewhere_asks_its_home_to_wake_the_bot(on, hermes, ask_first, monkeypatch):
+    from conduit_push import room_work_news
+
+    woken = []
+    monkeypatch.setattr(room_work_news, "ask_home", lambda root, room_id, profile: woken.append(room_id))
+    ask_first["turn"] = room_rules.RoomTurn(room_id="room-9", side="member", with_others=True, session_id=ROOM_CHAT)
+    ask_owner(on.home)
+    answer(on.home, "edit", "Only the afternoon.")
+    work.check_asks(on.home)
+    assert woken == ["room-9"] and ask_first["posted"] == []
+
+
+def test_a_restart_keeps_watching_a_waiting_share_ask(on, hermes, ask_first, monkeypatch):
+    ask_owner(on.home)
+    watched = []
+    monkeypatch.setattr(work, "_watch_asks", lambda home: watched.append(home))
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    assert watched and [row["kind"] for row in on.outbox_pending()] == ["share_ask"]
+
+
 def test_linked_work_never_saves_to_memory_or_messages_anyone(on, hermes, linked):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     answer(on.home, "confirmed")

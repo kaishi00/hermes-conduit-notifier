@@ -3,10 +3,12 @@ the ``conduit_ask_owner`` tool (designs/cross-owner-agents, N7c).
 
 In a room set to Ask me first, the agent asks its owner's phone ("Laifu asks whether you're free on the 22nd",
 with what it would share), and waits a little for the answer: Share, Say instead (what the owner writes), or Don't
-share. Unanswered, it tells the room it'll check, and the answer reaches it privately before its next turn in that
-room (``frame``, from the turn's framing, heard once that turn replied and ended without failing). Asks are the
-room's, not the session's, so a compacted room session's continuation hears them too. Nothing goes into the room by
-itself.
+share. Unanswered, it tells the room it'll check, and the answer reaches it privately at the start of its next turn
+in that room (``frame``, from the turn's framing, heard once that turn replied and ended without failing). Once the
+owner answers, that turn starts right away: the bare mention Run work's news posts wakes the agent
+(work_tool.watch_share_ask), so a Share tapped after the wait isn't left until someone else speaks (Eric,
+2026-11-12). Asks are the room's, not the session's, so a compacted room session's continuation hears them too.
+Nothing the agent would share goes into the room by itself.
 
 The ask is a confirm prompt in the profile's present store, so the panel, its notification and its voice yes are
 Conduit's own; only a Conduit that says it shows a room's asks gets one (present_store.ROOM_ASK_FEATURE). The tool
@@ -51,8 +53,8 @@ DESCRIPTION = (
     "what's being asked and by whom, on one line (\"Laifu asks whether you're free on the 22nd\"). share: exactly "
     "what you'd say if they agree. It waits a little for the answer: \"confirmed\" means share exactly that, "
     "\"edit\" means say only what your owner wrote (edit_text), \"declined\" means don't share it, and \"waiting\" "
-    "means tell the room you'll check with your owner and share nothing yet; their answer reaches you before your "
-    "next turn here. Ask once per question; asking again with the same question and share while one waits returns "
+    "means tell the room you'll check with your owner and share nothing yet; once they answer, a turn of yours "
+    "here starts with their answer. Ask once per question; asking again with the same question and share while one waits returns "
     "that one."
 )
 
@@ -74,8 +76,8 @@ SCHEMA: dict[str, Any] = {
 }
 
 _NOTES = {
-    "waiting": (f"Your owner hasn't answered yet. {_CHECK_LATER} Their answer reaches you before your next turn in "
-                "this room."),
+    "waiting": (f"Your owner hasn't answered yet. {_CHECK_LATER} Once they answer, a turn of yours in this room "
+                "starts with their answer."),
     "confirmed": "Your owner said yes: share exactly the share you gave (the text they saw), nothing more.",
     "declined": "Your owner said no: don't share it. Say you can't share that.",
     "edit": "Your owner wrote what to say instead (edit_text): say only what your owner wrote, nothing more.",
@@ -129,14 +131,16 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
            room_turn: Optional[Callable[[str], Any]] = None, choices: Optional[Callable[[Any], Any]] = None,
            room_name: Callable[[str], str] = _room_name, store: Optional[PresentStore] = None,
            push: Optional[Callable[[dict], None]] = None, profile: str = "default",
-           sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic) -> str:
+           sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
+           wake: Optional[Callable[[str, Any], None]] = None) -> str:
     try:
         session = session_id.strip() if isinstance(session_id, str) else ""
         return _answer(**_handle(
             args if isinstance(args, dict) else {}, session, is_child,
             room_turn or (lambda sid: room_rules.room_turn(sid, get_hermes_home())),
             choices or (lambda turn: room_rules.choices_for(turn, get_hermes_home())), room_name,
-            store or PresentStore(get_hermes_home()), push or client.enqueue, profile, sleep, monotonic))
+            store or PresentStore(get_hermes_home()), push or client.enqueue, profile, sleep, monotonic,
+            wake or _wake_on_answer))
     except Exception:  # noqa: BLE001 — a tool must never raise
         logger.warning("conduit_ask_owner failed", exc_info=True)
         return _answer(ok=False, error="unavailable", note=UNAVAILABLE)
@@ -145,7 +149,7 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
 def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool], room_turn: Callable[[str], Any],
             choices: Callable[[Any], Any], room_name: Callable[[str], str], store: PresentStore,
             push: Callable[[dict], None], profile: str, sleep: Callable[[float], None],
-            monotonic: Callable[[], float]) -> dict[str, Any]:
+            monotonic: Callable[[], float], wake: Callable[[str, Any], None]) -> dict[str, Any]:
     if is_child(session):
         return {"ok": False, "error": "subagent",
                 "note": "Only the room's own turn can ask your owner. Report back; the main agent can ask."}
@@ -190,7 +194,20 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
             prompt = {**prompt, "preview": share}
     if prompt["status"] != "waiting":
         _given(session, prompt["id"])
+    else:
+        try:
+            wake(prompt["id"], turn)
+        except Exception:  # noqa: BLE001 — the answer still reaches the room's next turn
+            logger.warning("conduit_push: couldn't watch a room's ask for its answer", exc_info=True)
     return {"ok": True, **_with_note(prompt)}
+
+
+def _wake_on_answer(prompt_id: str, turn: Any) -> None:
+    """Once the owner answers an ask the tool stopped waiting for, the agent's turn in the room starts with it."""
+    from . import work_tool
+
+    work_tool.watch_share_ask(get_hermes_home(), prompt_id, room_id=turn.room_id, session_id=turn.session_id,
+                              side=turn.side)
 
 
 def _wait(store: PresentStore, prompt: dict[str, Any], sleep: Callable[[float], None],

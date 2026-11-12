@@ -2791,11 +2791,11 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
                 oldest: float) -> None:
     if row["created_at"] >= _PROCESS_STARTED:
         return  # this process's own, still under way
-    if row["kind"] in ("line_linked", "room_ask"):
+    if row["kind"] in ("line_linked", "room_ask", "share_ask"):
         # A Linked Room's private line waits for the bot's next turn there; an ask for the owner's answer.
         if row["created_at"] < time.time() - LINKED_KEEP_S:
             store.outbox_done(row["id"], "expired")
-        elif row["kind"] == "room_ask":
+        elif row["kind"] != "line_linked":
             _watch_asks(home)
         return
     if row["created_at"] < oldest:
@@ -6217,6 +6217,15 @@ def _tell_room(home: Path, room: room_work.Room, line: str, wake: bool = True) -
     except (OSError, sqlite3.Error) as error:
         # What was done stands; the work's next report reaches the room again.
         logger.info("conduit_push: a Linked Room's private line couldn't be kept (%s)", type(error).__name__)
+    if room.side == "home" or wake:
+        _wake_linked(home, room, line)
+
+
+def _wake_linked(home: Path, room: room_work.Room, line: str = "") -> None:
+    """Starts the bot's turn in a Linked Room with the bare mention (room_work.LINKED_POST): posted here where it's
+    hosted here, else asked of the room's home over the Link (room_work_news). What the turn hears is framed into
+    it privately; ``line`` is only kept with a post's journal row."""
+    store = work_store.Store(home)
     if room.side == "home" and room.handle:
         profile = work_broker.profile_of(home)
         key = f"{profile}-{room.room_id}-{uuid.uuid4().hex[:16]}"
@@ -6227,7 +6236,7 @@ def _tell_room(home: Path, room: room_work.Room, line: str, wake: bool = True) -
         except (OSError, sqlite3.Error):
             item = ""
         _post_linked(home, room, key, line, item)
-    elif room.side == "member" and wake:
+    elif room.side == "member":
         from . import room_identity, room_work_news
 
         error = room_work_news.ask_home(room_identity.root_home(home), room.room_id, work_broker.profile_of(home))
@@ -6280,7 +6289,8 @@ def _watch_asks(home: Path) -> None:
                     # Exit only with no row left, decided under the lock asks are kept under: a row kept
                     # meanwhile is seen here, or finds this watcher gone and arms its own.
                     with _ask_lock:
-                        if any(row["kind"] == "room_ask" for row in work_store.Store(home).outbox_pending()):
+                        if any(row["kind"] in ("room_ask", "share_ask")
+                               for row in work_store.Store(home).outbox_pending()):
                             continue
                         if _ask_watchers.get(key) is threading.current_thread():
                             del _ask_watchers[key]
@@ -6294,21 +6304,57 @@ def _watch_asks(home: Path) -> None:
 
 
 def check_asks(home: Path) -> bool:
-    """Acts on each room's work ask the owner answered; whether any still waits."""
+    """Acts on each room's work ask the owner answered, and wakes the bot for each Ask me first answer
+    (watch_share_ask); whether any still waits."""
     from .present_store import PresentStore
 
     store = work_store.Store(home)
     present = PresentStore(home)
     waiting = False
-    for row in [row for row in store.outbox_pending() if row["kind"] == "room_ask"]:
+    for row in [row for row in store.outbox_pending() if row["kind"] in ("room_ask", "share_ask")]:
         prompt = present.room_ask(row["target"])
         if prompt is None:
             store.outbox_done(row["id"], "dropped")
-        elif prompt["status"] != "waiting":
+        elif prompt["status"] == "waiting":
+            waiting = True
+        elif row["kind"] == "room_ask":
             _answered(home, store, present, row["target"])
         else:
-            waiting = True
+            _share_answered(home, store, present, row, prompt)
     return waiting
+
+
+def watch_share_ask(home: Path, prompt_id: str, *, room_id: str, session_id: str, side: str) -> None:
+    """Watches an Ask me first ask (room_asks) its tool stopped waiting for: once the owner answers, the bot's turn
+    in the room starts, woken as Run work's news wakes it, and hears the answer privately (room_asks.frame). Kept
+    in the outbox, so a restart's watcher still wakes it."""
+    store = work_store.Store(home)
+    with _ask_lock:
+        if any(row["kind"] == "share_ask" and row["target"] == prompt_id for row in store.outbox_pending()):
+            return
+        store.outbox_add("", "share_ask", prompt_id,
+                         json.dumps({"room": room_id, "session": session_id, "side": side}))
+    _watch_asks(home)
+
+
+def _share_answered(home: Path, store: work_store.Store, present: Any, row: dict, prompt: dict) -> None:
+    """The owner answered (or the ask ran out): the bot is woken once for an answer its room hasn't heard yet. An
+    ask that ran out, or one a turn already heard, wakes nothing."""
+    store.outbox_done(row["id"], "answered")
+    if prompt["status"] not in ("confirmed", "declined", "edit"):
+        return
+    asked = json.loads(row["text"])
+    if not any(each["id"] == prompt["id"] for each in present.room_answers(asked["room"])):
+        return
+    handle = ""
+    if asked.get("side") == "home":
+        try:
+            handle = room_work.handle_of(asked["room"], Path(home), work_broker.profile_of(home))
+        except room_work.Unreadable as error:
+            logger.info("conduit_push: a Linked Room's agent wasn't woken for its owner's answer (%s)", error)
+            return
+    _wake_linked(home, room_work.Room(room_id=asked["room"], session_id=asked["session"], handle=handle,
+                                      linked=True, side=asked.get("side", "home")))
 
 
 # Private lines framed into a room turn, heard once that turn replied and ended (as room_asks' answers).
