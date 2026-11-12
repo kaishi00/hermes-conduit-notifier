@@ -1,9 +1,9 @@
 """One notice per turn: a failed turn's error text isn't a reply, and a
 subagent that ends inside its parent's turn is part of that reply."""
+import os
 import importlib.util
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools.clarify_tool" not in sys.modules:
     _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))

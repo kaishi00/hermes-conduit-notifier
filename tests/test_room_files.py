@@ -13,7 +13,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path("/nonexistent-hermes-home")
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"], "nonexistent-hermes-home")
     sys.modules["hermes_constants"] = _hermes_constants
 
 _spec = importlib.util.spec_from_file_location("conduit_plugin_api_room_files", ROOT / "dashboard" / "plugin_api.py")

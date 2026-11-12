@@ -77,6 +77,9 @@ class Hermes:
         self.web = self.module("hermes_cli.web_server")
         self.web.app = types.SimpleNamespace(state=types.SimpleNamespace(gateway_runner=None))
         self.peer = peer
+        # Optional, and a test that wants it says so: inside a real Hermes install
+        # its own would load against these stand-ins (notifier #322).
+        self.missing("gateway.owner_identity")
 
     def module(self, name, **attributes):
         module = types.ModuleType(name)

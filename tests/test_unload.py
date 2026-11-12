@@ -1,10 +1,10 @@
 """Unloading the plugin (disable, reload) stops its background work: nothing
 more goes to the relay from that load."""
+import os
 import importlib.util
 import json
 import pathlib
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools.clarify_tool" not in sys.modules:
     _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
@@ -315,7 +315,12 @@ def test_a_hermes_without_on_unload_still_loads_the_plugin(monkeypatch, tmp_path
     monkeypatch.setattr(calls, "get_hermes_home", lambda: tmp_path)
     ctx = _ctx([])
     del ctx.on_unload
-    plugin.register(ctx)
+    try:
+        plugin.register(ctx)
+    finally:
+        # What it put on Hermes comes off, so no later test finds it on: inside a
+        # real Hermes install that's Hermes' own modules (notifier #322).
+        plugin._unload()
 
 
 @pytest.fixture

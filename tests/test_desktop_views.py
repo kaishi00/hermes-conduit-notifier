@@ -3,7 +3,6 @@ import json
 import os
 import pathlib
 import sys
-import tempfile
 import threading
 import types
 from pathlib import Path
@@ -22,7 +21,7 @@ CONDUIT = "Conduit/212 CFNetwork/3826.500.1 Darwin/25.0.0"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 

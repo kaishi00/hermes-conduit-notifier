@@ -1,9 +1,9 @@
+import os
 import contextlib
 import contextvars
 import importlib.util
 import pathlib
 import sys
-import tempfile
 import types
 from pathlib import Path
 
@@ -17,7 +17,7 @@ BASE = "/api/plugins/conduit_push"
 # client.py imports hermes_constants at import time; same stub as the clarify tests.
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 
@@ -189,6 +189,14 @@ def test_route_is_rate_limited_per_profile(client, hermes, monkeypatch):
 
 
 # --- pre_llm_call hook --------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _plugins_own_voice_note(monkeypatch):
+    # The note the plugin falls back to: inside a real Hermes install, its own
+    # tools.voice_live wording would otherwise win (notifier #322).
+    monkeypatch.setattr(plugin, "_voice_live_prefix", plugin._VOICE_LIVE_NOTE_PREFIX)
+
 
 VOICE_NOTE = (
     "[Note: this message is a delegation from a live spoken conversation. The text is a voice "

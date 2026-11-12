@@ -1,9 +1,9 @@
+import os
 import contextlib
 import importlib.util
 import json
 import pathlib
 import sys
-import tempfile
 import types
 from pathlib import Path
 
@@ -18,7 +18,7 @@ DESKTOP_PID = 2000
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 

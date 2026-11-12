@@ -1,11 +1,11 @@
 """Checklist cards' ticks, kept on the host (checklist_store, dashboard/api/boards.py)."""
 
+import os
 import contextlib
 import importlib.util
 import json
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -17,7 +17,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 _spec = importlib.util.spec_from_file_location("conduit_push_test_checklist_store", ROOT / "checklist_store.py")

@@ -1,8 +1,8 @@
+import os
 import importlib.util
 import json
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -14,7 +14,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 spec = importlib.util.spec_from_file_location("conduit_plugin_api_self_restart", ROOT / "dashboard" / "plugin_api.py")
@@ -116,14 +116,21 @@ def test_markers_are_read_where_hermes_writes_them(monkeypatch, tmp_path):
         api.self_update._running_turns(api.self_update.os.getpid(), [tmp_path])
 
 
-@pytest.mark.parametrize("setup", ["windows", "plugin-host", "desktop"])
+@pytest.mark.parametrize("setup", ["windows", "plugin-host", "desktop", "hermes-desktop"])
 def test_backends_that_cannot_re_exec_refuse(monkeypatch, tmp_path, setup):
     if setup == "windows":
         monkeypatch.setattr(api.self_update.sys, "platform", "win32")
     elif setup == "plugin-host":
         monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
-    else:
+    elif setup == "desktop":
+        # A Hermes without its own answer: the variable Desktop sets (also
+        # inside a real Hermes install, notifier #322).
+        monkeypatch.setitem(sys.modules, "hermes_cli.anon_auth", None)
         monkeypatch.setenv("HERMES_DESKTOP_CHILD_PID", "123")
+    else:
+        anon_auth = types.ModuleType("hermes_cli.anon_auth")
+        anon_auth.on_local_desktop_backend = lambda: True
+        monkeypatch.setitem(sys.modules, "hermes_cli.anon_auth", anon_auth)
     with pytest.raises(api.core.TokenError) as raised:
         api.self_update.self_restart(lambda *a: pytest.fail("scheduled"), homes=lambda: [tmp_path])
     assert raised.value.status == 501

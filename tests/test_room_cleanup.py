@@ -1,6 +1,7 @@
 """Disbanding a room ends its hidden chats on its home, and a member host's
 owner can delete theirs later (designs/cross-owner-agents, N2; Eric,
 2026-10-26)."""
+import os
 import argparse
 import importlib.util
 import json
@@ -8,7 +9,6 @@ import logging
 import pathlib
 import sqlite3
 import sys
-import tempfile
 import threading
 import types
 
@@ -36,7 +36,7 @@ HOSTED_ROOMS_DDL = """CREATE TABLE IF NOT EXISTS hosted_rooms (
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")
@@ -1100,6 +1100,10 @@ def test_room_forget_is_a_listed_capability(client):
 
 def test_the_dashboard_routes_guard_it_as_they_load(hermes):
     # The dashboard hosts the rooms of a Hermes whose gateway doesn't (.52).
+    # Inside a real Hermes install, loading this file's routes above guarded
+    # Hermes' own rooms: that guard comes off first (notifier #322).
+    if api.rooms._room_cleanup_module is not None:
+        api.rooms._room_cleanup_module.uninstall()
     own = hermes.rooms.disband_room
     spec = importlib.util.spec_from_file_location("conduit_plugin_api_room_cleanup_load", ROOT / "dashboard" / "plugin_api.py")
     module = importlib.util.module_from_spec(spec)

@@ -1,12 +1,12 @@
 """Re-pairing revokes the credential it replaced at the relay, and a phone
 whose relay gateway slots are full is told how to get out (#250)."""
 
+import os
 import importlib.util
 import io
 import json
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")

@@ -40,7 +40,7 @@ RELAY_DIR = ROOT / "relay"
 # module already ran in this process).
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools" not in sys.modules:
     _tools = types.ModuleType("tools")

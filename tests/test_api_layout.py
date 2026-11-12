@@ -20,7 +20,10 @@ DASHBOARD = ROOT / "dashboard"
 API = DASHBOARD / "api"
 PROBES = sorted(p.stem for p in (ROOT / "probes").glob("*.py") if "def load_plugin_api(" in p.read_text())
 MODULE_SIZE_LIMIT = 150_000  # bytes: what an agent or a reviewer still reads whole
-MODULE_GLOBALS = {"__name__", "__file__", "__package__", "__spec__", "__doc__", "__loader__", "__builtins__"}
+# __conditional_annotations__: Python 3.14 makes it for a module with annotations
+# under an if or try (Hermes' own environment runs 3.14, notifier #322).
+MODULE_GLOBALS = {"__name__", "__file__", "__package__", "__spec__", "__doc__", "__loader__", "__builtins__",
+                  "__conditional_annotations__"}
 
 
 def _load_plugin_api():

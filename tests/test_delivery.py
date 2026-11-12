@@ -1,13 +1,13 @@
 """The delivery worker: transient relay failures are retried with the same
 event id, and a relay 401 is recorded on the pairing for `status`."""
 
+import os
 import http.server
 import importlib.util
 import json
 import pathlib
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -19,7 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")

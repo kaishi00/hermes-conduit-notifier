@@ -1,4 +1,5 @@
 """Group rooms keep answering once a thread passes 24 messages (room_planner)."""
+import os
 import importlib.util
 import logging
 import sys
@@ -328,7 +329,7 @@ def test_the_dashboard_routes_guard_the_planner_as_they_load(hermes, monkeypatch
     own = hermes._derive_member_watermarks
     if "hermes_constants" not in sys.modules:
         constants = types.ModuleType("hermes_constants")
-        constants.get_hermes_home = lambda: Path("/nonexistent-hermes-home")
+        constants.get_hermes_home = lambda: Path(os.environ["HERMES_HOME"], "nonexistent-hermes-home")
         monkeypatch.setitem(sys.modules, "hermes_constants", constants)
     spec = importlib.util.spec_from_file_location("conduit_plugin_api_room_planner", ROOT / "dashboard" / "plugin_api.py")
     spec.loader.exec_module(importlib.util.module_from_spec(spec))

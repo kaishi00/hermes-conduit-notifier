@@ -1,9 +1,9 @@
+import os
 import importlib.util
 import io
 import json
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -15,7 +15,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 spec = importlib.util.spec_from_file_location("conduit_plugin_api_pairing", ROOT / "dashboard" / "plugin_api.py")

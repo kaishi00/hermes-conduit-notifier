@@ -46,6 +46,9 @@ def hermes(monkeypatch):
     sessions = types.ModuleType("hermes_cli.web_routers.sessions")
     sessions.get_session_messages = get_session_messages
     monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.sessions", sessions)
+    # No per-profile plugin gate: inside a real Hermes install its own would
+    # answer 404 for these tests' made-up profiles (notifier #322).
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", None)
     return calls
 
 

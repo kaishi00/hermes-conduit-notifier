@@ -1,8 +1,8 @@
+import os
 import importlib.util
 import json
 import pathlib
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools" not in sys.modules:
     _tools = types.ModuleType("tools")
@@ -1073,7 +1073,9 @@ def test_the_hook_takes_the_note_with_the_kwargs_hermes_passes(home, clock):
     assert result["context"].startswith("[Conduit: the user declined the phone call you placed just now.")
 
 
-def test_a_voice_turn_after_a_missed_call_gets_both_notes(home, clock):
+def test_a_voice_turn_after_a_missed_call_gets_both_notes(home, clock, monkeypatch):
+    # The plugin's own note wording, even where Hermes' tools.voice_live has its own (notifier #322).
+    monkeypatch.setattr(plugin, "_voice_live_prefix", plugin._VOICE_LIVE_NOTE_PREFIX)
     calls._store(home).record_outcome(CALL_ID, ["rt-1"], "missed", age_s=0)
     voice = "[Note: this message is a delegation from a live spoken conversation ...]\n\nhi"
     context = plugin._pre_llm_call(session_id="rt-1", conversation_history=[{"role": "user", "content": voice}])["context"]

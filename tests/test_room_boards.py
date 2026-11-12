@@ -1,6 +1,7 @@
 """Boards in group rooms: kept on the host for Conduit to draw under the
 agent's message (room_boards, GET /boards/rooms)."""
 
+import os
 import contextlib
 import importlib.util
 import json
@@ -85,7 +86,7 @@ def test_the_plugin_keeps_a_board_only_for_a_room_it_runs(tmp_path, monkeypatch)
     import types
     if "hermes_constants" not in sys.modules:
         constants = types.ModuleType("hermes_constants")
-        constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+        constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
         sys.modules["hermes_constants"] = constants
     if "conduit_push" not in sys.modules:
         package = types.ModuleType("conduit_push")

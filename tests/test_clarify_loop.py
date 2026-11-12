@@ -1,9 +1,9 @@
+import os
 import importlib.util
 import json
 import pathlib
 import re
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -14,7 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # functions that never touch it, so provide a stub before loading the plugin.
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 # _format_result imports the real strip_recommended from the Hermes runtime;
