@@ -101,8 +101,11 @@ ROOM_FILES = ("conduit", "room-files")
 # The pictures a turn's messages name: Hermes' peer route carries no attachments, so an agent sees one only by
 # looking (Eric 2026-11-12, App Store polish: a native-vision bot answered as if nothing was sent).
 PICTURE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")
-TURN_PICTURES_LINE = ("This turn's messages include {count} sent into the room: {paths}. You can't see {them} "
-                      f"unless you look: call {LOOK_TOOL} with each path before you answer about {{them}}.")
+# The paths stay in the messages, the participants' words: a quoted reference can carry any text before its
+# room-files tail, which must never read as one of these rules.
+TURN_PICTURES_LINE = ("This turn's messages include {count} sent into the room, each an @file: reference. You "
+                      f"can't see {{them}} unless you look: call {LOOK_TOOL} with each one's path, as its message "
+                      "gives it, before you answer about {them}.")
 MAX_TURN_PICTURES = 4
 ROOM_PICTURES_LINE = (f"A picture sent into this room you may look at with {LOOK_TOOL}, by the path its message "
                       "names, whatever else these rules allow.")
@@ -492,17 +495,17 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
 
 
 def turn_pictures_line(prompt: Any) -> Optional[str]:
-    """The line telling the agent to look at the room pictures ``prompt`` names, the newest last (at most
-    MAX_TURN_PICTURES of them), or None when it names none."""
+    """The line telling the agent to look at the room pictures ``prompt`` names (counting at most
+    MAX_TURN_PICTURES of them), or None when it names none. It never repeats a path: see TURN_PICTURES_LINE."""
     from . import room_files_link
 
-    paths = list(dict.fromkeys(path for path, _folder, name in room_files_link.references(prompt)
-                               if name.lower().endswith(PICTURE_EXTENSIONS)))[-MAX_TURN_PICTURES:]
-    if not paths:
+    pictures = list(dict.fromkeys((folder, name) for _path, folder, name in room_files_link.references(prompt)
+                                  if name.lower().endswith(PICTURE_EXTENSIONS)))[-MAX_TURN_PICTURES:]
+    if not pictures:
         return None
-    one = len(paths) == 1
-    return TURN_PICTURES_LINE.format(count="a picture" if one else f"{len(paths)} pictures",
-                                     paths=", ".join(paths), them="it" if one else "them")
+    one = len(pictures) == 1
+    return TURN_PICTURES_LINE.format(count="a picture" if one else f"{len(pictures)} pictures",
+                                     them="it" if one else "them")
 
 
 def _poster_lines(turn: Optional[RoomTurn], people: Optional[Mapping[str, Any]],

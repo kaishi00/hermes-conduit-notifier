@@ -4685,13 +4685,16 @@ installation's):
   `{"profile", "handle", "display_name", "reason"}` (`left`, `removed` or
   `disbanded`). `profiles` are each of this Hermes' profiles with its choices
   for the room. `just_me` is true once you joined with no agents, and
-  `just_me_offered` whether their plugin takes that (0.166.3+).
+  `just_me_offered` whether their plugin takes that and the room could
+  start that way (0.166.3+).
 - `POST /rooms/invites/answer` with `{"link", "room_id", "agents": [...]}`:
   `{"invite": ...}`. No agents declines, and the same answer again is the
   first. With `"just_me": true` and no agents, you join with none of your
   agents ("Just me"): your Hermes gets the room's pages, so you read it and
   post in it, and `POST /rooms/leave` with no `profiles` leaves it. A home
-  whose plugin doesn't take it refuses that with `home_too_old` (409).
+  whose plugin doesn't take it refuses that with `home_too_old` (409), and
+  a room with one of their agents and nobody else invited, which needs two
+  agents to start, with `too_few` (409).
   Linked Hermes say it with `room.person` envelopes: the guest's
   `{"in": true}` joins and `{"in": false}` leaves, and the home's
   `{"in": false, "reason"}` says the room ended.

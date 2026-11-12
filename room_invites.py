@@ -536,6 +536,9 @@ class Rooms:
         if PERSON not in (shown.get("kinds") or ()):
             raise RoomsError("home_too_old", "Their Conduit plugin can't take Just me yet: they need to update it",
                              409)
+        if not _just_me_can_start(invite):
+            raise RoomsError("too_few", "A room needs two agents: with only one of theirs and nobody else invited, "
+                             "join with an agent of yours", 409)
         with self.store.update() as state:
             invite, now = state["invites"].get(key), int(self.clock())
             ended = _ended(invite, now)
@@ -1216,7 +1219,8 @@ class Rooms:
             "reason": invite["reason"],
             # Joined with no agents, and whether the home's plugin takes that (PERSON).
             "just_me": bool(invite.get("just_me")),
-            "just_me_offered": PERSON in ((self.link(invite["link"]) or {}).get("kinds") or ()),
+            "just_me_offered": PERSON in ((self.link(invite["link"]) or {}).get("kinds") or ())
+            and _just_me_can_start(invite),
         }
 
     @contextmanager
@@ -1563,6 +1567,12 @@ def _kept_invite(invite: Any) -> bool:
             for agent in invite.get("gone", [])) \
         and "members" in invite and "started_at" in invite and "reason" in invite \
         and "ended_at" in invite and (invite["ended_at"] is None or type(invite["ended_at"]) is int)
+
+
+def _just_me_can_start(invite: dict[str, Any]) -> bool:
+    """Whether a room can start with this person in it with no agents: a room needs two agents, so the home's
+    one alone, with nobody else invited who might bring one, never starts (it would end too_few)."""
+    return len(invite["agents"]) >= 2 or bool(invite["people"])
 
 
 def _agent(agent: Any) -> bool:

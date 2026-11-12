@@ -2875,6 +2875,17 @@ def _started_with_mona_just_me(side):
     return room_id
 
 
+def test_just_me_isnt_offered_where_the_room_could_never_start(rooms):
+    # The home's one agent and only them invited: with no agent of theirs it would end too_few.
+    room_id = draft(rooms, links=("link2",))["room_id"]
+    _takes_just_me(rooms, "mona", "link2")
+    assert invite_of(rooms, "mona", room_id)["just_me_offered"] is False
+    with pytest.raises(invites_module.RoomsError) as refused:
+        rooms.mona.answer("link2", room_id, [], just_me=True)
+    assert refused.value.code == "too_few"
+    assert invite_of(rooms, "mona", room_id)["status"] == "waiting"
+
+
 def test_a_room_with_someone_just_me_starts_and_sends_them_its_pages(rooms):
     room_id = _started_with_mona_just_me(rooms)
 
