@@ -6098,20 +6098,32 @@ def test_a_restart_keeps_watching_a_waiting_share_ask_with_workstreams_off(on, h
     ask_owner(on.home)
     on.set_policy("off")
     work._policy_cache.clear()
-    watched = []
+    watched, threads = [], []
     monkeypatch.setattr(work, "_watch_asks", lambda home: watched.append(home))
-    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: types.SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: threads.append(k) or types.SimpleNamespace(
+        start=lambda: None))
+    monkeypatch.setattr(work.work_broker, "server", lambda: object())
+    monkeypatch.setattr(work, "_watch_shutdown", lambda: True)
     work.start_recovery(on.home)
+    assert watched == [], "not before the session host is up"
+    threads[0]["target"]()
     assert watched and [row["kind"] for row in on.outbox_pending()] == ["share_ask"]
 
 
-def test_a_run_work_ask_waits_for_the_sweep_at_load(on, hermes, linked, monkeypatch):
+def test_a_run_work_ask_is_watched_at_load_once_the_session_host_is_up(on, hermes, linked, monkeypatch):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
-    watched = []
+    on.set_policy("off")
+    work._policy_cache.clear()
+    watched, threads = [], []
     monkeypatch.setattr(work, "_watch_asks", lambda home: watched.append(home))
-    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: types.SimpleNamespace(start=lambda: None))
+    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: threads.append(k) or types.SimpleNamespace(
+        start=lambda: None))
+    monkeypatch.setattr(work.work_broker, "server", lambda: object())
+    monkeypatch.setattr(work, "_watch_shutdown", lambda: True)
     work.start_recovery(on.home)
     assert watched == [], "a yes before the session host is up would start nothing"
+    threads[0]["target"]()
+    assert watched, "watched with workstreams off too, so its answer is still heard"
 
 def test_a_wake_the_roster_couldnt_be_read_for_is_tried_again(on, hermes, ask_first, monkeypatch):
     ask_owner(on.home)

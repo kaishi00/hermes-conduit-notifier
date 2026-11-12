@@ -3010,13 +3010,6 @@ def start_recovery(home: Optional[Path] = None) -> None:
     home = home or _home()
     if home is None or not work_store.exists(home):
         return
-    # Ask me first's asks still waiting for the owner are watched again whatever the policy, since they need no
-    # workstreams. Run work's asks wait for the sweep's replay, once the session host can start what a yes asks.
-    try:
-        if any(row["kind"] == "share_ask" for row in work_store.Store(home).outbox_pending()):
-            _watch_asks(home)
-    except Exception:  # noqa: BLE001 — the sweep's replay arms it where workstreams are on
-        logger.debug("conduit_push: couldn't read the room asks at load", exc_info=True)
     # Now, before a client can reopen a chat: Hermes re-runs a crash-killed
     # turn on its resume, which could come before the sweep below. Whatever
     # the policy: turning workstreams off doesn't stop one that's running.
@@ -3039,6 +3032,14 @@ def start_recovery(home: Optional[Path] = None) -> None:
         if not _watch_shutdown():
             logger.warning("conduit_push: Hermes' turn stopper wasn't found, so a workstream a clean restart "
                            "stops is left interrupted rather than recovered")
+        # A room's asks still waiting for the owner are watched again whatever the policy (Ask me first needs no
+        # workstreams, and a Run work ask kept before they were turned off still hears its answer), once the
+        # session host is up, so a yes can start what it asks.
+        try:
+            if any(row["kind"] in ("room_ask", "share_ask") for row in work_store.Store(home).outbox_pending()):
+                _watch_asks(home)
+        except Exception:  # noqa: BLE001 — the sweep's replay arms it where workstreams are on
+            logger.debug("conduit_push: couldn't read the room asks at load", exc_info=True)
         if policy(home) == "off":
             return
         try:
