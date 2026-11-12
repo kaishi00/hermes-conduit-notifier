@@ -25,6 +25,7 @@ answered.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -187,7 +188,8 @@ _ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL 
                   ("host", "TEXT NOT NULL DEFAULT ''"))
 # The same for the outbox: when a send showed in its target's saved messages,
 # and whether a turn the Bot Chat started itself sent it (work_coord).
-_ADDED_OUTBOX_COLUMNS = (("delivered_at", "REAL NOT NULL DEFAULT 0"), ("own", "INTEGER NOT NULL DEFAULT 0"))
+_ADDED_OUTBOX_COLUMNS = (("delivered_at", "REAL NOT NULL DEFAULT 0"), ("own", "INTEGER NOT NULL DEFAULT 0"),
+                         ("host", "TEXT NOT NULL DEFAULT ''"))
 # A question about several workstreams names the rest in ``also`` (space
 # apart), ``ref`` keeping the first for older apps; ``new`` is what a
 # question asked again after a decline says came up since (Eric 2026-11-10).
@@ -240,9 +242,9 @@ class Work:
     # The user set it to Leave alone (0: not): the Bot Chat sends it nothing
     # and doesn't stop it in a turn the user didn't start.
     left_alone_at: float = 0.0
-    # The Hermes process that last started or sent it a turn ("pid:start
-    # time", work_tool._host_stamp): only that process, or one after it, may
-    # take it for stopped by a restart (notifier#744). Empty: not known.
+    # The Hermes process that ran its latest turn ("pid:start time",
+    # host_stamp): only that process, or one after it, may take it for
+    # stopped by a restart (notifier#744). Empty: not known.
     host: str = ""
 
     @property
@@ -707,11 +709,13 @@ class Store:
     def outbox_add(self, ref: str, kind: str, target: str, text: str, own: bool = False) -> str:
         """Written before Hermes is asked, so a send a restart cut off can be
         found and checked against the target's transcript. ``own``: sent
-        from a turn the Bot Chat started itself."""
+        from a turn the Bot Chat started itself. Its ``host`` is the process
+        writing it, which settles it while it runs (notifier#744)."""
         item = f"out-{uuid.uuid4().hex[:16]}"
         with self._db() as con:
-            con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at, own) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (item, ref, kind, target, text, time.time(), 1 if own else 0))
+            con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at, own, host) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (item, ref, kind, target, text, time.time(), 1 if own else 0,
+                                                            host_stamp()))
         return item
 
     def outbox_delivered(self, item: str) -> None:
@@ -888,6 +892,19 @@ class Store:
         with self._db(write=False) as con:
             rows = con.execute("SELECT * FROM outbox WHERE accepted_at = 0 AND outcome = '' ORDER BY created_at").fetchall()
         return [dict(row) for row in rows]
+
+
+def host_stamp() -> str:
+    """This Hermes process, as a workstream's or a pending send's host:
+    "pid:start time", the start time (psutil's, as Hermes' own session
+    leases pair it) telling a reused pid apart; "pid:" when it can't be read."""
+    try:
+        import psutil  # a Hermes dependency
+
+        started = f"{float(psutil.Process(os.getpid()).create_time()):.3f}"
+    except Exception:  # noqa: BLE001 — the pid alone still names the process
+        started = ""
+    return f"{os.getpid()}:{started}"
 
 
 def _add_columns(con: sqlite3.Connection) -> None:

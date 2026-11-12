@@ -3077,11 +3077,16 @@ def test_a_restart_elsewhere_leaves_work_another_live_process_runs(on, hermes, m
     there left the gateway holding the session, and every work_send after
     that came back open_elsewhere."""
     start()
-    work.turn_started(WORKER_1)
-    lost = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nAlso check the logs.")
-    assert on.get("W1").host == work._host_stamp()  # the process that started it
     other = os.getppid()  # a live process that isn't this one, as the dashboard is to the gateway
     on.update("W1", host=f"{other}:")
+    work.turn_started(WORKER_1)
+    assert on.get("W1").host == work._host_stamp()  # the process running its turn, wherever it began
+    on.update("W1", host=f"{other}:")
+    # A send that process wrote and hasn't settled yet.
+    lost = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nAlso check the logs.")
+    assert {row["id"]: row["host"] for row in on.outbox_pending()}[lost] == work._host_stamp()
+    with on._db() as con:
+        con.execute("UPDATE outbox SET host = ? WHERE id = ?", (f"{other}:", lost))
     restart(hermes, monkeypatch)
     call("work_list")
     assert on.get("W1").status == "running" and submitted_to(hermes, WORKER_1) == []

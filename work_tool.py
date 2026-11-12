@@ -466,21 +466,11 @@ _sweeping: set[str] = set()
 _PROCESS_STARTED = time.time()
 
 
-def _host_stamp() -> str:
-    """This process as a workstream's host: "pid:start time", the start time
-    (psutil's, as Hermes' own session leases pair it) telling a reused pid
-    apart; "pid:" when it can't be read."""
-    try:
-        import psutil  # a Hermes dependency
-
-        started = f"{float(psutil.Process(os.getpid()).create_time()):.3f}"
-    except Exception:  # noqa: BLE001 — the pid alone still names the process
-        started = ""
-    return f"{os.getpid()}:{started}"
+_host_stamp = work_store.host_stamp
 
 
 def _hosted_elsewhere(host: Any) -> bool:
-    """Whether a workstream's host (``_host_stamp``) is another Hermes process
+    """Whether a workstream's or a pending send's host (``_host_stamp``) is another Hermes process
     that's still running: the dashboard, while a gateway or a TUI on the same
     home restarts. That process runs the work, so a restart elsewhere never
     takes it for stopped, continues it or resends to it (notifier#744). A host
@@ -2028,7 +2018,6 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
     try:
         _worktree_back(store, work.ref)
         yolo = _yolo(home, store, work.ref)
-        store.update(work.ref, host=_host_stamp())
         outcome, tip = broker.send(work.session_id, words, how, yolo=yolo)
         _yolo_sent(store, work.ref, yolo)
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
@@ -2712,7 +2701,6 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
             store.set_meta(_CONTINUED + ref, str(time.time()))
             _worktree_back(store, ref)
             yolo = _yolo(home, store, ref)
-            store.update(ref, host=_host_stamp())
             outcome, tip = broker.send(work.session_id, text, "after", yolo=yolo)
             _yolo_sent(store, ref, yolo)
         except Exception as error:  # noqa: BLE001 — it stays interrupted, for the user to continue
@@ -2864,9 +2852,8 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         elif row["kind"] != "line_linked":
             _watch_asks(home)
         return
-    hosted = store.get(row["ref"]) if row.get("ref") else None
-    if hosted is not None and _hosted_elsewhere(hosted.host):
-        return  # the process running that workstream is still up: its sends are its own (notifier#744)
+    if _hosted_elsewhere(row.get("host")):
+        return  # the process that wrote it is still up and settles it itself (notifier#744)
     if row["created_at"] < oldest:
         store.outbox_done(row["id"], "expired")
         return
@@ -2942,7 +2929,6 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
             try:
                 _worktree_back(store, work.ref)
                 yolo = _yolo(home, store, work.ref)
-                store.update(work.ref, host=_host_stamp())
                 outcome, _ = broker.send(work.session_id, row["text"], "after", yolo=yolo)
                 _yolo_sent(store, work.ref, yolo)
             except Exception:  # noqa: BLE001 — handed back below
@@ -3913,7 +3899,9 @@ def _turn_started(session_id: Any) -> bool:
     # (stop() clears only memory) is over once a turn starts.
     _keep_held(home, work.ref, None)
     # On disk too: after a restart, the steps since then are the turn it stopped.
-    work_store.Store(home).update(work.ref, turn_at=began)
+    # Its host is the process running this turn, wherever it was started or
+    # sent from, so only a restart of this one takes it for stopped (notifier#744).
+    work_store.Store(home).update(work.ref, turn_at=began, host=_host_stamp())
     if work_store.Store(home).get_meta(_CHECK + work.ref):
         work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
