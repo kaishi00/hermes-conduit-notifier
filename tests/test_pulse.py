@@ -3386,7 +3386,8 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
         due="2026-10-21", due_at=DAY + 86400, message_id=5, mentioned_at=DAY + 60)])
     assert run() == 0
     out = capsys.readouterr().out
-    said = time.strftime("%d %b", time.localtime(DAY))  # the host's day, as Pulse shows it (#322)
+    zone = pulse.report_zone(remembering.store, remembering.store.path.parent)
+    said = datetime.fromtimestamp(DAY, zone).strftime("%d %b")  # in the zone the command uses (#322)
     assert f"Promise (1)\n  #1 Hermes will check the build. (due 2026-10-21)\n      \"I'll check the build\" ({said})" in out
     assert run("fact") == 0 and "hasn't kept" in capsys.readouterr().out
     monkeypatch.setattr(cli, "MEMORY_LIST", 0)
