@@ -6172,6 +6172,12 @@ def test_an_answer_late_in_the_asks_life_is_still_tried_again_for_its_day(on, he
     # Kept a day before the answer came (an ask answered near the end of its life).
     with on._db() as con:
         con.execute("UPDATE outbox SET created_at = ? WHERE kind = 'share_ask'", (time.time() - work.LINKED_KEEP_S - 60,))
+    # A restart keeps it too: its age alone doesn't expire it.
+    watched = []
+    monkeypatch.setattr(work, "_watch_asks", lambda home: watched.append(home))
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    assert watched and [row["kind"] for row in on.outbox_pending() if row["kind"] == "share_ask"] == ["share_ask"]
     ask_first["refuse"].add("room-1@default")
     assert work.check_asks(on.home) is True, "its day counts from the answer, not from when the ask was kept"
     assert [row["kind"] for row in on.outbox_pending() if row["kind"] == "share_ask"] == ["share_ask"]

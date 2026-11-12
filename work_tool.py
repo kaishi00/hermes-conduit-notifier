@@ -2792,8 +2792,9 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
     if row["created_at"] >= _PROCESS_STARTED:
         return  # this process's own, still under way
     if row["kind"] in ("line_linked", "room_ask", "share_ask"):
-        # A Linked Room's private line waits for the bot's next turn there; an ask for the owner's answer.
-        if row["created_at"] < time.time() - LINKED_KEEP_S:
+        # A Linked Room's private line waits for the bot's next turn there; an ask for the owner's answer. A share
+        # ask's day counts from the answer, so _share_answered settles it, not its age here.
+        if row["kind"] != "share_ask" and row["created_at"] < time.time() - LINKED_KEEP_S:
             store.outbox_done(row["id"], "expired")
         elif row["kind"] != "line_linked":
             _watch_asks(home)
