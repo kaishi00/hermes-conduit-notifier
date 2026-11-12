@@ -797,6 +797,8 @@ def test_routes_say_why_they_refuse(tree, client):
     assert pasted["entry"]["name"] == "notes.txt" and (tree / "docs" / "notes.txt").exists()
     assert client.post(f"{BASE}/workspace/duplicate", json={"root": root, "path": str(tree / "notes.txt"),
                                                             "to": ""}).status_code == 400
+    mistyped = client.post(f"{BASE}/workspace/duplicate", json={"root": root, "path": str(tree / "notes.txt"), "to": 42})
+    assert mistyped.status_code == 400 and mistyped.json()["detail"] == "to must be a folder's path"
     bad = client.post(f"{BASE}/workspace/upload", json={"root": root, "path": root, "name": "x", "data": "%%%"})
     assert bad.status_code == 400
     stale = client.post(f"{BASE}/workspace/save", json={"root": root, "path": str(tree / "notes.txt"),

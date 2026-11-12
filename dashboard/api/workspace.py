@@ -511,7 +511,10 @@ async def post_workspace(action: str, request: Request, response: Response,
     elif action == "duplicate":
         path = _workspace_text(body, "path")
         # Paste: a copy in another folder (capability workspace-copy).
-        to = _workspace_text(body, "to") if body.get("to") is not None else None
+        to = body.get("to")
+        if to is not None and not isinstance(to, str):
+            raise HTTPException(status_code=400, detail="to must be a folder's path", headers=no_store)
+        to = _workspace_text(body, "to") if to is not None else None
         op = lambda ws: ws.duplicate(root, path, to)
     elif action == "delete":
         path = _workspace_text(body, "path")
