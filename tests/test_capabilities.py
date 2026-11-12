@@ -219,3 +219,18 @@ def test_a_managed_host_says_so(monkeypatch):
 def test_a_control_character_never_reaches_the_phone(monkeypatch):
     monkeypatch.setenv("CONDUIT_PUSH_MANAGED", "Farm\x07\x1b[31m")
     assert _client().get(f"{BASE}/capabilities").json()["managed_by"] == "Farm[31m"
+
+
+def test_a_host_that_keeps_disbanded_rooms_chats_says_so(monkeypatch):
+    # cleanup_disbanded_rooms: off (room_settings, notifier #443), so Disband's warning doesn't say they go.
+    settings = api.core._plugin_package_module("room_settings")
+    monkeypatch.setattr(settings, "cleanup_disbanded", lambda home=None: "off")
+    assert _client().get(f"{BASE}/capabilities").json()["room_chats_kept"] is True
+    monkeypatch.setattr(settings, "cleanup_disbanded", lambda home=None: "delete")
+    assert "room_chats_kept" not in _client().get(f"{BASE}/capabilities").json()
+
+    def broken(home=None):
+        raise OSError("config.yaml unreadable")
+
+    monkeypatch.setattr(settings, "cleanup_disbanded", broken)
+    assert "room_chats_kept" not in _client().get(f"{BASE}/capabilities").json()

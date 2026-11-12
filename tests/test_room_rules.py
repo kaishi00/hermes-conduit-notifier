@@ -1212,3 +1212,37 @@ def test_a_hosted_rooms_name_titles_its_pushes(tmp_path):
     legacy.commit()
     legacy.close()
     assert rules.room_name("room-b", home) == ""
+
+
+# --- A host that keeps the plugin to Conduit's rooms (notifier #443) ----------
+
+
+def _conduit_rooms_only(home, value):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(
+        "plugins:\n  entries:\n    conduit_push:\n      settings:\n"
+        f"        conduit_rooms_only: {'true' if value else 'false'}\n", encoding="utf-8")
+    _load("conduit_push.room_settings", ROOT / "room_settings.py")._clear()
+
+
+def test_conduit_rooms_only_leaves_other_rooms_turns_as_hermes_runs_them(tmp_path):
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "desktop-room", [FURINA, LAIFU])
+    _room(home / "state.db", "conduit-0f8e", [FURINA, LAIFU])
+    _room_session(home, "s-desktop", "desktop-room")
+    _room_session(home, "s-conduit", "conduit-0f8e")
+    _room_session(home, REMOTE, "theirs")
+    assert rules.room_turn("s-desktop", home).with_others  # remembered before the setting changes
+
+    _conduit_rooms_only(home, True)
+
+    assert rules.room_turn("s-desktop", home) is None
+    assert rules.room_turn(REMOTE, home) is None
+    assert rules.room_turn("s-conduit", home) == rules.RoomTurn(
+        room_id="conduit-0f8e", side="home", with_others=True, session_id="s-conduit", others=("laifu",))
+    # A remote room's session not named yet still gets the rules.
+    other = "room_" + "fedcba9876543210" * 2
+    assert rules.room_turn(other, home).with_others
+
+    _conduit_rooms_only(home, False)
+    assert rules.room_turn("s-desktop", home).with_others

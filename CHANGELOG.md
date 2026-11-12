@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.165.0 (2026-11-12)
+
+### New and improved
+- Two settings for a Hermes that others use group rooms on too, in Hermes'
+  Plugins page or the root profile's config.yaml. Disbanded rooms' hidden
+  chats (delete or off) lets a disbanded room's sessions stay, and Only
+  Conduit's rooms keeps the plugin's room rules, memory guard and cleanup to
+  the rooms Conduit made. Both start as before.
+
 ## 0.164.11 (2026-11-12)
 
 ### Fixes

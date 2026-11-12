@@ -2155,7 +2155,9 @@ section) where they're blocked. If Hermes' memory manager lacks one of the
 methods the plugin guards, the plugin guards the rest and logs a warning
 naming what's missing. If Hermes' session store (`state.db`) can't be read
 when the plugin needs it to tell whether a session is a room, the plugin logs
-a warning and treats that session as an ordinary chat.
+a warning and treats that session as an ordinary chat. A host set to
+`conduit_rooms_only` (Room settings for a shared Hermes, below) guards only
+the rooms Conduit made.
 
 ## Pulse and memory providers (plugin 0.147.1+)
 
@@ -4002,7 +4004,9 @@ hosted elsewhere runs in `room_<digest>`, and a local member runs in a hidden
 (this profile's `state.db`, the root's, the legacy `shared-state.db` or another
 profile's), seats a peer member. A compaction's continuation keeps its room
 (Hermes moves the session's title to it, and the plugin follows it there),
-and so does a helper agent the room's session delegated to.
+and so does a helper agent the room's session delegated to. On a host set to
+`conduit_rooms_only` (Room settings for a shared Hermes), a room Conduit
+didn't make runs with Hermes' own rules.
 
 Each profile keeps its choices per room in `conduit-rooms.json`, plus defaults
 for rooms with none of their own:
@@ -4148,6 +4152,43 @@ disbanding. In a room with people you've linked (below), their Hermes are
 told it was disbanded and undo their agents' joins (plugin 0.94+), and those
 sessions stay too. A Hermes without `disband_room`, or whose session delete
 can't take a compression chain, logs one line and deletes nothing.
+
+### Room settings for a shared Hermes (plugin 0.165+)
+
+Two settings change what the plugin does to Hermes' group rooms, for a Hermes
+others use rooms on too. Set them in Hermes' Plugins page (Conduit's
+settings), or in the root profile's `config.yaml`; the root's are the ones
+read, since a host's rooms are hosted from there, and a change holds from the
+next room event, without a restart:
+
+```yaml
+plugins:
+  entries:
+    conduit_push:
+      settings:
+        cleanup_disbanded_rooms: delete   # or "off"
+        conduit_rooms_only: false         # or true
+```
+
+- `cleanup_disbanded_rooms`: `delete` (the default) deletes the hidden
+  sessions as above. `off` keeps them, as Hermes alone would; the load sweep
+  deletes nothing either, people linked into a room are still told it ended,
+  and Conduit's Disband warning says the sessions stay (`/capabilities`
+  answers `room_chats_kept: true`). `rooms forget` still deletes what you ask
+  it to.
+- `conduit_rooms_only`: `false` (the default) applies the plugin's room changes
+  to every gateway-hosted room on this host. `true` keeps them to rooms Conduit
+  made, whose ids start `conduit-` (Conduit's create sheet and Linked Rooms'
+  drafts both name them so): the memory guard (Group rooms and memory), the
+  owner rules for rooms with other people's agents, and the disband cleanup.
+  Another room's turns reach the memory provider and run with Hermes' own
+  rules, and its sessions stay when it's disbanded. A room whose id the plugin
+  can't read yet is treated as Conduit's. The planner's fill-in, the driver's
+  wakeups (Group rooms between turns) and a cut-off member's single failed turn
+  stay on for every room: they only keep Hermes' room driver from getting
+  stuck.
+
+A value it can't read is the default, with one warning in the log.
 
 Your agent's hidden session for a room hosted elsewhere stays until you
 delete it:

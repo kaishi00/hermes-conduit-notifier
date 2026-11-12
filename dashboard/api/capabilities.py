@@ -372,4 +372,16 @@ async def get_capabilities(response: Response) -> Dict[str, Any]:
         body["managed"] = True
         if managed:
             body["managed_by"] = managed
+    if _room_chats_kept():
+        body["room_chats_kept"] = True
     return body
+
+
+def _room_chats_kept() -> bool:
+    """Whether this host keeps a disbanded room's hidden chats
+    (cleanup_disbanded_rooms: off, room_settings), so Disband's warning
+    doesn't say they're deleted. No when that can't be read."""
+    try:
+        return core._plugin_package_module("room_settings").cleanup_disbanded() == "off"
+    except Exception:  # noqa: BLE001 - the warning Conduit shows by default
+        return False

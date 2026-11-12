@@ -249,7 +249,9 @@ def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
     a room store that can't be read, or a room session not titled with its
     room yet, RoomStoreError. A room with other people's agents is remembered
     per session; a room without them is read again each time (an agent from
-    elsewhere may join it), as is one no store has (logged)."""
+    elsewhere may join it), as is one no store has (logged). A room Conduit
+    didn't make on a host that keeps the plugin to Conduit's rooms
+    (room_settings.conduit_rooms_only) runs as Hermes alone would: None."""
     value = str(session_id or "")
     if not value:
         return None
@@ -259,14 +261,27 @@ def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
         known = _remembered.get(key, _MISSING)
         if known is not _MISSING:
             _remembered.move_to_end(key)
-            return known  # type: ignore[return-value]
+            return _in_scope(known, home_path)  # type: ignore[arg-type]
     turn, settled = _find(value, home_path)
     if settled:
         with _lock:
             _remembered[key] = turn
             while len(_remembered) > MAX_REMEMBERED:
                 _remembered.popitem(last=False)
-    return turn
+    return _in_scope(turn, home_path)
+
+
+def _in_scope(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn]:
+    """The turn, unless the host keeps the plugin to Conduit's rooms and
+    this room isn't one (read each time, so a change to the setting holds
+    from the next call)."""
+    if turn is None or not turn.room_id:
+        return turn
+    try:
+        from . import room_settings
+    except ImportError:  # loaded on its own (tests): every room is in scope
+        return turn
+    return turn if room_settings.applies(turn.room_id, home) else None
 
 
 def choices_for(turn: RoomTurn, home: Any) -> RoomChoices:
