@@ -3697,6 +3697,17 @@ def test_lines_of_a_wake_hermes_rejected_arent_marked_delivered(on, hermes, monk
     assert outcomes["line"] == "refused" and outcomes["wake"] == "rejected" and rows == []
 
 
+def test_a_wake_the_gateway_started_at_once_counts_as_delivered(on, hermes, monkeypatch):
+    # The gateway's session authority answers "started" for a turn it runs now.
+    monkeypatch.setattr(work.work_broker.Broker, "wake", lambda self, coordinator, text: "started")
+    work._queue_wake(on.path.parent.parent, BOT_CHAT, "- W9 finished.")
+    work.flush_wakes()
+    with on._db() as con:
+        rows = {row["kind"]: (row["outcome"], row["accepted_at"])
+                for row in con.execute("SELECT kind, outcome, accepted_at FROM outbox")}
+    assert rows["line"][0] == "queued" and rows["wake"][0] == "queued" and rows["wake"][1]
+
+
 def test_update_lines_a_restart_caught_in_the_batch_go_out_again(on, hermes, monkeypatch):
     item = on.outbox_add("", "line", BOT_CHAT, "- W9 “Old job” finished. In short: all good.")
     restart(hermes, monkeypatch)

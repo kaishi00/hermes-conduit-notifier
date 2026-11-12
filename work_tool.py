@@ -710,7 +710,8 @@ def _titled_bot_chat(session_id: Any, home: Optional[Path] = None) -> Optional[b
 
 def _pending_title(session_id: str, home: Path) -> str:
     api = work_broker.server()
-    if api is None:
+    if api is None or work_broker.on_authority(api):
+        # The authority keeps no pending title on a record of its own.
         return ""
     try:
         found = work_broker.Broker(home, api).live(session_id)
@@ -5650,7 +5651,7 @@ def _send_wake(home: Path, coordinator: str) -> None:
         if asks:
             work_coord.ask_wake_sent(store, item)
         status = work_broker.Broker(home).wake(coordinator, text)
-        outcome = "queued" if status in ("queued", "streaming") else status or "accepted"
+        outcome = "queued" if status in ("queued", "streaming", "started") else status or "accepted"
         store.outbox_done(item, outcome)
         for line_item in items:
             # As the wake went: a line it never delivered isn't marked delivered.

@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.167.2 (2026-11-12)
+
+### Fixes
+- On a Hermes where the gateway serves Conduit's connection (one gateway for
+  every profile), tapping a workstream (W1, W2) showed "Failed to restore
+  this conversation: Hermes refused session.resume
+  (runtime_coordination_required)" instead of its chat. Workstreams now run
+  on the gateway like your other chats, so they open while they work.
+
 ## 0.167.1 (2026-11-12)
 
 ### Fixes

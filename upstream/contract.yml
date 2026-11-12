@@ -140,6 +140,10 @@ notes:
     _methods with nothing bound for a session another client holds and for the hidden queued
     work-update turn, and _sessions (session_key, profile_home, running, pending_title) to find
     live sessions. upstream/test_bot_work.py runs it on the launch profile and a secondary one.
+    Where the gateway's own listener serves, it runs them on the session authority instead
+    (gateway_chats.session_api(), naming the bot's profile on every request, with liveness and
+    approvals read from resume snapshots and the authority's started counted as running), never
+    on the TUI registry a socket loads there; upstream/test_gateway_listener.py runs that leg.
     After a restart, tui_gateway.turn_marker (read_turn_marker, marker_writer_state,
     clear_turn_marker) retires Hermes' own re-run of a crash-killed workstream turn, so recovery
     decides from the journal instead; without it a cut-off step could run twice. The turn stopper

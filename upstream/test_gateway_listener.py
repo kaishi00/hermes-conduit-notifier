@@ -49,6 +49,8 @@ from conftest import COPY_IGNORE, PLUGIN, READY_TIMEOUT_S, ROOT, FakeSpeechServe
 WORDS = 10
 WORD_DELAY_S = 0.4
 DRIVER = "conduit_listener_driver"
+# A second profile the gateway serves next to the launch one (multiplexed).
+SIBLING = "second"
 
 
 class _FakeModel(BaseHTTPRequestHandler):
@@ -341,6 +343,17 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
             "model": {"default": "fake-model", "provider": "custom", "switch_context_confirm_tokens": 1,
                       "base_url": f"http://127.0.0.1:{model.server_address[1]}/v1", "api_key": "fake"},
         }))
+        # A second profile, so the gateway serves both (multiplex_profiles) and a
+        # request finds the sibling's chats only by the profile it names.
+        subprocess.run([hermes, "profile", "create", SIBLING], env=env, check=True, capture_output=True,
+                       timeout=180)
+        sibling = home / "profiles" / SIBLING
+        sibling_config = yaml.safe_load((sibling / "config.yaml").read_text()) if (sibling / "config.yaml").exists() else {}
+        launch_config = yaml.safe_load((home / "config.yaml").read_text())
+        (sibling / "config.yaml").write_text(yaml.safe_dump({
+            **(sibling_config or {}), "model": launch_config["model"], "plugins": {"enabled": [PLUGIN]}}))
+        (sibling / "plugins").mkdir(exist_ok=True)
+        (sibling / "plugins" / PLUGIN).symlink_to(home / "plugins" / PLUGIN, target_is_directory=True)
         proc = subprocess.Popen([hermes, "gateway", "run"], env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         deadline = time.monotonic() + READY_TIMEOUT_S
@@ -653,6 +666,47 @@ def test_watch_jobs_session_api_runs_its_chats_on_the_authority(listener):
         full = await sock.result("session.resume", _resume(out["session_id"], omit_messages=False))
         return [m.get("text") or m.get("content") for m in full["messages"] if m.get("role") == "user"]
     assert "RUN the job" in listener.run(script)
+
+
+@pytest.mark.parametrize("profile", ["", SIBLING])
+def test_a_workstream_runs_on_the_authority_so_the_phone_opens_it(listener, profile):
+    """A bot's workstream is one of the authority's chats, on the launch
+    profile or a sibling one: the broker starts, reads, answers, sends to and
+    stops it there, and the phone opens it. Run in the TUI gateway a gateway
+    process also loads, it held the chat, and the phone's resume was refused
+    (runtime_coordination_required)."""
+    async def connect(sock: ConduitSocket) -> None:
+        # A socket loads the TUI gateway's module into the gateway process,
+        # where the broker used to find it.
+        await sock.result("session.list", {"limit": 1})
+    listener.run(connect)
+    status, out = listener.plugin_call(f"work-run?bot={profile}", plugin=DRIVER, timeout=240)
+    assert status == 200, out
+    assert out["api"] == "_AuthorityChats", out
+    assert out["live_ids"] is True, out
+    assert out["approvals"][0]["command"], out
+    assert out["answered"] is True, out
+    assert out["idle_stop"] is False, out
+    assert out["sent"][0] in ("started", "queued") and out["sent"][1] == out["session_id"], out
+    assert out["stopped"] is True, out
+    assert out["woke"] in ("queued", "started", "streaming"), out
+    assert out["bypass_on"] == {"key": "yolo", "value": "1", "scope": "session"}, out
+    assert out["bypass_off"] is True, out
+    # The chosen folder and model reach the authority's session.
+    assert out["stored"] and out["stored"]["cwd"] == out["folder"], out
+    assert out["stored"]["model"] == "fake-model", out
+
+    async def script(sock: ConduitSocket) -> Dict[str, Any]:
+        # Conduit names the bot's profile on every request (#2262).
+        params = {**_resume(out["session_id"], omit_messages=False), **({"profile": profile} if profile else {})}
+        frame = await sock.call("session.resume", params)
+        assert "error" not in frame, frame["error"]
+        return frame["result"]
+    opened = listener.run(script)
+    assert opened["session_id"] == out["session_id"], opened
+    users = [str(m.get("text") or m.get("content") or "") for m in opened["messages"] if m.get("role") == "user"]
+    assert any("Brief: RUN the job" in text for text in users), users
+    assert any("a long follow up" in text for text in users), users
 
 
 def test_a_watch_calls_local_live_chat_runs_on_the_authority(listener):

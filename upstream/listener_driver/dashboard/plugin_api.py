@@ -131,6 +131,70 @@ def _watch_call_turn() -> Dict[str, Any]:
     return {"status": status, "finished": finished, "kinds": sorted(set(kinds)), "session_id": sid}
 
 
+def _work_run(profile: str) -> Dict[str, Any]:
+    """A bot's workstream as work_tool drives one (work_broker.Broker), on
+    ``profile`` ("" for the launch profile): started with a turn that waits on
+    an approval, the approval read and denied, a message sent after the turn,
+    the next turn stopped, a hidden wake sent in. Its chat is left open."""
+    work_broker = _conduit(".work_broker", "Broker")
+    from hermes_constants import get_hermes_home
+
+    home = get_hermes_home() / "profiles" / profile if profile else get_hermes_home()
+    broker = work_broker.Broker(home)
+    out: Dict[str, Any] = {"api": type(broker.api).__name__}
+    # The settings work_tool passes: a worktree's folder, the bot's workstream
+    # model, and Don't Ask's session-only approval bypass (turned off below).
+    folder = home / "work-contract"
+    folder.mkdir(parents=True, exist_ok=True)
+    started = broker.start(title="W1 contract", prompt="Brief: RUN the job",
+                           idempotency_key=f"contract-{time.time_ns()}", cwd=str(folder), yolo=False,
+                           model={"model": "fake-model", "provider": "custom"})
+    sid = out["session_id"] = started.session_id
+    out["folder"] = str(folder)
+
+    def until(what: str, check: Any) -> Any:
+        deadline = time.monotonic() + WAIT_S
+        while True:
+            found = check()
+            if found:
+                return found
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{what} never happened")
+            time.sleep(0.5)
+
+    out["live_ids"] = sid in broker.live_session_ids()
+    asked = until("the approval", lambda: broker.approvals(sid))
+    out["approvals"] = asked
+    out["answered"] = broker.answer_approval(sid, asked[0]["request_id"], "deny")
+    until("the turn's end", lambda: not broker.live(sid)[1]["running"])
+    out["idle_stop"] = broker.stop(sid)
+    out["sent"] = broker.send(sid, "a long follow up", "after")
+    until("the next turn", lambda: broker.live(sid)[1]["running"])
+    out["stopped"] = broker.stop(sid)
+    until("the stop", lambda: not broker.live(sid)[1]["running"])
+    out["woke"] = broker.wake(sid, "WAKE a work update")
+    # Don't Ask on and off again between turns: Hermes takes both.
+    answers: List[Dict[str, Any]] = []
+
+    def kept(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        answers.append(broker._dispatch(method, params))
+        return answers[-1]
+
+    broker._set_yolo(sid, True, kept)  # a refusal here is only logged, so its answer is checked
+    out["bypass_on"] = answers[-1] if answers else None
+    broker.end_bypass(sid)
+    out["bypass_off"] = True
+    import sqlite3
+
+    db = sqlite3.connect(home / "state.db")
+    try:
+        row = db.execute("SELECT cwd, model FROM sessions WHERE id = ?", (sid,)).fetchone()
+    finally:
+        db.close()
+    out["stored"] = {"cwd": row[0], "model": row[1]} if row else None
+    return out
+
+
 def _pulse_send(chat_id: str) -> Dict[str, Any]:
     pulse_host = _conduit("pulse_host", "_send_on_authority")
     sent = pulse_host.send(chat_id, "PULSE check in", model={"provider": "custom", "model": "fake-model-2"})
@@ -150,6 +214,11 @@ async def session_api_start() -> Dict[str, Any]:
 @router.get("/watch-call-turn")
 async def watch_call_turn() -> Dict[str, Any]:
     return await asyncio.to_thread(_watch_call_turn)
+
+
+@router.get("/work-run")
+async def work_run(bot: str = "") -> Dict[str, Any]:
+    return await asyncio.to_thread(_work_run, bot)
 
 
 @router.get("/pulse-send")
