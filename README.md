@@ -2130,7 +2130,7 @@ In a room with other people's agents, every rule tier may call
 `vision_analyze` on a picture sent into the room, by its room-files path.
 Hermes' peer route carries no attachments, so a turn whose messages name
 pictures (up to the newest 4) is told their paths and to look at them with
-`vision_analyze` before answering about them (plugin 0.166.1+); Conduit
+`vision_analyze` before answering about them (plugin 0.167.3+); Conduit
 sends at most 16 MB a file into such a room, what reaches the others.
 
 ## Group pictures (plugin 0.41+)
@@ -3351,6 +3351,30 @@ whether notes and attendees are included (off by default).
   what it reads; subagents can't use them. Reads say how fresh the copy is
   ("as of" the last sync). What they return goes to your agent's model like
   any tool result, which Conduit tells the user before they turn sharing on.
+- **A fresh reading (plugin 0.167+).** `conduit_phone` `status` with
+  `fresh: true` wakes the phone with the same silent `phone.changes` push
+  an add made without asking sends, and waits up to 15 seconds for it.
+  Conduit sends its status on every such wake (an older Conduit only when
+  it changed, which the answer reads from the phone checking in). The
+  answer's `fresh` says whether a new reading came, the phone's status
+  hadn't changed, or it didn't answer in time, and `fresh_result` says the
+  same as `new_reading`, `unchanged`, `no_answer`, `not_shared` (the phone
+  doesn't share its status) or `not_asked` (not paired, the relay held the
+  wake back or couldn't be reached, or a wake less than a minute ago: one a
+  minute per profile, since wakes share the relay's hourly allowance; a
+  wake that didn't go doesn't count);
+  the rest is the usual status. iOS may hold a background wake back, so the tool says so rather
+  than guess.
+- **With each message (plugin 0.167+).** When the user turns on "With each
+  message" under Focus and phone status (`sharing.turn_status`, capability
+  `phone-turn-status`; only with the status or Focus shared), a turn whose
+  message Conduit sent (see [Where in Conduit a message was sent](#where-in-conduit-a-message-was-sent-plugin-051))
+  gets a second line after the surface line, for example
+  `[Conduit: the user's device "Eric's iPhone" as they sent this: 18% battery, Low Power Mode on, connected to CarPlay, Work Focus on. …]`
+  (the device as the user named it, since it may be an iPad).
+  It names only what's shared and only readings from the last 30 minutes,
+  and says how old they are past two minutes. Turns from other clients,
+  rooms with other people's agents and subagents never get it.
 
 - **Alarms and timers (plugin 0.30+).** When the user lets Hermes set them
   (AlarmKit, iOS 26), `conduit_phone` gains `alarms` (the alarms and timers
@@ -4312,7 +4336,7 @@ capability, with no `?profile=` (Links are the installation's):
   "reading"}}`, statuses `waiting`, `linked` or `unanswered`, and `reading`
   false while nothing on this Hermes reads the mailbox. Each Link also has
   `plugin`, the other side's plugin version (null until it says, and from
-  plugins before 0.166.2), and `behind`: `theirs` when their plugin takes
+  plugins before 0.167.4), and `behind`: `theirs` when their plugin takes
   fewer kinds of envelope than this one's rooms send, `yours` when theirs sent
   one this plugin doesn't take (for the 7 days the mailbox holds it), or null.
   `kinds` lists the envelope kinds their plugin takes (null until it says).
@@ -4686,7 +4710,7 @@ installation's):
   `disbanded`). `profiles` are each of this Hermes' profiles with its choices
   for the room. `just_me` is true once you joined with no agents, and
   `just_me_offered` whether their plugin takes that and the room could
-  start that way (0.166.3+).
+  start that way (0.167.5+).
 - `POST /rooms/invites/answer` with `{"link", "room_id", "agents": [...]}`:
   `{"invite": ...}`. No agents declines, and the same answer again is the
   first. With `"just_me": true` and no agents, you join with none of your

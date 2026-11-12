@@ -550,3 +550,122 @@ def test_a_queue_read_hermes_refuses_is_read_again_at_the_next_send(gateway):
     _call(chats, transport, "prompt.submit", {"session_id": "lost-5", "text": "again"})
     assert [r["method"] for r in connections[0].requests] == [
         "session.resume", "prompt.submit", "session.resume", "prompt.submit"]
+
+
+def test_a_sibling_profiles_chat_is_read_and_answered_by_its_profile(gateway):
+    """On a gateway serving several profiles the authority finds a sibling's
+    chat only by the profile a request names, so the link's own reads (its
+    fences, its queue, its detach, an answer it builds) name it too."""
+    chats, answers, connections = gateway
+    answers["session.create"] = {"result": {"session_id": "w1", "subscription_id": "sub"}}
+    answers["session.resume"] = {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub",
+                                            "prompts": [{"kind": "approval", "prompt_id": "p9",
+                                                         "execution_generation": 5, "command": "rm x"},
+                                                        {"kind": "clarify", "prompt_id": "c1",
+                                                         "execution_generation": 5}]}}
+    answers["approval.respond"] = {"result": {"status": "resolved"}}
+    transport = Transport()
+    _call(chats, transport, "session.create", {"cols": 96, "source": "desktop", "idempotency_key": "k1",
+                                               "profile": "manager"})
+    # The create's idempotency key is the authority's request id.
+    assert connections[0].requests[0]["params"] == {"source": "gui", "request_id": "k1", "profile": "manager"}
+    # The fence read for an interrupt that names no profile still names the chat's.
+    chats.link(transport).generations.clear()
+    _call(chats, transport, "session.interrupt", {"session_id": "w1"})
+    fence, interrupt = connections[0].requests[-2:]
+    assert fence["method"] == "session.resume" and fence["params"]["profile"] == "manager"
+    # A snapshot's waiting approval is answerable by its id, though the link never saw it asked.
+    answered = _call(chats, transport, "approval.respond", {"session_id": "w1", "choice": "deny", "request_id": "p9"})
+    assert answered["result"] == {"resolved": 1}
+    assert connections[0].requests[-1]["params"] == {"session_id": "w1", "execution_generation": 5,
+                                                     "prompt_id": "p9", "choice": "deny", "profile": "manager"}
+    _call(chats, transport, "session.close", {"session_id": "w1"})
+    assert connections[0].requests[-1]["method"] == "session.detach"
+    assert connections[0].requests[-1]["params"]["profile"] == "manager"
+
+
+class _AuthorityApi:
+    """gateway_chats' session API as work_broker sees it: answers by method."""
+
+    serves_authority = True
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.requests = []
+
+    def dispatch(self, frame, transport, timeout=None):
+        self.requests.append(frame)
+        answer = self.answers.get(frame["method"], {"result": {}})
+        answer = answer(frame) if callable(answer) else answer
+        return {"jsonrpc": "2.0", "id": frame["id"], **answer}
+
+
+def _broker(tmp_path, answers, open_ids, monkeypatch):
+    from conduit_push import work_broker
+
+    monkeypatch.setattr(gateway_chats, "authority_session_ids", lambda home: set(open_ids))
+    api = _AuthorityApi(answers)
+    return work_broker.Broker(tmp_path / "profiles" / "manager", api), api
+
+
+def test_the_work_broker_runs_a_bots_workstreams_on_the_authority_by_its_profile(tmp_path, monkeypatch):
+    """Where the gateway's listener runs, a workstream is the authority's chat
+    (the phone opens it), and every request names the bot's profile."""
+    snapshot = {"result": {"session_id": "w1", "stored_session_id": "w1", "running": True,
+                           "prompts": [{"kind": "approval", "prompt_id": "p1", "execution_generation": 2,
+                                        "command": "ls", "description": "list"}]}}
+    answers = {"session.create": {"result": {"session_id": "w1", "stored_session_id": "w1"}},
+               "prompt.submit": {"result": {"status": "started"}},
+               "session.resume": snapshot,
+               "session.redirect": {"result": {"status": "redirected"}},
+               "approval.respond": {"result": {"resolved": 1}}}
+    broker, api = _broker(tmp_path, answers, {"w1"}, monkeypatch)
+    started = broker.start(title="W1", prompt="brief", idempotency_key="k")
+    assert (started.runtime_id, started.session_id, started.profile) == ("w1", "w1", "manager")
+    assert broker.live_session_ids() == {"w1"}
+    runtime_id, record = broker.live("w1")
+    assert (runtime_id, record["session_key"], record["running"]) == ("w1", "w1", True)
+    assert broker.approvals("w1") == [{"request_id": "p1", "command": "ls", "description": "list"}]
+    assert broker.answer_approval("w1", "p1", "deny") is True
+    # A running turn is redirected; the authority's "started" reads as running now.
+    assert broker.send("w1", "instead", "auto") == ("redirected", "w1")
+    assert broker.send("w1", "later", "after") == ("started", "w1")
+    assert broker.stop("w1") is True
+    assert broker.wake("w1", "update") == "started"
+    assert all(frame["params"].get("profile") == "manager" for frame in api.requests), \
+        [frame for frame in api.requests if frame["params"].get("profile") != "manager"]
+    # A chat the authority doesn't have open isn't live, and nothing is asked.
+    asked = len(api.requests)
+    assert broker.live("w2") is None and broker.approvals("w2") == [] and broker.stop("w2") is False
+    assert len(api.requests) == asked
+
+
+def test_under_the_gateway_workstreams_never_use_the_listeners_tui_registry(monkeypatch):
+    from conduit_push import work_broker
+
+    server = types.SimpleNamespace(dispatch=lambda *a: None, _sessions={}, _methods={})
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=None))
+    assert work_broker.server() is server
+    # The listener runs here: its authority, else nothing.
+    runner = types.SimpleNamespace(session_authority=None)
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=runner))
+    assert work_broker.server() is None
+    runner.session_authority = object()
+    assert work_broker.on_authority(work_broker.server())
+
+
+def test_on_the_authority_the_bypass_is_the_sessions_and_a_timeout_says_it_may_have_gone(tmp_path, monkeypatch):
+    from conduit_push import work_broker
+
+    answers = {"session.resume": {"result": {"session_id": "w1", "running": False}},
+               "config.set": {"result": {"key": "yolo", "value": "0", "scope": "session"}},
+               "prompt.submit": {"error": {"code": -32000, "message": "prompt.submit timed out; it may still have started"}}}
+    broker, api = _broker(tmp_path, answers, {"w1"}, monkeypatch)
+    broker.end_bypass("w1")
+    # A scope there names the profile-wide switch: the session's has none.
+    sent = [frame["params"] for frame in api.requests if frame["method"] == "config.set"]
+    assert sent == [{"session_id": "w1", "key": "yolo", "value": "off", "profile": "manager"}]
+    with pytest.raises(work_broker.BrokerError) as raised:
+        broker.wake("w1", "update")
+    assert raised.value.timed_out is True

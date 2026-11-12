@@ -2175,7 +2175,7 @@ def test_a_link_whose_other_plugin_never_said_says_to_update_theirs_after_a_few_
     _kinds(monkeypatch, "test.echo")
     eric, _, link_id, clock = _clocked_link(home)
     with eric._store.update() as state:
-        state["links"][link_id].pop("peer", None)  # a plugin before 0.166.2 sends no hello
+        state["links"][link_id].pop("peer", None)  # a plugin before 0.167.4 sends no hello
 
     assert eric.get(link_id)["behind"] is None
     clock.now += 601
@@ -2227,17 +2227,17 @@ def test_a_hello_goes_again_when_the_kinds_change_and_after_six_days(home, monke
 
 
 @pytest.mark.parametrize("body", [
-    None, [], {"v": 1, "plugin": "0.166.2"}, {"v": True, "plugin": "0.166.2", "kinds": []},
+    None, [], {"v": 1, "plugin": "0.167.4"}, {"v": True, "plugin": "0.167.4", "kinds": []},
     {"v": 1, "plugin": "latest", "kinds": []}, {"v": 1, "plugin": 166, "kinds": []},
-    {"v": 1, "plugin": "0.166.2", "kinds": "room.out"}, {"v": 1, "plugin": "0.166.2", "kinds": ["Room Out"]},
-    {"v": 1, "plugin": "0.166.2", "kinds": [1]},
-    {"v": 1, "plugin": "0.166.2", "kinds": [f"k{n}" for n in range(links_module.MAX_HELLO_KINDS + 1)]},
-    {"v": 1, "plugin": "0.166.2", "kinds": [], "extra": 1},
+    {"v": 1, "plugin": "0.167.4", "kinds": "room.out"}, {"v": 1, "plugin": "0.167.4", "kinds": ["Room Out"]},
+    {"v": 1, "plugin": "0.167.4", "kinds": [1]},
+    {"v": 1, "plugin": "0.167.4", "kinds": [f"k{n}" for n in range(links_module.MAX_HELLO_KINDS + 1)]},
+    {"v": 1, "plugin": "0.167.4", "kinds": [], "extra": 1},
 ])
 def test_a_hello_that_isnt_one_is_dropped(body):
     assert links_module._peer_from(body) is None
 
 
 def test_a_hello_reads_its_version_and_kinds():
-    assert links_module._peer_from({"v": 1, "plugin": "0.166.2", "kinds": ["room.out", "room.out", "room.page"]}) \
-        == {"plugin": "0.166.2", "kinds": ["room.out", "room.page"]}
+    assert links_module._peer_from({"v": 1, "plugin": "0.167.4", "kinds": ["room.out", "room.out", "room.page"]}) \
+        == {"plugin": "0.167.4", "kinds": ["room.out", "room.page"]}

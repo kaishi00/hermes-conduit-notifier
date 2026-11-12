@@ -164,7 +164,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "profile (without one, all of them)")
     rooms.add_argument("--just-me", action="store_true",
                        help="for join: join with none of your agents, to read the room and post in it (their "
-                            "plugin needs 0.166.3 or later)")
+                            "plugin needs 0.167.5 or later)")
     rooms.add_argument("--member", default="", metavar="@HANDLE",
                        help="for remove: the agent to take out of your room, by its @handle or member id "
                             "(rooms drafts shows them)")

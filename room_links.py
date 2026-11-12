@@ -1287,7 +1287,7 @@ def _shown(link_id: str, link: dict[str, Any], now: int) -> dict[str, Any]:
 def _behind(link: dict[str, Any], now: int) -> Optional[str]:
     """Whose plugin to update for this Link to carry everything: ``theirs``
     when the other side takes fewer kinds than this side said it takes (or
-    never said, before plugin 0.166.2), ``yours`` when it sent a kind this side
+    never said, before plugin 0.167.4), ``yours`` when it sent a kind this side
     doesn't take, None when they match or the Link isn't linked yet. It reads
     what the store keeps, so any process answers it, not only the one whose
     loop registered the handlers."""
