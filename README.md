@@ -4315,6 +4315,7 @@ capability, with no `?profile=` (Links are the installation's):
   plugins before 0.166.2), and `behind`: `theirs` when their plugin takes
   fewer kinds of envelope than this one's rooms send, `yours` when theirs sent
   one this plugin doesn't take (for the 7 days the mailbox holds it), or null.
+  `kinds` lists the envelope kinds their plugin takes (null until it says).
   Each side's plugin sends a `link.hello` with its version and the kinds it
   takes when either changes, and every 6 days.
 - `DELETE /rooms/links?link_id=`: `{"removed": true}`, and `DELETE
@@ -4666,7 +4667,7 @@ installation's):
   [{"link", "name", "status", "agents"}], "cut_off", "left", "removed",
   "members"}`. Its status is `waiting`, `starting`, `started` or `ended`
   (with `reason` `withdrawn`, `lapsed`, `too_few`, `start_failed` or
-  `disbanded`), each person's `waiting`, `joined` or `declined`, and
+  `disbanded`), each person's `waiting`, `joined` or `declined` (with `just_me` true for one who joined with no agents), and
   `cut_off` lists the member ids still in whose route couldn't be saved,
   `left` those that left and `removed` those taken out. `members` is who's in
   a started room, as `GET /rooms/people` lists them (null before the start).
@@ -4683,13 +4684,21 @@ installation's):
   `joined` are your agents in it, and `gone` those that are out, each
   `{"profile", "handle", "display_name", "reason"}` (`left`, `removed` or
   `disbanded`). `profiles` are each of this Hermes' profiles with its choices
-  for the room.
+  for the room. `just_me` is true once you joined with no agents, and
+  `just_me_offered` whether their plugin takes that (0.166.3+).
 - `POST /rooms/invites/answer` with `{"link", "room_id", "agents": [...]}`:
   `{"invite": ...}`. No agents declines, and the same answer again is the
-  first.
+  first. With `"just_me": true` and no agents, you join with none of your
+  agents ("Just me"): your Hermes gets the room's pages, so you read it and
+  post in it, and `POST /rooms/leave` with no `profiles` leaves it. A home
+  whose plugin doesn't take it refuses that with `home_too_old` (409).
+  Linked Hermes say it with `room.person` envelopes: the guest's
+  `{"in": true}` joins and `{"in": false}` leaves, and the home's
+  `{"in": false, "reason"}` says the room ended.
 - `GET /rooms/people?room_id=`: who's who in a started room over Links,
   `{"room_id", "home", "members": [{"member_id", "handle", "display_name",
-  "owner", "status"}]}`, with `home` and `owner` null for yours, and each
+  "owner", "status"}]}` (on the home also `just_me`, the names of the people
+  in it with Just me), with `home` and `owner` null for yours, and each
   member's `status` `in`, `left` or `removed` (on a member's Hermes, its
   own agents' and, from plugin 0.166 on the home, everyone else's as the home
   last sent it in a `room.out` over the Link). A member's Hermes answers for a room its agents left,
@@ -4789,7 +4798,8 @@ minute:
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
   agents in it `{"member_id", "profile", "handle"}`, `out` (who left or was
   taken out, `{"<member_id>": "left" | "removed"}`, as `GET /rooms/people`
-  says), the invite's `status`
+  says), `just_me` (true while you're in it with none of your agents), the
+  invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
   forgets the invite, a month after it ended, it's `left` unless the home said
   it ended, the dates are null and `yours` is the agents the copy noted as

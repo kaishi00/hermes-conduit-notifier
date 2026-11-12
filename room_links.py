@@ -1280,7 +1280,8 @@ def _shown(link_id: str, link: dict[str, Any], now: int) -> dict[str, Any]:
     peer = link.get("peer") if isinstance(link.get("peer"), dict) else None
     return {"id": link_id, "name": link["name"], "status": _status(link, now),
             "words": _words(_key_of(link, "sign"), _key_of(link, "seal")), "created_at": link["created_at"],
-            "plugin": peer["plugin"] if peer else None, "behind": _behind(link, now)}
+            "plugin": peer["plugin"] if peer else None, "kinds": list(peer["kinds"]) if peer else None,
+            "behind": _behind(link, now)}
 
 
 def _behind(link: dict[str, Any], now: int) -> Optional[str]:

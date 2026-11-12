@@ -1890,7 +1890,7 @@ def test_people_says_whos_who_in_a_room_on_each_side(rooms):
     mona = {"member_id": slot("link2", 1), "handle": "mona", "display_name": "Mona", "status": "in"}
 
     assert invites_module.people(rooms.tmp_path / "furina", room_id) == {"room_id": room_id, "home": None, "members": [
-        {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}], "posts": []}
+        {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}], "just_me": [], "posts": []}
     assert invites_module.people(rooms.tmp_path / "laifu", room_id) == {"room_id": room_id, "home": "Furina",
                                                                         "you": "Laifu", "members": [
         {**furina, "owner": "Furina"}, {**laifu, "owner": None}, {**mona, "owner": "Mona"}]}
@@ -2806,3 +2806,134 @@ def test_a_route_change_read_before_the_room_moved_isnt_made_in_the_frozen_copy(
 
     assert key in rooms.home.canonical.peer_routes
     assert "route_todo" not in rooms.furina.store.read()["drafts"][room_id]
+
+
+# --- Just me ----------------------------------------------------------------------------------
+
+
+def _takes_just_me(side, name, link_id):
+    side.links[name][link_id]["kinds"] = [invites_module.PERSON]
+
+
+def _state(side, name):
+    return invites_module.Store(side.tmp_path / name).read()
+
+
+def test_just_me_joins_with_no_agents_where_the_home_takes_it(rooms):
+    room_id = draft(rooms)["room_id"]
+    assert invite_of(rooms, "mona", room_id)["just_me_offered"] is False
+    _takes_just_me(rooms, "mona", "link2")
+    assert invite_of(rooms, "mona", room_id)["just_me_offered"] is True
+
+    shown = rooms.mona.answer("link2", room_id, [], just_me=True)
+
+    assert (shown["status"], shown["joined"], shown["just_me"]) == ("joined", [], True)
+    assert rooms.member["mona"].issued == []
+    assert rooms.wire.bodies("room.person", "link2") == [{"v": 1, "room_id": room_id, "in": True}]
+    assert rooms.wire.bodies("room.answer", "link2") == []
+    people = {person["link"]: person for person in draft_of(rooms, room_id)["people"]}
+    assert (people["link2"]["status"], people["link2"]["just_me"], people["link2"]["agents"]) == ("joined", True, [])
+    assert people["link1"]["just_me"] is False
+    # The same answer again is the first; another is refused.
+    assert rooms.mona.answer("link2", room_id, [], just_me=True) == shown
+    with pytest.raises(invites_module.RoomsError) as refused:
+        answer(rooms, "mona", room_id, "link2")
+    assert refused.value.code == "answered"
+
+
+def test_just_me_is_refused_where_the_homes_plugin_doesnt_take_it(rooms):
+    room_id = draft(rooms)["room_id"]
+
+    with pytest.raises(invites_module.RoomsError) as refused:
+        rooms.mona.answer("link2", room_id, [], just_me=True)
+
+    assert (refused.value.code, refused.value.status) == ("home_too_old", 409)
+    assert rooms.wire.sent == [item for item in rooms.wire.sent if item[2] != "room.person"]
+    assert invite_of(rooms, "mona", room_id)["status"] == "waiting"
+
+
+@pytest.mark.parametrize("just_me, agents", [(True, [LAIFUS]), ("yes", [])])
+def test_just_me_that_cant_be_one_is_refused(rooms, just_me, agents):
+    room_id = draft(rooms)["room_id"]
+    _takes_just_me(rooms, "laifu", "link1")
+
+    with pytest.raises(invites_module.RoomsError) as refused:
+        rooms.laifu.answer("link1", room_id, [dict(agent) for agent in agents], just_me=just_me)
+
+    assert refused.value.code == "bad_agents"
+    assert rooms.member["laifu"].issued == []
+
+
+def _started_with_mona_just_me(side):
+    _listening(side)
+    room_id = draft(side)["room_id"]
+    _takes_just_me(side, "mona", "link2")
+    answer(side, "laifu", room_id, "link1", LAIFUS)
+    side.mona.answer("link2", room_id, [], just_me=True)
+    side.furina.pass_once()
+    return room_id
+
+
+def test_a_room_with_someone_just_me_starts_and_sends_them_its_pages(rooms):
+    room_id = _started_with_mona_just_me(rooms)
+
+    members = [{"member_id": "default", "handle": "furina", "display_name": "Furina", "owner": None},
+               {"member_id": slot("link1", 1), "handle": "laifu", "display_name": "Laifu", "owner": "Laifu"}]
+    assert rooms.wire.bodies("room.start", "link1") == [
+        {"v": 1, "room_id": room_id, "started_at": int(NOW), "members": members}]
+    assert rooms.wire.bodies("room.start", "link2") == [
+        {"v": 1, "room_id": room_id, "started_at": int(NOW), "members": members, "you": "Mona"}]
+    assert invite_of(rooms, "mona", room_id)["status"] == "started"
+    draft_state = _state(rooms, "furina")["drafts"][room_id]
+    assert invites_module.room_copies.just_me(draft_state) == ["link2"]
+    assert invites_module.room_copies._receiving(draft_state) == ["link1", "link2"]
+    # Who's who: the home names them; their own Hermes knows what the home calls them.
+    assert invites_module.people(rooms.tmp_path / "furina", room_id)["just_me"] == ["Mona"]
+    seen = invites_module.people(rooms.tmp_path / "mona", room_id)
+    assert seen["you"] == invites_module.room_posts.poster("Mona")
+    assert [member["owner"] for member in seen["members"]] == ["Furina", "Laifu"]
+
+
+def test_someone_just_me_leaves_and_their_pages_stop(rooms):
+    room_id = _started_with_mona_just_me(rooms)
+
+    shown = rooms.mona.leave("link2", room_id)
+
+    assert shown["status"] == "left"
+    assert rooms.wire.bodies("room.person", "link2")[-1] == {"v": 1, "room_id": room_id, "in": False}
+    draft_state = _state(rooms, "furina")["drafts"][room_id]
+    assert invites_module.room_copies.just_me(draft_state) == []
+    assert invites_module.room_copies._receiving(draft_state) == ["link1"]
+    with pytest.raises(invites_module.RoomsError) as refused:
+        rooms.mona.leave("link2", room_id)
+    assert refused.value.code == "not_in"
+
+
+def test_a_disbanded_room_tells_someone_just_me_it_ended(rooms):
+    room_id = _started_with_mona_just_me(rooms)
+
+    rooms.furina.disbanded(room_id)
+    rooms.furina.flush()
+
+    assert rooms.wire.bodies("room.person", "link2")[-1] == {"v": 1, "room_id": room_id, "in": False,
+                                                              "reason": "disbanded"}
+    shown = invite_of(rooms, "mona", room_id)
+    assert (shown["status"], shown["reason"]) == ("ended", "disbanded")
+
+
+def test_a_just_me_join_after_the_room_stopped_waiting_is_dropped(rooms):
+    room_id = _started_with_mona_just_me(rooms)
+    rooms.furina.handle(_received(rooms, "laifu", "link1", "room.person", {"v": 1, "room_id": room_id, "in": True}))
+
+    people = {person["link"]: person for person in draft_of(rooms, room_id)["people"]}
+    assert people["link1"]["just_me"] is False
+
+
+@pytest.mark.parametrize("body", [
+    {"v": 1, "room_id": "r1"}, {"v": True, "room_id": "r1", "in": True}, {"v": 1, "room_id": "r1", "in": "yes"},
+    {"v": 1, "room_id": "r1", "in": True, "reason": "disbanded"}, {"v": 1, "room_id": "r1", "in": False,
+                                                                    "reason": "Not A Code"},
+    {"v": 1, "room_id": "", "in": True}, {"v": 1, "room_id": "r1", "in": True, "extra": 1},
+])
+def test_a_room_person_that_isnt_one_is_dropped(body):
+    assert invites_module._person_from(body) is None

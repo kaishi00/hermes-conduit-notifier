@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.166.3 (2026-11-12)
+
+### New and improved
+- Just me: join a Linked Room someone else hosts without bringing any of your agents, to read it and post in it. The host's plugin needs this version too.
+
 ## 0.166.2 (2026-11-12)
 
 ### New and improved
