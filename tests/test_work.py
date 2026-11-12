@@ -3101,6 +3101,29 @@ def test_a_restart_elsewhere_leaves_work_another_live_process_runs(on, hermes, m
     assert "Hermes restarted" in continued["text"] and resent["text"] == "Bot passes on:\nAlso check the logs."
 
 
+def test_a_send_hermes_refused_leaves_the_host(on, hermes, monkeypatch):
+    """Only the process running a turn names itself host: a work_send that
+    another window's hold refused never claims the work (notifier#744)."""
+    start()
+    work.turn_ended(WORKER_1, "Done.")
+    other = f"{os.getppid()}:"
+    on.update("W1", host=other)
+    held = {"code": 4090, "message": "This chat is open in another Hermes window.",
+            "data": {"reason": "SESSION_NOT_OWNED"}}
+    for method in ("prompt.submit", "session.steer", "session.redirect"):
+        hermes.refuse[method] = held
+    refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert refused.get("error") == "open_elsewhere", refused
+    assert on.get("W1").host == other
+
+
+def test_a_calls_job_kept_mid_turn_is_hosted_here(on, hermes, monkeypatch):
+    """Its turn began before its row, so the turn's start stamped nothing."""
+    monkeypatch.setattr(work, "_asked_in", lambda home, session: True)
+    kept = adopt()
+    assert kept["work"]["status"] == "running" and on.get("W1").host == work._host_stamp()
+
+
 def test_a_hosts_start_time_tells_a_reused_pid_apart(monkeypatch):
     other = os.getppid()
     psutil = types.ModuleType("psutil")
