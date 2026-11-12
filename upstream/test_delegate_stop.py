@@ -34,10 +34,8 @@ for node in ast.walk(tree):
             and node.args[0].value == "subagent_start":
         for k in node.keywords:
             if k.arg == "child_subagent_id":
-                # The child's own stamp passed straight on counts as well.
-                own = isinstance(k.value, ast.Attribute) and k.value.attr == "_subagent_id"
-                hook_names.add("own" if own else ast.dump(k.value))
-stamped = {"own"}
+                hook_names.add(ast.dump(k.value))
+stamped = set()
 for node in ast.walk(tree):
     if not isinstance(node, ast.Assign):
         continue
@@ -47,7 +45,8 @@ for node in ast.walk(tree):
                  else [(target, node.value)])
         for t, v in pairs:
             if isinstance(t, ast.Attribute) and t.attr == "_subagent_id":
-                stamped.add(ast.dump(v))
+                # Its value, or the child's own stamp read back.
+                stamped |= {ast.dump(v), ast.dump(ast.Attribute(value=t.value, attr=t.attr, ctx=ast.Load()))}
 
 class Agent:
     def __init__(self, sid):
