@@ -3386,7 +3386,8 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
         due="2026-10-21", due_at=DAY + 86400, message_id=5, mentioned_at=DAY + 60)])
     assert run() == 0
     out = capsys.readouterr().out
-    assert "Promise (1)\n  #1 Hermes will check the build. (due 2026-10-21)\n      \"I'll check the build\" (20 Oct)" in out
+    said = time.strftime("%d %b", time.localtime(DAY))  # the host's day, as Pulse shows it (#322)
+    assert f"Promise (1)\n  #1 Hermes will check the build. (due 2026-10-21)\n      \"I'll check the build\" ({said})" in out
     assert run("fact") == 0 and "hasn't kept" in capsys.readouterr().out
     monkeypatch.setattr(cli, "MEMORY_LIST", 0)
     assert run() == 0 and "The 0 most recent of 1:" in capsys.readouterr().out
