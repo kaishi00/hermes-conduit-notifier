@@ -4858,7 +4858,8 @@ name: Share, Say instead (you write what it says) or Don't share, by tap or,
 during a call, "share it". The call waits 30 seconds for your answer. Without
 one, the agent tells the room it'll check with you and shares nothing, and
 your answer reaches it privately, once, at the start of its next turn in that
-room. Once you answer, that turn starts right away: a bare mention of your
+room. Once you answer, that turn starts without waiting for anyone to speak (after
+a discussion already running in the room, as any post does): a bare mention of your
 agent, the one Run work's news posts, wakes it (in a room hosted elsewhere,
 your Hermes asks the room's home to post it), so a Share tapped after the
 30 seconds isn't left until someone else speaks. What it would share never
