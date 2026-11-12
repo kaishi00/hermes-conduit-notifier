@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.3 (2026-11-13)
+
+### Fixes
+- Finishing a prediction could close resources belonging to the chat it
+  asked about. Predictions now release only their own clients, including
+  when the prediction fails.
+
 ## 0.168.2 (2026-11-13)
 
 ### Fixes
@@ -118,6 +125,7 @@ checks it). The format is fixed, because Conduit reads it:
   that, every message the Bot Chat sent them was refused as "open in another
   Hermes window" until the gateway restarted again. A restart now only
   recovers work that the restarted process itself was running.
+
 
 ## 0.165.0 (2026-11-12)
 

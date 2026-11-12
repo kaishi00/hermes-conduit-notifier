@@ -2060,6 +2060,11 @@ cache, every tool refused, nothing saved to the chat, state.db or memory.
 Unlike `prompt.btw`, whose answer goes to every client (Hermes Desktop shows
 it as a `[btw …]` note), the route answers only the device that asked.
 
+From plugin 0.168.3, finishing a prediction releases only its own clients,
+not the live chat's memory provider, terminal, browser or file state. This
+also applies when the prediction fails; older Hermes without the fork
+release helper use client-only cleanup too.
+
 - `POST /api/plugins/conduit_push/predict` with
   `{"session_id": "<runtime session id>", "kind": "replies" | "draft" | "turn", "count": 3, "language": "French", "model": "chat" | "fast", "wait_s": 20}`.
   `draft` adds `"draft": "<unsent text>"`; `turn` adds
