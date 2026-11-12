@@ -2937,3 +2937,21 @@ def test_a_just_me_join_after_the_room_stopped_waiting_is_dropped(rooms):
 ])
 def test_a_room_person_that_isnt_one_is_dropped(body):
     assert invites_module._person_from(body) is None
+
+
+def test_the_cli_joins_just_me_and_leaves(commands, capsys):
+    _listening(commands)
+    room_id = draft(commands)["room_id"]
+    _takes_just_me(commands, "mona", "link2")
+    answer(commands, "laifu", room_id, "link1", LAIFUS)
+
+    assert commands.run("mona", "join", room=room_id, just_me=True) == 0
+    assert _said(commands, capsys).startswith("Joined Zoo trip with none of your agents. It starts on Furina's "
+                                              "Hermes once everyone has answered.")
+    commands.furina.pass_once()
+    assert commands.run("furina", "drafts") == 0
+    assert "  Mona: joined without agents (Just me)" in _said(commands, capsys)
+
+    assert commands.run("mona", "leave", room=room_id) == 0
+    assert _said(commands, capsys).startswith("Left Zoo trip; Furina's Hermes is told.")
+    assert invite_of(commands, "mona", room_id)["status"] == "left"
