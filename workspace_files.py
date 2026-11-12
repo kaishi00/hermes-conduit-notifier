@@ -994,9 +994,9 @@ class SshWorkspace:
             raise WorkspaceError(400, "The workspace folder itself can't be duplicated")
         folder = posixpath.dirname(source)
         if to is not None:
+            # The script's resolved check (EINTO) decides a folder into
+            # itself, so a link inside the source to elsewhere still works.
             folder = self._check(root, to)
-            if self._inside(source, folder):
-                raise WorkspaceError(400, "A folder can't be copied into itself")
         keep = folder != posixpath.dirname(source)
         # The first free copy name, picked on the host itself (whatever the
         # folder's size) right before the copy.
