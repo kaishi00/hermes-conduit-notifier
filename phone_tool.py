@@ -34,8 +34,8 @@ from hermes_constants import get_hermes_home
 from . import client, session_titles
 from .conduit_first import CALENDAR_FIRST, CONTACTS_FIRST, PHONE_FIRST
 from .events import push_event
-from .phone_store import (ALARM_CHANGE_KINDS, CALENDAR_CHANGE_KINDS, MAX_PHOTO_RESULTS, PHOTO_KEPT_S,
-                          SHORTCUT_CHANGE_KINDS, WEEKDAYS, PhoneError, PhoneStore, alarm_summary, change_need,
+from .phone_store import (ALARM_CHANGE_KINDS, CALENDAR_CHANGE_KINDS, MAX_CLOCK_SKEW_S, MAX_PHOTO_RESULTS,
+                          PHOTO_KEPT_S, SHORTCUT_CHANGE_KINDS, WEEKDAYS, PhoneError, PhoneStore, alarm_summary, change_need,
                           clean_text, parse_day, parse_time, shares)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
@@ -62,6 +62,10 @@ PHONE_ACTIONS = ("status", "alarms", "shortcuts", "pending") + ALARM_CHANGE_KIND
 FRESH_WAIT_S = 15.0
 FRESH_POLL_S = 1.0
 FRESH_SETTLE_S = 4.0
+# At most one wake a minute per profile: the wakes share the relay's hourly
+# allowance with the changes Hermes queues.
+FRESH_MIN_GAP_S = 60.0
+_last_fresh: dict[str, float] = {}
 
 FRESHNESS_NOTE = ("This is the phone's copy as of its last sync (as_of). The phone syncs when Conduit is open and "
                   "on background wakes, so changes made since, on a Mac or by other people, can be missing. Say "
@@ -777,7 +781,7 @@ def _phone(args: dict[str, Any], store: PhoneStore | None = None, exact: bool = 
                       "open and on background wakes, so an old age means it may have changed. A Focus label is "
                       "what the user named it in Conduit's Focus filter.")
     if refreshed is not None:
-        answer["fresh"] = refreshed
+        answer["fresh_result"], answer["fresh"] = refreshed
     return answer
 
 
@@ -804,10 +808,11 @@ def turn_note(store: PhoneStore | None = None) -> str | None:
         now = store.clock()
         parts: list[str] = []
         ages: list[float] = []
-        fresh = lambda at: at is not None and 0 <= now - at <= TURN_STATUS_MAX_AGE_S  # noqa: E731
+        # A phone's clock may run a little ahead, as the store allows.
+        fresh = lambda at: at is not None and -MAX_CLOCK_SKEW_S <= now - at <= TURN_STATUS_MAX_AGE_S  # noqa: E731
         status = state["status"] if sharing.get("status") and fresh(state["status_at"]) else None
         if status:
-            ages.append(now - state["status_at"])
+            ages.append(max(0.0, now - state["status_at"]))
             if isinstance(status.get("battery"), (int, float)):
                 parts.append(f"{round(status['battery'] * 100)}% battery" + (", charging" if status.get("charging")
                                                                              else ""))
@@ -817,7 +822,7 @@ def turn_note(store: PhoneStore | None = None) -> str | None:
                 parts.append("connected to CarPlay")
         focus = state["focus"] if sharing.get("focus") and fresh(state["focus_at"]) else None
         if focus:
-            ages.append(now - state["focus_at"])
+            ages.append(max(0.0, now - state["focus_at"]))
             if focus.get("active"):
                 label = focus.get("label")
                 parts.append(f"{label} Focus on" if label else "a Focus on")
@@ -827,7 +832,9 @@ def turn_note(store: PhoneStore | None = None) -> str | None:
             return None
         oldest = max(ages)
         when = f" (as of {int(oldest // 60)} min ago)" if oldest >= 120 else ""
-        return (f"[Conduit: the user's iPhone as they sent this{when}: {', '.join(parts)}. They let Conduit send "
+        # Named as the user named the device: it may be an iPad.
+        return (f"[Conduit: the user's device \"{device['name']}\" as they sent this{when}: {', '.join(parts)}. "
+                "They let Conduit send "
                 "this with each message. Let it shape your answer only when it matters (short when the battery is "
                 "low, no reading to do while they drive); don't mention it otherwise.]")
     except Exception:  # noqa: BLE001
@@ -835,30 +842,43 @@ def turn_note(store: PhoneStore | None = None) -> str | None:
         return None
 
 
-def _refresh(store: PhoneStore, device: Any, exact: bool, profile: str, sleep: Callable[[float], None]) -> str:
+def _refresh(store: PhoneStore, device: Any, exact: bool, profile: str,
+             sleep: Callable[[float], None]) -> tuple[str, str]:
     """Wakes the phone for a new status reading and waits for it (issue
-    888). Says how it went, for the answer's ``fresh``; never raises past a
-    read the answer would refuse anyway."""
+    888). How it went, as a short kind and a sentence (the answer's
+    ``fresh_result`` and ``fresh``); never raises past a read the answer
+    would refuse anyway."""
     with store.reader("phone", device, exact=exact) as opened:
         if opened is None:
             raise PhoneError("nothing_shared", "No device shares its status or Focus with Hermes.")
         db, picked = opened
         if not picked["sharing"].get("status"):
-            return "The phone doesn't share its status, so there was nothing to ask it for."
+            return "not_shared", "The phone doesn't share its status, so there was nothing to ask it for."
         before = store.phone_status(db, picked["id"])["status_at"]
     if client.load_state() is None:
-        return ("This Hermes profile isn't paired with Conduit for notifications, so the phone couldn't be asked. "
-                "This is the latest it sent.")
+        return "not_asked", ("This Hermes profile isn't paired with Conduit for notifications, so the phone couldn't "
+                             "be asked. This is the latest it sent.")
+    started = time.monotonic()
+    last = _last_fresh.get(profile)
+    if last is not None and started - last < FRESH_MIN_GAP_S:
+        return "not_asked", ("The phone was asked for a reading less than a minute ago, so it wasn't woken again. "
+                             "This is the latest it sent.")
+    _last_fresh[profile] = started
     asked = int(store.clock())
     # A background wake runs the phone's sync, which sends its status: the
     # same push a change Hermes may make without asking sends.
     event = push_event("phone.changes", identifier=f"phone-status:{secrets.token_hex(8)}", profile=profile,
                        profile_name=session_titles.bot_name(), mode="background")
     try:
-        client.send_now(event)
+        sent = client.send_now(event)
     except Exception as error:  # noqa: BLE001
         logger.warning("conduit_phone: couldn't ask the phone for its status: %s", error)
-        return "The phone couldn't be asked just now. This is the latest it sent."
+        return "not_asked", "The phone couldn't be asked just now. This is the latest it sent."
+    if isinstance(sent, dict) and sent.get("delivered") is False:
+        # The relay held it back (notifications off on the phone, say).
+        logger.info("conduit_phone: the relay didn't deliver the status wake: %s", sent.get("reason"))
+        return "not_asked", ("The phone couldn't be woken (its notifications from Hermes may be off). "
+                             "This is the latest it sent.")
     waited = 0.0
     checked_in_at: float | None = None
     while waited < FRESH_WAIT_S:
@@ -871,15 +891,15 @@ def _refresh(store: PhoneStore, device: Any, exact: bool, profile: str, sleep: C
             status_at = store.phone_status(db, picked["id"])["status_at"]
             contact = store.last_contact(db, picked["id"])
         if status_at is not None and (before is None or status_at > before):
-            return "The phone sent a new reading just now."
+            return "new_reading", "The phone sent a new reading just now."
         # After the ask: a check-in in the same second came before it.
         if contact is not None and contact > asked and checked_in_at is None:
             checked_in_at = waited
         # An older Conduit sends its status only when it changed.
         if checked_in_at is not None and waited - checked_in_at >= FRESH_SETTLE_S:
-            return "The phone checked in just now and its status hadn't changed, so this is current."
-    return ("The phone didn't answer in time (it may be off, offline, or iOS held the wake back). "
-            "This is the latest it sent.")
+            return "unchanged", "The phone checked in just now and its status hadn't changed, so this is current."
+    return "no_answer", ("The phone didn't answer in time (it may be off, offline, or iOS held the wake back). "
+                         "This is the latest it sent.")
 
 
 def _pending(store: PhoneStore) -> dict[str, Any]:

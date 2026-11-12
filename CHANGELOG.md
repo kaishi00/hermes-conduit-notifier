@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.166.0 (2026-11-12)
+## 0.167.0 (2026-11-12)
 
 ### New and improved
 - Hermes can ask your iPhone for a fresh battery, charging, CarPlay and
@@ -23,6 +23,14 @@ checks it). The format is fixed, because Conduit reads it:
 - Turn on With each message under Focus and phone status, and each message
   you send from Conduit tells Hermes your battery, Low Power Mode, CarPlay
   and Focus, so it answers to fit.
+
+## 0.166.0 (2026-11-12)
+
+### Fixes
+- In a Linked Room someone else hosts, a bot that left or was taken out
+  still showed as in. The host's Hermes now tells everyone in the room, so
+  Group Info, the To row and @mentions leave it out. Both Hermes need this
+  version.
 
 ## 0.165.1 (2026-11-12)
 

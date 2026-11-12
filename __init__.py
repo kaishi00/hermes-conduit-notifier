@@ -1264,7 +1264,8 @@ def _text_parts(content: Any) -> list[str]:
 def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     """Context for this turn: calls from Hermes the user declined or missed
     since the last turn of this chat (#449), where in Conduit the message
-    was sent from, the voice persona hint, and which of the user's data
+    was sent from (with the phone's state, when the user lets it go with
+    each message), the voice persona hint, and which of the user's data
     Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)

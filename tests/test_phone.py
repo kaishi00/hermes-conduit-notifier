@@ -1340,6 +1340,7 @@ def _fresh_setup(home, monkeypatch, **sharing):
     monkeypatch.setattr(tool.client, "load_state", lambda: {"installation": "x"})
     monkeypatch.setattr(tool.client, "send_now", lambda event: sent.append(event) or {"accepted": True})
     monkeypatch.setattr(tool.session_titles, "bot_name", lambda: "Hermes")
+    monkeypatch.setattr(tool, "_last_fresh", {})
     return store, handset, clock, sent
 
 
@@ -1360,7 +1361,10 @@ def test_fresh_status_wakes_the_phone_and_returns_its_new_reading(home, monkeypa
     answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=sleep)
     assert sent[0]["type"] == "phone.changes" and sent[0]["mode"] == "background"
     assert answer["status"]["battery"] == "17%" and answer["status"]["low_power"] is True
-    assert "new reading" in answer["fresh"] and len(sleeps) == 2
+    assert "new reading" in answer["fresh"] and answer["fresh_result"] == "new_reading" and len(sleeps) == 2
+    # Asked again within the minute: the phone isn't woken again.
+    again = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=sleep)
+    assert again["fresh_result"] == "not_asked" and "less than a minute" in again["fresh"] and len(sent) == 1
 
 
 def test_fresh_status_from_a_phone_that_sends_nothing_new_says_it_is_current(home, monkeypatch):
@@ -1373,7 +1377,8 @@ def test_fresh_status_from_a_phone_that_sends_nothing_new_says_it_is_current(hom
         if len(sleeps) == 1:
             store.status(handset.device_id)  # an older Conduit: checks in, its status unchanged
     answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=sleep)
-    assert "hadn't changed" in answer["fresh"] and answer["status"]["battery"] == "42%"
+    assert "hadn't changed" in answer["fresh"] and answer["fresh_result"] == "unchanged"
+    assert answer["status"]["battery"] == "42%"
     assert sum(sleeps) == tool.FRESH_POLL_S + tool.FRESH_SETTLE_S
 
 
@@ -1382,7 +1387,8 @@ def test_fresh_status_that_gets_no_answer_says_so_and_returns_the_last_reading(h
     sleeps = []
     answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work",
                          sleep=lambda seconds: sleeps.append(seconds) or clock.__setitem__("now", clock["now"] + seconds))
-    assert "didn't answer" in answer["fresh"] and answer["status"]["battery"] == "42%"
+    assert "didn't answer" in answer["fresh"] and answer["fresh_result"] == "no_answer"
+    assert answer["status"]["battery"] == "42%"
     assert sum(sleeps) == tool.FRESH_WAIT_S and len(sent) == 1
 
 
@@ -1394,6 +1400,12 @@ def test_fresh_status_asks_nothing_when_status_isnt_shared_or_the_relay_cant_be_
     monkeypatch.setattr(tool.client, "send_now", lambda event: (_ for _ in ()).throw(RuntimeError("down")))
     answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=lambda _: None)
     assert "couldn't be asked" in answer["fresh"] and answer["status"]["battery"] == "42%"
+    monkeypatch.setattr(tool, "_last_fresh", {})
+    # The relay held the wake back: no wait for an answer that can't come.
+    monkeypatch.setattr(tool.client, "send_now", lambda event: {"accepted": True, "delivered": False})
+    waited = []
+    answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=waited.append)
+    assert "couldn't be woken" in answer["fresh"] and answer["fresh_result"] == "not_asked" and waited == []
     monkeypatch.setattr(tool.client, "load_state", lambda: None)
     answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=lambda _: None)
     assert "isn't paired" in answer["fresh"]
@@ -1411,9 +1423,14 @@ def test_the_phone_state_goes_with_a_turn_only_when_the_user_lets_it(home):
                                      status={"at": "2026-10-14T08:00:00+01:00", "battery": 0.18, "charging": True,
                                              "low_power": True, "carplay": True})))
     note = tool.turn_note(store)
+    assert note.startswith("[Conduit: the user's device \"Eric's iPhone\" as they sent this")
     assert "18% battery, charging" in note and "Low Power Mode on" in note and "connected to CarPlay" in note
     # Focus was sent half an hour before: the oldest part gives the age.
     assert "Work Focus on" in note and "(as of 30 min ago)" in note
+    # A phone clock a little ahead still counts, with no negative age.
+    clock["now"] -= 120
+    assert "18% battery" in tool.turn_note(store)
+    clock["now"] += 120
     # A reading past half an hour is left out; nothing left, no line.
     clock["now"] += 31 * 60
     assert tool.turn_note(store) is None
