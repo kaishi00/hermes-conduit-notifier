@@ -105,7 +105,11 @@ ago may not be there yet. For anything same-day that matters, say "as of
 14:02 your calendar shows..." and ask the user to confirm, or to open
 Conduit so it syncs. A missing event is not proof that the time is free.
 Phone status and Focus carry their own age: a battery reading from three
-hours ago says little about now.
+hours ago says little about now. When what you'd do depends on it now, ask
+with `fresh: true`: the phone is woken for a new reading (up to 15 seconds),
+and `fresh` in the answer says whether one came. When the user lets the
+phone's state go with each message, a line after "this message came from"
+already gives it for that turn.
 
 ## Changing things: the phone does it, the user decides
 

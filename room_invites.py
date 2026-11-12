@@ -424,7 +424,8 @@ class Rooms:
         """An envelope from a Link, as the Link's loop hands it over."""
         handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
                    LEAVE: self.on_leave, ENDED: self.on_ended, room_copies.PAGE: self.copies.on_page,
-                   room_copies.COPIED: self.copies.on_copied, room_posts.POST: self.posts.on_post,
+                   room_copies.COPIED: self.copies.on_copied, room_copies.OUT: self.copies.on_out,
+                   room_posts.POST: self.posts.on_post,
                    room_posts.POSTED: self.posts.on_posted, room_looks.LOOKS: self.looks.on_looks,
                    room_files_link.CHUNK: self.files.on_chunk,
                    room_files_link.GOT: self.files.on_got,
@@ -1186,7 +1187,8 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
     """Who's who in a started room over Links that this installation hosts or has agents in (plan ruling 8):
     ``home``, the host's owner as this installation's Link names them (None when it's this one), and each
     member with its owner's name (None for this installation's own) and its ``status``: in, or left or removed
-    (R10; on a member's Hermes, only its own agents' are known). A member's Hermes keeps answering for a room it
+    (R10; on a member's Hermes, its own agents' from their invite and the others' as the home last told it,
+    room_copies' room.out). A member's Hermes keeps answering for a room it
     left or that ended, whose hidden chats it keeps, with each member as it was when it ended (the invite says how
     it ended). On the home, ``posts``: the room's latest posts the plugin made for linked people (room_posts), each
     event id and seq with who it's ``by``; on a member's Hermes, ``you``: what the home calls this installation's
@@ -1218,6 +1220,8 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
     if invite is not None:
         gone = {agent["member_id"]: agent["reason"] for agent in invite.get("gone", [])}
         mine = {agent["member_id"] for agent in invite["joined"]} | set(gone)
+        # Theirs too, as the home last said (room_copies' room.out): it alone knows who else left.
+        out = room_copies.out_of_invite(invite)
         # What the home calls this installation's owner: the name its posts carry there.
         you = next((room_posts.poster(member["owner"]) for member in invite["members"]
                     if member["member_id"] in mine), None)
@@ -1225,8 +1229,7 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
             {"member_id": member["member_id"], "handle": member["handle"],
              "display_name": member["display_name"],
              "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],
-             "status": gone[member["member_id"]] if gone.get(member["member_id"]) in ("left", "removed")
-             else "in"}
+             "status": out.get(member["member_id"], "in")}
             for member in invite["members"]]}
     return None
 

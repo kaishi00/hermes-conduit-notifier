@@ -124,6 +124,8 @@ def test_every_capability_names_a_served_route_family():
         "phone-shortcuts": "/phone/",
         "phone-contact-edits": "/phone/",
         "phone-photos": "/phone/",
+        # sharing.turn_status, read from the phone store each turn.
+        "phone-turn-status": "/phone/",
         "pairing": "/pair",
         "self-restart": "/self/restart",
         "self-update": "/self/update",

@@ -3347,6 +3347,30 @@ whether notes and attendees are included (off by default).
   what it reads; subagents can't use them. Reads say how fresh the copy is
   ("as of" the last sync). What they return goes to your agent's model like
   any tool result, which Conduit tells the user before they turn sharing on.
+- **A fresh reading (plugin 0.167+).** `conduit_phone` `status` with
+  `fresh: true` wakes the phone with the same silent `phone.changes` push
+  an add made without asking sends, and waits up to 15 seconds for it.
+  Conduit sends its status on every such wake (an older Conduit only when
+  it changed, which the answer reads from the phone checking in). The
+  answer's `fresh` says whether a new reading came, the phone's status
+  hadn't changed, or it didn't answer in time, and `fresh_result` says the
+  same as `new_reading`, `unchanged`, `no_answer`, `not_shared` (the phone
+  doesn't share its status) or `not_asked` (not paired, the relay held the
+  wake back or couldn't be reached, or a wake less than a minute ago: one a
+  minute per profile, since wakes share the relay's hourly allowance; a
+  wake that didn't go doesn't count);
+  the rest is the usual status. iOS may hold a background wake back, so the tool says so rather
+  than guess.
+- **With each message (plugin 0.167+).** When the user turns on "With each
+  message" under Focus and phone status (`sharing.turn_status`, capability
+  `phone-turn-status`; only with the status or Focus shared), a turn whose
+  message Conduit sent (see [Where in Conduit a message was sent](#where-in-conduit-a-message-was-sent-plugin-051))
+  gets a second line after the surface line, for example
+  `[Conduit: the user's device "Eric's iPhone" as they sent this: 18% battery, Low Power Mode on, connected to CarPlay, Work Focus on. …]`
+  (the device as the user named it, since it may be an iPad).
+  It names only what's shared and only readings from the last 30 minutes,
+  and says how old they are past two minutes. Turns from other clients,
+  rooms with other people's agents and subagents never get it.
 
 - **Alarms and timers (plugin 0.30+).** When the user lets Hermes set them
   (AlarmKit, iOS 26), `conduit_phone` gains `alarms` (the alarms and timers
@@ -4680,8 +4704,9 @@ installation's):
 - `GET /rooms/people?room_id=`: who's who in a started room over Links,
   `{"room_id", "home", "members": [{"member_id", "handle", "display_name",
   "owner", "status"}]}`, with `home` and `owner` null for yours, and each
-  member's `status` `in`, `left` or `removed` (on a member's Hermes, only
-  for its own agents). A member's Hermes answers for a room its agents left,
+  member's `status` `in`, `left` or `removed` (on a member's Hermes, its
+  own agents' and, from plugin 0.166 on the home, everyone else's as the home
+  last sent it in a `room.out` over the Link). A member's Hermes answers for a room its agents left,
   or that ended, too, with each member as it was when it ended
   (`GET /rooms/invites` says how it ended). With `room-posts` (plugin
   0.115+), the home adds `posts`, the room's latest 500 posts it made for
@@ -4772,11 +4797,13 @@ and says so once in its log. The copies go through these, behind the
 minute:
 
 - `GET /rooms/copies`: `{"copies": [...]}`, the one that changed last first,
-  each `{"room_id", "name", "link", "from", "members", "yours", "status",
+  each `{"room_id", "name", "link", "from", "members", "yours", "out", "status",
   "reason", "started_at", "ended_at", "state", "last_seq", "latest_seq",
   "updated_at"}`: who hosts it as your Link names them, each member `{"member_id",
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
-  agents in it `{"member_id", "profile", "handle"}`, the invite's `status`
+  agents in it `{"member_id", "profile", "handle"}`, `out` (who left or was
+  taken out, `{"<member_id>": "left" | "removed"}`, as `GET /rooms/people`
+  says), the invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
   forgets the invite, a month after it ended, it's `left` unless the home said
   it ended, the dates are null and `yours` is the agents the copy noted as

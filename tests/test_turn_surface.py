@@ -109,6 +109,8 @@ def gateway(monkeypatch):
     gateway.install(monkeypatch)
     # The data-sharing line reads stores this test doesn't set up.
     monkeypatch.setattr(plugin.conduit_first, "note", lambda: None)
+    # So does the phone's state with each message.
+    monkeypatch.setattr(plugin.phone_tool, "turn_note", lambda: None)
     return gateway
 
 
@@ -234,6 +236,16 @@ def test_the_turn_of_the_reported_message_says_where_it_came_from_once(gateway, 
     assert gateway.turn(CONDUIT, "Find a charger") == surfaces.line("carplay", "spoken")
     # Taken by that turn: the same text sent again says nothing until Conduit reports again.
     assert gateway.turn(CONDUIT, "Find a charger") == ""
+
+
+def test_the_phones_state_follows_the_line_only_on_a_turn_conduit_sent(gateway, client, monkeypatch):
+    monkeypatch.setattr(plugin.phone_tool, "turn_note", lambda: "[phone state]")
+    client.post(f"{BASE}/turn-surface", json=_report("carplay", "Find a charger", "spoken"))
+    assert gateway.turn(CONDUIT, "Find a charger") == surfaces.line("carplay", "spoken") + "\n[phone state]"
+    # No report, no line: nothing says this turn came from Conduit.
+    assert gateway.turn(CONDUIT, "Find a charger") == ""
+    client.post(f"{BASE}/turn-surface", json=_report("watch", "same words", "spoken"))
+    assert gateway.turn(DESKTOP, "same words") == ""
 
 
 def test_a_report_never_labels_another_messages_turn(gateway, client):

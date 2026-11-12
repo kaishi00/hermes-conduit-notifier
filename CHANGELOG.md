@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.165.2 (2026-11-12)
+## 0.167.2 (2026-11-12)
 
 ### Fixes
 - On a Hermes where the gateway serves Conduit's connection (one gateway for
@@ -21,6 +21,32 @@ checks it). The format is fixed, because Conduit reads it:
   this conversation: Hermes refused session.resume
   (runtime_coordination_required)" instead of its chat. Workstreams now run
   on the gateway like your other chats, so they open while they work.
+
+## 0.167.1 (2026-11-12)
+
+### Fixes
+- When Hermes asked your iPhone for a fresh reading and the wake couldn't
+  be sent, Hermes had to wait a minute before it could ask again. It can
+  now ask again straight away.
+
+## 0.167.0 (2026-11-12)
+
+### New and improved
+- Hermes can ask your iPhone for a fresh battery, charging, CarPlay and
+  Low Power reading when it matters, instead of using the last one the
+  phone sent. It waits up to 15 seconds and says when the phone didn't
+  answer.
+- Turn on With each message under Focus and phone status, and each message
+  you send from Conduit tells Hermes your battery, Low Power Mode, CarPlay
+  and Focus, so it answers to fit.
+
+## 0.166.0 (2026-11-12)
+
+### Fixes
+- In a Linked Room someone else hosts, a bot that left or was taken out
+  still showed as in. The host's Hermes now tells everyone in the room, so
+  Group Info, the To row and @mentions leave it out. Both Hermes need this
+  version.
 
 ## 0.165.1 (2026-11-12)
 
