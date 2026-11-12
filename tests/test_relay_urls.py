@@ -307,6 +307,19 @@ def test_socks5_proxy_uses_remote_dns_and_auth_without_leaking_relay_credentials
     assert observed["connect"] == (5, 1, 0, 3, "relay.example", 443)
 
 
+def test_socks5_proxy_url_percent_decodes_credentials_and_rejects_invalid_proxy_schemes(monkeypatch):
+    fresh = _private_copy("conduit_push._client_socks5_url_under_test", ROOT / "client.py")
+    monkeypatch.setenv("CONDUIT_PUSH_PROXY", "socks5://user%40team:p%3Ass@proxy.example")
+    opener = fresh._https_opener()
+    handler = next(h for h in opener.handlers if isinstance(h, fresh._SOCKS5HTTPSHandler))
+    assert (handler._proxy_username, handler._proxy_password, handler._proxy_port) == ("user@team", "p:ss", 1080)
+
+    monkeypatch.setenv("CONDUIT_PUSH_PROXY", "socks4://proxy.example:1080")
+    invalid = _private_copy("conduit_push._client_socks5_invalid_scheme_under_test", ROOT / "client.py")
+    with pytest.raises(ValueError, match="CONDUIT_PUSH_PROXY must use"):
+        invalid._https_opener()
+
+
 def test_unpair_with_a_legacy_http_url_removes_the_local_pairing_and_says_so(monkeypatch, tmp_path, capsys):
     _paired_client(monkeypatch, tmp_path)
     monkeypatch.setattr(client, "request_json", lambda *a, **k: pytest.fail("sent over plain http"))
