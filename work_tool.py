@@ -6352,7 +6352,7 @@ def _share_answered(home: Path, store: work_store.Store, present: Any, row: dict
     """The owner answered (or the ask ran out): the bot is woken once for an answer its room hasn't heard yet. An
     ask that ran out, or one a turn already heard, wakes nothing. The row stays until the wake is made, so a roster
     that can't be read, a post Hermes refused or a Link store busy just now is tried again on the next look, for
-    as long as the room keeps a private line (LINKED_KEEP_S)."""
+    as long as the room keeps a private line (LINKED_KEEP_S). A roster that no longer names the bot settles it."""
     if prompt["status"] not in ("confirmed", "declined", "edit"):
         store.outbox_done(row["id"], "answered")
         return
@@ -6364,6 +6364,9 @@ def _share_answered(home: Path, store: work_store.Store, present: Any, row: dict
     try:
         if asked.get("side") == "home":
             handle = room_work.handle_of(asked["room"], Path(home), work_broker.profile_of(home))
+            if not handle:  # the roster was read and no longer names this bot: no retry will wake it
+                store.outbox_done(row["id"], "lost")
+                return
         woke = _wake_linked(home, room_work.Room(room_id=asked["room"], session_id=asked["session"], handle=handle,
                                                  linked=True, side=asked.get("side", "home")))
     except room_work.Unreadable as error:

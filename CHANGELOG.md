@@ -19,6 +19,9 @@ checks it). The format is fixed, because Conduit reads it:
 - When your answer to your agent's ask in a room came while that room's
   post or this Hermes' link to it was briefly unavailable, your agent still
   waited for someone to speak. It now tries again until it gets through.
+- Right after your Hermes restarted, a yes to your agent's ask (Share, or
+  Run work in a room) could be acted on before Hermes was ready, and was
+  lost. Waiting asks are now picked up once Hermes is ready.
 
 ## 0.164.9 (2026-11-12)
 

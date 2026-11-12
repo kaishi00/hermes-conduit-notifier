@@ -6146,6 +6146,26 @@ def test_a_wake_the_roster_couldnt_be_read_for_is_tried_again(on, hermes, ask_fi
     assert len(ask_first["posted"]) == 1 and not any(row["kind"] == "share_ask" for row in on.outbox_pending())
 
 
+def test_a_wake_that_cant_get_through_is_given_up_after_a_day_or_when_the_bot_left(on, hermes, ask_first, monkeypatch):
+    ask_owner(on.home)
+    answer(on.home, "confirmed")
+    ask_first["refuse"].add("room-1@default")
+    work.check_asks(on.home)
+    assert [row["kind"] for row in on.outbox_pending() if row["kind"] == "share_ask"] == ["share_ask"]
+    real = time.time()
+    monkeypatch.setattr(work.time, "time", lambda: real + work.LINKED_KEEP_S + 60)
+    assert work.check_asks(on.home) is False, "nothing left to watch"
+    assert ask_first["posted"] == [] and not any(row["kind"] == "share_ask" for row in on.outbox_pending())
+    # A roster that no longer names the bot: settled on the first look, not retried for a day.
+    monkeypatch.setattr(work.time, "time", lambda: real)
+    ask_first["refuse"].clear()
+    ask_owner(on.home, question="Mona asks where you are")
+    answer(on.home, "confirmed")
+    monkeypatch.setattr(room_rules, "_room_members", lambda room_id, home: [])
+    assert work.check_asks(on.home) is False
+    assert ask_first["posted"] == [] and not any(row["kind"] == "share_ask" for row in on.outbox_pending())
+
+
 def test_linked_work_never_saves_to_memory_or_messages_anyone(on, hermes, linked):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     answer(on.home, "confirmed")
