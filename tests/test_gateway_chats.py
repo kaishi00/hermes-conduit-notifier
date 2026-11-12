@@ -653,3 +653,19 @@ def test_under_the_gateway_workstreams_never_use_the_listeners_tui_registry(monk
     assert work_broker.server() is None
     runner.session_authority = object()
     assert work_broker.on_authority(work_broker.server())
+
+
+def test_on_the_authority_the_bypass_is_the_sessions_and_a_timeout_says_it_may_have_gone(tmp_path, monkeypatch):
+    from conduit_push import work_broker
+
+    answers = {"session.resume": {"result": {"session_id": "w1", "running": False}},
+               "config.set": {"result": {"key": "yolo", "value": "0", "scope": "session"}},
+               "prompt.submit": {"error": {"code": -32000, "message": "prompt.submit timed out; it may still have started"}}}
+    broker, api = _broker(tmp_path, answers, {"w1"}, monkeypatch)
+    broker.end_bypass("w1")
+    # A scope there names the profile-wide switch: the session's has none.
+    sent = [frame["params"] for frame in api.requests if frame["method"] == "config.set"]
+    assert sent == [{"session_id": "w1", "key": "yolo", "value": "off", "profile": "manager"}]
+    with pytest.raises(work_broker.BrokerError) as raised:
+        broker.wake("w1", "update")
+    assert raised.value.timed_out is True

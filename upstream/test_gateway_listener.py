@@ -690,6 +690,11 @@ def test_a_workstream_runs_on_the_authority_so_the_phone_opens_it(listener, prof
     assert out["sent"][0] in ("started", "queued") and out["sent"][1] == out["session_id"], out
     assert out["stopped"] is True, out
     assert out["woke"] in ("queued", "started", "streaming"), out
+    assert out["bypass_on"] == {"key": "yolo", "value": "1", "scope": "session"}, out
+    assert out["bypass_off"] is True, out
+    # The chosen folder and model reach the authority's session.
+    assert out["stored"] and out["stored"]["cwd"] == out["folder"], out
+    assert out["stored"]["model"] == "fake-model", out
 
     async def script(sock: ConduitSocket) -> Dict[str, Any]:
         # Conduit names the bot's profile on every request (#2262).

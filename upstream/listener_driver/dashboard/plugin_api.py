@@ -142,9 +142,15 @@ def _work_run(profile: str) -> Dict[str, Any]:
     home = get_hermes_home() / "profiles" / profile if profile else get_hermes_home()
     broker = work_broker.Broker(home)
     out: Dict[str, Any] = {"api": type(broker.api).__name__}
+    # The settings work_tool passes: a worktree's folder, the bot's workstream
+    # model, and Don't Ask's session-only approval bypass (turned off below).
+    folder = home / "work-contract"
+    folder.mkdir(parents=True, exist_ok=True)
     started = broker.start(title="W1 contract", prompt="Brief: RUN the job",
-                           idempotency_key=f"contract-{time.time_ns()}")
+                           idempotency_key=f"contract-{time.time_ns()}", cwd=str(folder), yolo=False,
+                           model={"model": "fake-model", "provider": "custom"})
     sid = out["session_id"] = started.session_id
+    out["folder"] = str(folder)
 
     def until(what: str, check: Any) -> Any:
         deadline = time.monotonic() + WAIT_S
@@ -167,6 +173,25 @@ def _work_run(profile: str) -> Dict[str, Any]:
     out["stopped"] = broker.stop(sid)
     until("the stop", lambda: not broker.live(sid)[1]["running"])
     out["woke"] = broker.wake(sid, "WAKE a work update")
+    # Don't Ask on and off again between turns: Hermes takes both.
+    answers: List[Dict[str, Any]] = []
+
+    def kept(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        answers.append(broker._dispatch(method, params))
+        return answers[-1]
+
+    broker._set_yolo(sid, True, kept)  # a refusal here is only logged, so its answer is checked
+    out["bypass_on"] = answers[-1] if answers else None
+    broker.end_bypass(sid)
+    out["bypass_off"] = True
+    import sqlite3
+
+    db = sqlite3.connect(home / "state.db")
+    try:
+        row = db.execute("SELECT cwd, model FROM sessions WHERE id = ?", (sid,)).fetchone()
+    finally:
+        db.close()
+    out["stored"] = {"cwd": row[0], "model": row[1]} if row else None
     return out
 
 

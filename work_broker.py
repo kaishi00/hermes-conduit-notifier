@@ -219,7 +219,11 @@ def _answer(response: Any, method: str) -> dict:
         code = error.get("code") if isinstance(error, dict) else None
         data = error.get("data") if isinstance(error, dict) else None
         reason = data.get("reason") if isinstance(data, dict) else ""
-        raise BrokerError(f"{message or method + ' failed'}{f' ({reason})' if reason else ''}"[:300], code=code)
+        # gateway_chats answers a call that ran out of time this way: it may
+        # still have reached Hermes, as a timed-out TUI call may.
+        timed_out = isinstance(message, str) and message.endswith("timed out; it may still have started")
+        raise BrokerError(f"{message or method + ' failed'}{f' ({reason})' if reason else ''}"[:300], code=code,
+                          timed_out=timed_out)
     result = response.get("result")
     return result if isinstance(result, dict) else {}
 
@@ -479,9 +483,13 @@ class Broker:
         asking, the safe side); turning it off can't."""
         if not runtime_id:
             raise BrokerError("no session to set approvals on")
+        params = {"session_id": runtime_id, "key": "yolo", "value": "on" if on else "off", **self._profile_params()}
+        if not on_authority(self.api):
+            # The authority's session bypass is the one with no scope: there a
+            # scope names the profile-wide switch (``global``) and refuses any other.
+            params["scope"] = "session"
         try:
-            call("config.set", {"session_id": runtime_id, "key": "yolo", "value": "on" if on else "off",
-                                "scope": "session", **self._profile_params()})
+            call("config.set", params)
         except Exception as error:  # noqa: BLE001 — on: whatever went wrong, Hermes keeps asking
             # A Hermes without config.set never turned it on, so there's nothing to turn off.
             if not on and not (isinstance(error, BrokerError) and error.unsupported):
