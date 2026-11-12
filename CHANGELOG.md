@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.164.13 (2026-11-12)
+## 0.164.14 (2026-11-12)
 
 ### Fixes
 - Stopping a workstream that was waiting for its background agents left
@@ -22,6 +22,12 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - With workstreams off, Bots Home shows when a bot's own chat has
   background agents running.
+
+## 0.164.13 (2026-11-12)
+
+### New and improved
+- Conduit's Folder can copy a file or folder and paste it into another folder,
+  keeping its name when nothing there has it.
 
 ## 0.164.12 (2026-11-12)
 
