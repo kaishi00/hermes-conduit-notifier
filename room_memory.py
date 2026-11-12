@@ -10,7 +10,10 @@ turns itself, the plugin keeps a room session's memory manager from saving
 anything: the per-turn sync, the session-end extraction and the summary it
 adds before compressing are skipped. Recall still runs, the way MEMORY.md
 still loads: the agent knows its owner in the room, it just doesn't learn
-from what others say there.
+from what others say there. A host that keeps the plugin to Conduit's rooms
+(room_settings.conduit_rooms_only, notifier #443) leaves other rooms' turns to
+the provider, as Hermes alone would; a room whose id can't be read yet is
+guarded.
 
 Pulse's turns (designs/proactivity.md) are hidden asks the plugin sends into
 the Pulse chat a few times a day, each with tens of thousands of characters of
@@ -30,10 +33,12 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import importlib.util
 import json
 import logging
 import re
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -47,6 +52,11 @@ ROOM_SOURCE = "bot_room"
 # (gateway/session_api.room_session_id); a local member's session has an
 # ordinary id, so its stored source decides.
 ROOM_SESSION_ID = re.compile(r"room_[0-9a-f]{32}")
+# Hermes titles each member's session for a room "Group: <room id>", numbered
+# " #N" when the title is taken (room_rules reads it the same way).
+ROOM_TITLE = re.compile(r"Group: ([A-Za-z0-9][A-Za-z0-9._:-]{0,127})(?: #\d+)?")
+# room_settings.py, when this module is loaded on its own (the tests).
+SETTINGS_MODULE = "conduit_push_room_settings"
 # Compaction continuations and delegated children followed back to the
 # room's own session.
 LINEAGE_HOPS = 32
@@ -81,30 +91,84 @@ _pulse_unread_count = 0
 
 def is_room_session(session_id: Any, home: Any = None) -> bool:
     """Whether ``session_id`` is a hosted room member's session, or a
-    compaction continuation of one. Anything unreadable counts as no: the
-    guard only skips saving for a session it can tell is a room."""
+    compaction continuation of one, and the guard covers its room (on a host
+    that keeps the plugin to Conduit's rooms, only theirs). Anything
+    unreadable counts as no: the guard only skips saving for a session it
+    can tell is a room."""
+    if ROOM_SESSION_ID.fullmatch(str(session_id or "")) and not _conduit_rooms_only(home):
+        return True  # every room is guarded: no need to read which
+    return _room_guarded(session_room(session_id, home), home)
+
+
+def session_room(session_id: Any, home: Any = None) -> Optional[str]:
+    """The room ``session_id`` is in, whatever the room settings say: its id,
+    "" when unknown (a remote member's session with no row here, a room
+    session not titled yet), a legacy Desktop group's display title (no
+    Conduit room's id), or None for any other session."""
     value = str(session_id or "")
     if not value:
-        return False
-    if ROOM_SESSION_ID.fullmatch(value):
-        return True
+        return None
+    remote = bool(ROOM_SESSION_ID.fullmatch(value))
     global _odd_id_logged
-    if value.startswith("room_") and not _odd_id_logged:
+    if not remote and value.startswith("room_") and not _odd_id_logged:
         # Hermes may have changed how it names remote room sessions; then only
         # the stored source below still finds them.
         _odd_id_logged = True
         logger.warning("conduit_push: session %s looks like a group room's but isn't named like one", value)
+    unknown = "" if remote else None
     if home is None:
-        return False
+        return unknown
     for attempt in range(READ_RETRIES + 1):
         try:
-            return _stored_room(Path(home) / STATE_DB, value)
+            room = _stored_room(Path(home) / STATE_DB, value)
         except Exception as error:  # noqa: BLE001 - the agent starts whatever this finds
             if attempt == READ_RETRIES or "disk i/o error" not in str(error).lower():
-                _store_unread(value)
-                return False
+                if not remote:
+                    _store_unread(value)
+                return unknown
             time.sleep(READ_RETRY_PAUSE)
-    return False
+            continue
+        return unknown if room is None else room
+    return unknown
+
+
+def _room_guarded(room: Optional[str], home: Any) -> bool:
+    """Whether the guard covers ``room`` (from session_room), read each time
+    so a change to the room settings holds from the next call."""
+    if room is None:
+        return False
+    return not _conduit_rooms_only(home) or _settings().applies(room, home)
+
+
+def _settings() -> Any:
+    """room_settings.py: the plugin's own, or loaded by path beside this
+    file when this module was."""
+    try:
+        from . import room_settings
+
+        return room_settings
+    except ImportError:
+        pass
+    module = sys.modules.get(SETTINGS_MODULE)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(SETTINGS_MODULE,
+                                                      Path(__file__).resolve().with_name("room_settings.py"))
+        if spec is None or spec.loader is None:
+            raise ImportError("room_settings.py is missing")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module = sys.modules.setdefault(SETTINGS_MODULE, module)
+    return module
+
+
+def _conduit_rooms_only(home: Any) -> bool:
+    """Whether the host keeps the plugin to Conduit's rooms; no when that
+    can't be read, so every room is guarded as before."""
+    try:
+        return bool(_settings().conduit_rooms_only(home))
+    except Exception:  # noqa: BLE001 - a broken install guards every room
+        logger.debug("conduit_push: couldn't read the room settings", exc_info=True)
+        return False
 
 
 def _store_unread(session_id: str) -> None:
@@ -121,24 +185,36 @@ def _store_unread(session_id: str) -> None:
         logger.debug("conduit_push: couldn't tell whether session %s is a group room", session_id, exc_info=True)
 
 
-def _stored_room(path: Path, session_id: str) -> bool:
+def _stored_room(path: Path, session_id: str) -> Optional[str]:
+    """The room a session's turns are in, by its id ("" when no session on
+    the way is titled yet, the title itself when it names no room), or None
+    when it isn't a room's."""
     if not path.exists():
-        return False
+        return None
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=READ_TIMEOUT)
     try:
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
         config = "model_config" if "model_config" in columns else "NULL"
+        title = "title" if "title" in columns else "NULL"
         current = session_id
+        room = ""
         for _ in range(LINEAGE_HOPS):
-            row = conn.execute(f"SELECT source, parent_session_id, {config} FROM sessions WHERE id = ?",
+            row = conn.execute(f"SELECT source, parent_session_id, {config}, {title} FROM sessions WHERE id = ?",
                                (current,)).fetchone()
             if row is None:
-                return False
+                return None
+            # The nearest title: a compaction's continuation carries the room's
+            # forward, and a delegated child's own ("Subagent: ...") isn't it.
+            # A title that names no room (a legacy Desktop group's display
+            # name) is kept as it is, which is no Conduit room's id.
+            if not room and isinstance(row[3], str) and row[3].strip() and not _delegated(row[0], row[2]):
+                match = ROOM_TITLE.fullmatch(row[3])
+                room = match.group(1) if match else row[3]
             if str(row[0] or "").strip().lower() == ROOM_SOURCE or ROOM_SESSION_ID.fullmatch(current):
-                return True
+                return room
             parent = row[1]
             if not parent:
-                return False
+                return None
             # A compaction carries the room on, and so does a delegated child
             # (it works for the room's turn, as room_rules counts it); a branch
             # is a conversation of its own. Hermes ends the parent and writes
@@ -146,9 +222,9 @@ def _stored_room(path: Path, session_id: str) -> bool:
             if not _delegated(row[0], row[2]):
                 ended = conn.execute("SELECT end_reason FROM sessions WHERE id = ?", (parent,)).fetchone()
                 if ended is None or ended[0] != "compression":
-                    return False
+                    return None
             current = parent
-        return False
+        return None
     finally:
         conn.close()
 
@@ -288,7 +364,13 @@ def _hermes_home() -> Optional[Path]:
 
 
 def _in_room(manager: Any, session_id: Any = "") -> bool:
-    return bool(getattr(manager, MARK, False)) or bool(ROOM_SESSION_ID.fullmatch(str(session_id or "")))
+    # MARK keeps the bound session's room, not the decision: the settings are
+    # read each call, so a change holds without a rebind.
+    home = _home(manager)
+    if _room_guarded(getattr(manager, MARK, None), home):
+        return True
+    value = str(session_id or "")
+    return bool(ROOM_SESSION_ID.fullmatch(value)) and is_room_session(value, home)
 
 
 def _guard(original: Callable[..., Any], wrapper: Callable[..., Any]) -> Callable[..., Any]:
@@ -306,7 +388,7 @@ def _initialize_all(original: Callable[..., Any]) -> Callable[..., Any]:
         # row exists by then (the room's admission writes it).
         home = kwargs.get("hermes_home") or _hermes_home()
         setattr(self, HOME, home)
-        setattr(self, MARK, is_room_session(kwargs.get("session_id", args[0] if args else ""), home))
+        setattr(self, MARK, session_room(kwargs.get("session_id", args[0] if args else ""), home))
         return original(self, *args, **kwargs)
     return _guard(original, initialize_all)
 
@@ -318,7 +400,7 @@ def _on_session_switch(original: Callable[..., Any]) -> Callable[..., Any]:
         # reason by keyword (the method takes it through **kwargs).
         if kwargs.get("reason") != "compression":
             new_session_id = kwargs.get("new_session_id", args[0] if args else "")
-            setattr(self, MARK, is_room_session(new_session_id, getattr(self, HOME, None) or _hermes_home()))
+            setattr(self, MARK, session_room(new_session_id, getattr(self, HOME, None) or _hermes_home()))
         return original(self, *args, **kwargs)
     return _guard(original, on_session_switch)
 

@@ -1200,3 +1200,99 @@ def test_cli_forget_says_try_again_when_the_session_store_wont_open(cli, hermes,
     assert cli.dispatch(_forget_args("theirs", yes=True)) == 1
     assert "try again shortly" in capsys.readouterr().out
     assert _ids(furina) == {REMOTE}
+
+
+# --- The host's room settings (notifier #443) ---------------------------------
+
+
+def _settings(hermes, **values):
+    import yaml
+
+    (hermes.root / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"entries": {"conduit_push": {"settings": values}}}}), encoding="utf-8")
+    sys.modules["conduit_push.room_settings"]._clear()
+
+
+def test_a_host_that_keeps_disbanded_rooms_chats_deletes_none(guard, monkeypatch):
+    told = []
+    invites = types.ModuleType("conduit_push.room_invites")
+    invites.disbanded = lambda root, room_id: told.append(room_id)
+    monkeypatch.setitem(sys.modules, "conduit_push.room_invites", invites)
+    monkeypatch.setattr(sys.modules["conduit_push"], "room_invites", invites, raising=False)
+    furina = _home(guard, "furina")
+    _settings(guard, cleanup_disbanded_rooms="off")
+    _room(guard.root / "state.db", "conduit-with-laifu", [FURINA, LAIFU])
+    _room_session(furina, "f-with", "conduit-with-laifu")
+
+    assert _disband(guard, "conduit-with-laifu")["room_id"] == "conduit-with-laifu"
+
+    assert _ids(furina) == {"f-with"}
+    assert guard.deletes == []
+    # The people linked into it are still told it ended.
+    assert told == ["conduit-with-laifu"]
+
+
+def test_a_bare_off_in_yaml_keeps_them_too(guard):
+    furina = _home(guard, "furina")
+    (guard.root / "config.yaml").write_text(
+        "plugins:\n  entries:\n    conduit_push:\n      settings:\n        cleanup_disbanded_rooms: off\n",
+        encoding="utf-8")
+    sys.modules["conduit_push.room_settings"]._clear()
+    _room(guard.root / "state.db", "conduit-mine", [FURINA])
+    _room_session(furina, "f-mine", "conduit-mine")
+
+    _disband(guard, "conduit-mine")
+
+    assert _ids(furina) == {"f-mine"}
+
+
+def test_a_setting_it_cant_read_deletes_as_by_default(guard, caplog):
+    furina = _home(guard, "furina")
+    _settings(guard, cleanup_disbanded_rooms="archive")
+    _room(guard.root / "state.db", "conduit-mine", [FURINA])
+    _room_session(furina, "f-mine", "conduit-mine")
+
+    _disband(guard, "conduit-mine")
+
+    assert _ids(furina) == set()
+    assert "cleanup_disbanded_rooms is 'archive'" in caplog.text
+
+
+def test_conduit_rooms_only_leaves_other_rooms_chats(guard):
+    furina = _home(guard, "furina")
+    _settings(guard, conduit_rooms_only=True)
+    _room(guard.root / "state.db", "desktop-room", [FURINA])
+    _room(guard.root / "state.db", "conduit-0f8e", [FURINA])
+    _room_session(furina, "f-desktop", "desktop-room")
+    _room_session(furina, "f-conduit", "conduit-0f8e")
+
+    _disband(guard, "desktop-room")
+    _disband(guard, "conduit-0f8e")
+
+    assert _ids(furina) == {"f-desktop"}
+
+
+def test_the_sweep_follows_the_settings(hermes, caplog):
+    furina = _home(hermes, "furina")
+    _room(hermes.root / "state.db", "desktop-room", [FURINA], disbanded_at=2.0)
+    _room(hermes.root / "state.db", "conduit-0f8e", [FURINA], disbanded_at=3.0)
+    _room_session(furina, "f-desktop", "desktop-room")
+    _room_session(furina, "f-conduit", "conduit-0f8e")
+
+    _settings(hermes, cleanup_disbanded_rooms="off")
+    with caplog.at_level(logging.INFO):
+        assert cleanup.sweep() == 0
+    assert "cleanup_disbanded_rooms is off" in caplog.text
+    assert _ids(furina) == {"f-desktop", "f-conduit"}
+
+    _settings(hermes, conduit_rooms_only=True)
+    assert cleanup.sweep() == 1
+    assert _ids(furina) == {"f-desktop"}
+
+
+def test_forget_deletes_whatever_the_settings_say(hermes):
+    furina = _home(hermes, "furina")
+    _settings(hermes, cleanup_disbanded_rooms="off", conduit_rooms_only=True)
+    _room_session(furina, "f-desktop", "desktop-room")
+
+    assert cleanup.forget_room("desktop-room", furina) == {"room_id": "desktop-room", "deleted": 1, "kept": 0}

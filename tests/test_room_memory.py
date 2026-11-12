@@ -618,3 +618,102 @@ def test_a_pulse_store_caught_mid_checkpoint_is_read_again(guard, hermes, tmp_pa
     monkeypatch.setattr(guard, "READ_RETRY_PAUSE", 0)
     assert guard.pulse_asks(tmp_path, [ask]) == [True]
     assert len(calls) == 2
+
+
+# --- A host that keeps the plugin to Conduit's rooms (notifier #443) ----------
+
+
+def _titled_db(home, rows, *, conduit_rooms_only):
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT, end_reason TEXT, "
+                 "title TEXT)")
+    conn.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    (home / "config.yaml").write_text(
+        "plugins:\n  entries:\n    conduit_push:\n      settings:\n"
+        f"        conduit_rooms_only: {'true' if conduit_rooms_only else 'false'}\n", encoding="utf-8")
+    settings = sys.modules.get("conduit_push_room_settings")
+    if settings is not None:
+        settings._clear()
+    return home
+
+
+def test_conduit_rooms_only_leaves_other_rooms_turns_to_the_provider(guard, hermes, tmp_path):
+    other_remote = "room_" + "fedcba9876543210" * 2
+    home = _titled_db(tmp_path, [
+        ("sess_desktop", "bot_room", None, "compression", "Group: desktop-room"),
+        ("sess_desktop_2", "api_server", "sess_desktop", None, None),
+        ("sess_conduit", "bot_room", None, None, "Group: conduit-0f8e"),
+        (REMOTE_ROOM, "api_server", None, None, "Group: theirs #2"),
+        (other_remote, "api_server", None, None, "Group: conduit-1a2b"),
+    ], conduit_rooms_only=True)
+
+    for session_id in ("sess_desktop", "sess_desktop_2", REMOTE_ROOM):
+        manager = _bound(hermes, session_id, home)
+        manager.sync_all("Mona: Saturday works", "Laifu: Saturday it is", session_id=session_id)
+        assert manager.saved == [("sync_all", "Mona: Saturday works", session_id)], session_id
+    for session_id in ("sess_conduit", other_remote):
+        manager = _bound(hermes, session_id, home)
+        assert _turn_end(manager, session_id) == ""
+        assert manager.saved == [], session_id
+
+
+def test_a_change_to_conduit_rooms_only_holds_without_a_rebind(guard, hermes, tmp_path):
+    home = _titled_db(tmp_path, [("sess_desktop", "bot_room", None, None, "Group: desktop-room")],
+                      conduit_rooms_only=True)
+    manager = _bound(hermes, "sess_desktop", home)
+    manager.sync_all("Mona: Saturday works", "Laifu: Saturday it is", session_id="sess_desktop")
+    assert manager.saved == [("sync_all", "Mona: Saturday works", "sess_desktop")]
+
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  entries:\n    conduit_push:\n      settings:\n        conduit_rooms_only: false\n",
+        encoding="utf-8")
+    sys.modules["conduit_push_room_settings"]._clear()
+    manager.sync_all("Mona: Sunday then", "Laifu: Sunday", session_id="sess_desktop")
+    assert manager.saved == [("sync_all", "Mona: Saturday works", "sess_desktop")]  # guarded from the next turn
+
+
+def test_a_room_it_cant_name_yet_is_still_guarded(guard, hermes, tmp_path):
+    home = _titled_db(tmp_path, [("sess_untitled", "bot_room", None, None, None)], conduit_rooms_only=True)
+
+    # A remote room's session with no row yet, and a local one Hermes hasn't titled.
+    for session_id in (REMOTE_ROOM, "sess_untitled"):
+        manager = _bound(hermes, session_id, home)
+        manager.sync_all("Mona: Saturday works", "Laifu: Saturday it is", session_id=session_id)
+        assert manager.saved == [], session_id
+
+
+def test_every_room_is_guarded_by_default(guard, hermes, tmp_path):
+    home = _titled_db(tmp_path, [("sess_desktop", "bot_room", None, None, "Group: desktop-room")],
+                      conduit_rooms_only=False)
+
+    manager = _bound(hermes, "sess_desktop", home)
+    assert _turn_end(manager, "sess_desktop") == ""
+    assert manager.saved == []
+
+
+def test_a_helpers_title_isnt_its_rooms_and_a_desktop_groups_isnt_conduits(guard, hermes, tmp_path):
+    conn = sqlite3.connect(tmp_path / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, parent_session_id TEXT, end_reason TEXT, "
+                 "model_config TEXT, title TEXT)")
+    conn.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)", [
+        ("sess_room", "bot_room", None, None, None, "Group: conduit-0f8e"),
+        ("sess_helper", "subagent", "sess_room", None, json.dumps({"_delegate_from": "sess_room"}),
+         "Subagent: find a zoo"),
+        ("sess_family", "bot_room", None, None, None, "Group: Family chat"),
+    ])
+    conn.commit()
+    conn.close()
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  entries:\n    conduit_push:\n      settings:\n        conduit_rooms_only: true\n", encoding="utf-8")
+    settings = sys.modules.get("conduit_push_room_settings")
+    if settings is not None:
+        settings._clear()
+
+    helper = _bound(hermes, "sess_helper", tmp_path)
+    helper.sync_all("Mona: Saturday works", "Laifu: Saturday it is", session_id="sess_helper")
+    assert helper.saved == []
+    family = _bound(hermes, "sess_family", tmp_path)
+    family.sync_all("Mum: dinner at 7", "Furina: noted", session_id="sess_family")
+    assert family.saved == [("sync_all", "Mum: dinner at 7", "sess_family")]

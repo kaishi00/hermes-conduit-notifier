@@ -13,7 +13,10 @@ agent's home on this host. Agents on other people's Hermes keep theirs (Eric,
 2026-10-26); forget_room is how their owner deletes one later, from
 `hermes conduit-push rooms forget` or Conduit. A room with people linked in
 (room_invites.py) ends for them first: their Hermes are told, and undo their
-agents' joins.
+agents' joins. A host that sets cleanup_disbanded_rooms to off keeps every
+room's hidden chats, and one that sets conduit_rooms_only keeps those of
+rooms Conduit didn't make (room_settings.py, notifier #443); the people linked
+into a room are told it ended either way.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from . import room_rules
+from . import room_rules, room_settings
 
 logger = logging.getLogger(__name__)
 
@@ -110,10 +113,14 @@ def forget_room(room_id: Any, home: Path) -> dict[str, Any]:
 def sweep(home: Optional[Path] = None) -> int:
     """Deletes what's left of the hidden chats of this host's agents in the
     rooms disbanded here (a turn that was still finishing, a room disbanded
-    before this version), the newest rooms of each store first. Returns how
-    many it deleted."""
+    before this version), the newest rooms of each store first, unless the
+    host's room settings keep them. Returns how many it deleted."""
     home = Path(home) if home is not None else _hermes_home()
     if home is None:
+        return 0
+    if room_settings.cleanup_disbanded(home) == room_settings.OFF:
+        logger.info("conduit_push: cleanup_disbanded_rooms is off, so the hidden chats of disbanded group rooms "
+                    "stay on this host")
         return 0
     plan: dict[Path, set[str]] = {}
     for store in room_rules.room_stores(home):
@@ -123,6 +130,7 @@ def sweep(home: Optional[Path] = None) -> int:
             logger.warning("conduit_push: couldn't read the disbanded rooms in %s; the plugin tries again when it "
                            "next loads", store, exc_info=True)
             continue
+        rooms = [(room_id, profiles) for room_id, profiles in rooms if room_settings.applies(room_id, home)]
         homes = _homes({profile for _, profiles in rooms for profile in profiles}, store)
         for room_id, profiles in rooms:
             for profile in profiles:
@@ -140,11 +148,24 @@ def sweep(home: Optional[Path] = None) -> int:
     return deleted
 
 
+def cleans(room_id: Any, home: Any) -> bool:
+    """Whether disbanding this room deletes its hidden chats on this host,
+    as the host's room settings have it."""
+    return room_settings.cleanup_disbanded(home) == room_settings.DELETE and room_settings.applies(room_id, home)
+
+
 def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
     def disband_room(db_path: Any, *args: Any, **kwargs: Any) -> Any:
         room_id = kwargs.get("room_id")
-        # Read first: Hermes can prune the room's row in the disband's own transaction.
-        profiles = _before(db_path, room_id)
+        # Read first: Hermes can prune the room's row in the disband's own
+        # transaction. A room whose chats stay has nothing to read.
+        try:
+            wanted = cleans(room_id, Path(db_path).parent)
+        except Exception:  # noqa: BLE001 - the disband is Hermes' either way
+            logger.warning("conduit_push: couldn't read the room settings; deleting room %s's hidden chats as by "
+                           "default", room_id, exc_info=True)
+            wanted = True
+        profiles = _before(db_path, room_id) if wanted else ()
         result = original(db_path, *args, **kwargs)
         if profiles is None:
             logger.warning("conduit_push: couldn't read room %s's members before it was disbanded; looking for its "
