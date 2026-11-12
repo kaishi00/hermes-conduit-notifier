@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.10 (2026-11-12)
+
+### Fixes
+- When your answer to your agent's ask in a room came while that room's
+  post or this Hermes' link to it was briefly unavailable, your agent still
+  waited for someone to speak. It now tries again until it gets through.
+
 ## 0.164.9 (2026-11-12)
 
 ### Fixes
