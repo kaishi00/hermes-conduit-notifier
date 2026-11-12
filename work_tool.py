@@ -474,7 +474,10 @@ def _hosted_elsewhere(host: Any) -> bool:
     that's still running: the dashboard, while a gateway or a TUI on the same
     home restarts. That process runs the work, so a restart elsewhere never
     takes it for stopped, continues it or resends to it (notifier#744). A host
-    that can't be told apart from a gone one counts as gone, as before."""
+    whose start time doesn't match the process now under its pid counts as
+    gone. One stamped without a start time (psutil unreadable) counts as
+    running while its pid is: a reused pid then holds its recovery until that
+    process exits, the safer side of taking live work for stopped."""
     pid_text, _, started = str(host or "").partition(":")
     try:
         pid = int(pid_text)
@@ -2247,6 +2250,10 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
         # The session is already one of the bot's own workstreams: it stays that.
         return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}
     adopted = work.created_at >= began  # else the row the session already had
+    if adopted and not isinstance(result, str) and work.status == "running" and not work.host:
+        # Its turn began before the row did, so its start stamped nothing: this
+        # process, where the phone runs the call's chats, runs it (notifier#744).
+        work = store.update(work.ref, host=_host_stamp()) or work
     if adopted and isinstance(result, str) and work.status == "running":
         # Its turn ended before it was kept: settled as its end would have.
         _turn_ended(session, result)
