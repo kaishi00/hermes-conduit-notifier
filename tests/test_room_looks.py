@@ -247,6 +247,15 @@ def test_the_routes_take_your_looks_and_show_a_rooms(rooms, monkeypatch):
     assert (refused.status_code, refused.json()["code"]) == (400, "bad_looks")
     assert "room-looks" in api.capabilities.ROUTE_CAPABILITIES
 
+    # Your own look, for each of your devices: given by one, kept when another gives only its bots'.
+    assert client.put(f"{BASE}/rooms/looks", json={"person": look(PNG, None)}).json()["looks"] \
+        == {"agents": ["default"], "person": True}
+    assert client.put(f"{BASE}/rooms/looks", json={"agents": {"default": look()}}).json()["looks"]["person"] is True
+    you = client.get(f"{BASE}/rooms/looks")
+    assert you.headers["cache-control"] == "no-store"
+    assert you.json() == {"ok": True, "person": look(PNG, None)}
+    assert "room-looks-you" in api.capabilities.ROUTE_CAPABILITIES
+
 
 def test_a_person_with_no_name_is_dropped(rooms):
     room_id = _started(rooms, links=("link1",))
@@ -313,3 +322,25 @@ def test_agents_that_arent_an_object_are_refused(rooms):
     with pytest.raises(looks_module.LooksError):
         looks_module.put_own(rooms.tmp_path / "furina", {"agents": [], "person": None})
     assert looks_module.own(rooms.tmp_path / "furina")["agents"] == {"default": look()}
+
+
+def test_a_device_that_gives_only_its_bots_looks_keeps_the_persons_picture(rooms):
+    # Eric's host, 2026-11-12: another of his devices gave its bots' looks without his picture, and the room's
+    # guest stopped seeing it. Each part sent takes the place of what was there; one left out stays.
+    room_id = _started(rooms, links=("link1",))
+    give(rooms, "furina", {"default": look()}, person=look(PNG, None))
+    everyone_passes(rooms)
+    assert shown(rooms, "laifu", room_id)["home"] == look(PNG, None)
+
+    assert looks_module.put_own(rooms.tmp_path / "furina", {"agents": {"default": look(color="#333333")}}) \
+        == {"agents": ["default"], "person": True}
+    assert looks_module.you(rooms.tmp_path / "furina") == {"person": look(PNG, None)}
+    everyone_passes(rooms)
+    assert shown(rooms, "laifu", room_id)["home"] == look(PNG, None)
+    assert shown(rooms, "laifu", room_id)["members"] == {"default": look(color="#333333")}
+
+    # Only the person: the bots' looks stay. Removing it, with an explicit null, takes it away.
+    looks_module.put_own(rooms.tmp_path / "furina", {"person": None})
+    assert looks_module.own(rooms.tmp_path / "furina") == {"agents": {"default": look(color="#333333")}, "person": None}
+    everyone_passes(rooms)
+    assert shown(rooms, "laifu", room_id)["home"] is None

@@ -581,9 +581,13 @@ async def get_room_looks(response: Response, room_id: Optional[str] = None) -> A
     """How a room over Links looks: ``members``, member id to ``{picture,
     color}`` for other people's agents; ``people``, each other person but
     the host as ``{name, poster, look}``; and ``home``, the host's look
-    when it isn't you. Empty until their Hermes sends them."""
+    when it isn't you. Empty until their Hermes sends them. Without
+    ``room_id``, ``person``: your own look, as one of your devices last
+    gave it, for each of them to show (capability room-looks-you)."""
     response.headers["Cache-Control"] = "no-store"
     looks = core._plugin_package_module("room_looks")
+    if room_id is None:
+        return await _room_invites_route(None, lambda rooms: looks.you(rooms.root), "your look")
     return await _room_invites_route(None, lambda rooms: looks.shown(rooms.root, room_id), "room looks")
 
 
