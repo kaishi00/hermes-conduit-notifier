@@ -52,10 +52,19 @@ _GUARDS = ("room_memory", "room_planner", "room_cutoff", "room_wakeups", "room_c
 
 
 def _plugin_copies(names):
-    """Every loaded copy of the plugin's modules named ``names``: the package
-    (conduit_push.*), the copies tests and the dashboard load under names of
-    their own (conduit_push_personality.forks, conduit_push_dashboard_pulse),
-    and the ones the dashboard's rooms routes hold."""
+    """Every loaded copy of the plugin's modules named ``names``, each once:
+    the package (conduit_push.*), the copies tests and the dashboard load
+    under names of their own (conduit_push_personality.forks,
+    conduit_push_dashboard_pkg.pulse), and the ones the dashboard's rooms
+    routes hold outside sys.modules (conduit_push_dashboard_room_planner)."""
+    seen = set()
+    for module in _plugin_copies_found(names):
+        if id(module) not in seen:
+            seen.add(id(module))
+            yield module
+
+
+def _plugin_copies_found(names):
     for name, module in list(sys.modules.items()):
         if module is None or not name.startswith("conduit_push"):
             continue
