@@ -1998,8 +1998,10 @@ about sound files, since the answer is heard as well as read (0.156.0+).
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
   answers `{"ok": true, "recorded": true}`. `text_sha256` is the SHA-256 of
   the UTF-8 text Conduit sends in `prompt.submit`. Surfaces: `iphone`,
-  `ipad`, `mac`, `vision`, `watch`, `carplay`, `siri`; `input` is `typed`
-  or `spoken`, or left out when unknown (a Shortcut). `"heard": true` on a
+  `ipad`, `mac`, `vision`, `watch`, `carplay`, `siri`, and `widget` for a
+  widget's button such as the Pulse widget's Do it (0.164.12+; an older
+  plugin refuses it, and that turn has no line); `input` is `typed` or
+  `spoken`, or left out when unknown (a Shortcut, a widget). `"heard": true` on a
   typed message says Conduit will read its reply aloud (0.156.0+; a plugin
   before it ignores the key). Capability `turn-surface`.
 - The report is kept on Hermes' in-memory record of that chat (up to 8, for

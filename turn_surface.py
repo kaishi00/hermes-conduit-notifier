@@ -83,6 +83,9 @@ SURFACES = {
     "watch": "the user's Apple Watch",
     "carplay": "CarPlay in the user's car",
     "siri": "Siri or a Shortcut",
+    # A widget's button (the Pulse widget's Do it, hermes-conduit#888): the
+    # user tapped it on the Home Screen and Conduit wrote the words.
+    "widget": "a button the user tapped on a Conduit widget, in words Conduit wrote",
 }
 INPUTS = ("typed", "spoken")
 # Said after the line where the surface changes what a good answer looks like.
@@ -90,6 +93,7 @@ HINTS = {
     "carplay": "They are likely driving: answer briefly, in plain sentences meant to be heard, "
                "with no tables, links or lists.",
     "watch": "Its screen is small: keep the answer short, with no tables.",
+    "widget": "Conduit isn't open: the user reads the answer later, in this chat.",
 }
 # Said for a message typed on a screen, where a clarify batch with open
 # questions shows as a form (hermes-conduit's ClarifyActivity.isForm). Only
