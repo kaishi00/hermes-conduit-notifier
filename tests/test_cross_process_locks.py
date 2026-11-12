@@ -1,5 +1,6 @@
 """Writers in two processes (two dashboards, or a dashboard and the agent)
 wait on one another through a lock file, not only on an in-process lock."""
+import os
 import base64
 import builtins
 import importlib.util
@@ -7,7 +8,6 @@ import json
 import pathlib
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the helper proc
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")

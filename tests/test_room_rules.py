@@ -1,11 +1,11 @@
 """Owner rules for turns in rooms with other people's agents (designs/cross-owner-agents, M1)."""
+import os
 import importlib.util
 import json
 import logging
 import pathlib
 import sqlite3
 import sys
-import tempfile
 import types
 
 import pytest
@@ -31,7 +31,7 @@ HOSTED_ROOMS_DDL = """CREATE TABLE IF NOT EXISTS hosted_rooms (
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools.clarify_tool" not in sys.modules:
     _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))

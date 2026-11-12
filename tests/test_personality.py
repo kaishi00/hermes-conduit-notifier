@@ -1,9 +1,9 @@
+import os
 import contextlib
 import contextvars
 import importlib.util
 import pathlib
 import sys
-import tempfile
 import types
 from pathlib import Path
 
@@ -17,7 +17,7 @@ BASE = "/api/plugins/conduit_push"
 # client.py imports hermes_constants at import time; same stub as the clarify tests.
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 

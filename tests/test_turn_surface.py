@@ -1,9 +1,9 @@
 """Where in Conduit a turn's message was sent (hermes-conduit#888)."""
+import os
 import contextvars
 import importlib.util
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -15,7 +15,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools.clarify_tool" not in sys.modules:
     _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))

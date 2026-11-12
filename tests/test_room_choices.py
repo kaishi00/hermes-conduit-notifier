@@ -1,11 +1,11 @@
 """Each owner's choices for their agent in a Linked Room (designs/cross-owner-agents, decision 9)."""
+import os
 import argparse
 import importlib.util
 import json
 import logging
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -17,7 +17,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")

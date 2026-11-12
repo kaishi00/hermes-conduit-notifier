@@ -3,6 +3,7 @@
 (room_boards.DesktopBoards, GET /boards/desktop, POST /boards/desktop/seen,
 desktop/plugin.js)."""
 
+import os
 import contextlib
 import importlib.util
 import json
@@ -89,7 +90,7 @@ def _plugin():
     import types
     if "hermes_constants" not in sys.modules:
         constants = types.ModuleType("hermes_constants")
-        constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+        constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
         sys.modules["hermes_constants"] = constants
     if "conduit_push" not in sys.modules:
         package = types.ModuleType("conduit_push")

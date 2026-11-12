@@ -4,6 +4,7 @@ Hermes' runs API, and the runs it admitted watched and sent back.
 Hermes' runs API is a fake of c73cbcc4's (its answers, statuses and error codes), and the Link a fake that keeps
 what's sent; test_two_loads_handle_each_request_once runs over the real mailbox.
 """
+import os
 import base64
 import hashlib
 import http.server
@@ -15,7 +16,6 @@ import logging
 import pathlib
 import stat
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -26,7 +26,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")

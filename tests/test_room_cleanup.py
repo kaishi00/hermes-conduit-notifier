@@ -1,6 +1,7 @@
 """Disbanding a room ends its hidden chats on its home, and a member host's
 owner can delete theirs later (designs/cross-owner-agents, N2; Eric,
 2026-10-26)."""
+import os
 import argparse
 import importlib.util
 import json
@@ -8,7 +9,6 @@ import logging
 import pathlib
 import sqlite3
 import sys
-import tempfile
 import threading
 import types
 
@@ -36,7 +36,7 @@ HOSTED_ROOMS_DDL = """CREATE TABLE IF NOT EXISTS hosted_rooms (
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")

@@ -3,11 +3,11 @@ inbox stores share. Each store's own vector test proves its bytes still
 match the phone; these prove the stores agree with each other and that each
 still refuses with its own error."""
 
+import os
 import importlib.util
 import pathlib
 import secrets
 import sys
-import tempfile
 import types
 
 import pytest
@@ -16,7 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")

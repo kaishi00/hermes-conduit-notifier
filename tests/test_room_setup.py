@@ -1,6 +1,7 @@
 """Setting a Hermes up for rooms with other people's agents: the API server,
 each agent's room ceiling and approvals, and the gateway restart
 (designs/cross-owner-agents, N3c, decision 13)."""
+import os
 import argparse
 import contextlib
 import hashlib
@@ -9,7 +10,6 @@ import json
 import logging
 import pathlib
 import sys
-import tempfile
 import threading
 import types
 
@@ -23,7 +23,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")
