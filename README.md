@@ -1718,7 +1718,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 
 | Method | Route | Returns |
 | --- | --- | --- |
-| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, coordination, counts, resolved_count, workstream_sessions, screen, work}` |
+| GET | `/api/plugins/conduit_push/workstreams` | `{ok, policy, bot, bot_chat, bot_chat_agents, coordination, counts, resolved_count, workstream_sessions, screen, work}` |
 | GET | `/api/plugins/conduit_push/workstreams?resolved=1&before=<closed_at>` | `{ok, ..., work, more}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/send` with `{text, how?}` | `{ok, outcome, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
@@ -1746,7 +1746,11 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   while it waits for it, else ""), `screen_used_at` (when it last used it,
   which says nothing about now) and `screen_ask` (what it waits on you to do
   on the screen, or ""), and `agents`: how many background agents it started
-  that it's still waiting for, once its own turn has ended.
+  that it's still waiting for, once its own turn has ended. Stopping it stops
+  those agents too (plugin 0.164.13+).
+- `bot_chat_agents` counts the background agents the Bot Chat itself started
+  that still run (it delegates on Everything Here, or with its workstreams
+  off), whatever the policy; Bots Home shows them on the bot's portrait.
 - Work leaves the list when it's resolved: by you (`resolve`, refused with
   `still_running` while it's at work: stop it first) or by the bot
   (`work_close`). Nothing resolves itself. `resolved=1` lists resolved work,

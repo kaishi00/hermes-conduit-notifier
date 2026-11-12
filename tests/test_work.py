@@ -168,6 +168,8 @@ def hermes(home, monkeypatch):
     work._redirecting.clear()
     work._shutting_down.clear()
     work._agents.clear()
+    work._bot_chat_agents.clear()
+    work._agent_ids.clear()
     work._held.clear()
     work._stopped_agents.clear()
     for timer in list(work._held_timers.values()):
@@ -880,6 +882,62 @@ def test_a_results_turn_that_starts_as_the_hold_runs_out_still_reports(on, herme
     work.turn_finished("20261031_work_1", failed=False, interrupted=False)
     assert on.get("W1").status == "done" and on.get("W1").last_result.startswith("The resolver times out")
     assert any("IPv6" in line for line in batched())
+
+
+def test_stopping_a_waiting_workstream_stops_its_agents(on, hermes, monkeypatch):
+    """Hermes stops a chat's agents only with its running turn: a workstream
+    stopped while it waits for its agents stops them itself (app issue 2206)."""
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1", "sa-1")
+    work.agent_started("child-2", "20261031_work_1", "sa-2")
+    work.agent_started("child-3", "20261031_work_1")  # a Hermes that named no subagent id
+    work.agent_started("elsewhere", OTHER_CHAT, "sa-other")
+    work.turn_ended("20261031_work_1", "Three agents are on it.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    interrupted = []
+    registry = types.ModuleType("tools.delegate_tool_registry")
+    registry.interrupt_subagent = lambda subagent_id: interrupted.append(subagent_id) or subagent_id != "sa-2"
+    monkeypatch.setitem(sys.modules, "tools.delegate_tool_registry", registry)
+
+    assert call("work_stop", {"ref": "W1"})["ok"]
+
+    assert sorted(interrupted) == ["sa-1", "sa-2"], "its own agents, by their ids, and no other chat's"
+    assert on.get("W1").status == "stopped"
+    # They end as stopped agents do: their ends are counted, and a results turn is stopped too.
+    work.agent_stopped("child-1")
+    assert (str(on.home), "W1") in work._stopped_agents
+
+
+def test_a_hermes_that_cant_stop_agents_still_stops_the_workstream(on, hermes, monkeypatch):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1", "sa-1")
+    work.turn_ended("20261031_work_1", "An agent is on it.")
+    work.turn_finished("20261031_work_1", failed=False, interrupted=False)
+    monkeypatch.setitem(sys.modules, "tools.delegate_tool_registry", types.ModuleType("tools.delegate_tool_registry"))
+    assert call("work_stop", {"ref": "W1"})["ok"]
+    assert on.get("W1").status == "stopped" and (str(on.home), "W1") in work._stopped_agents
+
+
+def test_the_bot_chats_own_agents_show_on_bots_home(home, hermes):
+    """A Bot Chat on Everything Here, or with its workstreams off, delegates
+    itself: Bots Home shows how many of its agents run (app issue 2206)."""
+    store_mod.Store(home).set_policy("off")
+    work._policy_cache.clear()
+    assert work.app_list(home)["bot_chat_agents"] == 0
+    work.agent_started("child-1", BOT_CHAT, "sa-1")
+    work.agent_started("child-2", BOT_CHAT, "sa-2")
+    work.agent_started("elsewhere", OTHER_CHAT, "sa-other")  # an ordinary chat's
+    listed = work.app_list(home)
+    assert listed["policy"] == "off" and listed["bot_chat_agents"] == 2
+    work.agent_stopped("child-1")
+    assert work.app_list(home)["bot_chat_agents"] == 1
+    # The id it ends under, which a compaction moved: still the Bot Chat's.
+    work.agent_stopped("child-2-compacted", BOT_CHAT)
+    assert work.app_list(home)["bot_chat_agents"] == 0
+    work.agent_stopped("elsewhere", OTHER_CHAT)
+    assert work.app_list(home)["bot_chat_agents"] == 0
 
 
 def test_agents_that_end_inside_the_turn_change_nothing(on, hermes):

@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.13 (2026-11-12)
+
+### Fixes
+- Stopping a workstream that was waiting for its background agents left
+  those agents running. Stopping it now stops them too.
+
+### New and improved
+- With workstreams off, Bots Home shows when a bot's own chat has
+  background agents running.
+
 ## 0.164.12 (2026-11-12)
 
 ### Fixes
