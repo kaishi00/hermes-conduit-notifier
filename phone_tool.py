@@ -25,6 +25,7 @@ import copy
 import json
 import logging
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -66,6 +67,7 @@ FRESH_SETTLE_S = 4.0
 # allowance with the changes Hermes queues.
 FRESH_MIN_GAP_S = 60.0
 _last_fresh: dict[str, float] = {}
+_fresh_lock = threading.Lock()
 
 FRESHNESS_NOTE = ("This is the phone's copy as of its last sync (as_of). The phone syncs when Conduit is open and "
                   "on background wakes, so changes made since, on a Mac or by other people, can be missing. Say "
@@ -842,6 +844,13 @@ def turn_note(store: PhoneStore | None = None) -> str | None:
         return None
 
 
+def _forget_fresh(profile: str, started: float) -> None:
+    """A wake that never reached the phone doesn't hold off the next ask."""
+    with _fresh_lock:
+        if _last_fresh.get(profile) == started:
+            del _last_fresh[profile]
+
+
 def _refresh(store: PhoneStore, device: Any, exact: bool, profile: str,
              sleep: Callable[[float], None]) -> tuple[str, str]:
     """Wakes the phone for a new status reading and waits for it (issue
@@ -859,11 +868,13 @@ def _refresh(store: PhoneStore, device: Any, exact: bool, profile: str,
         return "not_asked", ("This Hermes profile isn't paired with Conduit for notifications, so the phone couldn't "
                              "be asked. This is the latest it sent.")
     started = time.monotonic()
-    last = _last_fresh.get(profile)
-    if last is not None and started - last < FRESH_MIN_GAP_S:
-        return "not_asked", ("The phone was asked for a reading less than a minute ago, so it wasn't woken again. "
-                             "This is the latest it sent.")
-    _last_fresh[profile] = started
+    with _fresh_lock:
+        last = _last_fresh.get(profile)
+        if last is not None and started - last < FRESH_MIN_GAP_S:
+            return "not_asked", ("The phone was asked for a reading less than a minute ago, so it wasn't woken "
+                                 "again. This is the latest it sent.")
+        # Held while the wake goes, so two reads together send one.
+        _last_fresh[profile] = started
     asked = int(store.clock())
     # A background wake runs the phone's sync, which sends its status: the
     # same push a change Hermes may make without asking sends.
@@ -873,8 +884,10 @@ def _refresh(store: PhoneStore, device: Any, exact: bool, profile: str,
         sent = client.send_now(event)
     except Exception as error:  # noqa: BLE001
         logger.warning("conduit_phone: couldn't ask the phone for its status: %s", error)
+        _forget_fresh(profile, started)
         return "not_asked", "The phone couldn't be asked just now. This is the latest it sent."
     if isinstance(sent, dict) and sent.get("delivered") is False:
+        _forget_fresh(profile, started)
         # The relay held it back (notifications off on the phone, say).
         logger.info("conduit_phone: the relay didn't deliver the status wake: %s", sent.get("reason"))
         return "not_asked", ("The phone couldn't be woken (its notifications from Hermes may be off). "
