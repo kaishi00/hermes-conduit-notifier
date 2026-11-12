@@ -1267,3 +1267,13 @@ def test_a_current_environment_missing_its_python_is_not_called_out_of_date(tmp_
     (tmp_path / "env" / "bin" / "python").unlink()
     assert runtime.python() is None
     assert runtime.missing_reason() == api.watch_audio.WATCH_AUDIO_NEEDS_RUNTIME
+
+
+def test_a_gpt_live_start_on_the_ga_endpoint_tells_the_watch():
+    # Conduit issue 2236: the Watch speaks the GA events and appends the briefing itself.
+    answer = {"voice": "cove", "briefing_applied": False, "greeting_applied": False}
+    started = api.watch_audio._gpt_live_started("gpt_live", {**answer, "events": "ga"})
+    assert started == {"type": "started", "engine": "gpt_live", "voice": "cove", "input_rate": 16_000,
+                       "output_rate": 24_000, "briefing_applied": False, "greeting_applied": False, "events": "ga"}
+    assert "events" not in api.watch_audio._gpt_live_started("gpt_live", answer)
+    assert "events" not in api.watch_audio._gpt_live_started("gpt_live", {**answer, "events": "other"})
