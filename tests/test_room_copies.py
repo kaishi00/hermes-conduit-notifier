@@ -6,11 +6,13 @@ room log is a fake of c73cbcc4's gateway/hosted_rooms.read_events, and the membe
 gateway/hosted_room_replicas' schema (verbatim) with ingest_page's refusals (9e01b44 and 930e5ed have the same).
 """
 import hashlib
+import itertools
 import json
 import logging
 import sqlite3
 import stat
 import types
+import uuid
 
 import pytest
 from fastapi import FastAPI
@@ -226,6 +228,31 @@ def test_a_page_waits_for_its_start_the_mailbox_didnt_take(copies):
     assert [kind for link_id, kind in copies.wire.kinds("furina") if kind in ("room.start", "room.page")] == [
         "room.start", "room.page"]
     assert copy_of(copies, "laifu", room_id)["room_id"] == room_id
+
+
+def test_a_later_rooms_page_waits_for_its_start_too(copies, monkeypatch):
+    # Each room is held by its own start, not only the first room the pass looks at (they go in id order).
+    ids = (uuid.UUID(int=n) for n in itertools.count(1))
+    monkeypatch.setattr(invites_module.uuid, "uuid4", lambda: next(ids))
+    first = started(copies, links=("link1",))
+    copies.furina.pass_once()
+    _listening(copies)
+    room_id = draft(copies, links=("link1",))["room_id"]
+    assert first < room_id
+    answer(copies, "laifu", room_id, "link1", LAIFUS)
+    copies.log.add(room_id, "room.created", {"name": "Zoo trip"}, actor={"kind": "system", "id": "authority-control"})
+    say(copies, first, "Saturday at ten?")
+    send = copies.furina.send
+
+    def refusing_starts(link_id, kind, body, message_id=None):
+        if kind == "room.start":
+            raise invites_module.room_links.LinkError("unreachable", "Couldn't reach the mailbox", 503)
+        return send(link_id, kind, body, message_id=message_id)
+
+    copies.furina.send = refusing_starts
+    copies.furina.pass_once()
+
+    assert [body["room_id"] for _, body, _ in pages(copies)].count(room_id) == 0
 
 
 def test_each_person_in_the_room_gets_its_log_and_keeps_a_copy(copies):

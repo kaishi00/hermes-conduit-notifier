@@ -128,12 +128,12 @@ class Copies:
     def send_pages(self) -> None:
         """What the rooms loop does each pass on the home: a page to each person whose copy is behind the log or
         the room's state, when none is waiting for its answer."""
-        state = self.rooms.store.read()
-        drafts = state["drafts"]
+        stored = self.rooms.store.read()
+        drafts = stored["drafts"]
         for room_id, draft in sorted(drafts.items()):
             # Not before its start reaches the Link (a start the mailbox didn't take yet waits in the outbox):
             # a page ahead of it is dropped there, and sent again only after WAIT_S.
-            starting = {item["link"] for item in state.get("outbox") or () if item["id"] == f"room.start:{room_id}"}
+            starting = {item["link"] for item in stored.get("outbox") or () if item["id"] == f"room.start:{room_id}"}
             due = [link_id for link_id in _receiving(draft) if link_id not in starting]
             if not due:
                 continue
