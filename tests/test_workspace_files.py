@@ -209,6 +209,11 @@ def test_a_copy_pasted_in_another_folder_keeps_its_name_when_free(tree):
         with pytest.raises(wf.WorkspaceError) as exc:
             ws().duplicate(str(tree), str(tree / "docs"), str(target))
         assert exc.value.status == status, target
+    (tree / "elsewhere").mkdir()
+    (tree / "docs" / "out-link").symlink_to(tree / "elsewhere")
+    landed = ws().duplicate(str(tree), str(tree / "docs"), str(tree / "docs" / "out-link"))["entry"]
+    assert landed["name"] == "docs" and (tree / "elsewhere" / "docs" / "guide.md").exists(), \
+        "a link in the folder to somewhere else is somewhere else"
 
 
 def test_ssh_pastes_a_copy_in_another_folder(tree):
@@ -228,6 +233,11 @@ def test_ssh_pastes_a_copy_in_another_folder(tree):
         with pytest.raises(wf.WorkspaceError) as exc:
             remote.duplicate(root, str(tree / "docs"), str(target))
         assert exc.value.status == status, target
+    (tree / "elsewhere").mkdir()
+    (tree / "docs" / "out-link").symlink_to(tree / "elsewhere")
+    landed = remote.duplicate(root, str(tree / "docs"), str(tree / "docs" / "out-link"))["entry"]
+    assert landed["name"] == "docs" and (tree / "elsewhere" / "docs" / "guide.md").exists(), \
+        "a link in the folder to somewhere else is somewhere else"
 
 
 def test_delete_removes_files_and_folders_but_never_the_root(tree):
