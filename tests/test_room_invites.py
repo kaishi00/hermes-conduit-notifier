@@ -2231,6 +2231,9 @@ def test_a_draft_made_where_the_dashboard_runs_in_the_gateway_is_the_requests_su
     sessions = types.ModuleType("hermes_cli.web_server_sessions")
     sessions._session_mutation_context = context
     monkeypatch.setitem(__import__("sys").modules, "hermes_cli.web_server_sessions", sessions)
+    # No per-profile plugin gate unless a test sets one: inside a real Hermes
+    # install its own would load against the stand-in above (notifier #322).
+    monkeypatch.setitem(__import__("sys").modules, "hermes_cli.web_server_dashboard", None)
     routes.app.state.session_authority = object()
     scoped = []
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
@@ -2260,6 +2263,9 @@ def _drafts_for(routes, monkeypatch, work):
     sessions = types.ModuleType("hermes_cli.web_server_sessions")
     sessions._session_mutation_context = context
     monkeypatch.setitem(__import__("sys").modules, "hermes_cli.web_server_sessions", sessions)
+    # No per-profile plugin gate unless a test sets one: inside a real Hermes
+    # install its own would load against the stand-in above (notifier #322).
+    monkeypatch.setitem(__import__("sys").modules, "hermes_cli.web_server_dashboard", None)
     routes.app.state.session_authority = object()
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: scoped.append(profile) or contextlib.nullcontext())
     return asked, scoped

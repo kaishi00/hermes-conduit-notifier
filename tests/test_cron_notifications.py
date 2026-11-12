@@ -54,6 +54,9 @@ def test_an_unreadable_file_reads_as_nothing_muted(tmp_path):
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(api.notifications, "_cron_home", lambda: tmp_path)
+    # A Hermes whose cron can't show a report in the chat, also inside a real
+    # Hermes install, which can (notifier #322).
+    monkeypatch.setattr(api.notifications, "_shows_reports", False)
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
     return TestClient(app)

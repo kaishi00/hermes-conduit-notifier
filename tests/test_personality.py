@@ -190,6 +190,14 @@ def test_route_is_rate_limited_per_profile(client, hermes, monkeypatch):
 
 # --- pre_llm_call hook --------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _plugins_own_voice_note(monkeypatch):
+    # The note the plugin falls back to: inside a real Hermes install, its own
+    # tools.voice_live wording would otherwise win (notifier #322).
+    monkeypatch.setattr(plugin, "_voice_live_prefix", plugin._VOICE_LIVE_NOTE_PREFIX)
+
+
 VOICE_NOTE = (
     "[Note: this message is a delegation from a live spoken conversation. The text is a voice "
     "transcript ...]"

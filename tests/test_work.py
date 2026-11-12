@@ -4208,6 +4208,8 @@ def test_a_settings_change_lands_in_the_named_bots_own_registry(on, hermes, monk
     monkeypatch.setattr(api.workstreams, "_work_tool", lambda: work)
     monkeypatch.setattr(api.core, "_profile_scope", scope)
     monkeypatch.setattr(api.core, "_calls_home", lambda: homes[scoped[-1] or None])
+    # "nahida" is made up: a real Hermes' per-profile plugin gate would refuse it (#322).
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_dashboard", None)
     client = TestClient(FastAPI())
     client.app.include_router(api.router, prefix="/api/plugins/conduit_push")
     changed = client.post("/api/plugins/conduit_push/workstreams/settings?conduit_profile=nahida",

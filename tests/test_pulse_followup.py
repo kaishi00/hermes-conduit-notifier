@@ -897,6 +897,8 @@ def test_a_background_check_never_signals_on_windows_or_with_a_corrupt_pid(monke
 
 def test_without_hermes_redactor_a_background_command_isnt_shown(live, monkeypatch):
     monkeypatch.setitem(sys.modules, "agent", None)  # import fails
+    # Inside a real Hermes, agent.redact may already be imported (#321).
+    monkeypatch.setitem(sys.modules, "agent.redact", None)
     promise(live)
     (live.home / "processes.json").write_text(json.dumps([{"session_id": "p", "command": "curl -H 'Bearer sk-x'",
                                                             "watch_patterns": ["done"]}]))

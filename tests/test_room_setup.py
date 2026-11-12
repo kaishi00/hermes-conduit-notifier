@@ -1156,6 +1156,11 @@ def client(hermes, monkeypatch):
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    # Inside a real Hermes install its profile scope and plugin gate would
+    # still load behind the stand-in package, against these stand-in modules
+    # (notifier #322).
+    for name in ("hermes_cli.web_server_profiles", "hermes_cli.web_server_dashboard"):
+        monkeypatch.setitem(sys.modules, name, None)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_gateway", gateway)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", web_server)
     app = FastAPI()
@@ -1557,7 +1562,8 @@ def _hermes_cli_modules(monkeypatch, detach=True):
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     if not detach:
-        monkeypatch.delitem(sys.modules, "hermes_cli.gateway_runtime_start", raising=False)
+        # None, not missing: inside a real Hermes install its own would load (notifier #322).
+        monkeypatch.setitem(sys.modules, "hermes_cli.gateway_runtime_start", None)
 
 
 def test_the_restart_runs_in_the_background_where_hermes_can(monkeypatch):

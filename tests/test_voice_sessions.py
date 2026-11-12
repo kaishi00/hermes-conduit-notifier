@@ -1164,8 +1164,12 @@ def test_an_older_hermes_calls_the_plugin_hooks_directly(hermes, monkeypatch):
     assert events == ["on_session_end", "on_session_finalize"]
 
 
-def test_a_hermes_without_any_of_it_ends_quietly(hermes, caplog):
+def test_a_hermes_without_any_of_it_ends_quietly(hermes, caplog, monkeypatch):
     # No lifecycle, plugin or memory modules: nothing to call, nothing to warn about.
+    # Inside a real Hermes install, its own already imported would answer from
+    # behind the stand-in hermes_cli (notifier #322).
+    for name in ("hermes_cli.lifecycle", "hermes_cli.plugins", "agent", "agent.memory_manager"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
     with caplog.at_level("DEBUG"):
         api.voice_calls._run_voice_call_end(None, "s_call", "gpt-live", CALL)
     assert [r.message for r in caplog.records if r.levelname == "WARNING"] == []

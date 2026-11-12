@@ -523,7 +523,9 @@ def test_a_dashboard_that_cant_restart_itself_refuses(monkeypatch, tmp_path):
     assert raised.value.status == 501
 
 
-def test_a_hermes_without_the_steps_refuses():
+def test_a_hermes_without_the_steps_refuses(monkeypatch):
+    # Also inside a real Hermes install, which has them (notifier #322).
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins_cmd", None)
     with pytest.raises(api.core.TokenError) as raised:
         api.self_update._hermes_update_steps()
     assert raised.value.status == 501

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -114,9 +115,16 @@ def test_token_response_is_not_cacheable(client):
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_requested_profile_fails_closed_when_it_cannot_be_scoped(client):
-    # No hermes_cli in the test environment, so profile scoping is unavailable:
-    # the request must not fall back to the default profile's key.
+def _no_profile_scoping(monkeypatch):
+    # A Hermes without profile scoping, even when the suite runs inside a
+    # real Hermes install (notifier #322).
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", None)
+
+
+def test_requested_profile_fails_closed_when_it_cannot_be_scoped(client, monkeypatch):
+    # Profile scoping is unavailable: the request must not fall back to the
+    # default profile's key.
+    _no_profile_scoping(monkeypatch)
     for method, path in (("post", "token"), ("get", "status")):
         response = getattr(client, method)(f"/api/plugins/conduit_push/gemini-live/{path}?profile=coder")
         assert response.status_code == 503
@@ -142,6 +150,7 @@ def test_mint_limiter_frees_slots_after_the_window():
 
 
 def test_requests_that_never_reach_google_do_not_use_the_mint_budget(client, monkeypatch):
+    _no_profile_scoping(monkeypatch)
     monkeypatch.setattr(api.gemini_qwen_live, "_mint_limiter", api.core._MintLimiter(1, 60.0))
     for _ in range(3):
         assert client.post("/api/plugins/conduit_push/gemini-live/token?profile=nope").status_code == 503

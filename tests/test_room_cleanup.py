@@ -1100,6 +1100,10 @@ def test_room_forget_is_a_listed_capability(client):
 
 def test_the_dashboard_routes_guard_it_as_they_load(hermes):
     # The dashboard hosts the rooms of a Hermes whose gateway doesn't (.52).
+    # Inside a real Hermes install, loading this file's routes above guarded
+    # Hermes' own rooms: that guard comes off first (notifier #322).
+    if api.rooms._room_cleanup_module is not None:
+        api.rooms._room_cleanup_module.uninstall()
     own = hermes.rooms.disband_room
     spec = importlib.util.spec_from_file_location("conduit_plugin_api_room_cleanup_load", ROOT / "dashboard" / "plugin_api.py")
     module = importlib.util.module_from_spec(spec)

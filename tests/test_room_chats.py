@@ -20,6 +20,14 @@ LIMIT = chats_module.room_reading.MAX_LIMIT
 assert rooms and side  # the fixtures, imported for these tests
 
 
+@pytest.fixture(autouse=True)
+def _chats_hermes_has(monkeypatch):
+    # The test homes keep no Hermes session store: a chat counts as there,
+    # also inside a real Hermes install, whose SessionDB would find none
+    # (notifier #322). A test of a deleted chat sets its own.
+    monkeypatch.setattr(chats_module, "_chat_exists", lambda home, chat_id: True)
+
+
 def home(side, name, profile="default"):
     root = side.tmp_path / name
     return root if profile == "default" else root / "profiles" / profile

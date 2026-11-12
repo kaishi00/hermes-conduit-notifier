@@ -315,7 +315,12 @@ def test_a_hermes_without_on_unload_still_loads_the_plugin(monkeypatch, tmp_path
     monkeypatch.setattr(calls, "get_hermes_home", lambda: tmp_path)
     ctx = _ctx([])
     del ctx.on_unload
-    plugin.register(ctx)
+    try:
+        plugin.register(ctx)
+    finally:
+        # What it put on Hermes comes off, so no later test finds it on: inside a
+        # real Hermes install that's Hermes' own modules (notifier #322).
+        plugin._unload()
 
 
 @pytest.fixture
