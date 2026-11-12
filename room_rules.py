@@ -252,23 +252,28 @@ def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
     elsewhere may join it), as is one no store has (logged). A room Conduit
     didn't make on a host that keeps the plugin to Conduit's rooms
     (room_settings.conduit_rooms_only) runs as Hermes alone would: None."""
-    value = str(session_id or "")
+    home_path = Path(home) if home is not None else _hermes_home()
+    return _in_scope(_lookup(str(session_id or ""), home_path), home_path)
+
+
+def _lookup(value: str, home_path: Optional[Path]) -> Optional[RoomTurn]:
+    """room_turn before the room settings: a room they leave out comes back
+    unread (with_others False), never remembered."""
     if not value:
         return None
-    home_path = Path(home) if home is not None else _hermes_home()
     key = (str(home_path), value)
     with _lock:
         known = _remembered.get(key, _MISSING)
         if known is not _MISSING:
             _remembered.move_to_end(key)
-            return _in_scope(known, home_path)  # type: ignore[arg-type]
+            return known  # type: ignore[return-value]
     turn, settled = _find(value, home_path)
     if settled:
         with _lock:
             _remembered[key] = turn
             while len(_remembered) > MAX_REMEMBERED:
                 _remembered.popitem(last=False)
-    return _in_scope(turn, home_path)
+    return turn
 
 
 def _in_scope(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn]:
@@ -277,11 +282,15 @@ def _in_scope(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTu
     from the next call)."""
     if turn is None or not turn.room_id:
         return turn
+    return turn if _applies(turn.room_id, home) else None
+
+
+def _applies(room_id: str, home: Optional[Path]) -> bool:
     try:
         from . import room_settings
     except ImportError:  # loaded on its own (tests): every room is in scope
-        return turn
-    return turn if room_settings.applies(turn.room_id, home) else None
+        return True
+    return room_settings.applies(room_id, home)
 
 
 def choices_for(turn: RoomTurn, home: Any) -> RoomChoices:
@@ -701,11 +710,13 @@ def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optiona
         if not session_id:
             continue
         try:
-            turn = room_turn(session_id, home)
+            turn = _lookup(session_id, home)
         except RoomStoreError:
             return True
         if turn is not None:
-            return turn.with_others
+            # A room the settings leave out is searched as Hermes alone would
+            # search it, its compactions' continuations and all.
+            return turn.with_others and (not turn.room_id or _applies(turn.room_id, home))
     # No row here: hidden when it says it's a room's.
     return (str(source or "").strip().lower() == ROOM_SOURCE
             or any(ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids))
@@ -778,6 +789,10 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
     if not room_id:
         # A legacy Desktop group's title (its display name): only this host's agents.
         return RoomTurn(room_id="", side="home", with_others=False, session_id=session_id), True
+    if not _applies(room_id, home):
+        # Left out by the room settings: its store isn't read, and the answer
+        # isn't remembered, so a change to the setting holds from the next call.
+        return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), False
     members = _room_members(room_id, home)
     if members is None:
         # Kept where this plugin doesn't look: as Hermes alone would run it,

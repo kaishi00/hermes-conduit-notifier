@@ -659,6 +659,21 @@ def test_conduit_rooms_only_leaves_other_rooms_turns_to_the_provider(guard, herm
         assert manager.saved == [], session_id
 
 
+def test_a_change_to_conduit_rooms_only_holds_without_a_rebind(guard, hermes, tmp_path):
+    home = _titled_db(tmp_path, [("sess_desktop", "bot_room", None, None, "Group: desktop-room")],
+                      conduit_rooms_only=True)
+    manager = _bound(hermes, "sess_desktop", home)
+    manager.sync_all("Mona: Saturday works", "Laifu: Saturday it is", session_id="sess_desktop")
+    assert manager.saved == [("sync_all", "Mona: Saturday works", "sess_desktop")]
+
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  entries:\n    conduit_push:\n      settings:\n        conduit_rooms_only: false\n",
+        encoding="utf-8")
+    sys.modules["conduit_push_room_settings"]._clear()
+    manager.sync_all("Mona: Sunday then", "Laifu: Sunday", session_id="sess_desktop")
+    assert manager.saved == [("sync_all", "Mona: Saturday works", "sess_desktop")]  # guarded from the next turn
+
+
 def test_a_room_it_cant_name_yet_is_still_guarded(guard, hermes, tmp_path):
     home = _titled_db(tmp_path, [("sess_untitled", "bot_room", None, None, None)], conduit_rooms_only=True)
 

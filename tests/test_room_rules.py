@@ -1246,3 +1246,30 @@ def test_conduit_rooms_only_leaves_other_rooms_turns_as_hermes_runs_them(tmp_pat
 
     _conduit_rooms_only(home, False)
     assert rules.room_turn("s-desktop", home).with_others
+
+
+def test_conduit_rooms_only_doesnt_read_a_left_out_rooms_store(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    _room_session(home, "s-desktop", "desktop-room")
+    _conduit_rooms_only(home, True)
+
+    def unreadable(room_id, home):
+        raise rules.RoomStoreError("unreadable")
+
+    monkeypatch.setattr(rules, "_room_members", unreadable)
+    assert rules.room_turn("s-desktop", home) is None  # its tools run as Hermes alone would
+    _conduit_rooms_only(home, False)
+    with pytest.raises(rules.RoomStoreError):
+        rules.room_turn("s-desktop", home)
+
+
+def test_conduit_rooms_only_searches_a_left_out_room_whole(host):
+    _compact(host, "s-home", "s-home-2", source="api_server")
+    _conduit_rooms_only(host, True)
+    found = {"success": True, "mode": "discover", "results": [
+        _entry("s-home", "bot_room", None), _entry("s-home-2", "api_server", "Group: room-b"),
+        _entry("s-chat", "tui", "Bike")], "count": 3}
+    assert _search(found, query="x") is None  # root and continuation alike, as Hermes alone would
+    _conduit_rooms_only(host, False)
+    kept = json.loads(_search(found, query="x"))["results"]
+    assert [entry["session_id"] for entry in kept] == ["s-chat"]

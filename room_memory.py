@@ -91,23 +91,32 @@ _pulse_unread_count = 0
 
 def is_room_session(session_id: Any, home: Any = None) -> bool:
     """Whether ``session_id`` is a hosted room member's session, or a
-    compaction continuation of one. Anything unreadable counts as no: the
-    guard only skips saving for a session it can tell is a room."""
+    compaction continuation of one, and the guard covers its room (on a host
+    that keeps the plugin to Conduit's rooms, only theirs). Anything
+    unreadable counts as no: the guard only skips saving for a session it
+    can tell is a room."""
+    if ROOM_SESSION_ID.fullmatch(str(session_id or "")) and not _conduit_rooms_only(home):
+        return True  # every room is guarded: no need to read which
+    return _room_guarded(session_room(session_id, home), home)
+
+
+def session_room(session_id: Any, home: Any = None) -> Optional[str]:
+    """The room ``session_id`` is in, whatever the room settings say: its id,
+    "" when unknown (a remote member's session with no row here, a legacy
+    Desktop group), or None for any other session."""
     value = str(session_id or "")
     if not value:
-        return False
+        return None
     remote = bool(ROOM_SESSION_ID.fullmatch(value))
-    only = _conduit_rooms_only(home)
-    if remote and not only:
-        return True
     global _odd_id_logged
     if not remote and value.startswith("room_") and not _odd_id_logged:
         # Hermes may have changed how it names remote room sessions; then only
         # the stored source below still finds them.
         _odd_id_logged = True
         logger.warning("conduit_push: session %s looks like a group room's but isn't named like one", value)
+    unknown = "" if remote else None
     if home is None:
-        return remote
+        return unknown
     for attempt in range(READ_RETRIES + 1):
         try:
             room = _stored_room(Path(home) / STATE_DB, value)
@@ -115,13 +124,19 @@ def is_room_session(session_id: Any, home: Any = None) -> bool:
             if attempt == READ_RETRIES or "disk i/o error" not in str(error).lower():
                 if not remote:
                     _store_unread(value)
-                return remote
+                return unknown
             time.sleep(READ_RETRY_PAUSE)
             continue
-        if room is None:
-            return remote
-        return not only or _settings().applies(room, home)
-    return remote
+        return unknown if room is None else room
+    return unknown
+
+
+def _room_guarded(room: Optional[str], home: Any) -> bool:
+    """Whether the guard covers ``room`` (from session_room), read each time
+    so a change to the room settings holds from the next call."""
+    if room is None:
+        return False
+    return not _conduit_rooms_only(home) or _settings().applies(room, home)
 
 
 def _settings() -> Any:
@@ -348,10 +363,13 @@ def _hermes_home() -> Optional[Path]:
 
 
 def _in_room(manager: Any, session_id: Any = "") -> bool:
-    if getattr(manager, MARK, False):
+    # MARK keeps the bound session's room, not the decision: the settings are
+    # read each call, so a change holds without a rebind.
+    home = _home(manager)
+    if _room_guarded(getattr(manager, MARK, None), home):
         return True
     value = str(session_id or "")
-    return bool(ROOM_SESSION_ID.fullmatch(value)) and is_room_session(value, _home(manager))
+    return bool(ROOM_SESSION_ID.fullmatch(value)) and is_room_session(value, home)
 
 
 def _guard(original: Callable[..., Any], wrapper: Callable[..., Any]) -> Callable[..., Any]:
@@ -369,7 +387,7 @@ def _initialize_all(original: Callable[..., Any]) -> Callable[..., Any]:
         # row exists by then (the room's admission writes it).
         home = kwargs.get("hermes_home") or _hermes_home()
         setattr(self, HOME, home)
-        setattr(self, MARK, is_room_session(kwargs.get("session_id", args[0] if args else ""), home))
+        setattr(self, MARK, session_room(kwargs.get("session_id", args[0] if args else ""), home))
         return original(self, *args, **kwargs)
     return _guard(original, initialize_all)
 
@@ -381,7 +399,7 @@ def _on_session_switch(original: Callable[..., Any]) -> Callable[..., Any]:
         # reason by keyword (the method takes it through **kwargs).
         if kwargs.get("reason") != "compression":
             new_session_id = kwargs.get("new_session_id", args[0] if args else "")
-            setattr(self, MARK, is_room_session(new_session_id, getattr(self, HOME, None) or _hermes_home()))
+            setattr(self, MARK, session_room(new_session_id, getattr(self, HOME, None) or _hermes_home()))
         return original(self, *args, **kwargs)
     return _guard(original, on_session_switch)
 
