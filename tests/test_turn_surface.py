@@ -140,6 +140,10 @@ def test_the_line_names_the_surface_and_how_it_was_entered():
         "form, and they may leave some blank.]")
     assert surfaces.line("siri") == "[Conduit: this message came from Siri or a Shortcut.]"
     assert "likely driving" in surfaces.line("carplay", "spoken")
+    # The Pulse widget's Do it: a tap, never typed or spoken, in Conduit's words.
+    assert surfaces.line("widget") == (
+        "[Conduit: this message came from a button the user tapped on a Conduit widget, in words Conduit wrote. "
+        "Conduit isn't open: the user reads the answer later, in this chat.]")
 
 
 def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
@@ -149,7 +153,7 @@ def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
         # Conduit says was typed hears it.
         assert surfaces.FORM_HINT not in surfaces.line(surface, "spoken")
         assert surfaces.FORM_HINT not in surfaces.line(surface)
-    for surface in ("watch", "carplay", "siri"):
+    for surface in ("watch", "carplay", "siri", "widget"):
         assert surfaces.FORM_HINT not in surfaces.line(surface, "typed")
 
 

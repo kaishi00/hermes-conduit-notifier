@@ -13,11 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.164.12 (2026-11-12)
+## 0.164.13 (2026-11-12)
 
 ### New and improved
 - Conduit's Folder can copy a file or folder and paste it into another folder,
   keeping its name when nothing there has it.
+
+## 0.164.12 (2026-11-12)
+
+### Fixes
+- A message sent with Do it on the Pulse widget told your agent it came
+  from Siri or a Shortcut. It now says you tapped a widget button and that
+  you'll read the answer later in the chat.
 
 ## 0.164.11 (2026-11-12)
 
