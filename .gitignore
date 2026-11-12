@@ -20,3 +20,7 @@ mailbox/deploy/.env
 mailbox/deploy/data/
 mailbox/data/
 *.whl
+
+# Claude Code: personal settings and local worktrees
+.claude/settings.local.json
+.claude/worktrees/
