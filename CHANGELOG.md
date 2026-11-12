@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.167.0 (2026-11-12)
+
+### New and improved
+- Hermes can ask your iPhone for a fresh battery, charging, CarPlay and
+  Low Power reading when it matters, instead of using the last one the
+  phone sent. It waits up to 15 seconds and says when the phone didn't
+  answer.
+- Turn on With each message under Focus and phone status, and each message
+  you send from Conduit tells Hermes your battery, Low Power Mode, CarPlay
+  and Focus, so it answers to fit.
+
 ## 0.166.0 (2026-11-12)
 
 ### Fixes

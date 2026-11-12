@@ -167,6 +167,9 @@ ROUTE_CAPABILITIES = (
     # sharing.photos, a batch's "photos" ({full, upsert, delete}) and
     # "photo_files" (a picture the user said yes to), and the send_photo change.
     "phone-photos",
+    # sharing.turn_status: the phone's battery, Low Power Mode, CarPlay and
+    # Focus go with each message sent from Conduit, on one line (issue 888).
+    "phone-turn-status",
     "location-sync",
     "location-locate",
     # sharing.other_profiles: the host's other profiles paired with the

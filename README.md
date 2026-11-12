@@ -3347,6 +3347,28 @@ whether notes and attendees are included (off by default).
   what it reads; subagents can't use them. Reads say how fresh the copy is
   ("as of" the last sync). What they return goes to your agent's model like
   any tool result, which Conduit tells the user before they turn sharing on.
+- **A fresh reading (plugin 0.167+).** `conduit_phone` `status` with
+  `fresh: true` wakes the phone with the same silent `phone.changes` push
+  an add made without asking sends, and waits up to 15 seconds for it.
+  Conduit sends its status on every such wake (an older Conduit only when
+  it changed, which the answer reads from the phone checking in). The
+  answer's `fresh` says whether a new reading came, the phone's status
+  hadn't changed, or it didn't answer in time, and `fresh_result` says the
+  same as `new_reading`, `unchanged`, `no_answer` or `not_asked` (not
+  paired, the relay held the wake back, or a wake less than a minute ago:
+  one a minute per profile, since wakes share the relay's hourly allowance);
+  the rest is the usual status. iOS may hold a background wake back, so the tool says so rather
+  than guess.
+- **With each message (plugin 0.167+).** When the user turns on "With each
+  message" under Focus and phone status (`sharing.turn_status`, capability
+  `phone-turn-status`; only with the status or Focus shared), a turn whose
+  message Conduit sent (see [Where in Conduit a message was sent](#where-in-conduit-a-message-was-sent-plugin-051))
+  gets a second line after the surface line, for example
+  `[Conduit: the user's device "Eric's iPhone" as they sent this: 18% battery, Low Power Mode on, connected to CarPlay, Work Focus on. …]`
+  (the device as the user named it, since it may be an iPad).
+  It names only what's shared and only readings from the last 30 minutes,
+  and says how old they are past two minutes. Turns from other clients,
+  rooms with other people's agents and subagents never get it.
 
 - **Alarms and timers (plugin 0.30+).** When the user lets Hermes set them
   (AlarmKit, iOS 26), `conduit_phone` gains `alarms` (the alarms and timers

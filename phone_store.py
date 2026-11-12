@@ -1337,6 +1337,11 @@ class PhoneStore:
         return {"status": _decode(row[0], None), "status_at": row[1], "focus": _decode(row[2], None),
                 "focus_at": row[3]}
 
+    def last_contact(self, db: sqlite3.Connection, device: str) -> int | None:
+        """When the device last checked in or uploaded (epoch seconds)."""
+        row = db.execute(f"SELECT {_IN_TOUCH} FROM devices WHERE id=?", (device,)).fetchone()
+        return (row[0] or None) if row else None
+
     def shortcuts(self, db: sqlite3.Connection, device: str) -> tuple[list[dict[str, Any]], int | None]:
         """The Shortcuts the user lets Hermes run, and when they were sent."""
         row = db.execute("SELECT shortcuts, shortcuts_at FROM devices WHERE id=?", (device,)).fetchone()
@@ -1847,7 +1852,7 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
         raise PhoneError("malformed", f"sharing.calendar must be one of {', '.join(CALENDAR_SHARING)}")
     sharing: dict[str, Any] = {"calendar": calendar}
     for field in ("reminders", "details", "attendee_emails", "status", "focus", "auto_add", "alarms", "contacts",
-                  "shortcuts", "shortcuts_auto", "contacts_edit", "photos", *READ_ONLY_SHARING):
+                  "shortcuts", "shortcuts_auto", "contacts_edit", "photos", "turn_status", *READ_ONLY_SHARING):
         sharing[field] = bool(_bool(value.get(field), f"sharing.{field}", False))
     # Add-only and read-only leaves nothing; read-only reminders need reminders.
     if sharing["calendar"] == "write_only" and sharing["calendar_read_only"]:
@@ -1860,6 +1865,8 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     sharing["shortcuts_auto"] = sharing["shortcuts_auto"] and sharing["shortcuts"]
     # Changing contacts is part of sharing them.
     sharing["contacts_edit"] = sharing["contacts_edit"] and sharing["contacts"]
+    # With each message: only what the status and Focus already share.
+    sharing["turn_status"] = sharing["turn_status"] and (sharing["status"] or sharing["focus"])
     sharing["past_days"] = _whole(value.get("past_days"), "sharing.past_days", 0, MAX_WINDOW_DAYS)
     sharing["future_days"] = _whole(value.get("future_days"), "sharing.future_days", 0, MAX_WINDOW_DAYS)
     return sharing
