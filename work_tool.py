@@ -359,7 +359,8 @@ SCHEMAS: dict[str, dict] = {
     },
     "work_stop": {
         "name": "work_stop",
-        "description": "Stop the turn a workstream is working on. It stays open: work_send continues it.",
+        "description": ("Stop the turn a workstream is working on, and the background agents it started. It stays "
+                        "open: work_send continues it."),
         "parameters": {"type": "object", "properties": {"ref": _REF_SCHEMA}, "required": ["ref"]},
     },
     "work_read": {
@@ -475,6 +476,13 @@ _call_grace: set = set()
 # Hermes runs a chat's delegate_task in the background and gives the chat
 # their results as a new turn, so the turn that started them ends first.
 _agents: dict[tuple[str, str], set[str]] = {}
+# The delegate agents a bot's Bot Chat started that still run, by home: a
+# Bot Chat on Everything Here, or with its workstreams off, delegates itself,
+# and Bots Home shows them (`bot_chat_agents`, app issue 2206).
+_bot_chat_agents: dict[str, set[str]] = {}
+# Each running delegate agent's subagent id (Hermes' registry key), by its
+# session: what stopping a workstream stops it by.
+_agent_ids: dict[str, str] = {}
 # A workstream whose turn ended while its agents ran: (home, ref) -> that
 # turn's reply and when it began. It stays running until the turn their
 # results start ends (app issue 2142), or settles with this (_settle_held).
@@ -866,7 +874,8 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
         # A stop is its end, whatever its agents bring.
         waited = _held.pop((str(home), work.ref), None) is not None
         waiting = _held_timers.pop((str(home), work.ref), None)
-        running = bool(_agents.get((str(home), work.ref)))
+        children = set(_agents.get((str(home), work.ref)) or ())
+        running = bool(children)
         if running or waited:
             # Hermes stops them with a running turn only: the turns their
             # results start find the row stopped and are stopped too. Their
@@ -888,11 +897,15 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
             logger.warning("conduit_push: stopping a workstream failed", exc_info=True)
             error = type(error).__name__
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't stop it: {error}"}
+    # Its background agents go with it (app issue 2206), once its turn has
+    # stopped: a stop Hermes refused leaves them running with it.
+    agents = _stop_agents(children) if children else 0
+    with_agents = _with_agents(agents)
     # A stop ends the continued turn too: the next restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
     if stopped:
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
-                "note": f"Stopped {work.ref}: {work.title}. work_send continues it."}
+                "note": f"Stopped {work.ref}: {work.title}{with_agents}. work_send continues it."}
     if work.status in ("starting", "running", "needs_you"):
         # Nothing was running, so the row's turn has ended (its end may
         # have come while this stop was marked): it stays stopped.
@@ -900,7 +913,8 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
             # Or its brief's turn hasn't begun yet: when it does, it's stopped.
             store.set_meta(_STOPPED_START + work.ref, str(time.time()))
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
-                "note": f"{work.ref} wasn't working on anything; it's marked stopped. work_send continues it."}
+                "note": (f"{work.ref} wasn't working on anything; it's marked stopped{with_agents}. "
+                         "work_send continues it.")}
     store.update(work.ref, status=work.status, only_if=("stopped",))
     return {"ok": True, "ref": work.ref, "title": work.title, "status": work.status,
             "note": f"{work.ref} wasn't working on anything."}
@@ -4019,15 +4033,27 @@ def _settle(home: Path, store: work_store.Store, work: work_store.Work, text: st
             _shown_named(store, work.ref, shown_turn)
 
 
-def agent_started(child: Any, parent: Any) -> None:
+def agent_started(child: Any, parent: Any, subagent_id: Any = "") -> None:
     """A chat started a delegate agent (subagent_start): one a workstream
-    started is counted as its own, so its turn's end waits for it."""
+    started is counted as its own, so its turn's end waits for it; one the
+    Bot Chat started is counted for Bots Home."""
     if not (isinstance(child, str) and child and isinstance(parent, str) and parent):
         return
     home, work = _workstream(parent)
-    if home is None or work is None:
+    if home is None:
+        return
+    if work is None:
+        if is_bot_chat(parent, home):
+            with _wake_lock:
+                agents = _bot_chat_agents.setdefault(str(home), set())
+                if len(agents) < 512:
+                    agents.add(child)
         return
     with _wake_lock:
+        if isinstance(subagent_id, str) and subagent_id:
+            if len(_agent_ids) > 1024:
+                _agent_ids.clear()  # ids only stop agents early; their ends are still counted
+            _agent_ids[child] = subagent_id
         if len(_agents) > 512:
             # Never a held workstream's: it would read as finished while its agents run.
             for stale in [owner for owner in _agents if owner not in _held][:256]:
@@ -4042,8 +4068,11 @@ def agent_stopped(child: Any, parent: Any = None) -> None:
     results weren't delivered), it settles with what it had said."""
     if not (isinstance(child, str) and child):
         return  # no agent named: none is known to have ended
+    if _bot_chat_agent_stopped(child, parent):
+        return
     key = None
     with _wake_lock:
+        _agent_ids.pop(child, None)
         for owner, children in _agents.items():
             if child in children:
                 key = owner
@@ -4078,6 +4107,61 @@ def agent_stopped(child: Any, parent: Any = None) -> None:
     if earlier is not None:
         earlier.cancel()
     timer.start()
+
+
+def _bot_chat_agent_stopped(child: str, parent: Any) -> bool:
+    """A delegate agent a Bot Chat started ended: True when it was one."""
+    with _wake_lock:
+        for agents in _bot_chat_agents.values():
+            if child in agents:
+                agents.discard(child)
+                return True
+    if not (isinstance(parent, str) and parent) or _workstream(parent)[1] is not None:
+        return False
+    home = _home()
+    # The id it ended under, which a compaction moved from the one it started with.
+    if home is None or not is_bot_chat(parent, home):
+        return False
+    with _wake_lock:
+        agents = _bot_chat_agents.get(str(home))
+        if agents:
+            agents.pop()
+    return True
+
+
+def bot_chat_agents(home: Path) -> int:
+    """How many delegate agents the bot's Bot Chat started that still run."""
+    with _wake_lock:
+        return len(_bot_chat_agents.get(str(home)) or ())
+
+
+def _with_agents(count: int) -> str:
+    """The stop note's words for the background agents it stopped."""
+    if count <= 0:
+        return ""
+    return ", and its background agent" if count == 1 else f", and its {count} background agents"
+
+
+def _stop_agents(children: set[str]) -> int:
+    """Stops the delegate agents a stopped workstream started, by their
+    subagent ids (Hermes stops a chat's agents only with its running turn,
+    and a waiting workstream's turn has ended). How many Hermes found."""
+    with _wake_lock:
+        ids = [_agent_ids[child] for child in children if child in _agent_ids]
+    if not ids:
+        return 0
+    try:
+        from tools.delegate_tool_registry import interrupt_subagent
+    except Exception:  # noqa: BLE001 — a Hermes without it: they finish, and their turns are stopped
+        logger.debug("conduit_push: Hermes can't stop delegate agents here", exc_info=True)
+        return 0
+    stopped = 0
+    for subagent_id in ids:
+        try:
+            stopped += bool(interrupt_subagent(subagent_id))
+        except Exception:  # noqa: BLE001 — one that couldn't be stopped finishes; its turn is stopped
+            logger.debug("conduit_push: couldn't stop delegate agent %s", subagent_id, exc_info=True)
+    return stopped
 
 
 def _settle_held(key: tuple[str, str], again: bool = True) -> None:
@@ -4382,7 +4466,8 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     Chat did to keep the work in step over the last day (work_coord.app_items)."""
     home = Path(home)
     mode = policy(home)
-    out = {"policy": mode, "bot": _bot_name(home), "bot_chat": _bot_chat_of(home), "work": [],
+    out = {"policy": mode, "bot": _bot_name(home), "bot_chat": _bot_chat_of(home),
+           "bot_chat_agents": bot_chat_agents(home), "work": [],
            "counts": {"working": 0, "needs_you": 0, "ready": 0, "waiting": 0},
            "max_running": work_store.DEFAULT_MAX_RUNNING, "resolved_count": 0,
            "workstream_sessions": []}
@@ -4696,6 +4781,15 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
                 return {"ok": False, "ref": work.ref, "error": "not_now", "status": status,
                         "note": f"{work.ref} is {status.replace('_', ' ')} now, so it wasn't stopped."}
             answer = {"ok": True, "ref": work.ref, "status": "stopped"}
+            # Stopped from its chat while its agents ran: they go too, and
+            # their results' turn finds it stopped (app issue 2206).
+            key = (str(store.home), work.ref)
+            with _wake_lock:
+                children = set(_agents.get(key) or ())
+                if children:
+                    _stopped_agents[key] = (time.time(), 0.0)
+            if children:
+                _stop_agents(children)
         else:
             answer = _stop(store, broker, work)
         if answer.get("ok"):
@@ -5574,6 +5668,8 @@ def stop() -> None:
         _replies.clear()
         _redirecting.clear()
         _agents.clear()
+        _bot_chat_agents.clear()
+        _agent_ids.clear()
         _held.clear()
         _stopped_agents.clear()
         held_timers = list(_held_timers.values())
