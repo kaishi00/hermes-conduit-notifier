@@ -1008,6 +1008,9 @@ class Rooms:
         if self.starter is not None:
             self._follow_gateway()
             self._start_ready()
+            # A room's start goes before its first page: a member's Hermes drops a page for a room it hasn't heard
+            # started, and the home sends it again only after a minute without its answer (room_copies.WAIT_S).
+            self.flush()
             self.copies.send_pages()
             # The files the pages' messages name, to the Links that got them (room_files_link).
             self.files.send_files()
