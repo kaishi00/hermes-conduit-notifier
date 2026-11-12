@@ -102,8 +102,9 @@ def is_room_session(session_id: Any, home: Any = None) -> bool:
 
 def session_room(session_id: Any, home: Any = None) -> Optional[str]:
     """The room ``session_id`` is in, whatever the room settings say: its id,
-    "" when unknown (a remote member's session with no row here, a legacy
-    Desktop group), or None for any other session."""
+    "" when unknown (a remote member's session with no row here, a room
+    session not titled yet), a legacy Desktop group's display title (no
+    Conduit room's id), or None for any other session."""
     value = str(session_id or "")
     if not value:
         return None

@@ -22,6 +22,13 @@ checks it). The format is fixed, because Conduit reads it:
   Conduit's rooms keeps the plugin's room rules, memory guard and cleanup to
   the rooms Conduit made. Both start as before.
 
+## 0.164.15 (2026-11-12)
+
+### Fixes
+- Stopping a workstream with its agent's work_stop, after it had been
+  stopped from its own chat while its background agents ran, could leave
+  it starting again with their results. It now stays stopped, with them.
+
 ## 0.164.14 (2026-11-12)
 
 ### Fixes

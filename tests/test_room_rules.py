@@ -1270,6 +1270,10 @@ def test_conduit_rooms_only_searches_a_left_out_room_whole(host):
         _entry("s-home", "bot_room", None), _entry("s-home-2", "api_server", "Group: room-b"),
         _entry("s-chat", "tui", "Bike")], "count": 3}
     assert _search(found, query="x") is None  # root and continuation alike, as Hermes alone would
+    read = {"success": True, "mode": "read", "session_id": "s-home-2",
+            "session_meta": {"source": "api_server", "title": "Group: room-b"}, "messages": []}
+    assert _search(read, session_id="s-home-2") is None  # read directly too
     _conduit_rooms_only(host, False)
     kept = json.loads(_search(found, query="x"))["results"]
     assert [entry["session_id"] for entry in kept] == ["s-chat"]
+    assert json.loads(_search(read, session_id="s-home-2"))["success"] is False
