@@ -568,8 +568,9 @@ async def put_room_looks(request: Request, response: Response) -> Any:
     """How your agents and you look to the other people in rooms over
     Links: ``agents``, profile to ``{picture, color}`` (a JPEG or PNG of at
     most 8 KB, base64, and ``#RRGGBB``, each null when there's none), and
-    ``person``, yours. It takes the place of what was sent before, and goes
-    to each started room's people on the rooms loop's next pass."""
+    ``person``, yours. Each one sent takes the place of what was sent
+    before and one left out stays, and what changed goes to each started
+    room's people on the rooms loop's next pass."""
     response.headers["Cache-Control"] = "no-store"
     body = await core._read_json_body(request, ROOM_LOOKS_MAX_BODY_BYTES)
     looks = core._plugin_package_module("room_looks")

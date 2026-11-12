@@ -99,8 +99,11 @@ def put_own(root: Any, body: Any) -> dict[str, Any]:
     or null. Each one sent takes the place of what was there, and one left out stays as it was: the person's
     picture is theirs on this Hermes, so another of their devices that gives only its bots' looks doesn't take it
     away. A profile or person without a look is drawn as before."""
-    if not isinstance(body, dict) or not set(body) <= {"agents", "person"}:
-        raise LooksError("bad_looks", "Send {agents: {profile: {picture, color}}, person: {picture, color}}")
+    if not isinstance(body, dict) or not body or not set(body) <= {"agents", "person"}:
+        raise LooksError("bad_looks", "Send agents ({profile: {picture, color}}), person ({picture, color} or "
+                                      "null), or both; one left out stays as it was")
+    if "agents" in body and body["agents"] is None:
+        raise LooksError("bad_looks", "Send agents as {profile: {picture, color}}, {} for none, or leave it out")
     kept = _agents_from(body["agents"]) if "agents" in body else None
     person = body.get("person")
     if person is not None:
@@ -124,7 +127,6 @@ def you(root: Any) -> dict[str, Any]:
 
 
 def _agents_from(agents: Any) -> dict[str, Any]:
-    agents = {} if agents is None else agents
     if not isinstance(agents, dict) or len(agents) > MAX_AGENTS:
         raise LooksError("bad_looks", f"Send looks for at most {MAX_AGENTS} profiles")
     kept: dict[str, Any] = {}

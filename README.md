@@ -4650,10 +4650,11 @@ in a started room how its own look, and the home passes on everyone else's:
   "person": true|false}}`. A `picture` is a base64 JPEG or PNG of at most
   8 KB, a `color` `#RRGGBB`, each null when there's none. Each of `agents`
   and `person` sent takes the place of what was sent before, and one left
-  out stays as it was (plugin 0.164.7+; before, a body without `person` took
-  the person's picture away), so your devices share one picture: Conduit
-  sends `person` only when you choose or remove it (`bad_looks`, 400, for
-  one that isn't).
+  out stays as it was (plugin 0.164.7+; before, every body carried both, and
+  an older Conduit's `"person": null` still takes the picture away), so your
+  devices share one picture: Conduit sends `person` only when you choose or
+  remove it. An empty body, `"agents": null` or a look that isn't one is
+  `bad_looks` (400).
 - `GET /rooms/looks` without `room_id`: `{"person": look | null}`, your own
   look as one of your devices last gave it (capability `room-looks-you`,
   plugin 0.164.7+), which Conduit shows in Settings > Multiplayer.
