@@ -133,7 +133,7 @@ class Copies:
         for room_id, draft in sorted(drafts.items()):
             # Not before its start reaches the Link (a start the mailbox didn't take yet waits in the outbox):
             # a page ahead of it is dropped there, and sent again only after WAIT_S.
-            starting = {item["link"] for item in stored.get("outbox") or () if item["id"] == f"room.start:{room_id}"}
+            starting = {item["link"] for item in stored["outbox"] if item["id"] == f"room.start:{room_id}"}
             due = [link_id for link_id in _receiving(draft) if link_id not in starting]
             if not due:
                 continue
