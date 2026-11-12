@@ -676,6 +676,30 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
 # HTTPS to the relay keeps its connection between requests (#562).
 _keep_alive = KeepAliveHTTPSHandler()
 _opener = urllib.request.build_opener(_RefuseRedirects, _keep_alive)
+_https_proxy_lock = threading.Lock()
+_https_proxy_cache: tuple[str, Any] | None = None
+
+
+def _https_opener() -> Any:
+    """Opener for HTTPS relay calls, optionally using a dedicated proxy.
+
+    ``CONDUIT_PUSH_PROXY`` is deliberately separate from the process-wide
+    HTTPS_PROXY setting: only this plugin's relay traffic is routed through
+    it. Unset or empty keeps the ordinary opener and its keep-alive pool.
+    """
+    global _https_proxy_cache
+    proxy = (os.environ.get("CONDUIT_PUSH_PROXY") or "").strip()
+    if not proxy:
+        return _opener
+    with _https_proxy_lock:
+        if _https_proxy_cache is None or _https_proxy_cache[0] != proxy:
+            proxy_handler = urllib.request.ProxyHandler({"https": proxy})
+            _https_proxy_cache = (
+                proxy,
+                urllib.request.build_opener(_RefuseRedirects, proxy_handler),
+            )
+        return _https_proxy_cache[1]
+
 # Plain HTTP (loopback, or a LAN/Tailscale pairing claim) never goes through
 # an HTTP(S)_PROXY, which would see the credential or pairing code in clear.
 _direct_opener = urllib.request.build_opener(_RefuseRedirects, urllib.request.ProxyHandler({}))
@@ -701,7 +725,7 @@ def _request(
         headers["Authorization"] = f"Bearer {credential}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        opener = _opener if is_https(url) else _direct_opener
+        opener = _https_opener() if is_https(url) else _direct_opener
         with opener.open(request, timeout=timeout) as response:
             _note_relay_clock(url, response.headers)
             raw = response.read(MAX_RESPONSE_BYTES + 1)

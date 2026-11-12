@@ -8,6 +8,8 @@ import pathlib
 import sys
 import threading
 import types
+import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -112,7 +114,7 @@ class _Server:
                 outer.requests.append((self.command, self.path, dict(self.headers), self.rfile.read(length)))
                 answer(self)
 
-            do_GET = do_POST = do_DELETE = _any
+            do_GET = do_POST = do_DELETE = do_CONNECT = _any
 
             def log_message(self, *args):
                 pass
@@ -229,6 +231,24 @@ def test_plain_http_skips_any_proxy_and_answers_are_capped(servers, monkeypatch)
     with pytest.raises(fresh.RelayRejected) as raised:
         fresh.request_json(f"{huge.url}/v1/events", method="POST", credential="c", payload={})
     assert raised.value.detail == "response_too_large"
+
+
+def test_https_proxy_setting_routes_only_relay_https_through_explicit_proxy(servers, monkeypatch):
+    def reject_connect(handler):
+        assert handler.path == "relay.example:443"
+        _json(handler, 502, {"error": "proxy_denied"})
+
+    proxy = servers(reject_connect)
+    monkeypatch.setenv("CONDUIT_PUSH_PROXY", proxy.url)
+    fresh = _private_copy("conduit_push._client_proxy_setting_under_test", ROOT / "client.py")
+
+    with pytest.raises(urllib.error.URLError):
+        fresh.request_json("https://relay.example/v1/events", method="POST", credential="secret", payload={})
+
+    assert len(proxy.requests) == 1
+    method, target, headers, _body = proxy.requests[0]
+    assert (method, target) == ("CONNECT", "relay.example:443")
+    assert "Authorization" not in headers
 
 
 def test_unpair_with_a_legacy_http_url_removes_the_local_pairing_and_says_so(monkeypatch, tmp_path, capsys):
