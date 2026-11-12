@@ -919,7 +919,9 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
         # Its agents ran on (stopped from its chat, say): they're stopped, and
         # so is it, so their results' turn finds it stopped, as the app's Stop.
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
-                "note": f"Stopped {work.ref}{with_agents or ', and its background agents'}. work_send continues it."}
+                "note": (f"Stopped {work.ref}{with_agents}. "
+                         + ("" if with_agents else "Its background agents run on, but their results won't start it. ")
+                         + "work_send continues it.")}
     store.update(work.ref, status=work.status, only_if=("stopped",))
     return {"ok": True, "ref": work.ref, "title": work.title, "status": work.status,
             "note": f"{work.ref} wasn't working on anything."}
