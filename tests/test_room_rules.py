@@ -796,6 +796,27 @@ def notes(monkeypatch):
     return NOTES
 
 
+@pytest.mark.parametrize("session_id", ["s-home", REMOTE])
+def test_a_turn_naming_a_picture_is_told_to_look_at_it(host, session_id):
+    # Hermes' peer route carries no attachments, so a native-vision bot saw nothing (Eric 2026-11-12).
+    picture = str(host / "conduit" / "room-files" / ("20261112-" + "a" * 32) / "shot.jpg")
+    other = str(host / "conduit" / "room-files" / ("20261112-" + "b" * 32) / "notes.txt")
+    result = plugin._pre_llm_call(session_id=session_id, turn_id="t1", platform="api_server",
+                                  user_message=f"look at this\n@file:{picture}\n@file:{other}",
+                                  conversation_history=[])
+    context = (result or {}).get("context", "")
+    assert rules.TURN_PICTURES_LINE.format(count="a picture", paths=picture, them="it") in context
+    assert "notes.txt" not in context, "only pictures"
+    assert "This turn's messages include" not in _context(session_id)
+
+
+def test_the_pictures_line_names_the_newest_few():
+    paths = [f"/h/conduit/room-files/20261112-{index:032x}/p{index}.PNG" for index in range(6)]
+    line = rules.turn_pictures_line("\n".join(f"@file:{path}" for path in paths))
+    assert line == rules.TURN_PICTURES_LINE.format(count="4 pictures", paths=", ".join(paths[2:]), them="them")
+    assert rules.turn_pictures_line("no files here") is None
+
+
 def _context(session_id, platform="api_server"):
     result = plugin._pre_llm_call(session_id=session_id, turn_id="t1", platform=platform,
                                   user_message="hi", conversation_history=[])

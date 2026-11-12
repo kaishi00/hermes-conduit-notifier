@@ -2128,6 +2128,10 @@ home's path from it, so the guest's Conduit draws the room's pictures too.
 A guest keeps which home each upload folder belongs to (the first whose room pages name it, or whose file arrives first) and which Link sent each file: it refuses another home's bytes under that folder, and a turn names only a copy its own room's home sent. Pieces of files that never finish go after a day, swept hourly too. Carried files count toward the guest's 2 GB of room files, at most 20,000 of them (past that the oldest go first), and age out after 30 days, oldest first past the 2 GB, swept hourly by the rooms loop as well as on each arrival; none is kept with under 1 GB free, and uploads and carried files check the disk under one lock (`conduit/room-files.lock` in the root home). Capability `room-files-linked`. A file over 16 MB stays on the home's host.
 In a room with other people's agents, every rule tier may call
 `vision_analyze` on a picture sent into the room, by its room-files path.
+Hermes' peer route carries no attachments, so a turn whose messages name
+pictures (up to the newest 4) is told their paths and to look at them with
+`vision_analyze` before answering about them (plugin 0.166.1+); Conduit
+sends at most 16 MB a file into such a room, what reaches the others.
 
 ## Group pictures (plugin 0.41+)
 

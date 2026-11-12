@@ -98,6 +98,12 @@ WORK_TOOL = "conduit_room_work"
 # Only a file under this host's room-files root; nothing else it could load.
 LOOK_TOOL = "vision_analyze"
 ROOM_FILES = ("conduit", "room-files")
+# The pictures a turn's messages name: Hermes' peer route carries no attachments, so an agent sees one only by
+# looking (Eric 2026-11-12, App Store polish: a native-vision bot answered as if nothing was sent).
+PICTURE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")
+TURN_PICTURES_LINE = ("This turn's messages include {count} sent into the room: {paths}. You can't see {them} "
+                      f"unless you look: call {LOOK_TOOL} with each path before you answer about {{them}}.")
+MAX_TURN_PICTURES = 4
 ROOM_PICTURES_LINE = (f"A picture sent into this room you may look at with {LOOK_TOOL}, by the path its message "
                       "names, whatever else these rules allow.")
 
@@ -483,6 +489,20 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     if choices.note:
         lines.append(f"- {NOTE_LINE.format(note=choices.note)}")
     return "\n".join([FRAMING_HEAD, *lines])
+
+
+def turn_pictures_line(prompt: Any) -> Optional[str]:
+    """The line telling the agent to look at the room pictures ``prompt`` names, the newest last (at most
+    MAX_TURN_PICTURES of them), or None when it names none."""
+    from . import room_files_link
+
+    paths = list(dict.fromkeys(path for path, _folder, name in room_files_link.references(prompt)
+                               if name.lower().endswith(PICTURE_EXTENSIONS)))[-MAX_TURN_PICTURES:]
+    if not paths:
+        return None
+    one = len(paths) == 1
+    return TURN_PICTURES_LINE.format(count="a picture" if one else f"{len(paths)} pictures",
+                                     paths=", ".join(paths), them="it" if one else "them")
 
 
 def _poster_lines(turn: Optional[RoomTurn], people: Optional[Mapping[str, Any]],

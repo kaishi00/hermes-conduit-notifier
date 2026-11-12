@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.166.1 (2026-11-12)
+
+### Fixes
+- A bot in a room with other people's agents could answer as if a picture
+  sent there wasn't there. Each turn that names pictures now tells the bot
+  to look at them first.
+
 ## 0.166.0 (2026-11-12)
 
 ### Fixes
