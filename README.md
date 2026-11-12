@@ -2273,7 +2273,9 @@ through Hermes' `/api/fs/*` routes.
   `mkdir` and `new-file` (`name`, `content`), `save` (`content`, up to 8 MB,
   refused with 409 when `expected_mtime` no longer matches the file), `move`
   (`to`, `name`, `overwrite`; a rename is a move in the same folder),
-  `duplicate`, `delete` (never the root itself) and `upload` (`name`, base64
+  `duplicate` (beside it, or with `to` a copy pasted into that folder, keeping
+  its name there when free; capability `workspace-copy`, plugin 0.164.12+),
+  `delete` (never the root itself) and `upload` (`name`, base64
   `data` up to 25 MB, `overwrite`).
 
 - `GET …/workspace/resolve?path=…&session_id=…`: where a file a chat's reply

@@ -124,8 +124,11 @@ def _snippet(line: str, start: int, length: int) -> Dict[str, Any]:
     return {"text": prefix + text + suffix, "matchStart": start - lead + len(prefix), "matchLength": length}
 
 
-def copy_name(name: str, taken: Callable[[str], bool]) -> str:
-    """``report copy.md``, then ``report copy 2.md``: the first name not taken."""
+def copy_name(name: str, taken: Callable[[str], bool], keep_name: bool = False) -> str:
+    """``report copy.md``, then ``report copy 2.md``: the first name not taken.
+    With ``keep_name`` (a copy into another folder), the name itself first."""
+    if keep_name and not taken(name):
+        return name
     stem, dot, ext = name.rpartition(".")
     if not dot or not stem:
         stem, ext = name, ""
@@ -487,7 +490,9 @@ class LocalWorkspace:
             if not os.path.lexists(temp):
                 shutil.rmtree(box, ignore_errors=True)
 
-    def duplicate(self, root_raw: Any, path: Any) -> Dict[str, Any]:
+    def duplicate(self, root_raw: Any, path: Any, to: Any = None) -> Dict[str, Any]:
+        """A copy beside ``path``, or in the folder ``to`` (Copy, then Paste:
+        hermes-conduit#1438), keeping its name there when it's free."""
         root = self.root(root_raw)
         source = self._existing(root, path)
         if source == root:
@@ -498,7 +503,15 @@ class LocalWorkspace:
         if os.path.islink(link) and self._inside(root, link):
             source = link
         folder = os.path.dirname(source)
-        name = copy_name(os.path.basename(source), lambda candidate: os.path.lexists(os.path.join(folder, candidate)))
+        if to is not None:
+            folder = self._existing(root, to)
+            if not os.path.isdir(folder):
+                raise WorkspaceError(400, "That's not a folder")
+            if os.path.isdir(source) and not os.path.islink(source) and self._inside(source, folder):
+                raise WorkspaceError(400, "A folder can't be copied into itself")
+        keep = folder != os.path.dirname(source)
+        name = copy_name(os.path.basename(source), lambda candidate: os.path.lexists(os.path.join(folder, candidate)),
+                         keep_name=keep)
         target = os.path.join(folder, name)
         try:
             if os.path.isdir(source) and not os.path.islink(source):
@@ -973,12 +986,17 @@ class SshWorkspace:
                   f'[ -e "$s" ] || [ -L "$s" ] && {{ echo {_ERROR}EEXIST; exit 1; }}; exit 0')
         return {"entry": self._entry(target)}
 
-    def duplicate(self, root_raw: Any, path: Any) -> Dict[str, Any]:
+    def duplicate(self, root_raw: Any, path: Any, to: Any = None) -> Dict[str, Any]:
         root = self.root(root_raw)
         source = self._check(root, path)
         if source == root:
             raise WorkspaceError(400, "The workspace folder itself can't be duplicated")
         folder = posixpath.dirname(source)
+        if to is not None:
+            folder = self._check(root, to)
+            if self._inside(source, folder):
+                raise WorkspaceError(400, "A folder can't be copied into itself")
+        keep = folder != posixpath.dirname(source)
         # The first free copy name, picked on the host itself (whatever the
         # folder's size) right before the copy.
         candidates: List[str] = []
@@ -987,7 +1005,7 @@ class SshWorkspace:
             candidates.append(candidate)
             return len(candidates) < DUPLICATE_NAMES_TRIED
 
-        copy_name(posixpath.basename(source), offered)
+        copy_name(posixpath.basename(source), offered, keep_name=keep)
         quoted = " ".join(shlex.quote(candidate) for candidate in candidates)
         # The copy keeps links as links and leaves out what holds keys or
         # passwords, as this host's duplicate does.
@@ -996,6 +1014,7 @@ class SshWorkspace:
             + ["-iname '.env.*'"])
         lines = self._run(self._guard(root) + f's={shlex.quote(source)}; f={shlex.quote(folder)}; t=\n'
                   f'follows "$s" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
+                  f'[ -d "$f" ] || {{ if [ -e "$f" ]; then echo {_ERROR}ENOTDIR; else echo {_ERROR}ENOENT; fi; exit 1; }}\n'
                   f'for n in {quoted}; do [ -e "$f/$n" ] || [ -L "$f/$n" ] || {{ t="$f/$n"; break; }}; done\n'
                   f'[ -n "$t" ] || {{ echo {_ERROR}EEXIST; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'

@@ -510,7 +510,9 @@ async def post_workspace(action: str, request: Request, response: Response,
         op = lambda ws: ws.move(root, path, folder, name, overwrite)
     elif action == "duplicate":
         path = _workspace_text(body, "path")
-        op = lambda ws: ws.duplicate(root, path)
+        # Paste: a copy in another folder (capability workspace-copy).
+        to = _workspace_text(body, "to") if body.get("to") is not None else None
+        op = lambda ws: ws.duplicate(root, path, to)
     elif action == "delete":
         path = _workspace_text(body, "path")
         op = lambda ws: ws.delete(root, path)
