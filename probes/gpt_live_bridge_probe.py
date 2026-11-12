@@ -172,6 +172,8 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
         except Exception as exc:  # keep the channel's receive loop alive
             print(f"  handler error: {exc.__class__.__name__}")
 
+    quiet_timer: list = []
+
     def _handle(text):
         try:
             event = json.loads(text)
@@ -194,7 +196,10 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             run.mark("first " + side + " transcript")
             run.transcripts.append(f"{side}: {event.get('delta') or ''}")
             if side == "output":
-                greeted.set()
+                # The greeting is over once its words stop for a moment, as Conduit's turns end.
+                if quiet_timer:
+                    quiet_timer[0].cancel()
+                quiet_timer[:] = [asyncio.get_running_loop().call_later(1.5, greeted.set)]
         elif kind == "turn.done":
             turn = event.get("turn") if isinstance(event.get("turn"), dict) else {}
             print(f"  turn.done {turn.get('role')}: {str(turn.get('transcript') or '')[:200]}")
@@ -248,7 +253,7 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
                                          pc.localDescription.sdp, greeting=GREETING)
         run.mark("answer from chatgpt.com")
         result["source"] = answer.get("source")
-        result["events"] = answer.get("events") or "frameless"
+        result["protocol"] = answer.get("events") or "frameless"
         await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["transport"]["sdp"], type="answer"))
         deadline = time.monotonic() + seconds
         if not answer.get("greeting_applied"):
