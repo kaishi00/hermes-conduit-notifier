@@ -6,7 +6,9 @@ Conduit reads, so nobody's phone talks to anyone else's server, and they keep wh
 The home sends each of them the log a page at a time (room.page), with what the room is doing: whether it ended,
 who's answering and how each linked agent's route is. One page waits for its answer (room.copied, the seq the copy
 holds) before the next goes, and goes again after a minute without one, so a lost envelope only delays the copy.
-The pages leave out one thing: the home's own agents' turn errors, which are Hermes' raw ones.
+The pages leave out one thing: the home's own agents' turn errors, which are Hermes' raw ones. Who left or was taken
+out goes beside them, in a room.out of its own whenever that changes, since a member's Hermes otherwise knows it
+only for its own agents (an older plugin drops it, and shows everyone as in, as before).
 
 The person's Hermes takes a page only over the Link that invited it to the room, once it started, from the room's
 own authority, and keeps it with Hermes' replica store (gateway/hosted_room_replicas.ingest_page), which refuses a
@@ -37,8 +39,10 @@ from . import room_identity, room_links, room_posts
 logger = logging.getLogger(__name__)
 
 VERSION = 1
-PAGE, COPIED = "room.page", "room.copied"
-KINDS = (PAGE, COPIED)
+PAGE, COPIED, OUT = "room.page", "room.copied", "room.out"
+KINDS = (PAGE, COPIED, OUT)
+# How a member is out of a room, as the home's draft says it.
+OUT_REASONS = frozenset({"left", "removed"})
 FILE_NAME = "copies.db"
 # A page: Hermes' read_events limit, and a JSON body that fits an envelope sealed (room_envelope.MAX_BYTES, 256 KB).
 PAGE_EVENTS = 500
@@ -147,7 +151,29 @@ class Copies:
                 continue
             state = self._state(found, room_id, draft)
             for link_id in due:
+                self._send_out(room_id, draft, link_id)
                 self._send(room_id, draft, link_id, found, state)
+
+    def _send_out(self, room_id: str, draft: dict[str, Any], link_id: str) -> None:
+        """Who's out of the room, to a Link whose copy wasn't told since it changed. Sent before the page that
+        follows the change, so a copy never shows the page's events with the member still in."""
+        out = _out_of(draft)
+        digest = _digest(out)
+        if _copy_of(draft, link_id).get("out") == digest:
+            return
+        if not out and _copy_of(draft, link_id).get("out") is None:
+            return  # nobody's out, and nobody was: nothing to tell
+        try:
+            self.rooms.send(link_id, OUT, {"v": VERSION, "room_id": room_id, "out": out},
+                            message_id=f"{OUT}:" + hashlib.sha256(json.dumps([room_id, digest]).encode("utf-8"))
+                            .hexdigest()[:32])
+        except room_links.LinkError as exc:
+            logger.info("Linked Rooms will tell Link %s who's out of room %s later (%s)", link_id, room_id, exc.code)
+            return
+        with self.rooms.store.update() as stored:
+            kept = stored["drafts"].get(room_id)
+            if kept is not None and link_id in kept["links"]:
+                _copy_of(kept, link_id, keep=True)["out"] = digest
 
     def _state(self, found: Any, room_id: str, draft: dict[str, Any]) -> dict[str, Any]:
         """What the room is doing, as everyone in it may see it: never its pending actions, the home's own
@@ -319,6 +345,26 @@ class Copies:
             copy["sent"] = None
 
     # --- The copy ----------------------------------------------------------------------------
+
+    def on_out(self, received: room_links.Received) -> None:
+        """Who's out of a room this installation's agents are in, from its home: kept on the invite, for who's
+        who (room_invites.people) and the copy (copies). Only members the invite names; its own agents' are
+        its own to know (their invite's ``gone``)."""
+        body = received.body
+        if not isinstance(body, dict) or set(body) != {"v", "room_id", "out"} or body["v"] != VERSION \
+                or not isinstance(body["room_id"], str) or not isinstance(body["out"], dict) \
+                or not all(isinstance(key, str) and value in OUT_REASONS for key, value in body["out"].items()):
+            logger.info("Linked Rooms dropped a room.out from Link %s that isn't one", received.link_id)
+            return
+        key = f"{received.link_id}/{body['room_id']}"
+        with self.rooms.store.update() as state:
+            invite = state["invites"].get(key)
+            if invite is None or invite["started_at"] is None:
+                logger.info("Linked Rooms dropped a room.out from Link %s for a room it isn't in", received.link_id)
+                return
+            named = {member.get("member_id") for member in invite.get("members") or ()}
+            invite["others_out"] = {member_id: reason for member_id, reason in sorted(body["out"].items())
+                                    if member_id in named}
 
     def on_page(self, received: room_links.Received) -> None:
         """A page of a room this installation's agents are in, kept, and answered with what the copy holds."""
@@ -556,6 +602,24 @@ def _shown_members(draft: dict[str, Any]) -> list[dict[str, Any]]:
             for member in draft["members"]]
 
 
+def _out_of(draft: dict[str, Any]) -> dict[str, str]:
+    """The members out of a started room, each with how: left or removed."""
+    return {member["member_id"]: member["status"] for member in draft["members"] or ()
+            if member.get("status", "in") in OUT_REASONS}
+
+
+def out_of_invite(invite: Optional[dict[str, Any]]) -> dict[str, str]:
+    """Who's out of a room hosted elsewhere, as its invite knows: the home's room.out, then its own agents that
+    left or were taken out (their own word wins)."""
+    if invite is None:
+        return {}
+    out = {member_id: reason for member_id, reason in (invite.get("others_out") or {}).items()
+           if reason in OUT_REASONS}
+    out.update({agent["member_id"]: agent["reason"] for agent in invite.get("gone", ())
+                if agent.get("reason") in OUT_REASONS})
+    return out
+
+
 def _kept_event(event: Any, own: set[str]) -> Any:
     if isinstance(event, dict) and event.get("kind") == "turn.failed" and isinstance(event.get("payload"), dict) \
             and event["payload"].get("member_id") in own:
@@ -690,7 +754,7 @@ def _shown(row: sqlite3.Row, invite: Optional[dict[str, Any]]) -> dict[str, Any]
         status, reason = "ended", state["ended"]
     members = [{key: value for key, value in member.items() if key != YOURS} for member in members]
     return {"room_id": row["room_id"], "name": row["name"], "link": row["link"], "from": row["home_name"],
-            "members": members, "yours": yours, "status": status, "reason": reason,
+            "members": members, "yours": yours, "out": out_of_invite(invite), "status": status, "reason": reason,
             "started_at": started_at, "ended_at": ended_at, "state": state, "last_seq": int(row["last_seq"]),
             "latest_seq": int(row["latest_seq"]), "updated_at": float(row["updated_at"])}
 

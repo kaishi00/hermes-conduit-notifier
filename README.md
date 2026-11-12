@@ -4680,8 +4680,9 @@ installation's):
 - `GET /rooms/people?room_id=`: who's who in a started room over Links,
   `{"room_id", "home", "members": [{"member_id", "handle", "display_name",
   "owner", "status"}]}`, with `home` and `owner` null for yours, and each
-  member's `status` `in`, `left` or `removed` (on a member's Hermes, only
-  for its own agents). A member's Hermes answers for a room its agents left,
+  member's `status` `in`, `left` or `removed` (on a member's Hermes, its
+  own agents' and, from plugin 0.166 on the home, everyone else's as the home
+  last sent it in a `room.out` over the Link). A member's Hermes answers for a room its agents left,
   or that ended, too, with each member as it was when it ended
   (`GET /rooms/invites` says how it ended). With `room-posts` (plugin
   0.115+), the home adds `posts`, the room's latest 500 posts it made for
@@ -4772,11 +4773,13 @@ and says so once in its log. The copies go through these, behind the
 minute:
 
 - `GET /rooms/copies`: `{"copies": [...]}`, the one that changed last first,
-  each `{"room_id", "name", "link", "from", "members", "yours", "status",
+  each `{"room_id", "name", "link", "from", "members", "yours", "out", "status",
   "reason", "started_at", "ended_at", "state", "last_seq", "latest_seq",
   "updated_at"}`: who hosts it as your Link names them, each member `{"member_id",
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
-  agents in it `{"member_id", "profile", "handle"}`, the invite's `status`
+  agents in it `{"member_id", "profile", "handle"}`, `out` (who left or was
+  taken out, `{"<member_id>": "left" | "removed"}`, as `GET /rooms/people`
+  says), the invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
   forgets the invite, a month after it ended, it's `left` unless the home said
   it ended, the dates are null and `yours` is the agents the copy noted as
