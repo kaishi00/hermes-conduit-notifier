@@ -251,6 +251,10 @@ ROUTE_CAPABILITIES = (
     # GET/PUT /rooms/looks: your bots' pictures and glow colors and yours,
     # sent to the people in your rooms over Links, and theirs (Linked Rooms).
     "room-looks",
+    # GET /rooms/looks without room_id: your own picture for rooms, kept on
+    # this Hermes for all your devices; PUT /rooms/looks keeps what a body
+    # leaves out (a device's bots' looks without a person keep yours).
+    "room-looks-you",
     # GET/PUT /rooms/chats: a room's private chat with one of your agents,
     # told which room it's about, with notes on rooms it Listens in
     # (Linked Rooms).

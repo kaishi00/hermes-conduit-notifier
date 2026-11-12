@@ -158,6 +158,7 @@ def test_every_capability_names_a_served_route_family():
         "room-copies": "/rooms/copies",
         "room-posts": "/rooms/copies/messages",
         "room-looks": "/rooms/looks",
+        "room-looks-you": "/rooms/looks",
         "room-chats": "/rooms/chats",
         # ?conduit_profile= on the rooms routes that need the dashboard process, the setup's first.
         "room-dashboard-profiles": "/rooms/setup",

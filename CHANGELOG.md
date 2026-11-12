@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.7 (2026-11-12)
+
+### Fixes
+- Your picture in rooms with other people could go missing for them when
+  another of your devices connected to this Hermes without that picture set.
+  Hermes now keeps one picture for all your devices (update Conduit too).
+
 ## 0.164.6 (2026-11-11)
 
 ### Fixes
