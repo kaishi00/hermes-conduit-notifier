@@ -3010,6 +3010,13 @@ def start_recovery(home: Optional[Path] = None) -> None:
     home = home or _home()
     if home is None or not work_store.exists(home):
         return
+    # A room's asks still waiting for the owner are watched again whatever the policy: Ask me first needs no
+    # workstreams, and a Run work ask kept before they were turned off is still answered.
+    try:
+        if any(row["kind"] in ("room_ask", "share_ask") for row in work_store.Store(home).outbox_pending()):
+            _watch_asks(home)
+    except Exception:  # noqa: BLE001 — the sweep's replay arms it where workstreams are on
+        logger.debug("conduit_push: couldn't read the room asks at load", exc_info=True)
     # Now, before a client can reopen a chat: Hermes re-runs a crash-killed
     # turn on its resume, which could come before the sweep below. Whatever
     # the policy: turning workstreams off doesn't stop one that's running.
@@ -6339,22 +6346,27 @@ def watch_share_ask(home: Path, prompt_id: str, *, room_id: str, session_id: str
 
 def _share_answered(home: Path, store: work_store.Store, present: Any, row: dict, prompt: dict) -> None:
     """The owner answered (or the ask ran out): the bot is woken once for an answer its room hasn't heard yet. An
-    ask that ran out, or one a turn already heard, wakes nothing."""
-    store.outbox_done(row["id"], "answered")
+    ask that ran out, or one a turn already heard, wakes nothing. The row stays until the wake is made (a post is
+    journaled under its own key), so a roster that can't be read just now is tried again on the next look."""
     if prompt["status"] not in ("confirmed", "declined", "edit"):
+        store.outbox_done(row["id"], "answered")
         return
     asked = json.loads(row["text"])
     if not any(each["id"] == prompt["id"] for each in present.room_answers(asked["room"])):
+        store.outbox_done(row["id"], "answered")
         return
     handle = ""
     if asked.get("side") == "home":
         try:
             handle = room_work.handle_of(asked["room"], Path(home), work_broker.profile_of(home))
         except room_work.Unreadable as error:
-            logger.info("conduit_push: a Linked Room's agent wasn't woken for its owner's answer (%s)", error)
+            if row["created_at"] < time.time() - LINKED_KEEP_S:
+                store.outbox_done(row["id"], "lost")
+            logger.info("conduit_push: a Linked Room's agent wasn't woken for its owner's answer yet (%s)", error)
             return
     _wake_linked(home, room_work.Room(room_id=asked["room"], session_id=asked["session"], handle=handle,
                                       linked=True, side=asked.get("side", "home")))
+    store.outbox_done(row["id"], "answered")
 
 
 # Private lines framed into a room turn, heard once that turn replied and ended (as room_asks' answers).

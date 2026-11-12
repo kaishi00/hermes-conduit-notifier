@@ -6094,13 +6094,30 @@ def test_a_late_share_in_a_room_hosted_elsewhere_asks_its_home_to_wake_the_bot(o
     assert woken == ["room-9"] and ask_first["posted"] == []
 
 
-def test_a_restart_keeps_watching_a_waiting_share_ask(on, hermes, ask_first, monkeypatch):
+def test_a_restart_keeps_watching_a_waiting_share_ask_with_workstreams_off(on, hermes, ask_first, monkeypatch):
     ask_owner(on.home)
+    on.set_policy("off")
+    work._policy_cache.clear()
     watched = []
     monkeypatch.setattr(work, "_watch_asks", lambda home: watched.append(home))
-    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
-    work._replay(on.home, on)
+    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: types.SimpleNamespace(start=lambda: None))
+    work.start_recovery(on.home)
     assert watched and [row["kind"] for row in on.outbox_pending()] == ["share_ask"]
+
+
+def test_a_wake_the_roster_couldnt_be_read_for_is_tried_again(on, hermes, ask_first, monkeypatch):
+    ask_owner(on.home)
+    answer(on.home, "confirmed")
+
+    def unreadable(room_id, home):
+        raise room_rules.RoomStoreError("busy")
+
+    monkeypatch.setattr(room_rules, "_room_members", unreadable)
+    assert work.check_asks(on.home) is False and ask_first["posted"] == []
+    assert [row["kind"] for row in on.outbox_pending()] == ["share_ask"], "kept for the next look"
+    monkeypatch.setattr(room_rules, "_room_members", lambda room_id, home: ask_first["members"])
+    work.check_asks(on.home)
+    assert len(ask_first["posted"]) == 1 and not any(row["kind"] == "share_ask" for row in on.outbox_pending())
 
 
 def test_linked_work_never_saves_to_memory_or_messages_anyone(on, hermes, linked):
