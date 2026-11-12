@@ -1237,7 +1237,9 @@ class Rooms:
             "reason": "lapsed" if status != draft["status"] else draft["reason"],
             "agents": [{name: agent[name] for name in ("profile", "handle", "display_name")}
                        for agent in draft["own"]],
-            "people": [{"link": link_id, "name": person["name"], "status": person["status"],
+            # One in it with no agents who left is out of it, though their answer stays joined.
+            "people": [{"link": link_id, "name": person["name"],
+                        "status": "left" if person.get("just_me") == "left" else person["status"],
                         "just_me": person.get("just_me") is True,
                         "agents": [{name: agent[name] for name in ("member_id", "handle", "display_name")}
                                    for agent in person["join"]]}

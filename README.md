@@ -4667,7 +4667,7 @@ installation's):
   [{"link", "name", "status", "agents"}], "cut_off", "left", "removed",
   "members"}`. Its status is `waiting`, `starting`, `started` or `ended`
   (with `reason` `withdrawn`, `lapsed`, `too_few`, `start_failed` or
-  `disbanded`), each person's `waiting`, `joined` or `declined` (with `just_me` true for one who joined with no agents), and
+  `disbanded`), each person's `waiting`, `joined`, `declined` or `left` (with `just_me` true for one who joined with no agents and is still in it; `left` is one of those who left), and
   `cut_off` lists the member ids still in whose route couldn't be saved,
   `left` those that left and `removed` those taken out. `members` is who's in
   a started room, as `GET /rooms/people` lists them (null before the start).
@@ -4798,7 +4798,7 @@ minute:
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
   agents in it `{"member_id", "profile", "handle"}`, `out` (who left or was
   taken out, `{"<member_id>": "left" | "removed"}`, as `GET /rooms/people`
-  says), `just_me` (true while you're in it with none of your agents), the
+  says), `just_me` (true once you joined it with none of your agents, after you left too), the
   invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
   forgets the invite, a month after it ended, it's `left` unless the home said

@@ -1377,6 +1377,9 @@ def _answer_invite(rooms: Any, room_invites: Any, room_links: Any, root: Path, h
         print(f"Declined {_printable(shown['name'])}; {host}'s Hermes is told.")
         return 0
     if getattr(args, "just_me", False):
+        if getattr(args, "agent", None):
+            print("Just me joins with none of your agents: leave out --agent, or leave out --just-me.")
+            return 2
         shown = rooms.answer(invite["link"], room, [], just_me=True)
         print(f"Joined {_printable(shown['name'])} with none of your agents. It starts on {host}'s Hermes once "
               "everyone has answered.")
@@ -1519,7 +1522,8 @@ def _print_drafts(view: dict) -> None:
         for person in draft["people"]:
             agents = [{**agent, "handle": handles.get(agent["member_id"], agent["handle"])}
                       for agent in person["agents"]]
-            answered = {"waiting": "hasn't answered", "declined": "declined"}.get(person["status"]) \
+            answered = {"waiting": "hasn't answered", "declined": "declined",
+                        "left": "joined without agents (Just me), then left"}.get(person["status"]) \
                 or ("joined without agents (Just me)" if person.get("just_me") else f"joined with {_handles(agents)}")
             out = _out([agent["handle"] for agent in agents if agent["member_id"] in draft["left"]],
                        [agent["handle"] for agent in agents if agent["member_id"] in draft["removed"]])

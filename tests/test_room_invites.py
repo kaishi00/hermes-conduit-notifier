@@ -2910,6 +2910,9 @@ def test_someone_just_me_leaves_and_their_pages_stop(rooms):
     draft_state = _state(rooms, "furina")["drafts"][room_id]
     assert invites_module.room_copies.just_me(draft_state) == []
     assert invites_module.room_copies._receiving(draft_state) == ["link1"]
+    [shown_draft] = [each for each in rooms.furina.drafts()["drafts"] if each["room_id"] == room_id]
+    assert [(person["name"], person["status"], person["just_me"]) for person in shown_draft["people"]] == [
+        ("Laifu", "joined", False), ("Mona", "left", False)]
     with pytest.raises(invites_module.RoomsError) as refused:
         rooms.mona.leave("link2", room_id)
     assert refused.value.code == "not_in"
@@ -2951,6 +2954,8 @@ def test_the_cli_joins_just_me_and_leaves(commands, capsys):
     _takes_just_me(commands, "mona", "link2")
     answer(commands, "laifu", room_id, "link1", LAIFUS)
 
+    assert commands.run("mona", "join", room=room_id, just_me=True, agent=["mona"]) == 2
+    assert _said(commands, capsys).startswith("Just me joins with none of your agents")
     assert commands.run("mona", "join", room=room_id, just_me=True) == 0
     assert _said(commands, capsys).startswith("Joined Zoo trip with none of your agents. It starts on Furina's "
                                               "Hermes once everyone has answered.")
@@ -2961,3 +2966,6 @@ def test_the_cli_joins_just_me_and_leaves(commands, capsys):
     assert commands.run("mona", "leave", room=room_id) == 0
     assert _said(commands, capsys).startswith("Left Zoo trip; Furina's Hermes is told.")
     assert invite_of(commands, "mona", room_id)["status"] == "left"
+    commands.furina.pass_once()
+    assert commands.run("furina", "drafts") == 0
+    assert "  Mona: joined without agents (Just me), then left" in _said(commands, capsys)
