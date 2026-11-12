@@ -250,9 +250,10 @@ def test_a_later_rooms_page_waits_for_its_start_too(copies, monkeypatch):
         return send(link_id, kind, body, message_id=message_id)
 
     copies.furina.send = refusing_starts
+    before = len(pages(copies))
     copies.furina.pass_once()
 
-    sent = [body["room_id"] for _, body, _ in pages(copies)]
+    sent = [body["room_id"] for _, body, _ in pages(copies)[before:]]
     assert sent.count(room_id) == 0 and first in sent, "only the room whose start waits is held"
 
 
