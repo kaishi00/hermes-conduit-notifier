@@ -35,6 +35,7 @@ import time
 import uuid
 import weakref
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,39 @@ def authority_session(session_id: Any) -> Optional[tuple]:
         if live is not None:
             return gateway, authority, live
     return None
+
+
+def authority_for_home(home: Any) -> Any:
+    """The session authority in this process serving the Hermes home ``home``
+    (a gateway serving several profiles has one per profile), else None."""
+    gateway = runner()
+    if gateway is None:
+        return None
+    try:
+        wanted = Path(home).resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+    for authority in _authorities(gateway):
+        try:
+            if Path(str(authority.profile_id)).resolve() == wanted:
+                return authority
+        except (OSError, TypeError, ValueError, AttributeError):
+            continue
+    return None
+
+
+def authority_session_ids(home: Any) -> Optional[set]:
+    """The chats the session authority serving ``home`` has open, or None when
+    no authority in this process serves it."""
+    authority = authority_for_home(home)
+    if authority is None:
+        return None
+    sessions = getattr(authority, "sessions", None)
+    try:
+        return {sid for sid in list(sessions.keys()) if isinstance(sid, str)}
+    except Exception:  # noqa: BLE001 — unreadable: the caller tries again later
+        logger.warning("Conduit: couldn't list the chats a session authority has open", exc_info=True)
+        return None
 
 
 def authority_scope(authority: Any) -> Any:
@@ -172,6 +206,10 @@ class _AuthorityLink:
         # chat's ``pending`` last listed them: admission id -> the generation it ran as.
         # A chat this link has read (a snapshot or a ``session.info``) is a key.
         self.lost: Dict[str, Dict[str, int]] = {}
+        # session id -> the profile its requests named: on a gateway serving
+        # several profiles the authority finds a sibling profile's chat only
+        # by it, so the link's own reads of that chat name it too.
+        self.profiles: Dict[str, str] = {}
         self._closed = False
 
     @property
@@ -230,6 +268,9 @@ class _AuthorityLink:
         params = dict(frame.get("params")) if isinstance(frame.get("params"), dict) else {}
         shaped: Any = None
         sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
+        if sid and isinstance(params.get("profile"), str) and params["profile"]:
+            with self.lock:
+                self.profiles[sid] = params["profile"]
         # One budget for the whole call: the fence reads and the stale retry
         # come out of the caller's timeout, never on top of it.
         deadline = time.monotonic() + timeout
@@ -308,6 +349,12 @@ class _AuthorityLink:
         # (Hermes' session_controls; a gateway restart restarts this process).
         return await connection.dispatch(request)
 
+    def _scoped(self, sid: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """``params`` naming the profile this link's requests named for the chat."""
+        with self.lock:
+            profile = self.profiles.get(sid)
+        return {**params, "profile": profile} if profile else params
+
     def _generation(self, sid: str, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> int:
         with self.lock:
             known = self.generations.get(sid)
@@ -317,7 +364,7 @@ class _AuthorityLink:
                 snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                           "id": f"conduit-fences-{uuid.uuid4().hex}",
                                                           "method": "session.resume",
-                                                          "params": {"session_id": sid, "omit_messages": True}}),
+                                                          "params": self._scoped(sid, {"session_id": sid, "omit_messages": True})}),
                                          timeout)
             except TimeoutError as exc:
                 # Nothing was sent for the control itself: not "may have started".
@@ -342,7 +389,7 @@ class _AuthorityLink:
             snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                       "id": f"conduit-running-{uuid.uuid4().hex}",
                                                       "method": "session.resume",
-                                                      "params": {"session_id": sid, "omit_messages": True}}),
+                                                      "params": self._scoped(sid, {"session_id": sid, "omit_messages": True})}),
                                      timeout)
         except Exception:  # noqa: BLE001 — unknown reads as running
             return True
@@ -381,7 +428,7 @@ class _AuthorityLink:
                 snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                           "id": f"conduit-pending-{uuid.uuid4().hex}",
                                                           "method": "session.resume",
-                                                          "params": {"session_id": sid, "omit_messages": True}}),
+                                                          "params": self._scoped(sid, {"session_id": sid, "omit_messages": True})}),
                                          left() if left else AUTHORITY_RPC_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — the send goes on; a refused read is the send's to report
                 logger.debug("Conduit: reading a chat's queue before a send failed", exc_info=True)
@@ -400,8 +447,9 @@ class _AuthorityLink:
                 answer = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                         "id": f"conduit-discard-{uuid.uuid4().hex}",
                                                         "method": "prompt.resolve_unknown",
-                                                        "params": {"session_id": sid, "admission_id": admission_id,
-                                                                   "execution_generation": generation}}),
+                                                        "params": self._scoped(sid, {
+                                                            "session_id": sid, "admission_id": admission_id,
+                                                            "execution_generation": generation})}),
                                        left() if left else AUTHORITY_RPC_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — the send still goes; Hermes keeps it queued behind the lost turn
                 logger.debug("Conduit: discarding a chat's lost turn failed", exc_info=True)
@@ -423,6 +471,12 @@ class _AuthorityLink:
             if type(result.get("execution_generation")) is int:
                 self.generations[sid] = result["execution_generation"]
             self._note_pending(sid, result)
+            for prompt in result.get("prompts") or ():
+                # An approval still waiting when the chat was read: answerable by its id,
+                # though this link never saw it asked.
+                if (isinstance(prompt, dict) and prompt.get("kind") == "approval"
+                        and isinstance(prompt.get("prompt_id"), str) and type(prompt.get("execution_generation")) is int):
+                    self.prompts.setdefault(prompt["prompt_id"], (sid, prompt["execution_generation"]))
             replaced = None
             if isinstance(result.get("subscription_id"), str):
                 replaced = self.subscriptions.get(sid)
@@ -438,7 +492,7 @@ class _AuthorityLink:
         if connection is None or loop is None or loop.is_closed():
             return
         request = {"jsonrpc": "2.0", "id": f"conduit-detach-{uuid.uuid4().hex}", "method": "session.detach",
-                   "params": {"session_id": sid, "subscription_id": subscription}}
+                   "params": self._scoped(sid, {"session_id": sid, "subscription_id": subscription})}
         try:
             future = asyncio.run_coroutine_threadsafe(connection.dispatch(request), loop)
         except Exception:  # noqa: BLE001 — the view ends with the connection
@@ -459,6 +513,9 @@ class _AuthorityLink:
                 params["reasoning"] = params.pop("reasoning_effort")
             if params.pop("fast", None) is True:
                 params["service_tier"] = "fast"
+            if "idempotency_key" in params:
+                # The authority keeps a retried create to one chat by its request id.
+                params.setdefault("request_id", params.pop("idempotency_key"))
             return method, params
         if method == "prompt.submit":
             self._settle_lost(sid, left)
@@ -478,15 +535,15 @@ class _AuthorityLink:
                 prompt = self.prompts.get(wanted) if wanted else None
             if prompt is None:
                 return {"result": {"resolved": 0}}
-            return method, {"session_id": prompt[0], "execution_generation": prompt[1], "prompt_id": wanted,
-                            "choice": params.get("choice")}
+            return method, self._scoped(prompt[0], {"session_id": prompt[0], "execution_generation": prompt[1],
+                                                    "prompt_id": wanted, "choice": params.get("choice")})
         if method == "session.close":
             # The authority keeps the chat; this connection stops viewing it.
             with self.lock:
                 subscription = self.subscriptions.pop(sid, None)
             if not subscription:
                 return {"result": {}}
-            return "session.detach", {"session_id": sid, "subscription_id": subscription}
+            return "session.detach", self._scoped(sid, {"session_id": sid, "subscription_id": subscription})
         return method, params
 
     def _answer(self, method: Any, params: Dict[str, Any], shaped: Any, response: dict) -> dict:
@@ -518,7 +575,12 @@ class _AuthorityLink:
                 with self.lock:
                     self.subscriptions.setdefault(params.get("session_id"), subscription)
         if not error and method in ("session.create", "session.resume"):
-            self._note_snapshot(response.get("result"))
+            made = response.get("result") if isinstance(response.get("result"), dict) else {}
+            if (method == "session.create" and isinstance(made.get("session_id"), str)
+                    and isinstance(params.get("profile"), str) and params["profile"]):
+                with self.lock:
+                    self.profiles[made["session_id"]] = params["profile"]
+            self._note_snapshot(made)
         return response
 
     def close(self) -> None:
@@ -542,6 +604,9 @@ class _AuthorityChats:
     transport)`` and ``_sessions.get``), over the gateway's session authority:
     what the plugin's own chats (Watch jobs, a Watch call's Local Live chat,
     Pulse's turns) use. The calls block; run them off the gateway's loop."""
+
+    # What work_broker tells this API from the TUI gateway's module by.
+    serves_authority = True
 
     def __init__(self, runner: Any) -> None:
         self.runner = runner

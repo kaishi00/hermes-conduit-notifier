@@ -18,6 +18,17 @@ Two rules come from how that API binds its client:
 Only a process that already runs the session host has ``tui_gateway.server``
 loaded. A plugin host process (``plugins.isolation: host``) doesn't, and the
 broker says so instead of starting a second, private host.
+
+A process whose gateway serves its own listener (the Webapp, and the
+dashboard mounted on it, gateway_chats.py) runs the chats clients see on the
+gateway's session authority. Its TUI gateway module may be loaded too (a
+socket's handler imports it), but a session there is private to it: it holds
+the chat, and the phone's resume through the authority is refused
+(``runtime_coordination_required``). So there the broker runs workstreams
+on the authority, through gateway_chats' session API: every request names
+the bot's profile, since a gateway serving several profiles finds a sibling
+profile's chat only by it, and each transport has a connection of its own,
+so a session someone has open keeps their stream whatever the broker sends.
 """
 
 from __future__ import annotations
@@ -39,7 +50,10 @@ CALL_TIMEOUT_S = 45.0
 # Hermes answers a submit Desktop's chat owns with this code (SESSION_NOT_OWNED).
 NOT_OWNED = 4090
 # prompt.submit statuses that mean the wake went out (work_tool._send_wake counts the rest refused).
-WAKE_SENT = frozenset({"", "queued", "streaming", "accepted"})
+# "started" is the session authority's word for a turn that runs now.
+WAKE_SENT = frozenset({"", "queued", "streaming", "accepted", "started"})
+# prompt.submit statuses for a turn that runs now (the TUI gateway's, the authority's).
+RUNNING_NOW = frozenset({"streaming", "started"})
 
 UNAVAILABLE_HOST = ("Bot workstreams need the Hermes dashboard to run this bot's plugins in its own process. This "
                     "Hermes runs plugins in a separate plugin host (plugins.isolation: host), where there is no "
@@ -73,8 +87,34 @@ class Started:
     profile: str
 
 
+def _authority_api() -> Any:
+    """The session API over this process's gateway authority (gateway_chats.py), or None."""
+    try:
+        from . import gateway_chats
+    except ImportError:  # loaded on its own (tests): no gateway here
+        return None
+    return gateway_chats.session_api()
+
+
+def _gateway_runs_here() -> bool:
+    return getattr(sys.modules.get("gateway.run_api"), "_ACTIVE_RUNNER", None) is not None
+
+
+def on_authority(api: Any) -> bool:
+    return getattr(api, "serves_authority", False) is True
+
+
 def server() -> Any:
-    """Hermes' session API module when this process hosts the chats, else None."""
+    """Hermes' session API when this process hosts the chats, else None: the
+    gateway's session authority where its listener runs here, else the
+    dashboard's TUI gateway module."""
+    authority = _authority_api()
+    if authority is not None:
+        return authority
+    if _gateway_runs_here():
+        # Never the listener's TUI registry, even when the authority can't be
+        # reached: nobody else sees its chats, and it would hold them.
+        return None
     module = sys.modules.get("tui_gateway.server")
     if module is None or not callable(getattr(module, "dispatch", None)):
         return None
@@ -204,6 +244,15 @@ class Broker:
 
     def _dispatch(self, method: str, params: dict, timeout: float = RPC_TIMEOUT_S) -> dict:
         api = self.api
+        if on_authority(api):
+            # Its sibling profile's chat is found only by the profile the request names.
+            params = {**params, "profile": self.profile}
+
+            def ask() -> Any:
+                return api.dispatch({"jsonrpc": "2.0", "id": f"conduit-work-{uuid.uuid4().hex[:12]}",
+                                     "method": method, "params": params}, _transport, timeout)
+
+            return _answer(_on_own_thread(ask, timeout + 5), method)
 
         def call() -> Any:
             rid = f"conduit-work-{uuid.uuid4().hex[:12]}"
@@ -223,6 +272,9 @@ class Broker:
         return _answer(_on_own_thread(call, timeout + 5), method)
 
     def _unbound(self, method: str, params: dict) -> dict:
+        if on_authority(self.api):
+            # Each transport has its own connection there: nothing to keep unbound.
+            return self._dispatch(method, params)
         methods = self.api._methods
         if method not in methods:
             raise BrokerError(f"unknown method {method}", code=-32601)
@@ -236,9 +288,17 @@ class Broker:
 
     def live(self, session_id: str) -> Optional[tuple[str, dict]]:
         """The live session (runtime id, record) for a stored id on this
-        bot's profile, else None."""
+        bot's profile, else None. On the authority the record is what its
+        snapshot says (``running``), read through the broker's connection."""
         if not session_id:
             return None
+        if on_authority(self.api):
+            if session_id not in self._authority_session_ids():
+                return None
+            snapshot = self._snapshot(session_id)
+            runtime_id = str(snapshot.get("session_id") or session_id)
+            return runtime_id, {"session_key": str(snapshot.get("stored_session_id") or runtime_id),
+                                "running": snapshot.get("running") is True, "transport": _transport}
         sessions = getattr(self.api, "_sessions", {})
         home = str(self.home)
         for runtime_id, record in list(sessions.items()):
@@ -254,7 +314,22 @@ class Broker:
             return runtime_id, record
         return None
 
+    def _authority_session_ids(self) -> set[str]:
+        from . import gateway_chats
+
+        found = gateway_chats.authority_session_ids(self.home)
+        if found is None:
+            raise BrokerError(f"No session authority here serves {self.profile}")
+        return found
+
+    def _snapshot(self, session_id: str) -> dict:
+        """The authority's snapshot of a chat (no transcript), opened on the
+        broker's connection; it notes the chat's turn and open approvals."""
+        return self._dispatch("session.resume", {"session_id": session_id, "omit_messages": True})
+
     def live_session_ids(self) -> set[str]:
+        if on_authority(self.api):
+            return self._authority_session_ids()
         sessions = getattr(self.api, "_sessions", {})
         return {str(record.get("session_key") or "") for record in list(sessions.values())
                 if isinstance(record, dict) and not record.get("_finalized")}
@@ -272,6 +347,8 @@ class Broker:
         Anything that fails once the session exists ends it again (its turn
         interrupted, the session closed), so no session runs outside the
         registry."""
+        # On the authority, _dispatch names the profile and gateway_chats puts the
+        # TUI gateway's shape (cols, source desktop, idempotency_key) in its own.
         params: dict[str, Any] = {"cols": 96, "source": "desktop", "title": title, "hidden": True,
                                   "idempotency_key": idempotency_key, **self._profile_params()}
         if cwd:
@@ -307,6 +384,8 @@ class Broker:
         return Started(runtime_id, stored, self.profile)
 
     def _stored_id(self, runtime_id: str) -> str:
+        if on_authority(self.api):
+            return runtime_id  # the authority names a chat by its stored id
         record = getattr(self.api, "_sessions", {}).get(runtime_id)
         return str(record.get("session_key") or "") if isinstance(record, dict) else ""
 
@@ -321,6 +400,14 @@ class Broker:
     def _open(self, session_id: str) -> tuple[str, str, bool]:
         """(runtime id, stored id at the lineage tip, whether another client
         holds it) for a session on this profile, reopening it if needed."""
+        if on_authority(self.api):
+            # Opened on the broker's own connection: nobody else's stream moves.
+            snapshot = self._snapshot(session_id)
+            runtime_id = snapshot.get("session_id")
+            if not isinstance(runtime_id, str) or not runtime_id:
+                raise BrokerError("couldn't reopen the session")
+            tip = snapshot.get("stored_session_id")
+            return runtime_id, tip if isinstance(tip, str) and tip else runtime_id, False
         found = self.live(session_id)
         if found is not None:
             runtime_id, record = found
@@ -352,7 +439,7 @@ class Broker:
         running = bool(found and found[1].get("running"))
         if how == "after" or (running and how not in ("auto", "add")):
             status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
-            return ("queued" if status != "streaming" else "started"), tip
+            return ("started" if status in RUNNING_NOW else "queued"), tip
         if running and how == "add":
             try:
                 status = call("session.steer", {"session_id": runtime_id, "text": text}).get("status")
@@ -363,7 +450,7 @@ class Broker:
                     raise
             # Couldn't add it to the turn: it goes after it, never redirecting it.
             status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
-            return ("queued" if status != "streaming" else "started"), tip
+            return ("started" if status in RUNNING_NOW else "queued"), tip
         if running:
             try:
                 status = str(call("session.redirect", {"session_id": runtime_id, "text": text}).get("status") or "")
@@ -374,7 +461,7 @@ class Broker:
             if status in ("redirected", "queued"):
                 return status, tip
         status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
-        return ("started" if status == "streaming" else "queued"), tip
+        return ("started" if status in RUNNING_NOW else "queued"), tip
 
     def end_bypass(self, session_id: str) -> None:
         """Turns a session's own approval bypass off between turns (the
@@ -416,6 +503,17 @@ class Broker:
         """The approvals a live session waits on (``approval.pending``), by
         its stored id; none when it isn't live. Read through the method
         table, so the client showing the chat keeps its stream."""
+        if on_authority(self.api):
+            # The snapshot lists the prompts still waiting (and notes them, so
+            # answer_approval can name one).
+            if session_id not in self._authority_session_ids():
+                return []
+            prompts = self._snapshot(session_id).get("prompts")
+            return [{"request_id": prompt["prompt_id"], "command": prompt.get("command") or "",
+                     "description": prompt.get("description") or ""}
+                    for prompt in (prompts if isinstance(prompts, list) else [])
+                    if isinstance(prompt, dict) and prompt.get("kind") == "approval"
+                    and isinstance(prompt.get("prompt_id"), str)]
         found = self.live(session_id)
         if found is None:
             return []
@@ -437,9 +535,15 @@ class Broker:
         """A hidden, queued turn into this bot's Bot Chat, the way Pulse
         sends its turns: reopened through the method table with nothing
         bound, so the app keeps its stream. Hermes' status back."""
-        methods = self.api._methods
-        found = self.live(chat_id)
-        if found is not None:
+        authority = on_authority(self.api)
+        methods = {"prompt.submit": None} if authority else self.api._methods
+        found = None if authority else self.live(chat_id)
+        if authority:
+            # Viewed on the broker's own connection, so the app keeps its stream.
+            runtime_id = str(self._snapshot(chat_id).get("session_id") or "")
+            if not runtime_id:
+                raise BrokerError("couldn't reopen the Bot Chat")
+        elif found is not None:
             runtime_id = found[0]
         else:
             resumed = self._unbound("session.resume", {"session_id": chat_id, "source": "desktop",

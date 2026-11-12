@@ -710,7 +710,8 @@ def _titled_bot_chat(session_id: Any, home: Optional[Path] = None) -> Optional[b
 
 def _pending_title(session_id: str, home: Path) -> str:
     api = work_broker.server()
-    if api is None:
+    if api is None or work_broker.on_authority(api):
+        # The authority keeps no pending title on a record of its own.
         return ""
     try:
         found = work_broker.Broker(home, api).live(session_id)
