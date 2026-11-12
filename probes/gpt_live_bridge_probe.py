@@ -136,6 +136,7 @@ class Try:
         self.marks: dict = {}
         self.events: List[str] = []
         self.transcripts: List[str] = []
+        self.joining: Optional[str] = None  # the side whose GA deltas the last line is collecting
         self.audio = bytearray()
 
     def mark(self, name: str) -> None:
@@ -194,7 +195,12 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             # Codex's GA endpoint (Conduit issue 2236): deltas, and no turn.done.
             side = kind.split(".")[1].split("_")[0]
             run.mark("first " + side + " transcript")
-            run.transcripts.append(f"{side}: {event.get('delta') or ''}")
+            # One line per turn, as the frameless .added events give, so the summary keeps whole turns.
+            if run.joining == side:
+                run.transcripts[-1] += str(event.get("delta") or "")
+            else:
+                run.transcripts.append(f"{side}: {event.get('delta') or ''}")
+            run.joining = side
             if side == "output":
                 # The greeting is over once its words stop for a moment, as Conduit's turns end.
                 if quiet_timer:
@@ -287,6 +293,8 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
         print(f"  failed: {detail}")
         result["error"] = detail
     finally:
+        for timer in quiet_timer:
+            timer.cancel()
         try:
             if channel.readyState == "open":
                 channel.send(json.dumps({"type": "session.close"}))
