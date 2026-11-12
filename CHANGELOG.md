@@ -22,6 +22,29 @@ checks it). The format is fixed, because Conduit reads it:
   Conduit's rooms keeps the plugin's room rules, memory guard and cleanup to
   the rooms Conduit made. Both start as before.
 
+## 0.164.14 (2026-11-12)
+
+### Fixes
+- Stopping a workstream that was waiting for its background agents left
+  those agents running. Stopping it now stops them too.
+
+### New and improved
+- With workstreams off, Bots Home shows when a bot's own chat has
+  background agents running.
+
+## 0.164.13 (2026-11-12)
+
+### New and improved
+- Conduit's Folder can copy a file or folder and paste it into another folder,
+  keeping its name when nothing there has it.
+
+## 0.164.12 (2026-11-12)
+
+### Fixes
+- A message sent with Do it on the Pulse widget told your agent it came
+  from Siri or a Shortcut. It now says you tapped a widget button and that
+  you'll read the answer later in the chat.
+
 ## 0.164.11 (2026-11-12)
 
 ### Fixes

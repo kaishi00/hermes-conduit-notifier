@@ -66,6 +66,12 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  stopping a waiting workstream's agents: >-
+    work_tool._stop_agents calls tools.delegate_tool_registry.interrupt_subagent with the
+    child_subagent_id subagent_start reported (feature map: "Delegate agents a chat started"). Hermes
+    stops a chat's delegate agents only with its running turn, so a workstream stopped while it waits
+    for them stops them itself. Without it they run on, and the turns their results start are
+    stopped instead.
   old Bot Chat move: >-
     bot_chat_adopt.py moves a pre-gateway Bot Chat under its profile's gateway (feature map: "Bot
     mentions and teammate messages"): a child with that profile's HERMES_HOME calls
@@ -389,6 +395,8 @@ imports:
     optional: ["_normalize_questions", "_result"]
   tools.cronjob_tools:
     optional: ["cronjob"]
+  tools.delegate_tool_registry:
+    optional: ["interrupt_subagent"]
   tools.memory_tool:
     required: ["MemoryStore", "get_builtin_memory_config", "get_builtin_memory_store_flags", "get_memory_dir"]
   tools.tool_backend_helpers:
@@ -466,6 +474,7 @@ module_paths:
   - tools/clarify_gateway
   - tools/clarify_tool
   - tools/cronjob_tools
+  - tools/delegate_tool_registry
   - tools/memory_tool
   - tools/tool_backend_helpers
   - tools/voice_live

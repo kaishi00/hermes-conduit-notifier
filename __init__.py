@@ -1156,7 +1156,8 @@ def _subagent_start(**kwargs: Any) -> None:
         with _children_lock:
             _child_sessions.add(child)
     # One a workstream started keeps it working past its own turn's end.
-    _quietly(work_tool.agent_started, child, _text(kwargs.get("parent_session_id")))
+    _quietly(work_tool.agent_started, child, _text(kwargs.get("parent_session_id")),
+             _text(kwargs.get("child_subagent_id")))
 
 
 def _subagent_stop(**kwargs: Any) -> None:

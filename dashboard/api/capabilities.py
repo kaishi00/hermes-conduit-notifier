@@ -214,6 +214,9 @@ ROUTE_CAPABILITIES = (
     # the chat's folder, its repository's top, the terminal's folder and its
     # own tool calls (hermes-conduit#1809).
     "workspace-resolve",
+    # POST /workspace/duplicate with "to": a copy pasted into another folder,
+    # keeping its name there when free (hermes-conduit#1438).
+    "workspace-copy",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).
