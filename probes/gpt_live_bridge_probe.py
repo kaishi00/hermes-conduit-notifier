@@ -188,6 +188,13 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
             run.mark("first " + kind.split("_")[0] + " transcript")
             run.transcripts.append(f"{kind.split('_')[0]}: {item.get('text') or ''}")
+        elif kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
+            # Codex's GA endpoint (Conduit issue 2236): deltas, and no turn.done.
+            side = kind.split(".")[1].split("_")[0]
+            run.mark("first " + side + " transcript")
+            run.transcripts.append(f"{side}: {event.get('delta') or ''}")
+            if side == "output":
+                greeted.set()
         elif kind == "turn.done":
             turn = event.get("turn") if isinstance(event.get("turn"), dict) else {}
             print(f"  turn.done {turn.get('role')}: {str(turn.get('transcript') or '')[:200]}")
@@ -241,14 +248,20 @@ async def one_try(api, profile: Optional[str], number: int, speech: bytes, secon
                                          pc.localDescription.sdp, greeting=GREETING)
         run.mark("answer from chatgpt.com")
         result["source"] = answer.get("source")
+        result["events"] = answer.get("events") or "frameless"
         await pc.setRemoteDescription(RTCSessionDescription(sdp=answer["transport"]["sdp"], type="answer"))
         deadline = time.monotonic() + seconds
         if not answer.get("greeting_applied"):
             # As Conduit does: the call's opening is a speakable turn of its own.
             try:
                 await asyncio.wait_for(started.wait(), timeout=10.0)
-                channel.send(json.dumps({"type": "session.context.append", "channel": "speakable",
-                                         "content": [{"type": "input_text", "text": OPENING_TURN}]}))
+                if answer.get("events") == "ga":
+                    # Codex's GA endpoint takes the GA events (Conduit issue 2236).
+                    channel.send(json.dumps({"type": "session.commentary.append", "content": OPENING_TURN,
+                                             "delegation_id": None}))
+                else:
+                    channel.send(json.dumps({"type": "session.context.append", "channel": "speakable",
+                                             "content": [{"type": "input_text", "text": OPENING_TURN}]}))
                 run.mark("opening turn sent")
             except asyncio.TimeoutError:
                 print("  no session.started within 10s; opening turn not sent")
