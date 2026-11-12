@@ -498,7 +498,7 @@ def test_the_dashboard_routes_guard_it_as_they_load(driver, monkeypatch):
     own = driver.HostedRoomRuntime.wakeup
     if "hermes_constants" not in sys.modules:
         constants = types.ModuleType("hermes_constants")
-        constants.get_hermes_home = lambda: Path(os.environ["HERMES_HOME"], "nonexistent-hermes-home")
+        constants.get_hermes_home = lambda: Path(os.environ["CONDUIT_TESTS_NO_HOME"])
         monkeypatch.setitem(sys.modules, "hermes_constants", constants)
     spec = importlib.util.spec_from_file_location("conduit_plugin_api_room_wakeups",
                                                   ROOT / "dashboard" / "plugin_api.py")

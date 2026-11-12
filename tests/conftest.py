@@ -24,9 +24,15 @@ for _name in ("hermes_constants", "tools.clarify_tool", "hermes_cli.urllib_secur
     if _name not in sys.modules:
         try:
             __import__(_name)
-        except Exception:  # noqa: BLE001 - no Hermes here: the test modules' stand-ins
+        except ImportError:  # no Hermes here: the test modules' stand-ins
             pass
 del _name
+# A home that can't be made, even by root: under a file. Tests of a Hermes
+# home that isn't there use it (a path at / would be made by a root run).
+_no_home_parent = os.path.join(os.environ["HERMES_HOME"], "not-a-folder")
+open(_no_home_parent, "w").close()
+os.environ["CONDUIT_TESTS_NO_HOME"] = os.path.join(_no_home_parent, "hermes")
+del _no_home_parent
 
 
 @pytest.fixture(autouse=True)
@@ -45,11 +51,22 @@ _GUARDS = ("room_memory", "room_planner", "room_cutoff", "room_wakeups", "room_c
            "compaction_skip", "review_notices", "forks", "memory_scan")
 
 
+def _plugin_copies(names):
+    """Every loaded copy of the plugin's modules named ``names``: the package
+    (conduit_push.*) and the copies tests and the dashboard load under names
+    of their own (conduit_push_personality.forks, conduit_push_dashboard_pulse)."""
+    for name, module in list(sys.modules.items()):
+        if module is None or not name.startswith("conduit_push"):
+            continue
+        tail = name.rsplit(".", 1)[-1]
+        if tail in names or any(tail.endswith("_" + wanted) for wanted in names):
+            yield module
+
+
 @pytest.fixture(autouse=True)
 def _guards_come_off_with_the_test():
     yield
-    for name in _GUARDS:
-        module = sys.modules.get(f"conduit_push.{name}")
+    for module in _plugin_copies(_GUARDS):
         uninstall = getattr(module, "uninstall", None)
         if callable(uninstall):
             try:
@@ -66,7 +83,7 @@ def _pulse_loop_stops_with_the_test():
     # through every later test's monkeypatched home and host: a tick of its
     # own racing a test's tick can send or settle what the test expected
     # to find in flight.
-    pulse = sys.modules.get("conduit_push.pulse")
-    thread = getattr(pulse, "_thread", None)
-    if thread is not None and thread.is_alive():
-        pulse.stop(timeout=2.0)
+    for pulse in _plugin_copies(("pulse",)):
+        thread = getattr(pulse, "_thread", None)
+        if thread is not None and getattr(thread, "is_alive", lambda: False)() and callable(getattr(pulse, "stop", None)):
+            pulse.stop(timeout=2.0)
