@@ -1277,3 +1277,18 @@ def test_a_gpt_live_start_on_the_ga_endpoint_tells_the_watch():
                        "output_rate": 24_000, "briefing_applied": False, "greeting_applied": False, "events": "ga"}
     assert "events" not in api.watch_audio._gpt_live_started("gpt_live", answer)
     assert "events" not in api.watch_audio._gpt_live_started("gpt_live", {**answer, "events": "other"})
+
+
+def test_a_gpt_live_session_on_the_ga_endpoint_sends_the_watch_the_ga_marker():
+    sent = []
+
+    class Bridge:
+        async def control(self, stream, message):
+            sent.append((stream, message))
+
+    session = api.watch_audio._GptLiveWatchSession.__new__(api.watch_audio._GptLiveWatchSession)
+    session.bridge, session.stream, session.held = Bridge(), 7, []
+    session.answer = {"voice": "cove", "briefing_applied": False, "greeting_applied": False, "events": "ga"}
+    asyncio.run(session._started(None))
+    assert sent == [(7, api.watch_audio._gpt_live_started("gpt_live", session.answer))]
+    assert sent[0][1]["events"] == "ga" and session.live
