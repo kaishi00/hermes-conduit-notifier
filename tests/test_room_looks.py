@@ -344,3 +344,12 @@ def test_a_device_that_gives_only_its_bots_looks_keeps_the_persons_picture(rooms
     assert looks_module.own(rooms.tmp_path / "furina") == {"agents": {"default": look(color="#333333")}, "person": None}
     everyone_passes(rooms)
     assert shown(rooms, "laifu", room_id)["home"] is None
+
+
+@pytest.mark.parametrize("body", [{}, {"agents": None}, {"agents": {}, "person": None, "extra": 1}])
+def test_a_body_that_sends_nothing_or_null_agents_is_refused_and_changes_nothing(rooms, body):
+    give(rooms, "furina", {"default": look()}, person=look(PNG, None))
+    with pytest.raises(looks_module.LooksError) as refused:
+        looks_module.put_own(rooms.tmp_path / "furina", body)
+    assert refused.value.code == "bad_looks"
+    assert looks_module.own(rooms.tmp_path / "furina") == {"agents": {"default": look()}, "person": look(PNG, None)}
