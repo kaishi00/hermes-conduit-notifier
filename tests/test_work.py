@@ -957,6 +957,17 @@ def test_the_apps_stop_on_an_interrupted_workstream_stops_its_agents(on, hermes,
     assert (str(on.home), "W1") in work._stopped_agents
 
 
+def test_work_stop_on_an_interrupted_workstream_with_agents_leaves_it_stopped(on, hermes, monkeypatch):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1", "sa-1")
+    on.update("W1", status="interrupted")
+    interrupted = fake_registry(monkeypatch)
+    stopped = call("work_stop", {"ref": "W1"})
+    assert stopped["ok"] and stopped["status"] == "stopped" and "background agent" in stopped["note"]
+    assert interrupted == ["sa-1"] and on.get("W1").status == "stopped"
+
+
 def test_the_bot_chats_own_agents_show_on_bots_home(home, hermes):
     """A Bot Chat on Everything Here, or with its workstreams off, delegates
     itself: Bots Home shows how many of its agents run (app issue 2206)."""

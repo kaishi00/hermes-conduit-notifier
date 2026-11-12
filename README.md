@@ -1747,7 +1747,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   which says nothing about now) and `screen_ask` (what it waits on you to do
   on the screen, or ""), and `agents`: how many background agents it started
   that it's still waiting for, once its own turn has ended. Stopping it stops
-  those agents too (plugin 0.164.13+).
+  those agents too (plugin 0.164.14+).
 - `bot_chat_agents` counts the background agents the Bot Chat itself started
   that still run (it delegates on Everything Here, or with its workstreams
   off), whatever the policy; Bots Home shows them on the bot's portrait.

@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.15 (2026-11-12)
+
+### Fixes
+- Stopping a workstream with its agent's work_stop, after it had been
+  stopped from its own chat while its background agents ran, could leave
+  it starting again with their results. It now stays stopped, with them.
+
 ## 0.164.14 (2026-11-12)
 
 ### Fixes
