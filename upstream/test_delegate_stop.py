@@ -24,16 +24,20 @@ PROBE = r"""
 import ast, inspect, json
 from tools import delegate_tool, delegate_tool_registry as registry
 
-# The id subagent_start hands the plugin: in _build_child_agent, the variable
-# passed as child_subagent_id must be the one stamped on child._subagent_id.
+# The id subagent_start hands the plugin: in _build_child_agent, the
+# expression passed as child_subagent_id must be the one stamped on
+# child._subagent_id (compared as code), or child._subagent_id itself.
 tree = ast.parse(inspect.getsource(delegate_tool._build_child_agent))
 hook_names = set()
 for node in ast.walk(tree):
     if isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant) \
             and node.args[0].value == "subagent_start":
-        hook_names |= {k.value.id for k in node.keywords
-                       if k.arg == "child_subagent_id" and isinstance(k.value, ast.Name)}
-stamped = set()
+        for k in node.keywords:
+            if k.arg == "child_subagent_id":
+                # The child's own stamp passed straight on counts as well.
+                own = isinstance(k.value, ast.Attribute) and k.value.attr == "_subagent_id"
+                hook_names.add("own" if own else ast.dump(k.value))
+stamped = {"own"}
 for node in ast.walk(tree):
     if not isinstance(node, ast.Assign):
         continue
@@ -42,8 +46,8 @@ for node in ast.walk(tree):
                  if isinstance(target, ast.Tuple) and isinstance(node.value, ast.Tuple)
                  else [(target, node.value)])
         for t, v in pairs:
-            if isinstance(t, ast.Attribute) and t.attr == "_subagent_id" and isinstance(v, ast.Name):
-                stamped.add(v.id)
+            if isinstance(t, ast.Attribute) and t.attr == "_subagent_id":
+                stamped.add(ast.dump(v))
 
 class Agent:
     def __init__(self, sid):

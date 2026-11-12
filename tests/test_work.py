@@ -900,7 +900,8 @@ def test_stopping_a_waiting_workstream_stops_its_agents(on, hermes, monkeypatch)
     registry.interrupt_subagent = lambda subagent_id: interrupted.append(subagent_id) or subagent_id != "sa-2"
     monkeypatch.setitem(sys.modules, "tools.delegate_tool_registry", registry)
 
-    assert call("work_stop", {"ref": "W1"})["ok"]
+    stopped = call("work_stop", {"ref": "W1"})
+    assert stopped["ok"] and "and its background agent." in stopped["note"], "the one Hermes found"
 
     assert sorted(interrupted) == ["sa-1", "sa-2"], "its own agents, by their ids, and no other chat's"
     assert on.get("W1").status == "stopped"
@@ -918,6 +919,42 @@ def test_a_hermes_that_cant_stop_agents_still_stops_the_workstream(on, hermes, m
     monkeypatch.setitem(sys.modules, "tools.delegate_tool_registry", types.ModuleType("tools.delegate_tool_registry"))
     assert call("work_stop", {"ref": "W1"})["ok"]
     assert on.get("W1").status == "stopped" and (str(on.home), "W1") in work._stopped_agents
+
+
+def fake_registry(monkeypatch) -> list:
+    interrupted: list = []
+    registry = types.ModuleType("tools.delegate_tool_registry")
+    registry.interrupt_subagent = lambda subagent_id: interrupted.append(subagent_id) or True
+    monkeypatch.setitem(sys.modules, "tools.delegate_tool_registry", registry)
+    return interrupted
+
+
+def test_a_stop_hermes_refuses_leaves_its_agents_running(on, hermes, monkeypatch):
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1", "sa-1")
+    interrupted = fake_registry(monkeypatch)
+
+    def refuse(self, session_id):
+        raise work.work_broker.BrokerError("gateway away")
+
+    monkeypatch.setattr(work.work_broker.Broker, "stop", refuse)
+    stopped = call("work_stop", {"ref": "W1"})
+    assert not stopped["ok"] and on.get("W1").status == "running"
+    assert interrupted == [], "the workstream runs on, and its agents with it"
+
+
+def test_the_apps_stop_on_an_interrupted_workstream_stops_its_agents(on, hermes, monkeypatch):
+    """Stopped from its own chat while its agents ran, then Stop in the app:
+    the agents go too, and their results' turn finds it stopped."""
+    start()
+    hermes.live(BOT_CHAT, transport=object())
+    work.agent_started("child-1", "20261031_work_1", "sa-1")
+    on.update("W1", status="interrupted")
+    interrupted = fake_registry(monkeypatch)
+    assert work.app_act(on.home, "W1", "stop")["ok"]
+    assert interrupted == ["sa-1"] and on.get("W1").status == "stopped"
+    assert (str(on.home), "W1") in work._stopped_agents
 
 
 def test_the_bot_chats_own_agents_show_on_bots_home(home, hermes):

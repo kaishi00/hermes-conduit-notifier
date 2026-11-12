@@ -97,7 +97,8 @@ async def get_workstreams(request: Request, response: Response, profile: Optiona
     take and how they can file it (``manage``: pin, unpin, resolve,
     reopen); ``counts`` for the Work strip (working, needs_you, ready,
     waiting); ``resolved_count``; ``policy`` ("off" when the bot's
-    workstreams are off), ``bot_chat`` and ``coordination`` (its ``mode``
+    workstreams are off), ``bot_chat``, ``bot_chat_agents`` (the background
+    agents the Bot Chat itself started, for Bots Home) and ``coordination`` (its ``mode``
     and ``items``: what the watch flagged, what the Bot Chat sent on its own
     and asked the user over the last day, each with the lines behind it).
     ``resolved=1``: the Resolved

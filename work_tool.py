@@ -889,9 +889,6 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
         waiting.cancel()
     if waited:
         _keep_held(home, work.ref, None)
-    if children:
-        # Its background agents go with it (app issue 2206).
-        _stop_agents(children)
     try:
         stopped = broker.stop(work.session_id)
     except Exception as error:  # noqa: BLE001 — a stop that didn't happen leaves it as it was
@@ -900,11 +897,15 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
             logger.warning("conduit_push: stopping a workstream failed", exc_info=True)
             error = type(error).__name__
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": f"Hermes couldn't stop it: {error}"}
+    # Its background agents go with it (app issue 2206), once its turn has
+    # stopped: a stop Hermes refused leaves them running with it.
+    agents = _stop_agents(children) if children else 0
+    with_agents = _with_agents(agents)
     # A stop ends the continued turn too: the next restart may continue it again.
     store.set_meta(_CONTINUED + work.ref, "")
     if stopped:
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
-                "note": f"Stopped {work.ref}: {work.title}. work_send continues it."}
+                "note": f"Stopped {work.ref}: {work.title}{with_agents}. work_send continues it."}
     if work.status in ("starting", "running", "needs_you"):
         # Nothing was running, so the row's turn has ended (its end may
         # have come while this stop was marked): it stays stopped.
@@ -912,7 +913,8 @@ def _stop(store: work_store.Store, broker: work_broker.Broker, work: work_store.
             # Or its brief's turn hasn't begun yet: when it does, it's stopped.
             store.set_meta(_STOPPED_START + work.ref, str(time.time()))
         return {"ok": True, "ref": work.ref, "title": work.title, "status": "stopped",
-                "note": f"{work.ref} wasn't working on anything; it's marked stopped. work_send continues it."}
+                "note": (f"{work.ref} wasn't working on anything; it's marked stopped{with_agents}. "
+                         "work_send continues it.")}
     store.update(work.ref, status=work.status, only_if=("stopped",))
     return {"ok": True, "ref": work.ref, "title": work.title, "status": work.status,
             "note": f"{work.ref} wasn't working on anything."}
@@ -4133,6 +4135,13 @@ def bot_chat_agents(home: Path) -> int:
         return len(_bot_chat_agents.get(str(home)) or ())
 
 
+def _with_agents(count: int) -> str:
+    """The stop note's words for the background agents it stopped."""
+    if count <= 0:
+        return ""
+    return ", and its background agent" if count == 1 else f", and its {count} background agents"
+
+
 def _stop_agents(children: set[str]) -> int:
     """Stops the delegate agents a stopped workstream started, by their
     subagent ids (Hermes stops a chat's agents only with its running turn,
@@ -4772,6 +4781,15 @@ def _app_act(store: work_store.Store, broker: work_broker.Broker, ref: str, acti
                 return {"ok": False, "ref": work.ref, "error": "not_now", "status": status,
                         "note": f"{work.ref} is {status.replace('_', ' ')} now, so it wasn't stopped."}
             answer = {"ok": True, "ref": work.ref, "status": "stopped"}
+            # Stopped from its chat while its agents ran: they go too, and
+            # their results' turn finds it stopped (app issue 2206).
+            key = (str(store.home), work.ref)
+            with _wake_lock:
+                children = set(_agents.get(key) or ())
+                if children:
+                    _stopped_agents[key] = (time.time(), 0.0)
+            if children:
+                _stop_agents(children)
         else:
             answer = _stop(store, broker, work)
         if answer.get("ok"):
