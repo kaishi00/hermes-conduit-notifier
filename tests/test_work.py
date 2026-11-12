@@ -6115,7 +6115,13 @@ def test_a_wake_the_roster_couldnt_be_read_for_is_tried_again(on, hermes, ask_fi
     monkeypatch.setattr(room_rules, "_room_members", unreadable)
     assert work.check_asks(on.home) is False and ask_first["posted"] == []
     assert [row["kind"] for row in on.outbox_pending()] == ["share_ask"], "kept for the next look"
+    # The room's delivery refused it once: tried again too.
     monkeypatch.setattr(room_rules, "_room_members", lambda room_id, home: ask_first["members"])
+    ask_first["refuse"].add("room-1@default")
+    work.check_asks(on.home)
+    assert ask_first["posted"] == [] and [row["kind"] for row in on.outbox_pending()
+                                          if row["kind"] == "share_ask"] == ["share_ask"]
+    ask_first["refuse"].clear()
     work.check_asks(on.home)
     assert len(ask_first["posted"]) == 1 and not any(row["kind"] == "share_ask" for row in on.outbox_pending())
 
