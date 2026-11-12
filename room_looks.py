@@ -96,10 +96,34 @@ def own(root: Any) -> dict[str, Any]:
 
 def put_own(root: Any, body: Any) -> dict[str, Any]:
     """Keeps how this installation's agents and person look: ``agents``, profile to look, and ``person``, a look
-    or null. It takes the place of what was there; a profile or person without one is drawn as before."""
+    or null. Each one sent takes the place of what was there, and one left out stays as it was: the person's
+    picture is theirs on this Hermes, so another of their devices that gives only its bots' looks doesn't take it
+    away. A profile or person without a look is drawn as before."""
     if not isinstance(body, dict) or not set(body) <= {"agents", "person"}:
         raise LooksError("bad_looks", "Send {agents: {profile: {picture, color}}, person: {picture, color}}")
-    agents = body.get("agents")
+    kept = _agents_from(body["agents"]) if "agents" in body else None
+    person = body.get("person")
+    if person is not None:
+        person = look_from(person)
+        if person is None:
+            raise LooksError("bad_looks", f"Your look isn't a picture of at most {MAX_PICTURE_BYTES} bytes (JPEG or "
+                                          "PNG) and a #RRGGBB color")
+    with Store(root).update() as state:
+        if kept is not None:
+            state["own"]["agents"] = kept
+        if "person" in body:
+            state["own"]["person"] = person
+        stored = state["own"]
+    return {"agents": sorted(stored["agents"]), "person": stored["person"] is not None}
+
+
+def you(root: Any) -> dict[str, Any]:
+    """The person's own look on this Hermes, as one of their devices last gave it, for each of their Conduits to
+    show."""
+    return {"person": own(root)["person"]}
+
+
+def _agents_from(agents: Any) -> dict[str, Any]:
     agents = {} if agents is None else agents
     if not isinstance(agents, dict) or len(agents) > MAX_AGENTS:
         raise LooksError("bad_looks", f"Send looks for at most {MAX_AGENTS} profiles")
@@ -114,15 +138,7 @@ def put_own(root: Any, body: Any) -> dict[str, Any]:
             raise LooksError("bad_looks", f"{profile}'s look isn't a picture of at most {MAX_PICTURE_BYTES} "
                                           "bytes (JPEG or PNG) and a #RRGGBB color")
         kept[profile] = look
-    person = body.get("person")
-    if person is not None:
-        person = look_from(person)
-        if person is None:
-            raise LooksError("bad_looks", f"Your look isn't a picture of at most {MAX_PICTURE_BYTES} bytes (JPEG or "
-                                          "PNG) and a #RRGGBB color")
-    with Store(root).update() as state:
-        state["own"] = {"agents": kept, "person": person}
-    return {"agents": sorted(kept), "person": person is not None}
+    return kept
 
 
 # --- In rooms ----------------------------------------------------------------------------------------
