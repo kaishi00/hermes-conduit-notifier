@@ -3347,6 +3347,24 @@ whether notes and attendees are included (off by default).
   what it reads; subagents can't use them. Reads say how fresh the copy is
   ("as of" the last sync). What they return goes to your agent's model like
   any tool result, which Conduit tells the user before they turn sharing on.
+- **A fresh reading (plugin 0.166+).** `conduit_phone` `status` with
+  `fresh: true` wakes the phone with the same silent `phone.changes` push
+  an add made without asking sends, and waits up to 15 seconds for it.
+  Conduit sends its status on every such wake (an older Conduit only when
+  it changed, which the answer reads from the phone checking in). The
+  answer's `fresh` says whether a new reading came, the phone's status
+  hadn't changed, or it didn't answer in time; the rest is the usual
+  status. iOS may hold a background wake back, so the tool says so rather
+  than guess.
+- **With each message (plugin 0.166+).** When the user turns on "With each
+  message" under Focus and phone status (`sharing.turn_status`, capability
+  `phone-turn-status`; only with the status or Focus shared), a turn whose
+  message Conduit sent (see [Where in Conduit a message was sent](#where-in-conduit-a-message-was-sent-plugin-051))
+  gets a second line after the surface line, for example
+  `[Conduit: the user's iPhone as they sent this: 18% battery, Low Power Mode on, connected to CarPlay, Work Focus on. …]`.
+  It names only what's shared and only readings from the last 30 minutes,
+  and says how old they are past two minutes. Turns from other clients,
+  rooms with other people's agents and subagents never get it.
 
 - **Alarms and timers (plugin 0.30+).** When the user lets Hermes set them
   (AlarmKit, iOS 26), `conduit_phone` gains `alarms` (the alarms and timers

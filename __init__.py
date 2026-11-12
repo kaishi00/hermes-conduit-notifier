@@ -1692,7 +1692,13 @@ def _turn_surface_note(platform: Any, message: Any, session_id: str = "") -> str
         from_conduit = _turn_source(platform, session_id) == "conduit"
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         from_conduit = False
-    return turn_surface.note(from_conduit, message, transport, session_id=session_id)
+    line = turn_surface.note(from_conduit, message, transport, session_id=session_id)
+    if line is None:
+        return None
+    # The phone's state goes only with a turn Conduit sent, when the user
+    # lets it (issue 888).
+    state = phone_tool.turn_note()
+    return f"{line}\n{state}" if state else line
 
 
 def _note_lead_routing(session_id: str, turn_id: Any, user_message: Any) -> None:
