@@ -204,7 +204,8 @@ def test_a_copy_pasted_in_another_folder_keeps_its_name_when_free(tree):
     folder = ws().duplicate(str(tree), str(tree / "docs"), str(tree / "out"))["entry"]
     assert folder["path"] == str((tree / "out" / "docs").resolve())
     assert sorted(os.listdir(tree / "out" / "docs")) == ["guide.md"], "secrets stay out of a pasted copy"
-    for target, status in ((tree / "docs", 400), (tree / "notes.txt", 400), (tree / "gone", 404)):
+    (tree / "alias").symlink_to(tree / "docs")
+    for target, status in ((tree / "docs", 400), (tree / "alias", 400), (tree / "notes.txt", 400), (tree / "gone", 404)):
         with pytest.raises(wf.WorkspaceError) as exc:
             ws().duplicate(str(tree), str(tree / "docs"), str(target))
         assert exc.value.status == status, target
@@ -219,6 +220,10 @@ def test_ssh_pastes_a_copy_in_another_folder(tree):
     again = remote.duplicate(root, str(tree / "notes.txt"), str(tree / "out"))["entry"]
     assert again["name"] == "notes.txt"
     assert remote.duplicate(root, str(tree / "notes.txt"), str(tree / "out"))["entry"]["name"] == "notes copy.txt"
+    (tree / "alias").symlink_to(tree / "docs")
+    with pytest.raises(wf.WorkspaceError) as exc:
+        remote.duplicate(root, str(tree / "docs"), str(tree / "alias"))
+    assert exc.value.status == 400 and not (tree / "docs" / "docs").exists(), "a link to itself is itself"
     for target, status in ((tree / "docs" , 400), (tree / "gone", 404), (tree / "notes.txt", 400)):
         with pytest.raises(wf.WorkspaceError) as exc:
             remote.duplicate(root, str(tree / "docs"), str(target))

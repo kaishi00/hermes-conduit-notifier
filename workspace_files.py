@@ -705,6 +705,7 @@ class SshWorkspace:
                     "EACCES": (403, "Hermes can't do that here"),
                     "EOUTSIDE": (403, "That's outside this workspace"),
                     "ESTALE": (409, "This file changed since you opened it"),
+                    "EINTO": (400, "A folder can't be copied into itself"),
                 }.get(code, (500, "The SSH workspace couldn't do that")))
         if result.get("returncode") not in (0, None):
             raise WorkspaceError(502, "The SSH workspace request failed")
@@ -1015,6 +1016,9 @@ class SshWorkspace:
         lines = self._run(self._guard(root) + f's={shlex.quote(source)}; f={shlex.quote(folder)}; t=\n'
                   f'follows "$s" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   f'[ -d "$f" ] || {{ if [ -e "$f" ]; then echo {_ERROR}ENOTDIR; else echo {_ERROR}ENOENT; fi; exit 1; }}\n'
+                  # Through links too: a folder never into itself or a folder in it.
+                  'if [ -d "$s" ] && [ ! -L "$s" ]; then rs=$(cd "$s" && pwd -P); rf=$(cd "$f" && pwd -P);'
+                  f' case "$rf/" in "$rs"/*) echo {_ERROR}EINTO; exit 1;; esac; fi\n'
                   f'for n in {quoted}; do [ -e "$f/$n" ] || [ -L "$f/$n" ] || {{ t="$f/$n"; break; }}; done\n'
                   f'[ -n "$t" ] || {{ echo {_ERROR}EEXIST; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
