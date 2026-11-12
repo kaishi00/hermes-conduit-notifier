@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.166.0 (2026-11-12)
+
+### Fixes
+- In a Linked Room someone else hosts, a bot that left or was taken out
+  still showed as in. The host's Hermes now tells everyone in the room, so
+  Group Info, the To row and @mentions leave it out. Both Hermes need this
+  version.
+
 ## 0.165.1 (2026-11-12)
 
 ### Fixes
