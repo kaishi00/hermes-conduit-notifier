@@ -32,7 +32,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 DIRECTORY = "conduit"
 FILE_NAME = "workstreams.db"
@@ -183,7 +183,8 @@ _JSON_FIELDS = ("requested_by", "executor", "reply_to", "progress")
 # Columns added after a registry's first version: (name, definition).
 _ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL NOT NULL DEFAULT 0"),
                   ("pinned_at", "REAL NOT NULL DEFAULT 0"), ("resolved_by", "TEXT NOT NULL DEFAULT ''"),
-                  ("reopened_at", "REAL NOT NULL DEFAULT 0"), ("left_alone_at", "REAL NOT NULL DEFAULT 0"))
+                  ("reopened_at", "REAL NOT NULL DEFAULT 0"), ("left_alone_at", "REAL NOT NULL DEFAULT 0"),
+                  ("host", "TEXT NOT NULL DEFAULT ''"))
 # The same for the outbox: when a send showed in its target's saved messages,
 # and whether a turn the Bot Chat started itself sent it (work_coord).
 _ADDED_OUTBOX_COLUMNS = (("delivered_at", "REAL NOT NULL DEFAULT 0"), ("own", "INTEGER NOT NULL DEFAULT 0"))
@@ -239,6 +240,10 @@ class Work:
     # The user set it to Leave alone (0: not): the Bot Chat sends it nothing
     # and doesn't stop it in a turn the user didn't start.
     left_alone_at: float = 0.0
+    # The Hermes process that last started or sent it a turn ("pid:start
+    # time", work_tool._host_stamp): only that process, or one after it, may
+    # take it for stopped by a restart (notifier#744). Empty: not known.
+    host: str = ""
 
     @property
     def active(self) -> bool:
@@ -583,7 +588,8 @@ class Store:
         The row as written, or None when nothing was (no row, or not in
         those states)."""
         allowed = {"session_id", "status", "last_result", "error", "title", "goal", "cwd", "repo", "seen_at",
-                   "closed_at", "turn_at", "pinned_at", "resolved_by", "reopened_at", "left_alone_at", *_JSON_FIELDS}
+                   "closed_at", "turn_at", "pinned_at", "resolved_by", "reopened_at", "left_alone_at", "host",
+                   *_JSON_FIELDS}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown fields {sorted(unknown)}")
@@ -595,8 +601,8 @@ class Store:
             fields["title"] = _clip(fields["title"], TITLE_CHARS)
         values = {key: (json.dumps(value) if key in _JSON_FIELDS else value) for key, value in fields.items()}
         # Seen marks, a worker's checklist and the user's pin aren't changes
-        # the coordinator's "new since your last turn" is about.
-        if set(fields) - {"seen_at", "progress", "turn_at", "pinned_at", "left_alone_at"}:
+        # the coordinator's "new since your last turn" is about, nor is which process runs it.
+        if set(fields) - {"seen_at", "progress", "turn_at", "pinned_at", "left_alone_at", "host"}:
             values["updated_at"] = time.time()
         if not values:
             return self.get(ref)
@@ -617,19 +623,23 @@ class Store:
         with self._db() as con:
             con.executemany("UPDATE work SET seen_at = ? WHERE ref = ?", [(now, ref) for ref in refs])
 
-    def interrupt_running(self, live_session_ids: set[str], *, before: Optional[float] = None) -> list[str]:
+    def interrupt_running(self, live_session_ids: set[str], *, before: Optional[float] = None,
+                          hosted_elsewhere: Optional[Callable[[str], bool]] = None) -> list[str]:
         """Rows that say they're running on a session this process doesn't
         have live: a restart stopped them. Marked interrupted (never
         continued here: that's the restart sweep's call), their refs back.
         With ``before``, only rows made before then (when the live set was
-        read), so a start made since isn't caught."""
+        read), so a start made since isn't caught. With ``hosted_elsewhere``,
+        a row whose ``host`` it says is another live process is left alone:
+        that process runs it, and no restart stopped it (notifier#744)."""
         if not self.path.is_file():
             return []
         with self._db() as con:
-            rows = con.execute("SELECT ref, session_id FROM work WHERE kind = 'workstream' AND closed_at = 0 AND "
-                               "status IN ('starting', 'running', 'needs_you') AND created_at < ?",
+            rows = con.execute("SELECT ref, session_id, host FROM work WHERE kind = 'workstream' AND closed_at = 0 "
+                               "AND status IN ('starting', 'running', 'needs_you') AND created_at < ?",
                                (before if before is not None else float("inf"),)).fetchall()
-            stopped = [row["ref"] for row in rows if row["session_id"] not in live_session_ids]
+            stopped = [row["ref"] for row in rows if row["session_id"] not in live_session_ids
+                       and not (hosted_elsewhere is not None and hosted_elsewhere(row["host"]))]
             now = time.time()
             con.executemany("UPDATE work SET status = 'interrupted', updated_at = ? WHERE ref = ?",
                             [(now, ref) for ref in stopped])

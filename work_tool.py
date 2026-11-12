@@ -464,6 +464,44 @@ _sweep_lock = threading.RLock()
 # Homes whose sweep is under way (in this thread, as the lock is held).
 _sweeping: set[str] = set()
 _PROCESS_STARTED = time.time()
+
+
+def _host_stamp() -> str:
+    """This process as a workstream's host: "pid:start time", the start time
+    (psutil's, as Hermes' own session leases pair it) telling a reused pid
+    apart; "pid:" when it can't be read."""
+    try:
+        import psutil  # a Hermes dependency
+
+        started = f"{float(psutil.Process(os.getpid()).create_time()):.3f}"
+    except Exception:  # noqa: BLE001 — the pid alone still names the process
+        started = ""
+    return f"{os.getpid()}:{started}"
+
+
+def _hosted_elsewhere(host: Any) -> bool:
+    """Whether a workstream's host (``_host_stamp``) is another Hermes process
+    that's still running: the dashboard, while a gateway or a TUI on the same
+    home restarts. That process runs the work, so a restart elsewhere never
+    takes it for stopped, continues it or resends to it (notifier#744). A host
+    that can't be told apart from a gone one counts as gone, as before."""
+    pid_text, _, started = str(host or "").partition(":")
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    if pid <= 0 or pid == os.getpid() or not screen_lock._pid_alive(pid):
+        return False
+    if not started:
+        return True
+    try:
+        import psutil
+
+        return abs(float(psutil.Process(pid).create_time()) - float(started)) < 0.01
+    except ImportError:
+        return True
+    except Exception:  # noqa: BLE001 — gone meanwhile, or a start time that isn't one
+        return False
 # Workstreams a work_send may be redirecting: the superseded turn's end
 # (interrupted) leaves them running for the redirected turn to settle.
 _redirecting: set[tuple[str, str]] = set()
@@ -1274,6 +1312,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
     try:
         prompt = _brief(home, _bot_name(home), work, instructions, coordinator, same_repo, tree, room=room)
         item = store.outbox_add(work.ref, "start", work.idempotency_key, prompt)
+        store.update(work.ref, host=_host_stamp())
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
                                created=created, yolo=_yolo(home, store, work.ref),
                                model=store.workstream_model())
@@ -1989,6 +2028,7 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
     try:
         _worktree_back(store, work.ref)
         yolo = _yolo(home, store, work.ref)
+        store.update(work.ref, host=_host_stamp())
         outcome, tip = broker.send(work.session_id, words, how, yolo=yolo)
         _yolo_sent(store, work.ref, yolo)
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
@@ -2361,7 +2401,10 @@ def _sweep_once(home: Path, store: work_store.Store, broker: Optional[work_broke
         return False
     # Only rows from before this process: a restart stopped those, and a
     # start this process is making (its session not made yet) is left alone.
-    stopped = store.interrupt_running(live, before=min(read_at, _PROCESS_STARTED))
+    # Never a row another live process runs: a gateway or TUI on this home
+    # restarting didn't stop the dashboard's work (notifier#744).
+    stopped = store.interrupt_running(live, before=min(read_at, _PROCESS_STARTED),
+                                      hosted_elsewhere=_hosted_elsewhere)
     if stopped:
         logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
     for step, run in (("recovering", lambda: _recover(home, store, broker, stopped)),
@@ -2669,6 +2712,7 @@ def _recover_one(home: Path, store: work_store.Store, broker: Optional[work_brok
             store.set_meta(_CONTINUED + ref, str(time.time()))
             _worktree_back(store, ref)
             yolo = _yolo(home, store, ref)
+            store.update(ref, host=_host_stamp())
             outcome, tip = broker.send(work.session_id, text, "after", yolo=yolo)
             _yolo_sent(store, ref, yolo)
         except Exception as error:  # noqa: BLE001 — it stays interrupted, for the user to continue
@@ -2820,6 +2864,9 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         elif row["kind"] != "line_linked":
             _watch_asks(home)
         return
+    hosted = store.get(row["ref"]) if row.get("ref") else None
+    if hosted is not None and _hosted_elsewhere(hosted.host):
+        return  # the process running that workstream is still up: its sends are its own (notifier#744)
     if row["created_at"] < oldest:
         store.outbox_done(row["id"], "expired")
         return
@@ -2895,6 +2942,7 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
             try:
                 _worktree_back(store, work.ref)
                 yolo = _yolo(home, store, work.ref)
+                store.update(work.ref, host=_host_stamp())
                 outcome, _ = broker.send(work.session_id, row["text"], "after", yolo=yolo)
                 _yolo_sent(store, work.ref, yolo)
             except Exception:  # noqa: BLE001 — handed back below
