@@ -7,6 +7,7 @@ import json
 import re
 import pathlib
 import importlib.util
+import os
 import sys
 import time
 import sqlite3
@@ -258,6 +259,11 @@ def test_a_restart_marks_running_work_interrupted(home):
     store.update("W2", session_id="b", status="running")
     assert store.interrupt_running({"a"}) == ["W2"]
     assert store.get("W2").status == "interrupted"
+    assert store.get("W1").status == "running"
+    # Another live process's row is left alone (notifier#744).
+    store.update("W1", status="running", host="other")
+    store.update("W2", status="running", host="")
+    assert store.interrupt_running(set(), hosted_elsewhere=lambda host: host == "other") == ["W2"]
     assert store.get("W1").status == "running"
 
 
@@ -3063,6 +3069,73 @@ def test_a_restart_continues_work_with_nothing_uncertain_in_flight(on, hermes, m
     assert submitted_to(hermes, WORKER_1) == [] and on.get("W1").status == "interrupted"
     work.flush_wakes()
     assert "already continued once" in submitted_to(hermes, BOT_CHAT)[0]["text"]
+
+
+def test_a_restart_elsewhere_leaves_work_another_live_process_runs(on, hermes, monkeypatch):
+    """notifier#744: the gateway (or a TUI) on the same home restarting while
+    the dashboard runs a workstream never takes it for stopped. Continuing it
+    there left the gateway holding the session, and every work_send after
+    that came back open_elsewhere."""
+    start()
+    other = os.getppid()  # a live process that isn't this one, as the dashboard is to the gateway
+    on.update("W1", host=f"{other}:")
+    work.turn_started(WORKER_1)
+    assert on.get("W1").host == work._host_stamp()  # the process running its turn, wherever it began
+    on.update("W1", host=f"{other}:")
+    # A send that process wrote and hasn't settled yet.
+    lost = on.outbox_add("W1", "send", WORKER_1, "Bot passes on:\nAlso check the logs.")
+    assert {row["id"]: row["host"] for row in on.outbox_pending()}[lost] == work._host_stamp()
+    with on._db() as con:
+        con.execute("UPDATE outbox SET host = ? WHERE id = ?", (f"{other}:", lost))
+    restart(hermes, monkeypatch)
+    call("work_list")
+    assert on.get("W1").status == "running" and submitted_to(hermes, WORKER_1) == []
+    assert lost in {row["id"] for row in on.outbox_pending()}  # that process's own send, still its to settle
+    work.flush_wakes()
+    assert submitted_to(hermes, BOT_CHAT) == []
+    # Once that process is gone, the next restart recovers it as before.
+    monkeypatch.setattr(work.screen_lock, "_pid_alive", lambda pid: pid != other)
+    restart(hermes, monkeypatch)
+    call("work_list")
+    continued, resent = submitted_to(hermes, WORKER_1)
+    assert "Hermes restarted" in continued["text"] and resent["text"] == "Bot passes on:\nAlso check the logs."
+
+
+def test_a_send_hermes_refused_leaves_the_host(on, hermes, monkeypatch):
+    """Only the process running a turn names itself host: a work_send that
+    another window's hold refused never claims the work (notifier#744)."""
+    start()
+    work.turn_ended(WORKER_1, "Done.")
+    other = f"{os.getppid()}:"
+    on.update("W1", host=other)
+    held = {"code": 4090, "message": "This chat is open in another Hermes window.",
+            "data": {"reason": "SESSION_NOT_OWNED"}}
+    for method in ("prompt.submit", "session.steer", "session.redirect"):
+        hermes.refuse[method] = held
+    refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert refused.get("error") == "open_elsewhere", refused
+    assert on.get("W1").host == other
+
+
+def test_a_calls_job_kept_mid_turn_is_hosted_here(on, hermes, monkeypatch):
+    """Its turn began before its row, so the turn's start stamped nothing."""
+    monkeypatch.setattr(work, "_asked_in", lambda home, session: True)
+    kept = adopt()
+    assert kept["work"]["status"] == "running" and on.get("W1").host == work._host_stamp()
+
+
+def test_a_hosts_start_time_tells_a_reused_pid_apart(monkeypatch):
+    other = os.getppid()
+    psutil = types.ModuleType("psutil")
+    psutil.Process = lambda pid: types.SimpleNamespace(create_time=lambda: 1_000.0 + pid)
+    monkeypatch.setitem(sys.modules, "psutil", psutil)
+    assert work._host_stamp() == f"{os.getpid()}:{1_000.0 + os.getpid():.3f}"
+    assert work._hosted_elsewhere(f"{other}:{1_000.0 + other:.3f}")
+    assert not work._hosted_elsewhere(f"{other}:5.000")  # the pid now names a later process
+    assert not work._hosted_elsewhere(work._host_stamp())  # this process
+    assert not work._hosted_elsewhere("") and not work._hosted_elsewhere("junk")
+    monkeypatch.setattr(work.screen_lock, "_pid_alive", lambda pid: False)
+    assert not work._hosted_elsewhere(f"{other}:{1_000.0 + other:.3f}")
 
 
 def test_a_step_that_can_change_things_waits_for_the_user(on, hermes, monkeypatch):

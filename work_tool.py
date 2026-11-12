@@ -464,6 +464,37 @@ _sweep_lock = threading.RLock()
 # Homes whose sweep is under way (in this thread, as the lock is held).
 _sweeping: set[str] = set()
 _PROCESS_STARTED = time.time()
+
+
+_host_stamp = work_store.host_stamp
+
+
+def _hosted_elsewhere(host: Any) -> bool:
+    """Whether a workstream's or a pending send's host (``_host_stamp``) is another Hermes process
+    that's still running: the dashboard, while a gateway or a TUI on the same
+    home restarts. That process runs the work, so a restart elsewhere never
+    takes it for stopped, continues it or resends to it (notifier#744). A host
+    whose start time doesn't match the process now under its pid counts as
+    gone. One stamped without a start time (psutil unreadable) counts as
+    running while its pid is: a reused pid then holds its recovery until that
+    process exits, the safer side of taking live work for stopped."""
+    pid_text, _, started = str(host or "").partition(":")
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    if pid <= 0 or pid == os.getpid() or not screen_lock._pid_alive(pid):
+        return False
+    if not started:
+        return True
+    try:
+        import psutil
+
+        return abs(float(psutil.Process(pid).create_time()) - float(started)) < 0.01
+    except ImportError:
+        return True
+    except Exception:  # noqa: BLE001 — gone meanwhile, or a start time that isn't one
+        return False
 # Workstreams a work_send may be redirecting: the superseded turn's end
 # (interrupted) leaves them running for the redirected turn to settle.
 _redirecting: set[tuple[str, str]] = set()
@@ -1274,6 +1305,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
     try:
         prompt = _brief(home, _bot_name(home), work, instructions, coordinator, same_repo, tree, room=room)
         item = store.outbox_add(work.ref, "start", work.idempotency_key, prompt)
+        store.update(work.ref, host=_host_stamp())
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
                                created=created, yolo=_yolo(home, store, work.ref),
                                model=store.workstream_model())
@@ -2218,6 +2250,10 @@ def adopt(home: Path, session_id: Any, title: Any, *, via: str, goal: Any = "", 
         # The session is already one of the bot's own workstreams: it stays that.
         return {"ok": False, "error": "taken", "note": f"That session is {work.ref}, not a call's job."}
     adopted = work.created_at >= began  # else the row the session already had
+    if adopted and not isinstance(result, str) and work.status == "running" and not work.host:
+        # Its turn began before the row did, so its start stamped nothing: this
+        # process, where the phone runs the call's chats, runs it (notifier#744).
+        work = store.update(work.ref, host=_host_stamp()) or work
     if adopted and isinstance(result, str) and work.status == "running":
         # Its turn ended before it was kept: settled as its end would have.
         _turn_ended(session, result)
@@ -2361,7 +2397,10 @@ def _sweep_once(home: Path, store: work_store.Store, broker: Optional[work_broke
         return False
     # Only rows from before this process: a restart stopped those, and a
     # start this process is making (its session not made yet) is left alone.
-    stopped = store.interrupt_running(live, before=min(read_at, _PROCESS_STARTED))
+    # Never a row another live process runs: a gateway or TUI on this home
+    # restarting didn't stop the dashboard's work (notifier#744).
+    stopped = store.interrupt_running(live, before=min(read_at, _PROCESS_STARTED),
+                                      hosted_elsewhere=_hosted_elsewhere)
     if stopped:
         logger.info("conduit_push: %s were running before a restart; marked interrupted", ", ".join(stopped))
     for step, run in (("recovering", lambda: _recover(home, store, broker, stopped)),
@@ -2820,6 +2859,8 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         elif row["kind"] != "line_linked":
             _watch_asks(home)
         return
+    if _hosted_elsewhere(row.get("host")):
+        return  # the process that wrote it is still up and settles it itself (notifier#744)
     if row["created_at"] < oldest:
         store.outbox_done(row["id"], "expired")
         return
@@ -3865,7 +3906,9 @@ def _turn_started(session_id: Any) -> bool:
     # (stop() clears only memory) is over once a turn starts.
     _keep_held(home, work.ref, None)
     # On disk too: after a restart, the steps since then are the turn it stopped.
-    work_store.Store(home).update(work.ref, turn_at=began)
+    # Its host is the process running this turn, wherever it was started or
+    # sent from, so only a restart of this one takes it for stopped (notifier#744).
+    work_store.Store(home).update(work.ref, turn_at=began, host=_host_stamp())
     if work_store.Store(home).get_meta(_CHECK + work.ref):
         work_store.Store(home).set_meta(_CHECK + work.ref, "")  # a new turn: nothing left to check first
     _watch_shutdown()  # so a restart during it is told from a user's stop
