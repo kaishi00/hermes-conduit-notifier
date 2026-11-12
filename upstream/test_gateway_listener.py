@@ -634,6 +634,38 @@ def test_a_turn_hears_where_in_conduit_its_message_was_sent(listener):
     assert told and "[Conduit: this message came from CarPlay in the user's car, spoken." in told[0], told
 
 
+def test_a_turn_conduit_reported_gets_conduits_board_rule(listener):
+    # The authority binds no client to a turn, so the plugin reads Conduit's
+    # report ahead of the send as where it came from.
+    text = "show me the build status"
+    # Paired for this test only, to a relay nothing answers, and a phone that draws boards.
+    pairing = listener.home / "conduit-push.json"
+    pairing.write_text(json.dumps({"credential": "test-only", "relay_url": "https://127.0.0.1:9"}))
+    try:
+        status, body = listener.plugin_call("present/exchange", {
+            "installation_id": "listener-phone", "features": ["chat-cards", "board-cards"], "results": []})
+        assert status == 200, body
+        _board_rule_turns(listener, text)
+    finally:
+        pairing.unlink()
+    told = _told(text)
+    assert told and "[Conduit draws boards" in told[0], told
+
+
+def _board_rule_turns(listener: "Listener", text: str) -> None:
+
+    async def script(sock: ConduitSocket) -> None:
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        status, body = listener.plugin_call("turn-surface", {
+            "session_id": sid, "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "surface": "iphone", "input": "typed"})
+        assert status == 200 and body.get("recorded") is True, body
+        await sock.result("prompt.submit", _submit(sid, text))
+        await sock.event(sid, "message.complete")
+
+    listener.run(script)
+
+
 def test_predictions_answer_for_a_chat_the_authority_runs(listener):
     sid = _turn(listener, "plan my week")
     status, body = listener.plugin_call("predict", {"session_id": sid, "kind": "replies", "count": 2, "wait_s": 30},

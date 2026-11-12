@@ -897,6 +897,10 @@ def _turn_source(platform: Any, session_id: str = "") -> str | None:
         return None
     transport = reply_sources.current_transport()
     source = reply_sources.turn_source(platform, transport)
+    if source is None and transport is None and turn_surface.sent_from_conduit_on_authority(session_id):
+        # The gateway's session authority binds no client to a turn; the
+        # report Conduit sent ahead of it is what says it came from Conduit.
+        return "conduit"
     if source is None and reply_sources.conduit_among(transport):
         try:
             if chat_on_screen.on_screen(get_hermes_home(), session_id):
