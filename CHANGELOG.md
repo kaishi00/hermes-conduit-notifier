@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.165.1 (2026-11-12)
+
+### Fixes
+- On a Hermes that runs the gateway and the dashboard as separate services,
+  restarting only the gateway took over the bot's running workstreams. After
+  that, every message the Bot Chat sent them was refused as "open in another
+  Hermes window" until the gateway restarted again. A restart now only
+  recovers work that the restarted process itself was running.
+
 ## 0.165.0 (2026-11-12)
 
 ### New and improved
