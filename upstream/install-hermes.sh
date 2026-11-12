@@ -24,7 +24,11 @@ if [ ! -d "$dir/.git" ]; then
     git clone --quiet --filter=blob:none "${HERMES_REPO:-https://github.com/NousResearch/hermes-agent}" "$dir"
 fi
 git -C "$dir" fetch --quiet --tags origin
-git -C "$dir" checkout --quiet --detach "$ref"
+# --force: a fresh clone of Hermes' main can show a file as changed that a
+# checkout's line-ending rules rewrite (plugin-catalog/board-insights.yaml,
+# committed with CRLF, 2026-11-12), and the checkout refuses over it. This
+# directory is ours alone, so nothing of anyone's is lost.
+git -C "$dir" checkout --quiet --force --detach "$ref"
 (cd "$dir" && uv sync --frozen --quiet)
 uv pip install --quiet --python "$dir/.venv/bin/python" pytest==9.1.1 pyyaml==6.0.3
 if ! "$dir/.venv/bin/python" -c 'import websockets' 2>/dev/null; then
