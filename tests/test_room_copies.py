@@ -493,6 +493,37 @@ def test_the_others_hear_who_left_or_was_taken_out(copies):
     # Told once: the next pass sends nothing new.
     copies.furina.pass_once()
     assert len(_sent(copies, copies_module.OUT)) == 1
+    # Before the mailbox's hold could run out on it unread, it goes again, under a new id.
+    copies.clock.now += copies_module.OUT_AGAIN_S
+    copies.furina.pass_once()
+    sent = _sent(copies, copies_module.OUT)
+    assert len(sent) == 2 and sent[1][1] == body and sent[1][2] != sent[0][2]
+
+
+def test_who_left_goes_before_the_page_that_follows(copies):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    copies.laifu.leave("link1", room_id, None)
+    say(copies, room_id, "Bye Laifu")
+    copies.clock.now += copies_module.WAIT_S
+
+    copies.furina.pass_once()
+
+    kinds = [kind for _, link, kind, _, _ in copies.wire.sent
+             if link == "link2" and kind in (copies_module.OUT, copies_module.PAGE)]
+    assert kinds[-2:] == [copies_module.OUT, copies_module.PAGE]
+
+
+def test_a_copy_keeps_who_was_out_once_its_invite_is_forgotten(copies):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    copies.laifu.leave("link1", room_id, None)
+    copies.furina.pass_once()
+    with invites_module.Store(copies.tmp_path / "mona").update() as state:
+        state["invites"].clear()
+    shown = copy_of(copies, "mona", room_id)
+    assert shown["out"] == {slot("link1", 1): "left"}
+    assert all(copies_module.OUT_MARK not in member for member in shown["members"])
 
 
 def test_a_member_taken_out_is_out_on_everyones_copy(copies):
@@ -510,7 +541,10 @@ def test_a_member_taken_out_is_out_on_everyones_copy(copies):
 
 @pytest.mark.parametrize("body", [None, {"v": 1, "room_id": "r"}, {"v": 2, "room_id": "r", "out": {}},
                                   {"v": 1, "room_id": "r", "out": {"m": "gone"}},
-                                  {"v": 1, "room_id": "r", "out": {}, "extra": 1}])
+                                  {"v": 1, "room_id": "r", "out": {}, "extra": 1},
+                                  {"v": 1, "room_id": "r", "out": {"m": []}},
+                                  {"v": 1, "room_id": "r", "out": {"m": {"x": 1}}},
+                                  {"v": True, "room_id": "r", "out": {}}])
 def test_a_room_out_that_isnt_one_is_dropped(copies, body):
     room_id = started(copies)
     copies.furina.pass_once()
