@@ -6316,7 +6316,7 @@ def _watch_asks(home: Path) -> None:
 
 def check_asks(home: Path) -> bool:
     """Acts on each room's work ask the owner answered, and wakes the bot for each Ask me first answer
-    (watch_share_ask); whether any still waits."""
+    (watch_share_ask); whether any still waits for its answer or for a wake to be tried again."""
     from .present_store import PresentStore
 
     store = work_store.Store(home)
@@ -6330,8 +6330,8 @@ def check_asks(home: Path) -> bool:
             waiting = True
         elif row["kind"] == "room_ask":
             _answered(home, store, present, row["target"])
-        else:
-            _share_answered(home, store, present, row, prompt)
+        elif _share_answered(home, store, present, row, prompt):
+            waiting = True
     return waiting
 
 
@@ -6348,33 +6348,38 @@ def watch_share_ask(home: Path, prompt_id: str, *, room_id: str, session_id: str
     _watch_asks(home)
 
 
-def _share_answered(home: Path, store: work_store.Store, present: Any, row: dict, prompt: dict) -> None:
+def _share_answered(home: Path, store: work_store.Store, present: Any, row: dict, prompt: dict) -> bool:
     """The owner answered (or the ask ran out): the bot is woken once for an answer its room hasn't heard yet. An
     ask that ran out, or one a turn already heard, wakes nothing. The row stays until the wake is made, so a roster
     that can't be read, a post Hermes refused or a Link store busy just now is tried again on the next look, for
-    as long as the room keeps a private line (LINKED_KEEP_S). A roster that no longer names the bot settles it."""
+    as long as the room keeps a private line (LINKED_KEEP_S), counted from the owner's answer, so an answer late
+    in the ask's life is tried again as long. A roster that no longer names the bot settles it. Whether the row
+    is kept for another try."""
     if prompt["status"] not in ("confirmed", "declined", "edit"):
         store.outbox_done(row["id"], "answered")
-        return
+        return False
     asked = json.loads(row["text"])
     if not any(each["id"] == prompt["id"] for each in present.room_answers(asked["room"])):
         store.outbox_done(row["id"], "answered")
-        return
+        return False
     handle, woke = "", False
     try:
         if asked.get("side") == "home":
             handle = room_work.handle_of(asked["room"], Path(home), work_broker.profile_of(home))
             if not handle:  # the roster was read and no longer names this bot: no retry will wake it
                 store.outbox_done(row["id"], "lost")
-                return
+                return False
         woke = _wake_linked(home, room_work.Room(room_id=asked["room"], session_id=asked["session"], handle=handle,
                                                  linked=True, side=asked.get("side", "home")))
     except room_work.Unreadable as error:
         logger.info("conduit_push: a Linked Room's agent wasn't woken for its owner's answer yet (%s)", error)
     if woke:
         store.outbox_done(row["id"], "answered")
-    elif row["created_at"] < time.time() - LINKED_KEEP_S:
+        return False
+    if max(row["created_at"], prompt.get("finished_at") or 0) < time.time() - LINKED_KEEP_S:
         store.outbox_done(row["id"], "lost")
+        return False
+    return True
 
 
 # Private lines framed into a room turn, heard once that turn replied and ended (as room_asks' answers).

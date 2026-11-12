@@ -6133,7 +6133,7 @@ def test_a_wake_the_roster_couldnt_be_read_for_is_tried_again(on, hermes, ask_fi
         raise room_rules.RoomStoreError("busy")
 
     monkeypatch.setattr(room_rules, "_room_members", unreadable)
-    assert work.check_asks(on.home) is False and ask_first["posted"] == []
+    assert work.check_asks(on.home) is True and ask_first["posted"] == [], "still watched"
     assert [row["kind"] for row in on.outbox_pending()] == ["share_ask"], "kept for the next look"
     # The room's delivery refused it once: tried again too.
     monkeypatch.setattr(room_rules, "_room_members", lambda room_id, home: ask_first["members"])
@@ -6164,6 +6164,20 @@ def test_a_wake_that_cant_get_through_is_given_up_after_a_day_or_when_the_bot_le
     monkeypatch.setattr(room_rules, "_room_members", lambda room_id, home: [])
     assert work.check_asks(on.home) is False
     assert ask_first["posted"] == [] and not any(row["kind"] == "share_ask" for row in on.outbox_pending())
+
+
+def test_an_answer_late_in_the_asks_life_is_still_tried_again_for_its_day(on, hermes, ask_first, monkeypatch):
+    ask_owner(on.home)
+    answer(on.home, "confirmed")
+    # Kept a day before the answer came (an ask answered near the end of its life).
+    with on._db() as con:
+        con.execute("UPDATE outbox SET created_at = ? WHERE kind = 'share_ask'", (time.time() - work.LINKED_KEEP_S - 60,))
+    ask_first["refuse"].add("room-1@default")
+    assert work.check_asks(on.home) is True, "its day counts from the answer, not from when the ask was kept"
+    assert [row["kind"] for row in on.outbox_pending() if row["kind"] == "share_ask"] == ["share_ask"]
+    ask_first["refuse"].clear()
+    work.check_asks(on.home)
+    assert len(ask_first["posted"]) == 1
 
 
 def test_linked_work_never_saves_to_memory_or_messages_anyone(on, hermes, linked):
