@@ -53,14 +53,24 @@ _GUARDS = ("room_memory", "room_planner", "room_cutoff", "room_wakeups", "room_c
 
 def _plugin_copies(names):
     """Every loaded copy of the plugin's modules named ``names``: the package
-    (conduit_push.*) and the copies tests and the dashboard load under names
-    of their own (conduit_push_personality.forks, conduit_push_dashboard_pulse)."""
+    (conduit_push.*), the copies tests and the dashboard load under names of
+    their own (conduit_push_personality.forks, conduit_push_dashboard_pulse),
+    and the ones the dashboard's rooms routes hold."""
     for name, module in list(sys.modules.items()):
         if module is None or not name.startswith("conduit_push"):
             continue
         tail = name.rsplit(".", 1)[-1]
         if tail in names or any(tail.endswith("_" + wanted) for wanted in names):
             yield module
+    # The dashboard's rooms routes keep their own guard copies on the module
+    # (rooms._room_planner_module), outside sys.modules.
+    for name, module in list(sys.modules.items()):
+        if module is None or not name.endswith(".api.rooms"):
+            continue
+        for wanted in names:
+            copy = getattr(module, f"_{wanted}_module", None)
+            if copy is not None:
+                yield copy
 
 
 @pytest.fixture(autouse=True)
