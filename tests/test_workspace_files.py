@@ -195,6 +195,41 @@ def test_duplicates_take_the_next_free_copy_name(tree):
     assert folder["name"] == "docs copy" and (tree / "docs copy" / "guide.md").exists()
 
 
+def test_a_copy_pasted_in_another_folder_keeps_its_name_when_free(tree):
+    (tree / "out").mkdir()
+    first = ws().duplicate(str(tree), str(tree / "docs" / "guide.md"), str(tree / "out"))["entry"]
+    second = ws().duplicate(str(tree), str(tree / "docs" / "guide.md"), str(tree / "out"))["entry"]
+    assert (first["name"], second["name"]) == ("guide.md", "guide copy.md")
+    (tree / "docs" / ".env").write_text("SECRET=1\n")
+    folder = ws().duplicate(str(tree), str(tree / "docs"), str(tree / "out"))["entry"]
+    assert folder["path"] == str((tree / "out" / "docs").resolve())
+    assert sorted(os.listdir(tree / "out" / "docs")) == ["guide.md"], "secrets stay out of a pasted copy"
+    (tree / "alias").symlink_to(tree / "docs")
+    for target, status in ((tree / "docs", 400), (tree / "alias", 400), (tree / "notes.txt", 400), (tree / "gone", 404)):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            ws().duplicate(str(tree), str(tree / "docs"), str(target))
+        assert exc.value.status == status, target
+
+
+def test_ssh_pastes_a_copy_in_another_folder(tree):
+    remote = ssh(tree)
+    root = str(tree.resolve())
+    (tree / "out").mkdir()
+    copy = remote.duplicate(root, str(tree / "docs"), str(tree / "out"))["entry"]
+    assert copy["name"] == "docs" and (tree / "out" / "docs" / "guide.md").exists()
+    again = remote.duplicate(root, str(tree / "notes.txt"), str(tree / "out"))["entry"]
+    assert again["name"] == "notes.txt"
+    assert remote.duplicate(root, str(tree / "notes.txt"), str(tree / "out"))["entry"]["name"] == "notes copy.txt"
+    (tree / "alias").symlink_to(tree / "docs")
+    with pytest.raises(wf.WorkspaceError) as exc:
+        remote.duplicate(root, str(tree / "docs"), str(tree / "alias"))
+    assert exc.value.status == 400 and not (tree / "docs" / "docs").exists(), "a link to itself is itself"
+    for target, status in ((tree / "docs" , 400), (tree / "gone", 404), (tree / "notes.txt", 400)):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            remote.duplicate(root, str(tree / "docs"), str(target))
+        assert exc.value.status == status, target
+
+
 def test_delete_removes_files_and_folders_but_never_the_root(tree):
     ws().delete(str(tree), str(tree / "docs"))
     assert not (tree / "docs").exists()
@@ -757,6 +792,13 @@ def test_routes_say_why_they_refuse(tree, client):
     assert outside.status_code == 403 and outside.json()["detail"] == "That's outside this workspace"
     assert client.post(f"{BASE}/workspace/delete", json={"root": root}).status_code == 400
     assert client.post(f"{BASE}/workspace/explode", json={"root": root}).status_code == 404
+    pasted = client.post(f"{BASE}/workspace/duplicate", json={"root": root, "path": str(tree / "notes.txt"),
+                                                            "to": str(tree / "docs")}).json()
+    assert pasted["entry"]["name"] == "notes.txt" and (tree / "docs" / "notes.txt").exists()
+    assert client.post(f"{BASE}/workspace/duplicate", json={"root": root, "path": str(tree / "notes.txt"),
+                                                            "to": ""}).status_code == 400
+    mistyped = client.post(f"{BASE}/workspace/duplicate", json={"root": root, "path": str(tree / "notes.txt"), "to": 42})
+    assert mistyped.status_code == 400 and mistyped.json()["detail"] == "to must be a folder's path"
     bad = client.post(f"{BASE}/workspace/upload", json={"root": root, "path": root, "name": "x", "data": "%%%"})
     assert bad.status_code == 400
     stale = client.post(f"{BASE}/workspace/save", json={"root": root, "path": str(tree / "notes.txt"),
