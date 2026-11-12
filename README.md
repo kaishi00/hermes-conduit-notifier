@@ -4310,7 +4310,13 @@ capability, with no `?profile=` (Links are the installation's):
   Link stays, waiting, and its accept is tried again while the invite lasts.
 - `GET /rooms/links`: `{"links": [...], "invites": [...], "mailbox": {"url",
   "reading"}}`, statuses `waiting`, `linked` or `unanswered`, and `reading`
-  false while nothing on this Hermes reads the mailbox.
+  false while nothing on this Hermes reads the mailbox. Each Link also has
+  `plugin`, the other side's plugin version (null until it says, and from
+  plugins before 0.166.2), and `behind`: `theirs` when their plugin takes
+  fewer kinds of envelope than this one's rooms send, `yours` when theirs sent
+  one this plugin doesn't take (for the 7 days the mailbox holds it), or null.
+  Each side's plugin sends a `link.hello` with its version and the kinds it
+  takes when either changes, and every 6 days.
 - `DELETE /rooms/links?link_id=`: `{"removed": true}`, and `DELETE
   /rooms/links/invites?invite_id=`: `{"cancelled": true}` (false for one this
   Hermes doesn't have).

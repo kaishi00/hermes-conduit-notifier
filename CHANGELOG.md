@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.166.2 (2026-11-12)
+
+### New and improved
+
+- When your Conduit plugin and a linked person's differ, Settings > Multiplayer says whose to update, instead of rooms quietly missing what the older one can't take.
+
 ## 0.166.1 (2026-11-12)
 
 ### Fixes
