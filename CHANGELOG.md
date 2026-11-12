@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.167.1 (2026-11-12)
+
+### Fixes
+- When Hermes asked your iPhone for a fresh reading and the wake couldn't
+  be sent, Hermes had to wait a minute before it could ask again. It can
+  now ask again straight away.
+
 ## 0.167.0 (2026-11-12)
 
 ### New and improved

@@ -3354,9 +3354,11 @@ whether notes and attendees are included (off by default).
   it changed, which the answer reads from the phone checking in). The
   answer's `fresh` says whether a new reading came, the phone's status
   hadn't changed, or it didn't answer in time, and `fresh_result` says the
-  same as `new_reading`, `unchanged`, `no_answer` or `not_asked` (not
-  paired, the relay held the wake back, or a wake less than a minute ago:
-  one a minute per profile, since wakes share the relay's hourly allowance);
+  same as `new_reading`, `unchanged`, `no_answer`, `not_shared` (the phone
+  doesn't share its status) or `not_asked` (not paired, the relay held the
+  wake back or couldn't be reached, or a wake less than a minute ago: one a
+  minute per profile, since wakes share the relay's hourly allowance; a
+  wake that didn't go doesn't count);
   the rest is the usual status. iOS may hold a background wake back, so the tool says so rather
   than guess.
 - **With each message (plugin 0.167+).** When the user turns on "With each
