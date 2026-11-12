@@ -5,6 +5,8 @@ import http.server
 import importlib.util
 import json
 import pathlib
+import socket
+import socketserver
 import sys
 import threading
 import types
@@ -234,21 +236,75 @@ def test_plain_http_skips_any_proxy_and_answers_are_capped(servers, monkeypatch)
 
 
 def test_https_proxy_setting_routes_only_relay_https_through_explicit_proxy(servers, monkeypatch):
-    def reject_connect(handler):
-        assert handler.path == "relay.example:443"
-        _json(handler, 502, {"error": "proxy_denied"})
-
-    proxy = servers(reject_connect)
+    proxy = servers(lambda h: h.send_error(407, "proxy authentication required"))
     monkeypatch.setenv("CONDUIT_PUSH_PROXY", proxy.url)
     fresh = _private_copy("conduit_push._client_proxy_setting_under_test", ROOT / "client.py")
 
-    with pytest.raises(urllib.error.URLError):
+    with pytest.raises(urllib.error.URLError, match="Tunnel connection failed: 407"):
         fresh.request_json("https://relay.example/v1/events", method="POST", credential="secret", payload={})
 
     assert len(proxy.requests) == 1
     method, target, headers, _body = proxy.requests[0]
-    assert (method, target) == ("CONNECT", "relay.example:443")
+    assert method == "CONNECT" and target == "relay.example:443"
     assert "Authorization" not in headers
+
+
+def test_socks5_proxy_uses_remote_dns_and_auth_without_leaking_relay_credentials(monkeypatch):
+    observed = {}
+
+    class SocksHandler(socketserver.BaseRequestHandler):
+        def read_exact(self, size):
+            data = bytearray()
+            while len(data) < size:
+                chunk = self.request.recv(size - len(data))
+                if not chunk:
+                    raise ConnectionError("client closed early")
+                data.extend(chunk)
+            return bytes(data)
+
+        def handle(self):
+            version, count = self.read_exact(2)
+            observed["greeting"] = (version, self.read_exact(count))
+            self.request.sendall(b"\x05\x02")
+            version, username_length = self.read_exact(2)
+            username = self.read_exact(username_length)
+            password_length = self.read_exact(1)[0]
+            password = self.read_exact(password_length)
+            observed["auth"] = (version, username, password)
+            self.request.sendall(b"\x01\x00")
+            version, command, reserved, address_type = self.read_exact(4)
+            if address_type == 3:
+                host = self.read_exact(self.read_exact(1)[0]).decode()
+            elif address_type == 1:
+                host = socket.inet_ntop(socket.AF_INET, self.read_exact(4))
+            else:
+                host = socket.inet_ntop(socket.AF_INET6, self.read_exact(16))
+            port = int.from_bytes(self.read_exact(2), "big")
+            observed["connect"] = (version, command, reserved, address_type, host, port)
+            self.request.sendall(b"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00")
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SocksHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("CONDUIT_PUSH_PROXY", f"socks5://test-user:test-password@127.0.0.1:{server.server_address[1]}")
+    original_getaddrinfo = socket.getaddrinfo
+
+    def reject_origin_dns(host, *args, **kwargs):
+        assert host != "relay.example"
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", reject_origin_dns)
+    fresh = _private_copy("conduit_push._client_socks5_proxy_under_test", ROOT / "client.py")
+    try:
+        with pytest.raises(urllib.error.URLError, match="SOCKS5 connect failed: 5"):
+            fresh.request_json("https://relay.example/v1/events", method="POST", credential="secret-token", payload={})
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert observed["greeting"] == (5, b"\x00\x02")
+    assert observed["auth"] == (1, b"test-user", b"test-password")
+    assert observed["connect"] == (5, 1, 0, 3, "relay.example", 443)
 
 
 def test_unpair_with_a_legacy_http_url_removes_the_local_pairing_and_says_so(monkeypatch, tmp_path, capsys):

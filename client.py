@@ -6,6 +6,7 @@ import atexit
 import contextvars
 import hashlib
 import hmac
+import http.client
 import json
 import logging
 import os
@@ -680,6 +681,105 @@ _https_proxy_lock = threading.Lock()
 _https_proxy_cache: tuple[str, Any] | None = None
 
 
+class _SOCKS5ConnectError(OSError):
+    def __init__(self, reply: int):
+        super().__init__(f"SOCKS5 connect failed: {reply}")
+        self.reply = reply
+
+
+class _SOCKS5HTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection using SOCKS5; the proxy resolves the target hostname."""
+
+    def __init__(self, host: str, *, proxy_host: str, proxy_port: int,
+                 proxy_username: str = "", proxy_password: str = "",
+                 timeout: Any = socket._GLOBAL_DEFAULT_TIMEOUT,
+                 source_address: Any = None, context: Any = None,
+                 check_hostname: Any = None, blocksize: int = 8192):
+        super().__init__(host, timeout=timeout, source_address=source_address,
+                         context=context, blocksize=blocksize)
+        if check_hostname is not None and self._context.check_hostname != check_hostname:
+            self._context.check_hostname = check_hostname
+        self._proxy_host = proxy_host
+        self._proxy_port = proxy_port
+        self._proxy_username = proxy_username
+        self._proxy_password = proxy_password
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            chunk = sock.recv(size - len(data))
+            if not chunk:
+                raise OSError("SOCKS5 proxy closed the connection")
+            data.extend(chunk)
+        return bytes(data)
+
+    def connect(self) -> None:
+        try:
+            self.sock = socket.create_connection((self._proxy_host, self._proxy_port), self.timeout)
+        except OSError:
+            self.sock = None
+            raise
+        try:
+            methods = b"\x00\x02" if self._proxy_username or self._proxy_password else b"\x00"
+            self.sock.sendall(b"\x05" + bytes([len(methods)]) + methods)
+            version, method = self._recv_exact(self.sock, 2)
+            if version != 5 or method == 0xFF:
+                raise OSError("SOCKS5 proxy rejected authentication methods")
+            if method == 0x02:
+                username = self._proxy_username.encode("utf-8")
+                password = self._proxy_password.encode("utf-8")
+                if len(username) > 255 or len(password) > 255:
+                    raise OSError("SOCKS5 username or password is too long")
+                self.sock.sendall(b"\x01" + bytes([len(username)]) + username
+                                  + bytes([len(password)]) + password)
+                auth_version, status = self._recv_exact(self.sock, 2)
+                if auth_version != 1 or status != 0:
+                    raise OSError("SOCKS5 proxy authentication failed")
+            elif method != 0x00:
+                raise OSError("SOCKS5 proxy selected an unsupported authentication method")
+
+            host = self.host.split("%", 1)[0].encode("idna")
+            if len(host) > 255:
+                raise OSError("SOCKS5 target hostname is too long")
+            port = self.port or 443
+            self.sock.sendall(b"\x05\x01\x00\x03" + bytes([len(host)]) + host + int(port).to_bytes(2, "big"))
+            version, reply, _reserved, address_type = self._recv_exact(self.sock, 4)
+            if version != 5 or reply != 0:
+                raise _SOCKS5ConnectError(reply)
+            if address_type == 1:
+                self._recv_exact(self.sock, 4)
+            elif address_type == 3:
+                self._recv_exact(self.sock, self._recv_exact(self.sock, 1)[0])
+            elif address_type == 4:
+                self._recv_exact(self.sock, 16)
+            else:
+                raise OSError("SOCKS5 proxy returned an invalid address type")
+            self._recv_exact(self.sock, 2)
+            self.sock = self._context.wrap_socket(self.sock, server_hostname=self._tunnel_host or self.host)
+        except BaseException:
+            if self.sock is not None:
+                self.sock.close()
+                self.sock = None
+            raise
+
+
+class _SOCKS5HTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, proxy_host: str, proxy_port: int, username: str, password: str):
+        super().__init__()
+        self._proxy_host = proxy_host
+        self._proxy_port = proxy_port
+        self._proxy_username = username
+        self._proxy_password = password
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(
+            _SOCKS5HTTPSConnection, req, context=self._context,
+            proxy_host=self._proxy_host, proxy_port=self._proxy_port,
+            proxy_username=self._proxy_username, proxy_password=self._proxy_password,
+        )
+
+
 def _https_opener() -> Any:
     """Opener for HTTPS relay calls, optionally using a dedicated proxy.
 
@@ -693,7 +793,22 @@ def _https_opener() -> Any:
         return _opener
     with _https_proxy_lock:
         if _https_proxy_cache is None or _https_proxy_cache[0] != proxy:
-            proxy_handler = urllib.request.ProxyHandler({"https": proxy})
+            proxy_parts = urllib.parse.urlsplit(proxy)
+            scheme = proxy_parts.scheme.lower()
+            if scheme in {"socks5", "socks5h"}:
+                if not proxy_parts.hostname:
+                    raise ValueError("CONDUIT_PUSH_PROXY must include a SOCKS5 host")
+                proxy_handler: Any = _SOCKS5HTTPSHandler(
+                    proxy_parts.hostname, proxy_parts.port or 1080,
+                    urllib.parse.unquote(proxy_parts.username or ""),
+                    urllib.parse.unquote(proxy_parts.password or ""),
+                )
+            elif scheme in {"http", "https"}:
+                proxy_handler = urllib.request.ProxyHandler({"https": proxy})
+            else:
+                raise ValueError(
+                    "CONDUIT_PUSH_PROXY must use http://, https://, socks5://, or socks5h://"
+                )
             _https_proxy_cache = (
                 proxy,
                 urllib.request.build_opener(_RefuseRedirects, proxy_handler),
