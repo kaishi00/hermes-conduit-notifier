@@ -13,6 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.169.0 (2026-11-13)
+
+### Fixes
+
+- An answer one bot gave another over 2,000 characters was cut off without telling it. It's now refused whole, so the bot shortens it or points at a file.
+- An ask to a bot whose long Bot Chat Hermes wouldn't reopen after a restart stayed waiting until someone noticed. The Bot Chat now reopens the bounded way, and an ask that still can't reach it fails and tells the bot that asked why.
+
+### New and improved
+
+- A bot asked something by another can ask it a question back about that ask, and bots can send each other a note that needs no answer, so a long joint job no longer piles up open asks.
+
 ## 0.168.10 (2026-11-13)
 
 ### Fixes
