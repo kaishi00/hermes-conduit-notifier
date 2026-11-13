@@ -18,7 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 
 - Pulse: a whole report you put off with Not now came back as new a week later without a check, even when every day it spoke of had passed. It's now read first, like other cards, and stays away when it's out of date.
-- Pulse: a card held or put off is also dropped when the day, time or deadline it was about has passed and nothing in it is left to do.
+- Pulse: a card held for the brief, put off, or found on its own and still on your screen is also dropped when the day, time or deadline it was about has passed and nothing in it is left to do.
 
 ## 0.168.3 (2026-11-13)
 

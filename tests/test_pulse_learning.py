@@ -2026,9 +2026,13 @@ def test_a_whole_report_put_off_is_read_before_it_comes_back_and_stays_away_once
     assert len(seen) == 2 and all(news in text and "Held since: " in text for _, text in seen)
     assert "has passed by \"Now\" and nothing in it is left for the user to do" in seen[0][0]
     assert "is stale only when every part is" in seen[0][0]
-    # The first read found it out of date: in Done, marked by Pulse, not back as new.
-    assert live.store.done_marks([old, fresh]).keys() == {old}
-    assert live.store.done_marks([old])[old]["done_by"] == "pulse"
+    # The first read found it out of date: it stays swiped away, for good, with no
+    # Done mark (Done and Undo don't take a whole report), and Put back still works.
+    assert live.store.done_marks([old, fresh]) == {}
+    assert live.store.card(old)["dismissed_at"] is not None and live.store.card(old)["rest_until"] is None
+    assert followup.return_rested(live.store, back_at + 86400) == []
+    assert control.dismiss(live.store, old, False, now=back_at + 2) is True
+    assert control.dismiss(live.store, old, True, now=back_at + 3) is True
     assert live.store.card(fresh)["dismissed_at"] is None and live.store.card(fresh)["created_at"] == back_at + 1
     # With memory off nothing reads, so it comes back as before.
     live.store.set("memory", False)
