@@ -4576,10 +4576,12 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
             counts["ready"] += 1
         elif work.kind == "ask_out" and work.status == "waiting":
             counts["waiting"] += 1
+    asked: Optional[list] = None
     if mode != "off" and work_coord.mode(store) != "off":
         # What the Bot Chat asked the user and waits on: theirs to answer,
         # counted apart so an older app's "needs you" stays its workstreams'.
-        counts["questions"] = len(work_coord.open_questions(store))
+        asked = work_coord.open_questions(store)
+        counts["questions"] = len(asked)
     if resolved:
         rows = store.resolved(before=before, limit=APP_RESOLVED_ROWS + 1)
         out["more"] = len(rows) > APP_RESOLVED_ROWS
@@ -4601,7 +4603,7 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     if mode != "off" and setting != "off":
         try:
             titles = {work.ref: work.title for work in store.list(limit=-1, include_closed=True)}
-            out["coordination"]["items"] = work_coord.app_items(store, titles)
+            out["coordination"]["items"] = work_coord.app_items(store, titles, asked)
         except Exception:  # noqa: BLE001 — the panel still shows the work
             logger.debug("conduit_push: couldn't read the coordination list", exc_info=True)
     return out
@@ -4955,7 +4957,7 @@ def _app_answer_approval(store: work_store.Store, broker: work_broker.Broker, wo
     if action == "approve":
         # Approve only what a card can show whole: read it again by its id.
         try:
-            pending = broker.approvals(work.session_id)
+            pending = broker.approvals(work.session_id, fresh=True)
         except Exception as error:  # noqa: BLE001 — Hermes' own method runs here
             return {"ok": False, "ref": work.ref, "error": "hermes",
                     "note": f"Hermes didn't answer: {_cut(str(error), 200)}"}

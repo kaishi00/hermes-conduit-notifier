@@ -719,14 +719,15 @@ APP_WHY_BEFORE_S = 1800.0
 _FAILED = ("lost", "refused", "expired", "dropped")
 
 
-def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
+def app_items(store: work_store.Store, titles: dict[str, str], asked: Optional[list[dict]] = None) -> list[dict]:
     """What the Bot Chat did to keep the work in step over the last day,
     newest first, for the Work panel: what the watch flagged, what the Bot
     Chat sent from turns it started itself (with how far each got) and what
     it asked the user. Each has its ``why``: the ledger lines behind it,
     with who said each. A flag's are the lines the watch read; a send's are
     what the board had in the half hour before it, which is what the Bot
-    Chat could see, not a record of what it weighed."""
+    Chat could see, not a record of what it weighed. ``asked`` is
+    ``open_questions(store)`` when the caller has read it already."""
     now = time.time()
     since = now - BOARD_AGE_S
     known = store.ledger(since=since - APP_WHY_BEFORE_S, kinds=("found", "assumes", "changed", "user", "flag"),
@@ -766,7 +767,8 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
         items.append(item)
     # Every open question is listed, past both limits: each is counted as
     # needing the user (counts.questions), so each has its card to answer on.
-    asked = open_questions(store)  # one about resolved work is off the list
+    if asked is None:
+        asked = open_questions(store)  # one about resolved work is off the list
     # The answered ones have their own dozen, the latest answered: one asked
     # long ago and answered just now is among them.
     answered = store.proposals_answered(since=since, limit=PROPOSALS_SHOWN)
