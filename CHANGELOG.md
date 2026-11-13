@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### New and improved
 
-- Link two Hermes of your own: mark the Link as "This is my own Hermes" on both sides (Settings > Multiplayer), and a room with only your own Hermes in it runs as a room of your own agents. The bots from your other Hermes work there with their own tools, memory and approvals, as at home, with no room rules or turn limits.
+- Groundwork for using several of your own Hermes together: a Link both Hermes mark as your own (`hermes conduit-push links own`, and later Conduit by itself) makes a room with only your own Hermes in it a room of your own agents. The bots from your other Hermes work there with their own tools, memory and approvals, as at home, with no room rules or turn limits.
 
 ## 0.168.10 (2026-11-13)
 

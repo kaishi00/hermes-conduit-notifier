@@ -97,7 +97,7 @@ ACCEPT, CONFIRM, REMOVE = "link.accept", "link.confirm", "link.remove"
 # the mailbox's hold, for a side that restored an older links.json.
 HELLO = "link.hello"
 HELLO_AGAIN_S = 6 * 24 * 3600
-# "This is my own Hermes" (multi-instance plan, Rooms 1): each side says
+# Your own Hermes on both ends (multi-instance plan, Rooms 1): each side says
 # whether it marked the Link as its owner's own, with a number that only grows,
 # so the later of two changes holds whatever order they arrive in. A Link is
 # its owner's own only while both sides say so (``own_links``); a plugin

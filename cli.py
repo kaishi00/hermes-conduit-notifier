@@ -1112,7 +1112,7 @@ def _links(args: argparse.Namespace) -> int:
 
 
 def _own_note(link: dict) -> str:
-    """What a Link's "This is my own Hermes" says, or "" when neither side marked it."""
+    """What a Link's own-Hermes marks say, or "" when neither side marked it."""
     if link.get("own_link"):
         return "; your own Hermes on both sides: rooms with only your own Hermes run as at home"
     if link.get("own"):

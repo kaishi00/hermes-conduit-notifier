@@ -4325,9 +4325,10 @@ a route's answer.
 ### Your own Hermes on both sides (plugin 0.169+)
 
 When both Hermes are yours (a home server and a work one, say), mark the Link
-as your own Hermes on each side: Settings > Multiplayer's "This is my own
-Hermes" on the Link, `PUT /rooms/links/own` (`{"link_id": ..., "own": true}`),
-or `hermes conduit-push links own <Link id> on`. Each side tells the other in a
+as your own Hermes on each side: `PUT /rooms/links/own`
+(`{"link_id": ..., "own": true}`) or `hermes conduit-push links own <Link id> on`.
+Conduit shows no setting for it: once it holds both Hermes, it marks the Link
+between them itself, and it never marks a Link to someone else's Hermes. Each side tells the other in a
 `link.own` envelope, and the Link is your own only while both sides say so:
 one side's mark alone does nothing, so a Link with someone else can never
 become one from your side. Either side turning it off ends it on both, from

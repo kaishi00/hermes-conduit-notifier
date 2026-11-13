@@ -229,7 +229,7 @@ ROUTE_CAPABILITIES = (
     # /rooms/identity and /rooms/links: Links between this installation and
     # other people's, for Linked Rooms (no profile: they're the installation's).
     "room-links",
-    # PUT /rooms/links/own: "This is my own Hermes" on a Link; a room whose
+    # PUT /rooms/links/own: a Link between your own Hermes; a room whose
     # other installations all came over Links both sides marked runs without
     # the owner's room rules (multi-instance plan, Rooms 1).
     "room-own-links",
