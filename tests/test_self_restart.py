@@ -157,7 +157,7 @@ def test_a_windows_dashboard_restarts_itself(monkeypatch, tmp_path):
 
 
 def test_on_windows_the_restart_hands_the_command_line_to_the_relauncher_and_exits(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(api.self_update.sys, "platform", "win32")
     monkeypatch.setattr(api.self_update.sys, "orig_argv", ["python.exe", "C:\\hermes\\Scripts\\hermes.exe", "dashboard"])
     spawned, exits = [], []
@@ -175,7 +175,7 @@ def test_on_windows_the_restart_hands_the_command_line_to_the_relauncher_and_exi
 
 
 def test_a_job_that_forbids_breakaway_still_gets_the_relauncher(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
     flags = []
 
     def popen(argv, **kw):
@@ -189,7 +189,7 @@ def test_a_job_that_forbids_breakaway_still_gets_the_relauncher(monkeypatch, tmp
 
 
 def test_a_relauncher_that_cant_start_leaves_the_dashboard_serving(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(api.self_update.sys, "platform", "win32")
     monkeypatch.setattr(api.self_update.sys, "orig_argv", ["python.exe", "hermes.exe", "dashboard"])
 
