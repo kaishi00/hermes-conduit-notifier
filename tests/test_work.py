@@ -401,6 +401,9 @@ def test_a_wake_whose_submit_timed_out_still_counts_as_the_plugins_own_turn(bots
     work.flush_wakes()
     (_, params, _), = hermes.named("prompt.submit")
     turns = sys.modules["conduit_push.turn_surface"]
+    # Nor is the ask failed: the turn may still come, and its answer must be taken.
+    assert store_mod.Store(bots["nahida"]).get("A1").status == "running"
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
     try:
         turns.start_turn(NAHIDA_CHAT, params["text"])
         assert turns.woken(NAHIDA_CHAT)
@@ -564,6 +567,23 @@ def test_the_bot_asked_can_ask_the_one_that_asked_back_one_level_deep(bots, herm
     as_bot(monkeypatch, bots, "nahida")
     assert nahida.get("A2").last_result == "The outage report."
     assert call("work_reply", {"ref": "A1", "text": "Done."}, session_id=NAHIDA_CHAT)["ok"]
+
+
+def test_a_question_back_keeps_the_other_bots_waiting_in_its_chain(bots, hermes, monkeypatch):
+    # Greptile on notifier #780: Furina asks Nahida, Nahida asks Raiden, Raiden
+    # asks Nahida back, Nahida asks Furina back; Furina asking Raiden would close a circle.
+    assert call("work_ask", {"bot": "nahida", "text": "The report?"})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_ask", {"bot": "raiden", "text": "Numbers?"}, session_id=NAHIDA_CHAT)["ok"]
+    as_bot(monkeypatch, bots, "raiden")
+    assert call("work_ask", {"bot": "nahida", "text": "Which year?", "about": "A1"},
+                session_id=CHATS["raiden"])["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    back = call("work_ask", {"bot": "Furina", "text": "Which report?", "about": "A1"}, session_id=NAHIDA_CHAT)
+    assert back["ok"]
+    assert store_mod.Store(bots["hermes"]).get("A2").requested_by["chain"] == ["nahida", "raiden"]
+    as_bot(monkeypatch, bots, "hermes")
+    assert call("work_ask", {"bot": "raiden", "text": "Old numbers?"})["error"] == "loop"
 
 
 def test_a_question_back_names_an_open_ask_from_that_bot(bots, hermes, monkeypatch):

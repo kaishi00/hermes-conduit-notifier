@@ -1836,7 +1836,9 @@ def _ask(home: Path, store: work_store.Store, args: dict, coordinator: str) -> d
             return {"ok": False, "error": "about",
                     "note": f"{about.ref} is already {name}'s question back about an ask of yours, so it can't be "
                             f"asked about in turn. Answer {about.ref} with what you have. Nothing was sent."}
-        chain = [me]
+        # The bots already waiting on this one stay in the chain, so the
+        # question back opens no wider circle; only its asker is let through.
+        chain = [bot for bot in _chain(store, me) if bot != profile]
     else:
         chain = _chain(store, me)
         if profile in chain:
@@ -5850,12 +5852,14 @@ def _send_wake(home: Path, coordinator: str) -> None:
         said = work_coord.ANSWER_HEAD.format(lines="\n".join(line for line in lines if line in answers))
         text = said + work_coord.ANSWER_TAIL + ("\n\n" + text if text else " " + LINK_RULE)
     item = ""
+    sent = False
     try:
         item = store.outbox_add("", "wake", coordinator, text)
         if asks or answers:
             # Theirs to have acted on: not a turn the Bot Chat started itself.
             work_coord.ask_wake_sent(store, item)
         status = work_broker.Broker(home).wake(coordinator, text)
+        sent = True
         outcome = "queued" if status in ("queued", "streaming", "started") else status or "accepted"
         store.outbox_done(item, outcome)
         for line_item in items:
@@ -5871,7 +5875,10 @@ def _send_wake(home: Path, coordinator: str) -> None:
             except Exception:  # noqa: BLE001
                 logger.debug("conduit_push: couldn't mark an update row refused", exc_info=True)
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
-        _asks_unreached(home, store, items, str(error) or type(error).__name__)
+        # Only when Hermes is known not to have taken it: a submit that timed
+        # out may still queue the turn, and a write after the send changes nothing.
+        if not sent and not getattr(error, "timed_out", False):
+            _asks_unreached(home, store, items, str(error) or type(error).__name__)
 
 
 def _asks_unreached(home: Path, store: work_store.Store, items: list[str], reason: str) -> None:
