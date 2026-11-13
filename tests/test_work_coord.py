@@ -649,3 +649,12 @@ def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
     # Reworded, it's still the one question.
     assert call("work_propose", {"text": "Start the 2.3 changelog now that the notes are in.", "replaces": made})["ok"]
     assert len(on.proposals_open()) == 2
+    # Reworded into the other open one, it would be two cards asking the same.
+    into = call("work_propose", {"text": "Start a workstream to audit the billing export now.", "replaces": made})
+    assert into["error"] == "already_asked" and into["id"] == other["id"]
+    # Words in any language count, spaced or not.
+    asked = call("work_propose", {"text": "开始一个新的工作流来整理发布说明"})["id"]
+    same = call("work_propose", {"text": "开始一个新的工作流来整理发布说明吗"})
+    assert same["error"] == "already_asked" and same["id"] == asked
+    assert call("work_propose", {"text": "Начать работу над переводом документации."})["ok"]
+    assert call("work_propose", {"text": "Начать работу над переводом документации?"})["error"] == "already_asked"

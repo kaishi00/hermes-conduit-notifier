@@ -542,10 +542,15 @@ def _listed(refs: list[str]) -> str:
     return f"{', '.join(refs[:-1])} and {refs[-1]}"
 
 
+# A question's words in any language; where words aren't spaced (Chinese,
+# Japanese), each character is one.
+_WORDS = re.compile(r"[^\W_\u3040-\u30ff\u3400-\u9fff]+|[\u3040-\u30ff\u3400-\u9fff]")
+
+
 def _same_words(one: str, other: str) -> bool:
     """Whether two questions say nearly the same: most of the words of each
     are the other's."""
-    first, second = (set(re.findall(r"[a-z0-9]+", text.lower())) for text in (one, other))
+    first, second = (set(_WORDS.findall(text.lower())) for text in (one, other))
     if not first or not second:
         return False
     return len(first & second) / len(first | second) >= SAME_QUESTION_SHARE
@@ -629,7 +634,8 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
         # to the same rules as a new question's.
         had = work_store.proposal_refs(asked)
         added = [ref for ref in refs if ref not in had]
-        refusal = _asked_before(store, added, new, besides=replaces)
+        # One about no workstream is held against the other open ones' words.
+        refusal = _asked_before(store, added, new, besides=replaces, text="" if had else text)
         if refusal is not None:
             return refusal
         # "New since the last no" only on a question about work the user said no
