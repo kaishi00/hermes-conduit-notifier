@@ -226,17 +226,17 @@ def _not_owned(response: Any) -> bool:
 
 
 def _open_refused(response: Any) -> str:
-    """Why the chat didn't open, with what to do when Hermes says it doesn't
-    exist. Pulse only sends to a chat ``home_chat`` found in state.db, so a
-    not_found here is a chat this Hermes can't open from this process."""
-    detail = f"couldn't open the chat: {_message(response)}"
+    """Why the chat didn't open, led by what to do when Hermes says it doesn't
+    exist (Settings > Pulse shows three lines of it). Pulse only sends to a
+    chat ``home_chat`` found in state.db, so a not_found here is a chat this
+    Hermes can't open from this process."""
     if not _not_found(response):
-        return detail
+        return f"couldn't open the chat: {_message(response)}"
     version = hermes_version()
     if version is not None and version < HANDS_OVER_FROM:
-        return (f"{detail}. Hermes {'.'.join(map(str, version))} can't hand a chat Hermes Desktop made over to "
-                "the gateway: update Hermes to 0.22.6 or newer, and Pulse's next turn reaches it")
-    return f"{detail}. Hermes can't open this chat from here: set Pulse up again in Settings > Pulse"
+        return (f"Update Hermes to 0.22.6 or newer: {'.'.join(map(str, version))} can't move "
+                f"Hermes Desktop's chat to the gateway ({_message(response)})")
+    return f"Set Pulse up again in Settings > Pulse: Hermes couldn't open its chat ({_message(response)})"
 
 
 def _not_found(response: Any) -> bool:

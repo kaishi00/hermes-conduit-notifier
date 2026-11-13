@@ -3761,9 +3761,9 @@ def test_an_app_the_user_never_connected_is_left_out(recording):
 
 
 @pytest.mark.parametrize("version, hint", [
-    ("0.22.5", "Hermes 0.22.5 can't hand a chat Hermes Desktop made over to the gateway: update Hermes to 0.22.6"),
-    ("0.23.1", "set Pulse up again in Settings > Pulse"),
-    (None, "set Pulse up again in Settings > Pulse"),
+    ("0.22.5", "Update Hermes to 0.22.6 or newer: 0.22.5 can't move Hermes Desktop's chat to the gateway"),
+    ("0.23.1", "Set Pulse up again in Settings > Pulse: Hermes couldn't open its chat"),
+    (None, "Set Pulse up again in Settings > Pulse: Hermes couldn't open its chat"),
 ])
 def test_a_chat_hermes_cant_find_says_what_to_do(monkeypatch, version, hint):
     # Issue 713: a chat Hermes Desktop made on Hermes 0.22.5 is not_found once Pulse's turn
@@ -3771,7 +3771,9 @@ def test_a_chat_hermes_cant_find_says_what_to_do(monkeypatch, version, hint):
     monkeypatch.setattr(host, "hermes_version", lambda: tuple(map(int, version.split("."))) if version else None)
     FakeHost(resume={"error": {"code": 4007, "message": "session not found"}}).install(monkeypatch)
     sent = host.send(SID, "x")
-    assert not sent.ok and sent.detail.startswith("couldn't open the chat: session not found. ") and hint in sent.detail
+    # The step comes first: Settings > Pulse shows three lines of it.
+    assert not sent.ok and sent.detail.startswith(hint) and sent.detail.endswith("(session not found)")
+    assert len(sent.detail) <= 120, len(sent.detail)
 
 
 def test_only_a_missing_chat_gets_the_advice(monkeypatch):

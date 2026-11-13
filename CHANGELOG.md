@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 
-- Pulse: when Hermes couldn't find Pulse's chat, Settings › Pulse only said "not_found". It now says what to do: on a Hermes older than 0.22.6, where a chat Hermes Desktop made can't move to the gateway, update Hermes; otherwise set Pulse up again.
+- Pulse: when Hermes couldn't find Pulse's chat, Settings › Pulse only said "not_found". It now starts with what to do: on a Hermes older than 0.22.6, where a chat Hermes Desktop made can't move to the gateway, update Hermes; otherwise set Pulse up again.
 
 ## 0.168.4 (2026-11-13)
 

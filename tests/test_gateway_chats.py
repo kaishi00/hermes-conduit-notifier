@@ -686,4 +686,4 @@ def test_pulse_on_the_authority_names_the_update_for_a_desktop_chat(monkeypatch)
     monkeypatch.setattr(pulse_host, "_authority_chats", lambda: Chats())
     monkeypatch.setattr(pulse_host, "hermes_version", lambda: (0, 22, 5))
     sent = pulse_host.send("pulse-1", "check in")
-    assert not sent.ok and "update Hermes to 0.22.6 or newer" in sent.detail, sent
+    assert not sent.ok and sent.detail.startswith("Update Hermes to 0.22.6 or newer"), sent
