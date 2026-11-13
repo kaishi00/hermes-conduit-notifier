@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.2 (2026-11-13)
+
+### Fixes
+- A bot's second question was refused as already asked when it only shared
+  its wording with an open one ("fix the login bug" and "fix the logout
+  bug"). Questions that name different things are different questions.
+- A question you had just answered could drop off the Work panel's list on
+  a busy day.
+
 ## 0.168.1 (2026-11-13)
 
 ### Fixes

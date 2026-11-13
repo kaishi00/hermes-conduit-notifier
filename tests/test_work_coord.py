@@ -606,6 +606,11 @@ def test_every_open_question_is_listed_with_its_card(on, hermes, home):
     listed = work.app_list(on.home)
     done = next(item for item in listed["coordination"]["items"] if item["id"] == asked[0])
     assert done["status"] == "declined" and done["actions"] == [] and listed["counts"]["questions"] == 33
+    # And past a day's flags and sends, though it was asked before them.
+    for number in range(40):
+        on.event_add("W1", "flag", "watch", f"Flag {number}.", detail="{}")
+    listed = work.app_list(on.home)["coordination"]["items"]
+    assert asked[0] in [item["id"] for item in listed] and any(item["kind"] == "flag" for item in listed)
     # Unspaced scripts compare by character.
     assert coord._same_words("เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลง", "เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลงไหม")
 
@@ -656,6 +661,11 @@ def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
     # Reworded, it's still the one question.
     assert call("work_propose", {"text": "Start the 2.3 changelog now that the notes are in.", "replaces": made})["ok"]
     assert len(on.proposals_open()) == 2
+    # The same frame around something else is another question.
+    assert not coord._same_words("Start a workstream to fix the login bug.", "Start a workstream to fix the logout bug.")
+    assert not coord._same_words("Start a workstream to upgrade Postgres to 16.",
+                                 "Start a workstream to upgrade Postgres to 17.")
+    assert not coord._same_words("서버 로그 정리 작업을 시작할까요", "서버 백업 정리 작업을 시작할까요")
     # Reworded into the other open one, it would be two cards asking the same.
     into = call("work_propose", {"text": "Start a workstream to audit the billing export now.", "replaces": made})
     assert into["error"] == "already_asked" and into["id"] == other["id"]

@@ -543,18 +543,26 @@ def _listed(refs: list[str]) -> str:
 
 
 # A question's words in any language; where words aren't spaced (Chinese,
-# Japanese, Korean, Thai, Lao, Khmer, Burmese), each character is one.
-_UNSPACED = "\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3"
+# Japanese, Thai, Lao, Khmer, Burmese), each character is one.
+_UNSPACED = "\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u9fff"
 _WORDS = re.compile(rf"[^\W_{_UNSPACED}]+|[{_UNSPACED}]")
 
 
 def _same_words(one: str, other: str) -> bool:
     """Whether two questions say nearly the same: most of the words of each
-    are the other's."""
+    are the other's, and neither names something of its own in the other's
+    place. "Fix the login bug" and "fix the logout bug", or an upgrade to 16
+    and to 17, share their frame and are two questions."""
     first, second = (set(_WORDS.findall(text.lower())) for text in (one, other))
     if not first or not second:
         return False
-    return len(first & second) / len(first | second) >= SAME_QUESTION_SHARE
+    if len(first & second) / len(first | second) < SAME_QUESTION_SHARE:
+        return False
+
+    def names(words: set[str]) -> bool:
+        return any(len(word) >= 4 or word.isdigit() for word in words)
+
+    return not (names(first - second) and names(second - first))
 
 
 def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides: str = "",
@@ -756,16 +764,17 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
     # The answered ones have their own dozen: the store lists open ones first.
     answered = [row for row in store.proposals(since=since, limit=PROPOSALS_SHOWN + len(asked))
                 if row["status"] != "open"][-PROPOSALS_SHOWN:]
-    waiting = []
+    cards = []
     for row in asked + answered:
         refs = work_store.proposal_refs(row)
         # Older apps read ref and title: the first workstream, and every title.
         # ``actions``: how the user answers an open one from its card.
-        (waiting if row["status"] == "open" else items).append(
-            {"id": row["id"], "kind": "proposal", "ref": row["ref"], "refs": refs,
-             "title": " · ".join(title for title in (titles.get(ref, "") for ref in refs) if title),
-             "at": row["created_at"], "text": row["text"], "status": row["status"],
-             "answer": row["answer"], "answered_at": row["answered_at"], "why": [],
-             "actions": list(APP_ANSWERS) if row["status"] == "open" else []})
-    items = sorted(items, key=lambda item: -item["at"])[:max(PROPOSALS_SHOWN, APP_ITEMS - len(waiting))]
-    return sorted(waiting + items, key=lambda item: -item["at"])
+        cards.append({"id": row["id"], "kind": "proposal", "ref": row["ref"], "refs": refs,
+                      "title": " · ".join(title for title in (titles.get(ref, "") for ref in refs) if title),
+                      "at": row["created_at"], "text": row["text"], "status": row["status"],
+                      "answer": row["answer"], "answered_at": row["answered_at"], "why": [],
+                      "actions": list(APP_ANSWERS) if row["status"] == "open" else []})
+    # The questions keep their places whatever else the day brought: one the
+    # user just answered is older than the flags and sends since it was asked.
+    items = sorted(items, key=lambda item: -item["at"])[:max(PROPOSALS_SHOWN, APP_ITEMS - len(cards))]
+    return sorted(cards + items, key=lambda item: -item["at"])
