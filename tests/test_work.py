@@ -1422,6 +1422,24 @@ def test_a_fork_of_the_bot_chat_keeps_to_the_policy(on, hermes, monkeypatch):
     assert block and block["action"] == "block"
 
 
+def test_the_review_after_a_bot_chat_turn_keeps_the_bots_skills(on, hermes, monkeypatch):
+    """Hermes' review of a turn runs in a fork of the Bot Chat with the
+    skill tools only: they run there under every setting and take none of
+    the turn's quick steps, and the Bot Chat's own turn is held as before."""
+    for mode in ("strict", "lookups"):
+        on.set_policy(mode)
+        monkeypatch.setattr(work, "_in_fork", lambda: False)
+        if mode == "strict":
+            assert work.tool_block(BOT_CHAT, "skill_manage", {}, turn_id="t1")["action"] == "block"
+        monkeypatch.setattr(work, "_in_fork", lambda: True)
+        for name in ("skills_list", "skill_view", "skill_manage"):
+            assert work.tool_block(BOT_CHAT, name, {}, turn_id="t1") is None
+            assert work._last_take.taken is None
+    monkeypatch.setattr(work, "_in_fork", lambda: True)
+    on.set_policy("strict")
+    assert work.tool_block(BOT_CHAT, "terminal", {"command": "ls"}, turn_id="t3")["action"] == "block"
+
+
 def test_an_unreadable_registry_holds_the_bot_chat_to_strict(on, hermes, monkeypatch):
     def broken(self):
         raise OSError("disk I/O error")
@@ -4890,7 +4908,7 @@ def test_a_worktree_gives_a_workstream_its_own_branch(on, hermes, trees):
 
 
 def test_a_worktree_that_cant_be_made_starts_nothing(on, hermes, trees):
-    answer = start(cwd="/elsewhere", worktree=True)
+    answer = start(cwd=str(trees.root.parent), worktree=True)  # a folder that exists, outside the repository
     assert answer["error"] == "worktree" and "isn't in a git repository" in answer["note"]
     assert hermes.named("session.create") == [] and on.get("W1").status == "failed"
     trees.local = False
@@ -4951,6 +4969,21 @@ def test_a_hermes_that_cant_say_where_its_terminal_runs_makes_no_worktree(on, he
     answer = start(cwd=str(trees.root), worktree=True)
     assert answer["error"] == "worktree" and on.get("W1").status == "failed"
     assert hermes.named("session.create") == []
+
+
+def test_a_folder_that_isnt_there_is_refused_where_that_can_be_told(on, hermes, trees, monkeypatch):
+    """Hermes ignores a folder it can't find and works in its default one,
+    so the workstream would be somewhere else without knowing. Only on its
+    local terminal: a remote or container terminal's folders aren't here."""
+    gone = str(trees.root / "nowhere")
+    answer = start(cwd=gone)
+    assert answer["error"] == "no_such_folder" and gone in answer["note"]
+    assert on.list() == [] and hermes.named("session.create") == []
+    trees.local = False
+    assert start(cwd=gone)["ok"]
+    trees.local = True
+    monkeypatch.setattr(trees, "local_backend_active", lambda: 1 / 0)
+    assert start("Docs", "Write the docs.", cwd=gone, new=True)["ok"]  # no way to tell: as before
 
 
 def test_turning_approvals_back_on_stops_reopening_once_its_time_is_up(home, hermes, monkeypatch):
@@ -5943,6 +5976,11 @@ def test_a_linked_room_starts_work_only_once_the_owner_says_yes(on, hermes, link
     assert row.reply_to["linked"] is True and row.reply_to["side"] == "home"
     brief = _brief_text(hermes)
     assert "Linked Room" in brief and "OKd these instructions" in brief and "Map the park's shade." in brief
+    # Hermes' review of its turn, in a fork of its chat, keeps no skill from the room either.
+    assert work.tool_block(row.session_id, "skill_manage", {})["action"] == "block"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(work, "_in_fork", lambda: True)
+        assert work.tool_block(row.session_id, "skill_manage", {})["action"] == "block"
     # The room hears it privately, woken by a post that says nothing of it.
     assert any("started W1" in line for line in private_lines(on.home))
     posted, = linked["posted"]

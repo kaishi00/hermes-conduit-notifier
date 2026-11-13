@@ -583,6 +583,9 @@ def test_a_question_about_resolved_work_is_withdrawn(on, hermes, home):
     assert f"- {one} " not in note and f"- {two} (about W2)" in note and f"- {loose}, asked" in note
     assert work.app_act(on.home, one, "approve")["error"] == "not_now"
     assert on.proposal(one)["status"] == "withdrawn"
+    # One asked about work that was already resolved has its decision to make.
+    again = call("work_propose", {"text": "Start W1 over with the new API.", "ref": "W1"})["id"]
+    assert again in [item["id"] for item in work.app_list(on.home)["coordination"]["items"] if item.get("actions")]
     # A tap on a card drawn before its work was resolved: withdrawn there too.
     on.update("W2", status="stopped", closed_at=time.time(), resolved_by="user")
     assert work.app_act(on.home, two, "approve")["error"] == "not_now"
@@ -598,3 +601,67 @@ def test_every_open_question_is_listed_with_its_card(on, hermes, home):
     listed = work.app_list(on.home)
     cards = [item["id"] for item in listed["coordination"]["items"] if item.get("actions")]
     assert listed["counts"]["questions"] == len(asked) == len(cards) == 34
+    # One they answer keeps its card, answered, past all the open ones.
+    assert work.app_act(on.home, asked[0], "decline")["ok"]
+    listed = work.app_list(on.home)
+    done = next(item for item in listed["coordination"]["items"] if item["id"] == asked[0])
+    assert done["status"] == "declined" and done["actions"] == [] and listed["counts"]["questions"] == 33
+    # Unspaced scripts compare by character.
+    assert coord._same_words("เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลง", "เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลงไหม")
+
+
+def test_a_tapped_yes_a_restart_caught_goes_out_once(on, hermes, home, monkeypatch):
+    """The yes and its line are one write, so a restart before the update
+    went out replays it: the same row, as the user's answer, once."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    woken(home)
+    asked = call("work_propose", {"text": "Stop W1: the API it ports to is gone.", "ref": "W1"})["id"]
+    assert work.app_act(on.home, asked, "approve")["ok"]
+    line, = batched()
+    for held in (work._wakes, work._wake_answers, work._wake_items):
+        held.clear()  # the restart: nothing of the old process is queued
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    assert len(on.outbox_rows("", "line_answer")) == 1
+    work._send_wake(on.home, BOT_CHAT)
+    sent = on.outbox_rows("", "wake")[-1]["text"]
+    assert sent.startswith("Work update from Conduit: the user answered what you asked them")
+    assert sent.count(line) == 1
+    assert not [row for row in on.outbox_pending() if row["kind"] == "line_answer"]
+
+
+def test_a_pile_of_open_questions_takes_no_more(on, hermes, home):
+    """Every open question is a card the user answers, so the Bot Chat
+    can't keep adding them: past a dozen it rewords one or waits."""
+    woken(home)
+    for number in range(coord.PROPOSALS_SHOWN):
+        on.proposal_add("", f"Unrelated question number {number}.")
+    more = call("work_propose", {"text": "Start a workstream for the billing export audit."})
+    assert more["error"] == "too_many_open" and len(on.proposals_open()) == coord.PROPOSALS_SHOWN
+
+
+def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
+    """A start the Bot Chat would make names no workstream, so the open
+    question itself is what a second one is held against: nearly the same
+    words are the same question, other words another."""
+    woken(home)
+    made = call("work_propose", {"text": "Start a workstream to write the changelog for 2.3."})["id"]
+    again = call("work_propose", {"text": "Start a workstream to write the 2.3 changelog?"})
+    assert again["error"] == "already_asked" and again["id"] == made
+    assert "nearly the same" in again["note"] and f"replaces {made}" in again["note"]
+    other = call("work_propose", {"text": "Start a workstream to audit the billing export."})
+    assert other["ok"] and other["id"] != made
+    # Reworded, it's still the one question.
+    assert call("work_propose", {"text": "Start the 2.3 changelog now that the notes are in.", "replaces": made})["ok"]
+    assert len(on.proposals_open()) == 2
+    # Reworded into the other open one, it would be two cards asking the same.
+    into = call("work_propose", {"text": "Start a workstream to audit the billing export now.", "replaces": made})
+    assert into["error"] == "already_asked" and into["id"] == other["id"]
+    # Words in any language count, spaced or not.
+    asked = call("work_propose", {"text": "开始一个新的工作流来整理发布说明"})["id"]
+    same = call("work_propose", {"text": "开始一个新的工作流来整理发布说明吗"})
+    assert same["error"] == "already_asked" and same["id"] == asked
+    assert call("work_propose", {"text": "Начать работу над переводом документации."})["ok"]
+    assert call("work_propose", {"text": "Начать работу над переводом документации?"})["error"] == "already_asked"

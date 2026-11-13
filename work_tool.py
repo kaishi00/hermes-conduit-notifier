@@ -85,6 +85,11 @@ SHOWS_OR_ASKS = frozenset({"clarify", "conduit_notify", SHOW, "conduit_maps", "b
 # tools, its memory, Tool Search's bridge (checked by what it calls) and what
 # shows or asks (C.4). Strict, "Only Coordinates", allows only these.
 STRICT = frozenset({*TOOLS, *WORKER_TOOLS, "memory", *BRIDGE}) | SHOWS_OR_ASKS
+# What Hermes' review after a turn runs in its fork of the chat (its
+# dispatch whitelist, agent.background_review): reading and keeping the bot's
+# skills. Refused there, each review of a Bot Chat turn spent its tokens on
+# nothing and the bot learned no skill from what the user told it.
+REVIEW_TOOLS = frozenset({"skills_list", "skill_view", "skill_manage"})
 # Always a workstream's on strict and quick: a workstream is the bot's own
 # background work, kept, listed and recovered, where a subagent isn't.
 BACKGROUND = frozenset({"delegate_task"})
@@ -334,7 +339,8 @@ SCHEMAS: dict[str, dict] = {
         "parameters": {"type": "object", "properties": {
             "title": {"type": "string", "description": "A few words the user will recognise, like Login bug."},
             "instructions": {"type": "string", "description": "Everything the workstream needs to do the task."},
-            "cwd": {"type": "string", "description": "Optional folder to work in."},
+            "cwd": {"type": "string", "description": ("Optional folder to work in, one that exists. Left out, "
+                                                      "it works where this bot's chats do.")},
             "worktree": {"type": "boolean", "description": ("Work in a git worktree of its own, on a branch of "
                                                             "its own, made from the repository cwd is in: for a "
                                                             "coding task, above all when other work is in the "
@@ -1262,6 +1268,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                             "again with new=true if this really is separate work."}
     limit = store.max_running()
     cwd = str(args.get("cwd") or "").strip()
+    if work_trees.missing(cwd):
+        # Hermes would ignore it without a word and work in its default
+        # folder, with the workstream believing it was in this one.
+        return {"ok": False, "error": "no_such_folder",
+                "note": f"There's no folder {cwd} on this host, so the workstream would have worked somewhere "
+                        "else without knowing. Give a folder that exists, or leave cwd out and say in the "
+                        "instructions where to work."}
     # The count and the new row in one transaction: two starts in one turn
     # can't both take the last slot.
     # Started from a room: kept with the bot's Bot Chat (its note, its
@@ -1277,8 +1290,8 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         running = [_row(work) for work in store.list(active_only=True) if work.kind == "workstream"
                    and not _from_call(work) and work.status in ("starting", "running", "needs_you")]
         return {"ok": False, "error": "busy", "running": running,
-                "note": f"This bot already has {limit} workstreams running, its limit. Wait for one, stop one, or "
-                        "send this to one of them."}
+                "note": f"This bot already has {limit} workstreams running, its limit (the user sets it in "
+                        "Conduit: Edit Bot > Work). Wait for one, stop one, or send this to one of them."}
     tree = None
     repo = work_trees.repo_root(cwd) if cwd else ""
     if args.get("worktree"):
@@ -3166,6 +3179,12 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
     linked = _linked_worker_block(session_id, home, name, names)
     if linked is not None:
         return linked
+    if name in REVIEW_TOOLS and _in_fork():
+        # Hermes' review of a turn keeps the bot's skills, as it does after
+        # any chat's turn, and Hermes lets that fork run nothing else. It is
+        # no step of the coordinator's turn, so it takes none of its budget.
+        # After the Linked Room check: nothing from one is kept as a skill.
+        return None
     if mode == "off":
         # Turning workstreams off doesn't stop one that's running, nor what it may not do.
         if name == "tool_call" and (not names or any(called in BRIDGE for called in names)):
@@ -4718,12 +4737,12 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
     words straight into it (Reply in W3), ``stop`` it, ``continue`` it or
     ``check`` first after a restart. No Bot Chat turn: the coordinator sees
     it in its next digest. The answer has ``ok``, the row as it is now, and
-    ``error`` with a ``note`` when nothing was done."""
+    ``error`` with a ``note`` when nothing was done. A question's id (P1)
+    for ``ref`` is their Approve or Decline on its card (``_app_answer``)."""
     home = Path(home)
     body = body if isinstance(body, dict) else {}
-    asked = str(ref or "").strip().upper()
-    if work_coord._PROPOSAL.fullmatch(asked):
-        return _app_answer(home, asked, action)
+    if work_coord.is_question(ref):
+        return _app_answer(home, str(ref).strip().upper(), action)
     if action not in APP_ACTIONS:
         return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for work."}
     if action in APP_APPROVAL:

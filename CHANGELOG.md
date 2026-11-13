@@ -13,6 +13,24 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.1 (2026-11-13)
+
+### Fixes
+- After each turn in a Bot Chat, Hermes' skill review was refused every
+  tool, so it spent tokens and the bot learned no skill from what you told
+  it there. It runs now.
+- A workstream started in a folder that doesn't exist ran in Hermes' own
+  folder. It is refused, and the bot is told.
+- A question about work that was already resolved when the bot asked
+  ("start it over") was withdrawn before you saw it.
+- A bot could ask the same question twice when it was about work it would
+  start, and pile up questions without end. Nearly the same words are one
+  question, and a dozen open ones take no more.
+
+### New and improved
+- Work that finished more than six hours ago no longer counts as other work
+  the helper model checks new findings against (it was a day).
+
 ## 0.168.0 (2026-11-13)
 
 ### New and improved

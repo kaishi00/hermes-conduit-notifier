@@ -44,6 +44,23 @@ def _hermes() -> Any:
     return subagent_worktree
 
 
+def missing(cwd: Any) -> bool:
+    """Whether ``cwd`` names a folder that isn't there, where that can be
+    told: on Hermes' local terminal, whose sessions run on this host. Hermes
+    itself ignores such a folder without a word and works in its default
+    one. A remote or container terminal's folders aren't this host's, and a
+    Hermes that can't say where its terminal runs is given the doubt."""
+    hermes = _hermes()
+    if hermes is None or not isinstance(cwd, str) or not cwd.strip():
+        return False
+    try:
+        if not hermes.local_backend_active():
+            return False
+        return not os.path.isdir(os.path.abspath(os.path.expanduser(cwd.strip())))
+    except Exception:  # noqa: BLE001 — no way to tell: it starts as before
+        return False
+
+
 def repo_root(cwd: Any) -> str:
     """The git toplevel of ``cwd``, or '' (not a repo, or no way to tell)."""
     hermes = _hermes()
