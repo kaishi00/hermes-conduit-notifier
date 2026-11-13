@@ -51,6 +51,22 @@ def test_a_job_that_forbids_breakaway_starts_it_without(tmp_path):
     assert flags == [relaunch.DETACHED_BREAKAWAY, relaunch.DETACHED]
 
 
+def test_a_log_that_cant_be_opened_still_starts_the_dashboard(tmp_path):
+    started = []
+
+    class Proc:
+        pid = 9
+
+    def popen(command, **kw):
+        started.append(command)
+        return Proc()
+
+    blocked = tmp_path / "not-a-folder"
+    blocked.write_text("")
+    assert relaunch.start(COMMAND, str(blocked / "dashboard-restart.log"), popen=popen) == 9
+    assert started == [COMMAND]
+
+
 def test_the_same_command_matches_whatever_names_the_interpreter():
     assert relaunch._same_command(["python.exe", *COMMAND[1:]], COMMAND)
     assert not relaunch._same_command(COMMAND[1:], COMMAND)  # the hermes.exe launcher itself

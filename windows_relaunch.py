@@ -83,10 +83,19 @@ def started_by_someone_else(command: List[str], own_pid: Optional[int] = None) -
     return False
 
 
+def _open_log(log_path: str) -> Any:
+    """The restart log, or nowhere when it can't be opened: the dashboard starts either way."""
+    try:
+        log = open(log_path, "ab", buffering=0)
+        log.write(f"\n=== Conduit plugin: dashboard restarted {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode())
+        return log
+    except OSError:
+        return open(os.devnull, "wb")
+
+
 def start(command: List[str], log_path: str, popen: Callable[..., Any] = subprocess.Popen) -> int:
     """Starts `command` in the background, its output appended to `log_path`; returns its pid."""
-    with open(log_path, "ab", buffering=0) as log:
-        log.write(f"\n=== Conduit plugin: dashboard restarted {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode())
+    with _open_log(log_path) as log:
         kwargs = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True)
         try:
             return popen(command, creationflags=DETACHED_BREAKAWAY, **kwargs).pid
