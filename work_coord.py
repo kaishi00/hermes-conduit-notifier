@@ -543,8 +543,8 @@ def _listed(refs: list[str]) -> str:
 
 
 # A question's words in any language; where words aren't spaced (Chinese,
-# Japanese, Korean, Thai, Lao, Khmer, Burmese), each character is one.
-_UNSPACED = "\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3"
+# Japanese, Thai, Lao, Khmer, Burmese), each character is one.
+_UNSPACED = "\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u9fff"
 _WORDS = re.compile(rf"[^\W_{_UNSPACED}]+|[{_UNSPACED}]")
 
 
