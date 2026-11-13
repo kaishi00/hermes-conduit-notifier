@@ -206,6 +206,8 @@ def still_here(reply_to: dict, home: Path, profile: str) -> tuple[Optional[str],
             room = linked_room_of(session, home, profile)
         except RunWorkOff:
             return "Run work is off for the room now", ""
+        except ElsewhereOwn:
+            return "the room is on your own other Hermes now, where work doesn't start from it yet", ""
         except NotLinked:
             return "the room has no other people's agents now", ""
         except (NoReportsHere, Unreadable) as error:
@@ -215,6 +217,8 @@ def still_here(reply_to: dict, home: Path, profile: str) -> tuple[Optional[str],
         return None, room.handle
     try:
         room = room_of(session, home, profile)
+    except ElsewhereOwn:
+        return "the room is on your own other Hermes, where work doesn't start from it yet", ""
     except OthersHere:
         return "other people's agents are in the room now", ""
     except NoReportsHere:

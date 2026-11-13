@@ -6032,6 +6032,16 @@ def test_run_work_off_starts_nothing_and_asks_nobody(on, hermes, linked):
     assert room_work_call({"action": "list"})["error"] == "room_elsewhere"
 
 
+def test_work_for_a_room_now_on_your_own_other_hermes_says_why_it_cant_report(monkeypatch, tmp_path):
+    # A Link marked as your own while work for its room waits or runs (multi-instance plan, Rooms 1).
+    turn = room_rules.RoomTurn(room_id="room-1", side="member", with_others=False, session_id=ROOM_CHAT)
+    monkeypatch.setattr(room_rules, "room_turn", lambda session_id, home: turn)
+    for linked_work in (True, False):
+        why, handle = room_work.still_here({"linked": linked_work, "session": ROOM_CHAT, "room": "room-1"},
+                                           tmp_path, "default")
+        assert "own other Hermes" in why and handle == ""
+
+
 def test_a_yes_after_run_work_was_turned_off_does_nothing(on, hermes, linked):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     linked["choices"] = room_rules.RoomChoices()
