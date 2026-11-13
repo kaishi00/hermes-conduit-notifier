@@ -61,9 +61,11 @@ def wait_for_exit(pid: int, timeout: float = EXIT_WAIT_S) -> bool:
 
 
 def _same_command(cmdline: List[str], command: List[str]) -> bool:
-    # The interpreter can be named another way (a launcher's python.exe): compare what it runs.
-    return len(cmdline) == len(command) and \
-        [os.path.normcase(a) for a in cmdline[1:]] == [os.path.normcase(a) for a in command[1:]]
+    """Whether `cmdline` ends with what `command` runs: the interpreter, and anything a launcher
+    puts before the dashboard's own arguments (a flag, its own name), can differ."""
+    tail = [os.path.normcase(a) for a in command[1:]]
+    return bool(tail) and len(cmdline) >= len(tail) and \
+        [os.path.normcase(a) for a in cmdline[-len(tail):]] == tail
 
 
 def started_by_someone_else(command: List[str], own_pid: Optional[int] = None) -> bool:
@@ -71,6 +73,8 @@ def started_by_someone_else(command: List[str], own_pid: Optional[int] = None) -
     try:
         import psutil
     except ImportError:
+        print("windows_relaunch: no psutil, so a dashboard started again by something else can't be seen",
+              file=sys.stderr)
         return False
     own_pid = os.getpid() if own_pid is None else own_pid
     for process in psutil.process_iter(["pid", "cmdline"]):
@@ -85,11 +89,14 @@ def started_by_someone_else(command: List[str], own_pid: Optional[int] = None) -
 
 def _open_log(log_path: str) -> Any:
     """The restart log, or nowhere when it can't be opened: the dashboard starts either way."""
+    log = None
     try:
         log = open(log_path, "ab", buffering=0)
         log.write(f"\n=== Conduit plugin: dashboard restarted {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode())
         return log
     except OSError:
+        if log is not None:
+            log.close()
         return open(os.devnull, "wb")
 
 

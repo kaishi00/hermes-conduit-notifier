@@ -5134,7 +5134,11 @@ gateway (`POST /api/gateway/restart`), then this dashboard:
   once it's gone, in the background, with its output in
   `<HERMES_HOME>/logs/dashboard-restart.log` (from 0.168.9; a dashboard you
   started in a terminal comes back without one). A dashboard a launcher
-  script or service already started again is left to run. 409 while a chat
+  script or service already started again is left to run. The restarted
+  dashboard is no longer a child of the terminal or Scheduled Task that
+  started the first one, so ending that task doesn't stop it: stop it by its
+  process (Task Manager, `Stop-Process`). A task that runs again later finds
+  the port taken and exits. 409 while a chat
   turn this process runs is still going (from Hermes' turn markers); 501
   inside a plugin host and for Hermes Desktop's own backend, where you
   restart Hermes yourself.
