@@ -583,6 +583,9 @@ def test_a_question_about_resolved_work_is_withdrawn(on, hermes, home):
     assert f"- {one} " not in note and f"- {two} (about W2)" in note and f"- {loose}, asked" in note
     assert work.app_act(on.home, one, "approve")["error"] == "not_now"
     assert on.proposal(one)["status"] == "withdrawn"
+    # One asked about work that was already resolved has its decision to make.
+    again = call("work_propose", {"text": "Start W1 over with the new API.", "ref": "W1"})["id"]
+    assert again in [item["id"] for item in work.app_list(on.home)["coordination"]["items"] if item.get("actions")]
     # A tap on a card drawn before its work was resolved: withdrawn there too.
     on.update("W2", status="stopped", closed_at=time.time(), resolved_by="user")
     assert work.app_act(on.home, two, "approve")["error"] == "not_now"

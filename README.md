@@ -1472,6 +1472,12 @@ question or a small task doesn't start a workstream. Change it in Conduit
   can't be posted goes to the Bot Chat. Asks between bots, answers and notes
   stay the Bot Chat's, and a room with other people's agents in it starts no
   work.
+- `work_start` with a `cwd` that isn't a folder on the host is refused
+  (`no_such_folder`) instead of running in Hermes' own folder, where Hermes'
+  terminal runs on the host itself (plugin 0.168.1+). Hermes' review after a
+  Bot Chat turn (its skill tools, in a fork of the chat) runs under every
+  What It Does Itself setting and takes none of the turn's quick steps, so
+  the bot keeps skills from what you tell it there (plugin 0.168.1+).
 - A workstream that hands part of its work to Hermes' delegate agents
   (`delegate_task`) keeps working while they run (plugin 0.163.1+). Hermes
   runs them in the background and gives the workstream their results as its
@@ -1600,7 +1606,10 @@ question or a small task doesn't start a workstream. Change it in Conduit
   0.158.0+). In Conduit an open question counts as "needs you" and shows at
   the top of her Work panel with Approve and Decline: a tap is your own
   answer, and on a yes she goes ahead; a question about work you've since
-  resolved goes away by itself (plugin 0.168.0+). A
+  resolved goes away by itself (plugin 0.168.0+). A question about no
+  workstream (one she would start) that says nearly the same as an open one
+  is refused like one about the same workstream, and with a dozen open she
+  rewords one or waits (plugin 0.168.1+). A
   workstream you set to Leave alone (its card in Conduit) gets nothing from
   her and isn't stopped by her in a turn you didn't start. Past eight
   messages to one workstream in an hour from such turns, the next is refused
@@ -1618,7 +1627,9 @@ question or a small task doesn't start a workstream. Change it in Conduit
   work watch" under Models, or Watch Model under Coordination in Conduit's
   Edit Bot > Work), the bot's own model until you pick another; a small
   fast one is enough. It reads only when a bot has more than one
-  open workstream and Coordination isn't off, and may start twelve such
+  open workstream and Coordination isn't off (work that finished, stopped
+  or failed more than six hours ago and waits to be resolved no longer
+  counts as other work, plugin 0.168.1+), and may start twelve such
   turns an hour; past that a flag is kept on the board and her next turn
   says so. Conduit's Work panel lists what she did to keep the work in step
   over the last day (what the helper flagged, what she sent on her own and

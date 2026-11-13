@@ -467,7 +467,9 @@ def open_questions(store: work_store.Store) -> list[dict]:
         gone = []
         for row in rows:
             works = [store.get(ref) for ref in work_store.proposal_refs(row)]
-            if works and all(work is None or work.closed_at for work in works):
+            # Resolved since it was asked: one about work that was already
+            # closed then ("Start W1 over") still has its decision to make.
+            if works and all(work is None or work.closed_at > row["created_at"] for work in works):
                 gone.append(row["id"])
         if gone:
             store.proposals_withdraw(gone)
@@ -744,7 +746,9 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
     # Every open question is listed, past both limits: each is counted as
     # needing the user (counts.questions), so each has its card to answer on.
     asked = open_questions(store)  # one about resolved work is off the list
-    answered = [row for row in store.proposals(since=since, limit=PROPOSALS_SHOWN) if row["status"] != "open"]
+    # The answered ones have their own dozen: the store lists open ones first.
+    answered = [row for row in store.proposals(since=since, limit=PROPOSALS_SHOWN + len(asked))
+                if row["status"] != "open"][-PROPOSALS_SHOWN:]
     waiting = []
     for row in asked + answered:
         refs = work_store.proposal_refs(row)
