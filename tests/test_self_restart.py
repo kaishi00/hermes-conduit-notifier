@@ -172,6 +172,16 @@ def test_on_windows_the_restart_hands_the_command_line_to_the_relauncher_and_exi
     assert json.loads(argv[4]) == [api.self_update.sys.executable, "C:\\hermes\\Scripts\\hermes.exe", "dashboard"]
     assert argv[5] == str(tmp_path / "logs" / "dashboard-restart.log")
     assert kw["creationflags"] & 0x01000000 and kw["stdin"] == api.self_update.subprocess.DEVNULL
+    # The helper's own errors land in the restart log.
+    assert kw["stderr"].name == str(tmp_path / "logs" / "dashboard-restart.log")
+
+
+def test_a_missing_relauncher_leaves_the_dashboard_serving(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.core, "_plugin_root", lambda: str(tmp_path / "plugin"))
+    monkeypatch.setattr(api.self_update.subprocess, "Popen", lambda *a, **kw: pytest.fail("started"))
+    with pytest.raises(FileNotFoundError):
+        api.self_update._relaunch_on_windows(["python.exe", "hermes.exe", "dashboard"])
 
 
 def test_a_job_that_forbids_breakaway_still_gets_the_relauncher(monkeypatch, tmp_path):

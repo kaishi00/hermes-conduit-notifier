@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.10 (2026-11-13)
+
+### Fixes
+
+- On Windows, a dashboard restart that couldn't start the dashboard again now says why in the Hermes home's logs/dashboard-restart.log, and a dashboard a launcher started again with slightly different options is no longer started a second time.
+
 ## 0.168.9 (2026-11-13)
 
 ### Fixes

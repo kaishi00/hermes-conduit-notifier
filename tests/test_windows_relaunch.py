@@ -67,10 +67,40 @@ def test_a_log_that_cant_be_opened_still_starts_the_dashboard(tmp_path):
     assert started == [COMMAND]
 
 
-def test_the_same_command_matches_whatever_names_the_interpreter():
+def test_the_same_command_matches_whatever_launches_it():
     assert relaunch._same_command(["python.exe", *COMMAND[1:]], COMMAND)
-    assert not relaunch._same_command(COMMAND[1:], COMMAND)  # the hermes.exe launcher itself
+    # A supervisor's launcher, or an interpreter flag it adds, before the dashboard's own arguments.
+    assert relaunch._same_command(COMMAND[1:], COMMAND)
+    assert relaunch._same_command(["python.exe", "-I", "-X", "utf8", *COMMAND[1:]], COMMAND)
     assert not relaunch._same_command([*COMMAND[:-1], "9120"], COMMAND)
+    assert not relaunch._same_command(["python.exe"], COMMAND)
+    assert not relaunch._same_command(["python.exe", "x"], ["python.exe"])
+
+
+def test_a_log_whose_header_cant_be_written_is_closed(monkeypatch, tmp_path):
+    opened = []
+
+    class Log:
+        closed = False
+
+        def write(self, data):
+            raise OSError(28, "No space left on device")
+
+        def close(self):
+            self.closed = True
+
+    real_open = open
+
+    def fake_open(path, mode, **kw):
+        if str(path).endswith("restart.log"):
+            opened.append(Log())
+            return opened[-1]
+        return real_open(path, mode, **kw)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    fallback = relaunch._open_log(str(tmp_path / "restart.log"))
+    fallback.close()
+    assert opened and opened[0].closed
 
 
 def test_a_dashboard_its_supervisor_started_again_is_found():

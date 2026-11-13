@@ -201,17 +201,28 @@ def _relaunch_on_windows(command: List[str]) -> None:
     again."""
     from hermes_constants import get_hermes_home
     helper = os.path.join(core._plugin_root(), "windows_relaunch.py")
+    if not os.path.isfile(helper):  # a copy on disk without it: nothing would start the dashboard again
+        raise FileNotFoundError(helper)
     logs = Path(get_hermes_home()) / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    argv = [sys.executable, "-I", helper, str(os.getpid()), json.dumps(command), str(logs / WINDOWS_RELAUNCH_LOG)]
+    log_path = logs / WINDOWS_RELAUNCH_LOG
+    argv = [sys.executable, "-I", helper, str(os.getpid()), json.dumps(command), str(log_path)]
     detached = 0x00000200 | 0x08000000  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
-    kwargs = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL, close_fds=True)
+    # The helper's own errors go to the restart log too, so a restart that never came back says why.
     try:
-        subprocess.Popen(argv, creationflags=detached | 0x01000000, **kwargs)  # | CREATE_BREAKAWAY_FROM_JOB
+        errors = open(log_path, "ab", buffering=0)
     except OSError:
-        # A job that forbids breakaway refuses the flag; the hidden console alone still detaches.
-        subprocess.Popen(argv, creationflags=detached, **kwargs)
+        errors = subprocess.DEVNULL
+    try:
+        kwargs = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=errors, stderr=errors, close_fds=True)
+        try:
+            subprocess.Popen(argv, creationflags=detached | 0x01000000, **kwargs)  # | CREATE_BREAKAWAY_FROM_JOB
+        except OSError:
+            # A job that forbids breakaway refuses the flag; the hidden console alone still detaches.
+            subprocess.Popen(argv, creationflags=detached, **kwargs)
+    finally:
+        if errors is not subprocess.DEVNULL:
+            errors.close()
 
 
 def _restart_when_idle(schedule: Callable[[float, Callable[[], None]], Any],
