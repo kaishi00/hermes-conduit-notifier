@@ -2005,7 +2005,9 @@ def test_a_report_item_found_on_its_own_and_put_off_is_read_before_it_comes_back
 def test_a_whole_report_put_off_is_read_before_it_comes_back_and_stays_away_once_its_days_passed(live):
     live.store.set("memory", True)
     now = time.time()
-    news = "Election Day today: no school. The car payment posts tomorrow."
+    # Longer than a card's news is read at (NEWS_LIMIT): a report is read whole.
+    news = "Election Day today: no school. " + "The car payment posts tomorrow. " * 30 + "Renew the passport by June."
+    assert len(news) > followup.NEWS_LIMIT
     old, fresh = (live.store.add_card({"kind": "report", "level": "screen", "news": news, "chat_id": SID,
                                        "message_id": 1, "created_at": now}) for _ in range(2))
     for card_id in (old, fresh):

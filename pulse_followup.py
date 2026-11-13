@@ -830,8 +830,11 @@ def held_material(pulse_store: store.PulseStore, home: Path, card: dict, *, zone
         except hermes.HermesUnreadable as error:
             raise ChatUnreadable(str(error)) from None
     said, earlier = said_since(rows, f"{card['title']} {card['news']}", after=since, zone=zone)
+    # A whole report's card (rest_read) is read whole: cut short, a part still
+    # open past the cut would go with the parts whose day has passed.
+    news_limit = learning.TURN_NEWS_LIMIT if card["kind"] == "report" else NEWS_LIMIT
     parts = [f"Now: {_local(now, zone)}", f"Held since: {_local(since, zone)}",
-             f"About: {_clip(card['title'], 300)}", f"The news: {_clip(card['news'], NEWS_LIMIT)}",
+             f"About: {_clip(card['title'], 300)}", f"The news: {_clip(card['news'], news_limit)}",
              "## Said in its chat since\n" + ((said or "Nothing.") if own else "It came from no chat.")]
     if earlier:
         parts.append(EARLIER_TITLE.format(chat="its chat") + "\n" + earlier)
