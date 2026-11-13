@@ -13,6 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.3 (2026-11-13)
+
+### Fixes
+- A bot's question about the SQL bug was refused as already asked while
+  one about the CSS bug was open. A short name in capitals counts as
+  naming something, like a longer word.
+- On a busy day the Work panel could drop a question you answered last, if
+  the bot had asked it early. It keeps the ones you answered most recently.
+
+### New and improved
+- Sending to a workstream on the gateway reads its chat once instead of
+  twice.
+
 ## 0.168.2 (2026-11-13)
 
 ### Fixes
@@ -75,6 +88,7 @@ checks it). The format is fixed, because Conduit reads it:
 - A bot in a room with other people's agents could answer as if a picture
   sent there wasn't there. Each turn that names pictures now tells the bot
   to look at them first.
+
 ## 0.167.2 (2026-11-12)
 
 ### Fixes
