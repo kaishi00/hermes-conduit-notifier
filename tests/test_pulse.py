@@ -3758,3 +3758,32 @@ def test_an_app_the_user_never_connected_is_left_out(recording):
     followups = sys.modules["conduit_push.pulse_followup"]
     for checks in (followups.INSTRUCTIONS, followups.COMMITMENT_INSTRUCTIONS, followups.WATCH_INSTRUCTIONS):
         assert checks.endswith(ledger.UNSET_RULE)  # a check's news can be a card with no turn after it
+
+
+@pytest.mark.parametrize("version, hint", [
+    ("0.22.5", "Hermes 0.22.5 can't hand a chat Hermes Desktop made over to the gateway: update Hermes to 0.22.6"),
+    ("0.23.1", "set Pulse up again in Settings > Pulse"),
+    (None, "set Pulse up again in Settings > Pulse"),
+])
+def test_a_chat_hermes_cant_find_says_what_to_do(monkeypatch, version, hint):
+    # Issue 713: a chat Hermes Desktop made on Hermes 0.22.5 is not_found once Pulse's turn
+    # goes through the gateway; a bare "not_found" left the person with nothing to do.
+    monkeypatch.setattr(host, "hermes_version", lambda: tuple(map(int, version.split("."))) if version else None)
+    FakeHost(resume={"error": {"code": 4007, "message": "session not found"}}).install(monkeypatch)
+    sent = host.send(SID, "x")
+    assert not sent.ok and sent.detail.startswith("couldn't open the chat: session not found. ") and hint in sent.detail
+
+
+def test_only_a_missing_chat_gets_the_advice(monkeypatch):
+    monkeypatch.setattr(host, "hermes_version", lambda: (0, 22, 5))
+    FakeHost(resume={"error": {"code": 4007, "message": "session_key required"}}).install(monkeypatch)
+    assert host.send(SID, "x").detail == "couldn't open the chat: session_key required"
+
+
+def test_hermes_version_reads_hermes_cli(monkeypatch):
+    fake = types.ModuleType("hermes_cli")
+    fake.__version__ = "0.22.5+4.gc4434be"
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake)
+    assert host.hermes_version() == (0, 22, 5)
+    fake.__version__ = "dev"
+    assert host.hermes_version() is None

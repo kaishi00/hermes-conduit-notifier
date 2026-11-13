@@ -672,3 +672,18 @@ def test_on_the_authority_the_bypass_is_the_sessions_and_a_timeout_says_it_may_h
     with pytest.raises(work_broker.BrokerError) as raised:
         broker.wake("w1", "update")
     assert raised.value.timed_out is True
+
+
+def test_pulse_on_the_authority_names_the_update_for_a_desktop_chat(monkeypatch):
+    # Issue 713: the gateway answers not_found for a Desktop-made chat before Hermes 0.22.6.
+    class Chats:
+        def dispatch(self, frame, transport):
+            return {"error": {"code": 4004, "message": "not_found", "data": {"reason": "not_found"}}}
+
+        def release(self, transport):
+            pass
+
+    monkeypatch.setattr(pulse_host, "_authority_chats", lambda: Chats())
+    monkeypatch.setattr(pulse_host, "hermes_version", lambda: (0, 22, 5))
+    sent = pulse_host.send("pulse-1", "check in")
+    assert not sent.ok and "update Hermes to 0.22.6 or newer" in sent.detail, sent
