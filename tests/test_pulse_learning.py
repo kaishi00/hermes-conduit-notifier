@@ -2002,6 +2002,39 @@ def test_a_report_item_found_on_its_own_and_put_off_is_read_before_it_comes_back
     assert followup.return_rested(live.store, live.store.card(brief_card)["rest_until"] + 1) == [brief_card]
 
 
+def test_a_whole_report_put_off_is_read_before_it_comes_back_and_stays_away_once_its_days_passed(live):
+    live.store.set("memory", True)
+    now = time.time()
+    news = "Election Day today: no school. The car payment posts tomorrow."
+    old, fresh = (live.store.add_card({"kind": "report", "level": "screen", "news": news, "chat_id": SID,
+                                       "message_id": 1, "created_at": now}) for _ in range(2))
+    for card_id in (old, fresh):
+        assert followup.rest_read(live.store.card(card_id)) and not followup.read_first(live.store.card(card_id))
+        assert control.dismiss(live.store, card_id, True, now=now, until="next_week") is True
+    back_at = live.store.card(old)["rest_until"]
+    assert followup.return_rested(live.store, back_at + 1) == []  # both wait for their read
+    seen = []
+
+    def llm(instructions, text):
+        seen.append((instructions, text))
+        return {"stale": len(seen) == 1, "why": "both days have passed"}, 7
+
+    followup.check_rested(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=back_at + 1,
+                          still_leader=lambda: True, budget=10_000, done={})
+    assert len(seen) == 2 and all(news in text and "Held since: " in text for _, text in seen)
+    assert "has passed by \"Now\" and nothing in it is left for the user to do" in seen[0][0]
+    assert "is stale only when every part is" in seen[0][0]
+    # The first read found it out of date: in Done, marked by Pulse, not back as new.
+    assert live.store.done_marks([old, fresh]).keys() == {old}
+    assert live.store.done_marks([old])[old]["done_by"] == "pulse"
+    assert live.store.card(fresh)["dismissed_at"] is None and live.store.card(fresh)["created_at"] == back_at + 1
+    # With memory off nothing reads, so it comes back as before.
+    live.store.set("memory", False)
+    later = live.store.add_card({"kind": "report", "level": "screen", "news": news, "created_at": now})
+    assert control.dismiss(live.store, later, True, now=now, until="tomorrow") is True
+    assert followup.return_rested(live.store, live.store.card(later)["rest_until"] + 1) == [later]
+
+
 def test_a_found_card_read_before_it_comes_back_isnt_read_again_in_that_run_or_the_next(live, monkeypatch):
     live.store.set("memory", True)
     now = time.time()
