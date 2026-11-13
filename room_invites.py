@@ -1298,7 +1298,10 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
             # Who's who still shows; whose each post was waits for posts.db.
             logger.warning("Linked Rooms couldn't read who posted in room %s (%s)", room_id, type(exc).__name__)
             latest = []
+        seated = {member["link"] for member in draft["members"] or () if member["link"] is not None}
+        own = room_links.own_links(root)
         return {"room_id": room_id, "home": None, "members": _members(draft),
+                "own_hermes": bool(own) and (seated | set(room_copies.just_me(draft))) <= own,
                 "just_me": [draft["links"][link_id]["name"] for link_id in room_copies.just_me(draft)], "posts": [
             {"event_id": each["event_id"], "seq": each["seq"], "by": names.get(each["link"], room_posts.GUEST)}
             for each in latest]}
@@ -1315,7 +1318,9 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
                     if member["member_id"] in mine), None)
         if you is None and invite.get("you"):
             you = room_posts.poster(invite["you"])  # Just me: the name the home gave at the start
-        return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
+        from . import room_rules  # room_rules reads rooms.json through this module
+        return {"room_id": room_id, "home": invite["from"], "you": you,
+                "own_hermes": room_rules.own_guest_room(root, room_id), "members": [
             {"member_id": member["member_id"], "handle": member["handle"],
              "display_name": member["display_name"],
              "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],

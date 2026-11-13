@@ -818,6 +818,8 @@ def _handle(name: str, args: dict, session_id: Any) -> dict:
             return {"ok": False, "error": "not_bot_chat", "note": IN_WORKSTREAM}
         try:
             room = room_work.room_of(session_id, home, work_broker.profile_of(home))
+        except room_work.ElsewhereOwn:
+            return {"ok": False, "error": "room_elsewhere", "note": room_work.ELSEWHERE_OWN}
         except room_work.OthersHere:
             return {"ok": False, "error": "room_with_others", "note": room_work.WITH_OTHERS}
         except room_work.NoReportsHere:
@@ -6355,6 +6357,8 @@ def _room_work(args: dict, session_id: Any) -> dict:
         return {"ok": False, "error": "unavailable", "note": reason}
     try:
         room = room_work.linked_room_of(session, home, work_broker.profile_of(home))
+    except room_work.ElsewhereOwn:
+        return {"ok": False, "error": "room_elsewhere", "note": room_work.ELSEWHERE_OWN}
     except room_work.NotLinked:
         return {"ok": False, "error": "not_linked", "note": room_work.NOT_LINKED}
     except room_work.RunWorkOff:

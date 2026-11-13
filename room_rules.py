@@ -29,7 +29,7 @@ import sqlite3
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, TypeVar
 
@@ -244,6 +244,12 @@ class RoomTurn:
     # Handles of the members from other installations, when this host has the
     # roster (it hosts the room).
     others: tuple[str, ...] = ()
+    # On the home: the peer ids of those members (room_invites.peer_id of
+    # their Link, "" for one without), and the Links of the people in it with
+    # no agents ("Just me"), None when rooms.json couldn't be read. Only what
+    # ``_lifted`` needs to tell a room of the owner's own Hermes apart.
+    peers: tuple[str, ...] = ()
+    just_me: Optional[tuple[str, ...]] = ()
 
 
 _lock = threading.Lock()
@@ -262,7 +268,7 @@ def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
     didn't make on a host that keeps the plugin to Conduit's rooms
     (room_settings.conduit_rooms_only) runs as Hermes alone would: None."""
     home_path = Path(home) if home is not None else _hermes_home()
-    return _in_scope(_lookup(str(session_id or ""), home_path), home_path)
+    return _lifted(_in_scope(_lookup(str(session_id or ""), home_path), home_path), home_path)
 
 
 def _lookup(value: str, home_path: Optional[Path]) -> Optional[RoomTurn]:
@@ -739,7 +745,7 @@ def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optiona
         if turn is not None:
             # A room the settings leave out is searched as Hermes alone would
             # search it, its compactions' continuations and all.
-            return turn.with_others and (not turn.room_id or _applies(turn.room_id, home))
+            return _lifted(turn, home).with_others and (not turn.room_id or _applies(turn.room_id, home))
     # No row here: hidden when it says it's a room's.
     return (str(source or "").strip().lower() == ROOM_SOURCE
             or any(ROOM_SESSION_ID.fullmatch(session_id) for session_id in session_ids))
@@ -827,10 +833,11 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
     others = _others(members)
     # Someone in it with none of their agents ("Just me", room_invites.PERSON) posts in it too: the owner's
     # room rules hold for them as for another person's agent.
-    with_others = bool(others) or _just_me_in(room_id, home)
+    just_me = _just_me_links(room_id, home)
+    with_others = bool(others) or just_me is None or bool(just_me)
     # A room without other people is read again, so one who joins counts.
     return RoomTurn(room_id=room_id, side="home", with_others=with_others, session_id=session_id,
-                    others=others), with_others
+                    others=others, peers=_peer_ids(members), just_me=just_me), with_others
 
 
 def _lineage(path: Path, session_id: str) -> tuple[list[tuple[str, str]], str]:
@@ -1060,6 +1067,80 @@ def _named(handle: str, owners: Mapping[Optional[str], str]) -> str:
     return f"@{handle} ({owner}'s)" if owner else f"@{handle}"
 
 
+def _lifted(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn]:
+    """The turn as a room without other people's agents when everyone in it
+    from another installation came over a Link both sides marked as the
+    owner's own Hermes (room_links.own_links; the multi-instance plan's Rooms
+    1, Eric 2026-11-13): its far bots get what they have at home. Read each
+    time, after what's remembered, so unmarking a Link brings the rules back
+    from the next call. Anything that can't be read keeps the rules."""
+    if turn is None or not turn.with_others or not turn.room_id or home is None:
+        return turn
+    try:
+        lifted = _own_only(turn, home)
+    except Exception:  # noqa: BLE001 - unknown, so the owner's rules hold
+        logger.debug("conduit_push: couldn't tell whether room %s is only the owner's own Hermes", turn.room_id,
+                     exc_info=True)
+        lifted = False
+    return replace(turn, with_others=False, others=()) if lifted else turn
+
+
+def _own_only(turn: RoomTurn, home: Path) -> bool:
+    from . import room_identity, room_invites, room_links  # room_invites imports far more than the rules need
+    root = room_identity.root_home(home)
+    own = room_links.own_links(root)
+    if not own:
+        return False
+    if turn.side == "home":
+        if turn.just_me is None or not set(turn.just_me) <= own:
+            return False
+        own_peers = {room_invites.peer_id(link_id) for link_id in own}
+        return all(peer in own_peers for peer in turn.peers)
+    return _own_guest_room(root, turn.room_id, own)
+
+
+def own_guest_room(root: Any, room_id: str, link_id: Optional[str] = None) -> bool:
+    """Whether a room another Hermes hosts, which this one's agents are in, is
+    only the owner's own Hermes: the room's bridge (room_bridge_member) then
+    runs their turns there as at home, with no turns a day and no sitting out.
+    ``link_id``, when given, must be the Link the room came over. Anything
+    that can't be read says no."""
+    from . import room_links
+    try:
+        own = room_links.own_links(Path(root))
+        if link_id is not None and link_id not in own:
+            return False
+        return bool(own) and _own_guest_room(Path(root), room_id, own)
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: couldn't tell whether room %s is only the owner's own Hermes", room_id,
+                     exc_info=True)
+        return False
+
+
+def _own_guest_room(root: Path, room_id: str, own: frozenset[str]) -> bool:
+    """A member's Hermes knows the room by the invite it joined it from: its home's Link, and the other people
+    invited, by name. Only a room with no one else invited is the owner's own; one with a third Hermes, even
+    another of the owner's, keeps the rules here (its names say nothing of whose it is)."""
+    from . import room_invites
+    invites = [invite for key, invite in room_invites.Store(root).read()["invites"].items()
+               if isinstance(invite, dict) and key.rsplit("/", 1)[-1] == room_id]
+    return bool(invites) and all(invite.get("link") in own and invite.get("people") == [] for invite in invites)
+
+
+def _just_me_links(room_id: str, home: Path) -> Optional[tuple[str, ...]]:
+    """The Links of the people in a started room this Hermes hosts with no agents ("Just me"); None when
+    rooms.json can't be read, which counts as someone being there, so the owner's rules hold rather than lapse."""
+    from . import room_copies, room_identity, room_invites  # room_invites imports far more than the rules need
+    try:
+        draft = room_invites.Store(room_identity.root_home(home)).read()["drafts"].get(room_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: couldn't read rooms.json for room %s", room_id, exc_info=True)
+        return None
+    if draft is None or draft.get("status") != "started":
+        return ()
+    return tuple(room_copies.just_me(draft))
+
+
 def _just_me_in(room_id: str, home: Path) -> bool:
     """Whether a started room this Hermes hosts has someone in it with no agents ("Just me"). A rooms.json that
     can't be read counts as someone being there, so the owner's rules hold rather than lapse."""
@@ -1070,6 +1151,16 @@ def _just_me_in(room_id: str, home: Path) -> bool:
         logger.debug("conduit_push: couldn't read rooms.json for room %s", room_id, exc_info=True)
         return True
     return draft is not None and draft.get("status") == "started" and bool(room_copies.just_me(draft))
+
+
+def _peer_ids(members: Optional[list[Any]]) -> tuple[str, ...]:
+    """The peer id of each member another installation runs, in ``_others``' order ("" for one without)."""
+    peers: list[str] = []
+    for member in members or ():
+        target = member.get("target") if isinstance(member, dict) else None
+        if isinstance(target, dict) and target.get("kind") == "peer":
+            peers.append(str(target.get("peer_id") or ""))
+    return tuple(peers)
 
 
 def _others(members: Optional[list[Any]]) -> tuple[str, ...]:

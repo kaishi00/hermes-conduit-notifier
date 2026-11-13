@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.169.0 (2026-11-13)
+## 0.170.0 (2026-11-13)
 
 ### Fixes
 
@@ -23,6 +23,12 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 
 - A bot asked something by another can ask it a question back about that ask, and bots can send each other a note that needs no answer, so a long joint job no longer piles up open asks.
+
+## 0.169.0 (2026-11-13)
+
+### New and improved
+
+- Groundwork for using several of your own Hermes together: a Link both Hermes mark as your own (`hermes conduit-push links own`, and later Conduit by itself) makes a room with only your own Hermes in it a room of your own agents. The bots from your other Hermes work there with their own tools, memory and approvals, as at home, with no room rules or turn limits.
 
 ## 0.168.10 (2026-11-13)
 

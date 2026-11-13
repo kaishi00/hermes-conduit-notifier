@@ -636,6 +636,7 @@ routes:
   - POST /rooms/links
   - DELETE /rooms/links/invites
   - POST /rooms/links/invites
+  - PUT /rooms/links/own
   - POST /rooms/links/preview
   - GET /rooms/looks
   - PUT /rooms/looks
