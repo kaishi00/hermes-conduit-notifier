@@ -4736,12 +4736,12 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
     words straight into it (Reply in W3), ``stop`` it, ``continue`` it or
     ``check`` first after a restart. No Bot Chat turn: the coordinator sees
     it in its next digest. The answer has ``ok``, the row as it is now, and
-    ``error`` with a ``note`` when nothing was done."""
+    ``error`` with a ``note`` when nothing was done. A question's id (P1)
+    for ``ref`` is their Approve or Decline on its card (``_app_answer``)."""
     home = Path(home)
     body = body if isinstance(body, dict) else {}
-    asked = str(ref or "").strip().upper()
-    if work_coord._PROPOSAL.fullmatch(asked):
-        return _app_answer(home, asked, action)
+    if work_coord.is_question(ref):
+        return _app_answer(home, str(ref).strip().upper(), action)
     if action not in APP_ACTIONS:
         return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for work."}
     if action in APP_APPROVAL:

@@ -643,6 +643,13 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
     refusal = _asked_before(store, refs, new, text=text)
     if refusal is not None:
         return refusal
+    waiting = open_questions(store)
+    if len(waiting) >= PROPOSALS_SHOWN:
+        # Each open question is a card the user answers: a pile of them is
+        # no question at all, and one that loops would fill their Work panel.
+        return {"ok": False, "error": "too_many_open",
+                "note": f"The user already has {len(waiting)} of your questions waiting, so this one wasn't kept. "
+                        "Reword one that covers it (replaces), or wait for their answers."}
     declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)
     made = store.proposal_add(refs, text, new if declined is not None else "")
     covers = f" It covers {_listed(refs)}; their answer is for each." if len(refs) > 1 else ""
@@ -651,12 +658,17 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
                                             f"they answer, call work_propose with id {made} and their answer."}
 
 
+def is_question(ref: Any) -> bool:
+    """Whether ``ref`` is a question's id (P1), as the app sends it."""
+    return bool(_PROPOSAL.fullmatch(str(ref or "").strip().upper()))
+
+
 def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: str = "") -> dict:
     """The user's own answer to an open question, tapped on its card in
-    Conduit: kept as theirs with no Bot Chat turn to record it. ``line`` is
-    what a yes tells the Bot Chat (``coordinator``), which then acts on it;
-    it is in the outbox as ``outbox`` in the same write as the answer, so a
-    restart between the two doesn't lose it."""
+    Conduit: kept as theirs with no Bot Chat turn to record it. A yes
+    returns ``line``, what it tells the Bot Chat (``coordinator``), which
+    then acts on it, and ``outbox``, that line's outbox row, written with the
+    answer so a restart between the two doesn't lose it."""
 
     def line(row: dict) -> str:
         refs = work_store.proposal_refs(row)

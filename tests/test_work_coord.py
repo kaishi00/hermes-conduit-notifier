@@ -600,6 +600,38 @@ def test_every_open_question_is_listed_with_its_card(on, hermes, home):
     assert listed["counts"]["questions"] == len(asked) == len(cards) == 34
 
 
+def test_a_tapped_yes_a_restart_caught_goes_out_once(on, hermes, home, monkeypatch):
+    """The yes and its line are one write, so a restart before the update
+    went out replays it: the same row, as the user's answer, once."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    woken(home)
+    asked = call("work_propose", {"text": "Stop W1: the API it ports to is gone.", "ref": "W1"})["id"]
+    assert work.app_act(on.home, asked, "approve")["ok"]
+    line, = batched()
+    for held in (work._wakes, work._wake_answers, work._wake_items):
+        held.clear()  # the restart: nothing of the old process is queued
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    assert len(on.outbox_rows("", "line_answer")) == 1
+    work._send_wake(on.home, BOT_CHAT)
+    sent = on.outbox_rows("", "wake")[-1]["text"]
+    assert sent.startswith("Work update from Conduit: the user answered what you asked them")
+    assert sent.count(line) == 1
+    assert not [row for row in on.outbox_pending() if row["kind"] == "line_answer"]
+
+
+def test_a_pile_of_open_questions_takes_no_more(on, hermes, home):
+    """Every open question is a card the user answers, so the Bot Chat
+    can't keep adding them: past a dozen it rewords one or waits."""
+    woken(home)
+    for number in range(coord.PROPOSALS_SHOWN):
+        on.proposal_add("", f"Unrelated question number {number}.")
+    more = call("work_propose", {"text": "Start a workstream for the billing export audit."})
+    assert more["error"] == "too_many_open" and len(on.proposals_open()) == coord.PROPOSALS_SHOWN
+
+
 def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
     """A start the Bot Chat would make names no workstream, so the open
     question itself is what a second one is held against: nearly the same
