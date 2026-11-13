@@ -551,16 +551,22 @@ _WORDS = re.compile(rf"[^\W_{_UNSPACED}]+|[{_UNSPACED}]")
 def _same_words(one: str, other: str) -> bool:
     """Whether two questions say nearly the same: most of the words of each
     are the other's, and neither names something of its own in the other's
-    place. "Fix the login bug" and "fix the logout bug", or an upgrade to 16
-    and to 17, share their frame and are two questions."""
+    place. "Fix the login bug" and "fix the logout bug", the SQL bug and the
+    CSS bug, or an upgrade to 16 and to 17, share their frame and are two
+    questions. A word names something at four letters, with a digit or in
+    capitals (an acronym); shorter words ("the", "a") are the frame. A
+    Korean word that changes only its particle ("작업을", "작업이") is the
+    same word reworded, so short Hangul words stay frame too."""
     first, second = (set(_WORDS.findall(text.lower())) for text in (one, other))
     if not first or not second:
         return False
     if len(first & second) / len(first | second) < SAME_QUESTION_SHARE:
         return False
+    capitals = {word.lower() for text in (one, other) for word in _WORDS.findall(text)
+                if len(word) >= 2 and word.isupper()}
 
     def names(words: set[str]) -> bool:
-        return any(len(word) >= 4 or word.isdigit() for word in words)
+        return any(len(word) >= 4 or any(ch.isdigit() for ch in word) or word in capitals for word in words)
 
     return not (names(first - second) and names(second - first))
 
@@ -761,9 +767,9 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
     # Every open question is listed, past both limits: each is counted as
     # needing the user (counts.questions), so each has its card to answer on.
     asked = open_questions(store)  # one about resolved work is off the list
-    # The answered ones have their own dozen: the store lists open ones first.
-    answered = [row for row in store.proposals(since=since, limit=PROPOSALS_SHOWN + len(asked))
-                if row["status"] != "open"][-PROPOSALS_SHOWN:]
+    # The answered ones have their own dozen, the latest answered: one asked
+    # long ago and answered just now is among them.
+    answered = store.proposals_answered(since=since, limit=PROPOSALS_SHOWN)
     cards = []
     for row in asked + answered:
         refs = work_store.proposal_refs(row)

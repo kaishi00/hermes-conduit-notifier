@@ -2060,7 +2060,7 @@ cache, every tool refused, nothing saved to the chat, state.db or memory.
 Unlike `prompt.btw`, whose answer goes to every client (Hermes Desktop shows
 it as a `[btw …]` note), the route answers only the device that asked.
 
-From plugin 0.168.3, finishing a prediction releases only its own clients,
+From plugin 0.168.5, finishing a prediction releases only its own clients,
 not the live chat's memory provider, terminal, browser or file state. This
 also applies when the prediction fails; older Hermes without the fork
 release helper use client-only cleanup too.

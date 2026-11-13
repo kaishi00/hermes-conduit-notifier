@@ -615,6 +615,23 @@ def test_every_open_question_is_listed_with_its_card(on, hermes, home):
     assert coord._same_words("เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลง", "เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลงไหม")
 
 
+def test_the_answered_cards_are_the_latest_answered(on, hermes, home):
+    """Past a dozen answered in a day, the Work panel keeps the ones answered
+    last: a question asked long ago and answered just now stays on it
+    (notifier #760)."""
+    woken(home)
+    asked = [on.proposal_add("", f"Unrelated question number {number}.") for number in range(coord.PROPOSALS_SHOWN + 2)]
+    now = time.time()
+    with on._db() as con:
+        # The first one asked is the last one answered.
+        for order, item in enumerate(asked[1:] + asked[:1]):
+            con.execute("UPDATE proposals SET status = 'approved', answered_at = ? WHERE id = ?",
+                        (now - 60 + order, item))
+    shown = [card["id"] for card in coord.app_items(on, {}) if card["kind"] == "proposal"]
+    assert len(shown) == coord.PROPOSALS_SHOWN
+    assert asked[0] in shown and asked[1] not in shown and asked[2] not in shown
+
+
 def test_a_tapped_yes_a_restart_caught_goes_out_once(on, hermes, home, monkeypatch):
     """The yes and its line are one write, so a restart before the update
     went out replays it: the same row, as the user's answer, once."""
@@ -666,6 +683,14 @@ def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
     assert not coord._same_words("Start a workstream to upgrade Postgres to 16.",
                                  "Start a workstream to upgrade Postgres to 17.")
     assert not coord._same_words("서버 로그 정리 작업을 시작할까요", "서버 백업 정리 작업을 시작할까요")
+    # A short name in capitals is a name too (notifier #760), at the tool as well.
+    assert not coord._same_words("Start a workstream to fix the SQL bug in the export.",
+                                 "Start a workstream to fix the CSS bug in the export.")
+    assert coord._same_words("Start a workstream to fix the bug in the export.",
+                             "Start a workstream to fix a bug in the export.")
+    sql = call("work_propose", {"text": "Start a workstream to fix the SQL bug in the export."})
+    css = call("work_propose", {"text": "Start a workstream to fix the CSS bug in the export."})
+    assert sql["ok"] and css["ok"] and css["id"] != sql["id"]
     # Reworded into the other open one, it would be two cards asking the same.
     into = call("work_propose", {"text": "Start a workstream to audit the billing export now.", "replaces": made})
     assert into["error"] == "already_asked" and into["id"] == other["id"]

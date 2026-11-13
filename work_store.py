@@ -884,6 +884,14 @@ class Store:
                           "answered_at >= ?) ORDER BY status = 'open' DESC, created_at DESC LIMIT ?", (since, limit))
         return sorted(rows, key=lambda row: row["created_at"])
 
+    def proposals_answered(self, *, since: float = 0.0, limit: int = 20) -> list[dict]:
+        """The ``limit`` the user answered most recently since then (not
+        withdrawn ones), oldest asked first: one asked long ago and
+        answered last is among them."""
+        rows = self._read("SELECT * FROM proposals WHERE status NOT IN ('open', 'withdrawn') AND answered_at >= ? "
+                          "ORDER BY answered_at DESC LIMIT ?", (since, limit))
+        return sorted(rows, key=lambda row: row["created_at"])
+
     def proposals_open(self) -> list[dict]:
         """Every question still waiting on the user, oldest first."""
         if not self.path.is_file():

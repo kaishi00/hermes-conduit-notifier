@@ -13,12 +13,31 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.5 (2026-11-13)
+
+### Fixes
+
+- Predictions: finishing a guess could close the terminal, browser and file state of the chat it read, and end that chat's memory provider. A guess now lets go of only its own connections, also when it fails.
+
+## 0.168.4 (2026-11-13)
+
+### Fixes
+
+- Pulse: a whole report you put off with Not now came back as new a week later without a check, even when every day it spoke of had passed. It's now read first, like other cards, and stays away when it's out of date.
+- Pulse: a card held for the brief, put off, or found on its own and still on your screen is also dropped when the day, time or deadline it was about has passed and nothing in it is left to do.
+
 ## 0.168.3 (2026-11-13)
 
 ### Fixes
-- Finishing a prediction could close resources belonging to the chat it
-  asked about. Predictions now release only their own clients, including
-  when the prediction fails.
+- A bot's question about the SQL bug was refused as already asked while
+  one about the CSS bug was open. A short name in capitals counts as
+  naming something, like a longer word.
+- On a busy day the Work panel could drop a question you answered last, if
+  the bot had asked it early. It keeps the ones you answered most recently.
+
+### New and improved
+- Sending to a workstream on the gateway reads its chat once instead of
+  twice.
 
 ## 0.168.2 (2026-11-13)
 
@@ -82,6 +101,7 @@ checks it). The format is fixed, because Conduit reads it:
 - A bot in a room with other people's agents could answer as if a picture
   sent there wasn't there. Each turn that names pictures now tells the bot
   to look at them first.
+
 ## 0.167.2 (2026-11-12)
 
 ### Fixes
@@ -125,7 +145,6 @@ checks it). The format is fixed, because Conduit reads it:
   that, every message the Bot Chat sent them was refused as "open in another
   Hermes window" until the gateway restarted again. A restart now only
   recovers work that the restarted process itself was running.
-
 
 ## 0.165.0 (2026-11-12)
 
