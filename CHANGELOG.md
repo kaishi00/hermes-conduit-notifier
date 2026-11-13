@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.167.6 (2026-11-13)
+
+### Fixes
+- On a Hermes where the gateway serves Conduit's connection, the bot was
+  never told it could draw cards for your messages from Conduit, and
+  turning off Conduit replies in Settings > Notifications did nothing
+  there. Both now work for messages you send from Conduit.
+
 ## 0.167.5 (2026-11-12)
 
 ### New and improved
