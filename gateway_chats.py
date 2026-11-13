@@ -553,10 +553,12 @@ class _AuthorityLink:
             self._detach_later(sid, replaced)
 
     def _forget_prompt(self, prompt_id: Any) -> None:
-        # Called with the lock held.
-        if self.prompts.pop(prompt_id, None) is not None:
-            self.settled[prompt_id] = time.monotonic()
+        # Called with the lock held. Kept as settled even when this link never
+        # noted it: a first read in flight may list it (its snapshot not noted yet).
+        self.prompts.pop(prompt_id, None)
         self.prompt_texts.pop(prompt_id, None)
+        if isinstance(prompt_id, str) and prompt_id:
+            self.settled[prompt_id] = time.monotonic()
 
     def seen_approvals(self, sid: str, viewing: Any) -> Optional[list]:
         """The approvals ``sid`` waits on, oldest first, as this link's view of

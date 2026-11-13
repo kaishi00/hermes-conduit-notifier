@@ -645,6 +645,14 @@ def test_a_views_own_record_answers_which_approvals_a_chat_waits_on(gateway, mon
     assert [row["request_id"] for row in chats.seen_approvals(transport, "/home", "w1")] == ["p6"]
     # A snapshot doesn't say when Hermes asked, so its timeout isn't counted from the read.
     assert link.prompt_texts["p6"][2] is None
+    # The same on a first read, before the link knew the prompt at all.
+    answers["session.resume"] = lambda request: (
+        chats.link(fresh).write(_event("w2", "approval.settled", {"prompt_id": "q1"}, generation=1)),
+        {"result": {"session_id": "w2", "execution_generation": 1, "subscription_id": "sub2",
+                    "prompts": [{"kind": "approval", "prompt_id": "q1", "execution_generation": 1, "command": "x"}]}})[1]
+    fresh = Transport()
+    _call(chats, fresh, "session.resume", {"session_id": "w2", "omit_messages": True})
+    assert chats.seen_approvals(fresh, "/home", "w2") == []
     # Closing the view forgets what it followed of the chat.
     _call(chats, transport, "session.close", {"session_id": "w1"})
     assert chats.seen_approvals(transport, "/home", "w1") is None
