@@ -47,6 +47,10 @@ WHY_CHARS = 300
 READ_LINES = 6
 # Hidden turns the watch may start in a bot's Bot Chat in an hour.
 FLAGS_PER_HOUR = 12
+# How long finished work still counts as other work a report may matter to
+# (as long as work_start holds a new task against it): past it, one
+# workstream working alone costs no read.
+SETTLED_AGE_S = 6 * 3600.0
 CALL_TIMEOUT_S = 60.0
 MAX_TOKENS = 300
 KINDS = ("found", "assumes", "changed", "user")
@@ -193,7 +197,9 @@ def check(home: Path, words: Any = (), ask: Optional[Callable[[str, str], tuple[
     last = fresh[-1]["id"]
     more = len(fresh) >= NEW_EVENTS  # more came than one read takes: the rest get the next one
     new = [event for event in fresh if event["ref"] in works]
-    opened = [work for work in works.values() if work.active or work.updated_at >= now - work_coord.BOARD_AGE_S]
+    # Work still at it, and work that settled lately: what a running
+    # workstream reports can break what one that just finished built.
+    opened = [work for work in works.values() if work.active or work.updated_at >= now - SETTLED_AGE_S]
     opened = sorted(opened, key=lambda work: (not work.active, -work.updated_at))[:OPEN_WORK]
     sources = {event["ref"] for event in new}
     if not new or not any(work.ref not in sources for work in opened) and len(sources) < 2:

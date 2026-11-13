@@ -4890,7 +4890,7 @@ def test_a_worktree_gives_a_workstream_its_own_branch(on, hermes, trees):
 
 
 def test_a_worktree_that_cant_be_made_starts_nothing(on, hermes, trees):
-    answer = start(cwd="/elsewhere", worktree=True)
+    answer = start(cwd=str(trees.root.parent), worktree=True)  # a folder that exists, outside the repository
     assert answer["error"] == "worktree" and "isn't in a git repository" in answer["note"]
     assert hermes.named("session.create") == [] and on.get("W1").status == "failed"
     trees.local = False
@@ -4951,6 +4951,21 @@ def test_a_hermes_that_cant_say_where_its_terminal_runs_makes_no_worktree(on, he
     answer = start(cwd=str(trees.root), worktree=True)
     assert answer["error"] == "worktree" and on.get("W1").status == "failed"
     assert hermes.named("session.create") == []
+
+
+def test_a_folder_that_isnt_there_is_refused_where_that_can_be_told(on, hermes, trees, monkeypatch):
+    """Hermes ignores a folder it can't find and works in its default one,
+    so the workstream would be somewhere else without knowing. Only on its
+    local terminal: a remote or container terminal's folders aren't here."""
+    gone = str(trees.root / "nowhere")
+    answer = start(cwd=gone)
+    assert answer["error"] == "no_such_folder" and gone in answer["note"]
+    assert on.list() == [] and hermes.named("session.create") == []
+    trees.local = False
+    assert start(cwd=gone)["ok"]
+    trees.local = True
+    monkeypatch.setattr(trees, "local_backend_active", lambda: 1 / 0)
+    assert start("Docs", "Write the docs.", cwd=gone, new=True)["ok"]  # no way to tell: as before
 
 
 def test_turning_approvals_back_on_stops_reopening_once_its_time_is_up(home, hermes, monkeypatch):

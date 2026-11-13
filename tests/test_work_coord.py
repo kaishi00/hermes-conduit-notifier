@@ -598,3 +598,19 @@ def test_every_open_question_is_listed_with_its_card(on, hermes, home):
     listed = work.app_list(on.home)
     cards = [item["id"] for item in listed["coordination"]["items"] if item.get("actions")]
     assert listed["counts"]["questions"] == len(asked) == len(cards) == 34
+
+
+def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
+    """A start the Bot Chat would make names no workstream, so the open
+    question itself is what a second one is held against: nearly the same
+    words are the same question, other words another."""
+    woken(home)
+    made = call("work_propose", {"text": "Start a workstream to write the changelog for 2.3."})["id"]
+    again = call("work_propose", {"text": "Start a workstream to write the 2.3 changelog?"})
+    assert again["error"] == "already_asked" and again["id"] == made
+    assert "nearly the same" in again["note"] and f"replaces {made}" in again["note"]
+    other = call("work_propose", {"text": "Start a workstream to audit the billing export."})
+    assert other["ok"] and other["id"] != made
+    # Reworded, it's still the one question.
+    assert call("work_propose", {"text": "Start the 2.3 changelog now that the notes are in.", "replaces": made})["ok"]
+    assert len(on.proposals_open()) == 2

@@ -42,6 +42,7 @@ BOARD_AGE_S = 24 * 3600.0
 PROPOSAL_CHARS = 300
 PROPOSALS_SHOWN = 12  # open ones first; work_propose is told they stay
 PROPOSAL_CLOSED_AGE_S = 24 * 3600.0
+SAME_QUESTION_SHARE = 0.7  # of the two questions' words, for one about no workstream
 REPORT_ITEMS = 4
 # Messages to one workstream in an hour from turns the Bot Chat started
 # itself: past it, two models answering each other are stopped and the user
@@ -84,7 +85,7 @@ RULES = {
     "ask": ("You also keep this bot's workstreams working together. On every turn, read the board below: when "
             "what one workstream found or changed breaks what another relies on or is doing, act on it before "
             "the user has to tell you. Pass on information and ask a workstream to check something freely "
-            "(work_send, with how add while it's working). Before you change a workstream's direction, start, "
+            "(work_send, with how set to add while it's working). Before you change a workstream's direction, start, "
             "stop or interrupt one in a turn the user didn't start, ask them: say what you found, with the "
             "evidence, and what you recommend, and record it with work_propose; when they answer, record that "
             "with work_propose too and act on a yes. Check a finding that could be wrong (a 401 isn't a removed "
@@ -513,7 +514,9 @@ SCHEMA = {
                     "refused: wait for their answer, or call with replaces to reword the open one when new "
                     "evidence came. After they decline one, a question about the same work within a day needs "
                     "new: what came up since. When they answer, call it with the id and answer approved or "
-                    "declined, then act on a yes. Open and declined ones stay on your board."),
+                    "declined, then act on a yes. The user can also answer with a tap in Conduit: "
+                    "you're told then, and it's already recorded. Open ones stay on your board until "
+                    "they're answered, answered ones for a day."),
     "parameters": {"type": "object", "properties": {
         "text": {"type": "string", "description": "What you propose, with the evidence, in a line or two."},
         "ref": {"type": "string", "description": "The workstream it's about (W1), if one."},
@@ -537,12 +540,32 @@ def _listed(refs: list[str]) -> str:
     return f"{', '.join(refs[:-1])} and {refs[-1]}"
 
 
-def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides: str = "") -> Optional[dict]:
+def _same_words(one: str, other: str) -> bool:
+    """Whether two questions say nearly the same: most of the words of each
+    are the other's."""
+    first, second = (set(re.findall(r"[a-z0-9]+", text.lower())) for text in (one, other))
+    if not first or not second:
+        return False
+    return len(first & second) / len(first | second) >= SAME_QUESTION_SHARE
+
+
+def _asked_before(store: work_store.Store, refs: list[str], new: str, *, besides: str = "",
+                  text: str = "") -> Optional[dict]:
     """Why a question about ``refs`` isn't asked now, or None: another open
-    question covers some of that work, or the user said no to it in the last
-    day and nothing new came up."""
+    question covers some of that work (or, about no workstream, asks nearly
+    the same as ``text``), or the user said no to it in the last day and
+    nothing new came up."""
     # One open question per workstream: a second would ask the user twice.
     pending = store.proposal_about(refs, status="open", besides=besides)
+    if pending is None and not refs:
+        # About no workstream (a start it would make): the same words again
+        # are the same question.
+        pending = next((row for row in store.proposals_open() if row["id"] != besides
+                        and not work_store.proposal_refs(row) and _same_words(row["text"], text)), None)
+        if pending is not None:
+            return {"ok": False, "id": pending["id"], "error": "already_asked",
+                    "note": f"{pending['id']} asks the user nearly the same and is still open. Wait for their "
+                            f"answer, or call again with replaces {pending['id']} to reword it with what's new."}
     if pending is not None:
         return {"ok": False, "id": pending["id"], "error": "already_asked",
                 "note": f"{pending['id']} about {_listed(work_store.proposal_refs(pending))} is still open. "
@@ -617,7 +640,7 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
                     "note": f"There's no open {replaces}. Your note lists the open ones."}
         return {"ok": True, "id": replaces, "note": f"{replaces} now reads as you wrote it. Tell the user what "
                                                     "changed in your reply; it's still one question."}
-    refusal = _asked_before(store, refs, new)
+    refusal = _asked_before(store, refs, new, text=text)
     if refusal is not None:
         return refusal
     declined = store.proposal_about(refs, status="declined", since=time.time() - PROPOSAL_CLOSED_AGE_S)

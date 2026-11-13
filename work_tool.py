@@ -334,7 +334,8 @@ SCHEMAS: dict[str, dict] = {
         "parameters": {"type": "object", "properties": {
             "title": {"type": "string", "description": "A few words the user will recognise, like Login bug."},
             "instructions": {"type": "string", "description": "Everything the workstream needs to do the task."},
-            "cwd": {"type": "string", "description": "Optional folder to work in."},
+            "cwd": {"type": "string", "description": ("Optional folder to work in, one that exists. Left out, "
+                                                      "it works where this bot's chats do.")},
             "worktree": {"type": "boolean", "description": ("Work in a git worktree of its own, on a branch of "
                                                             "its own, made from the repository cwd is in: for a "
                                                             "coding task, above all when other work is in the "
@@ -1262,6 +1263,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                             "again with new=true if this really is separate work."}
     limit = store.max_running()
     cwd = str(args.get("cwd") or "").strip()
+    if work_trees.missing(cwd):
+        # Hermes would ignore it without a word and work in its default
+        # folder, with the workstream believing it was in this one.
+        return {"ok": False, "error": "no_such_folder",
+                "note": f"There's no folder {cwd} on this host, so the workstream would have worked somewhere "
+                        "else without knowing. Give a folder that exists, or leave cwd out and say in the "
+                        "instructions where to work."}
     # The count and the new row in one transaction: two starts in one turn
     # can't both take the last slot.
     # Started from a room: kept with the bot's Bot Chat (its note, its
@@ -1277,8 +1285,8 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         running = [_row(work) for work in store.list(active_only=True) if work.kind == "workstream"
                    and not _from_call(work) and work.status in ("starting", "running", "needs_you")]
         return {"ok": False, "error": "busy", "running": running,
-                "note": f"This bot already has {limit} workstreams running, its limit. Wait for one, stop one, or "
-                        "send this to one of them."}
+                "note": f"This bot already has {limit} workstreams running, its limit (the user sets it in "
+                        "Conduit: Edit Bot > Work). Wait for one, stop one, or send this to one of them."}
     tree = None
     repo = work_trees.repo_root(cwd) if cwd else ""
     if args.get("worktree"):
