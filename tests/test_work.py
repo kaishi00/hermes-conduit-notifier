@@ -5976,6 +5976,11 @@ def test_a_linked_room_starts_work_only_once_the_owner_says_yes(on, hermes, link
     assert row.reply_to["linked"] is True and row.reply_to["side"] == "home"
     brief = _brief_text(hermes)
     assert "Linked Room" in brief and "OKd these instructions" in brief and "Map the park's shade." in brief
+    # Hermes' review of its turn, in a fork of its chat, keeps no skill from the room either.
+    assert work.tool_block(row.session_id, "skill_manage", {})["action"] == "block"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(work, "_in_fork", lambda: True)
+        assert work.tool_block(row.session_id, "skill_manage", {})["action"] == "block"
     # The room hears it privately, woken by a post that says nothing of it.
     assert any("started W1" in line for line in private_lines(on.home))
     posted, = linked["posted"]

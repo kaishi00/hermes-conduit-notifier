@@ -543,8 +543,9 @@ def _listed(refs: list[str]) -> str:
 
 
 # A question's words in any language; where words aren't spaced (Chinese,
-# Japanese), each character is one.
-_WORDS = re.compile(r"[^\W_\u3040-\u30ff\u3400-\u9fff]+|[\u3040-\u30ff\u3400-\u9fff]")
+# Japanese, Korean, Thai, Lao, Khmer, Burmese), each character is one.
+_UNSPACED = "\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3"
+_WORDS = re.compile(rf"[^\W_{_UNSPACED}]+|[{_UNSPACED}]")
 
 
 def _same_words(one: str, other: str) -> bool:
@@ -766,5 +767,5 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
              "at": row["created_at"], "text": row["text"], "status": row["status"],
              "answer": row["answer"], "answered_at": row["answered_at"], "why": [],
              "actions": list(APP_ANSWERS) if row["status"] == "open" else []})
-    items = sorted(items, key=lambda item: -item["at"])[:max(0, APP_ITEMS - len(waiting))]
+    items = sorted(items, key=lambda item: -item["at"])[:max(PROPOSALS_SHOWN, APP_ITEMS - len(waiting))]
     return sorted(waiting + items, key=lambda item: -item["at"])

@@ -601,6 +601,13 @@ def test_every_open_question_is_listed_with_its_card(on, hermes, home):
     listed = work.app_list(on.home)
     cards = [item["id"] for item in listed["coordination"]["items"] if item.get("actions")]
     assert listed["counts"]["questions"] == len(asked) == len(cards) == 34
+    # One they answer keeps its card, answered, past all the open ones.
+    assert work.app_act(on.home, asked[0], "decline")["ok"]
+    listed = work.app_list(on.home)
+    done = next(item for item in listed["coordination"]["items"] if item["id"] == asked[0])
+    assert done["status"] == "declined" and done["actions"] == [] and listed["counts"]["questions"] == 33
+    # Unspaced scripts compare by character.
+    assert coord._same_words("เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลง", "เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลงไหม")
 
 
 def test_a_tapped_yes_a_restart_caught_goes_out_once(on, hermes, home, monkeypatch):

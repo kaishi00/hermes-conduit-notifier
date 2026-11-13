@@ -3164,11 +3164,6 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
     # A fork of the Bot Chat (its review, /btw) runs under its id and is
     # held to the same policy; a subagent never reaches here.
     calls = [(name, args)]
-    if name in REVIEW_TOOLS and _in_fork():
-        # Hermes' review of a turn keeps the bot's skills, as it does after
-        # any chat's turn, and Hermes lets that fork run nothing else. It is
-        # no step of the coordinator's turn, so it takes none of its budget.
-        return None
     if name == "tool_call":
         from . import pulse_tools
 
@@ -3184,6 +3179,12 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
     linked = _linked_worker_block(session_id, home, name, names)
     if linked is not None:
         return linked
+    if name in REVIEW_TOOLS and _in_fork():
+        # Hermes' review of a turn keeps the bot's skills, as it does after
+        # any chat's turn, and Hermes lets that fork run nothing else. It is
+        # no step of the coordinator's turn, so it takes none of its budget.
+        # After the Linked Room check: nothing from one is kept as a skill.
+        return None
     if mode == "off":
         # Turning workstreams off doesn't stop one that's running, nor what it may not do.
         if name == "tool_call" and (not names or any(called in BRIDGE for called in names)):
