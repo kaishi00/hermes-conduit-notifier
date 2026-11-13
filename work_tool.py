@@ -428,9 +428,9 @@ SCHEMAS: dict[str, dict] = {
     },
     "work_tell": {
         "name": "work_tell",
-        "description": ("Tell another of the user's bots on this Hermes something it needs no answer to (a "
-                        "status, a result, a heads-up), without opening an ask. It reaches that bot's Bot Chat as "
-                        "a work update. Only you can tell; for a question or work, use work_ask."),
+        "description": ("Tell another of the user's bots on this Hermes something, with no answer owed. "
+                        "A status, a result or a heads-up reaches that bot's Bot Chat as a work update, without "
+                        "opening an ask. Only you can tell; for a question or work, use work_ask."),
         "parameters": {"type": "object", "properties": {
             "bot": {"type": "string", "description": "The bot to tell, by its name (Nahida) or its profile."},
             "text": {"type": "string", "description": f"What to tell it, up to {ASK_CHARS:,} characters."}},
