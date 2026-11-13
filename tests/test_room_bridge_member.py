@@ -575,6 +575,20 @@ def test_the_daily_limit_tells_once_then_passes(laifu, hermes):
     assert next_day["run"]["status"] == "queued"
 
 
+def test_a_room_of_only_your_own_hermes_runs_as_at_home(laifu, hermes, monkeypatch):
+    # Multi-instance plan, Rooms 1: no sitting out and no turns a day there.
+    asked = []
+    monkeypatch.setattr(member_module.room_rules, "own_guest_room",
+                        lambda root, room_id, link_id=None: asked.append((room_id, link_id)) or True)
+    choose(laifu, takes_part="listens", daily_limit=1)
+
+    admit(laifu, "t1")
+    admit(laifu, "t2")
+
+    assert [call["key"] for call in hermes.calls_to("POST", "/v1/runs")] == ["room:t1:1", "room:t2:1"]
+    assert asked[0] == ("room-zoo", "link1")
+
+
 def test_a_retried_dispatch_counts_once_toward_the_limit(laifu, hermes):
     choose(laifu, daily_limit=1)
     body, key = dispatch("t1")

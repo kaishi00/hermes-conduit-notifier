@@ -4052,7 +4052,9 @@ A gateway-hosted room can seat an agent from another installation (a RoomLink
 peer member, `target.kind: "peer"`), so agents of different owners talk in
 one room (Linked Rooms, designs/cross-owner-agents). Each owner's rules for
 their own agent run on their own host, through this plugin's hooks, whichever
-host the room lives on. Rooms of only this host's own agents work as before.
+host the room lives on. Rooms of only this host's own agents work as before,
+and so do rooms whose other agents all live on your own Hermes (see "Your own
+Hermes on both sides" under Linking with someone).
 
 The plugin tells a room turn apart by its session: an agent sitting in a room
 hosted elsewhere runs in `room_<digest>`, and a local member runs in a hidden
@@ -4291,6 +4293,7 @@ hermes conduit-push links accept <conduit://link/...> --name Mona
 hermes conduit-push links list                           # Links, invites still waiting, the mailbox
 hermes conduit-push links remove <Link id>               # unlinks, on both sides; asks first (--yes doesn't)
 hermes conduit-push links cancel <invite id>             # takes an invite back
+hermes conduit-push links own <Link id> on|off           # both Hermes are yours (below)
 ```
 
 A Link waits until the inviter's Hermes confirms it, and one still waiting
@@ -4318,6 +4321,31 @@ since the mailbox's clock may be that far behind this host's), and a refusal
 for the count says how many. Everything a Link needs, its send tokens
 included, stays in `conduit-rooms/links.json` (owner only), never in a log or
 a route's answer.
+
+### Your own Hermes on both sides (plugin 0.169+)
+
+When both Hermes are yours (a home server and a work one, say), mark the Link
+as your own Hermes on each side: `PUT /rooms/links/own`
+(`{"link_id": ..., "own": true}`) or `hermes conduit-push links own <Link id> on`.
+Conduit shows no setting for it: once it holds both Hermes, it marks the Link
+between them itself, and it never marks a Link to someone else's Hermes. Each side tells the other in a
+`link.own` envelope, and the Link is your own only while both sides say so:
+one side's mark alone does nothing, so a Link with someone else can never
+become one from your side. Either side turning it off ends it on both, from
+the next turn. `links list` and the Link in `/rooms/links` say how it stands
+(`own` for this side, `their_own`, and `own_link` for both); a Hermes whose
+plugin is older drops the envelope, and its Link reads as needing an update.
+
+A room whose members from other installations all came over own Links runs as
+a room of only your own agents: no owner rules, framing or reply scrub, its
+chats found by past-chat search, and on the Hermes your far agent lives on, no
+turns a day and no sitting out. The far agent works with its own tools, memory
+and approvals there, as at home. On the room's home that means every member
+from elsewhere, and everyone in it with Just me, is over an own Link; on the
+other Hermes, that the room came over an own Link and its invite named no one
+else (a room with a third Hermes keeps the rules there, even another of yours,
+since a name says nothing of whose it is). `/rooms/people` says so in
+`own_hermes`. Anything that can't be read keeps the rules.
 
 The dashboard's process reads the inbox: one loop for the installation,
 whichever process holds `conduit-rooms/.lease`. While nothing waits it only

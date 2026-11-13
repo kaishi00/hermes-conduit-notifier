@@ -5740,6 +5740,10 @@ def test_a_room_with_other_peoples_agents_starts_no_work(on, hermes, room):
     assert refused["error"] == "room_with_others" and "other people's agents" in refused["note"]
     room["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=True, session_id=ROOM_CHAT)
     assert room_start()["error"] == "room_with_others"
+    # One of the owner's other Hermes hosts it (multi-instance plan, Rooms 1): an honest no, for now.
+    room["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=False, session_id=ROOM_CHAT)
+    elsewhere = room_start()
+    assert elsewhere["error"] == "room_elsewhere" and "other Hermes" in elsewhere["note"]
     room["turn"] = room_rules.RoomTurn(room_id="", side="home", with_others=False, session_id=ROOM_CHAT)
     legacy = room_start()
     assert legacy["error"] == "legacy_group" and "other people" not in legacy["note"]
@@ -6024,6 +6028,18 @@ def test_run_work_off_starts_nothing_and_asks_nobody(on, hermes, linked):
     linked["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=False, session_id=ROOM_CHAT)
     assert room_work_call({"action": "list"})["error"] == "not_linked"
     assert json.loads(work.handle_room_work({"action": "list"}, session_id=BOT_CHAT))["error"] == "not_linked"
+    linked["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=False, session_id=ROOM_CHAT)
+    assert room_work_call({"action": "list"})["error"] == "room_elsewhere"
+
+
+def test_work_for_a_room_now_on_your_own_other_hermes_says_why_it_cant_report(monkeypatch, tmp_path):
+    # A Link marked as your own while work for its room waits or runs (multi-instance plan, Rooms 1).
+    turn = room_rules.RoomTurn(room_id="room-1", side="member", with_others=False, session_id=ROOM_CHAT)
+    monkeypatch.setattr(room_rules, "room_turn", lambda session_id, home: turn)
+    for linked_work in (True, False):
+        why, handle = room_work.still_here({"linked": linked_work, "session": ROOM_CHAT, "room": "room-1"},
+                                           tmp_path, "default")
+        assert "own other Hermes" in why and handle == ""
 
 
 def test_a_yes_after_run_work_was_turned_off_does_nothing(on, hermes, linked):

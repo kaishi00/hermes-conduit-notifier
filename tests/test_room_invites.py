@@ -1891,12 +1891,29 @@ def test_people_says_whos_who_in_a_room_on_each_side(rooms):
     mona = {"member_id": slot("link2", 1), "handle": "mona", "display_name": "Mona", "status": "in"}
 
     assert invites_module.people(rooms.tmp_path / "furina", room_id) == {"room_id": room_id, "home": None, "members": [
-        {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}], "just_me": [], "posts": []}
+        {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}], "just_me": [], "posts": [],
+        "own_hermes": False}
     assert invites_module.people(rooms.tmp_path / "laifu", room_id) == {"room_id": room_id, "home": "Furina",
-                                                                        "you": "Laifu", "members": [
+                                                                        "you": "Laifu", "own_hermes": False, "members": [
         {**furina, "owner": "Furina"}, {**laifu, "owner": None}, {**mona, "owner": "Mona"}]}
     assert invites_module.people(rooms.tmp_path / "furina", "conduit-other") is None
     assert invites_module.people(rooms.tmp_path / "nobody", room_id) is None
+
+
+def test_people_says_when_a_room_is_only_the_owners_own_hermes(rooms, monkeypatch):
+    # Multi-instance plan, Rooms 1: a room whose other installations all came over own Links.
+    _listening(rooms)
+    room_id = draft(rooms)["room_id"]
+    _everyone_joins(rooms, room_id)
+    rooms.furina.pass_once()
+    from conduit_push import room_links
+
+    monkeypatch.setattr(room_links, "own_links", lambda root: frozenset({"link1"}))
+    assert invites_module.people(rooms.tmp_path / "furina", room_id)["own_hermes"] is False  # Mona's too
+    # Laifu's Hermes knows another person was invited.
+    assert invites_module.people(rooms.tmp_path / "laifu", room_id)["own_hermes"] is False
+    monkeypatch.setattr(room_links, "own_links", lambda root: frozenset({"link1", "link2"}))
+    assert invites_module.people(rooms.tmp_path / "furina", room_id)["own_hermes"] is True
 
 
 def test_people_has_no_room_that_hasnt_started(rooms):

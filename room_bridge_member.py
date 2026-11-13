@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import room_bridge, room_choices, room_files_link, room_links
+from . import room_bridge, room_choices, room_files_link, room_links, room_rules
 
 logger = logging.getLogger(__name__)
 
@@ -276,9 +276,11 @@ class Member:
         if request.key is None or request.key != _key_of(fields):
             return reply(403, _error("invalid_room_dispatch"))
         link_id, key, profile, room_id = received.link_id, request.key, request.profile, scope["room_id"]
+        # A room of only the owner's own Hermes runs its turns here as at home: no sitting out, no turns a day.
+        own = room_rules.own_guest_room(self.root, room_id, link_id)
         choices = self._choices(profile, room_id)
-        sits_out = choices.takes_part == "listens" or (
-            choices.takes_part == "asked" and not self._asked(fields.get("prompt"), room_id))
+        sits_out = not own and (choices.takes_part == "listens" or (
+            choices.takes_part == "asked" and not self._asked(fields.get("prompt"), room_id)))
         day, counted = _day(self.clock()), f"{profile}/{room_id}"
         with self.store.update() as state:
             member = state["member"]
@@ -289,7 +291,7 @@ class Member:
                 return reply(202, {"run_id": run_id, "status": "completed", "replayed": True},
                              run={"run_id": run_id, "status": "completed", "output": run["output"]})
             output = PASS if known is None and sits_out else None
-            if known is None and output is None:
+            if known is None and output is None and not own:
                 # Real runs a day, per profile and room: a key counts once,
                 # whether Hermes' answer comes or not, and comes off again
                 # when Hermes refuses it.

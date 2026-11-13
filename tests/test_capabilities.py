@@ -152,6 +152,7 @@ def test_every_capability_names_a_served_route_family():
         "room-rules": "/rooms/",
         "room-forget": "/rooms/sessions",
         "room-links": "/rooms/links",
+        "room-own-links": "/rooms/links/own",
         "room-setup": "/rooms/setup",
         "room-invites": "/rooms/drafts",
         # ?conduit_profile= on the voice and Watch routes, Local Live's first.
