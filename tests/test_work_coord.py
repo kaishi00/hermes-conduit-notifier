@@ -592,13 +592,18 @@ def test_a_question_about_resolved_work_is_withdrawn(on, hermes, home):
     assert on.proposal(two)["status"] == "withdrawn" and on.outbox_rows("", "line_answer") == []
 
 
-def test_every_open_question_is_listed_with_its_card(on, hermes, home):
+def test_every_open_question_is_listed_with_its_card(on, hermes, home, monkeypatch):
     """Each open question counts as needing the user, so each is in the
     list to answer, however many there are and whatever else is listed."""
     start()
     woken(home)
     asked = [on.proposal_add("", f"Question {number} about the release plan.") for number in range(1, 35)]
+    reads = []
+    real_open_questions = coord.open_questions
+    monkeypatch.setattr(coord, "open_questions", lambda store: reads.append(1) or real_open_questions(store))
     listed = work.app_list(on.home)
+    # The count and the cards come from one read of the open questions (notifier #764).
+    assert len(reads) == 1
     cards = [item["id"] for item in listed["coordination"]["items"] if item.get("actions")]
     assert listed["counts"]["questions"] == len(asked) == len(cards) == 34
     # One they answer keeps its card, answered, past all the open ones.

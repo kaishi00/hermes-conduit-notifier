@@ -513,15 +513,24 @@ class Broker:
         (self._unbound if held else self._dispatch)("session.interrupt", {"session_id": runtime_id})
         return True
 
-    def approvals(self, session_id: str) -> list[dict]:
+    def approvals(self, session_id: str, fresh: bool = False) -> list[dict]:
         """The approvals a live session waits on (``approval.pending``), by
         its stored id; none when it isn't live. Read through the method
-        table, so the client showing the chat keeps its stream."""
+        table, so the client showing the chat keeps its stream. On the
+        authority, what the broker's own view of the chat heard asked and not
+        settled answers, unless ``fresh`` (an Approve tap reads the chat)."""
         if on_authority(self.api):
-            # The snapshot lists the prompts still waiting (and notes them, so
-            # answer_approval can name one).
             if session_id not in self._authority_session_ids():
                 return []
+            seen = getattr(self.api, "seen_approvals", None)
+            if not fresh and callable(seen):
+                # The Work panel asks every poll for each row that waits: the
+                # view answers without a snapshot on the gateway's loop (notifier #764).
+                rows = seen(_transport, self.home, session_id)
+                if rows is not None:
+                    return rows
+            # The snapshot lists the prompts still waiting (and notes them, so
+            # answer_approval can name one, and the view answers next time).
             prompts = self._snapshot(session_id).get("prompts")
             return [{"request_id": prompt["prompt_id"], "command": prompt.get("command") or "",
                      "description": prompt.get("description") or ""}

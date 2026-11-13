@@ -584,6 +584,72 @@ def test_a_sibling_profiles_chat_is_read_and_answered_by_its_profile(gateway):
     assert connections[0].requests[-1]["params"]["profile"] == "manager"
 
 
+def test_a_views_own_record_answers_which_approvals_a_chat_waits_on(gateway, monkeypatch):
+    """The Work panel asks every poll which approval each waiting workstream
+    shows: the broker's view of the chat answers from the prompts it heard
+    asked and not settled, with no snapshot (notifier #764), and says it
+    can't once the authority stops sending it the chat's events."""
+    chats, answers, connections = gateway
+    answers["session.resume"] = {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub",
+                                            "prompts": [{"kind": "approval", "prompt_id": "p1", "execution_generation": 5,
+                                                         "command": "ls", "description": "list"}]}}
+    viewers = {"sub"}
+    monkeypatch.setattr(gateway_chats, "_viewing", lambda home, sid, subscription: subscription in viewers)
+    transport = Transport()
+    # Never read: the caller reads the chat.
+    assert chats.seen_approvals(transport, "/home", "w1") is None
+    _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
+    asked = len(connections[0].requests)
+    assert chats.seen_approvals(transport, "/home", "w1") == [{"request_id": "p1", "command": "ls", "description": "list"}]
+    link = chats.link(transport)
+    link.write(_event("w1", "approval.request", {"prompt_id": "p2", "command": "rm x", "description": "remove",
+                                                  "timeout_s": 300}, generation=5))
+    link.write(_event("w1", "approval.settled", {"prompt_id": "p1"}, generation=5))
+    assert chats.seen_approvals(transport, "/home", "w1") == [
+        {"request_id": "p2", "command": "rm x", "description": "remove"}]
+    # One Hermes stopped waiting on (it timed out) isn't offered.
+    link.prompt_texts["p2"] = link.prompt_texts["p2"][:2] + (0.0,)
+    assert chats.seen_approvals(transport, "/home", "w1") == []
+    link.write(_event("w1", "approval.request", {"prompt_id": "p3", "command": "make"}, generation=5))
+    # The turn's end settles what it asked.
+    link.write(_event("w1", "message.complete", {}, generation=5))
+    assert chats.seen_approvals(transport, "/home", "w1") == []
+    assert link.prompt_texts == {}
+    # Nothing of that was asked of the authority.
+    assert len(connections[0].requests) == asked
+    # A view the authority retired, or one read too long ago, can't say.
+    viewers.clear()
+    assert chats.seen_approvals(transport, "/home", "w1") is None
+    viewers.add("sub")
+    monkeypatch.setattr(gateway_chats, "SEEN_APPROVALS_MAX_AGE_S", -1.0)
+    assert chats.seen_approvals(transport, "/home", "w1") is None
+
+
+def test_a_view_counts_while_the_authority_still_sends_it_the_chat(monkeypatch):
+    live = types.SimpleNamespace(subscribers={"sub": "actor"})
+    authority = types.SimpleNamespace(sessions={"w1": live})
+    monkeypatch.setattr(gateway_chats, "authority_for_home", lambda home: authority)
+    assert gateway_chats._viewing("/home", "w1", "sub")
+    assert not gateway_chats._viewing("/home", "w1", "other")
+    assert not gateway_chats._viewing("/home", "w2", "sub")
+    monkeypatch.setattr(gateway_chats, "authority_for_home", lambda home: None)
+    assert not gateway_chats._viewing("/home", "w1", "sub")
+
+
+def test_the_work_panels_approval_read_takes_no_snapshot_the_view_can_answer(tmp_path, monkeypatch):
+    snapshot = {"result": {"session_id": "w1", "prompts": [{"kind": "approval", "prompt_id": "p1",
+                                                            "execution_generation": 2, "command": "ls"}]}}
+    broker, api = _broker(tmp_path, {"session.resume": snapshot}, {"w1"}, monkeypatch)
+    seen = {"rows": [{"request_id": "p1", "command": "ls", "description": ""}]}
+    api.seen_approvals = lambda transport, home, sid: seen["rows"]
+    assert broker.approvals("w1") == seen["rows"] and api.requests == []
+    # An Approve tap reads the chat itself, as does a poll the view can't answer.
+    assert broker.approvals("w1", fresh=True) == [{"request_id": "p1", "command": "ls", "description": ""}]
+    seen["rows"] = None
+    assert broker.approvals("w1") == [{"request_id": "p1", "command": "ls", "description": ""}]
+    assert [frame["method"] for frame in api.requests] == ["session.resume", "session.resume"]
+
+
 class _AuthorityApi:
     """gateway_chats' session API as work_broker sees it: answers by method."""
 

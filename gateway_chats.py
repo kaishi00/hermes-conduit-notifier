@@ -48,6 +48,11 @@ def _sibling(name: str) -> Any:
 
 
 AUTHORITY_RPC_TIMEOUT_S = 60.0
+# How long a view's own record of a chat's waiting approvals stands in for
+# reading the chat again (notifier #764). The view hears each prompt asked and
+# settled; Hermes prunes a prompt the native queue dropped only when the chat
+# is read, so a read this often catches what no event said.
+SEEN_APPROVALS_MAX_AGE_S = 300.0
 # Who the plugin's own chats act as: a sign-in acts for the host's owner, as
 # Conduit's socket on the Webapp's session token does, so the phone and the
 # Webapp open the chats the plugin starts.
@@ -181,6 +186,27 @@ def _log_failed_close(future: Any) -> None:
         logger.debug("Conduit: closing an authority connection failed", exc_info=future.exception())
 
 
+def _prompt_text(prompt: dict) -> tuple:
+    """An approval prompt's (command, description, when it times out)."""
+    timeout = prompt.get("timeout_s")
+    expires = (time.monotonic() + timeout if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+               and timeout > 0 else None)
+    return str(prompt.get("command") or ""), str(prompt.get("description") or ""), expires
+
+
+def _viewing(home: Any, sid: str, subscription: str) -> bool:
+    """Whether the authority serving ``home`` still sends ``subscription``
+    the chat's events: a view it retired (its backlog overflowed, or the chat
+    was closed and opened again) hears nothing more."""
+    authority = authority_for_home(home)
+    try:
+        live = getattr(authority, "sessions", {}).get(sid) if authority is not None else None
+        return subscription in getattr(live, "subscribers", {})
+    except Exception:  # noqa: BLE001 — unreadable: the caller reads the chat instead
+        logger.debug("Conduit: couldn't read a chat's viewers", exc_info=True)
+        return False
+
+
 class AgentLookupError(RuntimeError):
     """The gateway's agent for a chat couldn't be read (not: it has none)."""
 
@@ -200,6 +226,12 @@ class _AuthorityLink:
         self.generations: Dict[str, int] = {}
         # Open approval prompts, oldest first: prompt id -> (session id, generation).
         self.prompts: Dict[str, tuple] = {}
+        # What each open prompt asks: prompt id -> (command, description, when it
+        # times out (monotonic) or None).
+        self.prompt_texts: Dict[str, tuple] = {}
+        # session id -> when this link last read the chat (monotonic): its record of
+        # the chat's prompts is whole from then on while its view lasts.
+        self.viewed: Dict[str, float] = {}
         # session id -> this connection's subscription to it (session.detach names it).
         self.subscriptions: Dict[str, str] = {}
         # session id -> the plugin's own turns a gateway restart lost there, as the
@@ -248,17 +280,18 @@ class _AuthorityLink:
             if kind == "approval.request" and isinstance(payload.get("prompt_id"), str):
                 asked = payload.get("execution_generation", generation)
                 self.prompts[payload["prompt_id"]] = (sid, asked if type(asked) is int else self.generations.get(sid, 0))
+                self.prompt_texts[payload["prompt_id"]] = _prompt_text(payload)
                 # The TUI gateway's name for the prompt's id.
                 payload = {**payload, "request_id": payload["prompt_id"]}
             elif kind == "approval.settled":
                 # Answered (here or by another client) or timed out: the TUI
                 # gateway's word for a prompt that is no longer waiting.
                 prompt_id = payload.get("prompt_id")
-                self.prompts.pop(prompt_id, None)
+                self._forget_prompt(prompt_id)
                 kind, payload = "approval.cancelled", {"request_ids": [prompt_id] if isinstance(prompt_id, str) else []}
             elif kind in ("message.complete", "error"):
                 for prompt_id in [key for key, (owner, _) in self.prompts.items() if owner == sid]:
-                    del self.prompts[prompt_id]
+                    self._forget_prompt(prompt_id)
         return {**frame, "params": {**params, "type": kind, "payload": payload}}
 
     # The plugin's requests.
@@ -477,6 +510,8 @@ class _AuthorityLink:
                 if (isinstance(prompt, dict) and prompt.get("kind") == "approval"
                         and isinstance(prompt.get("prompt_id"), str) and type(prompt.get("execution_generation")) is int):
                     self.prompts.setdefault(prompt["prompt_id"], (sid, prompt["execution_generation"]))
+                    self.prompt_texts.setdefault(prompt["prompt_id"], _prompt_text(prompt))
+            self.viewed[sid] = time.monotonic()
             replaced = None
             if isinstance(result.get("subscription_id"), str):
                 replaced = self.subscriptions.get(sid)
@@ -485,6 +520,33 @@ class _AuthorityLink:
             # A second view of the chat on this connection (a resume for its
             # fences): the older one ends, so a close detaches all there is.
             self._detach_later(sid, replaced)
+
+    def _forget_prompt(self, prompt_id: Any) -> None:
+        # Called with the lock held.
+        self.prompts.pop(prompt_id, None)
+        self.prompt_texts.pop(prompt_id, None)
+
+    def seen_approvals(self, sid: str, viewing: Any) -> Optional[list]:
+        """The approvals ``sid`` waits on, oldest first, as this link's view of
+        the chat heard them asked and not settled; None when the view can't
+        say (never read, read too long ago, or ``viewing(subscription)`` finds
+        the authority no longer sends it the chat's events)."""
+        now = time.monotonic()
+        with self.lock:
+            subscription = self.subscriptions.get(sid)
+            viewed = self.viewed.get(sid)
+            if self._closed or not subscription or viewed is None or now - viewed > SEEN_APPROVALS_MAX_AGE_S:
+                return None
+            current = self.generations.get(sid)
+            rows = []
+            for prompt_id, (owner, generation) in self.prompts.items():
+                command, description, expires = self.prompt_texts.get(prompt_id, ("", "", None))
+                if owner != sid or (current is not None and generation != current):
+                    continue
+                if expires is not None and now >= expires:
+                    continue  # timed out: Hermes stopped waiting on it
+                rows.append({"request_id": prompt_id, "command": command, "description": description})
+        return rows if viewing(subscription) else None
 
     def _detach_later(self, sid: str, subscription: str) -> None:
         connection = self.connection
@@ -554,7 +616,7 @@ class _AuthorityLink:
             if not error or reason == "stale_generation":
                 # Settled (or its turn ended); a refused answer keeps it to try again.
                 with self.lock:
-                    self.prompts.pop(prompt_id, None)
+                    self._forget_prompt(prompt_id)
             if reason == "stale_generation":
                 # The turn that asked has ended: nothing was waiting.
                 return {**response, "error": None, "result": {"resolved": 0}}
@@ -631,6 +693,15 @@ class _AuthorityChats:
 
     def dispatch(self, frame: dict, transport: Any, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> dict:
         return self.link(transport).call(frame, timeout)
+
+    def seen_approvals(self, transport: Any, home: Any, session_id: str) -> Optional[list]:
+        """The approvals a chat waits on as ``transport``'s view of it heard
+        them, without asking the authority; None when it has no such view,
+        and the caller reads the chat."""
+        link = getattr(transport, "_conduit_authority_link", None)
+        if link is None or link.closed or link.chats is not self:
+            return None
+        return link.seen_approvals(session_id, lambda subscription: _viewing(home, session_id, subscription))
 
     def get(self, session_id: Any, default: Any = None) -> Any:
         """As the TUI gateway's chat record, only which transport views the
