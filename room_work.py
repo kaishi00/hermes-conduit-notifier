@@ -37,6 +37,9 @@ BOT_CHAT_ONLY = ("In a group room you can start, send to, stop and read your wor
 WITH_OTHERS = ("This room has other people's agents in it, so its work starts with conduit_room_work, and only "
                "when your owner has turned on Run work for the room (each start asks them first). Nothing was "
                "started.")
+# A room another of the owner's own Hermes hosts (room_rules._lifted): not a Linked Room's, nor one hosted here.
+ELSEWHERE_OWN = ("This room is hosted on your owner's other Hermes, so work doesn't start from it here yet. Nothing "
+                 "was started. Tell the room your owner can ask you in your Bot Chat.")
 # Linked Rooms' Run work (Eric 2026-11-07): conduit_room_work answers only there.
 NOT_LINKED = ("conduit_room_work is for a group room with other people's agents. Here, use your work tools "
               "(work_start and the rest). Nothing was done.")
@@ -96,6 +99,10 @@ class OthersHere(Exception):
     """The room has other people's agents in it, or another installation hosts it."""
 
 
+class ElsewhereOwn(OthersHere):
+    """A room another of the owner's own Hermes hosts: work doesn't start from it here (ELSEWHERE_OWN)."""
+
+
 def room_of(session_id: Any, home: Path, profile: str) -> Optional[Room]:
     """The room hosted here whose turn ``session_id`` is, with the bot's
     handle in it; None when the session isn't a room's. Raises OthersHere
@@ -107,7 +114,7 @@ def room_of(session_id: Any, home: Path, profile: str) -> Optional[Room]:
     if turn is None:
         return None
     if turn.with_others or turn.side != "home":
-        raise OthersHere(turn.room_id)
+        raise OthersHere(turn.room_id) if turn.with_others else ElsewhereOwn(turn.room_id)
     if not turn.room_id:
         # A legacy Desktop group, which Hermes' room delivery doesn't post to.
         raise NoReportsHere()
@@ -119,13 +126,16 @@ def room_of(session_id: Any, home: Path, profile: str) -> Optional[Room]:
 
 def linked_room_of(session_id: Any, home: Path, profile: str) -> Room:
     """The Linked Room whose turn ``session_id`` is, when its owner's
-    choices turn on Run work. Raises NotLinked for any other session,
+    choices turn on Run work. Raises ElsewhereOwn for a room another of the
+    owner's own Hermes hosts, NotLinked for any other session,
     RunWorkOff, NoReportsHere for one Hermes hasn't titled with its room
     yet, NotAMember and Unreadable."""
     try:
         turn = room_rules.room_turn(session_id, home)
     except room_rules.RoomStoreError as error:
         raise Unreadable(str(error)) from error
+    if turn is not None and not turn.with_others and turn.side == "member":
+        raise ElsewhereOwn(turn.room_id)
     if turn is None or not turn.with_others:
         raise NotLinked()
     if not turn.room_id:

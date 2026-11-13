@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.169.0 (2026-11-13)
+
+### New and improved
+
+- Link two Hermes of your own: mark the Link as "This is my own Hermes" on both sides (Settings > Multiplayer), and a room with only your own Hermes in it runs as a room of your own agents. The bots from your other Hermes work there with their own tools, memory and approvals, as at home, with no room rules or turn limits.
+
 ## 0.168.10 (2026-11-13)
 
 ### Fixes

@@ -197,14 +197,16 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     links = commands.add_parser(
         "links",
         help="Links between this Hermes and other people's, for rooms with their agents: make an invite, "
-             "preview or accept one, list them, remove a Link or cancel an invite; and what a linked person's "
+             "preview or accept one, list them, remove a Link or cancel an invite, mark a Link as your own Hermes "
+             "(own <Link id> on|off); and what a linked person's "
              "Hermes may ask yours (rules), the asks it sent (asks), and answering one (answer)",
     )
-    links.add_argument("links_action", choices=["invite", "preview", "accept", "list", "remove", "cancel", "rules",
-                                                "asks", "answer"])
+    links.add_argument("links_action", choices=["invite", "preview", "accept", "list", "remove", "cancel", "own",
+                                                "rules", "asks", "answer"])
     links.add_argument("target", nargs="?", default="",
-                       help="for preview and accept: the invite's conduit://link/ URL; for remove and rules: the "
+                       help="for preview and accept: the invite's conduit://link/ URL; for remove, own and rules: the "
                             "Link's id; for cancel: the invite's id; for answer: the ask's id")
+    links.add_argument("value", nargs="?", default="", help="for own: on or off")
     links.add_argument("--name", default="",
                        help="for invite: who the other person sees it's from; for accept: who they see linked")
     links.add_argument("--yes", action="store_true", help="for remove: unlink without asking first")
@@ -1018,6 +1020,7 @@ _LINKS_USAGE = {
     "accept": "hermes conduit-push links accept <conduit://link/...> --name <your name>",
     "remove": "hermes conduit-push links remove <Link id> (links list shows them)",
     "cancel": "hermes conduit-push links cancel <invite id> (links list shows them)",
+    "own": "hermes conduit-push links own <Link id> on|off (links list shows them)",
 }
 
 
@@ -1033,7 +1036,8 @@ def _links(args: argparse.Namespace) -> int:
         return _link_asks_command(args, room_identity.root_home(get_hermes_home()))
     target = str(getattr(args, "target", "") or "").strip()
     name = str(getattr(args, "name", "") or "").strip()
-    if action in _LINKS_USAGE and not target:
+    value = str(getattr(args, "value", "") or "").strip().lower()
+    if action in _LINKS_USAGE and not target or action == "own" and value not in ("on", "off"):
         print(f"Usage: {_LINKS_USAGE[action]}")
         return 2
     if action in ("invite", "accept") and not name:
@@ -1043,7 +1047,7 @@ def _links(args: argparse.Namespace) -> int:
     root = room_identity.root_home(get_hermes_home())
     links = room_links.Links(root)
     verb = {"invite": "make the invite", "preview": "read that invite", "accept": "accept it", "list": "list them",
-            "remove": "unlink", "cancel": "cancel it"}[action]
+            "remove": "unlink", "cancel": "cancel it", "own": "mark it"}[action]
     try:
         if action == "invite":
             made = links.invite(name)
@@ -1081,7 +1085,7 @@ def _links(args: argparse.Namespace) -> int:
                 return 0
             for link in view["links"]:
                 print(f"{_printable(link['name'])}: {_LINK_STATUS.get(link['status'], link['status'])}, words "
-                      f"{' '.join(link['words'])} (Link {link['id']})")
+                      f"{' '.join(link['words'])} (Link {link['id']}){_own_note(link)}")
             for invite in view["invites"]:
                 print(f"Invite from {_printable(invite['name'])}, until {_link_time(invite['expires_at'])} "
                       f"(invite {invite['id']})")
@@ -1090,6 +1094,12 @@ def _links(args: argparse.Namespace) -> int:
                   + ("" if mailbox["reading"] else "; nothing on this Hermes reads it right now"))
         elif action == "remove":
             return _remove_link(links, target, bool(getattr(args, "yes", False)))
+        elif action == "own":
+            link = links.set_own(target, value == "on")
+            if link is None:
+                print(f"No Link {_printable(target)} on this Hermes.")
+                return 1
+            print(f"{_printable(link['name'])}{_own_note(link) or ': not marked as your own Hermes.'}")
         elif not links.cancel(target)["cancelled"]:
             print(f"No invite {_printable(target)} is waiting on this Hermes.")
             return 1
@@ -1099,6 +1109,17 @@ def _links(args: argparse.Namespace) -> int:
         print(f"Couldn't {verb}: {error}")
         return 1
     return 0
+
+
+def _own_note(link: dict) -> str:
+    """What a Link's "This is my own Hermes" says, or "" when neither side marked it."""
+    if link.get("own_link"):
+        return "; your own Hermes on both sides: rooms with only your own Hermes run as at home"
+    if link.get("own"):
+        return "; marked as your own Hermes here, waiting for the other Hermes to say so too"
+    if link.get("their_own"):
+        return "; the other Hermes marked it as your own: mark it here too (links own <Link id> on)"
+    return ""
 
 
 # What a linked person's Hermes may ask this one (link_asks), as the CLI names them.

@@ -361,6 +361,29 @@ async def delete_room_link(response: Response, link_id: Optional[str] = None) ->
     return await _room_links_route(lambda links: links.remove(link_id), "unlink", mailbox=True)
 
 
+@router.put("/rooms/links/own")
+async def put_room_link_own(request: Request, response: Response) -> Any:
+    """Marks a Link as the owner's own Hermes, or not (``link_id``, ``own``),
+    and tells the other side: ``link`` as the list shows it, with ``own``
+    (this side), ``their_own`` and ``own_link`` (both sides, which is what
+    lifts the owner's room rules). 404 for a Link this Hermes doesn't have."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await core._read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"link_id": ..., "own": true|false}')
+    if type(body.get("own")) is not bool:
+        raise HTTPException(status_code=400, detail="Expected own: true or false",
+                            headers={"Cache-Control": "no-store"})
+
+    def mark(links: Any) -> Dict[str, Any]:
+        shown = links.set_own(body.get("link_id"), body["own"])
+        if shown is None:
+            raise core._plugin_package_module("room_links").LinkError(
+                "not_found", "This Hermes has no such Link", 404)
+        return {"link": shown}
+
+    return await _room_links_route(mark, "own", mailbox=True)
+
+
 @router.delete("/rooms/links/invites")
 async def delete_room_link_invite(response: Response, invite_id: Optional[str] = None) -> Any:
     """Takes an invite back before it's used."""
