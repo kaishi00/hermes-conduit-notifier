@@ -195,6 +195,24 @@ def _work_run(profile: str) -> Dict[str, Any]:
     return out
 
 
+def _work_send(profile: str, session_id: str, text: str) -> Dict[str, Any]:
+    """A message the broker sends a workstream someone else has open (the
+    phone, the Webapp): sent after its turn, on the broker's own connection,
+    and the turn it starts runs to its end."""
+    work_broker = _conduit(".work_broker", "Broker")
+    from hermes_constants import get_hermes_home
+
+    home = get_hermes_home() / "profiles" / profile if profile else get_hermes_home()
+    broker = work_broker.Broker(home)
+    sent = broker.send(session_id, text, "after")
+    deadline = time.monotonic() + WAIT_S
+    while broker.live(session_id)[1]["running"]:
+        if time.monotonic() > deadline:
+            raise TimeoutError("the sent turn never ended")
+        time.sleep(0.5)
+    return {"sent": list(sent)}
+
+
 def _pulse_send(chat_id: str) -> Dict[str, Any]:
     pulse_host = _conduit("pulse_host", "_send_on_authority")
     sent = pulse_host.send(chat_id, "PULSE check in", model={"provider": "custom", "model": "fake-model-2"})
@@ -219,6 +237,11 @@ async def watch_call_turn() -> Dict[str, Any]:
 @router.get("/work-run")
 async def work_run(bot: str = "") -> Dict[str, Any]:
     return await asyncio.to_thread(_work_run, bot)
+
+
+@router.get("/work-send")
+async def work_send(session: str, text: str, bot: str = "") -> Dict[str, Any]:
+    return await asyncio.to_thread(_work_send, bot, session, text)
 
 
 @router.get("/pulse-send")

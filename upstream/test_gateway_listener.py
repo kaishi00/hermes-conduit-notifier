@@ -35,6 +35,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -739,6 +740,16 @@ def test_a_workstream_runs_on_the_authority_so_the_phone_opens_it(listener, prof
     users = [str(m.get("text") or m.get("content") or "") for m in opened["messages"] if m.get("role") == "user"]
     assert any("Brief: RUN the job" in text for text in users), users
     assert any("a long follow up" in text for text in users), users
+    # With the phone (or the Webapp) holding it open, the chat has one writer:
+    # the broker's next message reaches the same conversation (issue 750).
+    query = urllib.parse.urlencode({"bot": profile, "session": out["session_id"], "text": "PING after the open"})
+    status, later = listener.plugin_call(f"work-send?{query}", plugin=DRIVER, timeout=180)
+    assert status == 200, later
+    assert later["sent"][1] == out["session_id"], later
+    reopened = listener.run(script)
+    assert reopened["session_id"] == out["session_id"], reopened
+    users = [str(m.get("text") or m.get("content") or "") for m in reopened["messages"] if m.get("role") == "user"]
+    assert any("PING after the open" in text for text in users), users
 
 
 def test_a_watch_calls_local_live_chat_runs_on_the_authority(listener):
