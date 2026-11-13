@@ -48,6 +48,9 @@ def _sibling(name: str) -> Any:
 
 
 AUTHORITY_RPC_TIMEOUT_S = 60.0
+# How long a link remembers that a prompt stopped waiting: longer than any
+# read that could have been in flight then (a call's budget, plus its thread's).
+SETTLED_KEPT_S = 2 * AUTHORITY_RPC_TIMEOUT_S
 # How long a view's own record of a chat's waiting approvals stands in for
 # reading the chat again (notifier #764). The view hears each prompt asked and
 # settled; Hermes prunes a prompt the native queue dropped only when the chat
@@ -186,12 +189,13 @@ def _log_failed_close(future: Any) -> None:
         logger.debug("Conduit: closing an authority connection failed", exc_info=future.exception())
 
 
-def _prompt_text(prompt: dict) -> tuple:
+def _prompt_text(prompt: dict, timed: bool = True) -> tuple:
     """An approval prompt's (command, description, when it times out, when it
-    was heard), the times monotonic."""
+    was heard), the times monotonic. ``timed`` when it was heard as Hermes
+    asked it, so its ``timeout_s`` runs from now."""
     now = time.monotonic()
     timeout = prompt.get("timeout_s")
-    expires = (now + timeout if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+    expires = (now + timeout if timed and isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
                and timeout > 0 else None)
     return str(prompt.get("command") or ""), str(prompt.get("description") or ""), expires, now
 
@@ -234,6 +238,10 @@ class _AuthorityLink:
         # session id -> when this link last read the chat (monotonic): its record of
         # the chat's prompts is whole from then on while its view lasts.
         self.viewed: Dict[str, float] = {}
+        # prompt id -> when this link stopped counting it as waiting (monotonic), so
+        # a read already in flight then doesn't bring it back. Kept a little past
+        # the longest call (SETTLED_KEPT_S).
+        self.settled: Dict[str, float] = {}
         # session id -> this connection's subscription to it (session.detach names it).
         self.subscriptions: Dict[str, str] = {}
         # session id -> the plugin's own turns a gateway restart lost there, as the
@@ -520,14 +528,21 @@ class _AuthorityLink:
                 heard = self.prompt_texts.get(prompt_id, (None, None, None, 0.0))[3]
                 if heard < asked_at:
                     self._forget_prompt(prompt_id)
+            now = time.monotonic()
+            for prompt_id in [key for key, at in self.settled.items() if now - at > SETTLED_KEPT_S]:
+                del self.settled[prompt_id]
             for prompt in result.get("prompts") or ():
                 # An approval still waiting when the chat was read: answerable by its id,
-                # though this link never saw it asked.
+                # though this link never saw it asked. One it heard settle after the
+                # request went out was read before it settled: it stays settled.
                 if (isinstance(prompt, dict) and prompt.get("kind") == "approval"
-                        and isinstance(prompt.get("prompt_id"), str) and type(prompt.get("execution_generation")) is int):
+                        and isinstance(prompt.get("prompt_id"), str) and type(prompt.get("execution_generation")) is int
+                        and self.settled.get(prompt["prompt_id"], -1.0) < asked_at):
                     self.prompts.setdefault(prompt["prompt_id"], (sid, prompt["execution_generation"]))
-                    self.prompt_texts.setdefault(prompt["prompt_id"], _prompt_text(prompt))
-            self.viewed[sid] = time.monotonic()
+                    # No timeout of its own: Hermes counts it from when it asked, which
+                    # the snapshot doesn't say. The view's next read drops it once gone.
+                    self.prompt_texts.setdefault(prompt["prompt_id"], _prompt_text(prompt, timed=False))
+            self.viewed[sid] = now
             replaced = None
             if isinstance(result.get("subscription_id"), str):
                 replaced = self.subscriptions.get(sid)
@@ -539,7 +554,8 @@ class _AuthorityLink:
 
     def _forget_prompt(self, prompt_id: Any) -> None:
         # Called with the lock held.
-        self.prompts.pop(prompt_id, None)
+        if self.prompts.pop(prompt_id, None) is not None:
+            self.settled[prompt_id] = time.monotonic()
         self.prompt_texts.pop(prompt_id, None)
 
     def seen_approvals(self, sid: str, viewing: Any) -> Optional[list]:
@@ -616,9 +632,13 @@ class _AuthorityLink:
             return method, self._scoped(prompt[0], {"session_id": prompt[0], "execution_generation": prompt[1],
                                                     "prompt_id": wanted, "choice": params.get("choice")})
         if method == "session.close":
-            # The authority keeps the chat; this connection stops viewing it.
+            # The authority keeps the chat; this connection stops viewing it, and
+            # what it followed of the chat goes with the view.
             with self.lock:
                 subscription = self.subscriptions.pop(sid, None)
+                self.viewed.pop(sid, None)
+                for prompt_id in [key for key, (owner, _) in self.prompts.items() if owner == sid]:
+                    self._forget_prompt(prompt_id)
             if not subscription:
                 return {"result": {}}
             return "session.detach", self._scoped(sid, {"session_id": sid, "subscription_id": subscription})
