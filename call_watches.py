@@ -64,6 +64,10 @@ MAX_FOR_MINUTES = 24 * 60
 EVERY_BOUNDS = (5, 24 * 60)
 # An incident no run has seen for this long (and three checks) starts over.
 STALE_S = 30 * 60
+# The same watch won't ring twice within this many seconds, even if a cleared
+# incident flaps back on right away. Stops point-in-time reminders from
+# re-firing when one run decides they're over and the next decides they're back.
+REARM_CALL_GAP_S = 6 * 3600
 _HOURS = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*(?:-|–|—|to)\s*(\d{1,2}):(\d{2})\s*$")
 _thread_lock = threading.Lock()
 _setup_thread_lock = threading.Lock()
@@ -801,6 +805,7 @@ class WatchStore:
             entry["config"] = dict(config)
             if reset:
                 entry["incident"] = None
+                entry.pop("last_call", None)
             state["watches"][job_id] = entry
 
     def uncall(self, job_id: str) -> None:
@@ -845,7 +850,14 @@ class WatchStore:
             hours = config["hours"]
             if not in_hours(hours, when):
                 return {"status": "outside_hours", "hours": hours}
+            last_call = entry.get("last_call")
+            if isinstance(last_call, (int, float)) and not isinstance(last_call, bool) and math.isfinite(last_call) and 0 < now - last_call < REARM_CALL_GAP_S:
+                # A call was already placed for this watch recently; don't ring
+                # again just because a cleared incident flapped back on.
+                incident["called"] = True
+                return {"status": "already_called"}
             incident["called"] = True
+            entry["last_call"] = now
             return {"status": "call"}
 
     def _load(self, *, for_write: bool = False) -> dict[str, Any]:
@@ -893,8 +905,13 @@ def _normalized(raw: Any) -> dict[str, Any]:
         if cron_store.valid_job_id(job_id) is None or not isinstance(entry, dict):
             continue
         config = _stored_config(entry.get("config"))
-        if config is not None:
-            watches[job_id] = {"config": config, "incident": _stored_incident(entry.get("incident"))}
+        if config is None:
+            continue
+        watch_entry: dict[str, Any] = {"config": config, "incident": _stored_incident(entry.get("incident"))}
+        last_call = entry.get("last_call")
+        if isinstance(last_call, (int, float)) and not isinstance(last_call, bool) and math.isfinite(last_call):
+            watch_entry["last_call"] = float(last_call)
+        watches[job_id] = watch_entry
     return {"v": VERSION, "watches": watches}
 
 
