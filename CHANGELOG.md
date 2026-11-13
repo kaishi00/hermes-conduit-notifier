@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.8 (2026-11-13)
+
+### Fixes
+
+- On a host where the gateway serves Conduit itself, a workstream's "Needs you" card could, for a few minutes, keep offering an approval that had just been answered or had timed out. It now drops it straight away.
+
 ## 0.168.7 (2026-11-13)
 
 ### Fixes
