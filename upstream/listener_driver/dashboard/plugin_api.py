@@ -197,20 +197,14 @@ def _work_run(profile: str) -> Dict[str, Any]:
 
 def _work_send(profile: str, session_id: str, text: str) -> Dict[str, Any]:
     """A message the broker sends a workstream someone else has open (the
-    phone, the Webapp): sent after its turn, on the broker's own connection,
-    and the turn it starts runs to its end."""
+    phone, the Webapp): sent after its turn, on the broker's own connection.
+    It may wait behind a turn still running, so the caller watches the chat
+    for it rather than this route for a turn's end."""
     work_broker = _conduit(".work_broker", "Broker")
     from hermes_constants import get_hermes_home
 
     home = get_hermes_home() / "profiles" / profile if profile else get_hermes_home()
-    broker = work_broker.Broker(home)
-    sent = broker.send(session_id, text, "after")
-    deadline = time.monotonic() + WAIT_S
-    while broker.live(session_id)[1]["running"]:
-        if time.monotonic() > deadline:
-            raise TimeoutError("the sent turn never ended")
-        time.sleep(0.5)
-    return {"sent": list(sent)}
+    return {"sent": list(work_broker.Broker(home).send(session_id, text, "after"))}
 
 
 def _pulse_send(chat_id: str) -> Dict[str, Any]:

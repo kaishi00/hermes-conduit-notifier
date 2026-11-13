@@ -732,6 +732,9 @@ def test_a_workstream_runs_on_the_authority_so_the_phone_opens_it(listener, prof
     params = {**_resume(out["session_id"], omit_messages=False), **({"profile": profile} if profile else {})}
     query = urllib.parse.urlencode({"bot": profile, "session": out["session_id"], "text": "PING after the open"})
 
+    def users(snapshot: Dict[str, Any]) -> List[str]:
+        return [str(m.get("text") or m.get("content") or "") for m in snapshot["messages"] if m.get("role") == "user"]
+
     async def script(sock: ConduitSocket) -> Dict[str, Any]:
         # Conduit names the bot's profile on every request (#2262).
         frame = await sock.call("session.resume", params)
@@ -742,13 +745,16 @@ def test_a_workstream_runs_on_the_authority_so_the_phone_opens_it(listener, prof
         status, later = await asyncio.to_thread(listener.plugin_call, f"work-send?{query}", None, DRIVER, 180)
         assert status == 200, later
         assert later["sent"][1] == out["session_id"], later
-        again = await sock.call("session.resume", params)
-        assert "error" not in again, again["error"]
-        return {"opened": frame["result"], "after": again["result"]}
+        # The message may wait behind the wake's turn: watch the chat until
+        # it's one of the conversation's messages, not a queued one.
+        deadline = time.monotonic() + 90
+        while True:
+            again = await sock.call("session.resume", params)
+            assert "error" not in again, again["error"]
+            if any("PING after the open" in text for text in users(again["result"])) or time.monotonic() > deadline:
+                return {"opened": frame["result"], "after": again["result"]}
+            await asyncio.sleep(1)
     result = listener.run(script)
-
-    def users(snapshot: Dict[str, Any]) -> List[str]:
-        return [str(m.get("text") or m.get("content") or "") for m in snapshot["messages"] if m.get("role") == "user"]
     opened, after = result["opened"], result["after"]
     assert opened["session_id"] == out["session_id"], opened
     assert any("Brief: RUN the job" in text for text in users(opened)), users(opened)
