@@ -1656,6 +1656,13 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
                 unread = True
                 _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
     framing = room_rules.framing(turn, choices, people, posts, unread=unread)
+    try:
+        # A picture the turn's messages name, which the agent sees only by looking.
+        pictures = room_rules.turn_pictures_line(prompt)
+    except Exception:  # noqa: BLE001 — the standing pictures line still says how
+        pictures = None
+    if pictures:
+        framing += f"\n- {pictures}"
     if home is not None and turn.room_id and not child:
         try:
             # What the owner answered the agent's asks since (room_asks), once.

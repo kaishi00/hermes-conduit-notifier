@@ -2128,6 +2128,10 @@ home's path from it, so the guest's Conduit draws the room's pictures too.
 A guest keeps which home each upload folder belongs to (the first whose room pages name it, or whose file arrives first) and which Link sent each file: it refuses another home's bytes under that folder, and a turn names only a copy its own room's home sent. Pieces of files that never finish go after a day, swept hourly too. Carried files count toward the guest's 2 GB of room files, at most 20,000 of them (past that the oldest go first), and age out after 30 days, oldest first past the 2 GB, swept hourly by the rooms loop as well as on each arrival; none is kept with under 1 GB free, and uploads and carried files check the disk under one lock (`conduit/room-files.lock` in the root home). Capability `room-files-linked`. A file over 16 MB stays on the home's host.
 In a room with other people's agents, every rule tier may call
 `vision_analyze` on a picture sent into the room, by its room-files path.
+Hermes' peer route carries no attachments, so a turn whose messages name
+pictures (up to the newest 4) is told their paths and to look at them with
+`vision_analyze` before answering about them (plugin 0.167.3+); Conduit
+sends at most 16 MB a file into such a room, what reaches the others.
 
 ## Group pictures (plugin 0.41+)
 
@@ -4330,7 +4334,14 @@ capability, with no `?profile=` (Links are the installation's):
   Link stays, waiting, and its accept is tried again while the invite lasts.
 - `GET /rooms/links`: `{"links": [...], "invites": [...], "mailbox": {"url",
   "reading"}}`, statuses `waiting`, `linked` or `unanswered`, and `reading`
-  false while nothing on this Hermes reads the mailbox.
+  false while nothing on this Hermes reads the mailbox. Each Link also has
+  `plugin`, the other side's plugin version (null until it says, and from
+  plugins before 0.167.4), and `behind`: `theirs` when their plugin takes
+  fewer kinds of envelope than this one's rooms send, `yours` when theirs sent
+  one this plugin doesn't take (for the 7 days the mailbox holds it), or null.
+  `kinds` lists the envelope kinds their plugin takes (null until it says).
+  Each side's plugin sends a `link.hello` with its version and the kinds it
+  takes when either changes, and every 6 days.
 - `DELETE /rooms/links?link_id=`: `{"removed": true}`, and `DELETE
   /rooms/links/invites?invite_id=`: `{"cancelled": true}` (false for one this
   Hermes doesn't have).
@@ -4680,7 +4691,7 @@ installation's):
   [{"link", "name", "status", "agents"}], "cut_off", "left", "removed",
   "members"}`. Its status is `waiting`, `starting`, `started` or `ended`
   (with `reason` `withdrawn`, `lapsed`, `too_few`, `start_failed` or
-  `disbanded`), each person's `waiting`, `joined` or `declined`, and
+  `disbanded`), each person's `waiting`, `joined`, `declined` or `left` (with `just_me` true for one who joined with no agents and is still in it; `left` is one of those who left), and
   `cut_off` lists the member ids still in whose route couldn't be saved,
   `left` those that left and `removed` those taken out. `members` is who's in
   a started room, as `GET /rooms/people` lists them (null before the start).
@@ -4697,13 +4708,24 @@ installation's):
   `joined` are your agents in it, and `gone` those that are out, each
   `{"profile", "handle", "display_name", "reason"}` (`left`, `removed` or
   `disbanded`). `profiles` are each of this Hermes' profiles with its choices
-  for the room.
+  for the room. `just_me` is true once you joined with no agents, and
+  `just_me_offered` whether their plugin takes that and the room could
+  start that way (0.167.5+).
 - `POST /rooms/invites/answer` with `{"link", "room_id", "agents": [...]}`:
   `{"invite": ...}`. No agents declines, and the same answer again is the
-  first.
+  first. With `"just_me": true` and no agents, you join with none of your
+  agents ("Just me"): your Hermes gets the room's pages, so you read it and
+  post in it, and `POST /rooms/leave` with no `profiles` leaves it. A home
+  whose plugin doesn't take it refuses that with `home_too_old` (409), and
+  a room with one of their agents and nobody else invited, which needs two
+  agents to start, with `too_few` (409).
+  Linked Hermes say it with `room.person` envelopes: the guest's
+  `{"in": true}` joins and `{"in": false}` leaves, and the home's
+  `{"in": false, "reason"}` says the room ended.
 - `GET /rooms/people?room_id=`: who's who in a started room over Links,
   `{"room_id", "home", "members": [{"member_id", "handle", "display_name",
-  "owner", "status"}]}`, with `home` and `owner` null for yours, and each
+  "owner", "status"}]}` (on the home also `just_me`, the names of the people
+  in it with Just me), with `home` and `owner` null for yours, and each
   member's `status` `in`, `left` or `removed` (on a member's Hermes, its
   own agents' and, from plugin 0.166 on the home, everyone else's as the home
   last sent it in a `room.out` over the Link). A member's Hermes answers for a room its agents left,
@@ -4803,7 +4825,8 @@ minute:
   "handle", "display_name", "owner"}` (`owner` null for the host's own), your
   agents in it `{"member_id", "profile", "handle"}`, `out` (who left or was
   taken out, `{"<member_id>": "left" | "removed"}`, as `GET /rooms/people`
-  says), the invite's `status`
+  says), `just_me` (true once you joined it with none of your agents, after you left too), the
+  invite's `status`
   and `reason` (`ended` with the home's reason once it ends; after this Hermes
   forgets the invite, a month after it ended, it's `left` unless the home said
   it ended, the dates are null and `yours` is the agents the copy noted as

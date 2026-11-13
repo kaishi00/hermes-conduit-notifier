@@ -514,12 +514,14 @@ async def get_room_invites(response: Response) -> Any:
 async def post_room_invite_answer(request: Request, response: Response) -> Any:
     """Joins the room ``room_id`` the Link ``link`` invited this Hermes to
     with ``agents`` (each ``{profile, handle, display_name}``, with its
-    ``choices``, or null for the join card's), or declines it with none."""
+    ``choices``, or null for the join card's), or declines it with none;
+    ``just_me`` true joins with no agents."""
     response.headers["Cache-Control"] = "no-store"
     body = _room_links_body(await core._read_json_body(request, ROOM_INVITES_MAX_BODY_BYTES),
                             '{"link": ..., "room_id": ..., "agents": [...]}')
     return await _room_invites_route(None, lambda rooms: {"invite": rooms.answer(
-        body.get("link"), body.get("room_id"), body.get("agents"))}, "answer", mailbox=True)
+        body.get("link"), body.get("room_id"), body.get("agents"), body.get("just_me", False))}, "answer",
+        mailbox=True)
 
 
 @router.post("/rooms/leave")

@@ -44,7 +44,11 @@ logger = logging.getLogger(__name__)
 VERSION = 1
 INVITE, ANSWER, START = "room.invite", "room.answer", "room.start"
 GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
-KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, *room_copies.KINDS, *room_posts.KINDS, *room_looks.KINDS,
+# "Just me": a person in a room without agents of theirs, who reads its pages and posts in it. From the guest,
+# {in: true} joins while the room waits and {in: false} leaves it once started; from the home, {in: false,
+# reason} says it ended for them. Only sent to a home whose link.hello names it: an older one drops it.
+PERSON = "room.person"
+KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, PERSON, *room_copies.KINDS, *room_posts.KINDS, *room_looks.KINDS,
          *room_files_link.KINDS, *room_work_news.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
@@ -300,6 +304,9 @@ class Rooms:
                 if ids:
                     _queue(state, link_id, ENDED, room_id, {"v": VERSION, "room_id": room_id, "reason": "disbanded",
                                                             "member_ids": ids}, now, parts=("disbanded", *ids))
+                elif person.get("just_me") is True and person["status"] == "joined":
+                    _queue(state, link_id, PERSON, room_id, {"v": VERSION, "room_id": room_id, "in": False,
+                                                             "reason": "disbanded"}, now, parts=("disbanded",))
             draft.update(status="ended", reason="disbanded", ended_at=now)
             draft.pop("route_todo", None)
 
@@ -312,24 +319,32 @@ class Rooms:
         return [self._shown_invite(invite) for _, invite in sorted(
             state["invites"].items(), key=lambda item: (-item[1]["received_at"], item[0]))]
 
-    def answer(self, link_id: Any, room_id: Any, agents: Any) -> dict[str, Any]:
+    def answer(self, link_id: Any, room_id: Any, agents: Any, just_me: Any = False) -> dict[str, Any]:
         """Joins the room ``room_id`` the Link ``link_id`` invited this installation to with ``agents``, each
         ``{profile, handle, display_name}`` with its ``choices`` for the room if they aren't the join card's, or
         declines it with none. The same answer again is the first; another is refused (``answered``). A join
         that the home's word on the room or the invite's end crosses is undone (``ended``, ``lapsed``). Returns
-        the invite as the join card shows it."""
+        the invite as the join card shows it. ``just_me`` joins with no agents ("Just me", PERSON): to read the
+        room and post in it, where the home's plugin takes that."""
         key = f"{link_id}/{room_id}"
         with self._answering():
             invite = self.store.read()["invites"].get(key) if isinstance(link_id, str) and isinstance(
                 room_id, str) else None
             if invite is None:
                 raise RoomsError("no_invite", "This Hermes wasn't invited to that room over that Link", 404)
+            if not isinstance(just_me, bool):
+                raise RoomsError("bad_agents", "just_me is true or false")
             agents = self._agents(agents, minimum=0)
+            if just_me and agents:
+                raise RoomsError("bad_agents", "Just me brings no agents")
             if invite["status"] in ("joined", "declined"):
                 if [[agent[name] for name in ("profile", "handle", "display_name")] for agent in agents] == [
-                        [agent[name] for name in ("profile", "handle", "display_name")] for agent in invite["joined"]]:
+                        [agent[name] for name in ("profile", "handle", "display_name")] for agent in invite["joined"]] \
+                        and just_me == bool(invite.get("just_me")):
                     return self._shown_invite(invite)
                 raise RoomsError("answered", "This invite has been answered", 409)
+            if just_me:
+                return self._join_just_me(key, link_id, room_id, invite)
             ended = _ended(invite, int(self.clock()))
             if ended is not None:
                 raise ended
@@ -399,6 +414,17 @@ class Rooms:
                 raise RoomsError("not_started", "That room hasn't started yet: decline it instead", 409)
             if status == "joined":
                 raise RoomsError("not_started", "That room hasn't started yet: you can leave it once it does", 409)
+            if invite.get("just_me") and profiles is None:
+                if status != "started":
+                    raise RoomsError("not_in", "You aren't in that room", 409)
+                with self.store.update() as state:
+                    invite, now = state["invites"][key], int(self.clock())
+                    if invite["status"] == "started":
+                        invite.update(status="left", reason="left", ended_at=now)
+                        _queue(state, link_id, PERSON, room_id, {"v": VERSION, "room_id": room_id, "in": False}, now,
+                               parts=("left",))
+                self.flush()
+                return self._shown_invite(self.store.read()["invites"][key])
             in_room = {agent["profile"]: agent for agent in invite["joined"]} if status == "started" else {}
             wanted = list(in_room) if profiles is None else profiles
             if not wanted or any(profile not in in_room for profile in wanted):
@@ -423,7 +449,8 @@ class Rooms:
     def handle(self, received: room_links.Received) -> None:
         """An envelope from a Link, as the Link's loop hands it over."""
         handler = {INVITE: self.on_invite, ANSWER: self.on_answer, START: self.on_start, GRANT: self.on_grant,
-                   LEAVE: self.on_leave, ENDED: self.on_ended, room_copies.PAGE: self.copies.on_page,
+                   LEAVE: self.on_leave, ENDED: self.on_ended, PERSON: self.on_person,
+                   room_copies.PAGE: self.copies.on_page,
                    room_copies.COPIED: self.copies.on_copied, room_copies.OUT: self.copies.on_out,
                    room_posts.POST: self.posts.on_post,
                    room_posts.POSTED: self.posts.on_posted, room_looks.LOOKS: self.looks.on_looks,
@@ -498,6 +525,55 @@ class Rooms:
                 state["installations"].setdefault(received.link_id, next(iter(installations)))
             person.update(status="joined" if body["join"] else "declined", join=body["join"], answered_at=now)
 
+    def _join_just_me(self, key: str, link_id: str, room_id: str, invite: dict[str, Any]) -> dict[str, Any]:
+        """Answers an invite with Just me (PERSON): no agents join, so nothing binds here."""
+        ended = _ended(invite, int(self.clock()))
+        if ended is not None:
+            raise ended
+        shown = self.link(link_id)
+        if shown is None or shown.get("status") != "linked":
+            raise RoomsError("not_linked", "This Hermes isn't linked with them any more", 404)
+        if PERSON not in (shown.get("kinds") or ()):
+            raise RoomsError("home_too_old", "Their Conduit plugin can't take Just me yet: they need to update it",
+                             409)
+        if not _just_me_can_start(invite):
+            raise RoomsError("too_few", "A room needs two agents: with only one of theirs and nobody else invited, "
+                             "join with an agent of yours", 409)
+        with self.store.update() as state:
+            invite, now = state["invites"].get(key), int(self.clock())
+            ended = _ended(invite, now)
+            if ended is None:
+                invite.update(status="joined", ended_at=None, joined=[], just_me=True)
+                _queue(state, link_id, PERSON, room_id, {"v": VERSION, "room_id": room_id, "in": True}, now,
+                       parts=("in",))
+        if ended is not None:
+            raise ended
+        self.flush()
+        return self._shown_invite(self.store.read()["invites"][key])
+
+    def on_person(self, received: room_links.Received) -> None:
+        """Just me over a Link (PERSON). On the home, a guest joining a waiting room with no agents, or leaving a
+        started one; on the guest, the home saying the room it joined that way ended."""
+        body = _person_from(received.body)
+        if body is None:
+            logger.info("Linked Rooms dropped a room.person from Link %s that isn't one", received.link_id)
+            return
+        now, room_id = int(self.clock()), body["room_id"]
+        with self.store.update() as state:
+            draft = state["drafts"].get(room_id)
+            person = draft["links"].get(received.link_id) if draft is not None else None
+            if person is not None and "reason" not in body:
+                if body["in"]:
+                    if person["status"] == "waiting" and draft["status"] == "waiting" and now < draft["expires_at"]:
+                        person.update(status="joined", join=[], just_me=True, answered_at=now)
+                elif person.get("just_me") is True and draft["status"] == "started":
+                    person["just_me"] = "left"
+                return
+            invite = state["invites"].get(f"{received.link_id}/{room_id}")
+            if invite is not None and invite.get("just_me") and not body["in"] and "reason" in body \
+                    and invite["status"] in ("joined", "started"):
+                invite.update(status="ended", reason=body["reason"], ended_at=now)
+
     def on_start(self, received: room_links.Received) -> None:
         """The home's word on a room this installation was invited to: started, with who's in it, or not.
         Agents that aren't in it are left (unbound, their grants revoked)."""
@@ -518,6 +594,8 @@ class Rooms:
                 leaving = [agent for agent in invite["joined"] if agent["member_id"] not in kept]
                 invite.update(status="started", started_at=body["started_at"], members=body["members"],
                               joined=[agent for agent in invite["joined"] if agent["member_id"] in kept])
+                if "you" in body:
+                    invite["you"] = body["you"]
         for agent in leaving:
             self._leave(received.link_id, agent)
 
@@ -714,10 +792,12 @@ class Rooms:
                         "display_name": member["display_name"],
                         "owner": None if member["link"] is None else draft["links"][member["link"]]["name"]}
                        for member in draft["members"]]
-            seated = {member["link"] for member in draft["members"]}
+            seated = {member["link"] for member in draft["members"]} | set(room_copies.just_me(draft))
             for link_id, person in draft["links"].items():
                 if person["status"] == "joined" and link_id in seated:
                     body = {"v": VERSION, "room_id": room_id, "started_at": now, "members": members}
+                    if person.get("just_me") is True:
+                        body["you"] = person["name"]
                 elif person["status"] == "declined":
                     continue
                 else:
@@ -1137,6 +1217,10 @@ class Rooms:
                           "choices": self._filled(profile, invite["room_id"], people).as_dict()}
                          for profile in self._profiles()],
             "reason": invite["reason"],
+            # Joined with no agents, and whether the home's plugin takes that (PERSON).
+            "just_me": bool(invite.get("just_me")),
+            "just_me_offered": PERSON in ((self.link(invite["link"]) or {}).get("kinds") or ())
+            and _just_me_can_start(invite),
         }
 
     @contextmanager
@@ -1157,7 +1241,10 @@ class Rooms:
             "reason": "lapsed" if status != draft["status"] else draft["reason"],
             "agents": [{name: agent[name] for name in ("profile", "handle", "display_name")}
                        for agent in draft["own"]],
-            "people": [{"link": link_id, "name": person["name"], "status": person["status"],
+            # One in it with no agents who left is out of it, though their answer stays joined.
+            "people": [{"link": link_id, "name": person["name"],
+                        "status": "left" if person.get("just_me") == "left" else person["status"],
+                        "just_me": person.get("just_me") is True,
                         "agents": [{name: agent[name] for name in ("member_id", "handle", "display_name")}
                                    for agent in person["join"]]}
                        for link_id, person in draft["links"].items()],
@@ -1211,7 +1298,8 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
             # Who's who still shows; whose each post was waits for posts.db.
             logger.warning("Linked Rooms couldn't read who posted in room %s (%s)", room_id, type(exc).__name__)
             latest = []
-        return {"room_id": room_id, "home": None, "members": _members(draft), "posts": [
+        return {"room_id": room_id, "home": None, "members": _members(draft),
+                "just_me": [draft["links"][link_id]["name"] for link_id in room_copies.just_me(draft)], "posts": [
             {"event_id": each["event_id"], "seq": each["seq"], "by": names.get(each["link"], room_posts.GUEST)}
             for each in latest]}
     # The invite the room is on now: a re-join over a new Link has its own, beside the old one's.
@@ -1225,6 +1313,8 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
         # What the home calls this installation's owner: the name its posts carry there.
         you = next((room_posts.poster(member["owner"]) for member in invite["members"]
                     if member["member_id"] in mine), None)
+        if you is None and invite.get("you"):
+            you = room_posts.poster(invite["you"])  # Just me: the name the home gave at the start
         return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
             {"member_id": member["member_id"], "handle": member["handle"],
              "display_name": member["display_name"],
@@ -1479,6 +1569,12 @@ def _kept_invite(invite: Any) -> bool:
         and "ended_at" in invite and (invite["ended_at"] is None or type(invite["ended_at"]) is int)
 
 
+def _just_me_can_start(invite: dict[str, Any]) -> bool:
+    """Whether a room can start with this person in it with no agents: a room needs two agents, so the home's
+    one alone, with nobody else invited who might bring one, never starts (it would end too_few)."""
+    return len(invite["agents"]) >= 2 or bool(invite["people"])
+
+
 def _agent(agent: Any) -> bool:
     return isinstance(agent, dict) and all(isinstance(agent.get(name), str)
                                            for name in ("profile", "handle", "display_name"))
@@ -1691,7 +1787,9 @@ def _start_from(body: Any) -> Optional[dict[str, Any]]:
     if set(body) == {"v", "room_id", "cancelled", "reason"}:
         return dict(body) if body["cancelled"] is True and isinstance(body["reason"], str) \
             and CODE.fullmatch(body["reason"]) else None
-    if set(body) != {"v", "room_id", "started_at", "members"} or type(body["started_at"]) is not int:
+    # A Just me guest is told what the home calls them ("you"), since no member of theirs says.
+    if set(body) - {"you"} != {"v", "room_id", "started_at", "members"} or type(body["started_at"]) is not int \
+            or ("you" in body and room_links._checked_name(body["you"]) != body["you"]):
         return None
     members = body["members"]
     if not isinstance(members, list) or not 2 <= len(members) <= MAX_AGENTS or not all(
@@ -1724,6 +1822,20 @@ def _leave_from(body: Any) -> Optional[dict[str, Any]]:
             or body["v"] != VERSION or not _identifier(body["room_id"]) or not _member_ids(body["member_ids"]):
         return None
     return dict(body)
+
+
+def _person_from(body: Any) -> Optional[dict[str, Any]]:
+    """A room.person's body, or None when it isn't one: {v, room_id, in}, with a reason only on the home's
+    {in: false}."""
+    if not isinstance(body, dict) or type(body.get("v")) is not int or body["v"] != VERSION \
+            or not _identifier(body.get("room_id")) or not isinstance(body.get("in"), bool):
+        return None
+    if set(body) == {"v", "room_id", "in"}:
+        return dict(body)
+    if set(body) == {"v", "room_id", "in", "reason"} and body["in"] is False and isinstance(body["reason"], str) \
+            and CODE.fullmatch(body["reason"]):
+        return dict(body)
+    return None
 
 
 def _ended_from(body: Any) -> Optional[dict[str, Any]]:

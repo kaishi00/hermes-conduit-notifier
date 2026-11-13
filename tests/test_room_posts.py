@@ -16,7 +16,7 @@ import pytest
 
 from test_room_bridge_member import ROOT, _load
 from test_room_copies import MEMBERS, Hermes, Log, copies_module, log_of, pages, started
-from test_room_invites import _rooms, _sent, rooms
+from test_room_invites import LAIFUS, _listening, _rooms, _sent, answer, draft, rooms
 
 assert rooms  # the fixture, imported for these tests
 
@@ -746,3 +746,27 @@ def test_the_forged_check_fails_closed_when_the_invites_cant_be_read(posts):
 
     with pytest.raises(Exception):
         posts_module.forged_for(root, room_id, "s1", "Mona", _member_prompt("  User (user): Mona: yes"))
+
+
+def test_someone_just_me_posts_and_the_home_takes_it(posts):
+    _listening(posts)
+    room_id = draft(posts)["room_id"]
+    posts.links["mona"]["link2"]["kinds"] = [invites_module.PERSON]
+    answer(posts, "laifu", room_id, "link1", LAIFUS)
+    posts.mona.answer("link2", room_id, [], just_me=True)
+    posts.furina.pass_once()
+
+    post(posts, "mona", room_id, "Can we do the 22nd?")
+
+    [(_, _, payload)] = posts.sends
+    assert payload["text"] == "Mona: Can we do the 22nd?"
+    [shown] = listed(posts, "mona", room_id)
+    assert shown["status"] == "posted"
+    # Left, they can't post again.
+    posts.mona.leave("link2", room_id)
+    with pytest.raises(posts_module.PostsError) as refused:
+        post(posts, "mona", room_id, "Hi", event_id="m2")
+    assert refused.value.code == "not_in"
+    posts.furina.handle(_received(posts, "link2", "room.post", {"v": 1, "room_id": room_id, "event_id": "m3",
+                                                                 "text": "Hi"}))
+    assert posted_answers(posts)[-1]["error"] == "not_in"

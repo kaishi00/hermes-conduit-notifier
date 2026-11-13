@@ -418,6 +418,9 @@ def start_turn(session_id: Any, user_message: Any = None, clock: Callable[[], fl
         return
     with _turn_entries_lock:
         _woken.pop(session_id, None)
+        # A turn that never reaches note() (Pulse's) mustn't keep the last
+        # turn's mark that Conduit sent it.
+        _authority_turns.pop(session_id, None)
         key = user_message.strip() if isinstance(user_message, str) else None
         now = clock()
         times = [at for at in _wakes.get(key, []) if 0 <= now - at <= WAKE_TTL_S] if key else []

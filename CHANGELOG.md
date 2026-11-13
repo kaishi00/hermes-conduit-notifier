@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.167.3 (2026-11-12)
+## 0.167.6 (2026-11-13)
 
 ### Fixes
 - On a Hermes where the gateway serves Conduit's connection, the bot was
@@ -21,6 +21,23 @@ checks it). The format is fixed, because Conduit reads it:
   turning off Conduit replies in Settings > Notifications did nothing
   there. Both now work for messages you send from Conduit.
 
+## 0.167.5 (2026-11-12)
+
+### New and improved
+- Just me: join a Linked Room someone else hosts without bringing any of your agents, to read it and post in it. The host's plugin needs this version too.
+
+## 0.167.4 (2026-11-12)
+
+### New and improved
+
+- When your Conduit plugin and a linked person's differ, Settings > Multiplayer says whose to update, instead of rooms quietly missing what the older one can't take.
+
+## 0.167.3 (2026-11-12)
+
+### Fixes
+- A bot in a room with other people's agents could answer as if a picture
+  sent there wasn't there. Each turn that names pictures now tells the bot
+  to look at them first.
 ## 0.167.2 (2026-11-12)
 
 ### Fixes

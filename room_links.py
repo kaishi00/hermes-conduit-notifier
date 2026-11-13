@@ -24,6 +24,7 @@ the next pass. Envelopes of other kinds go to the handlers registered with
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -90,6 +91,16 @@ MAX_PAGES = 20
 HANDLER_TRIES = 3
 
 ACCEPT, CONFIRM, REMOVE = "link.accept", "link.confirm", "link.remove"
+# What each side's plugin is and the kinds it takes, so a Link whose plugins
+# differ says which one to update instead of dropping envelopes unseen. Sent
+# again when the plugin or its kinds change, and every HELLO_AGAIN_S, inside
+# the mailbox's hold, for a side that restored an older links.json.
+HELLO = "link.hello"
+HELLO_AGAIN_S = 6 * 24 * 3600
+# A kind this side couldn't take is shown for as long as the mailbox holds one.
+UNHEARD_S = 7 * 24 * 3600
+_PLUGIN = re.compile(r"^\d{1,6}(?:\.\d{1,6}){1,3}\Z")
+MAX_HELLO_KINDS = 128
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z")
 _KEY = re.compile(r"^[A-Za-z0-9_-]{43}\Z")
@@ -429,6 +440,30 @@ class Links:
         except (room_mailbox.MailboxError, room_envelope.EnvelopeError) as exc:
             raise _link_error(exc) from None
         return message_id
+
+    def _say_hello(self) -> None:
+        """Queues a link.hello for each linked Link that hasn't had this plugin's version and kinds, or not for
+        HELLO_AGAIN_S. Its message id names what it says, so the other side, which keeps the ids it has seen,
+        takes a changed one."""
+        body = _hello_body()
+        said = [body["plugin"], body["kinds"]]
+        now = int(self.clock())
+        digest = hashlib.sha256(json.dumps([*said, now // HELLO_AGAIN_S]).encode()).hexdigest()[:16]
+        with self._store.update() as state:
+            for link_id, link in state["links"].items():
+                if link["status"] != "linked" or link.get("leaving"):
+                    continue
+                if link.get("hello") == said and now - int(link.get("hello_at") or 0) < HELLO_AGAIN_S:
+                    continue
+                state["outbox"] = [item for item in state["outbox"]
+                                   if not (item["kind"] == HELLO and item["link"] == link_id)]
+                item = _outgoing(HELLO, link_id, link, body, now)
+                item["id"] = f"hello.{link_id}.{digest}"
+                state["outbox"].append(item)
+                link.update(hello=said, hello_at=now)
+                # What it couldn't take before, this plugin may take now.
+                if isinstance(link.get("unheard"), dict) and link["unheard"].get("kind") in body["kinds"]:
+                    link.pop("unheard")
 
     def mailbox(self) -> room_mailbox.Mailbox:
         """This installation's own inbox."""
@@ -790,6 +825,7 @@ class LinkLoop:
         links._registered(mailbox)
         read_at = int(self.clock())
         drained = self._read(identity, mailbox, wait)
+        links._say_hello()
         links.flush()
         if drained and self._run_out(read_at):
             links.flush()
@@ -988,12 +1024,28 @@ class LinkLoop:
                 if link_id in state["links"]:
                     _forget(state, link_id, now)
             return True
+        if kind == HELLO:
+            peer = _peer_from(opened.body)
+            if peer is None:
+                logger.info("Linked Rooms dropped a link.hello from Link %s that isn't one", link_id)
+                return True
+            with store.update() as state:
+                link = state["links"].get(link_id)
+                if link is not None:
+                    link["peer"] = {**peer, "at": now}
+            return True
         handler = HANDLERS.get(kind)
         if link["status"] != "linked":
             logger.info("Linked Rooms dropped a %s envelope for Link %s, which isn't confirmed", kind, link_id)
             return True
         if handler is None:
             logger.info("Linked Rooms dropped a %s envelope: nothing on this Hermes handles that kind", kind)
+            if not kind.startswith("link."):
+                # A newer plugin's kind: the Link says to update this one (_behind).
+                with store.update() as state:
+                    known = state["links"].get(link_id)
+                    if known is not None:
+                        known["unheard"] = {"kind": kind, "at": now}
             return True
         if header.id in link.get("seen", {}):
             return True
@@ -1225,8 +1277,51 @@ def _senders(state: dict[str, Any], now: int) -> list[tuple[str, str]]:
 
 
 def _shown(link_id: str, link: dict[str, Any], now: int) -> dict[str, Any]:
+    peer = link.get("peer") if isinstance(link.get("peer"), dict) else None
     return {"id": link_id, "name": link["name"], "status": _status(link, now),
-            "words": _words(_key_of(link, "sign"), _key_of(link, "seal")), "created_at": link["created_at"]}
+            "words": _words(_key_of(link, "sign"), _key_of(link, "seal")), "created_at": link["created_at"],
+            "plugin": peer["plugin"] if peer else None, "kinds": list(peer["kinds"]) if peer else None,
+            "behind": _behind(link, now)}
+
+
+def _behind(link: dict[str, Any], now: int) -> Optional[str]:
+    """Whose plugin to update for this Link to carry everything: ``theirs``
+    when the other side takes fewer kinds than this side said it takes (or
+    never said, before plugin 0.167.4), ``yours`` when it sent a kind this side
+    doesn't take, None when they match or the Link isn't linked yet. It reads
+    what the store keeps, so any process answers it, not only the one whose
+    loop registered the handlers."""
+    if link["status"] != "linked":
+        return None
+    hello = link.get("hello")
+    mine = set(hello[1]) if isinstance(hello, list) and len(hello) == 2 and isinstance(hello[1], list) else None
+    unheard = link.get("unheard")
+    if isinstance(unheard, dict) and (mine is None or unheard.get("kind") not in mine) \
+            and now - int(unheard.get("at") or 0) < UNHEARD_S:
+        return "yours"
+    peer = link.get("peer")
+    if not isinstance(peer, dict):
+        # Its hello goes on the first pass after the Link is made: give it a few minutes.
+        return "theirs" if now - link["created_at"] > 600 else None
+    return "theirs" if mine is not None and mine - set(peer["kinds"]) else None
+
+
+def _hello_body() -> dict[str, Any]:
+    from . import events  # noqa: PLC0415 - plugin.yaml's version, read once there
+
+    return {"v": VERSION, "plugin": events.PLUGIN_VERSION, "kinds": sorted(HANDLERS)[:MAX_HELLO_KINDS]}
+
+
+def _peer_from(body: Any) -> Optional[dict[str, Any]]:
+    """What a link.hello says, or None for one that isn't."""
+    if not isinstance(body, dict) or set(body) != {"v", "plugin", "kinds"} or type(body["v"]) is not int:
+        return None
+    plugin, kinds = body["plugin"], body["kinds"]
+    if not isinstance(plugin, str) or not _PLUGIN.match(plugin) or not isinstance(kinds, list) \
+            or len(kinds) > MAX_HELLO_KINDS \
+            or not all(isinstance(kind, str) and room_envelope.KIND.match(kind) for kind in kinds):
+        return None
+    return {"plugin": plugin, "kinds": sorted(set(kinds))}
 
 
 def _words(sign: bytes, seal: bytes) -> list[str]:

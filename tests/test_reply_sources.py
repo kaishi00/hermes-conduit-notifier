@@ -205,6 +205,11 @@ def test_on_the_gateways_authority_a_turn_conduit_reported_is_conduits(tmp_path,
     surfaces.note(False, "from Desktop", session_id="local-1")
     assert plugin._turn_source("local", "local-1") is None
     assert plugin._source_notifies("local", "local-1") is True
+    # A turn that never reaches note() (Pulse's) doesn't keep an earlier mark.
+    surfaces.record_for_authority(surfaces.Report("local-1", surfaces.text_sha256("again"), "iphone", "typed"))
+    assert surfaces.note(False, "again", session_id="local-1")
+    surfaces.start_turn("local-1", "Pulse looked around")
+    assert plugin._turn_source("local", "local-1") is None
 
 
 def test_unreadable_fanout_clients_are_unknown():

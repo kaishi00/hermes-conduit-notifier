@@ -1615,7 +1615,7 @@ def test_an_accept_naming_a_mailbox_whose_name_points_inside_this_network_gets_n
 @needs_node
 def test_sends_tell_the_mailbox_client_which_mailbox_is_this_hermes_own(home, monkeypatch):
     # It looks up only a mailbox someone else named, so one on a home network that both Hermes use links
-    # them: an accept, a confirm, an envelope and a remove.
+    # them: an accept, a confirm, each side's hello, an envelope and a remove.
     calls = []
     real_send = mailbox_module.send
 
@@ -1628,7 +1628,7 @@ def test_sends_tell_the_mailbox_client_which_mailbox_is_this_hermes_own(home, mo
     mona.send(link_id, "test.echo", {"text": "hi"})
     mona.remove(link_id)
 
-    assert len(calls) == 4 and all(url == own for url, own in calls)
+    assert len(calls) == 6 and all(url == own for url, own in calls)
 
 
 @needs_node
@@ -2127,3 +2127,117 @@ def test_the_links_command_parses(tmp_path):
     assert (args.conduit_push_action, args.links_action, args.target, args.name) == (
         "links", "accept", "conduit://link/abc", "Mona")
     assert parser.parse_args(["links", "remove", "abc", "--yes"]).yes is True
+
+
+# --- Plugin versions ----------------------------------------------------------
+
+
+def _kinds(monkeypatch, *kinds):
+    """What this process takes, as the rooms loop's registrations would say."""
+    monkeypatch.setattr(links_module, "HANDLERS", {kind: (lambda received: None) for kind in kinds})
+
+
+def _clocked_link(home):
+    clock = Clock()
+    eric, mona = home("eric", clock), home("mona", clock)
+    link_id = mona.accept(eric.invite("Eric")["url"], "Mona")["link"]["id"]
+    _run(eric, mona)
+    return eric, mona, link_id, clock
+
+
+@needs_node
+def test_linked_plugins_tell_each_other_their_version_and_match(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, _ = _clocked_link(home)
+    _run(eric, mona)
+    from conduit_push import events
+
+    for side in (eric, mona):
+        shown = side.get(link_id)
+        assert shown["plugin"] == events.PLUGIN_VERSION
+        assert shown["behind"] is None
+
+
+@needs_node
+def test_a_link_whose_other_plugin_takes_fewer_kinds_says_to_update_theirs(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, _ = _clocked_link(home)
+    _one_loop(mona, 2)
+    _kinds(monkeypatch, "test.echo", "test.newer")
+    _one_loop(eric, 2)
+
+    assert eric.get(link_id)["behind"] == "theirs"
+    assert mona.get(link_id)["behind"] is None  # it hasn't heard eric's yet, and takes nothing eric doesn't
+
+
+@needs_node
+def test_a_link_whose_other_plugin_never_said_says_to_update_theirs_after_a_few_minutes(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, _, link_id, clock = _clocked_link(home)
+    with eric._store.update() as state:
+        state["links"][link_id].pop("peer", None)  # a plugin before 0.167.4 sends no hello
+
+    assert eric.get(link_id)["behind"] is None
+    clock.now += 601
+    assert eric.get(link_id)["behind"] == "theirs"
+    assert eric.get(link_id)["plugin"] is None
+
+
+@needs_node
+def test_a_kind_this_plugin_doesnt_take_says_to_update_yours_until_it_does(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    _run(eric, mona)
+
+    eric.send(link_id, "room.someday", {"text": "for a later version"})
+    _one_loop(mona, 2)
+    assert mona.get(link_id)["behind"] == "yours"
+
+    # Updated: its hello now names the kind, which takes the notice down.
+    _kinds(monkeypatch, "test.echo", "room.someday")
+    _run(mona, eric, mona)
+    assert mona.get(link_id)["behind"] is None
+    assert eric.get(link_id)["behind"] is None
+
+    _kinds(monkeypatch, "test.echo")
+    eric.send(link_id, "room.later", {"text": "and another"})
+    _one_loop(mona, 2)
+    clock.now += links_module.UNHEARD_S
+    assert mona.get(link_id)["behind"] is None  # the mailbox no longer holds what it couldn't take
+
+
+@needs_node
+def test_a_hello_goes_again_when_the_kinds_change_and_after_six_days(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    _run(eric, mona)
+    said_at = mona._store.read()["links"][link_id]["peer"]["at"]
+
+    _run(eric, mona)
+    assert mona._store.read()["links"][link_id]["peer"]["at"] == said_at  # nothing changed: nothing sent
+
+    _kinds(monkeypatch, "test.echo", "test.newer")
+    clock.now += 5
+    _run(eric, mona)
+    assert mona._store.read()["links"][link_id]["peer"]["kinds"] == ["test.echo", "test.newer"]
+
+    clock.now += links_module.HELLO_AGAIN_S
+    _run(eric, mona)
+    assert mona._store.read()["links"][link_id]["peer"]["at"] == int(clock.now)
+
+
+@pytest.mark.parametrize("body", [
+    None, [], {"v": 1, "plugin": "0.167.4"}, {"v": True, "plugin": "0.167.4", "kinds": []},
+    {"v": 1, "plugin": "latest", "kinds": []}, {"v": 1, "plugin": 166, "kinds": []},
+    {"v": 1, "plugin": "0.167.4", "kinds": "room.out"}, {"v": 1, "plugin": "0.167.4", "kinds": ["Room Out"]},
+    {"v": 1, "plugin": "0.167.4", "kinds": [1]},
+    {"v": 1, "plugin": "0.167.4", "kinds": [f"k{n}" for n in range(links_module.MAX_HELLO_KINDS + 1)]},
+    {"v": 1, "plugin": "0.167.4", "kinds": [], "extra": 1},
+])
+def test_a_hello_that_isnt_one_is_dropped(body):
+    assert links_module._peer_from(body) is None
+
+
+def test_a_hello_reads_its_version_and_kinds():
+    assert links_module._peer_from({"v": 1, "plugin": "0.167.4", "kinds": ["room.out", "room.out", "room.page"]}) \
+        == {"plugin": "0.167.4", "kinds": ["room.out", "room.page"]}
