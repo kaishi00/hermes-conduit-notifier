@@ -633,6 +633,30 @@ def test_a_views_own_record_answers_which_approvals_a_chat_waits_on(gateway, mon
         {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub", "prompts": []}})[1]
     _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
     assert [row["request_id"] for row in chats.seen_approvals(transport, "/home", "w1")] == ["p5"]
+    # One the snapshot lists that settles before the link notes the snapshot
+    # stays settled: the snapshot was taken before it settled.
+    answers["session.resume"] = lambda request: (
+        link.write(_event("w1", "approval.settled", {"prompt_id": "p5"}, generation=5)),
+        {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub",
+                    "prompts": [{"kind": "approval", "prompt_id": "p5", "execution_generation": 5, "command": "new"},
+                                {"kind": "approval", "prompt_id": "p6", "execution_generation": 5,
+                                 "command": "late", "timeout_s": 300}]}})[1]
+    _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
+    assert [row["request_id"] for row in chats.seen_approvals(transport, "/home", "w1")] == ["p6"]
+    # A snapshot doesn't say when Hermes asked, so its timeout isn't counted from the read.
+    assert link.prompt_texts["p6"][2] is None
+    # The same on a first read, before the link knew the prompt at all.
+    answers["session.resume"] = lambda request: (
+        chats.link(fresh).write(_event("w2", "approval.settled", {"prompt_id": "q1"}, generation=1)),
+        {"result": {"session_id": "w2", "execution_generation": 1, "subscription_id": "sub2",
+                    "prompts": [{"kind": "approval", "prompt_id": "q1", "execution_generation": 1, "command": "x"}]}})[1]
+    fresh = Transport()
+    _call(chats, fresh, "session.resume", {"session_id": "w2", "omit_messages": True})
+    assert chats.seen_approvals(fresh, "/home", "w2") == []
+    # Closing the view forgets what it followed of the chat.
+    _call(chats, transport, "session.close", {"session_id": "w1"})
+    assert chats.seen_approvals(transport, "/home", "w1") is None
+    assert "w1" not in link.viewed and link.prompts == {}
 
 
 def test_a_view_counts_while_the_authority_still_sends_it_the_chat(monkeypatch):
