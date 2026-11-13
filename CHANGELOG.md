@@ -13,6 +13,16 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.0 (2026-11-13)
+
+### New and improved
+- Under Ask Me First, a question your bot asks you about its workstreams
+  can be answered with a tap: Approve or Decline on its card in the Work
+  panel, and on a yes the bot goes ahead. Open questions count as "needs
+  you". Needs the next Conduit build.
+- A question about work you've since resolved goes away by itself instead
+  of waiting on you.
+
 ## 0.167.6 (2026-11-13)
 
 ### Fixes

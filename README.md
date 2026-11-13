@@ -1597,7 +1597,10 @@ question or a small task doesn't start a workstream. Change it in Conduit
   about it (she can reword the open one with new evidence), a no stands for a
   day unless she tells you what came up since, and one decision that covers
   several workstreams is one question, your answer covering each (plugin
-  0.158.0+). A
+  0.158.0+). In Conduit an open question counts as "needs you" and shows at
+  the top of her Work panel with Approve and Decline: a tap is your own
+  answer, and on a yes she goes ahead; a question about work you've since
+  resolved goes away by itself (plugin 0.168.0+). A
   workstream you set to Leave alone (its card in Conduit) gets nothing from
   her and isn't stopped by her in a turn you didn't start. Past eight
   messages to one workstream in an hour from such turns, the next is refused
@@ -1724,6 +1727,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
+| POST | `/api/plugins/conduit_push/workstreams/<question>/approve` or `/decline` (`<question>`: an open question's id, P1, from `coordination`'s items) | `{ok, id, status}`; `not_now` (409) once it's answered |
 | GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, policies, quick_steps, quick_steps_choices, coordination, coordinations, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, workstream_model, unavailable}` (`policy`: off, strict, lookups or open; `policies`: the ones this plugin takes; `quick_steps`: the steps a lookups turn does in the Bot Chat) |
 | POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, quick_steps, coordination, max_running, after_restart, workstream_approvals, workstream_model}` | the settings as they are now |
 | POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?, chat?, result?}` (`via`: `phone` or `watch`; `result`: the reply of a turn that ended before the phone kept it, which settles the row; `chat`: the chat the call is kept with, so the Bot Chat's makes it the coordinator's workstream, `call` on its row; `call`: the call's own id) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title`, `goal`, `chat` or `result` isn't text; `off` (409) when the bot's workstreams are off |
