@@ -116,10 +116,13 @@ def test_markers_are_read_where_hermes_writes_them(monkeypatch, tmp_path):
         api.self_update._running_turns(api.self_update.os.getpid(), [tmp_path])
 
 
-@pytest.mark.parametrize("setup", ["windows", "plugin-host", "desktop", "hermes-desktop"])
+@pytest.mark.parametrize("setup", ["plugin-host", "desktop", "hermes-desktop", "windows-desktop"])
 def test_backends_that_cannot_re_exec_refuse(monkeypatch, tmp_path, setup):
-    if setup == "windows":
+    if setup == "windows-desktop":
+        # Hermes Desktop on Windows is still Desktop's to restart.
         monkeypatch.setattr(api.self_update.sys, "platform", "win32")
+        monkeypatch.setitem(sys.modules, "hermes_cli.anon_auth", None)
+        monkeypatch.setenv("HERMES_DESKTOP_CHILD_PID", "123")
     elif setup == "plugin-host":
         monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
     elif setup == "desktop":
@@ -142,6 +145,61 @@ def test_the_re_exec_keeps_the_original_command_line(monkeypatch):
     monkeypatch.setattr(api.self_update.os, "execv", lambda exe, argv: seen.append((exe, argv)))
     api.self_update._reexec()
     assert seen == [(api.self_update.sys.executable, [api.self_update.sys.executable, "-m", "hermes_cli.main", "dashboard", "--port", "9119"])]
+
+
+def test_a_windows_dashboard_restarts_itself(monkeypatch, tmp_path):
+    # Issue notifier 774: Windows used to answer 501, so an update left the dashboard on the old plugin.
+    monkeypatch.setattr(api.self_update.sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "hermes_cli.anon_auth", None)
+    scheduled = []
+    result = api.self_update.self_restart(lambda delay, fn: scheduled.append(fn), homes=lambda: [tmp_path])
+    assert result["restarting"] is True and len(scheduled) == 1
+
+
+def test_on_windows_the_restart_hands_the_command_line_to_the_relauncher_and_exits(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.self_update.sys, "platform", "win32")
+    monkeypatch.setattr(api.self_update.sys, "orig_argv", ["python.exe", "C:\\hermes\\Scripts\\hermes.exe", "dashboard"])
+    spawned, exits = [], []
+    monkeypatch.setattr(api.self_update.subprocess, "Popen", lambda argv, **kw: spawned.append((argv, kw)))
+    monkeypatch.setattr(api.self_update.os, "execv", lambda *a: pytest.fail("exec on Windows"))
+    monkeypatch.setattr(api.self_update.os, "_exit", lambda code: exits.append(code))
+    api.self_update._reexec()
+    assert exits == [0]
+    argv, kw = spawned[0]
+    assert argv[1:3] == ["-I", str(ROOT / "windows_relaunch.py")]
+    assert argv[3] == str(api.self_update.os.getpid())
+    assert json.loads(argv[4]) == [api.self_update.sys.executable, "C:\\hermes\\Scripts\\hermes.exe", "dashboard"]
+    assert argv[5] == str(tmp_path / "logs" / "dashboard-restart.log")
+    assert kw["creationflags"] & 0x01000000 and kw["stdin"] == api.self_update.subprocess.DEVNULL
+
+
+def test_a_job_that_forbids_breakaway_still_gets_the_relauncher(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    flags = []
+
+    def popen(argv, **kw):
+        flags.append(kw["creationflags"])
+        if kw["creationflags"] & 0x01000000:
+            raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(api.self_update.subprocess, "Popen", popen)
+    api.self_update._relaunch_on_windows(["python.exe", "hermes.exe", "dashboard"])
+    assert flags == [0x08000200 | 0x01000000, 0x08000200]
+
+
+def test_a_relauncher_that_cant_start_leaves_the_dashboard_serving(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.self_update.sys, "platform", "win32")
+    monkeypatch.setattr(api.self_update.sys, "orig_argv", ["python.exe", "hermes.exe", "dashboard"])
+
+    def popen(argv, **kw):
+        raise FileNotFoundError(2, "No such file")
+
+    monkeypatch.setattr(api.self_update.subprocess, "Popen", popen)
+    monkeypatch.setattr(api.self_update.os, "_exit", lambda code: pytest.fail("exited"))
+    with pytest.raises(OSError):
+        api.self_update._reexec()
 
 
 def test_the_route_answers_and_schedules_the_restart(monkeypatch, tmp_path):

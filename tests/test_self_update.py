@@ -517,7 +517,7 @@ def test_another_process_loading_the_file_leaves_a_live_job_alone(tmp_path):
 
 
 def test_a_dashboard_that_cant_restart_itself_refuses(monkeypatch, tmp_path):
-    monkeypatch.setattr(api.self_update.sys, "platform", "win32")
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
     with pytest.raises(api.core.TokenError) as raised:
         api.self_update.start_self_update(None, lambda *a: None, path=tmp_path / "job.json", steps=(dict, _restarted))
     assert raised.value.status == 501
