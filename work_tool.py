@@ -85,6 +85,11 @@ SHOWS_OR_ASKS = frozenset({"clarify", "conduit_notify", SHOW, "conduit_maps", "b
 # tools, its memory, Tool Search's bridge (checked by what it calls) and what
 # shows or asks (C.4). Strict, "Only Coordinates", allows only these.
 STRICT = frozenset({*TOOLS, *WORKER_TOOLS, "memory", *BRIDGE}) | SHOWS_OR_ASKS
+# What Hermes' review after a turn runs in its fork of the chat (its
+# dispatch whitelist, agent.background_review): reading and keeping the bot's
+# skills. Refused there, each review of a Bot Chat turn spent its tokens on
+# nothing and the bot learned no skill from what the user told it.
+REVIEW_TOOLS = frozenset({"skills_list", "skill_view", "skill_manage"})
 # Always a workstream's on strict and quick: a workstream is the bot's own
 # background work, kept, listed and recovered, where a subagent isn't.
 BACKGROUND = frozenset({"delegate_task"})
@@ -3159,6 +3164,11 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
     # A fork of the Bot Chat (its review, /btw) runs under its id and is
     # held to the same policy; a subagent never reaches here.
     calls = [(name, args)]
+    if name in REVIEW_TOOLS and _in_fork():
+        # Hermes' review of a turn keeps the bot's skills, as it does after
+        # any chat's turn, and Hermes lets that fork run nothing else. It is
+        # no step of the coordinator's turn, so it takes none of its budget.
+        return None
     if name == "tool_call":
         from . import pulse_tools
 

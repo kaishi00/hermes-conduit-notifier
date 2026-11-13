@@ -1422,6 +1422,24 @@ def test_a_fork_of_the_bot_chat_keeps_to_the_policy(on, hermes, monkeypatch):
     assert block and block["action"] == "block"
 
 
+def test_the_review_after_a_bot_chat_turn_keeps_the_bots_skills(on, hermes, monkeypatch):
+    """Hermes' review of a turn runs in a fork of the Bot Chat with the
+    skill tools only: they run there under every setting and take none of
+    the turn's quick steps, and the Bot Chat's own turn is held as before."""
+    for mode in ("strict", "lookups"):
+        on.set_policy(mode)
+        monkeypatch.setattr(work, "_in_fork", lambda: False)
+        if mode == "strict":
+            assert work.tool_block(BOT_CHAT, "skill_manage", {}, turn_id="t1")["action"] == "block"
+        monkeypatch.setattr(work, "_in_fork", lambda: True)
+        for name in ("skills_list", "skill_view", "skill_manage"):
+            assert work.tool_block(BOT_CHAT, name, {}, turn_id="t1") is None
+            assert work._last_take.taken is None
+    monkeypatch.setattr(work, "_in_fork", lambda: True)
+    on.set_policy("strict")
+    assert work.tool_block(BOT_CHAT, "terminal", {"command": "ls"}, turn_id="t3")["action"] == "block"
+
+
 def test_an_unreadable_registry_holds_the_bot_chat_to_strict(on, hermes, monkeypatch):
     def broken(self):
         raise OSError("disk I/O error")
