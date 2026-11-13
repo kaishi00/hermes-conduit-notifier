@@ -512,3 +512,89 @@ def test_what_a_calls_workstream_found_waits_with_its_result(on, hermes, home, m
     monkeypatch.setattr(work, "_call_of", lambda row: "call-1")
     note = work.digest(BOT_CHAT)
     assert "you'll get it once the" in note and "· it found" not in note
+
+
+def test_a_question_is_answered_with_a_tap_and_a_yes_is_the_users_turn(on, hermes, home, monkeypatch):
+    """Approve or Decline on a question's card in Conduit is the user's own
+    answer: recorded with no Bot Chat turn, and a yes reaches the Bot Chat as
+    a work update whose turn isn't held as one it started itself."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    woken(home)
+    first = call("work_propose", {"text": "Stop W1: the API it ports to is gone.", "ref": "W1"})["id"]
+    listed = work.app_list(on.home)
+    assert listed["counts"]["questions"] == 1 and listed["counts"]["needs_you"] == 0
+    shown = next(item for item in listed["coordination"]["items"] if item["id"] == first)
+    assert shown["actions"] == ["approve", "decline"]
+    assert work.app_act(on.home, first, "stop")["error"] == "unknown_action"
+    assert work.app_act(on.home, "P9", "approve")["error"] == "no_such_work"
+    done = work.app_act(on.home, "p1", "approve")
+    assert done == {"ok": True, "id": "P1", "status": "approved"}
+    line, = batched()
+    assert line == "- P1 (about W1), approved by the user just now: «Stop W1: the API it ports to is gone.»"
+    kept, = on.outbox_rows("", "line_answer")  # written with the answer, once
+    assert kept["text"] == line and kept["target"] == BOT_CHAT
+    assert work.app_act(on.home, first, "decline")["error"] == "not_now"  # answered once
+    listed = work.app_list(on.home)
+    assert listed["counts"]["questions"] == 0
+    shown = next(item for item in listed["coordination"]["items"] if item["id"] == first)
+    assert shown["status"] == "approved" and shown["actions"] == []
+    assert "- P1 (about W1), approved by the user just now" in work.digest(BOT_CHAT)
+    # The update that carries their yes: Ask Me First doesn't hold what it approves.
+    assert call("work_stop", {"ref": "W1"})["error"] == "ask_first"
+    work._queue_wake(on.home, BOT_CHAT, line, kind="answer")
+    work._queue_wake(on.home, BOT_CHAT, "- W1 reported: done")
+    work._send_wake(on.home, BOT_CHAT)
+    sent = on.outbox_rows("", "wake")[-1]["text"]
+    assert sent.startswith("Work update from Conduit: the user answered what you asked them")
+    assert sent.index(line) < sent.index("Do what they said yes to now") < sent.index("- W1 reported: done")
+    _chat_db(home, [(BOT_CHAT, "user", sent, "hidden")])
+    assert call("work_stop", {"ref": "W1"})["ok"]
+    # Their tap answered that question only: another stays theirs to answer.
+    start("Docs", "Write the docs.", new=True)
+    second = call("work_propose", {"text": "Start the docs over.", "ref": "W2"})["id"]
+    assert call("work_propose", {"id": second, "answer": "approved"})["error"] == "not_the_user"
+    # A no is kept and starts no turn.
+    assert work.app_act(on.home, second, "decline")["status"] == "declined"
+    assert batched() == []
+    assert f"- {second} (about W2), declined by the user just now" in work.digest(BOT_CHAT)
+
+
+def test_a_question_about_resolved_work_is_withdrawn(on, hermes, home):
+    """Nothing is left to decide once every workstream a question is about
+    is resolved, so it stops waiting on the user; one with other open work,
+    or about no workstream, stays."""
+    start()
+    start("Docs", "Write the docs.", new=True)
+    woken(home)
+    one = call("work_propose", {"text": "Stop W1.", "ref": "W1"})["id"]
+    both = call("work_propose", {"text": "Merge W1 into W2.", "refs": ["W2", "W1"]})
+    assert both["error"] == "already_asked"
+    two = call("work_propose", {"text": "Pause W2 for the release.", "ref": "W2"})["id"]
+    loose = call("work_propose", {"text": "Start a workstream for the changelog."})["id"]
+    assert work.app_list(on.home)["counts"]["questions"] == 3
+    for ref in ("W1",):
+        on.update(ref, status="stopped", closed_at=time.time(), resolved_by="user")
+    listed = work.app_list(on.home)
+    assert listed["counts"]["questions"] == 2
+    assert [item["id"] for item in listed["coordination"]["items"] if item["kind"] == "proposal"] == [loose, two]
+    note = work.digest(BOT_CHAT)
+    assert f"- {one} " not in note and f"- {two} (about W2)" in note and f"- {loose}, asked" in note
+    assert work.app_act(on.home, one, "approve")["error"] == "not_now"
+    assert on.proposal(one)["status"] == "withdrawn"
+    # A tap on a card drawn before its work was resolved: withdrawn there too.
+    on.update("W2", status="stopped", closed_at=time.time(), resolved_by="user")
+    assert work.app_act(on.home, two, "approve")["error"] == "not_now"
+    assert on.proposal(two)["status"] == "withdrawn" and on.outbox_rows("", "line_answer") == []
+
+
+def test_every_open_question_is_listed_with_its_card(on, hermes, home):
+    """Each open question counts as needing the user, so each is in the
+    list to answer, however many there are and whatever else is listed."""
+    start()
+    woken(home)
+    asked = [on.proposal_add("", f"Question {number} about the release plan.") for number in range(1, 35)]
+    listed = work.app_list(on.home)
+    cards = [item["id"] for item in listed["coordination"]["items"] if item.get("actions")]
+    assert listed["counts"]["questions"] == len(asked) == len(cards) == 34

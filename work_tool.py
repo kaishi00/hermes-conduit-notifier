@@ -2866,10 +2866,11 @@ def _replay_one(home: Path, store: work_store.Store, broker: Optional[work_broke
         store.outbox_done(row["id"], "expired")
         return
     kind = row["kind"]
-    if kind in ("line", "line_ask", "line_call"):
+    if kind in ("line", "line_ask", "line_call", "line_answer"):
         # A call's held line is held again while that call is still on.
         _queue_wake(home, row["target"], row["text"],
-                    kind={"line_ask": "ask", "line_call": "call"}.get(kind, "work"), item=row["id"])
+                    kind={"line_ask": "ask", "line_call": "call", "line_answer": "answer"}.get(kind, "work"),
+                    item=row["id"])
         return
     if kind == "line_room":
         # A room's report a restart cut off: posted again under its own key,
@@ -4519,7 +4520,7 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     mode = policy(home)
     out = {"policy": mode, "bot": _bot_name(home), "bot_chat": _bot_chat_of(home),
            "bot_chat_agents": bot_chat_agents(home), "work": [],
-           "counts": {"working": 0, "needs_you": 0, "ready": 0, "waiting": 0},
+           "counts": {"working": 0, "needs_you": 0, "ready": 0, "waiting": 0, "questions": 0},
            "max_running": work_store.DEFAULT_MAX_RUNNING, "resolved_count": 0,
            "workstream_sessions": []}
     # Who drives the bot's screen now, apart from who used it last
@@ -4556,6 +4557,10 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
             counts["ready"] += 1
         elif work.kind == "ask_out" and work.status == "waiting":
             counts["waiting"] += 1
+    if mode != "off" and work_coord.mode(store) != "off":
+        # What the Bot Chat asked the user and waits on: theirs to answer,
+        # counted apart so an older app's "needs you" stays its workstreams'.
+        counts["questions"] = len(work_coord.open_questions(store))
     if resolved:
         rows = store.resolved(before=before, limit=APP_RESOLVED_ROWS + 1)
         out["more"] = len(rows) > APP_RESOLVED_ROWS
@@ -4716,6 +4721,9 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
     ``error`` with a ``note`` when nothing was done."""
     home = Path(home)
     body = body if isinstance(body, dict) else {}
+    asked = str(ref or "").strip().upper()
+    if work_coord._PROPOSAL.fullmatch(asked):
+        return _app_answer(home, asked, action)
     if action not in APP_ACTIONS:
         return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for work."}
     if action in APP_APPROVAL:
@@ -4758,6 +4766,35 @@ def app_act(home: Path, ref: Any, action: str, body: Optional[dict] = None) -> d
 
 
 _app_lock = threading.Lock()
+
+
+def _app_answer(home: Path, item: str, action: str) -> dict:
+    """The user's Approve or Decline on a question the Bot Chat asked them
+    (work_propose), tapped on its card: recorded as their own answer. A yes
+    goes to the Bot Chat as a work update that is theirs, so it acts on it
+    under Ask Me First too; a no only stays on its board."""
+    answer = work_coord.APP_ANSWERS.get(action)
+    if answer is None:
+        return {"ok": False, "error": "unknown_action", "note": f"There's no {action} for a question."}
+    if policy(home) == "off":
+        return {"ok": False, "error": "off", "note": "Bot workstreams are off for this bot."}
+    if not work_store.exists(home):
+        return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's questions."}
+    store = work_store.Store(home)
+    # Asked before the lock: _bot_chat_of may read the bot's settings.
+    coordinator = _bot_chat_of(home) if answer == "approved" else ""
+    with _app_lock:
+        # One about work resolved since the card was drawn has nothing left to decide.
+        work_coord.open_questions(store)
+        # One answer: a second tap finds it answered.
+        if store.proposal(item) is None:
+            return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's questions."}
+        # A yes and its line for the Bot Chat are one write (the outbox row).
+        done = work_coord.answer_tapped(store, item, answer, coordinator)
+    line, kept = done.pop("line", ""), done.pop("outbox", "")
+    if line:
+        _queue_wake(home, coordinator, line, kind="answer", item=kept)
+    return done
 
 
 def _app_manage_act(store: work_store.Store, ref: str, action: str) -> dict:
@@ -5534,7 +5571,8 @@ def _settle_room_line(store: Optional[work_store.Store], item: str, outcome: str
 
 def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", item: str = "") -> None:
     """A line for a Bot Chat's next work update, batched; ``kind`` "ask"
-    for an ask from another bot (its turn says how to answer), "call" for
+    for an ask from another bot (its turn says how to answer), "answer" for
+    the user's yes tapped on a question's card (its turn is theirs), "call" for
     a workstream a call kept with the Bot Chat started: held while that
     call is on (its result is the call's to speak first), then batched.
     Each line is in the outbox until its update is sent, so one a restart
@@ -5559,7 +5597,8 @@ def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", ite
     kind = "work" if kind == "call" else kind
     if not item:
         try:
-            item = work_store.Store(home).outbox_add("", "line_ask" if kind == "ask" else "line", coordinator, line)
+            item = work_store.Store(home).outbox_add(
+                "", {"ask": "line_ask", "answer": "line_answer"}.get(kind, "line"), coordinator, line)
         except Exception:  # noqa: BLE001 — the digest still carries the work
             logger.debug("conduit_push: couldn't keep a work update line", exc_info=True)
             item = ""
@@ -5568,6 +5607,8 @@ def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", ite
             _wake_items.setdefault(key, []).append(item)
         if kind == "ask":
             _wake_asks.setdefault(key, set()).add(line)
+        if kind == "answer":
+            _wake_answers.setdefault(key, set()).add(line)
         lines, timer = _wakes.get(key, ([], None))
         lines.append(line)
         if timer is None:
@@ -5617,6 +5658,11 @@ def _send_wake(home: Path, coordinator: str) -> None:
         marked -= asks
         if not marked:
             _wake_asks.pop(key, None)
+        tapped = _wake_answers.get(key, set())
+        answers = {line for line in lines if line in tapped}
+        tapped -= answers
+        if not tapped:
+            _wake_answers.pop(key, None)
         items = _wake_items.pop(key, [])
     if not lines:
         return
@@ -5632,6 +5678,8 @@ def _send_wake(home: Path, coordinator: str) -> None:
             _wakes[key] = (lines + more, retry)
             if asks:
                 _wake_asks.setdefault(key, set()).update(asks)
+            if answers:
+                _wake_answers.setdefault(key, set()).update(answers)
             if items:
                 _wake_items[key] = items + _wake_items.get(key, [])
             _wake_held[key] = held_since or now
@@ -5644,11 +5692,18 @@ def _send_wake(home: Path, coordinator: str) -> None:
     # A Bot Chat that keeps its work in step looks at its other work first,
     # and stays silent when the user has nothing to hear (work_coord).
     tail = WORK_TAIL if work_coord.mode(store) == "off" else work_coord.WAKE_TAIL + LINK_RULE
-    text = _wake_text(lines, asks, tail) if asks else WAKE_HEAD.format(lines="\n".join(lines)) + tail
+    rest = [line for line in lines if line not in answers]
+    text = "" if not rest else (_wake_text(rest, asks, tail) if asks
+                                else WAKE_HEAD.format(lines="\n".join(rest)) + tail)
+    if answers:
+        # The user's tapped yes leads, then whatever else came in with it.
+        said = work_coord.ANSWER_HEAD.format(lines="\n".join(line for line in lines if line in answers))
+        text = said + work_coord.ANSWER_TAIL + ("\n\n" + text if text else " " + LINK_RULE)
     item = ""
     try:
         item = store.outbox_add("", "wake", coordinator, text)
-        if asks:
+        if asks or answers:
+            # Theirs to have acted on: not a turn the Bot Chat started itself.
             work_coord.ask_wake_sent(store, item)
         status = work_broker.Broker(home).wake(coordinator, text)
         outcome = "queued" if status in ("queued", "streaming", "started") else status or "accepted"
@@ -5676,6 +5731,8 @@ def _wake_text(lines: list[str], asks: set[str], work_tail: str = WORK_TAIL) -> 
 
 # Lines of a batched update that are asks from other bots, by Bot Chat.
 _wake_asks: dict[tuple[str, str], set[str]] = {}
+# Lines that are the user's yes to a question, tapped on its card, by Bot Chat.
+_wake_answers: dict[tuple[str, str], set[str]] = {}
 # The outbox rows of a batched update's lines, by Bot Chat.
 _wake_items: dict[tuple[str, str], list[str]] = {}
 # Sessions whose turn's end has been handled, until their next turn starts:
@@ -5711,6 +5768,7 @@ def stop() -> None:
         _call_grace.clear()
         _call_held.clear()
         _wake_asks.clear()
+        _wake_answers.clear()
         _wake_items.clear()
         _load_verdicts.clear()
         _finished.clear()

@@ -3807,7 +3807,7 @@ def test_the_work_panel_lists_work_with_its_counts_and_actions(on, hermes):
     on.update("W2", status="ready", last_result="The NAS has 12% free.")
     listed = work.app_list(on.home)
     assert listed["policy"] == "strict" and listed["bot"] == "Furina"
-    assert listed["counts"] == {"working": 1, "needs_you": 0, "ready": 1, "waiting": 0}
+    assert listed["counts"] == {"working": 1, "needs_you": 0, "ready": 1, "waiting": 0, "questions": 0}
     rows = {row["ref"]: row for row in listed["work"]}
     assert rows["W1"]["step"] == "terminal: command: dig login.example.com"
     assert rows["W1"]["checklist"][1] == {"step": "Time the DNS lookup", "state": "doing"}

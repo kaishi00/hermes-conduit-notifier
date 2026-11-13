@@ -856,21 +856,46 @@ class Store:
         wanted = set(refs)
         return next((row for row in rows if wanted & set(proposal_refs(row))), None)
 
-    def proposal_answer(self, item: str, status: str, answer: str = "") -> Optional[dict]:
-        """The user's answer to an open proposal; None when it isn't open."""
+    def proposal_answer(self, item: str, status: str, answer: str = "", *, target: str = "",
+                        line: Optional[Callable[[dict], str]] = None) -> Optional[dict]:
+        """The user's answer to an open proposal; None when it isn't open.
+        With ``target`` and ``line`` (the answer's line for that Bot Chat's
+        next work update), the line is in the outbox in the same write, as
+        ``outbox`` on the row: an answer a restart catches before its update
+        is queued still goes out (``line_answer``)."""
         if status not in ("approved", "declined"):
             raise ValueError(f"unknown answer {status}")
         with self._db() as con:
             changed = con.execute("UPDATE proposals SET status = ?, answer = ?, answered_at = ? WHERE id = ? AND "
                                   "status = 'open'", (status, answer, time.time(), item)).rowcount
             row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None
-        return dict(row) if row else None
+            done = dict(row) if row else None
+            if done is not None and target and line is not None:
+                done["outbox"] = f"out-{uuid.uuid4().hex[:16]}"
+                done["line"] = line(done)
+                con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at, own, host) "
+                            "VALUES (?, '', 'line_answer', ?, ?, ?, 0, ?)",
+                            (done["outbox"], target, done["line"], time.time(), host_stamp()))
+        return done
 
     def proposals(self, *, since: float = 0.0, limit: int = 20) -> list[dict]:
-        """The open ones, and those answered since then, oldest first."""
-        rows = self._read("SELECT * FROM proposals WHERE status = 'open' OR answered_at >= ? "
-                          "ORDER BY status = 'open' DESC, created_at DESC LIMIT ?", (since, limit))
+        """The open ones, and those the user answered since then, oldest first."""
+        rows = self._read("SELECT * FROM proposals WHERE status = 'open' OR (status != 'withdrawn' AND "
+                          "answered_at >= ?) ORDER BY status = 'open' DESC, created_at DESC LIMIT ?", (since, limit))
         return sorted(rows, key=lambda row: row["created_at"])
+
+    def proposals_open(self) -> list[dict]:
+        """Every question still waiting on the user, oldest first."""
+        if not self.path.is_file():
+            return []
+        return self._read("SELECT * FROM proposals WHERE status = 'open' ORDER BY created_at")
+
+    def proposals_withdraw(self, items: list[str]) -> None:
+        """Open questions that need no answer any more (their work was
+        resolved): off the lists, and never the user's yes or no."""
+        with self._db() as con:
+            con.executemany("UPDATE proposals SET status = 'withdrawn', answered_at = ? WHERE id = ? AND "
+                            "status = 'open'", [(time.time(), item) for item in items])
 
     def outbox_done(self, item: str, outcome: str) -> None:
         with self._db() as con:
