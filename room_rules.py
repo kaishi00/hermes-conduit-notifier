@@ -98,6 +98,15 @@ WORK_TOOL = "conduit_room_work"
 # Only a file under this host's room-files root; nothing else it could load.
 LOOK_TOOL = "vision_analyze"
 ROOM_FILES = ("conduit", "room-files")
+# The pictures a turn's messages name: Hermes' peer route carries no attachments, so an agent sees one only by
+# looking (Eric 2026-11-12, App Store polish: a native-vision bot answered as if nothing was sent).
+PICTURE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif")
+# The paths stay in the messages, the participants' words: a quoted reference can carry any text before its
+# room-files tail, which must never read as one of these rules.
+TURN_PICTURES_LINE = ("This turn's messages include {count} sent into the room, each an @file: reference. You "
+                      f"can't see {{them}} unless you look: call {LOOK_TOOL} with each one's path, as its message "
+                      "gives it, before you answer about {them}.")
+MAX_TURN_PICTURES = 4
 ROOM_PICTURES_LINE = (f"A picture sent into this room you may look at with {LOOK_TOOL}, by the path its message "
                       "names, whatever else these rules allow.")
 
@@ -485,6 +494,20 @@ def framing(turn: Optional[RoomTurn], choices: RoomChoices, people: Optional[Map
     return "\n".join([FRAMING_HEAD, *lines])
 
 
+def turn_pictures_line(prompt: Any) -> Optional[str]:
+    """The line telling the agent to look at the room pictures ``prompt`` names (counting at most
+    MAX_TURN_PICTURES of them), or None when it names none. It never repeats a path: see TURN_PICTURES_LINE."""
+    from . import room_files_link
+
+    pictures = list(dict.fromkeys((folder, name) for _path, folder, name in room_files_link.references(prompt)
+                                  if name.lower().endswith(PICTURE_EXTENSIONS)))[-MAX_TURN_PICTURES:]
+    if not pictures:
+        return None
+    one = len(pictures) == 1
+    return TURN_PICTURES_LINE.format(count="a picture" if one else f"{len(pictures)} pictures",
+                                     them="it" if one else "them")
+
+
 def _poster_lines(turn: Optional[RoomTurn], people: Optional[Mapping[str, Any]],
                   posts: Optional[Mapping[str, Any]]) -> list[str]:
     """Who wrote the user's lines: on the home, the others' names; on a
@@ -802,9 +825,12 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
                    "without the owner's room rules", room_id, exc_info=False)
         return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), False
     others = _others(members)
-    # A room without other people's agents is read again, so one that joins counts.
-    return RoomTurn(room_id=room_id, side="home", with_others=bool(others), session_id=session_id,
-                    others=others), bool(others)
+    # Someone in it with none of their agents ("Just me", room_invites.PERSON) posts in it too: the owner's
+    # room rules hold for them as for another person's agent.
+    with_others = bool(others) or _just_me_in(room_id, home)
+    # A room without other people is read again, so one who joins counts.
+    return RoomTurn(room_id=room_id, side="home", with_others=with_others, session_id=session_id,
+                    others=others), with_others
 
 
 def _lineage(path: Path, session_id: str) -> tuple[list[tuple[str, str]], str]:
@@ -1032,6 +1058,18 @@ def _gone(people: Optional[Mapping[str, Any]]) -> set[str]:
 def _named(handle: str, owners: Mapping[Optional[str], str]) -> str:
     owner = owners.get(handle.casefold())
     return f"@{handle} ({owner}'s)" if owner else f"@{handle}"
+
+
+def _just_me_in(room_id: str, home: Path) -> bool:
+    """Whether a started room this Hermes hosts has someone in it with no agents ("Just me"). A rooms.json that
+    can't be read counts as someone being there, so the owner's rules hold rather than lapse."""
+    from . import room_copies, room_identity, room_invites  # room_invites imports far more than the rules need
+    try:
+        draft = room_invites.Store(room_identity.root_home(home)).read()["drafts"].get(room_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: couldn't read rooms.json for room %s", room_id, exc_info=True)
+        return True
+    return draft is not None and draft.get("status") == "started" and bool(room_copies.just_me(draft))
 
 
 def _others(members: Optional[list[Any]]) -> tuple[str, ...]:

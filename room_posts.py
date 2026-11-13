@@ -216,12 +216,14 @@ class Posts:
             posted = []
         if posted:
             seq = int(posted[0]["seq"])
-        elif draft is None or not any(member["link"] == link_id for member in draft.get("members") or ()):
+        elif draft is None or not (any(member["link"] == link_id for member in draft.get("members") or ())
+                                   or (draft["links"].get(link_id) or {}).get("just_me")):
             error = "not_in"
         elif draft["status"] != "started":
             error = "ended"
         elif not any(member["link"] == link_id and member.get("status", "in") == "in"
-                     for member in draft["members"]):
+                     for member in draft["members"]) \
+                and (draft["links"].get(link_id) or {}).get("just_me") is not True:
             error = "not_in"
         else:
             try:
@@ -415,9 +417,11 @@ def _named(text: str, name: str) -> str:
 
 
 def _in(invites: dict[str, Any], room_id: str) -> Optional[dict[str, Any]]:
-    """The invite a started room someone else hosts came with, while an agent of this installation's is in it."""
+    """The invite a started room someone else hosts came with, while an agent of this installation's is in it, or
+    its person is with Just me (room_invites.PERSON)."""
     return next((invite for invite in invites.values()
-                 if invite["room_id"] == room_id and invite["status"] == "started" and invite["joined"]), None)
+                 if invite["room_id"] == room_id and invite["status"] == "started"
+                 and (invite["joined"] or invite.get("just_me"))), None)
 
 
 def _link_filter(root: Any, room_id: str, strict: bool = False) -> tuple[str, tuple]:
@@ -437,7 +441,8 @@ def current_invite(invites: Any, room_id: str) -> Optional[dict[str, Any]]:
     """The invite a room hosted elsewhere is on now: the started one an agent of this installation's is in, else
     the one that started last (a room id is only unique per home, so a re-join over a new Link has its own)."""
     found = [invite for invite in invites if invite["room_id"] == room_id and invite["members"] is not None]
-    return next((invite for invite in found if invite["status"] == "started" and invite["joined"]), None) or max(
+    return next((invite for invite in found if invite["status"] == "started"
+                 and (invite["joined"] or invite.get("just_me"))), None) or max(
         found, key=lambda invite: invite.get("started_at") or 0, default=None)
 
 

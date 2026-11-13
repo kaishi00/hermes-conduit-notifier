@@ -162,6 +162,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                             "in the room when it isn't the one from its bot's name; repeat it for more "
                             "(without one, this profile's); for leave: one of your agents to take out, by its "
                             "profile (without one, all of them)")
+    rooms.add_argument("--just-me", action="store_true",
+                       help="for join: join with none of your agents, to read the room and post in it (their "
+                            "plugin needs 0.167.5 or later)")
     rooms.add_argument("--member", default="", metavar="@HANDLE",
                        help="for remove: the agent to take out of your room, by its @handle or member id "
                             "(rooms drafts shows them)")
@@ -1373,6 +1376,15 @@ def _answer_invite(rooms: Any, room_invites: Any, room_links: Any, root: Path, h
         shown = rooms.answer(invite["link"], room, [])
         print(f"Declined {_printable(shown['name'])}; {host}'s Hermes is told.")
         return 0
+    if getattr(args, "just_me", False):
+        if getattr(args, "agent", None):
+            print("Just me joins with none of your agents: leave out --agent, or leave out --just-me.")
+            return 2
+        shown = rooms.answer(invite["link"], room, [], just_me=True)
+        print(f"Joined {_printable(shown['name'])} with none of your agents. It starts on {host}'s Hermes once "
+              "everyone has answered.")
+        _say_if_nothing_reads(room_links, root, f"{host}'s Hermes can't reach you in it")
+        return 0
     shown = rooms.answer(invite["link"], room, _room_agents(room_invites, root, home, args))
     print(f"Joined {_printable(shown['name'])} with {_handles(shown['joined'])}. It starts on {host}'s Hermes "
           "once everyone has answered.")
@@ -1415,6 +1427,10 @@ def _leave_room(rooms: Any, room: str, args: argparse.Namespace) -> int:
         return 2
     invite = invites[0]
     named = getattr(args, "agent", None)
+    if invite.get("just_me") and not named:
+        shown = rooms.leave(invite["link"], room, None)
+        print(f"Left {_printable(shown['name'])}; {_printable(invite['from'])}'s Hermes is told.")
+        return 0
     profiles = [str(spec).partition("=")[0].strip() for spec in named] if named else None
     leaving = [agent for agent in invite["joined"] if profiles is None or agent["profile"] in profiles]
     if invite["status"] == "started" and leaving and len(leaving) == len(profiles or leaving):
@@ -1506,8 +1522,9 @@ def _print_drafts(view: dict) -> None:
         for person in draft["people"]:
             agents = [{**agent, "handle": handles.get(agent["member_id"], agent["handle"])}
                       for agent in person["agents"]]
-            answered = {"waiting": "hasn't answered", "declined": "declined"}.get(person["status"]) \
-                or f"joined with {_handles(agents)}"
+            answered = {"waiting": "hasn't answered", "declined": "declined",
+                        "left": "joined without agents (Just me), then left"}.get(person["status"]) \
+                or ("joined without agents (Just me)" if person.get("just_me") else f"joined with {_handles(agents)}")
             out = _out([agent["handle"] for agent in agents if agent["member_id"] in draft["left"]],
                        [agent["handle"] for agent in agents if agent["member_id"] in draft["removed"]])
             print(f"  {_printable(person['name'])}: {answered}" + (f" ({out})" if out else ""))
