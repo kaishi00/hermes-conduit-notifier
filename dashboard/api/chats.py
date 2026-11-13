@@ -386,6 +386,7 @@ def _predict_fork_answer(agent: Any, history: List[Dict[str, Any]], question: st
     without the fork's parts answers through its plain /btw (the chat's own
     model)."""
     try:
+        from agent import background_review
         from agent.background_review import (
             _digest_history, _record_review_usage_to_parent, _snapshot_review_usage, build_cache_parity_fork)
         from agent.side_question import _FORK_PROMPT, trim_snapshot_for_fork
@@ -410,9 +411,23 @@ def _predict_fork_answer(agent: Any, history: List[Dict[str, Any]], question: st
             raise RuntimeError(str(result["error"]))
         return text.strip()
     finally:
-        for step in (clear_thread_tool_whitelist,
-                     lambda: _record_review_usage_to_parent(agent, _snapshot_review_usage(fork)),
-                     lambda: fork.shutdown_memory_provider(), lambda: fork.close()):
+        # The fork shares the chat's session ID. Full teardown can release
+        # the chat's memory, terminal, browser and file state too.
+        release = getattr(background_review, "release_cache_parity_fork", None)
+        steps = [clear_thread_tool_whitelist]
+        if callable(release):
+            def release_fork():
+                try:
+                    release(agent, fork, task=PREDICT_TASK)
+                except Exception:
+                    # A bad usage snapshot can fail before the helper releases clients.
+                    fork.release_clients()
+            steps.append(release_fork)
+        else:
+            # Older Hermes: keep usage attribution and release only clients.
+            steps.extend((lambda: _record_review_usage_to_parent(agent, _snapshot_review_usage(fork)),
+                          lambda: fork.release_clients()))
+        for step in steps:
             try:
                 step()
             except Exception:  # noqa: BLE001 — teardown never fails the answer

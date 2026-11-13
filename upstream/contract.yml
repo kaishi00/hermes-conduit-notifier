@@ -66,6 +66,11 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  prediction fork lifecycle: >-
+    dashboard/api/chats.py uses agent.background_review.release_cache_parity_fork
+    when available to attribute prediction usage and release only fork clients
+    (feature map: "Predictions"). Without that helper it records usage and calls
+    release_clients directly; it must never close the shared chat's session resources.
   stopping a waiting workstream's agents: >-
     work_tool._stop_agents calls tools.delegate_tool_registry.interrupt_subagent with the
     child_subagent_id subagent_start reported (feature map: "Delegate agents a chat started"). Hermes
