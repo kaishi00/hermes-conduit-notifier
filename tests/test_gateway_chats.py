@@ -608,7 +608,7 @@ def test_a_views_own_record_answers_which_approvals_a_chat_waits_on(gateway, mon
     assert chats.seen_approvals(transport, "/home", "w1") == [
         {"request_id": "p2", "command": "rm x", "description": "remove"}]
     # One Hermes stopped waiting on (it timed out) isn't offered.
-    link.prompt_texts["p2"] = link.prompt_texts["p2"][:2] + (0.0,)
+    link.prompt_texts["p2"] = link.prompt_texts["p2"][:2] + (0.0,) + link.prompt_texts["p2"][3:]
     assert chats.seen_approvals(transport, "/home", "w1") == []
     link.write(_event("w1", "approval.request", {"prompt_id": "p3", "command": "make"}, generation=5))
     # The turn's end settles what it asked.
@@ -623,6 +623,16 @@ def test_a_views_own_record_answers_which_approvals_a_chat_waits_on(gateway, mon
     viewers.add("sub")
     monkeypatch.setattr(gateway_chats, "SEEN_APPROVALS_MAX_AGE_S", -1.0)
     assert chats.seen_approvals(transport, "/home", "w1") is None
+    monkeypatch.undo()
+    monkeypatch.setattr(gateway_chats, "_viewing", lambda home, sid, subscription: True)
+    # A view that missed a settle (retired meanwhile) drops what the next read
+    # no longer lists, and keeps one heard asked after that read went out.
+    link.write(_event("w1", "approval.request", {"prompt_id": "p4", "command": "old"}, generation=5))
+    answers["session.resume"] = lambda request: (
+        link.write(_event("w1", "approval.request", {"prompt_id": "p5", "command": "new"}, generation=5)),
+        {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub", "prompts": []}})[1]
+    _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
+    assert [row["request_id"] for row in chats.seen_approvals(transport, "/home", "w1")] == ["p5"]
 
 
 def test_a_view_counts_while_the_authority_still_sends_it_the_chat(monkeypatch):

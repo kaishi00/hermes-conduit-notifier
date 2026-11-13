@@ -187,11 +187,13 @@ def _log_failed_close(future: Any) -> None:
 
 
 def _prompt_text(prompt: dict) -> tuple:
-    """An approval prompt's (command, description, when it times out)."""
+    """An approval prompt's (command, description, when it times out, when it
+    was heard), the times monotonic."""
+    now = time.monotonic()
     timeout = prompt.get("timeout_s")
-    expires = (time.monotonic() + timeout if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+    expires = (now + timeout if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
                and timeout > 0 else None)
-    return str(prompt.get("command") or ""), str(prompt.get("description") or ""), expires
+    return str(prompt.get("command") or ""), str(prompt.get("description") or ""), expires, now
 
 
 def _viewing(home: Any, sid: str, subscription: str) -> bool:
@@ -227,7 +229,7 @@ class _AuthorityLink:
         # Open approval prompts, oldest first: prompt id -> (session id, generation).
         self.prompts: Dict[str, tuple] = {}
         # What each open prompt asks: prompt id -> (command, description, when it
-        # times out (monotonic) or None).
+        # times out or None, when this link heard of it), the times monotonic.
         self.prompt_texts: Dict[str, tuple] = {}
         # session id -> when this link last read the chat (monotonic): its record of
         # the chat's prompts is whole from then on while its view lasts.
@@ -306,7 +308,8 @@ class _AuthorityLink:
                 self.profiles[sid] = params["profile"]
         # One budget for the whole call: the fence reads and the stale retry
         # come out of the caller's timeout, never on top of it.
-        deadline = time.monotonic() + timeout
+        asked_at = time.monotonic()
+        deadline = asked_at + timeout
 
         def left() -> float:
             return max(0.05, deadline - time.monotonic())
@@ -355,7 +358,7 @@ class _AuthorityLink:
             # surface line would wait for the next one. "queued", "started" and
             # "unknown" each have the turn still to run.
             self._drop_surface(method, params)
-        return self._answer(method, params, shaped, response)
+        return self._answer(method, params, shaped, response, asked_at)
 
     def _drop_surface(self, method: Any, params: Dict[str, Any]) -> None:
         if method == "prompt.submit":
@@ -392,6 +395,7 @@ class _AuthorityLink:
         with self.lock:
             known = self.generations.get(sid)
         if known is None:
+            asked_at = time.monotonic()
             # Its own id: two chats' controls on one connection read their fences at once.
             try:
                 snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
@@ -403,7 +407,7 @@ class _AuthorityLink:
                 # Nothing was sent for the control itself: not "may have started".
                 raise RuntimeError("Reading the chat's turn timed out; nothing was sent") from exc
             result = snapshot.get("result") if isinstance(snapshot, dict) else None
-            self._note_snapshot(result)
+            self._note_snapshot(result, asked_at)
             with self.lock:
                 known = self.generations.get(sid)
             if known is None:
@@ -418,6 +422,7 @@ class _AuthorityLink:
     def _still_running(self, sid: str, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> bool:
         """Whether the chat runs a turn now; one that can't be read counts as running,
         so a refusal is never reported as nothing to stop."""
+        asked_at = time.monotonic()
         try:
             snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                       "id": f"conduit-running-{uuid.uuid4().hex}",
@@ -427,7 +432,7 @@ class _AuthorityLink:
         except Exception:  # noqa: BLE001 — unknown reads as running
             return True
         result = snapshot.get("result") if isinstance(snapshot, dict) else None
-        self._note_snapshot(result)
+        self._note_snapshot(result, asked_at)
         return not (isinstance(result, dict) and result.get("running") is False)
 
     def _note_pending(self, sid: str, snapshot: Dict[str, Any]) -> None:
@@ -457,6 +462,7 @@ class _AuthorityLink:
         with self.lock:
             known = sid in self.lost
         if not known:
+            asked_at = time.monotonic()
             try:
                 snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                           "id": f"conduit-pending-{uuid.uuid4().hex}",
@@ -469,7 +475,7 @@ class _AuthorityLink:
             result = snapshot.get("result") if isinstance(snapshot, dict) else None
             if not isinstance(result, dict) or result.get("session_id") != sid:
                 return  # Not read: the next send reads it again.
-            self._note_snapshot(result)
+            self._note_snapshot(result, asked_at)
             with self.lock:
                 # Read: a Hermes whose snapshot lists no queue isn't read again.
                 self.lost.setdefault(sid, {})
@@ -496,14 +502,24 @@ class _AuthorityLink:
             with self.lock:
                 (self.lost.get(sid) or {}).pop(admission_id, None)
 
-    def _note_snapshot(self, result: Any) -> None:
+    def _note_snapshot(self, result: Any, asked_at: float) -> None:
+        """Notes a chat's snapshot, read by a request sent at ``asked_at``
+        (monotonic) or later."""
         if not isinstance(result, dict) or not isinstance(result.get("session_id"), str):
             return
         sid = result["session_id"]
+        listed = {prompt.get("prompt_id") for prompt in result.get("prompts") or () if isinstance(prompt, dict)}
         with self.lock:
             if type(result.get("execution_generation")) is int:
                 self.generations[sid] = result["execution_generation"]
             self._note_pending(sid, result)
+            for prompt_id in [key for key, (owner, _) in self.prompts.items() if owner == sid and key not in listed]:
+                # Settled before the read though this link never heard it (a
+                # retired view misses the event). One heard asked after the
+                # request went may be newer than the snapshot: its own events settle it.
+                heard = self.prompt_texts.get(prompt_id, (None, None, None, 0.0))[3]
+                if heard < asked_at:
+                    self._forget_prompt(prompt_id)
             for prompt in result.get("prompts") or ():
                 # An approval still waiting when the chat was read: answerable by its id,
                 # though this link never saw it asked.
@@ -540,7 +556,7 @@ class _AuthorityLink:
             current = self.generations.get(sid)
             rows = []
             for prompt_id, (owner, generation) in self.prompts.items():
-                command, description, expires = self.prompt_texts.get(prompt_id, ("", "", None))
+                command, description, expires, _heard = self.prompt_texts.get(prompt_id, ("", "", None, 0.0))
                 if owner != sid or (current is not None and generation != current):
                     continue
                 if expires is not None and now >= expires:
@@ -608,7 +624,7 @@ class _AuthorityLink:
             return "session.detach", self._scoped(sid, {"session_id": sid, "subscription_id": subscription})
         return method, params
 
-    def _answer(self, method: Any, params: Dict[str, Any], shaped: Any, response: dict) -> dict:
+    def _answer(self, method: Any, params: Dict[str, Any], shaped: Any, response: dict, asked_at: float) -> dict:
         error = response.get("error")
         reason = _reason(response)
         if method == "approval.respond":
@@ -642,7 +658,7 @@ class _AuthorityLink:
                     and isinstance(params.get("profile"), str) and params["profile"]):
                 with self.lock:
                     self.profiles[made["session_id"]] = params["profile"]
-            self._note_snapshot(made)
+            self._note_snapshot(made, asked_at)
         return response
 
     def close(self) -> None:
