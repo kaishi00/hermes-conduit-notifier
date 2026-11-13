@@ -35,6 +35,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -728,17 +729,32 @@ def test_a_workstream_runs_on_the_authority_so_the_phone_opens_it(listener, prof
     assert out["stored"] and out["stored"]["cwd"] == out["folder"], out
     assert out["stored"]["model"] == "fake-model", out
 
+    params = {**_resume(out["session_id"], omit_messages=False), **({"profile": profile} if profile else {})}
+    query = urllib.parse.urlencode({"bot": profile, "session": out["session_id"], "text": "PING after the open"})
+
     async def script(sock: ConduitSocket) -> Dict[str, Any]:
         # Conduit names the bot's profile on every request (#2262).
-        params = {**_resume(out["session_id"], omit_messages=False), **({"profile": profile} if profile else {})}
         frame = await sock.call("session.resume", params)
         assert "error" not in frame, frame["error"]
-        return frame["result"]
-    opened = listener.run(script)
+        # With the phone (or the Webapp) holding it open, the chat has one
+        # writer: the broker's next message reaches the same conversation
+        # (issue 750), sent while this socket is still connected.
+        status, later = await asyncio.to_thread(listener.plugin_call, f"work-send?{query}", None, DRIVER, 180)
+        assert status == 200, later
+        assert later["sent"][1] == out["session_id"], later
+        again = await sock.call("session.resume", params)
+        assert "error" not in again, again["error"]
+        return {"opened": frame["result"], "after": again["result"]}
+    result = listener.run(script)
+
+    def users(snapshot: Dict[str, Any]) -> List[str]:
+        return [str(m.get("text") or m.get("content") or "") for m in snapshot["messages"] if m.get("role") == "user"]
+    opened, after = result["opened"], result["after"]
     assert opened["session_id"] == out["session_id"], opened
-    users = [str(m.get("text") or m.get("content") or "") for m in opened["messages"] if m.get("role") == "user"]
-    assert any("Brief: RUN the job" in text for text in users), users
-    assert any("a long follow up" in text for text in users), users
+    assert any("Brief: RUN the job" in text for text in users(opened)), users(opened)
+    assert any("a long follow up" in text for text in users(opened)), users(opened)
+    assert after["session_id"] == out["session_id"], after
+    assert any("PING after the open" in text for text in users(after)), users(after)
 
 
 def test_a_watch_calls_local_live_chat_runs_on_the_authority(listener):
