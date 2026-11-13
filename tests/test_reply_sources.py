@@ -190,7 +190,7 @@ def test_on_the_gateways_authority_a_turn_conduit_reported_is_conduits(tmp_path,
     # The authority binds no client to a turn and runs its chats as local
     # sessions, so only Conduit's report ahead of the send says it sent it:
     # its board rule and Settings > Notifications' Conduit switch apply.
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(plugin.reply_sources, "current_transport", lambda: None)
     monkeypatch.delitem(sys.__dict__, plugin.turn_surface._AUTHORITY_STORE, raising=False)
     surfaces = plugin.turn_surface
