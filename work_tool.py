@@ -4781,15 +4781,19 @@ def _app_answer(home: Path, item: str, action: str) -> dict:
     if not work_store.exists(home):
         return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's questions."}
     store = work_store.Store(home)
+    # Asked before the lock: _bot_chat_of may read the bot's settings.
+    coordinator = _bot_chat_of(home) if answer == "approved" else ""
     with _app_lock:
+        # One about work resolved since the card was drawn has nothing left to decide.
+        work_coord.open_questions(store)
         # One answer: a second tap finds it answered.
         if store.proposal(item) is None:
             return {"ok": False, "error": "no_such_work", "note": "That isn't one of this bot's questions."}
-        done = work_coord.answer_tapped(store, item, answer)
-    line = done.pop("line", "")
-    coordinator = _bot_chat_of(home) if line else ""
-    if coordinator:
-        _queue_wake(home, coordinator, line, kind="answer")
+        # A yes and its line for the Bot Chat are one write (the outbox row).
+        done = work_coord.answer_tapped(store, item, answer, coordinator)
+    line, kept = done.pop("line", ""), done.pop("outbox", "")
+    if line:
+        _queue_wake(home, coordinator, line, kind="answer", item=kept)
     return done
 
 

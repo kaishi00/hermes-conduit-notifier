@@ -533,7 +533,8 @@ def test_a_question_is_answered_with_a_tap_and_a_yes_is_the_users_turn(on, herme
     assert done == {"ok": True, "id": "P1", "status": "approved"}
     line, = batched()
     assert line == "- P1 (about W1), approved by the user just now: «Stop W1: the API it ports to is gone.»"
-    assert on.outbox_rows("", "line_answer")[0]["text"] == line
+    kept, = on.outbox_rows("", "line_answer")  # written with the answer, once
+    assert kept["text"] == line and kept["target"] == BOT_CHAT
     assert work.app_act(on.home, first, "decline")["error"] == "not_now"  # answered once
     listed = work.app_list(on.home)
     assert listed["counts"]["questions"] == 0
@@ -582,3 +583,18 @@ def test_a_question_about_resolved_work_is_withdrawn(on, hermes, home):
     assert f"- {one} " not in note and f"- {two} (about W2)" in note and f"- {loose}, asked" in note
     assert work.app_act(on.home, one, "approve")["error"] == "not_now"
     assert on.proposal(one)["status"] == "withdrawn"
+    # A tap on a card drawn before its work was resolved: withdrawn there too.
+    on.update("W2", status="stopped", closed_at=time.time(), resolved_by="user")
+    assert work.app_act(on.home, two, "approve")["error"] == "not_now"
+    assert on.proposal(two)["status"] == "withdrawn" and on.outbox_rows("", "line_answer") == []
+
+
+def test_every_open_question_is_listed_with_its_card(on, hermes, home):
+    """Each open question counts as needing the user, so each is in the
+    list to answer, however many there are and whatever else is listed."""
+    start()
+    woken(home)
+    asked = [on.proposal_add("", f"Question {number} about the release plan.") for number in range(1, 35)]
+    listed = work.app_list(on.home)
+    cards = [item["id"] for item in listed["coordination"]["items"] if item.get("actions")]
+    assert listed["counts"]["questions"] == len(asked) == len(cards) == 34

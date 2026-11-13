@@ -628,19 +628,26 @@ def propose(home: Path, store: work_store.Store, args: dict, session_id: Any) ->
                                             f"they answer, call work_propose with id {made} and their answer."}
 
 
-def answer_tapped(store: work_store.Store, item: str, answer: str) -> dict:
+def answer_tapped(store: work_store.Store, item: str, answer: str, coordinator: str = "") -> dict:
     """The user's own answer to an open question, tapped on its card in
     Conduit: kept as theirs with no Bot Chat turn to record it. ``line`` is
-    what a yes tells the Bot Chat, which then acts on it."""
-    done = store.proposal_answer(item, answer)
+    what a yes tells the Bot Chat (``coordinator``), which then acts on it;
+    it is in the outbox as ``outbox`` in the same write as the answer, so a
+    restart between the two doesn't lose it."""
+
+    def line(row: dict) -> str:
+        refs = work_store.proposal_refs(row)
+        return ANSWER_LINE.format(id=item, about=f" (about {_listed(refs)})" if refs else "",
+                                  text=_short(row["text"], PROPOSAL_CHARS))
+
+    told = answer == "approved" and bool(coordinator)
+    done = store.proposal_answer(item, answer, target=coordinator if told else "", line=line if told else None)
     if done is None:
         return {"ok": False, "id": item, "error": "not_now",
                 "note": f"{item} isn't waiting on an answer any more."}
     out = {"ok": True, "id": item, "status": answer}
-    if answer == "approved":
-        refs = work_store.proposal_refs(done)
-        out["line"] = ANSWER_LINE.format(id=item, about=f" (about {_listed(refs)})" if refs else "",
-                                         text=_short(done["text"], PROPOSAL_CHARS))
+    if done.get("outbox"):
+        out.update({"line": done["line"], "outbox": done["outbox"]})
     return out
 
 
@@ -699,14 +706,20 @@ def app_items(store: work_store.Store, titles: dict[str, str]) -> list[dict]:
                                    "not_arrived" if state.get("outcome") in _FAILED else "waiting"),
                          "why": [line(known_event) for known_event in before[-APP_WHY_ITEMS:]]})
         items.append(item)
-    open_questions(store)  # one about resolved work is off the list
-    for row in store.proposals(since=since, limit=PROPOSALS_SHOWN):
+    # Every open question is listed, past both limits: each is counted as
+    # needing the user (counts.questions), so each has its card to answer on.
+    asked = open_questions(store)  # one about resolved work is off the list
+    answered = [row for row in store.proposals(since=since, limit=PROPOSALS_SHOWN) if row["status"] != "open"]
+    waiting = []
+    for row in asked + answered:
         refs = work_store.proposal_refs(row)
         # Older apps read ref and title: the first workstream, and every title.
         # ``actions``: how the user answers an open one from its card.
-        items.append({"id": row["id"], "kind": "proposal", "ref": row["ref"], "refs": refs,
-                      "title": " · ".join(title for title in (titles.get(ref, "") for ref in refs) if title),
-                      "at": row["created_at"], "text": row["text"], "status": row["status"],
-                      "answer": row["answer"], "answered_at": row["answered_at"], "why": [],
-                      "actions": list(APP_ANSWERS) if row["status"] == "open" else []})
-    return sorted(items, key=lambda item: -item["at"])[:APP_ITEMS]
+        (waiting if row["status"] == "open" else items).append(
+            {"id": row["id"], "kind": "proposal", "ref": row["ref"], "refs": refs,
+             "title": " · ".join(title for title in (titles.get(ref, "") for ref in refs) if title),
+             "at": row["created_at"], "text": row["text"], "status": row["status"],
+             "answer": row["answer"], "answered_at": row["answered_at"], "why": [],
+             "actions": list(APP_ANSWERS) if row["status"] == "open" else []})
+    items = sorted(items, key=lambda item: -item["at"])[:max(0, APP_ITEMS - len(waiting))]
+    return sorted(waiting + items, key=lambda item: -item["at"])

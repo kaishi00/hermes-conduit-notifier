@@ -856,15 +856,27 @@ class Store:
         wanted = set(refs)
         return next((row for row in rows if wanted & set(proposal_refs(row))), None)
 
-    def proposal_answer(self, item: str, status: str, answer: str = "") -> Optional[dict]:
-        """The user's answer to an open proposal; None when it isn't open."""
+    def proposal_answer(self, item: str, status: str, answer: str = "", *, target: str = "",
+                        line: Optional[Callable[[dict], str]] = None) -> Optional[dict]:
+        """The user's answer to an open proposal; None when it isn't open.
+        With ``target`` and ``line`` (the answer's line for that Bot Chat's
+        next work update), the line is in the outbox in the same write, as
+        ``outbox`` on the row: an answer a restart catches before its update
+        is queued still goes out (``line_answer``)."""
         if status not in ("approved", "declined"):
             raise ValueError(f"unknown answer {status}")
         with self._db() as con:
             changed = con.execute("UPDATE proposals SET status = ?, answer = ?, answered_at = ? WHERE id = ? AND "
                                   "status = 'open'", (status, answer, time.time(), item)).rowcount
             row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None
-        return dict(row) if row else None
+            done = dict(row) if row else None
+            if done is not None and target and line is not None:
+                done["outbox"] = f"out-{uuid.uuid4().hex[:16]}"
+                done["line"] = line(done)
+                con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at, own, host) "
+                            "VALUES (?, '', 'line_answer', ?, ?, ?, 0, ?)",
+                            (done["outbox"], target, done["line"], time.time(), host_stamp()))
+        return done
 
     def proposals(self, *, since: float = 0.0, limit: int = 20) -> list[dict]:
         """The open ones, and those the user answered since then, oldest first."""
