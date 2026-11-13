@@ -66,6 +66,11 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  Hermes version for Pulse's advice: >-
+    pulse_host.hermes_version reads hermes_cli.__version__ (feature map: "Pulse"). When Hermes can't
+    find Pulse's chat, a Hermes before 0.22.6 is told to update, since only 0.22.6 and newer hand a
+    chat Hermes Desktop made over to the gateway (issue 713). Without it, everyone gets the
+    set-it-up-again advice.
   prediction fork lifecycle: >-
     dashboard/api/chats.py uses agent.background_review.release_cache_parity_fork
     when available to attribute prediction usage and release only fork clients
@@ -325,7 +330,7 @@ imports:
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
-    optional: ["active_sessions", "lifecycle"]
+    optional: ["__version__", "active_sessions", "lifecycle"]
   hermes_cli._launchers:
     optional: ["runtime_command"]
   hermes_cli.active_sessions:

@@ -13,11 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.168.6 (2026-11-13)
+## 0.168.7 (2026-11-13)
 
 ### Fixes
 
 - On a host where the gateway serves Conduit itself, an open Work panel re-read each waiting workstream's chat from Hermes on every refresh, which kept Hermes busy for as long as the panel stayed open. It now shows the approval it already heard about, and reads the chat again only now and then.
+
+## 0.168.6 (2026-11-13)
+
+### Fixes
+
+- Pulse: when Hermes couldn't find Pulse's chat, Settings › Pulse only said "not_found". It now starts with what to do: on a Hermes older than 0.22.6, where a chat Hermes Desktop made can't move to the gateway, update Hermes; otherwise set Pulse up again.
 
 ## 0.168.5 (2026-11-13)
 
