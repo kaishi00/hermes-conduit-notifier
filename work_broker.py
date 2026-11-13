@@ -401,21 +401,26 @@ class Broker:
             except Exception:  # noqa: BLE001 — the start's own failure is what gets reported
                 pass
 
-    def _open(self, session_id: str) -> tuple[str, str, bool]:
+    def _open(self, session_id: str) -> tuple[str, str, bool, Optional[bool]]:
         """(runtime id, stored id at the lineage tip, whether another client
-        holds it) for a session on this profile, reopening it if needed."""
+        holds it, whether its turn runs) for a session on this profile,
+        reopening it if needed. Whether it runs is None when the reopen
+        didn't say; send reads it then."""
         if on_authority(self.api):
             # Opened on the broker's own connection: nobody else's stream moves.
+            # Its snapshot says whether it runs, so send takes no second one
+            # (each opens a view and detaches the last, notifier #756).
             snapshot = self._snapshot(session_id)
             runtime_id = snapshot.get("session_id")
             if not isinstance(runtime_id, str) or not runtime_id:
                 raise BrokerError("couldn't reopen the session")
             tip = snapshot.get("stored_session_id")
-            return runtime_id, tip if isinstance(tip, str) and tip else runtime_id, False
+            return (runtime_id, tip if isinstance(tip, str) and tip else runtime_id, False,
+                    snapshot.get("running") is True)
         found = self.live(session_id)
         if found is not None:
             runtime_id, record = found
-            return runtime_id, session_id, record.get("transport") not in (None, _transport)
+            return runtime_id, session_id, record.get("transport") not in (None, _transport), None
         resumed = self._dispatch("session.resume", {"session_id": session_id, "source": "desktop",
                                                     **self._profile_params()})
         runtime_id = resumed.get("session_id")
@@ -426,7 +431,7 @@ class Broker:
             self._end(runtime_id)
             raise BrokerError(f"the session reopened on {landed[:64]}, not {self.profile}")
         tip = resumed.get("stored_session_id")
-        return runtime_id, tip if isinstance(tip, str) and tip else session_id, False
+        return runtime_id, tip if isinstance(tip, str) and tip else session_id, False, None
 
     def send(self, session_id: str, text: str, how: str = "auto",
              yolo: Optional[bool] = None) -> tuple[str, str]:
@@ -435,12 +440,13 @@ class Broker:
         behind it). Returns (what Hermes did, the stored id at the tip):
         "started", "redirected", "steered" or "queued". ``yolo``: the
         session's own approval bypass, set before the words go in."""
-        runtime_id, tip, held = self._open(session_id)
+        runtime_id, tip, held, running = self._open(session_id)
         call = self._unbound if held else self._dispatch
         if yolo is not None:
             self._set_yolo(runtime_id, yolo, call)
-        found = self.live(tip) or self.live(session_id)
-        running = bool(found and found[1].get("running"))
+        if running is None:
+            found = self.live(tip) or self.live(session_id)
+            running = bool(found and found[1].get("running"))
         if how == "after" or (running and how not in ("auto", "add")):
             status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
             return ("started" if status in RUNNING_NOW else "queued"), tip
@@ -472,7 +478,7 @@ class Broker:
         user turned approvals back on for workstreams), reopening it if it
         isn't live, so a turn started in it later asks again. Raises when
         Hermes didn't take it."""
-        runtime_id, _, held = self._open(session_id)
+        runtime_id, _, held, _ = self._open(session_id)
         self._set_yolo(runtime_id, False, self._unbound if held else self._dispatch)
 
     def _set_yolo(self, runtime_id: str, on: bool, call: Callable[[str, dict], dict]) -> None:

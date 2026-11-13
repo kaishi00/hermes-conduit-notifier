@@ -628,7 +628,10 @@ def test_the_work_broker_runs_a_bots_workstreams_on_the_authority_by_its_profile
     assert broker.approvals("w1") == [{"request_id": "p1", "command": "ls", "description": "list"}]
     assert broker.answer_approval("w1", "p1", "deny") is True
     # A running turn is redirected; the authority's "started" reads as running now.
+    resumes = sum(frame["method"] == "session.resume" for frame in api.requests)
     assert broker.send("w1", "instead", "auto") == ("redirected", "w1")
+    # One snapshot for a send: its reopen says whether the turn runs (notifier #756).
+    assert sum(frame["method"] == "session.resume" for frame in api.requests) == resumes + 1
     assert broker.send("w1", "later", "after") == ("started", "w1")
     assert broker.stop("w1") is True
     assert broker.wake("w1", "update") == "started"
