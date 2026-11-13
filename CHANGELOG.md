@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.9 (2026-11-13)
+
+### Fixes
+
+- On Windows, an update from Conduit restarted the gateway but left the Hermes dashboard on the old plugin, and asked you to restart the dashboard by hand. The dashboard now restarts itself too, so the update finishes on its own (after this one).
+
 ## 0.168.8 (2026-11-13)
 
 ### Fixes

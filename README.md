@@ -5128,13 +5128,20 @@ gateway (`POST /api/gateway/restart`), then this dashboard:
 - `POST /api/plugins/conduit_push/self/restart` answers
   `{ok, restarting, boot_id, loaded_version, version}` and a second later
   re-executes the dashboard with the command line it started with, keeping its
-  pid, so systemd, launchd and terminal launches carry on. 409 while a chat
-  turn this process runs is still going (from Hermes' turn markers); 501 on
-  Windows, inside a plugin host, and for Hermes Desktop's own backend, where
-  you restart Hermes yourself.
+  pid, so systemd, launchd and terminal launches carry on. On Windows, which
+  can't re-execute a process in place, the dashboard exits and a small
+  detached helper (`windows_relaunch.py`) starts the same command line again
+  once it's gone, in the background, with its output in
+  `<HERMES_HOME>/logs/dashboard-restart.log` (from 0.168.9; a dashboard you
+  started in a terminal comes back without one). A dashboard a launcher
+  script or service already started again is left to run. 409 while a chat
+  turn this process runs is still going (from Hermes' turn markers); 501
+  inside a plugin host and for Hermes Desktop's own backend, where you
+  restart Hermes yourself.
 
 The first update to 0.24 still runs the old code, which has no restart route:
-restart the dashboard by hand once.
+restart the dashboard by hand once. The same goes for the first update on
+Windows to 0.168.9, the first version that restarts a Windows dashboard.
 
 From 0.63 the host can run the whole update itself, so Conduit can be closed
 while it runs:

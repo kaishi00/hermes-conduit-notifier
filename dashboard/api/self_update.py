@@ -63,10 +63,12 @@ threading.Thread(target=_point_profiles, name="conduit-profile-copies", daemon=T
 # for the gateway, but this dashboard keeps serving the routes (and the hooks of
 # the chats it runs) it imported at start. Conduit calls this last: the process
 # re-executes itself with the command line it started with, keeping its pid, so
-# systemd, launchd and a terminal launch all carry on. Refused while a chat turn
+# systemd, launchd and a terminal launch all carry on. On Windows, where exec
+# spawns a new process instead of replacing this one, a detached helper
+# (windows_relaunch.py) starts the same command line once this process has
+# exited, in the background (issue notifier 774). Refused while a chat turn
 # this process runs is still going, for the Desktop app's own backend (it
-# supervises and re-ports its child), inside a plugin host, and on Windows,
-# where exec spawns a new process instead of replacing this one.
+# supervises and re-ports its child), and inside a plugin host.
 
 SELF_RESTART_DELAY_S = 1.0
 SELF_RESTART_RECHECK_S = 2.0
@@ -153,8 +155,6 @@ def _running_turns(pid: int, homes: List[Path], start_time: Optional[float] = No
 
 
 def _self_restart_refusal() -> Optional[Tuple[int, str]]:
-    if sys.platform == "win32":
-        return 501, "Restart the Hermes dashboard on this host to finish the update"
     if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
         return 501, "This plugin runs in a Hermes plugin host; restart Hermes to finish the update"
     try:
@@ -180,7 +180,38 @@ def _reexec() -> None:
     with contextlib.suppress(Exception):
         sys.stdout.flush()
         sys.stderr.flush()
-    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+    command = [sys.executable, *sys.orig_argv[1:]]
+    if sys.platform == "win32":
+        _relaunch_on_windows(command)
+        os._exit(0)  # exec skips atexit too; the relauncher starts the new process once this one is gone
+    else:
+        os.execv(sys.executable, command)
+
+
+WINDOWS_RELAUNCH_LOG = "dashboard-restart.log"
+
+
+def _relaunch_on_windows(command: List[str]) -> None:
+    """Hands `command` to windows_relaunch.py, which starts it once this process has exited.
+
+    The helper is detached (its own process group and hidden console, out of the job object
+    when that's allowed), so it outlives this process and whatever started it. The restarted
+    dashboard runs in the background: its output goes to logs/dashboard-restart.log. Raises
+    when the helper can't start, so this process keeps serving and the restart can be asked
+    again."""
+    from hermes_constants import get_hermes_home
+    helper = os.path.join(core._plugin_root(), "windows_relaunch.py")
+    logs = Path(get_hermes_home()) / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    argv = [sys.executable, "-I", helper, str(os.getpid()), json.dumps(command), str(logs / WINDOWS_RELAUNCH_LOG)]
+    detached = 0x00000200 | 0x08000000  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    kwargs = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL, close_fds=True)
+    try:
+        subprocess.Popen(argv, creationflags=detached | 0x01000000, **kwargs)  # | CREATE_BREAKAWAY_FROM_JOB
+    except OSError:
+        # A job that forbids breakaway refuses the flag; the hidden console alone still detaches.
+        subprocess.Popen(argv, creationflags=detached, **kwargs)
 
 
 def _restart_when_idle(schedule: Callable[[float, Callable[[], None]], Any],
