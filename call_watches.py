@@ -71,7 +71,7 @@ _HOURS = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*(?:-|–|—|to)\s*(\d{1,2}):(\d{2
 _thread_lock = threading.Lock()
 _setup_thread_lock = threading.Lock()
 # What the store keeps of a watch.
-CONFIG_KEYS = ("what", "how", "for_minutes", "every_minutes", "hours", "unless")
+CONFIG_KEYS = ("what", "how", "for_minutes", "every_minutes", "hours", "unless", "once")
 
 _WATCH_FIELDS: dict[str, Any] = {
     "id": {"type": "string", "description": "To change an existing watch: its id, from list."},
@@ -100,6 +100,13 @@ _WATCH_FIELDS: dict[str, Any] = {
         "description": ("Other limits the user gave, in their words (\"not during planned maintenance\"). A run "
                         "that sees one of these doesn't count it."),
     },
+    "once": {
+        "type": "boolean",
+        "description": ("true for something that comes once and then stays true: a time (\"call me at 12:46\"), "
+                        "results being certified, a parcel arriving. The watch stops after its call, so a run "
+                        "that reads it differently later can't ring again. Leave it out for something that can "
+                        "happen again (an outage), which calls again each time it stops and starts over."),
+    },
     "every_minutes": {
         "type": "integer",
         "description": ("How often to check, 5 or more. Leave it out for something that can happen any minute "
@@ -113,10 +120,10 @@ SETUP_SCHEMA: dict[str, Any] = {
     "description": (
         "Phone the user later through Conduit, when something happens: call watches. "
         "A call watch is a scheduled check that calls the user when what it watches happens (\"call me "
-        "if the homelab is down for more than 10 minutes\"), or a one-time event comes (\"call me when the "
-        "results are certified\"). Use it whenever the user wants a call about something after this turn, "
-        "rather than a job that only sends a message (for arriving at or leaving a place, use a place rule "
-        "with a call). This tool writes and keeps the scheduled jobs; you "
+        "if the homelab is down for more than 10 minutes\"), or a one-time event or time comes (\"call me "
+        "when the results are certified\", \"call me at 12:46\": set once, so it stops after its call). Use it "
+        "whenever the user wants a call about something after this turn, rather than a job that only sends a "
+        "message (for arriving at or leaving a place, use a place rule with a call). This tool writes and keeps the scheduled jobs; you "
         "only describe each watch. action set: add one watch, or change it (the same `what` is the same "
         "watch, never a second one). action sync: when the user sends their What's worth a call note, pass "
         "every watch the note describes, each with the note's limits that apply to it; it changes the ones "
@@ -456,6 +463,13 @@ def _call_watches(cronjob: Callable[..., str]) -> list[tuple[dict[str, Any], dic
         raise JobsUnavailable(str(answer.get("error") or "the scheduled jobs couldn't be read"))
     jobs = [job for job in answer["jobs"] if isinstance(job, dict) and job.get("job_id")]
     store = _store()
+    # A one-time watch that had its call is over: its job goes now, outside
+    # its runs, so it doesn't count toward MAX_WATCHES or show in the list.
+    finished = store.done()
+    if finished:
+        removed = {str(job["job_id"]) for job in jobs if str(job["job_id"]) in finished
+                   and _call(cronjob, action="remove", job_id=str(job["job_id"])).get("success")}
+        jobs = [job for job in jobs if str(job["job_id"]) not in removed]
     configs = store.configs()
     present = {str(job["job_id"]) for job in jobs}
     gone = [job_id for job_id in configs if job_id not in present]
@@ -511,8 +525,13 @@ def _watch(raw: Any) -> tuple[dict[str, Any], str | None]:
     if hours and parse_hours(hours) is None:
         return {}, ("hours is local time as HH:MM-HH:MM (\"09:00-24:00\" for \"never before 9 am\"), or leave it "
                     "out for any time.")
+    once = raw.get("once")
+    if isinstance(once, str) and once.strip().casefold() in ("true", "false"):
+        once = once.strip().casefold() == "true"
+    if once is not None and not isinstance(once, bool):
+        return {}, "once is true or false, or leave it out."
     return {"id": _line(raw.get("id")), "what": what, "how": how, "unless": unless, "for_minutes": for_minutes,
-            "every_minutes": every, "hours": _hours_text(hours) if hours else ""}, None
+            "every_minutes": every, "hours": _hours_text(hours) if hours else "", "once": once is True}, None
 
 
 def default_every(for_minutes: int) -> int:
@@ -598,6 +617,8 @@ def _summary(job_id: str, config: dict[str, Any], state: Any = None) -> dict[str
         view["calls_only_between"] = config["hours"]
     if config["unless"]:
         view["unless"] = config["unless"]
+    if config["once"]:
+        view["stops_after_its_call"] = True
     if state and state != "scheduled":
         # Paused, say: it doesn't check until it's resumed.
         view["state"] = state
@@ -750,6 +771,28 @@ def _report(args: dict[str, Any], session_id: Any, task_id: Any = None) -> dict[
     if status == "already_called":
         return {"ok": True, "status": status, "reply": "[SILENT]",
                 "note": f"You already called about this, and it's still happening. Don't call again. {SILENT}"}
+    if status == "done":
+        _pause(job_id)
+        return {"ok": True, "status": status, "reply": "[SILENT]",
+                "note": f"This one-time watch already called and has stopped. Don't call. {SILENT}"}
+    answer = _place_call(store, job_id, session_id, saw)
+    if answer["status"] != "busy" and decision.get("once"):
+        # Its call is placed (or the user is told why not): it checks no more.
+        _pause(job_id)
+        answer["note"] += (" This watch was for a one-time event, so it has stopped: say so in a few words.")
+    return answer
+
+
+def _pause(job_id: str) -> None:
+    """Stops a one-time watch's runs. Paused, not removed: an older Hermes
+    cancels a run that removes its own job, and the call rings only when the
+    run ends. The next change or list of the watches removes it."""
+    cronjob = _cronjob()
+    if cronjob is not None:
+        _call(cronjob, action="pause", job_id=job_id, reason="Its one-time call is done.")
+
+
+def _place_call(store: "WatchStore", job_id: str, session_id: Any, saw: str) -> dict[str, Any]:
     # Time to call: the store already counts it as called, so a failure
     # below never rings twice. At most once per incident is the point: only
     # a full queue (which clears soon) tries again; anything else lasting
@@ -846,6 +889,7 @@ class WatchStore:
             entry["prompt"] = PROMPT_VERSION  # set and sync write the current prompt
             if reset:
                 entry["incident"] = None
+            entry.pop("done", None)
             state["watches"][job_id] = entry
 
     def stale_prompts(self) -> dict[str, dict[str, Any]]:
@@ -862,9 +906,15 @@ class WatchStore:
     def uncall(self, job_id: str) -> None:
         """The call couldn't be queued yet: the next run tries again."""
         with self._locked() as state:
-            incident = (state["watches"].get(job_id) or {}).get("incident")
+            entry = state["watches"].get(job_id) or {}
+            entry.pop("done", None)
+            incident = entry.get("incident")
             if incident is not None:
                 incident["called"] = False
+
+    def done(self) -> set[str]:
+        """The one-time watches that have had their call."""
+        return {job_id for job_id, entry in self._load()["watches"].items() if entry.get("done")}
 
     def drop(self, *job_ids: str) -> None:
         with self._locked() as state:
@@ -879,6 +929,10 @@ class WatchStore:
             if entry is None:
                 # Not one of these watches, or removed since the run began.
                 return {"status": "older"}
+            if entry.get("done"):
+                # A one-time watch that already called: a run already under
+                # way, or the job resumed by hand, never rings again.
+                return {"status": "done"}
             config = entry["config"]
             incident = entry["incident"]
             if not happening:
@@ -902,7 +956,12 @@ class WatchStore:
             if not in_hours(hours, when):
                 return {"status": "outside_hours", "hours": hours}
             incident["called"] = True
-            return {"status": "call"}
+            if config["once"]:
+                # Its event stays true once it came, and a run that later
+                # reads it as over ("the reminder was sent") would open a
+                # new incident and ring again (notifier #775).
+                entry["done"] = True
+            return {"status": "call", "once": config["once"]}
 
     def _load(self, *, for_write: bool = False) -> dict[str, Any]:
         try:
@@ -953,6 +1012,8 @@ def _normalized(raw: Any) -> dict[str, Any]:
             watches[job_id] = {"config": config, "incident": _stored_incident(entry.get("incident"))}
             if isinstance(entry.get("prompt"), int) and not isinstance(entry.get("prompt"), bool):
                 watches[job_id]["prompt"] = entry["prompt"]
+            if entry.get("done") is True:
+                watches[job_id]["done"] = True
     return {"v": VERSION, "watches": watches}
 
 

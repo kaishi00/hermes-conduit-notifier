@@ -74,6 +74,9 @@ class FakeHermes:
         if action == "remove":
             del self.jobs[job_id]
             return json.dumps({"success": True})
+        if action == "pause":
+            self.jobs[job_id]["state"] = "paused"
+            return json.dumps({"success": True, "job": {"job_id": job_id, "state": "paused"}})
         raise AssertionError(f"unexpected action {action}")
 
     def older(self, name, prompt="Check the homelab and call me", skills=("conduit_push:calling-the-user",), **extra):
@@ -552,6 +555,71 @@ def test_a_full_call_queue_tries_again_on_the_next_run(home, hermes, clock, monk
     assert busy["status"] == "busy" and busy["reply"] == "[SILENT]"
     monkeypatch.setattr(calls, "tool_watch", real)
     assert _report(job_id, True)["status"] == "calling"
+
+
+REMINDER = {"what": "reminder at 12:46", "how": "the local time is 12:46 or later", "for_minutes": 0, "once": True}
+
+
+def _reminder(hermes, **changes):
+    _setup({"action": "set", "watch": {**REMINDER, **changes}})
+    [job_id] = [key for key, job in hermes.jobs.items() if job["name"] == "Call watch: reminder at 12:46"]
+    return job_id
+
+
+def test_a_one_time_watch_rings_once_and_stops_even_when_a_run_reads_it_differently(home, hermes, clock):
+    # notifier #775: a time stays passed, and one run said "the reminder was
+    # already sent" (happening false), so the next opened a new incident and
+    # rang again: three calls, hours apart, for one reminder.
+    job_id = _reminder(hermes)
+    first = _report(job_id, True)
+    assert first["status"] == "calling" and "it has stopped" in first["note"]
+    assert hermes.jobs[job_id]["state"] == "paused", "it checks no more"
+    assert len(_rang(home)) == 1
+    clock.now[0] += 4 * 3600
+    for happening in (False, True, True):
+        later = _report(job_id, happening)
+        assert later["status"] == "done" and later["reply"] == "[SILENT]"
+    assert len(_rang(home)) == 1, "never a second call"
+    listed = _setup({"action": "list"})
+    assert listed["watches"] == [] and job_id not in hermes.jobs, "the next list removes it"
+
+
+def test_a_one_time_watch_set_again_after_its_call_starts_over(home, hermes, clock):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    again = _setup({"action": "set", "watch": {**REMINDER, "once": "true"}})
+    assert again["result"] == "created" and again["watch"]["stops_after_its_call"] is True
+    assert job_id not in hermes.jobs
+    [new_id] = hermes.jobs
+    assert _report(new_id, True)["status"] == "calling"
+
+
+def test_a_one_time_watch_whose_call_waits_for_a_full_queue_keeps_checking(home, hermes, clock, monkeypatch):
+    job_id = _reminder(hermes)
+    real = calls.tool_watch
+
+    def full(*args, **kwargs):
+        raise ValueError("too_many")
+    monkeypatch.setattr(calls, "tool_watch", full)
+    assert _report(job_id, True)["status"] == "busy"
+    assert hermes.jobs[job_id].get("state", "scheduled") == "scheduled", "not paused"
+    monkeypatch.setattr(calls, "tool_watch", real)
+    assert _report(job_id, True)["status"] == "calling"
+    assert hermes.jobs[job_id]["state"] == "paused"
+
+
+def test_a_one_time_watch_with_calls_off_tells_the_user_once_and_stops(home, hermes, clock):
+    CallStore(home).update_settings({"enabled": False})
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calls_off"
+    assert hermes.jobs[job_id]["state"] == "paused"
+    assert _report(job_id, False)["status"] == "done"
+
+
+def test_once_is_true_or_false(home, hermes):
+    answer = _setup({"action": "set", "watch": {**REMINDER, "once": "soon"}})
+    assert answer["ok"] is False and "once" in answer["note"]
+    assert _setup({"action": "set", "watch": HOMELAB})["watch"].get("stops_after_its_call") is None
 
 
 def test_a_removed_watch_never_rings_from_a_run_already_going(home, hermes, clock):

@@ -55,10 +55,15 @@ watch:
 - `hours`: when calls are allowed, as HH:MM-HH:MM, if the user limited it.
 - `unless`: any other limit, in the user's words.
 
+- `once`: true for something that comes once and then stays true: a time
+  ("call me at 12:46"), results being certified, a parcel arriving. The
+  watch stops after its call. Leave it out for something that can happen
+  again, like an outage.
+
 The tool picks how often to check and keeps track of each incident: it calls
-once, and again only after the thing stops and starts over. For something
-slow, like results being certified or a parcel shipping, pass
-`every_minutes` too: every few hours is enough.
+once, and again only after the thing stops and starts over, unless it was set
+`once`. For something slow, like results being certified or a parcel
+shipping, pass `every_minutes` too: every few hours is enough.
 
 For a call about something after this turn, set up a call watch (or a
 place rule with a call, for arriving or leaving somewhere), not a scheduled

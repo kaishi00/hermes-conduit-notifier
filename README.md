@@ -2698,8 +2698,12 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   (HH:MM-HH:MM) and `unless`. The plugin writes the cron job through
   Hermes's own `cronjob` function: named "Call watch: <what>", checked every
   few minutes (picked from `for_minutes`), with a fixed run prompt. A
-  one-time event ("call me when the results are certified") is a watch too,
-  checked every few hours through `every_minutes`. The tools steer Hermes
+  one-time event ("call me when the results are certified") or a time ("call
+  me at 12:46") is a watch too, set `once` and, for a slow event, checked
+  every few hours through `every_minutes`. A `once` watch stops after its
+  call (its job is paused then, and removed the next time the watches are
+  listed or changed), so a later run that reads the event as over and then
+  as back can't ring again (0.177.1, from sixgodgit's #775). The tools steer Hermes
   to a call watch (or a place rule with a call) for any call about
   something after the turn, rather than a job that only sends a message,
   since `conduit_call_user` rings only when its own turn ends. The same
