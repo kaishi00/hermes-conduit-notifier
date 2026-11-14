@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.170.7 (2026-11-14)
+
+### Fixes
+
+- A hand-off to a workstream also leaves out keys under one-word names like secretkey or usercredentials.
+
 ## 0.170.6 (2026-11-14)
 
 ### Fixes
