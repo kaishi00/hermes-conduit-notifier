@@ -1034,7 +1034,7 @@ voice:
     url: ws://192.168.1.20:8765/v1/realtime   # http(s) works too; a bare host gets /v1/realtime
     api_key: ""                               # optional, for a server behind an auth proxy
     api_key_file: ""                          # optional: read the key from this file instead
-    drive_turns: false                        # true: Hermes answers on a server with a model of its own (plugin 0.173+)
+    drive_turns: false                        # true: Hermes answers on a server with a model of its own (plugin 0.173+) A YAML boolean, not 1.
     transcription_model: ""                   # optional, with drive_turns: the model the server transcribes with
 ```
 
@@ -1054,7 +1054,7 @@ speech-to-speech has no authentication of its own, so keep it on your network.
 
 | Method | Path | Returns |
 |--------|------|---------|
-| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, drive_turns, reason}` |
+| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, drive_turns, model, voice, transcription_model, reason}` |
 | POST | `/api/plugins/conduit_push/speech-server/test` | `{ok, connected, url, latency_ms, event, reason}`: dials the server from the host and waits for its first event |
 | WebSocket | `/api/plugins/conduit_push/speech-server/socket` | OpenAI Realtime events, relayed |
 
@@ -1192,8 +1192,9 @@ server only listens and reads aloud:
   `create_response: false`) is cancelled and nothing of it reaches the call;
   the reply's sentences wait for its end, 2 s at most. One that started while
   a sentence was on its way, which the server answers with
-  `conversation_already_has_active_response`, is cancelled the same way and
-  the sentence said after it.
+  `conversation_already_has_active_response`, is cancelled when that error
+  arrives and the sentence said after it. On a server that never echoes the
+  mark below, a little of that response's audio can reach the call first.
 - Each sentence carries a mark (`response.metadata`, `{"conduit": "say"}`).
   Once the server has echoed it on a `response.created`, a response that
   starts without it while a sentence waits is the server's own, and is

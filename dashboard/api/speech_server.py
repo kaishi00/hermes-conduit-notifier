@@ -143,6 +143,7 @@ def speech_server_transcription_model(settings: Optional[Dict[str, Any]] = None)
     value = settings.get("transcription_model")
     name = value.strip() if isinstance(value, str) else ""
     if len(name) > SPEECH_SERVER_MAX_MODEL_NAME_CHARS or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+        logger.warning("voice.speech_server.transcription_model is not a model name, so none is asked for.")
         return ""
     return name
 

@@ -342,6 +342,19 @@ def test_socket_relays_both_ways(client, server):
     assert server.connects == [("ws://127.0.0.1:8765/v1/realtime", {})]
 
 
+def test_socket_tells_a_driven_server_to_read_aloud(client, hermes, server):
+    _settings(hermes, url="ws://127.0.0.1:8765", drive_turns=True, transcription_model="gpt-4o-mini-transcribe")
+    server.upstream = FakeUpstream(frames=['{"type":"session.created"}'])
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "session.update", "session": {"audio": {"input": {}}}}))
+        ws.send_text("finish")
+        _wait_close(ws)
+    session = json.loads(server.upstream.sent[0])["session"]
+    assert session["instructions"] == api.speech_server.SPEECH_SERVER_SAY_INSTRUCTIONS
+    assert session["audio"]["input"]["transcription"] == {"model": "gpt-4o-mini-transcribe"}
+
+
 def test_socket_without_a_server_closes_with_the_reason(client, hermes, server):
     hermes.config = {}
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
