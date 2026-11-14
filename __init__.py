@@ -1316,6 +1316,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else conduit_first.note(),
         # A room's private chat is told which room it's about (room_chats).
         None if child else _room_chat_note(session_id),
+        # A room of only the owner's own Hermes runs as at home, which its turn is told (room_rules.OWN_FRAMING).
+        _own_room_note(session_id),
         # What linked people answered this chat's asks since (link_ask_tool), once.
         None if child else _link_answers_note(session_id),
         # A coordinator Bot Chat's open work (work_tool).
@@ -1398,6 +1400,17 @@ def _link_answers_note(session_id: str) -> str | None:
     if not lines:
         return None
     return "Answers to your asks to linked people (conduit_ask_linked):" + "".join(f"\n- {line}" for line in lines)
+
+
+def _own_room_note(session_id: str) -> str | None:
+    if not session_id:
+        return None
+    try:
+        turn = room_rules.room_turn(session_id, get_hermes_home())
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: own room note failed", exc_info=True)
+        return None
+    return room_rules.OWN_FRAMING if turn is not None and turn.own else None
 
 
 def _room_chat_note(session_id: str) -> str | None:

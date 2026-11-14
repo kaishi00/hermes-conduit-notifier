@@ -5744,6 +5744,7 @@ def test_a_room_with_other_peoples_agents_starts_no_work(on, hermes, room):
     room["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=False, session_id=ROOM_CHAT)
     elsewhere = room_start()
     assert elsewhere["error"] == "room_elsewhere" and "other Hermes" in elsewhere["note"]
+    assert "usual tools" in elsewhere["note"] and "Bot Chat" not in elsewhere["note"]
     room["turn"] = room_rules.RoomTurn(room_id="", side="home", with_others=False, session_id=ROOM_CHAT)
     legacy = room_start()
     assert legacy["error"] == "legacy_group" and "other people" not in legacy["note"]

@@ -1378,7 +1378,7 @@ def test_a_members_hermes_runs_a_room_from_its_own_hermes_as_at_home(tmp_path, m
     _room_session(home, REMOTE, "room-a")
     _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
     assert rules.room_turn(REMOTE, home) == rules.RoomTurn(
-        room_id="room-a", side="member", with_others=False, session_id=REMOTE)
+        room_id="room-a", side="member", with_others=False, session_id=REMOTE, own=True)
     assert rules.own_guest_room(tmp_path, "room-a", "own-link")
     assert not rules.own_guest_room(tmp_path, "room-a", "another-link")
     # Someone else invited too, even by a name: the rules hold.
@@ -1417,3 +1417,18 @@ def test_past_chat_search_finds_a_room_from_your_own_other_hermes_while_the_link
     _own(monkeypatch, set(), _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
     assert [entry["session_id"] for entry in json.loads(_search(found, query="otter"))["results"]] == ["s-chat"]
     assert json.loads(_search(read, session_id=REMOTE))["success"] is False
+
+
+def test_a_room_of_your_own_hermes_tells_its_turn_to_use_its_home_tools(host, notes, monkeypatch):
+    # Seen on .52/.58 (2026-11-14): a far bot whose earlier turns ran under the room's rules kept reaching for the
+    # room's tools instead of its terminal, so the turn is told the rules are off, beside its usual notes.
+    _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    assert rules.room_turn(REMOTE, host).own
+    context = _context(REMOTE)
+    assert rules.OWN_FRAMING in context and rules.FRAMING_HEAD not in context
+    assert NOTES["conduit_first"] in context
+    _own(monkeypatch, set(), _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    context = _context(REMOTE)
+    assert rules.FRAMING_HEAD in context and rules.OWN_FRAMING not in context
+    # A home room with no one from another installation is no room of your own Hermes: no note.
+    assert rules.OWN_FRAMING not in _context("s-local") and rules.OWN_FRAMING not in _context("s-chat")
