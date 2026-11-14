@@ -1933,6 +1933,28 @@ def test_a_chat_whose_title_cant_be_read_is_held_to_the_policy(on, hermes, monke
     assert call("work_start", {"title": "x", "instructions": "y"})["error"] == "not_bot_chat"
 
 
+def test_a_call_that_names_no_chat_isnt_held_as_the_coordinators(on, hermes, home, monkeypatch):
+    # notifier#784: an agent with no session (the TUI's before its first
+    # save) passes an empty id, which lost it every tool for good.
+    on.set_policy("lookups")
+    work._policy_cache.clear()
+    for no_id in ("", "  ", None):
+        assert work.tool_block(no_id, "web_search", {}) is None
+        assert work.tool_block(no_id, "terminal", {}) is None
+        assert work.tool_block(no_id, "message_agent", {}) is None
+        assert work.tool_block(no_id, "work_list", {}) is None
+    assert store_mod.exists(home)
+
+    def locked(h, key):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(titles, "read_or_raise", locked)
+    work._title_cache.clear()
+    assert work.tool_block("", "web_search", {}) is None
+    # A chat that is named and can't be read is still held.
+    assert work.tool_block(OTHER_CHAT, "web_search", {}) == {"action": "block", "message": work.CHECK_FAILED}
+
+
 def _state_db(home, rows):
     import sqlite3
 
@@ -2144,12 +2166,6 @@ def test_a_refused_send_puts_the_row_back(on, hermes):
     assert call("work_send", {"ref": "W1", "text": "More"})["error"] == "hermes"
     row = on.get("W1")
     assert row.status == "done" and row.closed_at == 5.0
-
-
-@pytest.mark.parametrize("session_id", [None, "", "  "])
-def test_a_call_naming_no_chat_keeps_to_the_policy(on, hermes, session_id):
-    assert work.tool_block(session_id, "terminal", {}) == {"action": "block", "message": work.CHECK_FAILED}
-    assert work.tool_block(session_id, "work_list", {}) is None
 
 
 def test_a_send_that_fails_unexpectedly_frees_the_slot(on, hermes, monkeypatch):

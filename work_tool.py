@@ -3368,10 +3368,11 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
         return held
     if all(runs(called) for called in names):
         return None  # allowed in any chat: which one this is doesn't matter
-    has_id = isinstance(session_id, str) and session_id.strip()
-    # A call that names no chat might be the coordinator's: held like one
-    # whose title can't be read.
-    titled = _titled_bot_chat(session_id, home) if has_id else None
+    # A call that names no chat isn't the coordinator's: Hermes gives the hook
+    # an empty id only for an agent with no session, which the Bot Chat always
+    # has. Held as a failed title read, every tool of that agent would be,
+    # for good (notifier#784).
+    titled = _titled_bot_chat(session_id, home)
     if titled is False:
         # A workstream reaches other bots only through its coordinator,
         # whose asks carry the loop guard and the limits.
