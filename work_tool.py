@@ -3425,7 +3425,8 @@ def _step_line(name: str, args: Any) -> str:
         shown = json.dumps(args, ensure_ascii=False, sort_keys=True) if args else ""
     except (TypeError, ValueError):
         shown = str(args)
-    return _cut(f"{name} {shown}".strip(), 300)
+    # Credentials inside ordinary values too (a command's bearer header).
+    return _cut(_masked(f"{name} {shown}".strip()), 300)
 
 
 # Each Bot Chat turn's ask, as Hermes gave it to pre_llm_call: (session,
@@ -3434,21 +3435,24 @@ _asks: dict[tuple[str, str], str] = {}
 
 
 def note_turn_ask(session_id: Any, turn_id: Any, user_message: Any) -> None:
-    """Keeps a turn's ask for the workstream its quick steps may hand on to."""
+    """Keeps a turn's ask for the workstream its quick steps may hand on to.
+    Hermes calls pre_llm_call once a turn, so each call starts a new one:
+    the last turn's steps and hand-off aren't this one's, even when Hermes
+    names no turn id (its key is the chat's alone) or the user sends the
+    same words again."""
     if not isinstance(user_message, str) or not user_message.strip():
-        return
-    if user_message.startswith("Work update from "):
-        # The plugin's own turn (a workstream's report, another bot's ask),
-        # not the user's: its rest is the bot's to route, never handed off.
         return
     key = (str(session_id or ""), str(turn_id or ""))
     with _steps_lock:
-        if _asks.pop(key, None) != user_message.strip():
-            # A new ask is a new turn, even one Hermes names no id for (its
-            # key is the chat's alone): the last one's steps and hand-off
-            # aren't this one's.
-            _did.pop(key, None)
-            _handed.pop(key, None)
+        _asks.pop(key, None)
+        _did.pop(key, None)
+        _handed.pop(key, None)
+        if not turn_id:
+            _steps.pop(key, None)
+        if user_message.startswith("Work update from "):
+            # The plugin's own turn (a workstream's report, another bot's ask),
+            # not the user's: its rest is the bot's to route, never handed off.
+            return
         _asks[key] = user_message.strip()
         while len(_asks) > _STEP_TURNS:
             del _asks[next(iter(_asks))]
@@ -6190,7 +6194,12 @@ def flush_wakes() -> None:
 
 def _summary(args: Any) -> str:
     """A step's arguments in a line, with credential-shaped text masked."""
-    text = _raw_summary(args)
+    return _masked(_raw_summary(args))
+
+
+def _masked(text: str) -> str:
+    """Text with credential-shaped runs masked, by Hermes' redactor where
+    there is one."""
     try:
         from agent.redact import redact_sensitive_text
 

@@ -7171,8 +7171,9 @@ def test_unreadable_kept_cards_read_as_none(on):
 
 
 def test_a_hand_off_lists_only_the_steps_that_ran_and_starts_over_with_a_new_ask(on, hermes, monkeypatch):
-    # Review leftovers of notifier #782: a step the screen lock refused never ran, a new ask in a
-    # chat whose Hermes names no turn is a new turn, and secrets stay out of the instructions.
+    # Review leftovers of notifier #782: a step the screen lock refused never ran, each turn in a
+    # chat whose Hermes names no turn is a new one (the same words too), and secrets stay out of
+    # the instructions, inside a command as well.
     monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
     on.set_policy("lookups")
     held = {"action": "block", "message": "another chat has the screen"}
@@ -7181,15 +7182,26 @@ def test_a_hand_off_lists_only_the_steps_that_ran_and_starts_over_with_a_new_ask
     plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="computer_use", args={"action": "screenshot"},
                           tool_call_id="c0")
     monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
+    bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
     for n in range(work.QUICK_STEPS):
         plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal",
-                              args={"command": f"step {n}", "api_key": "sk-123"}, tool_call_id=f"c{n + 1}")
+                              args={"command": f"step {n} -H 'Authorization: Bearer {bearer}'", "api_key": "sk-123"},
+                              tool_call_id=f"c{n + 1}")
     assert "W1" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
     goal = on.get("W1").goal
     assert "computer_use" not in goal and "step 4" in goal
     assert "sk-123" not in goal and "(left out)" in goal
-    # A new ask a moment later, with no turn id: its own hand-off, not W1's.
+    assert bearer not in goal, "a credential inside a command is masked too"
+    # A new ask a moment later, with no turn id: a new turn, with its own steps and hand-off, not W1's.
     plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Book a dentist visit", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        assert work.tool_block(BOT_CHAT, "terminal", {"command": f"look {n}"}) is None
     assert "W2" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
     assert "step 4" not in on.get("W2").goal
+    # The same words again, a new turn: not told W2 took it over, but pointed at W2 as open work like it.
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Book a dentist visit", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        assert work.tool_block(BOT_CHAT, "terminal", {}) is None
+    again = work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    assert again.startswith(work.STEP_BLOCK.format(tool="terminal")) and "W2" in again and on.get("W3") is None
 
