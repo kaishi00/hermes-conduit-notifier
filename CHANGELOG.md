@@ -19,6 +19,11 @@ checks it). The format is fixed, because Conduit reads it:
 
 - A note one bot sent another that never reached it (its Bot Chat couldn't be woken) was lost without a word. The bot that sent it is now told.
 - A bot waiting on another's question back was told to ask about it, which couldn't work. It's now told to answer it first.
+- After a restart, an ask or a tapped yes that had already reached a Bot Chat could be handed to it a second time if saving that it arrived failed. It's now marked delivered.
+
+### New and improved
+
+- A note from another bot now arrives under its own heading, saying no answer is owed.
 
 ## 0.170.0 (2026-11-14)
 
