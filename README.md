@@ -4376,7 +4376,10 @@ draft's `bring` (`{"<Link id>": ["<profile>", ...]}`) names the other Hermes'
 bots to seat; after the invite a `room.bring` names them, and that Hermes joins
 them by itself, with no join card, but only over an own Link, only for an invite
 that names nobody else, and only profiles it has. One that can't join (not set
-up for rooms, or on Codex's app server) leaves the invite on its join card. In
+up for rooms, or on Codex's app server) leaves the invite on its join card. An
+invite from an own Link holds its push up to 2 minutes for the `room.bring`, so
+bots that join by themselves don't also ask; it goes when they can't, or when no
+bring comes. An unchanged bot list goes again once a day. In
 such a room no bot has room choices: each runs with its own Hermes' settings
 (Eric 2026-11-14).
 

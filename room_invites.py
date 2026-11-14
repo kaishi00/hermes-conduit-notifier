@@ -515,9 +515,12 @@ class Rooms:
                 "reason": None,
             }
             told = dict(invite)
-        self.notify(told)
-        # Bots of this Hermes the home asked for over an own Link join by themselves (room_own_bots).
-        self.own_bots.join_pending(key)
+        # Bots of this Hermes the home asks for over an own Link join by themselves (room_own_bots): such an
+        # invite's push waits for the room.bring, and goes only when they can't join.
+        if self.own_bots.holds(received.link_id, told):
+            self.own_bots.hold(key)
+        else:
+            self.notify(told)
 
     def on_answer(self, received: room_links.Received) -> None:
         """A person's answer to a draft: taken only from the Link invited, for its own places, while the draft

@@ -3027,6 +3027,14 @@ def test_each_side_tells_the_other_its_bots_over_an_own_link(rooms, monkeypatch)
     rooms.member["laifu"].not_ready.clear()
     rooms.laifu.own_bots.pass_once(force=True)
     assert rooms.wire.kinds("laifu")[-1] == ("link1", "room.bots")
+    # And once a day unchanged, in case the other side missed it past the mailbox's hold.
+    before = len(rooms.wire.sent)
+    rooms.clock.now += own_bots_module.RESEND_S - 1
+    rooms.laifu.own_bots.pass_once(force=True)
+    assert len(rooms.wire.sent) == before
+    rooms.clock.now += 1
+    rooms.laifu.own_bots.pass_once(force=True)
+    assert len(rooms.wire.sent) == before + 1
     # A Link that isn't an own one hears nothing and shows nothing.
     monkeypatch.setattr(links_module, "own_links", lambda root: frozenset())
     assert rooms.furina.own_bots.theirs() == {"links": {}}
@@ -3073,6 +3081,61 @@ def test_a_bring_that_cant_join_leaves_the_join_card(rooms, monkeypatch):
     room_id = rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY,
                                  bring={"link1": ["work"]})["room_id"]
     assert invite_of(rooms, "laifu", room_id)["status"] == "waiting"
+    # Its push goes, since the owner has to answer it.
+    assert [told["room_id"] for told in rooms.notified["laifu"]] == [room_id]
+
+
+def test_bots_that_join_by_themselves_send_no_invite_push(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    room_id = rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY,
+                                 bring={"link1": ["work"]})["room_id"]
+    assert invite_of(rooms, "laifu", room_id)["status"] == "joined"
+    assert rooms.notified["laifu"] == []
+    # Nor when the bring came first.
+    rooms.wire.holding = True
+    second = rooms.furina.draft("Picnic", [dict(FURINAS)], ["link1"], where=LEGACY,
+                                bring={"link1": ["default"]})["room_id"]
+    rooms.wire.held = rooms.wire.held[::-1]
+    rooms.wire.release()
+    assert invite_of(rooms, "laifu", second)["status"] == "joined"
+    assert rooms.notified["laifu"] == []
+
+
+def test_an_own_links_invite_with_no_bring_pushes_once_its_wait_ends(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    room_id = draft(rooms, links=("link1",))["room_id"]
+    assert rooms.notified["laifu"] == []
+    rooms.laifu.own_bots.pass_once()
+    assert rooms.notified["laifu"] == []
+    rooms.clock.now += own_bots_module.HOLD_S
+    rooms.laifu.own_bots.pass_once()
+    assert [told["room_id"] for told in rooms.notified["laifu"]] == [room_id]
+    assert own_bots_module.Store(rooms.tmp_path / "laifu").read()["held"] == {}
+    # A bring after the wait joins its bots without a second push.
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.bring",
+                                 {"v": 1, "room_id": room_id, "profiles": ["default"]}))
+    assert invite_of(rooms, "laifu", room_id)["status"] == "joined"
+    assert len(rooms.notified["laifu"]) == 1
+
+
+def test_a_bring_whose_invite_never_comes_is_forgotten(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.bring",
+                                 {"v": 1, "room_id": "conduit-gone", "profiles": ["default"]}))
+    store = own_bots_module.Store(rooms.tmp_path / "laifu")
+    assert list(store.read()["pending"]) == ["link1/conduit-gone"]
+    rooms.clock.now += own_bots_module.PENDING_S
+    rooms.laifu.own_bots.pass_once()
+    assert store.read()["pending"] == {}
+
+
+def test_a_bot_the_other_side_wouldnt_take_is_left_out_alone(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    (rooms.tmp_path / "laifu" / "profiles" / "everyone").mkdir()
+    (rooms.tmp_path / "laifu" / "profiles" / "everyone" / "config.yaml").write_text("model: {}\n")
+    rooms.laifu.own_bots.pass_once(force=True)
+    [shown] = rooms.furina.own_bots.theirs()["links"].values()
+    assert [bot["profile"] for bot in shown["bots"]] == ["default", "work"]
 
 
 def test_a_bring_over_a_link_that_isnt_your_own_is_refused_or_dropped(rooms, monkeypatch):

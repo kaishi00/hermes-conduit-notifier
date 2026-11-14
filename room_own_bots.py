@@ -10,8 +10,11 @@ profiles. The other Hermes joins them by itself, with no join card: only over an
 that names nobody else (``people`` empty, as room_rules.own_guest_room asks), and only profiles it has. One
 that can't join (not set up for rooms, or on Codex) leaves the invite waiting on its join card, as before.
 
-A room.bots goes again only when what it says changed, and with each link.hello (a side that restored an older
-file hears it again). What each side last said and was told is kept in ``conduit-rooms/own_bots.json``, owner
+The invite's push waits for its room.bring (HOLD_S), so bots that join by themselves don't also ask; it goes when
+they can't, or when no bring comes.
+
+A room.bots goes again when what it says changed, when the other side's plugin changed (it may have restored an
+older file), and once a day, so one that missed it while offline past the mailbox's hold hears it again. What each side last said and was told is kept in ``conduit-rooms/own_bots.json``, owner
 only, beside rooms.json.
 """
 
@@ -42,6 +45,10 @@ MAX_BOTS = 32
 CHECK_S = 60
 # A room.bring that came before its invite waits this long for it.
 PENDING_S = 7 * 24 * 3600
+# An own Link's invite that may bring bots holds its push this long for the room.bring the home sends after it.
+HOLD_S = 120
+# An unchanged room.bots goes again this often, well within the mailbox's seven-day hold.
+RESEND_S = 24 * 3600
 _thread_lock = threading.Lock()
 
 
@@ -61,10 +68,13 @@ class OwnBots:
         from . import room_invites  # noqa: PLC0415 - room_invites imports this module
 
         bots = []
-        for profile in self.rooms._profiles()[:MAX_BOTS]:
+        for profile in self.rooms._profiles():
             agent = room_invites.own_agent(self.rooms.root, profile)
-            bots.append({**agent, "ready": self._ready(profile)})
-        return bots
+            bot = {**agent, "ready": self._ready(profile)}
+            # One the other side wouldn't take (a reserved handle, say) is left out, not the whole list.
+            if _bots_from({"v": VERSION, "bots": [bot]}) is not None:
+                bots.append(bot)
+        return bots[:MAX_BOTS]
 
     def _ready(self, profile: str) -> bool:
         joiner = self.rooms.joiner
@@ -80,6 +90,7 @@ class OwnBots:
         """Tells each own Link whose other side takes room.bots what this Hermes' bots are, when that changed
         since it last said (or ``force``), at most every CHECK_S."""
         now = self.clock()
+        self._release_holds(now)
         if not force and now - self._checked_at < CHECK_S:
             return
         self._checked_at = now
@@ -95,7 +106,9 @@ class OwnBots:
         said = self.store.read()["said"]
         for link_id in targets:
             hello = (self.rooms.link(link_id) or {}).get("plugin")
-            if said.get(link_id) == [digest, hello]:
+            last = said.get(link_id)
+            if isinstance(last, list) and len(last) == 3 and last[:2] == [digest, hello] \
+                    and isinstance(last[2], (int, float)) and 0 <= now - last[2] < RESEND_S:
                 continue
             try:
                 self.rooms.send(link_id, BOTS, body, message_id=f"{BOTS}:{digest}:{int(now)}")
@@ -104,7 +117,7 @@ class OwnBots:
                 continue
             with self.store.update() as state:
                 # Said again when the other side's plugin changes: it may have restored an older file.
-                state["said"][link_id] = [digest, hello]
+                state["said"][link_id] = [digest, hello, int(now)]
 
     # --- What the other side says -------------------------------------------------------------
 
@@ -158,24 +171,67 @@ class OwnBots:
         with self.store.update() as state:
             state["pending"] = {name: kept for name, kept in state["pending"].items() if kept["until"] > now}
             state["pending"][key] = {"profiles": body["profiles"], "until": now + PENDING_S}
-        self.join_pending(key)
+            held = state["held"].pop(key, None) is not None
+        if not self.join_pending(key) and held:
+            self._tell(key)
 
-    def join_pending(self, key: str) -> None:
+    # --- The invite's push --------------------------------------------------------------------
+
+    def holds(self, link_id: str, invite: dict[str, Any]) -> bool:
+        """Whether an invite's push waits for a room.bring: one from an own Link whose other side brings bots,
+        naming nobody else."""
+        return not invite.get("people") and self.brings(link_id)
+
+    def hold(self, key: str) -> None:
+        """The invite ``key`` came: its bots join now when their room.bring is here, else its push waits HOLD_S
+        for one. Its push goes when they can't join."""
+        if key in self.store.read()["pending"]:
+            if not self.join_pending(key):
+                self._tell(key)
+            return
+        with self.store.update() as state:
+            state["held"][key] = int(self.clock()) + HOLD_S
+
+    def _release_holds(self, now: float) -> None:
+        """Pushes the invites whose room.bring didn't come in time, and forgets room.brings past PENDING_S
+        whose invite never came."""
+        state = self.store.read()
+        if any(not isinstance(kept, dict) or kept.get("until", 0) <= now for kept in state["pending"].values()):
+            with self.store.update() as changing:
+                changing["pending"] = {key: kept for key, kept in changing["pending"].items()
+                                       if isinstance(kept, dict) and kept.get("until", 0) > now}
+        held = state["held"]
+        due = [key for key, until in held.items() if not isinstance(until, int) or until <= now]
+        if not due:
+            return
+        with self.store.update() as state:
+            for key in due:
+                state["held"].pop(key, None)
+        for key in due:
+            self._tell(key)
+
+    def _tell(self, key: str) -> None:
+        invite = self.rooms.store.read()["invites"].get(key)
+        if invite is not None and invite["status"] == "waiting":
+            self.rooms.notify(dict(invite))
+
+    def join_pending(self, key: str) -> bool:
         """Joins the bots a room.bring named for the invite ``key`` (``link/room``), once both are here: only
-        an invite still waiting, from an own Link, that names nobody else. Each bring is tried once."""
+        an invite still waiting, from an own Link, that names nobody else. Each bring is tried once. True when
+        they joined."""
         link_id, _, room_id = key.partition("/")
         pending = self.store.read()["pending"].get(key)
         if pending is None:
-            return
+            return False
         invite = self.rooms.store.read()["invites"].get(key)
         if invite is None:
-            return  # its invite hasn't come yet
+            return False  # its invite hasn't come yet
         with self.store.update() as state:
             state["pending"].pop(key, None)
         if invite["status"] != "waiting" or invite["people"] or link_id not in room_links.own_links(self.rooms.root):
             logger.info("Linked Rooms left room %s's invite on its join card: it isn't one of only your own "
                         "Hermes, or it was answered", room_id)
-            return
+            return False
         from . import room_invites  # noqa: PLC0415 - room_invites imports this module
 
         mine = set(self.rooms._profiles())
@@ -184,12 +240,14 @@ class OwnBots:
         if not agents:
             logger.info("Linked Rooms left room %s's invite on its join card: none of the bots it named are "
                         "profiles here", room_id)
-            return
+            return False
         try:
             self.rooms.answer(link_id, room_id, [{**agent, "choices": None} for agent in agents])
         except Exception as exc:  # noqa: BLE001 - its join card still offers it
             logger.info("Linked Rooms left room %s's invite on its join card: its bots couldn't join by "
                         "themselves (%s)", room_id, getattr(exc, "code", type(exc).__name__))
+            return False
+        return True
 
 
 # --- The store ----------------------------------------------------------------------------
@@ -197,7 +255,7 @@ class OwnBots:
 
 class Store:
     """``<root>/conduit-rooms/own_bots.json``: what this side last said to each own Link, what each told it,
-    and the room.brings waiting for their invites."""
+    the room.brings waiting for their invites, and the invites whose push waits for a room.bring."""
 
     def __init__(self, root: Any) -> None:
         self.directory = Path(root) / room_identity.DIRECTORY
@@ -212,7 +270,7 @@ class Store:
             logger.info("Linked Rooms couldn't read %s; starting it again", self.path)
             return _empty()
         if not isinstance(state, dict) or state.get("version") != VERSION or not all(
-                isinstance(state.get(name), dict) for name in ("said", "theirs", "pending")):
+                isinstance(state.get(name), dict) for name in ("said", "theirs", "pending", "held")):
             return _empty()
         return state
 
@@ -246,7 +304,7 @@ class Store:
 
 
 def _empty() -> dict[str, Any]:
-    return {"version": VERSION, "said": {}, "theirs": {}, "pending": {}}
+    return {"version": VERSION, "said": {}, "theirs": {}, "pending": {}, "held": {}}
 
 
 def _bots_from(body: Any) -> Optional[list[dict[str, Any]]]:
