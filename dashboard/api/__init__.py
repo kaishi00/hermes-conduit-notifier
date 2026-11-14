@@ -24,6 +24,7 @@ MODULES = (
     "local_live",
     "local_live_read_back",
     "local_live_agent",
+    "local_live_own_model",
     "voice_calls",
     "chats",
     "history",

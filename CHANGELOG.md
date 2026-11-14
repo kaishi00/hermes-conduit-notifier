@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.175.0 (2026-11-14)
+
+### New and improved
+
+- A hosted realtime speech server (OpenAI Realtime, Qwen Audio Realtime) can now answer Live > Local calls with its own model: it gets the call's instructions and tools, and hands the work to Hermes as jobs, like Grok Live. Turn it on in Conduit under Live > Local, or with voice.speech_server.own_model in the Hermes config. Classic voice and Apple Watch calls on that server still get Hermes' replies read aloud.
+
 ## 0.174.1 (2026-11-14)
 
 ### Fixes
