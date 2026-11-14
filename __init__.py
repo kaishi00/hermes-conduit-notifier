@@ -133,7 +133,8 @@ def register(ctx: Any) -> None:
     try:
         ctx.register_hook("post_tool_call", _post_tool_call)
     except Exception:  # noqa: BLE001
-        logger.warning("conduit_push: post_tool_call hook unavailable; Pulse records no tool outcomes", exc_info=True)
+        logger.warning("conduit_push: post_tool_call hook unavailable; Pulse records no tool outcomes, and a quick "
+                       "turn's time runs from each step's start, its hand-off without the steps' results", exc_info=True)
     ctx.register_hook("subagent_start", _subagent_start)
     ctx.register_hook("subagent_stop", _subagent_stop)
     # A call held over a restart goes out when its hold runs out (#449).
@@ -372,7 +373,8 @@ def _screen_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
     try:
         return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"),
-                                    turn_id=kwargs.get("turn_id"), task_id=kwargs.get("task_id"))
+                                    turn_id=kwargs.get("turn_id"), task_id=kwargs.get("task_id"),
+                                    tool_call_id=kwargs.get("tool_call_id"))
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
         # Only a bot that has had work (on by default otherwise) is held when its check fails.
@@ -384,6 +386,9 @@ def _post_tool_call(**kwargs: Any) -> None:
     if session_id != kwargs.get("session_id") or turn_id != kwargs.get("turn_id"):
         kwargs = {**kwargs, "session_id": session_id, "turn_id": turn_id}  # as _pre_tool_call reads it
     _quietly(work_tool.code_ended, kwargs.get("tool_name"), kwargs.get("task_id"), kwargs.get("args"))
+    # A Bot Chat's quick step, a fork's too: its running time and what it returned (work_tool).
+    _quietly(work_tool.step_ran, _text(kwargs.get("session_id")), kwargs.get("turn_id"), kwargs.get("tool_name"),
+             kwargs.get("tool_call_id"), kwargs.get("result"))
     if not forks.inside():
         if kwargs.get("tool_name") == "clarify":
             _quietly(work_tool.answered, _text(kwargs.get("session_id")))
