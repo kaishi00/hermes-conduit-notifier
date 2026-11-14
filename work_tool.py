@@ -245,7 +245,13 @@ STEP_BATCH_BLOCK = ("That tool_call batch has {count} calls, more than the {left
 MESSAGE_AGENT_BLOCK = ("In a coordinator's Bot Chat, other bots get questions and work through work_ask, which "
                        "queues it for that bot's coordinator and brings its answer back to you. Use work_ask "
                        'instead, like tool_call {"name": "work_ask", "arguments": {"bot": "Nahida", "text": "..."}}, '
-                       "or work_tell for a note that needs no answer.")
+                       "or work_tell for a note that needs no answer. A bot of the user's here whose workstreams "
+                       "are off takes message_agent as before; name it by its name or profile.")
+# A bot whose workstreams are off has no coordinator to take an ask, and no
+# work_reply to answer one: it's messaged as any bot is (notifier#799).
+BOT_OFF = ("{name}'s workstreams are off, so it takes no {what}: it runs as a plain bot, with no coordinator. "
+           'Message it with message_agent instead, like {{"target": "{profile}", "message": "..."}}{reply}. '
+           "Nothing was sent.")
 MEMORY = "memory"
 MEMORY_IN_WORKSTREAM = ("A workstream doesn't save to this bot's memory, so nothing was saved. Put what's worth "
                         "keeping in your report: your coordinator decides what to remember.")
@@ -431,7 +437,8 @@ SCHEMAS: dict[str, dict] = {
         "description": ("Ask another of the user's bots on this Hermes a question or for some work. "
                         "That bot's coordinator does it its own way and answers; the answer comes back to you as a "
                         "work update, or into the workstream named in for. Don't wait for it. Only you can ask: when "
-                        "one of your workstreams needs another bot, ask for it with for."),
+                        "one of your workstreams needs another bot, ask for it with for. A bot whose workstreams are off takes "
+                        "no asks: message it with message_agent."),
         "parameters": {"type": "object", "properties": {
             "bot": {"type": "string", "description": "The bot to ask, by its name (Nahida) or its profile."},
             "text": {"type": "string", "description": "The question or the work, with everything it needs."},
@@ -459,7 +466,8 @@ SCHEMAS: dict[str, dict] = {
         "name": "work_tell",
         "description": ("Tell another of the user's bots on this Hermes something, with no answer owed. "
                         "A status, a result or a heads-up reaches that bot's Bot Chat as a work update, without "
-                        "opening an ask. Only you can tell; for a question or work, use work_ask."),
+                        "opening an ask. Only you can tell; for a question or work, use work_ask. A bot whose workstreams "
+                        "are off takes no notes: message it with message_agent."),
         "parameters": {"type": "object", "properties": {
             "bot": {"type": "string", "description": "The bot to tell, by its name (Nahida) or its profile."},
             "text": {"type": "string", "description": f"What to tell it, up to {ASK_CHARS:,} characters."}},
@@ -1808,14 +1816,33 @@ def _other_bot(home: Path, args: dict, what: str) -> tuple[Optional[tuple[str, P
                               f"The user's other bots here: {names}. Nothing was sent."}
     profile, target_home, name = target
     if policy(target_home) == "off":
+        reply = ' (add "expects_reply": false, since a note needs no answer)' if what == "notes" else ""
         return None, {"ok": False, "error": "bot_off",
-                      "note": f"{name}'s workstreams are off, so it can't take {what}. The user can turn them on "
-                              f"for that bot (profile {profile}). Nothing was sent."}
+                      "note": BOT_OFF.format(name=name, what=what, profile=profile, reply=reply)}
     target_chat = _bot_chat_of(target_home)
     if not target_chat:
         return None, {"ok": False, "error": "no_bot_chat",
                       "note": f"{name} has no Bot Chat yet, so there's no one to take {what}. Nothing was sent."}
     return (profile, target_home, name, target_chat), {}
+
+
+def _to_bots_off(home: Path, args: Any) -> bool:
+    """Whether a message_agent call goes only to the user's bots on this
+    Hermes whose workstreams are off: they take no work_ask, so Hermes' own
+    message is how they're reached (notifier#799). A target the plugin
+    can't name (a peer, another machine, an alias) stays with work_ask."""
+    target = args.get("target") if isinstance(args, dict) else None
+    if not isinstance(target, str):
+        return False
+    whole = _find_bot(home, target.strip().lstrip("@"))
+    parts = [target] if whole is not None else [part for part in target.split(",") if part.strip()]
+    if not parts:
+        return False
+    for part in parts:
+        found = whole or _find_bot(home, part.strip().lstrip("@"))
+        if found is None or policy(found[1]) != "off":
+            return False
+    return True
 
 
 def _pair_count(store: work_store.Store, profile: str) -> int:
@@ -3472,7 +3499,7 @@ def _tool_block(session_id: Any, tool_name: Any, args: Any = None,
                 return {"action": "block", "message": CHECK_FAILED}
         return None
     steps = []
-    for called in names:
+    for called, called_args in calls:
         if runs(called):
             continue
         if titled is None:
@@ -3482,6 +3509,8 @@ def _tool_block(session_id: Any, tool_name: Any, args: Any = None,
             # every chat of every bot would be, for a title read that failed.
             return {"action": "block", "message": CHECK_FAILED} if work_store.exists(home) else None
         if called == MESSAGE_AGENT:
+            if _to_bots_off(home, called_args):
+                continue  # a plain bot's message: no step, as work_ask takes none
             return {"action": "block", "message": MESSAGE_AGENT_BLOCK}
         if mode != "lookups" or called in BACKGROUND:
             return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
@@ -5615,7 +5644,8 @@ def digest(session_id: Any) -> Optional[str]:
              '{"text": ...}: every new workstream gets them. Ask the user\'s other bots with work_ask {"bot": "Nahida", '
              '"text": ...} (add "for": "W4" when a workstream needs the answer, or "about": "A2" to ask the bot '
              'that asked you something back), answer their asks with work_reply {"ref": "A2", "text": ...}, and '
-             'tell them what needs no answer with work_tell {"bot": "Nahida", "text": ...}. ' + LINK_RULE + " " + _settings_line(home, store))
+             'tell them what needs no answer with work_tell {"bot": "Nahida", "text": ...}; a bot whose workstreams are '
+             'off takes neither, so message it with message_agent. ' + LINK_RULE + " " + _settings_line(home, store))
     if reason:
         rules = f"Bot workstreams can't run here: {reason}"
     screen = _screen_line(home)

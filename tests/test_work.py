@@ -806,6 +806,42 @@ def test_an_ask_to_a_bot_that_cant_take_it_is_refused(bots, hermes):
     assert store_mod.Store(bots["hermes"]).list() == [] and hermes.calls == []
 
 
+def test_a_bot_with_workstreams_off_is_messaged_with_message_agent(bots, hermes):
+    # Issue 799: work_ask and work_tell refuse a bot whose workstreams are
+    # off, so the message_agent their refusal named must reach it.
+    store_mod.Store(bots["zhongli"]).set_policy("off")
+    asked = call("work_ask", {"bot": "zhongli", "text": "?"})
+    assert asked["error"] == "bot_off" and '"target": "zhongli"' in asked["note"]
+    assert "expects_reply" not in asked["note"]
+    told = call("work_tell", {"bot": "Zhongli", "text": "Run 3 starts now."})
+    assert told["error"] == "bot_off" and '"expects_reply": false' in told["note"]
+    for target in ("zhongli", "Zhongli", "@zhongli", " zhongli "):
+        assert work.tool_block(BOT_CHAT, "message_agent", {"target": target, "message": "hi"}) is None
+    bridged = {"name": "message_agent", "arguments": {"target": "zhongli", "message": "hi"}}
+    assert work.tool_block(BOT_CHAT, "tool_call", bridged) is None
+    # A bot with workstreams on, a name the plugin can't place, or a list
+    # with either in it still goes through work_ask.
+    for target in ("nahida", "zhongli, nahida", "Venti", "peer/zhongli", "", None):
+        block = work.tool_block(BOT_CHAT, "message_agent", {"target": target, "message": "hi"})
+        assert "work_ask" in block["message"] and "workstreams are off takes message_agent" in block["message"]
+    store_mod.Store(bots["raiden"]).set_policy("off")
+    assert work.tool_block(BOT_CHAT, "message_agent", {"target": "zhongli,raiden", "message": "hi"}) is None
+    # A workstream still reaches no bot itself.
+    start()
+    held = work.tool_block("20261031_work_1", "message_agent", {"target": "zhongli", "message": "hi"})
+    assert held["message"] == work.MESSAGE_AGENT_IN_WORKSTREAM
+
+
+def test_a_message_to_a_bot_with_workstreams_off_takes_no_step(bots, hermes):
+    store_mod.Store(bots["hermes"]).set_policy("lookups")
+    store_mod.Store(bots["zhongli"]).set_policy("off")
+    for turn in range(work.QUICK_STEPS + 2):
+        assert work.tool_block(BOT_CHAT, "message_agent", {"target": "zhongli", "message": str(turn)},
+                               turn_id="t1") is None
+    for step in range(work.QUICK_STEPS):
+        assert work.tool_block(BOT_CHAT, "terminal", {"command": "ls"}, turn_id="t1") is None, step
+
+
 def test_each_pair_of_bots_has_an_hourly_cap(bots, hermes, monkeypatch):
     monkeypatch.setattr(work, "ASK_PAIR_PER_HOUR", 2)
     assert call("work_ask", {"bot": "nahida", "text": "One?"})["ok"]
