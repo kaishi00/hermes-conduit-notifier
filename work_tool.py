@@ -3593,7 +3593,8 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
     title = _cut(" ".join(ask.split()[:6]), 60)
     # Whole steps only, so every result below has its step above it.
     lines, size = [], 0
-    for n, (line, _) in enumerate(did, 1):
+    for n, step in enumerate(did, 1):
+        line = step[0]
         size += len(f"{n}. {line}") + 1
         if size > HANDOFF_STEPS_CHARS:
             break
@@ -3641,12 +3642,16 @@ def _returned(did: list[list[str]]) -> str:
     workstream it hands on to: each cut to its share of HANDOFF_RESULTS_CHARS,
     credentials masked. Nothing when no result was kept (a Hermes with no
     post_tool_call)."""
-    kept = [(n, result) for n, (_, result) in enumerate(did, 1) if result]
+    kept = [(n, step[1], min(step[2] if len(step) > 2 else 1, len(did) - n + 1)) for n, step in enumerate(did, 1)
+            if step[1]]
     if not kept:
         return ""
     least, most = HANDOFF_RESULT_CHARS
-    each = max(least, min(most, HANDOFF_RESULTS_CHARS // len(kept)))
-    return "\n".join(f"{n}. «{_cut(_masked(result), each)}»" for n, result in kept)
+    each = max(least, min(most, HANDOFF_RESULTS_CHARS // sum(count for _, _, count in kept)))
+    # A tool_call batch's one answer holds all of its calls': named for them
+    # all, with their share, so none of them reads as missing.
+    return "\n".join(f"{n}{f' to {n + count - 1}' if count > 1 else ''}. «{_cut(_masked(result), each * count)}»"
+                     for n, result, count in kept)
 
 
 def _result_text(result: Any) -> str:
@@ -3741,15 +3746,15 @@ def step_ran(session_id: Any, turn_id: Any, tool_name: Any, tool_call_id: Any = 
         at = next((n for call in calls if call for n, running in enumerate(ran[2]) if running[0] == call), None)
         if at is None:
             return
-        _, place, _count = ran[2].pop(at)
+        _, place, count = ran[2].pop(at)
         if not ran[2]:
             ran[0] += max(now - ran[1], 0.0)
         steps = _did.get(key) or []
         if result is not None and place < len(steps):
-            # A tool_call batch's answer holds all of its calls': kept with its first.
-            # Cut here with its mark, so a result that masking then shortens
-            # to its share still shows it isn't whole.
-            steps[place][1] = _cut(_result_text(result), 4 * HANDOFF_RESULT_CHARS[1])
+            # A tool_call batch's answer holds all of its calls': kept with
+            # its first, for them all. Cut here with its mark, so a result
+            # that masking then shortens to its share still shows it isn't whole.
+            steps[place][1:] = [_cut(_result_text(result), 4 * HANDOFF_RESULT_CHARS[1]), count]
 
 
 def give_back_steps() -> None:

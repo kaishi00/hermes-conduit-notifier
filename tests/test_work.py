@@ -7383,6 +7383,19 @@ def test_a_hand_off_carries_what_the_steps_returned(on, hermes, monkeypatch):
     assert 1000 < len(long) <= work.HANDOFF_RESULT_CHARS[1] + 6 and long.endswith("…»")
     assert on.get("W1").goal.startswith("The user asked this in the Bot Chat")
     assert work._did[(BOT_CHAT, "")][2][1].endswith("…"), "cut as it's kept, with its mark"
+    # A tool_call batch's one answer is named for all of its calls, so none reads as missing.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="batch", user_message="Look up the three vendors", platform="tui")
+    kwargs = {"session_id": BOT_CHAT, "turn_id": "batch", "tool_name": "terminal", "args": {"command": "ls"},
+              "tool_call_id": "b0"}
+    assert plugin._work_tool_block(kwargs) is None
+    plugin._post_tool_call(**kwargs, result="a listing")
+    kwargs = {"session_id": BOT_CHAT, "turn_id": "batch", "tool_name": "tool_call", "tool_call_id": "b1",
+              "args": {"calls": [{"name": "web_search", "arguments": {"query": f"vendor {n}"}} for n in range(3)]}}
+    assert plugin._work_tool_block(kwargs) is None
+    plugin._post_tool_call(**kwargs, result="three answers in one")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="batch", tool_call_id="b2") is None
+    assert "W2" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="batch")["message"]
+    assert "\n1. «a listing»\n2 to 4. «three answers in one»" in briefs[-1] and "4. web_search" in briefs[-1]
     # More steps than the list holds: whole steps only, and no result without its step above it.
     on.set_quick_steps(20)
     monkeypatch.setattr(work, "_quick_steps_cache", {})
@@ -7402,7 +7415,7 @@ def test_a_hand_off_carries_what_the_steps_returned(on, hermes, monkeypatch):
     plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Renew the wildcard certificate", platform="tui")
     for n in range(work.QUICK_STEPS):
         assert work.tool_block(BOT_CHAT, "terminal", {"command": f"look {n}"}) is None
-    assert "W3" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    assert "W4" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
     assert "their results aren't here; run again what you need" in briefs[-1] and "«" not in briefs[-1]
 
 
