@@ -2701,9 +2701,9 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   one-time event ("call me when the results are certified") or a time ("call
   me at 12:46") is a watch too, set `once` and, for a slow event, checked
   every few hours through `every_minutes`. A `once` watch stops after its
-  call (its job is paused then, and removed the next time the watches are
-  listed or changed), so a later run that reads the event as over and then
-  as back can't ring again (0.177.1, from sixgodgit's #775). The tools steer Hermes
+  call (its job is paused and listed as finished; a sync of a note that
+  still describes it leaves it so, and setting it again starts it over), so
+  a later run that reads the event as over and then as back can't ring again (0.177.1, from sixgodgit's #775). The tools steer Hermes
   to a call watch (or a place rule with a call) for any call about
   something after the turn, rather than a job that only sends a message,
   since `conduit_call_user` rings only when its own turn ends. The same

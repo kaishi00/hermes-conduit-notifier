@@ -74,6 +74,9 @@ class FakeHermes:
         if action == "remove":
             del self.jobs[job_id]
             return json.dumps({"success": True})
+        if action == "resume":
+            self.jobs[job_id]["state"] = "scheduled"
+            return json.dumps({"success": True, "job": {"job_id": job_id, "state": "scheduled"}})
         if action == "pause":
             self.jobs[job_id]["state"] = "paused"
             return json.dumps({"success": True, "job": {"job_id": job_id, "state": "paused"}})
@@ -580,18 +583,39 @@ def test_a_one_time_watch_rings_once_and_stops_even_when_a_run_reads_it_differen
         later = _report(job_id, happening)
         assert later["status"] == "done" and later["reply"] == "[SILENT]"
     assert len(_rang(home)) == 1, "never a second call"
-    listed = _setup({"action": "list"})
-    assert listed["watches"] == [] and job_id not in hermes.jobs, "the next list removes it"
+    [listed] = _setup({"action": "list"})["watches"]
+    assert listed["finished"] is True and listed["state"] == "paused"
 
 
 def test_a_one_time_watch_set_again_after_its_call_starts_over(home, hermes, clock):
     job_id = _reminder(hermes)
     assert _report(job_id, True)["status"] == "calling"
     again = _setup({"action": "set", "watch": {**REMINDER, "once": "true"}})
-    assert again["result"] == "created" and again["watch"]["stops_after_its_call"] is True
-    assert job_id not in hermes.jobs
-    [new_id] = hermes.jobs
-    assert _report(new_id, True)["status"] == "calling"
+    assert again["result"] == "changed" and again["watch"]["stops_after_its_call"] is True
+    assert list(hermes.jobs) == [job_id] and hermes.jobs[job_id]["state"] == "scheduled", "resumed"
+    assert _report(job_id, True)["status"] == "calling"
+
+
+def test_a_sync_of_a_note_that_still_describes_a_finished_one_time_watch_leaves_it_finished(home, hermes, clock):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    synced = _setup({"action": "sync", "watches": [REMINDER]})
+    assert [view["what"] for view in synced["unchanged"]] == [REMINDER["what"]]
+    assert synced["unchanged"][0]["finished"] is True
+    assert hermes.jobs[job_id]["state"] == "paused"
+    assert _report(job_id, True)["status"] == "done", "never rings twice for the same event"
+    changed = _setup({"action": "sync", "watches": [{**REMINDER, "how": "the local time is 13:00 or later"}]})
+    assert changed["changed"] and hermes.jobs[job_id]["state"] == "scheduled", "a changed watch starts over"
+    assert _report(job_id, True)["status"] == "calling"
+
+
+def test_a_finished_one_time_watch_can_be_removed_by_id_and_leaves_room_under_the_cap(home, hermes, clock):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    for index in range(watches.MAX_WATCHES - 1):
+        assert _setup({"action": "set", "watch": {**HOMELAB, "what": f"host {index} down"}})["ok"]
+    assert _setup({"action": "set", "watch": {**HOMELAB, "what": "one more"}})["ok"], "finished ones don't count"
+    assert _setup({"action": "remove", "id": job_id})["ok"] and job_id not in hermes.jobs
 
 
 def test_a_one_time_watch_whose_call_waits_for_a_full_queue_keeps_checking(home, hermes, clock, monkeypatch):
@@ -611,7 +635,9 @@ def test_a_one_time_watch_whose_call_waits_for_a_full_queue_keeps_checking(home,
 def test_a_one_time_watch_with_calls_off_tells_the_user_once_and_stops(home, hermes, clock):
     CallStore(home).update_settings({"enabled": False})
     job_id = _reminder(hermes)
-    assert _report(job_id, True)["status"] == "calls_off"
+    off = _report(job_id, True)
+    assert off["status"] == "calls_off" and "set this watch up again" in off["note"]
+    assert "for this watch to ring" not in off["note"]
     assert hermes.jobs[job_id]["state"] == "paused"
     assert _report(job_id, False)["status"] == "done"
 

@@ -54,7 +54,6 @@ watch:
   the first check that sees it).
 - `hours`: when calls are allowed, as HH:MM-HH:MM, if the user limited it.
 - `unless`: any other limit, in the user's words.
-
 - `once`: true for something that comes once and then stays true: a time
   ("call me at 12:46"), results being certified, a parcel arriving. The
   watch stops after its call. Leave it out for something that can happen
