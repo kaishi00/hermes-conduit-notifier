@@ -361,7 +361,7 @@ def speech_server_abilities(frame: Any) -> Dict[str, Any]:
         voice = voice.get("id")
     detection = audio_input["turn_detection"] if "turn_detection" in audio_input else session.get("turn_detection")
     answers: Optional[bool] = None
-    if model is not None:
+    if model is not None and ("turn_detection" in audio_input or "turn_detection" in session):
         answers = isinstance(detection, dict) and detection.get("create_response", True) is not False
     return {"model": model, "voice": _speech_server_name(voice) or None, "answers_alone": answers}
 

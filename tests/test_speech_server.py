@@ -239,6 +239,8 @@ def test_a_server_that_names_no_model_is_not_said_to_answer_alone(client, server
     quiet = {"model": "m", "turn_detection": {"type": "server_vad", "create_response": False}}
     assert api.speech_server.speech_server_abilities({"session": quiet})["answers_alone"] is False
     assert api.speech_server.speech_server_abilities({"session": {"model": "m", "turn_detection": None}})["answers_alone"] is False
+    # A model named with nothing said about turn detection: not known.
+    assert api.speech_server.speech_server_abilities({"session": {"model": "m"}})["answers_alone"] is None
 
 
 def test_a_transcription_model_that_cant_be_used_is_logged_and_a_good_one_is_not(caplog):
