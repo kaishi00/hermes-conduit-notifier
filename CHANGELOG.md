@@ -19,11 +19,24 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Your own Hermes tell each other which bots they have, so Conduit can offer your other Hermes' bots when you make a group chat, and those bots join by themselves, with no join card.
 
+## 0.170.7 (2026-11-14)
+
+### Fixes
+
+- A hand-off to a workstream also leaves out keys under one-word names like secretkey or usercredentials.
+
+## 0.170.6 (2026-11-14)
+
+### Fixes
+
+- When the Bot Chat hands the rest of a turn to a workstream, keys under names like x-api-key or privateKey are left out of its instructions too, while ordinary fields such as author are kept.
+
 ## 0.170.5 (2026-11-14)
 
 ### Fixes
 
-- When the Bot Chat hands the rest of a turn to a workstream, the workstream is no longer told about a step that never ran, a new request right after an earlier hand-off gets its own steps and workstream (even the same words sent again), and passwords, tokens and keys in the steps, commands included, are left out of its instructions.
+- When the Bot Chat hands the rest of a turn to a workstream, the workstream is no longer told about a step that never ran, a new request right after an earlier hand-off gets its own steps and hand-off (even the same words sent again, though if a workstream is already on it the bot is pointed there), and passwords, tokens and keys in the steps, commands included, are left out of its instructions.
+- A call watch whose job another run had just refreshed could miss how to report on that run. It now always hears how.
 
 ## 0.170.4 (2026-11-14)
 
