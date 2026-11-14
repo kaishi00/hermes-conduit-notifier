@@ -24,6 +24,12 @@ checks it). The format is fixed, because Conduit reads it:
 
 - A bot asked something by another can ask it a question back about that ask, and bots can send each other a note that needs no answer, so a long joint job no longer piles up open asks.
 
+## 0.169.2 (2026-11-14)
+
+### Fixes
+
+- A Link marked as between your own Hermes no longer stops this Hermes' Linked Rooms messages from going out when its Linked Rooms file was edited by hand.
+
 ## 0.169.1 (2026-11-13)
 
 ### Fixes
