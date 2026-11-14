@@ -29,6 +29,7 @@ watch_paths:
   # session_route.py wraps tui_gateway.server._runtime_model_config through sys.modules,
   # which the scanner can't see; a rename there brings back picks snapping back to an old provider.
   - tui_gateway/server.py
+  - tui_gateway/agent_factory*.py
   - tui_gateway/transport.py
   - tui_gateway/methods_session*.py
   - tui_gateway/methods_prompt.py
