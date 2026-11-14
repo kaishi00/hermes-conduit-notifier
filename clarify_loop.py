@@ -253,6 +253,9 @@ def _first_answer_wins(
     consecutive_unproductive = 0
     unanswered_polls = 0
     previous_remaining: int | None = None
+    # A batch's answers locked so far, from the last pending poll: a card
+    # that times out half answered still hands Hermes those answers.
+    locked_answers: dict[str, Any] = {}
     while True:
         if time.monotonic() >= deadline:
             expired = True
@@ -334,6 +337,8 @@ def _first_answer_wins(
                 # this notification): nobody can answer by id. Stop polling
                 # and let the original path's timeout conclude the race.
                 break
+            if batch_protocol and isinstance(status.get("answers"), dict):
+                locked_answers = dict(status["answers"])
             remaining = status.get("remaining")
             if isinstance(remaining, list):
                 # Batch progress (a shrinking remaining set means another qid
@@ -372,7 +377,7 @@ def _first_answer_wins(
             # The card was shown and nobody answered it in time.
             minutes = max(1, int((deadline - started) // 60))
             return _format_batch_result(
-                batch, {}, outcome="timed_out",
+                batch, locked_answers, outcome="timed_out",
                 notice=f"[the question was shown on the Conduit device but not answered within {minutes} min]",
             )
         return outcome["original"]
@@ -442,7 +447,7 @@ def _card_asks_instead(session_id: str) -> bool:
     another person). A session whose room can't be told yet counts as a
     room's: the card is still released at once there, as before."""
     try:
-        if room_rules.room_turn(session_id) is not None:
+        if room_rules.in_a_room(session_id):
             return False
     except room_rules.RoomStoreError:
         return False

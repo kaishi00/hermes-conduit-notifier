@@ -1313,7 +1313,7 @@ def test_an_undelivered_original_in_a_group_room_returns_at_once(monkeypatch):
     # to ask the room, so the card goes at once, as before.
     fake = _FakeState([])  # pending forever
     _install(fake)
-    monkeypatch.setattr(loop.room_rules, "room_turn", lambda session_id, home=None: object())
+    monkeypatch.setattr(loop.room_rules, "in_a_room", lambda session_id, home=None: True)
     args = _batch_args()
     started = time.monotonic()
     result = loop.middleware(**_kwargs(_undelivered_original(), args))
@@ -1329,7 +1329,7 @@ def test_an_undelivered_original_whose_room_cant_be_told_yet_returns_at_once(mon
     def unknown(session_id, home=None):
         raise loop.room_rules.RoomStoreError("not titled yet")
 
-    monkeypatch.setattr(loop.room_rules, "room_turn", unknown)
+    monkeypatch.setattr(loop.room_rules, "in_a_room", unknown)
     result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
     assert json.loads(result)["outcome"] == "undelivered"
     assert _wait_for_release(fake)
@@ -1342,7 +1342,7 @@ def test_an_undelivered_original_in_a_peers_forwarded_chat_returns_at_once(monke
         conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT)")
         conn.execute("INSERT INTO sessions VALUES ('sess-1', 'a2a', '')")
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: str(tmp_path), raising=False)
-    monkeypatch.setattr(loop.room_rules, "room_turn", lambda session_id, home=None: None)
+    monkeypatch.setattr(loop.room_rules, "in_a_room", lambda session_id, home=None: False)
     assert loop._session_source("sess-1") == "a2a"
     fake = _FakeState([])
     _install(fake)
@@ -1358,9 +1358,19 @@ def test_a_bot_chat_session_in_the_store_still_waits_for_the_card(monkeypatch, t
         conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT)")
         conn.execute("INSERT INTO sessions VALUES ('sess-1', 'cron', '')")
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: str(tmp_path), raising=False)
-    monkeypatch.setattr(loop.room_rules, "room_turn", lambda session_id, home=None: None)
+    monkeypatch.setattr(loop.room_rules, "in_a_room", lambda session_id, home=None: False)
     fake = _FakeState([{"status": "pending"}, {"status": "answered", "answers": {"q0": "prod", "q1": '["ui"]'},
                                                "remaining": []}])
     _install(fake)
     result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
     assert [row["user_response"] for row in json.loads(result)["responses"]] == ["prod", ["ui"]]
+
+
+def test_a_half_answered_card_that_times_out_keeps_the_locked_answers(monkeypatch):
+    fake = _FakeState([{"status": "pending", "remaining": ["q1"], "answers": {"q0": "staging"}}] * 1000)
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 0.3)
+    parsed = json.loads(loop.middleware(**_kwargs(_undelivered_original(), _batch_args())))
+    assert parsed["outcome"] == "timed_out"
+    assert [(row["status"], row["user_response"]) for row in parsed["responses"]] == [
+        ("answered", "staging"), ("unanswered", None)]
