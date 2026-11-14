@@ -1078,7 +1078,12 @@ class LinkLoop:
                 link = state["links"].get(link_id)
                 if link is not None and link["status"] == "linked":
                     known = link.get("peer_own") if isinstance(link.get("peer_own"), dict) else {}
-                    if said["seq"] > int(known.get("seq") or 0):
+                    held = int(known.get("seq") or 0)
+                    # A later seq wins. The same seq twice comes only from a
+                    # links.json restored on the other side within a second:
+                    # then unmarked wins, so the room rules come back rather
+                    # than stay lifted.
+                    if said["seq"] > held or (said["seq"] == held and not said["own"] and known.get("own") is True):
                         link["peer_own"] = {**said, "at": now}
             return True
         handler = HANDLERS.get(kind)

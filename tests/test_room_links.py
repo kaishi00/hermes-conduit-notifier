@@ -2365,6 +2365,21 @@ def test_link_own_heals_after_an_older_links_json_comes_back(home, monkeypatch):
     assert mona.get(link_id)["their_own"] is True
 
 
+@needs_node
+def test_an_unmark_with_the_seq_already_held_still_ends_the_own_link(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)
+    _run(eric, mona)
+    held = mona._store.read()["links"][link_id]["peer_own"]["seq"]
+    with eric._store.update() as state:  # a backup from before the mark, restored the same second
+        state["links"][link_id].update(own=True, own_seq=held - 1)
+    eric.set_own(link_id, False)  # sends the seq mona already holds
+    assert eric._store.read()["links"][link_id]["own_seq"] == held
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is False
+
+
 def test_the_next_own_seq_is_past_the_last_and_the_clock():
     assert links_module._next_own_seq({}, 100) == 101
     assert links_module._next_own_seq({"own_seq": 100}, 100) == 101  # one the other side took this second
