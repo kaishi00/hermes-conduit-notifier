@@ -1194,6 +1194,11 @@ server only listens and reads aloud:
   a sentence was on its way, which the server answers with
   `conversation_already_has_active_response`, is cancelled the same way and
   the sentence said after it.
+- Each sentence carries a mark (`response.metadata`, `{"conduit": "say"}`).
+  Once the server has echoed it on a `response.created`, a response that
+  starts without it while a sentence waits is the server's own, and is
+  cancelled before any of its audio reaches the call. A server that refuses
+  a sentence over the mark gets it again, and the ones after, without it.
 - Classic voice on the server gets the same instructions on its listen and
   speak sockets, so a hosted model reads Hermes' reply instead of answering it.
 - `transcription_model`, when set, is asked for in the session

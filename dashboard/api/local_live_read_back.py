@@ -98,6 +98,8 @@ _LOCAL_LIVE_READ_BACK_CLIENT_KINDS = ('"session.update"', '"conversation.item.cr
                                       '"response.cancel"')
 _LOCAL_LIVE_READ_BACK_TRANSCRIPT_DELTAS = ("response.output_audio_transcript.delta", "response.audio_transcript.delta")
 _LOCAL_LIVE_READ_BACK_TRANSCRIPT_DONE = ("response.output_audio_transcript.done", "response.audio_transcript.done")
+# What marks a driven server's sentence as the plugin's.
+_LOCAL_LIVE_READ_BACK_MARK = {"conduit": "say"}
 _LOCAL_LIVE_READ_BACK_WORD = re.compile(r"[\w']+")
 
 
@@ -326,6 +328,13 @@ class _LocalLiveReadBack:
         # Read-back is on: the server refused automatic responses, or the
         # profile has the plugin run the turns.
         self.on = drive is not None
+        # A driven server's sentences carry a mark (response.metadata) that a
+        # server may echo on the response it starts for one: once it has,
+        # a response that starts without the mark is the server's own, even
+        # while a sentence waits. A server that refuses the mark gets its
+        # sentences without it.
+        self.marks = drive is not None
+        self.echoes = False
         # The call's session.update, until the server answers it.
         self.update: Optional[Dict[str, Any]] = None
         self.interrupts = True
@@ -562,6 +571,23 @@ class _LocalLiveReadBack:
                     self.reply_id = self.server_response
                     return text
                 return None
+            if self.drive is not None and self.marks:
+                metadata = response.get("metadata")
+                if isinstance(metadata, dict) and metadata.get("conduit") == _LOCAL_LIVE_READ_BACK_MARK["conduit"]:
+                    self.echoes = True
+                elif self.echoes:
+                    # The server's own response, started while the sentence
+                    # was on its way: nothing of it is heard. The sentence
+                    # goes again once it has ended.
+                    self.sentences.appendleft(self.speaking)
+                    self.reply_sentences -= 1
+                    self.speaking, self.started = None, False
+                    self.server_response = str(response.get("id") or f"resp_conduit_{uuid.uuid4().hex[:16]}")
+                    self.filler_plays = False
+                    self.muting = True
+                    self._arm_watchdog(LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S)
+                    await self._send_server(json.dumps({"type": "response.cancel"}))
+                    return None
             self.started = True
             self.started_id = str(response.get("id") or "") or None
             self.heard_at = self.clock()
@@ -667,6 +693,12 @@ class _LocalLiveReadBack:
                 if busy and not self.muting:
                     self.sentences.appendleft(self.speaking)
                     # Counted again when it's sent again.
+                    self.reply_sentences -= 1
+                elif not busy and self.marks and not self.muting:
+                    # The mark may be what it refused: the sentence goes
+                    # again without it, and so do the ones after.
+                    self.marks = False
+                    self.sentences.appendleft(self.speaking)
                     self.reply_sentences -= 1
                 elif not busy:
                     logger.info("Local Live: the speech server refused a read-back sentence (%s)",
@@ -838,6 +870,8 @@ class _LocalLiveReadBack:
             create: Dict[str, Any] = {"type": "response.create", "response": {"conversation": "none", "input": [item]}}
             if self.drive is not None:
                 create = self.drive.say(create)
+                if self.marks:
+                    create["response"]["metadata"] = dict(_LOCAL_LIVE_READ_BACK_MARK)
             await self._send_server(json.dumps(create))
             return
         if self.turn_over:

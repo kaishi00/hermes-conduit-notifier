@@ -724,6 +724,10 @@ class ReadBackUpstream:
         self.deferred = None
         # Streams a response's audio over this long before its end.
         self.stream_s = 0.0
+        # Echoes a response.create's metadata on its response.created, as
+        # OpenAI's servers do; or refuses one that carries any.
+        self.echo = False
+        self.refuses_metadata = False
         self.sent = []
         self.events = _queue.Queue()
         self.close_code = 1000
@@ -762,13 +766,20 @@ class ReadBackUpstream:
                 # The response it was busy with ends.
                 self.push({"type": "response.done", "response": {"id": "other", "status": "completed"}})
                 return
+            metadata = (event.get("response") or {}).get("metadata")
+            if metadata is not None and self.refuses_metadata:
+                self.push({"type": "error", "error": {"code": "unknown_parameter", "param": "response.metadata"}})
+                return
             self.count += 1
             rid = f"resp{self.count}"
             text = api.local_live_read_back._local_live_item_words((event.get("response") or {}).get("input", [None])[0]) or ""
             if self.unstarted:
                 self.held = (rid, text)
                 return
-            self.push({"type": "response.created", "response": {"id": rid, "status": "in_progress"}})
+            created = {"id": rid, "status": "in_progress"}
+            if self.echo:
+                created["metadata"] = metadata
+            self.push({"type": "response.created", "response": created})
             if self.hold:
                 self.held = (rid, text)
                 return
@@ -2290,3 +2301,46 @@ def test_a_transcription_model_name_with_control_characters_is_ignored():
     assert api.speech_server.speech_server_transcription_model({"transcription_model": " whisper-1 "}) == "whisper-1"
     assert api.speech_server.speech_server_transcription_model({"transcription_model": "a\nb"}) == ""
     assert api.speech_server.speech_server_transcription_model({"transcription_model": 5}) == ""
+
+
+def test_once_a_driven_server_echoes_the_mark_its_own_response_is_never_heard_over_a_waiting_sentence(client, hermes, server):
+    # The server echoes each sentence's mark on the response it starts for
+    # it, so one that starts without the mark while a sentence waits is the
+    # server's own: its audio stays here from the first frame.
+    _drive(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    upstream.echo = True
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream, greeting="Hi, I'm listening.")
+        upstream.unstarted = True
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "transcript": "What time is it"})
+        turn, _ = _next(ws, "conduit.turn")
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"],
+                                 "text": "It is a quarter past nine in the evening."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": turn["turn_id"]}))
+        _wait_for(lambda: len(upstream.creates()) == 2)
+        upstream.unstarted = False
+        upstream.push({"type": "response.created", "response": {"id": "own1", "status": "in_progress", "metadata": None}})
+        upstream.push({"type": "response.output_audio_transcript.delta", "response_id": "own1", "delta": "Sure, it's"})
+        upstream.push({"type": "response.output_audio.delta", "response_id": "own1", "delta": PCM})
+        _wait_for(lambda: {"type": "response.cancel"} in upstream.sent)
+        upstream.push({"type": "response.done", "response": {"id": "own1", "status": "cancelled"}})
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert upstream.creates()[0]["response"]["metadata"] == {"conduit": "say"}
+    assert "".join(frame["delta"] for frame in seen if frame["type"] == "response.output_audio_transcript.delta") == \
+        "It is a quarter past nine in the evening."
+    assert [frame["type"] for frame in seen].count("response.output_audio.delta") == 1
+    assert done["response"]["status"] == "completed"
+
+
+def test_a_driven_server_that_refuses_the_mark_gets_its_sentences_without_it(client, hermes, server):
+    _drive(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    upstream.refuses_metadata = True
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        seen = _ready(ws, upstream, greeting="Hi, I'm listening.")
+        _finish(ws)
+    assert upstream.spoken() == ["Hi, I'm listening."] * 2
+    assert "metadata" in upstream.creates()[0]["response"] and "metadata" not in upstream.creates()[1]["response"]
+    assert [frame["type"] for frame in seen].count("response.output_audio.delta") == 1
