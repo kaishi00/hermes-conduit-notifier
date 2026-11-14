@@ -1374,3 +1374,25 @@ def test_a_half_answered_card_that_times_out_keeps_the_locked_answers(monkeypatc
     assert parsed["outcome"] == "timed_out"
     assert [(row["status"], row["user_response"]) for row in parsed["responses"]] == [
         ("answered", "staging"), ("unanswered", None)]
+
+
+def test_an_answer_locked_during_the_last_sleep_of_the_unattended_wait_still_counts(monkeypatch):
+    # Pending at every poll the deadline allows, then the answer arrives in
+    # the last backoff sleep: the one more poll at the deadline reads it.
+    fake = _FakeState([{"status": "pending"},
+                       {"status": "answered", "answers": {"q0": "prod", "q1": '["ui"]'}, "remaining": []}])
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 0.05)
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.2)
+    parsed = json.loads(loop.middleware(**_kwargs(_undelivered_original(), _batch_args())))
+    assert parsed["outcome"] == "submitted"
+    assert [row["user_response"] for row in parsed["responses"]] == ["prod", ["ui"]]
+
+
+def test_a_real_ordinary_chat_session_keeps_the_card_waiting(monkeypatch, tmp_path):
+    import sqlite3
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT)")
+        conn.execute("INSERT INTO sessions VALUES ('sess-1', 'cron', 'Daily digest')")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: str(tmp_path), raising=False)
+    assert loop._card_asks_instead("sess-1")
