@@ -247,6 +247,7 @@ BRIDGE_JSON_BLOCK = ("That tool_call's calls is JSON text that couldn't be read 
 SHOW_FROM_WORK_HINT = (' To show a workstream\'s options as a review, call conduit_show with just '
                        '{"title": "...", "from_work": "W3"} (its ref) and no cards: the plugin builds the card from '
                        "the report.")
+CODE_TOOL = "execute_code"
 CHECK_FAILED = ("This bot's coordinator settings couldn't be checked just now, so its tools are held back for this "
                 "call. Try again in a moment.")
 
@@ -3294,8 +3295,77 @@ def _bridge_block(args: Any) -> str:
     return message
 
 
+# execute_code's script calls tools through Hermes with no session id, only
+# the task of the execute_code call it runs in (its RPC and its kernel both
+# pass that call's task_id). Each running execute_code, by task: its chat, its
+# turn, how many of its calls are running and when the first began.
+_code_cells: dict[str, list] = {}
+_code_cells_lock = threading.Lock()
+CODE_CELL_KEEP_S = 3600.0
+
+
+def _code_chat(session_id: Any, turn_id: Any, task_id: Any) -> tuple[Any, Any]:
+    """The chat and turn a call is from: for one with no session id, those
+    of the execute_code call running under its task, if there is one."""
+    if (isinstance(session_id, str) and session_id.strip()) or not isinstance(task_id, str) or not task_id:
+        return session_id, turn_id
+    with _code_cells_lock:
+        cell = _code_cells.get(task_id)
+        return (cell[0], cell[1]) if cell else (session_id, turn_id)
+
+
+def _code_began(session_id: Any, turn_id: Any, task_id: Any) -> None:
+    if not isinstance(session_id, str) or not session_id.strip() or not isinstance(task_id, str) or not task_id:
+        return
+    now = time.monotonic()
+    with _code_cells_lock:
+        for stale in [key for key, cell in _code_cells.items() if now - cell[3] > CODE_CELL_KEEP_S]:
+            del _code_cells[stale]
+        cell = _code_cells.get(task_id)
+        if cell and cell[0] == session_id:
+            cell[2] += 1
+        else:
+            _code_cells[task_id] = [session_id, str(turn_id or ""), 1, now]
+
+
+def _runs_code(tool_name: Any, args: Any) -> bool:
+    if tool_name == CODE_TOOL:
+        return True
+    if tool_name != "tool_call":
+        return False
+    from . import pulse_tools
+
+    return any(called == CODE_TOOL for called, _ in pulse_tools.called(args))
+
+
+def code_ended(tool_name: Any, task_id: Any, args: Any = None) -> None:
+    """An execute_code call ended (Hermes' post_tool_call): its script calls
+    no more tools under its task."""
+    if not isinstance(task_id, str) or not task_id or not _runs_code(tool_name, args):
+        return
+    with _code_cells_lock:
+        cell = _code_cells.get(task_id)
+        if cell:
+            cell[2] -= 1
+            if cell[2] <= 0:
+                del _code_cells[task_id]
+
+
 def tool_block(session_id: Any, tool_name: Any, args: Any = None,
-               turn_id: Any = None) -> Optional[dict[str, str]]:
+               turn_id: Any = None, task_id: Any = None) -> Optional[dict[str, str]]:
+    """``_tool_block`` for the chat the call is from. A call execute_code's
+    script makes names no chat, so it's the execute_code call's, and takes
+    its steps and its limits (notifier#784); any other call with no session
+    id comes from an agent with no session, never a Bot Chat."""
+    session_id, turn_id = _code_chat(session_id, turn_id, task_id)
+    block = _tool_block(session_id, tool_name, args, turn_id)
+    if block is None and _runs_code(tool_name, args):
+        _code_began(session_id, turn_id, task_id)
+    return block
+
+
+def _tool_block(session_id: Any, tool_name: Any, args: Any = None,
+                turn_id: Any = None) -> Optional[dict[str, str]]:
     """The bot's policy for its Bot Chat: a block for a tool the coordinator
     doesn't run itself, else None. Strict runs only its own tools; quick
     (lookups) runs any other for the bot's quick_steps of a turn (``turn_id``,
@@ -3368,10 +3438,10 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
         return held
     if all(runs(called) for called in names):
         return None  # allowed in any chat: which one this is doesn't matter
-    # A call that names no chat isn't the coordinator's: Hermes gives the hook
-    # an empty id only for an agent with no session, which the Bot Chat always
-    # has. Held as a failed title read, every tool of that agent would be,
-    # for good (notifier#784).
+    # A call that still names no chat (tool_block names execute_code's) is
+    # from an agent with no session, which a Bot Chat never is. Held as a
+    # failed title read, every tool of that agent would be, for good
+    # (notifier#784).
     titled = _titled_bot_chat(session_id, home)
     if titled is False:
         # A workstream reaches other bots only through its coordinator,

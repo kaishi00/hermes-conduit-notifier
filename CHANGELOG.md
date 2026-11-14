@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 
-- A Hermes chat that has no session yet, such as the terminal's, no longer has every tool held back with "This bot's coordinator settings couldn't be checked just now". It isn't a Bot Chat, so the coordinator's limits don't apply to it.
+- A Hermes chat that has no session yet, such as the terminal's, no longer has every tool held back with "This bot's coordinator settings couldn't be checked just now". It isn't a Bot Chat, so the coordinator's limits don't apply to it. The tools a script run with execute_code calls count as steps of the chat that ran it, so they no longer fail in every chat, and a Bot Chat's script stays within its turn's steps.
 
 ## 0.171.0 (2026-11-14)
 

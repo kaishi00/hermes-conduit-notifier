@@ -159,6 +159,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_policy_cache", {})
     monkeypatch.setattr(work, "_quick_steps_cache", {})
     monkeypatch.setattr(work, "_steps", {})
+    monkeypatch.setattr(work, "_code_cells", {})
     monkeypatch.setattr(work, "_asks", {})
     monkeypatch.setattr(work, "_did", {})
     monkeypatch.setattr(work, "_handed", {})
@@ -1435,6 +1436,37 @@ def test_quick_counts_what_a_bridged_call_runs(on, hermes):
     assert bridged["action"] == "block" and "read_file didn't run" in bridged["message"]
 
 
+def test_quick_counts_what_execute_codes_script_runs(on, hermes):
+    # CodeRabbit on hermes-conduit#2434: Hermes names no session for a tool
+    # execute_code's script calls, only the execute_code call's task, so the
+    # script's calls are the Bot Chat's steps, not a chat with no session.
+    on.set_policy("lookups")
+    assert work.tool_block(BOT_CHAT, "execute_code", {"code": "..."}, turn_id="t1", task_id="task-1") is None
+    for _ in range(4):
+        assert work.tool_block("", "terminal", {}, task_id="task-1") is None
+    block = work.tool_block("", "web_search", {}, task_id="task-1")
+    assert block["action"] == "block" and "web_search didn't run" in block["message"]
+    assert work.tool_block(BOT_CHAT, "read_file", {}, turn_id="t1")["action"] == "block"  # the same turn's budget
+    work.code_ended("execute_code", "task-1")
+    assert work.tool_block("", "terminal", {}, task_id="task-1") is None  # it ended: no chat's any more
+    # Another chat's script runs as that chat does, bridged or not.
+    assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "execute_code", "arguments": {}}, turn_id="t9",
+                           task_id="task-2") is None
+    assert all(work.tool_block("", "terminal", {}, task_id="task-2") is None for _ in range(8))
+    work.code_ended("tool_call", "task-2", {"name": "execute_code", "arguments": {}})
+    assert not work._code_cells
+
+
+def test_two_scripts_of_one_turn_keep_its_chat_until_both_end(on, hermes):
+    on.set_policy("lookups")
+    for _ in range(2):
+        assert work.tool_block(BOT_CHAT, "execute_code", {}, turn_id="t1", task_id="task-1") is None
+    work.code_ended("execute_code", "task-1")
+    for _ in range(3):
+        assert work.tool_block("", "terminal", {}, task_id="task-1") is None
+    assert work.tool_block("", "terminal", {}, task_id="task-1")["action"] == "block"  # still the Bot Chat's
+
+
 def test_quick_says_when_only_a_batch_is_too_big(on, hermes):
     # GLM's review: Hermes runs a batch whole, so one past what's left is refused whole,
     # and the bot is told single calls still fit rather than that the turn is done here.
@@ -1934,8 +1966,9 @@ def test_a_chat_whose_title_cant_be_read_is_held_to_the_policy(on, hermes, monke
 
 
 def test_a_call_that_names_no_chat_isnt_held_as_the_coordinators(on, hermes, home, monkeypatch):
-    # notifier#784: an agent with no session (the TUI's before its first
-    # save) passes an empty id, which lost it every tool for good.
+    # notifier#784: an agent with no session passes an empty id, which lost
+    # it every tool for good. So does execute_code's script, with a task no
+    # running execute_code has (a Bot Chat's is counted, above).
     on.set_policy("lookups")
     work._policy_cache.clear()
     for no_id in ("", "  ", None):
@@ -1943,6 +1976,7 @@ def test_a_call_that_names_no_chat_isnt_held_as_the_coordinators(on, hermes, hom
         assert work.tool_block(no_id, "terminal", {}) is None
         assert work.tool_block(no_id, "message_agent", {}) is None
         assert work.tool_block(no_id, "work_list", {}) is None
+        assert work.tool_block(no_id, "terminal", {}, task_id="no-such-task") is None
     assert store_mod.exists(home)
 
     def locked(h, key):
