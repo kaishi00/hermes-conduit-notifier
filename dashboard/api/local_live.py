@@ -801,7 +801,7 @@ async def local_live_socket(ws: WebSocket) -> None:
     """A Local Live call: relayed to the speech server like Classic voice, plus its turns."""
 
     async def relay(refuse: Callable[[int, str], Any], url: str, key: str, profile: Optional[str],
-                    drive: Optional[speech_server.SpeechServerDrive] = None) -> None:
+                    drive: Optional[speech_server.SpeechServerSetup] = None) -> None:
         call = _LocalLiveCall(ws, _local_live_profile_key(profile), speaks=ws.query_params.get("mode") == "speak")
 
         async def to_phone(text: str) -> None:

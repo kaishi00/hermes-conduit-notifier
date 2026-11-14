@@ -2248,6 +2248,51 @@ def test_classics_speak_socket_tells_a_driven_server_to_read_its_words_aloud(cli
     assert sent[2] == {"type": "input_audio_buffer.append", "audio": PCM}
 
 
+def test_the_set_voice_goes_on_every_session_driven_or_not(client, hermes, server):
+    # Left to itself, the server still gets the profile's voice; the frame
+    # is otherwise what Conduit sent, and a response.create is untouched.
+    hermes.config["voice"]["speech_server"]["voice"] = "marin"
+    update = {"type": "session.update", "session": {"type": "realtime", "audio": {"input": {
+        "turn_detection": {"type": "server_vad", "create_response": False}}}}}
+    with client.websocket_connect(f"{BASE}/local-live/socket?mode=speak") as ws:
+        ws.send_text(json.dumps(update))
+        ws.send_text(json.dumps({"type": "response.create"}))
+        ws.send_text("finish")
+        with contextlib.suppress(Exception):
+            while True:
+                ws.receive_text()
+    sent = [json.loads(frame) for frame in server.upstream.sent if frame != "finish"]
+    assert sent[0]["session"]["audio"]["output"] == {"voice": "marin"}
+    assert "instructions" not in sent[0]["session"]
+    assert sent[1] == {"type": "response.create"}
+
+    # A server that refuses automatic responses: the first update and the
+    # one the plugin sends when it takes the turns over both name the voice.
+    server.upstream = upstream = ReadBackUpstream()
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        _finish(ws)
+    sessions = [frame["session"] for frame in upstream.sent if frame["type"] == "session.update"]
+    assert len(sessions) == 2
+    assert all(s["audio"]["output"]["voice"] == "marin" and "instructions" not in s for s in sessions)
+
+    _drive(hermes, voice="cedar")
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        _finish(ws)
+    session = next(frame for frame in upstream.sent if frame["type"] == "session.update")["session"]
+    assert session["audio"]["output"]["voice"] == "cedar" and session["instructions"] == SAY
+
+
+def test_a_voice_the_frame_names_or_a_beta_session_keeps_its_shape():
+    setup = api.speech_server.SpeechServerSetup("marin")
+    named = {"type": "session.update", "session": {"audio": {"output": {"voice": "ash"}}}}
+    assert setup.update(named)["session"]["audio"]["output"]["voice"] == "ash"
+    assert setup.update({"type": "session.update", "session": {"modalities": ["audio"]}})["session"]["voice"] == "marin"
+    assert api.speech_server.speech_server_drive({"voice": "two words"}) is None
+
+
 def test_without_the_setting_a_socket_s_frames_go_on_unchanged(client, hermes, server):
     with client.websocket_connect(f"{BASE}/local-live/socket?mode=speak") as ws:
         ws.send_text(json.dumps({"type": "response.create"}))

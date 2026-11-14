@@ -13,12 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.173.1 (2026-11-14)
+## 0.174.1 (2026-11-14)
 
 ### Fixes
 
 - When a Bot Chat hands a task to a workstream, a very long step result can no longer leave the first characters of a password or key in the workstream's instructions. Results are masked before they are cut, not after.
 - Two steps refused at the same moment (another chat had the bot's screen) no longer leave the turn's time limit counting the model's thinking again.
+
+## 0.174.0 (2026-11-14)
+
+### New and improved
+
+- A speech server can be set up from a list of known ones (Hugging Face speech-to-speech, OpenAI Realtime, Qwen Audio Realtime) and given a model and a voice in Conduit's speech server settings, and Test connection says when the server has a model of its own. Needs the Conduit build that shows them; until then the settings work from the Hermes config (voice.speech_server.model and voice).
 
 ## 0.173.0 (2026-11-14)
 
