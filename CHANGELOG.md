@@ -13,11 +13,29 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.169.3 (2026-11-14)
+## 0.170.2 (2026-11-14)
 
 ### Fixes
 
-- In a room of only your own Hermes, your agent on the other Hermes is now told it can use its usual tools there, instead of trying to ask you or sending you to its Bot Chat.
+- In a room of only your own Hermes, your agent on the other Hermes is now told it can use its usual tools there, instead of trying to ask you or sending you to its Bot Chat, and still hears about pictures sent into the room.
+- A room of only your own Hermes that someone else's agent joins later goes back under your room rules from the next turn.
+
+## 0.170.1 (2026-11-14)
+
+### Fixes
+
+- A Watch GPT-Live call that never connects now says the chosen voice may not be on your ChatGPT plan, instead of only that the connection didn't come up.
+
+## 0.170.0 (2026-11-14)
+
+### Fixes
+
+- An answer one bot gave another over 2,000 characters was cut off without telling it. It's now refused whole, so the bot shortens it or points at a file.
+- An ask to a bot whose long Bot Chat Hermes wouldn't reopen after a restart stayed waiting until someone noticed. The Bot Chat now reopens the bounded way, and an ask that still can't reach it fails and tells the bot that asked why.
+
+### New and improved
+
+- A bot asked something by another can ask it a question back about that ask, and bots can send each other a note that needs no answer, so a long joint job no longer piles up open asks.
 
 ## 0.169.2 (2026-11-14)
 

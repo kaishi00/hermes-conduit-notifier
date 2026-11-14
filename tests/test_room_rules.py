@@ -1342,6 +1342,13 @@ def test_a_room_whose_others_all_came_over_own_links_runs_as_your_own(tmp_path, 
     _room_session(home, "s-own", "room-own")
     turn = rules.room_turn("s-own", home)
     assert (turn.side, turn.with_others, turn.others) == ("home", False, ())
+    # Someone else's agent joining later brings the rules back, though the turn is remembered.
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("UPDATE hosted_rooms SET members_json = ? WHERE room_id = 'room-own'",
+                 (json.dumps([FURINA, laifu, LAIFU]),))
+    conn.commit()
+    conn.close()
+    assert rules.room_turn("s-own", home).with_others
     # Another person's agent beside it keeps the rules.
     _room(home / "state.db", "room-mixed", [FURINA, laifu, LAIFU])
     _room_session(home, "s-mixed", "room-mixed")
