@@ -1229,7 +1229,8 @@ OpenAI Realtime server needs no plugin change:
 
 The servers Conduit offers by name are a file,
 `dashboard/speech_server_presets.json`, served by `/speech-server/presets`.
-An entry has an `id` and a `name`, a `url` (complete, saved as is) or a
+An entry has an `id` and a `name`, a `url` (complete; Conduit gets it as it
+is dialed, `ws(s)://` with the path) or a
 `url_hint` (an example to finish, such as one with a workspace in it),
 `needs_key`, `drive_turns` (the server has a model of its own, so Hermes
 answers is the setting to start from), and optionally `model`, `models`,

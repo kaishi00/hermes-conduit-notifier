@@ -181,6 +181,17 @@ def test_the_set_model_goes_on_the_address_unless_the_address_names_one(hermes):
     assert api.speech_server.speech_server_target()[0] == "wss://voice.example.com/v1/realtime"
 
 
+def test_a_model_or_voice_that_cant_be_given_to_a_server_is_logged(caplog):
+    with caplog.at_level("WARNING"):
+        assert api.speech_server.speech_server_model({"model": "gpt-realtime"}) == "gpt-realtime"
+        assert api.speech_server.speech_server_voice({}) == ""
+    assert "voice.speech_server" not in caplog.text
+    with caplog.at_level("WARNING"):
+        assert api.speech_server.speech_server_model({"model": "two words"}) == ""
+        assert api.speech_server.speech_server_voice({"voice": 7}) == ""
+    assert "voice.speech_server.model" in caplog.text and "voice.speech_server.voice" in caplog.text
+
+
 def test_status_reports_the_model_voice_and_transcription_model(client, hermes):
     _settings(hermes, url="wss://voice.example.com", model="gpt-realtime", voice="marin",
               transcription_model="gpt-4o-mini-transcribe", drive_turns=True)

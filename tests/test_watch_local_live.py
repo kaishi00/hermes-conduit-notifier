@@ -763,6 +763,41 @@ def test_a_driven_server_has_the_host_run_the_watchs_turns_from_the_first_update
     _run(scenario())
 
 
+def test_the_set_voice_goes_on_the_watchs_session_driven_or_not(call, monkeypatch):
+    class AcceptingSocket(SpeechSocket):
+        async def send(self, message):
+            await SpeechSocket.send(self, message)
+            event = self.received[-1]
+            if event.get("type") == "session.update":
+                self.push({"type": "session.updated", "session": event["session"]})
+
+    async def connect(url, headers):
+        socket = AcceptingSocket()
+        call.speech.sockets.append(socket)
+        return socket
+
+    monkeypatch.setattr(api.speech_server, "_connect_speech_server", connect)
+
+    async def scenario(setup, driven):
+        monkeypatch.setattr(api.speech_server, "speech_server_drive", lambda settings=None: setup)
+        call.speech.sockets.clear()
+        bridge = _bridge()
+        socket = await _attach(bridge)
+        watch = Watch()
+        await _start(bridge, socket, watch)
+        upstream = call.speech.sockets[0]
+        await bridge._handle(watch.event(WATCH_UPDATE))
+        await _until(lambda: [event for event in upstream.received if event.get("type") == "session.update"])
+        session = next(event for event in upstream.received if event.get("type") == "session.update")["session"]
+        assert session["audio"]["output"]["voice"] == "marin"
+        assert ("instructions" in session) is driven
+        await bridge._end_session("test")
+
+    # Left to itself, the server still gets the profile's voice.
+    _run(scenario(api.speech_server.SpeechServerSetup("marin"), False))
+    _run(scenario(api.speech_server.SpeechServerDrive(voice="marin"), True))
+
+
 def test_on_a_read_back_server_the_host_runs_the_watchs_turns_and_has_each_sentence_read_back(call, monkeypatch):
     async def connect(url, headers):
         socket = ReadBackSocket()

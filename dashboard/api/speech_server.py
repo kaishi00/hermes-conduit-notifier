@@ -257,6 +257,7 @@ def speech_server_drive(settings: Optional[Dict[str, Any]] = None) -> Optional[S
 SPEECH_SERVER_PRESETS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                           "speech_server_presets.json")
 SPEECH_SERVER_MAX_PRESETS = 64
+SPEECH_SERVER_MAX_PRESET_NAMES = 64
 _SPEECH_SERVER_PRESET_NAMES = ("model", "voice", "transcription_model")
 _speech_server_presets_cache: Optional[List[Dict[str, Any]]] = None
 
@@ -269,18 +270,28 @@ def _speech_server_name(value: Any) -> str:
     return name
 
 
+def _speech_server_set_name(settings: Dict[str, Any], key: str) -> str:
+    """A name the profile set, or "" with a line in the log when what is set
+    can't go on to a server: the server then uses its own, and the log says why."""
+    value = settings.get(key)
+    name = _speech_server_name(value)
+    if value and not name:
+        logger.warning("voice.speech_server.%s is not a name a server can be given, so none is set.", key)
+    return name
+
+
 def speech_server_model(settings: Optional[Dict[str, Any]] = None) -> str:
     """The model the server is asked for (``voice.speech_server.model``), or ""."""
     if settings is None:
         settings = _speech_server_settings()
-    return _speech_server_name(settings.get("model"))
+    return _speech_server_set_name(settings, "model")
 
 
 def speech_server_voice(settings: Optional[Dict[str, Any]] = None) -> str:
     """The voice a session is set to (``voice.speech_server.voice``), or "" for the server's own."""
     if settings is None:
         settings = _speech_server_settings()
-    return _speech_server_name(settings.get("voice"))
+    return _speech_server_set_name(settings, "voice")
 
 
 def _speech_server_preset(raw: Any) -> Optional[Dict[str, Any]]:
@@ -309,7 +320,7 @@ def _speech_server_preset(raw: Any) -> Optional[Dict[str, Any]]:
         values = raw.get(key)
         names = [n for n in map(_speech_server_name, values if isinstance(values, list) else []) if n]
         if names:
-            preset[key] = names[:SPEECH_SERVER_MAX_PRESETS]
+            preset[key] = names[:SPEECH_SERVER_MAX_PRESET_NAMES]
     return preset
 
 
