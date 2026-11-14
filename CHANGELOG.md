@@ -13,11 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.172.4 (2026-11-14)
+## 0.173.1 (2026-11-14)
 
 ### Fixes
 
 - A question a Bot Chat asks while nobody has it open, such as during a scheduled task, waits for your answer on the Conduit card instead of going on at once without one. It waits as long as Hermes waits for any answer (its clarify timeout), never more than 30 minutes, and stopping the chat ends the wait.
+- On Quick Things Here, a slow model no longer has its Bot Chat turns ended well before the step count you picked. The time limit counted the model's thinking between steps, so a model that takes 26 seconds a step got about 9 of its 20 steps. It now counts only the time the steps themselves take to run.
+- When a Bot Chat hands the rest of a task to a workstream, the workstream gets what the Bot Chat's steps returned, cut short, and works from it. Before, it was told the results weren't there and began by running the same steps again.
+
+## 0.173.0 (2026-11-14)
+
+### New and improved
+
+- Hermes can answer on a speech server that has a model of its own, such as a hosted realtime model. Turn on "Hermes answers" in Conduit's speech server settings (voice.speech_server.drive_turns) and the server only listens and reads the replies aloud, in Local Live, agent mode, Classic and on the Watch. Before, such a server answered by itself and Hermes never got a turn.
 
 ## 0.172.3 (2026-11-14)
 

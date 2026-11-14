@@ -1034,6 +1034,8 @@ voice:
     url: ws://192.168.1.20:8765/v1/realtime   # http(s) works too; a bare host gets /v1/realtime
     api_key: ""                               # optional, for a server behind an auth proxy
     api_key_file: ""                          # optional: read the key from this file instead
+    drive_turns: false                        # true: Hermes answers on a server with a model of its own (plugin 0.173+) A YAML boolean, not 1.
+    transcription_model: ""                   # optional, with drive_turns: the model the server transcribes with
 ```
 
 `api_key_file` names a file holding the key (an absolute path, or one starting
@@ -1052,7 +1054,7 @@ speech-to-speech has no authentication of its own, so keep it on your network.
 
 | Method | Path | Returns |
 |--------|------|---------|
-| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, reason}` |
+| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, drive_turns, reason}` |
 | POST | `/api/plugins/conduit_push/speech-server/test` | `{ok, connected, url, latency_ms, event, reason}`: dials the server from the host and waits for its first event |
 | WebSocket | `/api/plugins/conduit_push/speech-server/socket` | OpenAI Realtime events, relayed |
 
@@ -1100,7 +1102,7 @@ fixed line, so the server's warmup request succeeds.
 
 | Method | Path | Returns |
 |--------|------|---------|
-| GET | `/api/plugins/conduit_push/local-live/status` | `{ok, available, reason, model_path, model_name, api_key, speech_server, in_call, last_request_at}` |
+| GET | `/api/plugins/conduit_push/local-live/status` | `{ok, available, reason, model_path, model_name, api_key, speech_server, in_call, last_request_at, answers_alone}` |
 | POST | `/api/plugins/conduit_push/local-live/key` | `{ok, api_key}`: a new key |
 | WebSocket | `/api/plugins/conduit_push/local-live/socket` | the speech server relay, plus turn frames |
 | POST | `/api/plugins/conduit_push/local-live/v1/chat/completions` | OpenAI chat completions (streaming or not), key auth |
@@ -1167,6 +1169,52 @@ With an older plugin or Conduit, run a dashboard for each profile instead
 (`hermes --profile <name> dashboard` on its own port, saved in Conduit as its
 own dashboard): that profile is then the one the dashboard started with. In a
 plugin host, Local Live's status says so and suggests the same.
+
+### Hermes answers on a speech server with a model of its own (plugin 0.173+)
+
+A hosted realtime model (OpenAI Realtime, Alibaba's Qwen realtime, any server
+that speaks the OpenAI Realtime protocol and answers by itself) never asks the
+model address for a reply and never refuses automatic responses, so left alone
+it talks to the user with its own model and Hermes gets no turn. With
+`voice.speech_server.drive_turns: true` (the "Hermes answers" switch in
+Conduit's speech server settings) the plugin runs every turn instead, and the
+server only listens and reads aloud:
+
+- A Local Live call is in read-back (the next section) from its first
+  `session.update`, on the phone's socket and the Watch's bridge: automatic
+  responses go off without waiting for a refusal. Agent mode, the fast model,
+  job hand-offs and talking over the reply all work as they do there.
+- The server is told it is the voice, not the one answering: the session's
+  `instructions`, and each sentence's `response.create`, say to read the text
+  aloud exactly as written. A `session.update` that already carries
+  instructions keeps them.
+- A response the server starts by itself (one that doesn't honour
+  `create_response: false`) is cancelled and nothing of it reaches the call;
+  the reply's sentences wait for its end, 2 s at most. One that started while
+  a sentence was on its way, which the server answers with
+  `conversation_already_has_active_response`, is cancelled when that error
+  arrives and the sentence said after it. On a server that never echoes the
+  mark below, a little of that response's audio can reach the call first.
+- Each sentence carries a mark (`response.metadata`, `{"conduit": "say"}`).
+  Once the server has echoed it on a `response.created`, a response that
+  starts without it while a sentence waits is the server's own, and is
+  cancelled before any of its audio reaches the call. A server that refuses
+  a sentence over the mark gets it again, and the ones after, without it.
+- Classic voice on the server gets the same instructions on its listen and
+  speak sockets, so a hosted model reads Hermes' reply instead of answering it.
+- `transcription_model`, when set, is asked for in the session
+  (`audio.input.transcription`, or `input_audio_transcription` on a session in
+  the older shape): some hosted servers send no transcripts until a model is
+  named. The plugin starts a turn on each
+  `conversation.item.input_audio_transcription.completed`.
+- The check below still applies: a server whose transcripts of two sentences
+  in a row don't match them is answering, not reading, and the call ends with
+  that reason.
+
+`speech_server.drive_turns` in the status routes says whether the switch is
+on. Local Live's status has `answers_alone`: true once a call's response
+ended with the model address not asked since the call began and the switch
+off, which is how Conduit knows to offer it.
 
 ### Local Live on a read-back speech server (plugin 0.50+)
 
@@ -1679,10 +1727,13 @@ question or a small task doesn't start a workstream. Change it in Conduit
   and code prompts (`browser_vault`). Strict ("Only Coordinates") leaves it
   only those. Lookups ("Quick Things Here") also runs any other tool, reads
   and changes alike, under the bot's usual approvals, for 5 steps of a turn
-  or a minute after the turn's first (the user can pick 10 or 20 steps per
-  bot, `quick_steps`, with 12 seconds for each); the step after that doesn't
+  or a minute of those steps running (the user can pick 10 or 20 steps per
+  bot, `quick_steps`, with 12 seconds for each; only the time the tools take
+  counts, never the model's thinking between them, so a slow model gets its
+  whole step count, plugin 0.172.4+); the step after that doesn't
   run, and the plugin starts a workstream for the rest itself, with the turn's
-  ask and the steps it took, so the bot only says so (when it can't, similar
+  ask, the steps it took and what each returned, cut short (0.172.4+), so
+  the bot only says so (when it can't, similar
   open work or the running limit, say, the bot is told to), and `delegate_task`
   always goes to a workstream. Open ("Everything Here") runs everything in
   the Bot Chat and starts workstreams when it judges the work long or you ask.
