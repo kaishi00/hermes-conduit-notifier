@@ -1567,7 +1567,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   open ask: the bot asked can ask the bot that asked it with `about` (A3),
   one level deep, and the first ask stays open until it answers.
   `work_tell` sends another bot's Bot Chat a note that needs no answer (a
-  status, a result), as a work update, without opening an ask.
+  status, a result), as a work update, without opening an ask. A note whose
+  wake Hermes refuses is told back to the bot that sent it.
 - Every new workstream's brief carries the coordinator's notes (`work_note`,
   kept in `<profile>/conduit/work-notes.md`, labelled as data, never as your
   go-ahead) and the message of yours the Bot Chat is answering, quoted as
@@ -2559,7 +2560,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   defers plugin tools behind `tool_search`, so a run reaches the report
   through `tool_call` when it isn't listed; a quoted `"false"` counts, and a
   call without `saw` rings with the watch's name instead. A watch whose job
-  carries an older run prompt gets the current one on its next run (0.170.3).
+  carries an older run prompt gets the current one on its next run (0.170.4).
   `conduit_call_user` refuses in such a run. Watches set up by 0.16.x (jobs
   that load the skill and keep their own state) keep running as written, and
   setting one again by name or id moves it onto the report.

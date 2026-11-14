@@ -755,6 +755,15 @@ class Store:
                           f"({', '.join('?' for _ in ids)}) ORDER BY created_at", (kind, *ids))
         return [row["ref"] for row in rows]
 
+    def outbox_texts_of(self, ids: list[str], kind: str) -> list[tuple[str, str]]:
+        """(ref, text) of the rows with these ids and this kind."""
+        ids = [item for item in dict.fromkeys(ids) if item][:500]
+        if not ids:
+            return []
+        rows = self._read(f"SELECT ref, text FROM outbox WHERE kind = ? AND ref != '' AND id IN "
+                          f"({', '.join('?' for _ in ids)}) ORDER BY created_at", (kind, *ids))
+        return [(row["ref"], row["text"]) for row in rows]
+
     def outbox_count_since(self, kind: str, target: str, since: float) -> int:
         rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE kind = ? AND target = ? AND created_at >= ?",
                           (kind, target, since))
