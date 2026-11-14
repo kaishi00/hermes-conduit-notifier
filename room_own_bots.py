@@ -14,8 +14,8 @@ The invite's push waits for its room.bring (HOLD_S), so bots that join by themse
 they can't, or when no bring comes.
 
 A room.bots goes again when what it says changed, when the other side's plugin changed (it may have restored an
-older file), and once a day, so one that missed it while offline past the mailbox's hold hears it again. What each side last said and was told is kept in ``conduit-rooms/own_bots.json``, owner
-only, beside rooms.json.
+older file), and once a day, so one that missed it while offline past the mailbox's hold hears it again. What
+each side last said and was told is kept in ``conduit-rooms/own_bots.json``, owner only, beside rooms.json.
 """
 
 from __future__ import annotations
@@ -261,12 +261,19 @@ class Store:
         self.directory = Path(root) / room_identity.DIRECTORY
         self.path = self.directory / FILE_NAME
 
-    def read(self) -> dict[str, Any]:
+    def read(self, strict: bool = False) -> dict[str, Any]:
+        """The state; one that can't be read reads as empty, except that ``strict`` raises an OSError other
+        than a missing file, so an update doesn't write over a file it only failed to read."""
         try:
             state = json.loads(self.path.read_bytes())
         except FileNotFoundError:
             return _empty()
-        except (OSError, ValueError, RecursionError):
+        except OSError:
+            if strict:
+                raise
+            logger.info("Linked Rooms couldn't read %s", self.path)
+            return _empty()
+        except (ValueError, RecursionError):
             logger.info("Linked Rooms couldn't read %s; starting it again", self.path)
             return _empty()
         if not isinstance(state, dict) or state.get("version") != VERSION or not all(
@@ -280,7 +287,7 @@ class Store:
         self.directory.chmod(0o700)
         lock_path = self.directory / f".{FILE_NAME}.lock"
         with _thread_lock, open(lock_path, "a+b") as handle, room_identity._exclusive(handle):
-            state = self.read()
+            state = self.read(strict=True)
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
