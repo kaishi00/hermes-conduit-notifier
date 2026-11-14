@@ -4336,8 +4336,9 @@ a route's answer.
 When both Hermes are yours (a home server and a work one, say), mark the Link
 as your own Hermes on each side: `PUT /rooms/links/own`
 (`{"link_id": ..., "own": true}`) or `hermes conduit-push links own <Link id> on`.
-Conduit shows no setting for it: once it holds both Hermes, it marks the Link
-between them itself, and it never marks a Link to someone else's Hermes. Each side tells the other in a
+Conduit shows no setting for it: later, once Conduit holds both Hermes, it will
+mark the Link between them itself, and it never marks a Link to someone else's
+Hermes. Each side tells the other in a
 `link.own` envelope, and the Link is your own only while both sides say so:
 one side's mark alone does nothing, so a Link with someone else can never
 become one from your side. Either side turning it off ends it on both, from

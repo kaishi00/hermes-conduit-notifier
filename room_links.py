@@ -443,7 +443,7 @@ class Links:
                 raise LinkError("not_linked", "This Hermes isn't linked with that one yet", 409)
             if bool(link.get("own")) != own or not link.get("own_seq"):
                 link["own"] = own
-                link["own_seq"] = int(link.get("own_seq") or 0) + 1
+                link["own_seq"] = _next_own_seq(link, now)
                 _queue_own(state, link_id, link, now)
         self._flush_quietly()
         return self.get(link_id)
@@ -490,7 +490,7 @@ class Links:
                 state["outbox"].append(item)
                 link.update(hello=said, hello_at=now)
                 if link.get("own_seq"):
-                    _queue_own(state, link_id, link, now)
+                    _resend_own(state, link_id, link, now)
                 # What it couldn't take before, this plugin may take now.
                 if isinstance(link.get("unheard"), dict) and link["unheard"].get("kind") in body["kinds"]:
                     link.pop("unheard")
@@ -1067,7 +1067,7 @@ class LinkLoop:
                     if before.get("plugin") != peer["plugin"] and link.get("own_seq") \
                             and link["status"] == "linked" and not link.get("leaving"):
                         # Updated, it may take what its older plugin dropped.
-                        _queue_own(state, link_id, link, now)
+                        _resend_own(state, link_id, link, now)
             return True
         if kind == OWN:
             said = _own_from(opened.body)
@@ -1389,6 +1389,22 @@ def _queue_own(state: dict[str, Any], link_id: str, link: dict[str, Any], now: i
     state["outbox"].append(item)
 
 
+def _resend_own(state: dict[str, Any], link_id: str, link: dict[str, Any], now: int) -> None:
+    """Says this side's mark again under a fresh seq: the other side takes only a
+    later seq, and after an older links.json comes back the seq here may be
+    behind the one it already holds (it says the same mark, so a fresh seq
+    can't reorder anything)."""
+    link["own_seq"] = _next_own_seq(link, now)
+    _queue_own(state, link_id, link, now)
+
+
+def _next_own_seq(link: dict[str, Any], now: int) -> int:
+    """The seq for this side's next link.own: past the last one and no lower
+    than the clock, so a links.json restored from a backup gets ahead of what
+    the other side already holds."""
+    return max(int(link.get("own_seq") or 0) + 1, int(now))
+
+
 def _their_own(link: dict[str, Any]) -> bool:
     peer_own = link.get("peer_own")
     return isinstance(peer_own, dict) and peer_own.get("own") is True
@@ -1408,7 +1424,8 @@ def own_links(root: Any) -> frozenset[str]:
     except Exception:  # noqa: BLE001
         logger.debug("conduit_push: couldn't read links.json for own Links", exc_info=True)
         return frozenset()
-    return frozenset(link_id for link_id, link in state["links"].items() if isinstance(link, dict) and _is_own(link))
+    return frozenset(link_id for link_id, link in state.get("links", {}).items()
+                     if isinstance(link, dict) and _is_own(link))
 
 
 def _words(sign: bytes, seal: bytes) -> list[str]:

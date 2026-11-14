@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.170.0 (2026-11-13)
+## 0.170.0 (2026-11-14)
 
 ### Fixes
 
@@ -23,6 +23,12 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 
 - A bot asked something by another can ask it a question back about that ask, and bots can send each other a note that needs no answer, so a long joint job no longer piles up open asks.
+
+## 0.169.1 (2026-11-13)
+
+### Fixes
+
+- A Link marked as between your own Hermes is marked again on the other side after this Hermes' Linked Rooms files are restored from an older backup.
 
 ## 0.169.0 (2026-11-13)
 
