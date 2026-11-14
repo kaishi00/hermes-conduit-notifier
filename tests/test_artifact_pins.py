@@ -242,3 +242,15 @@ def test_a_long_name_fits_with_its_extension():
     assert name.endswith(".pdf")
     assert len(name.encode("utf-8")) <= pins.MAX_COPY_NAME_BYTES
     assert pins._safe_name(".env") == "_.env"
+
+
+def test_a_copy_a_crash_cut_short_is_swept(tmp_path):
+    clock = Clock(now=100_000.0)
+    store = pins.PinStore(tmp_path / "home", clock=clock)
+    stale = store.copies / "abc-123"
+    stale.mkdir(parents=True)
+    temporary = stale / ".big.mov.tmp"
+    temporary.write_bytes(b"x" * 10)
+    os.utime(temporary, (1_000.0, 1_000.0))
+    assert store._copies_size() == 0
+    assert not stale.exists()

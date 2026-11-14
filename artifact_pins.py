@@ -71,6 +71,8 @@ _thread_lock = threading.Lock()
 # before it starts, so saves at once can't pass the budget together.
 _reserved_lock = threading.Lock()
 _reserved: dict = {}
+# A temporary copy older than this was cut short (no copy runs this long).
+STALE_COPY_SECONDS = 6 * 3600
 # The longest copy name, in bytes, leaving room for the temporary suffix
 # under a 255-byte file name limit.
 MAX_COPY_NAME_BYTES = 150
@@ -202,8 +204,15 @@ class PinStore:
         try:
             for root, _dirs, files in os.walk(self.copies):
                 for name in files:
+                    path = os.path.join(root, name)
                     try:
-                        total += os.lstat(os.path.join(root, name)).st_size
+                        info = os.lstat(path)
+                        # A copy a crash cut short: never finished, so it
+                        # goes rather than counting against the budget.
+                        if name.endswith(".tmp") and self.clock() - info.st_mtime > STALE_COPY_SECONDS:
+                            shutil.rmtree(root, ignore_errors=True)
+                            continue
+                        total += info.st_size
                     except OSError:
                         pass
         except OSError:
