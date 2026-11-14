@@ -10,6 +10,10 @@ wraps clarify execution with ``tool_execution`` middleware:
   the gateway's own ``clarify.request`` is completely unchanged),
 * poll the relay for the device's answer while both wait,
 * first answer wins; the loser resolves into a discarded result.
+  One exception: an original call the host could not show (outcome
+  ``undelivered``, e.g. a Bot Chat's automation turn with nobody looking) is
+  no answer, so the device card keeps waiting, for at most
+  ``MAX_UNATTENDED_WAIT_SECONDS``.
 
 The tool result is built by the built-in ``clarify_tool``'s own result helper
 when it is importable (a local mirror otherwise), so the agent cannot tell the
@@ -61,6 +65,10 @@ MAX_POLL_SECONDS = 24 * 60 * 60.0
 # decision costs ~a handful of requests per minute instead of 30+, and a
 # gateway's concurrent loops stay well under the relay's shared poll budget.
 MAX_POLL_BACKOFF_SECONDS = 10.0
+# Longest wait for the device card once the host could not show the question
+# (the original call came back ``undelivered``): the turn is blocked meanwhile,
+# so an unlimited or long clarify timeout must not hold it for hours.
+MAX_UNATTENDED_WAIT_SECONDS = 30 * 60
 
 # Set by register() so pushes carry the profile the rest of the plugin uses.
 profile = "default"
@@ -198,9 +206,17 @@ def _first_answer_wins(
     through the relay and format the built-in batch result shape; a native
     (desktop/CLI) completion of the whole original call wins instead,
     releases the parked decision, and the losing path is discarded.
+
+    An original that ends ``undelivered`` (the host could not show the
+    question) is not a win: it is kept as the fallback while the device card,
+    then the only way to ask, waits up to ``MAX_UNATTENDED_WAIT_SECONDS``; an
+    interrupt ends that wait. If the shown card times out, a batch call gets a
+    ``timed_out`` result saying so.
     """
     outcome: dict[str, Any] = {}
     relay_won = False
+    # The original came back undelivered: outcome["original"] is the fallback.
+    unattended = False
 
     def _run_original() -> None:
         try:
@@ -225,13 +241,25 @@ def _first_answer_wins(
         daemon=True,
     ).start()
 
-    deadline = time.monotonic() + _clarify_poll_budget()
+    started = time.monotonic()
+    deadline = started + _clarify_poll_budget()
     saw_pending = False
+    expired = False
     consecutive_unproductive = 0
     unanswered_polls = 0
     previous_remaining: int | None = None
-    while time.monotonic() < deadline:
-        if "original" in outcome or "original_error" in outcome:
+    while True:
+        if time.monotonic() >= deadline:
+            expired = True
+            break
+        if not unattended and "original" in outcome and _undelivered(outcome["original"]):
+            # The host could not show the question: not an answer. Keep it
+            # as the fallback and wait for the device card, capped.
+            unattended = True
+            deadline = min(deadline, started + MAX_UNATTENDED_WAIT_SECONDS)
+        if unattended and _interrupted():
+            break
+        if not unattended and ("original" in outcome or "original_error" in outcome):
             # The native path resolved the whole call first (desktop/CLI
             # answered through the gateway). Release the parked decision so
             # a late device answer is rejected (409) instead of being
@@ -332,6 +360,15 @@ def _first_answer_wins(
     # the original path produces, waiting for it if necessary. The parked
     # decision is released first so late device answers are rejected.
     _release_decision(request_id, relay_won)
+    if unattended:
+        if expired and saw_pending and batch_protocol:
+            # The card was shown and nobody answered it in time.
+            minutes = max(1, int((deadline - started) // 60))
+            return _format_batch_result(
+                batch, {}, outcome="timed_out",
+                notice=f"[the question was shown on the Conduit device but not answered within {minutes} min]",
+            )
+        return outcome["original"]
     if "original_error" in outcome:
         raise outcome["original_error"]
     while "original" not in outcome and "original_error" not in outcome:
@@ -371,6 +408,31 @@ def _call_answer_result(batch: list[dict[str, Any]], batch_protocol: bool, answe
     entry = batch[0]
     return _format_result(question=entry["question"], offered=list(entry["choices"]),
                           answer=str(answers.get(entry["qid"]) or ""), multi_select=entry["multi_select"])
+
+
+def _undelivered(result: Any) -> bool:
+    """Whether the original clarify result says the host could not show the
+    question (Hermes' ``outcome: "undelivered"``, whatever its notice)."""
+    if not isinstance(result, str):
+        return False
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("outcome") == "undelivered"
+
+
+def _interrupted() -> bool:
+    """Whether the agent's turn was interrupted (/stop). The middleware runs
+    on the agent's thread, which is the one Hermes marks."""
+    try:
+        from tools.interrupt import is_interrupted
+    except Exception:
+        return False
+    try:
+        return bool(is_interrupted())
+    except Exception:
+        return False
 
 
 def _release_decision(request_id: str, relay_won: bool) -> None:
@@ -441,7 +503,8 @@ def _format_result(*, question: str, offered: list[str], answer: str, multi_sele
     )
 
 
-def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any]) -> str:
+def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any], *, outcome: str = "submitted",
+                         notice: str | None = None) -> str:
     """Build the JSON the built-in clarify_tool returns for a batch.
 
     Uses Hermes' own ``tools.clarify_tool._result`` when it is importable, so
@@ -450,7 +513,8 @@ def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any]) -
     ``user_response`` that is null unless answered, plus ``outcome``. A qid
     the relay never locked (only through the legacy collapsed-answer path) is
     left out of the answers, so it comes back unanswered. ``_local_result``
-    mirrors it for a Hermes without the helper.
+    mirrors it for a Hermes without the helper. ``outcome`` and ``notice``
+    say how the wait ended when it wasn't answered (a shown card timing out).
 
     A card shows each choice cut to its label length; an answer made from a
     cut label is mapped back to the full choice first (``_full_choice``), so
@@ -471,8 +535,10 @@ def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any]) -
             for entry in batch
             if entry["qid"] in answers
         },
-        "outcome": "submitted",
+        "outcome": outcome,
     }
+    if notice:
+        reply["notice"] = notice
     try:
         from tools.clarify_tool import _result
     except ImportError:

@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.172.4 (2026-11-14)
+
+### Fixes
+
+- A question a Bot Chat asks while nobody has it open, such as during a scheduled task, waits for your answer on the Conduit card instead of going on at once without one. It waits up to 30 minutes, and stopping the chat ends the wait.
+
 ## 0.172.3 (2026-11-14)
 
 ### Fixes

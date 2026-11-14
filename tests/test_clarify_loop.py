@@ -1126,3 +1126,183 @@ def test_a_written_answer_still_answers_once_polling_stopped(monkeypatch):
     finally:
         release.set()
     assert [row["user_response"] for row in json.loads(result)["responses"]] == ["Shelly"]
+
+
+# --- A host that could not show the question ---------------------------------
+# Hermes answers a clarify it could not deliver at once, with outcome
+# "undelivered" (a Bot Chat's automation turn with nobody looking). That is no
+# answer: the card on the device is then the only way to ask, so the loop keeps
+# waiting for it.
+
+UNDELIVERED_NOTICE = "[clarify prompt could not be delivered: destination refused]"
+
+
+def _undelivered_result(args):
+    entries = args.get("questions") or [{"question": args.get("question"), "choices": args.get("choices")}]
+    return json.dumps({
+        "responses": [{"question": entry["question"], "choices_offered": entry.get("choices"), "status": "unanswered",
+                       "user_response": None} for entry in entries],
+        "outcome": "undelivered",
+        "notice": UNDELIVERED_NOTICE,
+    })
+
+
+def _undelivered_original(returned=None):
+    """Hermes' own clarify, refused by the host at once."""
+
+    def original(args):
+        if returned is not None:
+            returned.set()
+        return _undelivered_result(args)
+
+    return original
+
+
+def _wait_for_release(fake, seconds=5):
+    deadline = time.monotonic() + seconds
+    while not fake.cancelled_ids and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return fake.cancelled_ids
+
+
+def test_an_undelivered_original_waits_for_the_device_answer():
+    fake = _FakeState([{"status": "pending"}, {"status": "pending"},
+                       {"status": "answered", "answers": {"q0": "staging", "q1": '["unit"]'}, "remaining": []}])
+    _install(fake)
+    result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
+    parsed = json.loads(result)
+    assert parsed["outcome"] == "submitted"
+    assert [row["user_response"] for row in parsed["responses"]] == ["staging", ["unit"]]
+    assert len(fake.poll_ids) == 3
+    assert fake.cancelled_ids == [], "the device answered: nothing to release"
+
+
+def test_an_undelivered_scalar_original_waits_for_the_device_answer():
+    fake = _FakeState([{"status": "pending"}, {"status": "answered", "answer": "Blue"}])
+    _install(fake)
+    result = loop.middleware(**_kwargs(_undelivered_original(), {"question": "Q?", "choices": ["Red", "Blue"]}))
+    assert json.loads(result)["user_response"] == "Blue"
+
+
+def test_an_unanswered_card_after_an_undelivered_original_times_out(monkeypatch):
+    fake = _FakeState([])  # pending forever
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 0.3)
+    started = time.monotonic()
+    result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
+    assert time.monotonic() - started < 5
+    parsed = json.loads(result)
+    assert parsed["outcome"] == "timed_out"
+    assert "not answered within" in parsed["notice"]
+    assert "Conduit device" in parsed["notice"]
+    assert [(row["status"], row["user_response"]) for row in parsed["responses"]] == [
+        ("unanswered", None), ("unanswered", None)]
+    assert [row["question"] for row in parsed["responses"]] == ["Which environment?", "Which tests should run?"]
+    assert len(fake.poll_ids) >= 2
+    assert _wait_for_release(fake) == [fake.enqueued[0]["decision"]["request_id"]]
+
+
+def test_the_timed_out_batch_is_built_by_hermes_clarify_result_when_it_exists(monkeypatch):
+    seen = []
+    monkeypatch.setattr(sys.modules["tools.clarify_tool"], "_result",
+                        lambda normalized, reply: seen.append(reply) or "built by hermes", raising=False)
+    fake = _FakeState([])
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 0.2)
+    assert loop.middleware(**_kwargs(_undelivered_original(), _batch_args())) == "built by hermes"
+    [reply] = seen
+    assert reply["answers"] == {} and reply["outcome"] == "timed_out"
+    assert "not answered within" in reply["notice"]
+
+
+def test_an_unanswered_scalar_card_after_an_undelivered_original_returns_the_original(monkeypatch):
+    fake = _FakeState([])
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 0.2)
+    args = {"question": "Q?", "choices": ["Red", "Blue"]}
+    result = loop.middleware(**_kwargs(_undelivered_original(), args))
+    assert result == _undelivered_result(args)
+    assert len(fake.poll_ids) >= 2
+    assert _wait_for_release(fake)
+
+
+def test_an_undelivered_original_with_no_card_shown_returns_the_original():
+    fake = _FakeState([{"status": "pending", "deliverable": False}, {"status": "answered", "answer": "late"}])
+    _install(fake)
+    returned = threading.Event()
+    result = loop.middleware(**_kwargs(_undelivered_original(returned), _batch_args()))
+    assert json.loads(result)["outcome"] == "undelivered"
+    assert json.loads(result)["notice"] == UNDELIVERED_NOTICE
+    assert len(fake.poll_ids) == 1
+    assert _wait_for_release(fake)
+
+
+def test_an_undelivered_original_waits_no_longer_than_the_unattended_cap(monkeypatch):
+    fake = _FakeState([])
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 60.0)
+    monkeypatch.setattr(loop, "MAX_UNATTENDED_WAIT_SECONDS", 0.3)
+    started = time.monotonic()
+    result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
+    assert time.monotonic() - started < 10, "the cap, not the 60 s budget, ends the wait"
+    assert json.loads(result)["outcome"] == "timed_out"
+    assert _wait_for_release(fake)
+
+
+def test_the_unattended_cap_is_thirty_minutes():
+    assert loop.MAX_UNATTENDED_WAIT_SECONDS == 30 * 60
+
+
+def test_an_interrupt_ends_the_wait_after_an_undelivered_original(monkeypatch):
+    fake = _FakeState([])
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 60.0)
+    interrupted = threading.Event()
+    monkeypatch.setitem(sys.modules, "tools.interrupt", types.SimpleNamespace(is_interrupted=interrupted.is_set))
+    threading.Timer(0.2, interrupted.set).start()
+    started = time.monotonic()
+    result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
+    assert 0.1 <= time.monotonic() - started < 5, "it waited for the device until the interrupt"
+    assert json.loads(result)["outcome"] == "undelivered"
+    assert _wait_for_release(fake)
+
+
+def test_a_hermes_without_interrupts_still_waits_for_the_device(monkeypatch):
+    fake = _FakeState([{"status": "pending"}, {"status": "answered", "answer": "Blue"}])
+    _install(fake)
+    monkeypatch.delitem(sys.modules, "tools.interrupt", raising=False)
+    result = loop.middleware(**_kwargs(_undelivered_original(), {"question": "Q?", "choices": ["Red", "Blue"]}))
+    assert json.loads(result)["user_response"] == "Blue"
+
+
+def test_an_original_that_ended_any_other_way_still_wins_at_once():
+    for outcome in ("submitted", "cancelled", "timed_out"):
+        fake = _FakeState([])
+        _install(fake)
+        native = json.dumps({"responses": [{"question": "Which environment?", "choices_offered": ["staging", "prod"],
+                                            "status": "unanswered", "user_response": None}],
+                             "outcome": outcome, "notice": "[closed]"})
+        result = loop.middleware(**_kwargs(lambda args, native=native: native, _batch_args()))
+        assert result == native, outcome
+        assert _wait_for_release(fake), outcome
+
+
+def test_a_call_answer_wins_while_waiting_after_an_undelivered_original(monkeypatch):
+    fake = _FakeState([])
+    _install(fake)
+    returned = threading.Event()
+    polls_after = []
+
+    def taken_answers(request_id):
+        if not returned.is_set():
+            return None
+        polls_after.append(request_id)
+        return {"q0": "prod", "q1": json.dumps(["ui"])} if len(polls_after) >= 2 else None
+
+    monkeypatch.setattr(loop.calls, "taken_answers", taken_answers)
+    monkeypatch.setattr(loop.calls, "has_call_answers", lambda request_id: False)
+    result = loop.middleware(**_kwargs(_undelivered_original(returned), _batch_args()))
+    parsed = json.loads(result)
+    assert parsed["outcome"] == "submitted"
+    assert [row["user_response"] for row in parsed["responses"]] == ["prod", ["ui"]]
+    assert _wait_for_release(fake)
