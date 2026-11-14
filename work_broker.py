@@ -569,8 +569,11 @@ class Broker:
         elif found is not None:
             runtime_id = found[0]
         else:
+            # Bounded, as the authority's snapshot is: Hermes checks only the
+            # chat's tip against sessions.max_resume_messages, so a long Bot
+            # Chat a restart closed still takes its wake (issue 2395).
             resumed = self._unbound("session.resume", {"session_id": chat_id, "source": "desktop",
-                                                       **self._profile_params()})
+                                                       "omit_messages": True, **self._profile_params()})
             runtime_id = str(resumed.get("session_id") or "")
             if not runtime_id:
                 raise BrokerError("couldn't reopen the Bot Chat")

@@ -746,6 +746,20 @@ class Store:
                           f"({', '.join('?' for _ in ids)})", tuple(ids))
         return {row["id"]: row for row in rows}
 
+    def outbox_refs_of(self, ids: list[str], kind: str) -> list[str]:
+        """The refs the rows with these ids and this kind were written for."""
+        ids = [item for item in dict.fromkeys(ids) if item][:500]
+        if not ids:
+            return []
+        rows = self._read(f"SELECT ref FROM outbox WHERE kind = ? AND ref != '' AND id IN "
+                          f"({', '.join('?' for _ in ids)}) ORDER BY created_at", (kind, *ids))
+        return [row["ref"] for row in rows]
+
+    def outbox_count_since(self, kind: str, target: str, since: float) -> int:
+        rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE kind = ? AND target = ? AND created_at >= ?",
+                          (kind, target, since))
+        return int(rows[0]["n"]) if rows else 0
+
     def own_sends_since(self, ref: str, since: float) -> int:
         rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE ref = ? AND kind = 'send' AND own = 1 AND "
                           "accepted_at > 0 AND created_at >= ?", (ref, since))
