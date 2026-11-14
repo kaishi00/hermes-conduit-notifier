@@ -3423,10 +3423,16 @@ _SECRET_PAIRS = frozenset((first, key) for first in ("api", "private", "access",
                           for key in ("key", "keys")) | {("client", "secret")}
 
 
+# One-word spellings: "usercredentials", "secretkey", "privatekeys".
+_SECRET_ENDINGS = ("token", "tokens", "secret", "secrets", "password", "passwords", "credential", "credentials")
+_SECRET_COMPOUNDS = frozenset({"apikey", "privatekey", "secretkey", "accesskey", "masterkey", "authkey",
+                               "securitykey", "signingkey", "encryptionkey", "recoverykey", "sessionkey"})
+
+
 def _secret_arg(name: Any) -> bool:
     """Whether an argument's name says its value is a credential."""
     words = [word.lower() for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", str(name))]
-    return any(word in _SECRET_WORDS or word.endswith(("token", "tokens", "secret", "secrets", "password", "passwords")) for word in words) or any(
+    return any(word in _SECRET_WORDS or word.endswith(_SECRET_ENDINGS) or word.rstrip("s") in _SECRET_COMPOUNDS for word in words) or any(
         pair in _SECRET_PAIRS for pair in zip(words, words[1:]))
 
 
