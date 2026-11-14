@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.170.1 (2026-11-14)
+## 0.170.2 (2026-11-14)
 
 ### Fixes
 
@@ -24,6 +24,12 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 
 - A note from another bot now arrives under its own heading, saying no answer is owed.
+
+## 0.170.1 (2026-11-14)
+
+### Fixes
+
+- A Watch GPT-Live call that never connects now says the chosen voice may not be on your ChatGPT plan, instead of only that the connection didn't come up.
 
 ## 0.170.0 (2026-11-14)
 

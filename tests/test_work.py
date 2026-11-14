@@ -637,6 +637,25 @@ def test_a_note_whose_wake_hermes_refused_is_told_back(bots, hermes, monkeypatch
     assert any("Your note to Nahida («The merge is verified.») never reached it" in text for text in texts)
 
 
+def test_a_note_a_restart_caught_in_the_batch_goes_out_again_as_a_note(bots, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends
+    assert call("work_tell", {"bot": "nahida", "text": "Built."})["ok"]
+    for pending in (work._wakes, work._wake_asks, work._wake_tells, work._wake_answers, work._wake_items):
+        for batch in list(pending.values()):
+            timer = batch[1] if isinstance(batch, tuple) else None
+            if hasattr(timer, "cancel"):
+                timer.cancel()
+        pending.clear()  # the process ended before the batch went
+    monkeypatch.setattr(work, "_PROCESS_STARTED", __import__("time").time() + 1)
+    nahida = store_mod.Store(bots["nahida"])
+    work._replay(bots["nahida"], nahida)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and "«Built.»" in params["text"]
+    assert "Work update from another bot" in params["text"] and work.TELL_TAIL in params["text"]
+    assert not [row for row in nahida.outbox_pending() if row["kind"] == "line_tell"]
+
+
 def test_the_loop_hint_never_offers_a_question_back_to_ask_about(bots, hermes, monkeypatch):
     # DeepSeek on #780: Furina, waiting on Nahida's question back, was told to ask about it.
     assert call("work_ask", {"bot": "nahida", "text": "The report?"})["ok"]
