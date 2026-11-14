@@ -3416,17 +3416,17 @@ def _cut_keeping_lines(text: str, limit: int) -> str:
 # instructions, which are kept and shown in its chat.
 # Matched against the name's words (snake, kebab or camel case), so "author"
 # or "tokenizer" keep their values while "x-api-key" and "oauthToken" don't.
-_SECRET_WORDS = frozenset({"token", "tokens", "secret", "secrets", "password", "passwd", "passphrase",
-                           "pwd", "auth", "authorization", "oauth", "credential", "credentials", "cookie",
-                           "cookies", "apikey", "bearer", "jwt"})
-_SECRET_PAIRS = frozenset({("api", "key"), ("private", "key"), ("access", "key"), ("secret", "key"),
-                           ("client", "secret")})
+_SECRET_WORDS = frozenset({"token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passphrase",
+                           "pwd", "auth", "authn", "authz", "authorization", "authentication", "oauth",
+                           "credential", "credentials", "cookie", "cookies", "apikey", "apikeys", "bearer", "jwt"})
+_SECRET_PAIRS = frozenset((first, key) for first in ("api", "private", "access", "secret")
+                          for key in ("key", "keys")) | {("client", "secret")}
 
 
 def _secret_arg(name: Any) -> bool:
     """Whether an argument's name says its value is a credential."""
     words = [word.lower() for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", str(name))]
-    return any(word in _SECRET_WORDS or word.endswith(("token", "secret", "password")) for word in words) or any(
+    return any(word in _SECRET_WORDS or word.endswith(("token", "tokens", "secret", "secrets", "password", "passwords")) for word in words) or any(
         pair in _SECRET_PAIRS for pair in zip(words, words[1:]))
 
 

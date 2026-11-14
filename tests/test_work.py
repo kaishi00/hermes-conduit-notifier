@@ -7227,9 +7227,10 @@ def test_a_hand_offs_secret_names_are_read_by_their_words():
     # Review leftovers of notifier #790: "x-api-key" or "privateKey" with a short value slipped past the
     # old substring match, which also dropped "author" and "tokenizer".
     for name in ("api_key", "apiKey", "x-api-key", "oauthToken", "Authorization", "db_password", "privateKey",
-                 "access_key", "client_secret", "cookie", "refresh_token"):
+                 "access_key", "client_secret", "cookie", "refresh_token", "passwords", "authentication",
+                 "api_keys", "privateKeys", "userPasswords"):
         assert work._secret_arg(name), name
     for name in ("author", "source", "tokenizer", "authority", "command", "path", "session_id", "passage"):
         assert not work._secret_arg(name), name
-    line = work._step_line("http", {"headers": {"x-api-key": "k1"}, "author": "Eric"})
-    assert "k1" not in line and "Eric" in line
+    line = work._step_line("http", {"headers": {"x-api-key": "k1"}, "passwords": ["hunter2"], "author": "Eric"})
+    assert "k1" not in line and "hunter2" not in line and "Eric" in line
