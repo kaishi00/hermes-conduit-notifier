@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.172.0 (2026-11-14)
+
+### New and improved
+
+- A Hermes on a network without direct internet access can send this plugin's traffic through an HTTP proxy of its own with `CONDUIT_PUSH_PROXY`, without routing the rest of Hermes through it. Thanks to aminrpg for the idea and the first version.
+
 ## 0.171.0 (2026-11-14)
 
 ### New and improved
