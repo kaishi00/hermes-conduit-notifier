@@ -1220,7 +1220,8 @@ What a server needs beyond its address is three optional names, so a new
 OpenAI Realtime server needs no plugin change:
 
 - `model` goes on the address as `?model=`, unless the address already
-  names one. The status's `url` stays the address as set.
+  names one. The status's `url` is the set address as `ws(s)://` with its
+  path, without the model the dial adds.
 - `voice` is set on every `session.update` that goes to the server
   (`session.audio.output.voice`, or `session.voice` on a session in the older
   shape), on Classic's sockets and Local Live calls, the Watch's included,
@@ -1229,7 +1230,8 @@ OpenAI Realtime server needs no plugin change:
 
 The servers Conduit offers by name are a file,
 `dashboard/speech_server_presets.json`, served by `/speech-server/presets`.
-An entry has an `id` and a `name`, a `url` (complete, saved as is) or a
+An entry has an `id` and a `name`, a `url` (complete; Conduit gets it as it
+is dialed, `ws(s)://` with the path) or a
 `url_hint` (an example to finish, such as one with a workspace in it),
 `needs_key`, `drive_turns` (the server has a model of its own, so Hermes
 answers is the setting to start from), and optionally `model`, `models`,
