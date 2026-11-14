@@ -635,6 +635,11 @@ _local_live_limiter = core._MintLimiter(LOCAL_LIVE_REQUEST_LIMIT, 60.0,
 # When each profile's voice server last asked for a turn: Conduit's setup
 # shows whether the server is pointed at this plugin.
 _local_live_last_request: Dict[str, float] = {}
+# When a profile's speech server last answered a call by itself: a response
+# ended with the model address not asked since the call began. A server with
+# a model of its own does that; the plugin never gets a turn on it unless
+# the profile has it run them (voice.speech_server.drive_turns).
+_local_live_answered_alone: Dict[str, float] = {}
 
 
 _local_live_tasks: set = set()
@@ -704,6 +709,7 @@ def _local_live_profile_can_carry_key(profile: Optional[str]) -> bool:
 
 def local_live_status(
     profile: Optional[str], in_call: Optional[bool] = None, last_request_at: Optional[float] = None,
+    answered_alone_at: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Inside the profile's scope: what Conduit shows in Local Live's settings.
 
@@ -729,6 +735,9 @@ def local_live_status(
         "in_call": (_local_live_active_call(profile or "") is not None) if in_call is None else in_call,
         "last_request_at": (_local_live_last_request.get(_local_live_profile_key(profile))
                             if last_request_at is None else last_request_at),
+        # The server answered a call with a model of its own, and still
+        # would: Hermes gets no turn on it until the plugin runs them.
+        "answers_alone": bool(answered_alone_at) and not server.get("drive_turns"),
     }
 
 
@@ -739,9 +748,11 @@ async def get_local_live_status(request: Request, response: Response, profile: O
     _local_live_start_auth()
     in_call = _local_live_active_call(profile or "") is not None
     last_request_at = _local_live_last_request.get(_local_live_profile_key(profile))
+    answered_alone_at = _local_live_answered_alone.get(_local_live_profile_key(profile))
     try:
         return {"ok": True, **(await asyncio.wait_for(
-            core._run_scoped(profile, lambda: local_live_status(profile, in_call, last_request_at), speech_server._speech_server_executor),
+            core._run_scoped(profile, lambda: local_live_status(profile, in_call, last_request_at, answered_alone_at),
+                             speech_server._speech_server_executor),
             timeout=speech_server.SPEECH_SERVER_SETUP_TIMEOUT_S))}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Local Live status timed out", headers={"Cache-Control": "no-store"})
@@ -789,7 +800,8 @@ async def post_local_live_key(request: Request, response: Response, profile: Opt
 async def local_live_socket(ws: WebSocket) -> None:
     """A Local Live call: relayed to the speech server like Classic voice, plus its turns."""
 
-    async def relay(refuse: Callable[[int, str], Any], url: str, key: str, profile: Optional[str]) -> None:
+    async def relay(refuse: Callable[[int, str], Any], url: str, key: str, profile: Optional[str],
+                    drive: Optional[speech_server.SpeechServerDrive] = None) -> None:
         call = _LocalLiveCall(ws, _local_live_profile_key(profile), speaks=ws.query_params.get("mode") == "speak")
 
         async def to_phone(text: str) -> None:
@@ -799,15 +811,16 @@ async def local_live_socket(ws: WebSocket) -> None:
         async def fail(reason: str) -> None:
             await refuse(speech_server.SPEECH_SERVER_CLOSE_REFUSED, reason)
 
-        # A live call's turns, should its server only read text back.
-        read_back = None if call.speaks else local_live_read_back._LocalLiveReadBack(call, to_phone, fail)
+        # A live call's turns, should its server only read text back, or
+        # from the start when the profile has the plugin run them.
+        read_back = None if call.speaks else local_live_read_back._LocalLiveReadBack(call, to_phone, fail, drive=drive)
         if not _local_live_register(call):
             call.close()
             await fail("A Local Live call is already running on this Hermes profile")
             return
         try:
             await speech_server._speech_server_relay(ws, refuse, url, key, intercept=call.intercept, send_lock=call.send_lock,
-                                       read_back=read_back)
+                                       read_back=read_back, drive=drive)
         finally:
             call.close()
             _local_live_unregister(call)
