@@ -2430,6 +2430,22 @@ in its profile, and the sessions continuing it; a chat asked for by
 `session_id` is read even when hidden (plugin 0.78.1+; before, a Bot Chat
 listed nothing). Capability `artifacts`.
 
+### Saved artifacts (plugin 0.176+)
+
+An artifact saved in Conduit stays under Saved, whatever happens to its chat:
+`/api/plugins/conduit_push/artifacts/pins` keeps the profile's saved set in
+its `conduit-artifact-pins.json`, so every iPhone and iPad signed in to the
+profile shows the same one, and it survives a reinstall. `GET` lists them, the
+one saved last first; `POST` with `{"item": <a row from /artifacts>, "note":
+"..."}` saves one, or changes the note (up to 200 characters) of one already
+saved; `DELETE ?id=<path or URL>` unsaves it. Saving a file still on the host
+copies it into the profile's `conduit-saved-artifacts/` folder (a regular file
+up to 200 MB, every copy together up to 2 GB), and the row names the copy as
+`kept_path`, so it opens after the original, its chat or its session is gone;
+`not_kept` says why a file has none (`too_large`, `no_room`, `missing`,
+`not_a_file`, `unreadable`). Unsaving removes the copy. A link keeps its row
+only. Capability `artifact-pins`.
+
 ## Workspace files (plugin 0.109+)
 
 Conduit's Folder tab, beside Artifacts, browses one folder at a time: the

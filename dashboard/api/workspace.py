@@ -160,6 +160,81 @@ async def get_artifacts(response: Response, profile: Optional[str] = None, befor
     return {"ok": True, **page}
 
 
+# /artifacts/pins: the artifacts the user saved (artifact_pins.py in the
+# plugin's folder, hermes-conduit#2467), shared by every device signed in to
+# the profile. GET lists them, the one saved last first; POST saves one (its
+# row from /artifacts, as {"item": …, "note": …}) and keeps a copy of a file
+# so it opens after its chat or file is gone, or changes a saved one's note;
+# DELETE ?id=<path or URL> unsaves it and removes the copy.
+
+ARTIFACT_PINS_LIMIT = 60
+ARTIFACT_PINS_WINDOW_S = 60.0
+ARTIFACT_PINS_MAX_BODY_BYTES = 32 * 1024
+_artifact_pins_limiter = core._MintLimiter(ARTIFACT_PINS_LIMIT, ARTIFACT_PINS_WINDOW_S,
+                                           message="Too many saved-artifact requests; try again shortly")
+_artifact_pins_module: Any = None
+
+
+def _artifact_pins() -> Any:
+    """artifact_pins.py in the plugin's folder, loaded once."""
+    global _artifact_pins_module
+    with _artifacts_module_lock:
+        if _artifact_pins_module is None:
+            path = os.path.join(core._plugin_root(), "artifact_pins.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_artifact_pins", path)
+            if spec is None or spec.loader is None or not os.path.isfile(path):
+                raise core.TokenError(501, "This plugin install is missing artifact_pins.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _artifact_pins_module = module
+        return _artifact_pins_module
+
+
+def artifact_pins(action: str, body: Any = None) -> Dict[str, Any]:
+    """Runs inside the profile scope: the pins are the profile's."""
+    module = _artifact_pins()
+    store = module.PinStore(core._calls_home())
+    try:
+        if action == "save":
+            return store.save(body)
+        if action == "remove":
+            return store.remove(body)
+        return store.view()
+    except module.PinError as exc:
+        raise core.TokenError(409 if exc.code == "too_many" else 400, str(exc))
+
+
+async def _artifact_pins_route(profile: Optional[str], run: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    try:
+        return {"ok": True, **(await core._run_scoped(profile, core._limited(_artifact_pins_limiter, profile, run)))}
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
+    except Exception as exc:
+        raise core._unexpected("pins", exc, feature="Saved artifacts")
+
+
+@router.get("/artifacts/pins")
+async def get_artifact_pins(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _artifact_pins_route(profile, lambda: artifact_pins("view"))
+
+
+@router.post("/artifacts/pins")
+async def post_artifact_pin(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await core._read_json_body(request, ARTIFACT_PINS_MAX_BODY_BYTES)
+    return await _artifact_pins_route(profile, lambda: artifact_pins("save", body))
+
+
+@router.delete("/artifacts/pins")
+async def delete_artifact_pin(response: Response, id: str, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _artifact_pins_route(profile, lambda: artifact_pins("remove", id))
+
+
 
 # GET /workspace/resolve: where a file a chat's reply names by its name or a
 # relative path is (hermes-conduit#1809), from the chat's folder, its git
