@@ -5875,6 +5875,8 @@ def _send_wake(home: Path, coordinator: str) -> None:
         text = said + work_coord.ANSWER_TAIL + ("\n\n" + text if text else " " + LINK_RULE)
     item = ""
     sent = False
+    outcome = ""
+    told = False
     try:
         item = store.outbox_add("", "wake", coordinator, text)
         if asks or answers:
@@ -5889,13 +5891,14 @@ def _send_wake(home: Path, coordinator: str) -> None:
             store.outbox_done(line_item, outcome if outcome in ("queued", "accepted") else "refused")
         if outcome not in ("queued", "accepted"):
             _asks_unreached(home, store, items, f"Hermes answered {outcome}")
+            told = True
     except Exception as error:  # noqa: BLE001 — the digest still carries it on the next turn
         # Not sent: none of it comes back as news after a restart. A write
         # that failed after Hermes took it tries once more to mark the rows
         # delivered, so a restart doesn't hand the same ask or yes over twice.
         for row in ([item] if item else []) + items:
             try:
-                store.outbox_done(row, "accepted" if sent else "refused")
+                store.outbox_done(row, "accepted" if sent and outcome in ("queued", "accepted") else "refused")
             except Exception:  # noqa: BLE001
                 logger.debug("conduit_push: couldn't mark an update row", exc_info=True)
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
@@ -5903,6 +5906,9 @@ def _send_wake(home: Path, coordinator: str) -> None:
         # out may still queue the turn, and a write after the send changes nothing.
         if not sent and not getattr(error, "timed_out", False):
             _asks_unreached(home, store, items, str(error) or type(error).__name__)
+        elif sent and not told and outcome and outcome not in ("queued", "accepted"):
+            # Refused, and a write on the way failed: the asks still fail.
+            _asks_unreached(home, store, items, f"Hermes answered {outcome}")
 
 
 def _asks_unreached(home: Path, store: work_store.Store, items: list[str], reason: str) -> None:
@@ -5946,13 +5952,16 @@ def _asks_unreached(home: Path, store: work_store.Store, items: list[str], reaso
         return
     for sender, line in notes:
         # A note opens no ask, so only the bot that sent it is told.
-        teller_home = _home_of(home, sender)
-        chat = _bot_chat_of(teller_home) if teller_home is not None else ""
-        if not chat:
-            continue
-        said = line.split("«", 1)[-1].rsplit("»", 1)[0] if "«" in line else line
-        _queue_wake(teller_home, chat, f"- Your note to {name} («{_cut(said, 120)}») never reached it: {why}. "
-                                       "Send it again later if it still matters.")
+        try:
+            teller_home = _home_of(home, sender)
+            chat = _bot_chat_of(teller_home) if teller_home is not None else ""
+            if not chat:
+                continue
+            said = line.split("«", 1)[-1].rsplit("»", 1)[0] if "«" in line else line
+            _queue_wake(teller_home, chat, f"- Your note to {name} («{_cut(said, 120)}») never reached it: "
+                                           f"{why}. Send it again later if it still matters.")
+        except Exception:  # noqa: BLE001 — the next note's sender is still told
+            logger.warning("conduit_push: couldn't tell a bot its note never arrived", exc_info=True)
 
 
 def _wake_text(lines: list[str], asks: set[str], work_tail: str = WORK_TAIL, tells: frozenset | set = frozenset()) -> str:

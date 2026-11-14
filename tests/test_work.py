@@ -754,6 +754,23 @@ def test_a_wake_hermes_took_doesnt_hand_its_lines_over_again_when_a_write_fails(
     assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
 
 
+def test_a_refused_wake_whose_write_fails_still_fails_the_ask(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_done
+
+    def broken(self, item, outcome):
+        if outcome == "rejected":
+            raise OSError("disk full")
+        return real(self, item, outcome)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_done", broken)
+    monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+        "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "failed"
+    assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
+
+
 def test_an_ask_to_a_bot_that_cant_take_it_is_refused(bots, hermes):
     store_mod.Store(bots["zhongli"]).set_policy("off")
     assert call("work_ask", {"bot": "zhongli", "text": "?"})["error"] == "bot_off"
