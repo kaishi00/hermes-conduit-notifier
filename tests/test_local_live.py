@@ -2462,6 +2462,7 @@ def test_an_agent_call_is_answered_by_the_servers_own_model_with_the_calls_instr
     assert session["audio"]["input"]["transcription"] == {"model": "gpt-4o-mini-transcribe"}
     greeting = next(frame for frame in upstream.sent if frame["type"] == "response.create")
     assert greeting["response"]["instructions"] == SAY and greeting["response"]["conversation"] == "none"
+    assert greeting["response"]["tool_choice"] == "none"
     assert api.local_live_read_back._local_live_item_words(greeting["response"]["input"][0]) == "Hi, I'm listening."
     outputs = [frame["item"] for frame in upstream.sent if frame.get("item", {}).get("type") == "function_call_output"]
     assert outputs == [{"type": "function_call_output", "call_id": "call_1", "output": '{"status": "started"}'}]
@@ -2489,6 +2490,25 @@ def test_a_tools_answer_waits_for_the_servers_response_to_end(client, hermes, se
         assert {"type": "response.create"} not in upstream.sent
         upstream.push({"type": "response.done", "response": {"id": "talk", "status": "completed"}})
         _wait_for(lambda: upstream.sent[-1] == {"type": "response.create"})
+        _finish(ws)
+
+
+def test_a_refused_ask_for_the_tools_reply_is_made_again_when_the_server_is_free(client, hermes, server):
+    # The server had started answering new speech before the relay knew.
+    _own_model(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _own_ready(ws, upstream)
+        _function_call(upstream)
+        _next(ws, "conduit.tool.call")
+        upstream.busy = 1
+        ws.send_text(json.dumps({"type": "conduit.tool.result", "call_id": "call_1", "output": "{}", "speak": False}))
+        # Refused as busy, then asked again once that response ended.
+        _wait_for(lambda: upstream.sent.count({"type": "response.create"}) == 2)
+        # A setup sent again with no tools takes them away.
+        ws.send_text(json.dumps({"type": "conduit.agent", "instructions": "No tools now.", "tools": []}))
+        _wait_for(lambda: upstream.sent[-1].get("type") == "session.update")
+        assert upstream.sent[-1]["session"]["tools"] == [] and upstream.sent[-1]["session"]["tool_choice"] == "none"
         _finish(ws)
 
 

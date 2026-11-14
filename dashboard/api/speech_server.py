@@ -261,9 +261,10 @@ class SpeechServerOwnModel(SpeechServerDrive):
         if not isinstance(session, dict):
             session = frame["session"] = {}
         session["instructions"] = instructions
-        if tools:
-            session["tools"] = tools
-            session["tool_choice"] = "auto"
+        # Always the call's current tools: a setup sent again with none
+        # takes the earlier ones away.
+        session["tools"] = tools
+        session["tool_choice"] = "auto" if tools else "none"
         return self.update(frame)
 
 

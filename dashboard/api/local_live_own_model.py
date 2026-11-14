@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import time
 import uuid
@@ -43,6 +44,7 @@ LOCAL_LIVE_OWN_MODEL_READY_S = 10.0
 # A response asked for after a tool's answer that the server says nothing
 # about in this long is asked for again with the next answer.
 LOCAL_LIVE_OWN_MODEL_ASK_S = 5.0
+# Call ids remembered: the server names a call in up to three events.
 LOCAL_LIVE_OWN_MODEL_MAX_CALLS = 256
 _LOCAL_LIVE_OWN_MODEL_AUDIO = ('"response.output_audio.delta"', '"response.audio.delta"')
 _LOCAL_LIVE_OWN_MODEL_KINDS = ('"response.created"', '"response.done"', "function_call", '"error"')
@@ -83,7 +85,8 @@ class _LocalLiveOwnModel:
         self.pending = 0
         # When a response was last asked for, until the server starts it.
         self.asked_at: Optional[float] = None
-        self.seen: Set[str] = set()
+        # The latest call ids, so one the server names twice runs once.
+        self.seen: "collections.OrderedDict[str, None]" = collections.OrderedDict()
         self.tasks: Set["asyncio.Task[None]"] = set()
         self.closed = False
         call.own_model = self
@@ -171,8 +174,15 @@ class _LocalLiveOwnModel:
             await self._settle()
             return text
         if kind == "error":
-            # A refused response.create: the next answer asks again.
-            self.asked_at = None
+            if self.asked_at is not None:
+                # The response.create for a tool's answer was refused: it is
+                # still owed. A server busy with a response it had started
+                # (the user spoke meanwhile) is asked again when that ends.
+                self.asked_at = None
+                self.owed = True
+                error = event.get("error") if isinstance(event.get("error"), dict) else {}
+                if error.get("code") == "conversation_already_has_active_response":
+                    self.active = True
             return text
         if kind == "response.function_call_arguments.delta":
             return None
@@ -225,8 +235,10 @@ class _LocalLiveOwnModel:
         greeting = " ".join("".join(said).split())[:local_live.LOCAL_LIVE_MAX_REPLY_CHARS]
         if greeting:
             item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": greeting}]}
+            # Read aloud, never answered: no tool runs for it.
             await self._send(self.setup.say({"type": "response.create",
-                                             "response": {"conversation": "none", "input": [item]}}))
+                                             "response": {"conversation": "none", "input": [item],
+                                                          "tool_choice": "none"}}))
             return
         response_id = f"resp_conduit_{uuid.uuid4().hex[:16]}"
         for frame in (local_live_read_back._local_live_read_back_response(None, response_id),
@@ -242,9 +254,11 @@ class _LocalLiveOwnModel:
             return
         call_id, name = item.get("call_id"), item.get("name")
         if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name \
-                or call_id in self.seen or len(self.seen) >= LOCAL_LIVE_OWN_MODEL_MAX_CALLS:
+                or call_id in self.seen:
             return
-        self.seen.add(call_id)
+        self.seen[call_id] = None
+        if len(self.seen) > LOCAL_LIVE_OWN_MODEL_MAX_CALLS:
+            self.seen.popitem(last=False)
         arguments = item.get("arguments")
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments if isinstance(arguments, dict) else {})
