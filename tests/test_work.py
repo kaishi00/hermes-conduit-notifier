@@ -293,6 +293,7 @@ def test_the_default_leaves_a_bot_chat_as_it_was_where_workstreams_cant_run(home
     monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat")
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
+    monkeypatch.setattr(work, "_home", lambda: home)  # not a home another test pinned
     assert work.policy(home) == "off" and not work.available()
     assert work.tool_block(BOT_CHAT, "terminal") is None  # not sent to a work_start that can't run
     store_mod.Store(home).set_policy("strict")  # the user's own choice stands
