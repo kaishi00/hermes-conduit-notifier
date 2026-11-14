@@ -229,3 +229,36 @@ def test_status_says_nothing_when_unset(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli, "load_state", lambda: {"gateway_name": "box", "relay_url": "https://relay.example"})
     cli.dispatch(types.SimpleNamespace(conduit_push_action="status"))
     assert "Proxy" not in capsys.readouterr().out
+
+
+def test_an_https_proxy_url_is_used_like_an_http_one(monkeypatch):
+    monkeypatch.setenv("CONDUIT_PUSH_PROXY", "https://proxy.example:8443")
+    assert push_proxy.proxy_url() == "https://proxy.example:8443"
+    opener = push_proxy.opener(object(), room_mailbox._proxied_opener)
+    handler = next(h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler))
+    assert handler.proxies == {"https": "https://proxy.example:8443"}
+    monkeypatch.setattr(push_proxy, "_ws_proxy_support", True)
+    assert push_proxy.websocket_kwargs("wss://relay.example/x", None) == {"proxy": "https://proxy.example:8443"}
+
+
+def test_an_unpaired_host_still_shows_the_proxy(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CONDUIT_PUSH_PROXY", "proxy.example:3128")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cli, "load_state", lambda: {})
+    assert cli.dispatch(types.SimpleNamespace(conduit_push_action="status")) == 1
+    out = capsys.readouterr().out
+    assert "not paired" in out
+    assert "Proxy (CONDUIT_PUSH_PROXY): ignored (it must start with http:// or https://, and SOCKS isn't supported)" in out
+
+
+def test_a_push_proxy_file_that_wont_load_is_tried_and_logged_once(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(api.core, "_push_proxy_module", None)
+    monkeypatch.setattr(api.core, "_push_proxy_failed", False)
+    monkeypatch.setattr(api.core, "_plugin_root", lambda: str(tmp_path))  # no push_proxy.py there
+    monkeypatch.setenv("CONDUIT_PUSH_PROXY", "http://proxy.example:3128")
+    default = object()
+    with caplog.at_level(logging.WARNING):
+        assert api.core._proxy_opener(default, lambda proxy: pytest.fail("proxied")) is default
+        assert api.core._proxy_opener(default, lambda proxy: pytest.fail("proxied")) is default
+        assert api.core._proxy_websocket_kwargs("wss://relay.example/x", None) == {}
+    assert sum("Couldn't load push_proxy.py" in r.getMessage() for r in caplog.records) == 1
