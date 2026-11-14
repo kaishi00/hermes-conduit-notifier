@@ -1812,6 +1812,7 @@ def test_routes_mark_a_link_as_your_own_hermes(routes, monkeypatch, mailbox_url)
 
     assert eric.call("PUT", "/rooms/links/own", json={"link_id": "nope", "own": True}).status_code == 404
     assert eric.call("PUT", "/rooms/links/own", json={"link_id": link_id, "own": "yes"}).status_code == 400
+    assert eric.call("PUT", "/rooms/links/own", json={"link_id": 123, "own": True}).status_code == 400
 
 
 @needs_node
@@ -2321,10 +2322,10 @@ def test_an_older_link_own_never_undoes_a_later_one(home, monkeypatch):
     eric.set_own(link_id, True)
     _run(eric, mona)
     with mona._store.update() as state:
-        state["links"][link_id]["peer_own"]["seq"] = 5  # a later change already arrived
+        state["links"][link_id]["peer_own"]["seq"] = 10 ** 12  # a later change already arrived
 
     clock.now += 1
-    eric.set_own(link_id, False)  # seq 2: older than what mona has
+    eric.set_own(link_id, False)  # older than what mona has
     _run(eric, mona)
     assert mona.get(link_id)["their_own"] is True
 
@@ -2341,6 +2342,50 @@ def test_link_own_goes_again_with_the_hello(home, monkeypatch):
     clock.now += links_module.HELLO_AGAIN_S
     _run(eric, mona)
     assert mona.get(link_id)["their_own"] is True
+
+
+@needs_node
+def test_link_own_heals_after_an_older_links_json_comes_back(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)  # seqs are past the clock's second
+    _run(eric, mona)
+    with eric._store.update() as state:
+        backup = dict(state["links"][link_id])
+    clock.now += 1
+    eric.set_own(link_id, False)  # a later seq
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is False
+    with eric._store.update() as state:  # the backup from between the two
+        state["links"][link_id].update(own=backup["own"], own_seq=backup["own_seq"])
+
+    assert eric.set_own(link_id, True)["own"] is True  # already marked: nothing new to say
+    clock.now += links_module.HELLO_AGAIN_S
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is True
+
+
+@needs_node
+def test_an_unmark_with_the_seq_already_held_still_ends_the_own_link(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)
+    _run(eric, mona)
+    held = mona._store.read()["links"][link_id]["peer_own"]["seq"]
+    with eric._store.update() as state:  # a backup from before the mark, restored the same second
+        state["links"][link_id].update(own=True, own_seq=held - 1)
+    eric.set_own(link_id, False)  # sends the seq mona already holds
+    assert eric._store.read()["links"][link_id]["own_seq"] == held
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is False
+
+
+def test_the_next_own_seq_is_past_the_last_and_the_clock():
+    assert links_module._next_own_seq({}, 100) == 101
+    assert links_module._next_own_seq({"own_seq": 100}, 100) == 101  # one the other side took this second
+    assert links_module._next_own_seq({"own_seq": 500}, 100) == 501
+    assert links_module._next_own_seq({"own_seq": "x"}, 100) == 101  # a hand-edited file doesn't stop the hello
+    assert links_module._next_own_seq({"own_seq": True}, 100) == 101
 
 
 def test_set_own_needs_a_linked_link(home):
