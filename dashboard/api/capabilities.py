@@ -233,6 +233,9 @@ ROUTE_CAPABILITIES = (
     # other installations all came over Links both sides marked runs without
     # the owner's room rules (multi-instance plan, Rooms 1).
     "room-own-links",
+    # GET /rooms/own-bots and /rooms/drafts' bring: your other Hermes' bots
+    # over an own Link, listed in New Group Chat and joining by themselves.
+    "room-own-bots",
     # GET/POST /rooms/setup: this Hermes' API server, a profile's room
     # ceiling and approvals, set up for Linked Rooms.
     "room-setup",

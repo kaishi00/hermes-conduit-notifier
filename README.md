@@ -4368,6 +4368,18 @@ else (a room with a third Hermes keeps the rules there, even another of yours,
 since a name says nothing of whose it is). `/rooms/people` says so in
 `own_hermes`. Anything that can't be read keeps the rules.
 
+Over an own Link each Hermes also tells the other which bots it has
+(`room.bots`, plugin 0.171+): each profile's agent as a room names it, and
+whether it's set up to join a room another Hermes hosts. `GET /rooms/own-bots`
+lists them by Link, so Conduit's New Group Chat offers them beside your own. A
+draft's `bring` (`{"<Link id>": ["<profile>", ...]}`) names the other Hermes'
+bots to seat; after the invite a `room.bring` names them, and that Hermes joins
+them by itself, with no join card, but only over an own Link, only for an invite
+that names nobody else, and only profiles it has. One that can't join (not set
+up for rooms, or on Codex's app server) leaves the invite on its join card. In
+such a room no bot has room choices: each runs with its own Hermes' settings
+(Eric 2026-11-14).
+
 The dashboard's process reads the inbox: one loop for the installation,
 whichever process holds `conduit-rooms/.lease`. While nothing waits it only
 looks at `links.json` every 2 s, and it reads the mailbox once there's an

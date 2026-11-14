@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.171.0 (2026-11-14)
+
+### New and improved
+
+- Your own Hermes tell each other which bots they have, so Conduit can offer your other Hermes' bots when you make a group chat, and those bots join by themselves, with no join card.
+
 ## 0.170.5 (2026-11-14)
 
 ### Fixes
