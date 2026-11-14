@@ -3412,13 +3412,30 @@ def _cut_keeping_lines(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+# Argument names whose values a hand-off leaves out of the workstream's
+# instructions, which are kept and shown in its chat.
+_SECRET_ARG = re.compile(r"token|secret|passw|api_?key|auth|credential|cookie", re.IGNORECASE)
+
+
+def _without_secret_args(value: Any) -> Any:
+    """``value`` with secret-named arguments' values left out, nested ones too."""
+    if isinstance(value, dict):
+        return {key: "(left out)" if _SECRET_ARG.search(str(key)) else _without_secret_args(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_secret_args(item) for item in value]
+    return value
+
+
 def _step_line(name: str, args: Any) -> str:
     """One step a quick turn took, for the workstream it hands on to."""
+    args = _without_secret_args(args)
     try:
         shown = json.dumps(args, ensure_ascii=False, sort_keys=True) if args else ""
     except (TypeError, ValueError):
         shown = str(args)
-    return _cut(f"{name} {shown}".strip(), 300)
+    # Credentials inside ordinary values too (a command's bearer header).
+    return _cut(_masked(f"{name} {shown}".strip()), 300)
 
 
 # Each Bot Chat turn's ask, as Hermes gave it to pre_llm_call: (session,
@@ -3427,16 +3444,24 @@ _asks: dict[tuple[str, str], str] = {}
 
 
 def note_turn_ask(session_id: Any, turn_id: Any, user_message: Any) -> None:
-    """Keeps a turn's ask for the workstream its quick steps may hand on to."""
+    """Keeps a turn's ask for the workstream its quick steps may hand on to.
+    Hermes calls pre_llm_call once a turn, so each call starts a new one:
+    the last turn's steps and hand-off aren't this one's, even when Hermes
+    names no turn id (its key is the chat's alone) or the user sends the
+    same words again."""
     if not isinstance(user_message, str) or not user_message.strip():
-        return
-    if user_message.startswith("Work update from "):
-        # The plugin's own turn (a workstream's report, another bot's ask),
-        # not the user's: its rest is the bot's to route, never handed off.
         return
     key = (str(session_id or ""), str(turn_id or ""))
     with _steps_lock:
         _asks.pop(key, None)
+        _did.pop(key, None)
+        _handed.pop(key, None)
+        if not turn_id:
+            _steps.pop(key, None)
+        if user_message.startswith("Work update from "):
+            # The plugin's own turn (a workstream's report, another bot's ask),
+            # not the user's: its rest is the bot's to route, never handed off.
+            return
         _asks[key] = user_message.strip()
         while len(_asks) > _STEP_TURNS:
             del _asks[next(iter(_asks))]
@@ -3481,6 +3506,10 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
         return STEP_BLOCK.format(tool=tool) + (f" (The plugin couldn't start it for you: {note})" if note else "")
     shown = str(answer.get("title") or title)
     with _steps_lock:
+        if _asks.get(key) != ask:
+            # A new turn came in while it started: this hand-off is the last
+            # turn's, and the new one's blocked calls mustn't be told it's theirs.
+            return HANDED_OFF.format(tool=tool, ref=ref, title=shown)
         _handed[key] = (ref, shown)
         while len(_handed) > _STEP_TURNS:
             del _handed[next(iter(_handed))]
@@ -3546,6 +3575,10 @@ def give_back_steps() -> None:
         if key in _steps:
             first, taken = _steps[key]
             _steps[key] = (first, max(taken - count, 0))
+        did = _did.get(key)
+        if did:
+            # Nor is it among the steps a hand-off says already ran.
+            del did[-count:]
 
 
 # Each home's memory provider and its tools, by config.yaml's mtime.
@@ -6174,7 +6207,12 @@ def flush_wakes() -> None:
 
 def _summary(args: Any) -> str:
     """A step's arguments in a line, with credential-shaped text masked."""
-    text = _raw_summary(args)
+    return _masked(_raw_summary(args))
+
+
+def _masked(text: str) -> str:
+    """Text with credential-shaped runs masked, by Hermes' redactor where
+    there is one."""
     try:
         from agent.redact import redact_sensitive_text
 

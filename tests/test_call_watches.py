@@ -633,3 +633,13 @@ def test_a_quoted_happening_is_read(home, hermes, clock):
     assert json.loads(watches.report({"happening": " true ", "saw": "Down."},
                                      session_id=RUN.format(job_id)))["status"] == "calling"
     assert json.loads(watches.report({"happening": "maybe"}, session_id=RUN.format(job_id)))["error"] == "invalid"
+
+
+def test_a_run_whose_watch_was_refreshed_meanwhile_still_hears_how_to_report(home, hermes, clock, monkeypatch):
+    job_id = _homelab(hermes)
+    store = watches._store()
+    # The first read finds it stale; by the read under the lock another run refreshed it.
+    reads = iter([{job_id: store.configs()[job_id]}, {}])
+    monkeypatch.setattr(type(store), "stale_prompts", lambda self: next(reads))
+    monkeypatch.setattr(watches, "_store", lambda: store)
+    assert watches.run_note(RUN.format(job_id)) == watches.RUN_NOTE

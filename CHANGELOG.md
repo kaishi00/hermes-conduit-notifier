@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.170.5 (2026-11-14)
+
+### Fixes
+
+- When the Bot Chat hands the rest of a turn to a workstream, the workstream is no longer told about a step that never ran, a new request right after an earlier hand-off gets its own steps and workstream (even the same words sent again), and passwords, tokens and keys in the steps, commands included, are left out of its instructions.
+
 ## 0.170.4 (2026-11-14)
 
 ### Fixes
