@@ -210,7 +210,9 @@ class PinStore:
                         # crash cut short goes rather than counting forever.
                         # A finished copy keeps its name, whatever it ends in.
                         if name.startswith(".") and name.endswith(".tmp"):
-                            if self.clock() - info.st_mtime > STALE_COPY_SECONDS:
+                            if (self.clock() - info.st_mtime > STALE_COPY_SECONDS
+                                    and os.path.dirname(root) == str(self.copies)):
+                                # Only a per-copy folder, never the store.
                                 shutil.rmtree(root, ignore_errors=True)
                             continue
                         total += info.st_size

@@ -275,3 +275,16 @@ def test_a_running_copys_temporary_counts_by_its_reservation_only(tmp_path):
     (running / ".big.mov.tmp").write_bytes(b"x" * 10)
     assert store._copies_size() == 0
     assert running.exists()
+
+
+def test_a_stray_temporary_at_the_root_never_sweeps_the_store(tmp_path):
+    original = tmp_path / "a.txt"
+    original.write_text("one")
+    clock = Clock(now=100_000.0)
+    store = pins.PinStore(tmp_path / "home", clock=clock)
+    kept = pathlib.Path(store.save({"item": _file_row(original)})["pin"]["kept_path"])
+    stray = store.copies / ".stray.tmp"
+    stray.write_bytes(b"x")
+    os.utime(stray, (1_000.0, 1_000.0))
+    store._copies_size()
+    assert kept.exists()
