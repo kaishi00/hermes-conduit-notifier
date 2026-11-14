@@ -13,11 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.172.1 (2026-11-14)
+## 0.172.2 (2026-11-14)
 
 ### Fixes
 
 - A model you pick for a chat sticks. A chat that once ran a turn on a fallback model (a Bot Chat, say) went back to that fallback's provider whenever Hermes reopened it, so the model you picked was refused and the chat snapped back to the fallback model.
+
+## 0.172.1 (2026-11-14)
+
+### Fixes
+
+- `hermes conduit-push status` on a profile that isn't paired yet now also shows the `CONDUIT_PUSH_PROXY` in use, or why it was ignored, so a mistyped proxy that stopped pairing is easy to spot.
+
+## 0.172.0 (2026-11-14)
+
+### New and improved
+
+- A Hermes on a network without direct internet access can send this plugin's traffic through an HTTP proxy of its own with `CONDUIT_PUSH_PROXY`, without routing the rest of Hermes through it. Thanks to aminrpg for the idea and the first version.
 
 ## 0.171.0 (2026-11-14)
 

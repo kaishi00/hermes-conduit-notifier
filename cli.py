@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import e2e, session_titles
+from . import e2e, push_proxy, session_titles
 from .client import DEFAULT_RELAY_URL, RelayRejected, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, record_relay_accepted, record_relay_refusal, request_key_rotation, send_now, set_redact_content, state_path, unpair
 from .relay_urls import check_request_url
 from .events import event_id, plugin_hello, push_event
@@ -262,12 +262,17 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if action == "status":
         state = load_state()
+        proxy = push_proxy.status()
         if not state:
             print("This Hermes profile is not paired with Conduit.")
+            if proxy:
+                print(f"Proxy (CONDUIT_PUSH_PROXY): {_printable(proxy)}")
             return 1
         print(f"Paired: {_printable(state.get('gateway_name') or socket.gethostname())}")
         relay_url = str(state.get('relay_url') or DEFAULT_RELAY_URL)
         print(f"Relay: {_printable(relay_url)}")
+        if proxy:
+            print(f"Proxy (CONDUIT_PUSH_PROXY): {_printable(proxy)}")
         try:
             check_request_url(f"{relay_url.rstrip('/')}/v1/events")
         except ValueError:

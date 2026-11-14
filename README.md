@@ -73,6 +73,28 @@ put on disk waits for its restart (plugin 0.147.2+), runs only the gateway's
 and the dashboard's restarts, as an update would. Leave it unset (or `0`) for
 a plugin you update from Conduit.
 
+### A host without direct internet access (plugin 0.172.0+)
+
+On a network where only this plugin should reach the internet, set
+`CONDUIT_PUSH_PROXY` in the gateway's and the dashboard's environment to an
+HTTP proxy and restart them, such as `CONDUIT_PUSH_PROXY=http://proxy.internal:3128` (an
+`https://` proxy and a `user:password@` in the URL work too). The plugin's
+own HTTPS and WSS traffic then goes through it: the relay (notifications,
+calls, Lock Screen progress, pairing), the Watch's relay socket, the rooms
+mailbox, Apple Maps lookups, and the voice providers the host calls (Gemini,
+Qwen, GPT-Live, Grok, an `https://` Local Live front model or `wss://`
+speech server). The rest of Hermes doesn't use it, unlike a process-wide
+`HTTPS_PROXY`, which the plugin also follows when this is unset.
+
+Plain HTTP and WS never go through it (loopback, a LAN or Tailscale
+pairing claim, a speech server on your LAN), and a host named in `NO_PROXY`
+is reached directly. SOCKS proxies aren't supported; most proxy clients also
+offer an HTTP port. A value that isn't an `http://` or `https://` proxy URL
+is ignored with a warning in the log, and
+`hermes conduit-push status` shows the proxy in use (without its password)
+or why it was ignored. WSS through the proxy needs websockets 15 or newer
+in Hermes' environment. Proposed by aminrpg (#746).
+
 Pairing codes expire after ten minutes and can only be claimed once.
 
 With plugin 0.24+ Conduit pairs the active dashboard's profile by itself: it

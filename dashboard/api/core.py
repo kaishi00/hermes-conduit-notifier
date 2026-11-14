@@ -358,6 +358,51 @@ def _plugin_package_module(name: str) -> Any:
         raise TokenError(501, f"This plugin install is missing {name}.py; update the plugin") from None
 
 
+# --- CONDUIT_PUSH_PROXY (push_proxy.py) ------------------------------------------
+
+_push_proxy_module: Any = None
+_push_proxy_failed = False
+_push_proxy_lock = threading.Lock()
+
+
+def _push_proxy() -> Any:
+    """push_proxy.py in the plugin's folder, loaded once by path (as relay_urls.py
+    is); None when it can't be, which leaves every request as it was. A failed
+    load is tried and logged once, not on every request."""
+    global _push_proxy_module, _push_proxy_failed
+    with _push_proxy_lock:
+        if _push_proxy_module is None and not _push_proxy_failed:
+            try:
+                import importlib.util
+
+                path = os.path.join(_plugin_root(), "push_proxy.py")
+                spec = importlib.util.spec_from_file_location("conduit_push_dashboard_push_proxy", path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"no loader for {path}")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception:  # noqa: BLE001 - a missing or broken file must not stop any request
+                _push_proxy_failed = True
+                logger.warning("Couldn't load push_proxy.py; CONDUIT_PUSH_PROXY is ignored", exc_info=True)
+                return None
+            _push_proxy_module = module
+        return _push_proxy_module
+
+
+def _proxy_opener(default: Any, build: Callable[[Any], Any]) -> Any:
+    """The opener for an HTTPS request: `default`, unless CONDUIT_PUSH_PROXY is set
+    (then one `build` made around its ProxyHandler)."""
+    module = _push_proxy()
+    return default if module is None else module.opener(default, build)
+
+
+def _proxy_websocket_kwargs(url: str, connect: Any) -> Dict[str, Any]:
+    """Extra `websockets` connect arguments for CONDUIT_PUSH_PROXY: {} unless it's
+    set and applies to this wss:// URL."""
+    module = _push_proxy()
+    return {} if module is None else module.websocket_kwargs(url, connect)
+
+
 # --- The profile a request acts for -------------------------------------------
 
 _NO_PRINCIPAL = object()

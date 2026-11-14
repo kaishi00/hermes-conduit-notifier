@@ -1079,6 +1079,7 @@ async def _connect_watch_audio_relay(url: str, credential: str) -> Any:
 
         def status_of(exc: Any) -> int:
             return int(getattr(exc, "status_code", 0) or 0)
+    kwargs.update(core._proxy_websocket_kwargs(url, connect))
     try:
         return await connect(url, max_size=WATCH_AUDIO_MAX_MESSAGE_BYTES, open_timeout=WATCH_AUDIO_RELAY_TIMEOUT_S,
                              compression=None, **kwargs)
