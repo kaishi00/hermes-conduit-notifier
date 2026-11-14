@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.172.1 (2026-11-14)
+
+### Fixes
+
+- `hermes conduit-push status` on a profile that isn't paired yet now also shows the `CONDUIT_PUSH_PROXY` in use, or why it was ignored, so a mistyped proxy that stopped pairing is easy to spot.
+
 ## 0.172.0 (2026-11-14)
 
 ### New and improved
