@@ -1220,7 +1220,8 @@ What a server needs beyond its address is three optional names, so a new
 OpenAI Realtime server needs no plugin change:
 
 - `model` goes on the address as `?model=`, unless the address already
-  names one. The status's `url` stays the address as set.
+  names one. The status's `url` is the set address as `ws(s)://` with its
+  path, without the model the dial adds.
 - `voice` is set on every `session.update` that goes to the server
   (`session.audio.output.voice`, or `session.voice` on a session in the older
   shape), on Classic's sockets and Local Live calls, the Watch's included,

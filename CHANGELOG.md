@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.174.1 (2026-11-14)
+
+### Fixes
+
+- Test connection no longer takes a speech server that says nothing about how it takes turns for one that leaves the answering to Hermes. Before, Conduit could miss telling you such a server has a model of its own.
+- A speech server model or voice name that can't be used (one with a space in it, say) is now named in the Hermes log. Before, it was dropped without a word and the server used its own.
+
 ## 0.174.0 (2026-11-14)
 
 ### New and improved
