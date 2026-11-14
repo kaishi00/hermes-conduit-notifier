@@ -1297,6 +1297,12 @@ def test_a_quick_turn_past_its_steps_hands_the_rest_to_a_workstream(on, hermes, 
     for n in range(work.QUICK_STEPS):
         work.tool_block(BOT_CHAT, "terminal", {"command": f"cat {n}"}, turn_id="t3")
     assert "W2" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3")["message"]
+    # The plugin's own turn (a work update, another bot's ask) is never handed off.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t5", user_message=work.WAKE.format(lines="W2 done"),
+                         platform="tui")
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t5")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t5")["message"] == work.STEP_BLOCK.format(tool="terminal")
     # The same ask again goes to the open work, by the bot.
     plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t4", user_message="Fix the missing saw argument", platform="tui")
     for n in range(work.QUICK_STEPS):

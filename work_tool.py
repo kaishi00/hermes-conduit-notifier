@@ -3290,6 +3290,10 @@ def note_turn_ask(session_id: Any, turn_id: Any, user_message: Any) -> None:
     """Keeps a turn's ask for the workstream its quick steps may hand on to."""
     if not isinstance(user_message, str) or not user_message.strip():
         return
+    if user_message.startswith("Work update from "):
+        # The plugin's own turn (a workstream's report, another bot's ask),
+        # not the user's: its rest is the bot's to route, never handed off.
+        return
     key = (str(session_id or ""), str(turn_id or ""))
     with _steps_lock:
         _asks.pop(key, None)
