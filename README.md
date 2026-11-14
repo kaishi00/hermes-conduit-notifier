@@ -1658,8 +1658,10 @@ question or a small task doesn't start a workstream. Change it in Conduit
   only those. Lookups ("Quick Things Here") also runs any other tool, reads
   and changes alike, under the bot's usual approvals, for 5 steps of a turn
   or a minute after the turn's first (the user can pick 10 or 20 steps per
-  bot, `quick_steps`, with 12 seconds for each); the step after that is refused with a
-  note to start a workstream with what it found so far, and `delegate_task`
+  bot, `quick_steps`, with 12 seconds for each); the step after that doesn't
+  run, and the plugin starts a workstream for the rest itself, with the turn's
+  ask and the steps it took, so the bot only says so (when it can't, similar
+  open work or the running limit, say, the bot is told to), and `delegate_task`
   always goes to a workstream. Open ("Everything Here") runs everything in
   the Bot Chat and starts workstreams when it judges the work long or you ask.
   Calls through `tool_call` count by what they call. `message_agent` is
@@ -2554,7 +2556,11 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   whether it's happening. The plugin keeps the incident per job in
   `conduit-call-watches.json`, waits out `for_minutes` and the allowed hours,
   calls once per incident with the run's sentence as the reason, and tells
-  the run what to reply (`[SILENT]` while there's nothing to send).
+  the run what to reply (`[SILENT]` while there's nothing to send). Hermes
+  defers plugin tools behind `tool_search`, so a run reaches the report
+  through `tool_call` when it isn't listed; a quoted `"false"` counts, and a
+  call without `saw` rings with the watch's name instead. A watch whose job
+  carries an older run prompt gets the current one on its next run (0.170.4).
   `conduit_call_user` refuses in such a run. Watches set up by 0.16.x (jobs
   that load the skill and keep their own state) keep running as written, and
   setting one again by name or id moves it onto the report.

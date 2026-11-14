@@ -1289,6 +1289,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     if not child:
         _note_turn_start(kwargs.get("turn_id"))
         _note_lead_routing(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
+        # The ask a Bot Chat's quick steps hand on to a workstream (work_tool).
+        _quietly(work_tool.note_turn_ask, session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))
         _drop_unnamed_end(session_id)
         # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
@@ -1330,9 +1332,19 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else _review_note(session_id),
         # When to draw a board instead of writing it out (show_tool).
         None if child else _board_rule(kwargs.get("platform"), session_id),
+        # A call watch's run on an older prompt: how to reach the report (call_watches).
+        None if child else _watch_run_note(session_id, kwargs.get("task_id")),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _watch_run_note(session_id: str, task_id: Any) -> str | None:
+    try:
+        return call_watches.run_note(session_id, task_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: call watch prompt refresh failed", exc_info=True)
+        return None
 
 
 def _checklist_note(session_id: str) -> str | None:
