@@ -13,13 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.170.2 (2026-11-14)
+## 0.170.3 (2026-11-14)
 
 ### Fixes
 
 - A call watch could miss its call: its runs found the report tool hidden behind Hermes' tool search and went quiet without reporting. Runs now reach it, and watches you already have pick up the fix on their next run.
 - A call watch's report no longer fails when the model leaves out what it saw or writes "False" in quotes.
 - When the Bot Chat runs out of quick steps in a turn, the plugin now starts a workstream for the rest itself, instead of leaving the bot to do it (some models never did, and said they were blocked).
+
+## 0.170.2 (2026-11-14)
+
+### Fixes
+
+- In a room of only your own Hermes, your agent on the other Hermes is now told it can use its usual tools there, instead of trying to ask you or sending you to its Bot Chat, and still hears about pictures sent into the room.
+- A room of only your own Hermes that someone else's agent joins later goes back under your room rules from the next turn.
 
 ## 0.170.1 (2026-11-14)
 

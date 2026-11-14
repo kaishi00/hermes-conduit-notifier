@@ -291,6 +291,10 @@ def test_the_tool_refuses_outside_a_room_and_in_a_subagent(store, sleeper, pushe
     assert call(store, sleeper, pushes, session_id="")["error"] == "not_room"
     alone = rules.RoomTurn(room_id="zoo-trip", side="home", with_others=False, session_id=ROOM_SESSION)
     assert call(store, sleeper, pushes, turn=alone)["error"] == "not_room"
+    # A room of only the owner's own Hermes (room_rules._lifted): told to just use its tools, never "not a room".
+    own = rules.RoomTurn(room_id="zoo-trip", side="member", with_others=False, session_id=ROOM_SESSION, own=True)
+    refused = call(store, sleeper, pushes, turn=own)
+    assert refused["error"] == "own_room" and "usual tools" in refused["note"]
     # A member's room session not titled with its room yet is still a room: never told to ask "the user" there.
     untitled = rules.RoomTurn(room_id="", side="member", with_others=True, session_id=ROOM_SESSION)
     refused = call(store, sleeper, pushes, turn=untitled)
