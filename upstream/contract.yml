@@ -640,6 +640,7 @@ routes:
   - POST /rooms/links/preview
   - GET /rooms/looks
   - PUT /rooms/looks
+  - GET /rooms/own-bots
   - GET /rooms/people
   - DELETE /rooms/sessions
   - GET /rooms/setup

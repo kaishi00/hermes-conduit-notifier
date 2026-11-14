@@ -493,7 +493,18 @@ async def post_room_draft(request: Request, response: Response, profile: Optiona
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     return await _room_invites_route(profile, lambda rooms: {"draft": rooms.draft(
-        body.get("name"), body.get("agents"), body.get("links"), where=where)}, "draft", mailbox=True)
+        body.get("name"), body.get("agents"), body.get("links"), where=where, bring=body.get("bring"))},
+        "draft", mailbox=True)
+
+
+@router.get("/rooms/own-bots")
+async def get_room_own_bots(response: Response) -> Any:
+    """The bots of your own other Hermes, by Link (room_own_bots): each own
+    Link's name, the bots its Hermes last said it has (each ``{profile,
+    handle, display_name, ready}``) and whether a draft may bring them
+    (``brings``), so New Group Chat lists them beside yours."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_invites_route(None, lambda rooms: rooms.own_bots.theirs(), "own_bots")
 
 
 @router.get("/rooms/drafts")
