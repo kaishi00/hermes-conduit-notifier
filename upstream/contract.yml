@@ -523,6 +523,9 @@ module_paths:
 # The plugin's routes under /api/plugins/conduit_push/, from dashboard/.
 routes:
   - GET /artifacts
+  - DELETE /artifacts/pins
+  - GET /artifacts/pins
+  - POST /artifacts/pins
   - GET /boards/checklists
   - POST /boards/checklists
   - GET /boards/desktop

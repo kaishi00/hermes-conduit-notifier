@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.0 (2026-11-14)
+
+### New and improved
+
+- Save an artifact in Conduit to keep it: it shows under Saved in Artifacts with an optional note, on every iPhone and iPad signed in, and a copy of the file stays on your host so it still opens after the original file or its chat is gone.
+
 ## 0.176.0 (2026-11-14)
 
 ### New and improved

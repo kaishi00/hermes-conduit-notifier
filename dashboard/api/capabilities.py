@@ -211,6 +211,9 @@ ROUTE_CAPABILITIES = (
     "speech-server",
     "local-live-agent",
     "artifacts",
+    # /artifacts/pins: artifacts saved in Conduit, with a copy of each file
+    # kept on the host (hermes-conduit#2467).
+    "artifact-pins",
     # /workspace/*: the Folder tab's listings, search, recent files and file actions.
     "workspace-files",
     # GET /workspace/resolve: where a file a reply names by its name is, from
