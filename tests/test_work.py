@@ -1462,7 +1462,11 @@ def test_two_scripts_of_one_turn_keep_its_chat_until_both_end(on, hermes):
     for _ in range(2):
         assert work.tool_block(BOT_CHAT, "execute_code", {}, turn_id="t1", task_id="task-1") is None
     work.code_ended("execute_code", "task-1")
-    for _ in range(3):
+    # GLM on notifier#795: a script still calling tools outlives the hour.
+    work._code_cells["task-1"][3] -= work.CODE_CELL_KEEP_S + 1
+    assert work.tool_block("", "terminal", {}, task_id="task-1") is None
+    assert work.tool_block(OTHER_CHAT, "execute_code", {}, turn_id="t9", task_id="task-9") is None
+    for _ in range(2):
         assert work.tool_block("", "terminal", {}, task_id="task-1") is None
     assert work.tool_block("", "terminal", {}, task_id="task-1")["action"] == "block"  # still the Bot Chat's
 

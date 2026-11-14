@@ -3311,7 +3311,10 @@ def _code_chat(session_id: Any, turn_id: Any, task_id: Any) -> tuple[Any, Any]:
         return session_id, turn_id
     with _code_cells_lock:
         cell = _code_cells.get(task_id)
-        return (cell[0], cell[1]) if cell else (session_id, turn_id)
+        if not cell:
+            return session_id, turn_id
+        cell[3] = time.monotonic()  # kept while its script still calls tools
+        return cell[0], cell[1]
 
 
 def _code_began(session_id: Any, turn_id: Any, task_id: Any) -> None:
