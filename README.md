@@ -1700,7 +1700,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   has no coordinator to take an ask or a note, so the Bot Chat messages it
   with Hermes' own `message_agent`, which the policy lets through to such a
   bot (and only to one the plugin can name on this Hermes), and `work_ask`
-  and `work_tell` say so when they're refused (notifier#799). A chain of asks can't come back to
+  and `work_tell` say so when they're refused (notifier#799). Such a
+  message is Hermes' own, so the hourly cap below doesn't count it. A chain of asks can't come back to
   a bot already in it, goes at most two bots deep, and one bot can ask or
   tell another 10 times an hour. The one way back is a question about an
   open ask: the bot asked can ask the bot that asked it with `about` (A3),
