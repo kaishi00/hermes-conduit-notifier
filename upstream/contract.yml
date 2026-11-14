@@ -267,6 +267,12 @@ known_failures:
     upstream: NousResearch/hermes-agent#140051
     since: v0.22.3 (da01ee9c3)
     workaround: ?conduit_profile= on the dashboard-process routes (notifier #412)
+  - test: test_hermes_rebuilds_a_pick_on_its_own_provider
+    signature: stale gateway_runtime wins
+    issue: kaishi00/hermes-conduit-notifier (session_route, 2026-11-14)
+    upstream: tui_gateway/agent_factory.py _runtime_model_config leaves model_config.gateway_runtime, which session_gateway_runtime reads first
+    since: v0.22.5
+    workaround: dashboard/api/session_route.py writes the TUI's live route into gateway_runtime too
   - test: test_hermes_counts_a_hidden_ask_after_a_handoff
     signature: hidden ask skipped
     issue: kaishi00/hermes-conduit-notifier (compaction_skip, 2026-11-06)

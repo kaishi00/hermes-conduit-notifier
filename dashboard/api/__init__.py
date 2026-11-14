@@ -41,6 +41,7 @@ MODULES = (
     "watch_local_live",
     "link_status",
     "desktop_views",
+    "session_route",
     "rooms",
     "workspace",
     "workstreams",
