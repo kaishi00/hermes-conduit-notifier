@@ -3304,7 +3304,7 @@ _code_cells_lock = threading.Lock()
 CODE_CELL_KEEP_S = 3600.0
 
 
-def _code_chat(session_id: Any, turn_id: Any, task_id: Any) -> tuple[Any, Any]:
+def code_chat(session_id: Any, turn_id: Any, task_id: Any) -> tuple[Any, Any]:
     """The chat and turn a call is from: for one with no session id, those
     of the execute_code call running under its task, if there is one."""
     if (isinstance(session_id, str) and session_id.strip()) or not isinstance(task_id, str) or not task_id:
@@ -3360,7 +3360,7 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
     script makes names no chat, so it's the execute_code call's, and takes
     its steps and its limits (notifier#784); any other call with no session
     id comes from an agent with no session, never a Bot Chat."""
-    session_id, turn_id = _code_chat(session_id, turn_id, task_id)
+    session_id, turn_id = code_chat(session_id, turn_id, task_id)
     block = _tool_block(session_id, tool_name, args, turn_id)
     if block is None and _runs_code(tool_name, args):
         _code_began(session_id, turn_id, task_id)
