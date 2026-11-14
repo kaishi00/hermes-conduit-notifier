@@ -146,6 +146,7 @@ def test_every_capability_names_a_served_route_family():
         # Agent mode: the call's tools for an engine with its own front model.
         "local-live-agent": "/local-live/v1/tools",
         "artifacts": "/artifacts",
+        "artifact-pins": "/artifacts/pins",
         "workspace-files": "/workspace/",
         "workspace-resolve": "/workspace/resolve",
         "workspace-copy": "/workspace/",

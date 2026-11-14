@@ -13,7 +13,7 @@ import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, Response, WebSocket
 
@@ -134,6 +134,17 @@ def speech_server_drives(settings: Optional[Dict[str, Any]] = None) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() in _SPEECH_SERVER_TRUE)
 
 
+def speech_server_own_model(settings: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether this profile's speech server answers Live > Local calls with
+    its own model (``voice.speech_server.own_model``): it gets the call's
+    instructions and tools, as Grok Live's model does. Every other call on
+    it (Classic voice, the Watch) has the plugin run the turns."""
+    if settings is None:
+        settings = _speech_server_settings()
+    value = settings.get("own_model")
+    return value is True or (isinstance(value, str) and value.strip().lower() in _SPEECH_SERVER_TRUE)
+
+
 def speech_server_transcription_model(settings: Optional[Dict[str, Any]] = None) -> str:
     """The model a driven server is asked to transcribe with
     (``voice.speech_server.transcription_model``), or "" to ask for none: a
@@ -142,24 +153,76 @@ def speech_server_transcription_model(settings: Optional[Dict[str, Any]] = None)
         settings = _speech_server_settings()
     value = settings.get("transcription_model")
     name = value.strip() if isinstance(value, str) else ""
-    if len(name) > SPEECH_SERVER_MAX_MODEL_NAME_CHARS or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+    if (value and not isinstance(value, str)) or len(name) > SPEECH_SERVER_MAX_MODEL_NAME_CHARS \
+            or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
         logger.warning("voice.speech_server.transcription_model is not a model name, so none is asked for.")
         return ""
     return name
 
 
-class SpeechServerDrive:
+class SpeechServerSetup:
+    """What the profile's settings add to the frames that set a session up
+    on its speech server: the voice (``voice.speech_server.voice``)."""
+
+    # Whether the plugin runs the turns (SpeechServerDrive).
+    drives = False
+
+    def __init__(self, voice: str = "") -> None:
+        self.voice = voice
+
+    def update(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        """A session.update with the set voice, unless the frame names one."""
+        session = frame.get("session")
+        if not isinstance(session, dict) or not self.voice:
+            return frame
+        audio = session.get("audio")
+        if isinstance(audio, dict):
+            output = audio.get("output")
+            if not isinstance(output, dict):
+                output = audio["output"] = {}
+            output.setdefault("voice", self.voice)
+        else:
+            # The beta session shape.
+            session.setdefault("voice", self.voice)
+        return frame
+
+    def say(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        return frame
+
+    def client_frame(self, text: str) -> str:
+        """A frame from Conduit on a socket nothing else reads (Classic's
+        listen and speak sockets, a Local Live call the server runs), as it
+        goes on to the server."""
+        update = '"session.update"' in text
+        if not update and (not self.drives or '"response.create"' not in text):
+            return text
+        try:
+            frame = json.loads(text)
+        except ValueError:
+            return text
+        kind = frame.get("type") if isinstance(frame, dict) else None
+        if kind == "session.update":
+            return json.dumps(self.update(frame))
+        if kind == "response.create" and self.drives:
+            return json.dumps(self.say(frame))
+        return text
+
+
+class SpeechServerDrive(SpeechServerSetup):
     """How the plugin drives a speech server's turns: what it adds to the
     frames that set the session up and ask for words to be said."""
 
-    def __init__(self, transcription_model: str = "") -> None:
+    drives = True
+
+    def __init__(self, transcription_model: str = "", voice: str = "") -> None:
+        super().__init__(voice)
         self.transcription_model = transcription_model
 
     def update(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         """A session.update for a server that only listens and reads aloud:
         told so, and asked for transcripts when a model is named. What the
         frame already says stays."""
-        session = frame.get("session")
+        session = super().update(frame).get("session")
         if not isinstance(session, dict):
             return frame
         session.setdefault("instructions", SPEECH_SERVER_SAY_INSTRUCTIONS)
@@ -181,31 +244,174 @@ class SpeechServerDrive:
         response.setdefault("instructions", SPEECH_SERVER_SAY_INSTRUCTIONS)
         return frame
 
-    def client_frame(self, text: str) -> str:
-        """A frame from Conduit on a socket nothing else reads (Classic's
-        listen and speak sockets), as it goes on to the server."""
-        update = '"session.update"' in text
-        if not update and '"response.create"' not in text:
-            return text
-        try:
-            frame = json.loads(text)
-        except ValueError:
-            return text
-        kind = frame.get("type") if isinstance(frame, dict) else None
-        if kind == "session.update":
-            return json.dumps(self.update(frame))
-        if kind == "response.create":
-            return json.dumps(self.say(frame))
-        return text
+
+class SpeechServerOwnModel(SpeechServerDrive):
+    """A server whose own model answers a Live > Local call
+    (``voice.speech_server.own_model``). Only a call that brings
+    instructions and tools (the phone's, in agent mode) is answered by it:
+    on any other the plugin runs the turns, as a SpeechServerDrive."""
+
+    answers = True
+
+    def own_update(self, frame: Dict[str, Any], instructions: str, tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The call's session.update for a server that answers by itself:
+        the call's instructions and tools, with the set voice and
+        transcription model. Its turn detection stays the call's."""
+        session = frame.get("session")
+        if not isinstance(session, dict):
+            session = frame["session"] = {}
+        session["instructions"] = instructions
+        # Always the call's current tools: a setup sent again with none
+        # takes the earlier ones away.
+        session["tools"] = tools
+        session["tool_choice"] = "auto" if tools else "none"
+        return self.update(frame)
 
 
-def speech_server_drive(settings: Optional[Dict[str, Any]] = None) -> Optional[SpeechServerDrive]:
-    """This profile's drive, or None when the server is left to itself."""
+def speech_server_drive(settings: Optional[Dict[str, Any]] = None) -> Optional[SpeechServerSetup]:
+    """What this profile's settings add to a session: a SpeechServerOwnModel
+    when the server's model answers Live > Local, a SpeechServerDrive when
+    the plugin runs the turns, a SpeechServerSetup when only a voice is
+    set, None when the server is left to itself."""
     if settings is None:
         settings = _speech_server_settings()
-    if not speech_server_drives(settings):
+    voice = speech_server_voice(settings)
+    if speech_server_own_model(settings):
+        return SpeechServerOwnModel(speech_server_transcription_model(settings), voice)
+    if speech_server_drives(settings):
+        return SpeechServerDrive(speech_server_transcription_model(settings), voice)
+    return SpeechServerSetup(voice) if voice else None
+
+
+# --- The server as data ---------------------------------------------------------
+#
+# What a server needs beyond its address is settings, not code:
+# voice.speech_server.model (the ``model`` the URL asks for), .voice (the
+# voice a session is set to) and .transcription_model. The known servers are
+# a file, speech_server_presets.json, that Conduit offers as a list and
+# writes into those same settings, so a new server is a new entry there.
+
+SPEECH_SERVER_PRESETS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                          "speech_server_presets.json")
+SPEECH_SERVER_MAX_PRESETS = 64
+SPEECH_SERVER_MAX_PRESET_NAMES = 64
+_SPEECH_SERVER_PRESET_NAMES = ("model", "voice", "transcription_model")
+_speech_server_presets_cache: Optional[List[Dict[str, Any]]] = None
+
+
+def _speech_server_name(value: Any) -> str:
+    """A model or voice name as it can go on to a server, or ""."""
+    name = value.strip() if isinstance(value, str) else ""
+    if len(name) > SPEECH_SERVER_MAX_MODEL_NAME_CHARS or any(ord(c) <= 0x20 or ord(c) == 0x7F for c in name):
+        return ""
+    return name
+
+
+def _speech_server_set_name(settings: Dict[str, Any], key: str) -> str:
+    """A name the profile set, or "" with a line in the log when what is set
+    can't go on to a server: the server then uses its own, and the log says why."""
+    value = settings.get(key)
+    name = _speech_server_name(value)
+    if value and not name:
+        logger.warning("voice.speech_server.%s is not a name a server can be given, so none is set.", key)
+    return name
+
+
+def speech_server_model(settings: Optional[Dict[str, Any]] = None) -> str:
+    """The model the server is asked for (``voice.speech_server.model``), or ""."""
+    if settings is None:
+        settings = _speech_server_settings()
+    return _speech_server_set_name(settings, "model")
+
+
+def speech_server_voice(settings: Optional[Dict[str, Any]] = None) -> str:
+    """The voice a session is set to (``voice.speech_server.voice``), or "" for the server's own."""
+    if settings is None:
+        settings = _speech_server_settings()
+    return _speech_server_set_name(settings, "voice")
+
+
+def _speech_server_preset(raw: Any) -> Optional[Dict[str, Any]]:
+    """One entry of the presets file as Conduit gets it, or None when it can't be offered."""
+    if not isinstance(raw, dict):
         return None
-    return SpeechServerDrive(speech_server_transcription_model(settings))
+    preset_id, name = _speech_server_name(raw.get("id")), raw.get("name")
+    if not preset_id or not isinstance(name, str) or not name.strip() or len(name) > 80:
+        return None
+    preset: Dict[str, Any] = {"id": preset_id, "name": name.strip(), "needs_key": raw.get("needs_key") is True,
+                              "drive_turns": raw.get("drive_turns") is True}
+    if raw.get("url"):
+        try:
+            preset["url"] = speech_server_url(raw.get("url"))
+        except core.TokenError:
+            return None
+    for key in ("url_hint", "docs_url"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip() and len(value) <= 256:
+            preset[key] = value.strip()
+    for key in _SPEECH_SERVER_PRESET_NAMES:
+        value = _speech_server_name(raw.get(key))
+        if value:
+            preset[key] = value
+    for key in ("models", "voices"):
+        values = raw.get(key)
+        names = [n for n in map(_speech_server_name, values if isinstance(values, list) else []) if n]
+        if names:
+            preset[key] = names[:SPEECH_SERVER_MAX_PRESET_NAMES]
+    return preset
+
+
+def speech_server_presets() -> List[Dict[str, Any]]:
+    """The servers Conduit can fill the settings in for. Read once: the file ships with the plugin."""
+    global _speech_server_presets_cache
+    if _speech_server_presets_cache is None:
+        presets: List[Dict[str, Any]] = []
+        try:
+            with open(SPEECH_SERVER_PRESETS_PATH, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+            entries = raw.get("presets") if isinstance(raw, dict) else None
+            seen = set()
+            for entry in entries if isinstance(entries, list) else []:
+                preset = _speech_server_preset(entry)
+                if preset is not None and preset["id"] not in seen:
+                    seen.add(preset["id"])
+                    presets.append(preset)
+        except (OSError, ValueError) as exc:
+            logger.warning("The speech server presets can't be read: %s", type(exc).__name__)
+        _speech_server_presets_cache = presets[:SPEECH_SERVER_MAX_PRESETS]
+    return [dict(preset) for preset in _speech_server_presets_cache]
+
+
+def _speech_server_with_model(url: str, model: str) -> str:
+    """The URL asking for the set model, unless it names one itself."""
+    if not model:
+        return url
+    parts = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    if any(name == "model" for name, _ in query):
+        return url
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query + [("model", model)])))
+
+
+def speech_server_abilities(frame: Any) -> Dict[str, Any]:
+    """What a server's first event (session.created) says it is: its model
+    and voice, and whether it answers by itself (it has a model, and its turn
+    detection starts responses). None where the event doesn't say."""
+    session = frame.get("session") if isinstance(frame, dict) else None
+    if not isinstance(session, dict):
+        return {"model": None, "voice": None, "answers_alone": None}
+    audio = session.get("audio") if isinstance(session.get("audio"), dict) else {}
+    audio_input = audio.get("input") if isinstance(audio.get("input"), dict) else {}
+    audio_output = audio.get("output") if isinstance(audio.get("output"), dict) else {}
+    model = _speech_server_name(session.get("model")) or None
+    voice = audio_output.get("voice", session.get("voice"))
+    if isinstance(voice, dict):
+        voice = voice.get("id")
+    detection = audio_input["turn_detection"] if "turn_detection" in audio_input else session.get("turn_detection")
+    answers: Optional[bool] = None
+    if model is not None and ("turn_detection" in audio_input or "turn_detection" in session):
+        answers = isinstance(detection, dict) and detection.get("create_response", True) is not False
+    return {"model": model, "voice": _speech_server_name(voice) or None, "answers_alone": answers}
 
 
 def _speech_server_host_is_private(host: str) -> bool:
@@ -305,7 +511,7 @@ def speech_server_target(settings: Optional[Dict[str, Any]] = None) -> Tuple[str
     """(url, api_key) for this profile's speech server; TokenError(503) when unset or invalid."""
     if settings is None:
         settings = _speech_server_settings()
-    url = speech_server_url(settings.get("url"))
+    url = _speech_server_with_model(speech_server_url(settings.get("url")), speech_server_model(settings))
     key = _speech_server_key(settings)
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in key):
         raise core.TokenError(503, "The speech server key contains a control character.")
@@ -318,16 +524,25 @@ def speech_server_status() -> Dict[str, Any]:
         settings = _speech_server_settings()
     except core.TokenError as exc:
         return {"configured": False, "available": False, "url": None, "has_key": False, "drive_turns": False,
-                "reason": str(exc)}
+                "own_model": False, "model": None, "voice": None, "transcription_model": None, "reason": str(exc)}
     configured = bool(str(settings.get("url") or "").strip())
-    has_key = bool(str(settings.get("api_key") or "").strip() or str(settings.get("api_key_file") or "").strip())
-    drives = speech_server_drives(settings)
+    status = {
+        "configured": configured, "available": False, "url": None,
+        "has_key": bool(str(settings.get("api_key") or "").strip() or str(settings.get("api_key_file") or "").strip()),
+        "drive_turns": speech_server_drives(settings),
+        "own_model": speech_server_own_model(settings),
+        "model": speech_server_model(settings) or None,
+        "voice": speech_server_voice(settings) or None,
+        "transcription_model": speech_server_transcription_model(settings) or None,
+        "reason": None,
+    }
     try:
-        url, _ = speech_server_target(settings)
+        speech_server_target(settings)
     except core.TokenError as exc:
-        return {"configured": configured, "available": False, "url": None, "has_key": has_key, "drive_turns": drives,
-                "reason": str(exc)}
-    return {"configured": True, "available": True, "url": url, "has_key": has_key, "drive_turns": drives, "reason": None}
+        return {**status, "reason": str(exc)}
+    # The address as set, without the model the dial adds: Conduit shows it
+    # in the address field and saves it back.
+    return {**status, "configured": True, "available": True, "url": speech_server_url(settings.get("url"))}
 
 
 async def _connect_speech_server(url: str, headers: Dict[str, str]) -> Any:
@@ -363,6 +578,13 @@ async def get_speech_server_status(response: Response, profile: Optional[str] = 
         raise core._unexpected("status", exc, feature="Speech server")
 
 
+@router.get("/speech-server/presets")
+async def get_speech_server_presets(response: Response) -> Dict[str, Any]:
+    """The known servers, for Conduit to fill a profile's settings in from."""
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True, "presets": speech_server_presets()}
+
+
 def _speech_server_setup(profile: Optional[str]) -> Tuple[str, str]:
     """The target to dial, checked before a rate-limit slot is spent on it."""
     target = speech_server_target()
@@ -370,7 +592,7 @@ def _speech_server_setup(profile: Optional[str]) -> Tuple[str, str]:
     return target
 
 
-def _speech_server_call_setup(profile: Optional[str]) -> Tuple[str, str, Optional[SpeechServerDrive]]:
+def _speech_server_call_setup(profile: Optional[str]) -> Tuple[str, str, Optional[SpeechServerSetup]]:
     """A relay's target, and its drive when the plugin runs the turns."""
     url, key = _speech_server_setup(profile)
     return url, key, speech_server_drive()
@@ -393,7 +615,8 @@ async def post_speech_server_test(response: Response, profile: Optional[str] = N
     except core.TokenError as exc:
         if exc.status == 429:
             raise HTTPException(status_code=429, detail=str(exc), headers={"Cache-Control": "no-store"})
-        return {"ok": True, "connected": False, "url": None, "latency_ms": None, "event": None, "reason": str(exc)}
+        return {"ok": True, "connected": False, "url": None, "latency_ms": None, "event": None, "abilities": None,
+                "reason": str(exc)}
     except HTTPException as exc:
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
@@ -401,7 +624,8 @@ async def post_speech_server_test(response: Response, profile: Optional[str] = N
         raise core._unexpected("test", exc, feature="Speech server")
 
     def failed(reason: str) -> Dict[str, Any]:
-        return {"ok": True, "connected": False, "url": url, "latency_ms": None, "event": None, "reason": reason}
+        return {"ok": True, "connected": False, "url": url, "latency_ms": None, "event": None, "abilities": None,
+                "reason": reason}
 
     started = time.monotonic()
     try:
@@ -419,7 +643,7 @@ async def post_speech_server_test(response: Response, profile: Optional[str] = N
         except Exception as exc:
             return failed(f"The speech server closed the connection ({type(exc).__name__})")
         latency_ms = int((time.monotonic() - started) * 1000)
-        event = None
+        event = parsed = None
         with contextlib.suppress(Exception):
             parsed = json.loads(frame)
             if isinstance(parsed, dict) and isinstance(parsed.get("type"), str):
@@ -428,7 +652,8 @@ async def post_speech_server_test(response: Response, profile: Optional[str] = N
             return failed("The speech server answered with something other than OpenAI Realtime events.")
         if event == "error":
             return failed("The speech server answered with an error event.")
-        return {"ok": True, "connected": True, "url": url, "latency_ms": latency_ms, "event": event, "reason": None}
+        return {"ok": True, "connected": True, "url": url, "latency_ms": latency_ms, "event": event,
+                "abilities": speech_server_abilities(parsed), "reason": None}
     finally:
         with contextlib.suppress(Exception):
             await upstream.close()
@@ -498,7 +723,7 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
                                intercept: Optional[Callable[[str], Any]] = None,
                                send_lock: Optional[asyncio.Lock] = None,
                                read_back: Optional["local_live_read_back._LocalLiveReadBack"] = None,
-                               drive: Optional[SpeechServerDrive] = None) -> None:
+                               drive: Optional[SpeechServerSetup] = None) -> None:
     """One utterance's relay, from dialing the speech server to forwarding its close.
 
     ``intercept`` sees each text frame from Conduit first and returns True for
@@ -540,6 +765,7 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
                 if read_back is not None:
                     if await read_back.from_client(text):
                         continue
+                    text = read_back.passed_on(text)
                 elif drive is not None:
                     text = drive.client_frame(text)
                 await upstream.send(text)

@@ -13,19 +13,62 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.173.1 (2026-11-14)
+## 0.177.1 (2026-11-14)
 
 ### Fixes
 
 - A question a Bot Chat asks while nobody has it open, such as during a scheduled task, waits for your answer on the Conduit card instead of going on at once without one. It waits as long as Hermes waits for any answer (its clarify timeout), never more than 30 minutes, and stopping the chat ends the wait.
-- On Quick Things Here, a slow model no longer has its Bot Chat turns ended well before the step count you picked. The time limit counted the model's thinking between steps, so a model that takes 26 seconds a step got about 9 of its 20 steps. It now counts only the time the steps themselves take to run.
-- When a Bot Chat hands the rest of a task to a workstream, the workstream gets what the Bot Chat's steps returned, cut short, and works from it. Before, it was told the results weren't there and began by running the same steps again.
+
+## 0.177.0 (2026-11-14)
+
+### New and improved
+
+- Save an artifact in Conduit to keep it: it shows under Saved in Artifacts with an optional note, on every iPhone and iPad signed in, and a copy of the file stays on your host so it still opens after the original file or its chat is gone.
+
+## 0.176.0 (2026-11-14)
+
+### New and improved
+
+- Hermes can now write a text for someone who has only an email address: Send text opens Messages with their email as the iMessage recipient. Needs the Conduit update that adds it; an older Conduit gets the text in Hermes' reply instead.
+
+## 0.175.0 (2026-11-14)
+
+### New and improved
+
+- A hosted realtime speech server (OpenAI Realtime, Qwen Audio Realtime) can now answer Live > Local calls with its own model: it gets the call's instructions and tools, and hands the work to Hermes as jobs, like Grok Live. Turn it on in Conduit under Live > Local, or with voice.speech_server.own_model in the Hermes config. Classic voice and Apple Watch calls on that server still get Hermes' replies read aloud.
+
+## 0.174.2 (2026-11-14)
+
+### Fixes
+
+- When a Bot Chat hands a task to a workstream, a very long step result can no longer leave the first characters of a password or key in the workstream's instructions. Results are masked before they are cut, not after.
+- Two steps refused at the same moment (another chat had the bot's screen) no longer leave the turn's time limit counting the model's thinking again.
+
+## 0.174.1 (2026-11-14)
+
+### Fixes
+
+- Test connection no longer takes a speech server that says nothing about how it takes turns for one that leaves the answering to Hermes. Before, Conduit could miss telling you such a server has a model of its own.
+- A speech server model or voice name that can't be used (one with a space in it, say) is now named in the Hermes log. Before, it was dropped without a word and the server used its own.
+
+## 0.174.0 (2026-11-14)
+
+### New and improved
+
+- A speech server can be set up from a list of known ones (Hugging Face speech-to-speech, OpenAI Realtime, Qwen Audio Realtime) and given a model and a voice in Conduit's speech server settings, and Test connection says when the server has a model of its own. Needs the Conduit build that shows them; until then the settings work from the Hermes config (voice.speech_server.model and voice).
 
 ## 0.173.0 (2026-11-14)
 
 ### New and improved
 
 - Hermes can answer on a speech server that has a model of its own, such as a hosted realtime model. Turn on "Hermes answers" in Conduit's speech server settings (voice.speech_server.drive_turns) and the server only listens and reads the replies aloud, in Local Live, agent mode, Classic and on the Watch. Before, such a server answered by itself and Hermes never got a turn.
+
+## 0.172.4 (2026-11-14)
+
+### Fixes
+
+- On Quick Things Here, a slow model no longer has its Bot Chat turns ended well before the step count you picked. The time limit counted the model's thinking between steps, so a model that takes 26 seconds a step got about 9 of its 20 steps. It now counts only the time the steps themselves take to run.
+- When a Bot Chat hands the rest of a task to a workstream, the workstream gets what the Bot Chat's steps returned, cut short, and works from it. Before, it was told the results weren't there and began by running the same steps again.
 
 ## 0.172.3 (2026-11-14)
 

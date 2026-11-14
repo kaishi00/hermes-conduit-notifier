@@ -293,6 +293,7 @@ def test_the_default_leaves_a_bot_chat_as_it_was_where_workstreams_cant_run(home
     monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat")
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
+    monkeypatch.setattr(work, "_home", lambda: home)  # not a home another test pinned
     assert work.policy(home) == "off" and not work.available()
     assert work.tool_block(BOT_CHAT, "terminal") is None  # not sent to a work_start that can't run
     store_mod.Store(home).set_policy("strict")  # the user's own choice stands
@@ -7345,6 +7346,30 @@ def test_a_slow_models_thinking_takes_none_of_a_quick_turns_time(on, home, herme
     work.step_ran(BOT_CHAT, "t4", "terminal", "b", "second's result")
     assert work._ran[(BOT_CHAT, "t4")][2] == [] and work._steps[(BOT_CHAT, "t4")][1] == 1
     assert [step[1] for step in work._did[(BOT_CHAT, "t4")]] == ["second's result"]
+    # Two refused on two threads, handed back in either order, while a third runs: only theirs go.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t5", user_message="Click through the wizard", platform="tui")
+    takes = []
+    for call in ("a", "b", "c"):
+        assert work.tool_block(BOT_CHAT, "terminal", {"command": call}, turn_id="t5", tool_call_id=call) is None
+        takes.append(work._last_take.taken)
+    for held in (takes[0], takes[1]):
+        work._last_take.taken = held
+        work.give_back_steps()
+    assert [running[0] for running in work._ran[(BOT_CHAT, "t5")][2]] == ["c"]
+    work.step_ran(BOT_CHAT, "t5", "terminal", "c", "c's result")
+    assert work._did[(BOT_CHAT, "t5")] == [['terminal {"command": "c"}', "c's result", 1]]
+    assert work._steps[(BOT_CHAT, "t5")][1] == 1 and work._ran[(BOT_CHAT, "t5")][2] == []
+    # A step that ran beside a refused one still ran: its time counts when the refused one is handed back.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t6", user_message="Build while I click", platform="tui")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t6", tool_call_id="long") is None
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t6", tool_call_id="refused") is None
+    held = work._last_take.taken
+    clock[0] += 90.0
+    work.step_ran(BOT_CHAT, "t6", "terminal", "long", "built")
+    clock[0] += 30.0
+    work._last_take.taken = held
+    work.give_back_steps()
+    assert work._ran[(BOT_CHAT, "t6")][0] == 90.0
     # The bot's own tools take no step, so their end is nobody's.
     work.step_ran(BOT_CHAT, "t3", "work_list", "own", "{}")
     assert len(work._ran[(BOT_CHAT, "t3")][2]) == 1
@@ -7409,14 +7434,53 @@ def test_a_hand_off_carries_what_the_steps_returned(on, hermes, monkeypatch):
     listed = [line for line in briefs[-1].splitlines() if line[:1].isdigit() and "terminal" in line]
     assert 0 < len(listed) < 20 and f"(and {20 - len(listed)} more)" in briefs[-1]
     assert f"\n{len(listed)}. «result {len(listed) - 1}»" in briefs[-1] and f"«result {len(listed)}»" not in briefs[-1]
+    # A batch the list can't hold whole is left out whole, and a credential a cut would split is masked first.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="split", user_message="Survey the mirrors", platform="tui")
+    for n in range(7):
+        kwargs = {"session_id": BOT_CHAT, "turn_id": "split", "tool_name": "terminal",
+                  "args": {"command": f"mirror {n} " + "word " * 60}, "tool_call_id": f"s{n}"}
+        assert plugin._work_tool_block(kwargs) is None
+        plugin._post_tool_call(**kwargs, result=f"mirror {n} " + "line " * 1195 + bearer)
+    kwargs = {"session_id": BOT_CHAT, "turn_id": "split", "tool_name": "tool_call", "tool_call_id": "s7",
+              "args": {"calls": [{"name": "web_search", "arguments": {"query": f"q{n} " + "word " * 60}}
+                                 for n in range(3)]}}
+    assert plugin._work_tool_block(kwargs) is None
+    plugin._post_tool_call(**kwargs, result="the batch's answer")
+    for n in range(10):
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="split", tool_call_id=f"r{n}") is None
+    assert "W" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="split")["message"]
+    assert "7. terminal" in briefs[-1] and "8. web_search" not in briefs[-1] and "(and 13 more)" in briefs[-1]
+    assert "the batch's answer" not in briefs[-1] and bearer[:8] not in briefs[-1]
+    assert bearer[:8] not in work._did[(BOT_CHAT, "split")][0][1]
     on.set_quick_steps(5)
     monkeypatch.setattr(work, "_quick_steps_cache", {})
     # A Hermes that reports no step's end: the steps alone, as before.
     plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Renew the wildcard certificate", platform="tui")
     for n in range(work.QUICK_STEPS):
         assert work.tool_block(BOT_CHAT, "terminal", {"command": f"look {n}"}) is None
-    assert "W4" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"  # the bot's limit is reached by now
+    assert "Renew the wildcard certificate" in briefs[-1]
     assert "their results aren't here; run again what you need" in briefs[-1] and "«" not in briefs[-1]
+
+
+def test_a_kept_result_is_masked_before_any_cut():
+    # Greptile on notifier #804: the cut of a result too long to mask whole, with a credential across it.
+    bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
+    short = work._result_kept("ok " * 10)
+    assert short == ("ok " * 10).strip() and "…" not in short
+    filler = "a " * ((work._RESULT_READ_CHARS - 10) // 2)
+    for text in (filler + bearer, "\n" * (work._RESULT_READ_CHARS - 10) + bearer + " tail"):
+        assert len(text) > work._RESULT_READ_CHARS
+        kept = work._result_kept(text)
+        assert bearer[:6] not in kept and kept.endswith("…") and len(kept) <= work._RESULT_KEPT_CHARS
+    long = f"Authorization: Bearer {bearer} " + filler + "a b c d e f"
+    assert len(long) > work._RESULT_READ_CHARS
+    assert bearer[:6] not in work._result_kept(long)  # masked in the long path too
+    whole = work._result_kept("a " * 2000 + bearer)  # under the read limit: masked whole, then cut
+    assert bearer[:6] not in whole
+    assert work._result_kept({"output": "x"}) == '{"output": "x"}'
+    blob = work._result_kept("QUJD" * 60000 + " tail")  # one unbroken run keeps its (masked) start, not nothing
+    assert len(blob) > 3 and blob.endswith("…")
 
 
 def test_a_hand_offs_secret_names_are_read_by_their_words():

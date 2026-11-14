@@ -37,7 +37,7 @@ test suites run, so the two can't drift:
   and drops a day whose low is above its high; a comparison recommends one
   option at most; media needs a source, and an image has no duration or
   artwork; a contact keeps only a phone and an email that look like one,
-  and a person's message only with their phone;
+  and a person's message only with their phone or email;
   a table keeps the rows with one cell per column; a checklist keeps one
   item per text; a list item's photo needs an https url; a progress goal is
   above 0;
@@ -445,9 +445,10 @@ def _apply_rules(card: dict[str, Any], raw: dict[str, Any], notes: list[str] | N
             if "email" in person and not _EMAIL.match(person["email"]):
                 del person["email"]
                 _note(notes, f"{who}.email: not an email address, left out")
-            # A text goes to their number, so there's none without it.
-            if "phone" not in person and person.pop("message", None) is not None:
-                _note(notes, f"{who}.message: a text needs their phone number, left out")
+            # A text goes to their number, or to their email over iMessage,
+            # so there's none without either.
+            if "phone" not in person and "email" not in person and person.pop("message", None) is not None:
+                _note(notes, f"{who}.message: a text needs their phone number or email, left out")
             # The phone loads photos over https only.
             if "photo" in person and not _is_https(person["photo"]["url"]):
                 del person["photo"]

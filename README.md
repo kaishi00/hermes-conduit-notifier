@@ -1036,6 +1036,8 @@ voice:
     api_key_file: ""                          # optional: read the key from this file instead
     drive_turns: false                        # true: Hermes answers on a server with a model of its own (plugin 0.173+) A YAML boolean, not 1.
     transcription_model: ""                   # optional, with drive_turns: the model the server transcribes with
+    model: ""                                 # optional: the model the address asks for (?model=), unless it names one (plugin 0.174+)
+    voice: ""                                 # optional: the voice each session is set to (plugin 0.174+)
 ```
 
 `api_key_file` names a file holding the key (an absolute path, or one starting
@@ -1054,8 +1056,9 @@ speech-to-speech has no authentication of its own, so keep it on your network.
 
 | Method | Path | Returns |
 |--------|------|---------|
-| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, drive_turns, reason}` |
-| POST | `/api/plugins/conduit_push/speech-server/test` | `{ok, connected, url, latency_ms, event, reason}`: dials the server from the host and waits for its first event |
+| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, drive_turns, model, voice, transcription_model, reason}` |
+| POST | `/api/plugins/conduit_push/speech-server/test` | `{ok, connected, url, latency_ms, event, abilities, reason}`: dials the server from the host and waits for its first event |
+| GET | `/api/plugins/conduit_push/speech-server/presets` | `{ok, presets}`: the known servers Conduit can fill the settings in for (plugin 0.174+) |
 | WebSocket | `/api/plugins/conduit_push/speech-server/socket` | OpenAI Realtime events, relayed |
 
 The socket takes the dashboard's WebSocket credential (`?ticket=`) and an
@@ -1211,10 +1214,72 @@ server only listens and reads aloud:
   in a row don't match them is answering, not reading, and the call ends with
   that reason.
 
+### A speech server is settings, not code (plugin 0.174+)
+
+What a server needs beyond its address is three optional names, so a new
+OpenAI Realtime server needs no plugin change:
+
+- `model` goes on the address as `?model=`, unless the address already
+  names one. The status's `url` is the set address as `ws(s)://` with its
+  path, without the model the dial adds.
+- `voice` is set on every `session.update` that goes to the server
+  (`session.audio.output.voice`, or `session.voice` on a session in the older
+  shape), on Classic's sockets and Local Live calls, the Watch's included,
+  whether or not Hermes answers. A frame that names a voice keeps it.
+- `transcription_model`, as above.
+
+The servers Conduit offers by name are a file,
+`dashboard/speech_server_presets.json`, served by `/speech-server/presets`.
+An entry has an `id` and a `name`, a `url` (complete; Conduit gets it as it
+is dialed, `ws(s)://` with the path) or a
+`url_hint` (an example to finish, such as one with a workspace in it),
+`needs_key`, `drive_turns` (the server has a model of its own, so Hermes
+answers is the setting to start from), and optionally `model`, `models`,
+`voice`, `voices`, `transcription_model` and `docs_url`. Picking one writes
+those into `voice.speech_server`; nothing else knows about presets, so a
+server that isn't listed works the same once its fields are filled in. An
+entry whose `url` can't be dialed, or that has no name, is left out.
+
+The test's `abilities` is what the server's first event says about it:
+`{model, voice, answers_alone}`, each null when the event doesn't say.
+`answers_alone` is true for a server that names a model and whose turn
+detection starts responses, which is the kind Hermes answers is for; Conduit
+offers the switch there without waiting for a call.
+
 `speech_server.drive_turns` in the status routes says whether the switch is
 on. Local Live's status has `answers_alone`: true once a call's response
 ended with the model address not asked since the call began and the switch
 off, which is how Conduit knows to offer it.
+
+### A speech server whose own model answers (plugin 0.175+)
+
+`voice.speech_server.own_model: true` (a Boolean, Conduit's "The speech
+server's own model answers" switch under Live > Local) has a hosted realtime
+model hold a Local Live call in agent mode itself, the way Grok Live's does.
+When the phone's call brings its agent setup (`conduit.agent`, which a
+current Conduit sends before the `session.update`), the plugin sends the
+server one `session.update` with the call's instructions and tools, the set
+voice and transcription model, and the call's own turn detection, so the
+server starts and interrupts its responses. From there:
+
+- The server's audio, transcripts and responses pass to the call unchanged.
+- A function call the server's model makes (`response.output_item.done` or
+  `response.function_call_arguments.done`, once per `call_id`) goes to the
+  phone as `conduit.tool.call`, and the phone's `conduit.tool.result` goes
+  back as a `function_call_output` item, followed by one `response.create`
+  once every call of the response has answered and no response is running.
+- `conduit.agent.note` becomes a user item the model keeps without answering.
+- The readiness check is still the phone's own turn. Its greeting, when
+  there is one, is read aloud as written (an out-of-band `response.create`
+  with the read-aloud instructions).
+
+A call that brings no agent setup (Classic's hands-free option, Classic's
+listen and speak sockets, the Watch) is run as with `drive_turns`: the
+plugin runs the turns and the server reads the replies aloud, so the server's
+model never answers without the call's instructions. The fast model isn't
+asked on either kind of call. The status routes report
+`speech_server.own_model`, and Local Live's `answers_alone` stays false while
+it is on.
 
 ### Local Live on a read-back speech server (plugin 0.50+)
 
@@ -2365,6 +2430,24 @@ in its profile, and the sessions continuing it; a chat asked for by
 `session_id` is read even when hidden (plugin 0.78.1+; before, a Bot Chat
 listed nothing). Capability `artifacts`.
 
+### Saved artifacts (plugin 0.177+)
+
+An artifact saved in Conduit stays under Saved, whatever happens to its chat:
+`/api/plugins/conduit_push/artifacts/pins` keeps the profile's saved set in
+its `conduit-artifact-pins.json`, so every iPhone and iPad signed in to the
+profile shows the same one, and it survives a reinstall. `GET` lists them, the
+one saved last first; `POST` with `{"item": <a row from /artifacts>, "note":
+"..."}` saves one, or changes the note (up to 200 characters) of one already
+saved; `DELETE ?id=<path or URL>` unsaves it. Saving a file still on the host
+copies it into the profile's `conduit-saved-artifacts/` folder (a regular file
+up to 200 MB, every copy together up to 2 GB), and the row names the copy as
+`kept_path`, so it opens after the original, its chat or its session is gone;
+`not_kept` says why a file has none (`too_large`, `no_room`, `missing`,
+`not_a_file`, `unreadable`, `changing` for a file still being written, `sensitive` for a secret the Folder hides, such as `.env`,
+`outside` for a path past a hosted install's folder, `remote` for a profile whose files are on its SSH machine).
+Only a file the Folder would open is copied. Unsaving removes the copy. A link keeps its row
+only. Capability `artifact-pins`.
+
 ## Workspace files (plugin 0.109+)
 
 Conduit's Folder tab, beside Artifacts, browses one folder at a time: the
@@ -2873,10 +2956,13 @@ keep only that field.
   the phone, only when Conduit already has access). A phone or email that
   doesn't read as one is dropped. A person can carry a `message`, a text
   Hermes wrote for the user to send them (plugin 0.67+, only with their
-  `phone`): Conduit shows it with Send text, which opens Messages filled in,
-  and only the user's tap sends it. A Conduit that says `text-drafts` in its
-  exchange gets it; for any other, the tool leaves the text off the card and
-  tells Hermes to give it in its reply.
+  `phone`, or from plugin 0.176 with their `email` when they have no phone,
+  since Messages sends to an email address over iMessage): Conduit shows it
+  with Send text, which opens Messages filled in, and only the user's tap
+  sends it. A Conduit that says `text-drafts` in its exchange gets it; for
+  any other, the tool leaves the text off the card and tells Hermes to give
+  it in its reply. A text to an email goes only to a Conduit that also says
+  `email-texts`.
 - **`status`**: where something in progress stands (`state`, `phase`
   waiting/active/done/problem, `progress` 0–1, `detail`, `eta`,
   `milestones`).

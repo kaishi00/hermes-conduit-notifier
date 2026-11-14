@@ -21,6 +21,7 @@ they run:
     local_live_read_back  Local Live on a read-back speech server
     local_live_agent      Local Live agent mode: a fast front model in front of
                           Hermes
+    local_live_own_model  Local Live on a speech server whose own model answers
     voice_calls           Voice transcripts and call end: a live call's turns
                           saved into its chat
     chats                 Chat takeover, where in Conduit a message was sent,
