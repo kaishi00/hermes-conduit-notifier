@@ -7358,6 +7358,17 @@ def test_a_slow_models_thinking_takes_none_of_a_quick_turns_time(on, home, herme
     work.step_ran(BOT_CHAT, "t5", "terminal", "c", "c's result")
     assert work._did[(BOT_CHAT, "t5")] == [['terminal {"command": "c"}', "c's result", 1]]
     assert work._steps[(BOT_CHAT, "t5")][1] == 1 and work._ran[(BOT_CHAT, "t5")][2] == []
+    # A step that ran beside a refused one still ran: its time counts when the refused one is handed back.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t6", user_message="Build while I click", platform="tui")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t6", tool_call_id="long") is None
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t6", tool_call_id="refused") is None
+    held = work._last_take.taken
+    clock[0] += 90.0
+    work.step_ran(BOT_CHAT, "t6", "terminal", "long", "built")
+    clock[0] += 30.0
+    work._last_take.taken = held
+    work.give_back_steps()
+    assert work._ran[(BOT_CHAT, "t6")][0] == 90.0
     # The bot's own tools take no step, so their end is nobody's.
     work.step_ran(BOT_CHAT, "t3", "work_list", "own", "{}")
     assert len(work._ran[(BOT_CHAT, "t3")][2]) == 1
@@ -7464,6 +7475,8 @@ def test_a_kept_result_is_masked_before_any_cut():
     whole = work._result_kept("a " * 2000 + bearer)  # under the read limit: masked whole, then cut
     assert bearer[:6] not in whole
     assert work._result_kept({"output": "x"}) == '{"output": "x"}'
+    blob = work._result_kept("QUJD" * 60000 + " tail")  # one unbroken run keeps its (masked) start, not nothing
+    assert len(blob) > 3 and blob.endswith("…")
 
 
 def test_a_hand_offs_secret_names_are_read_by_their_words():
