@@ -517,9 +517,15 @@ class Rooms:
             told = dict(invite)
         # Bots of this Hermes the home asks for over an own Link join by themselves (room_own_bots): such an
         # invite's push waits for the room.bring, and goes only when they can't join.
-        if self.own_bots.holds(received.link_id, told):
-            self.own_bots.hold(key)
-        else:
+        try:
+            held = self.own_bots.holds(received.link_id, told)
+            if held:
+                self.own_bots.hold(key)
+        except Exception:  # noqa: BLE001 - a retry stops at the stored invite: push it now rather than never
+            logger.warning("Linked Rooms couldn't hold room %s's invite push for its bots; pushing it", body["room_id"],
+                           exc_info=True)
+            held = False
+        if not held:
             self.notify(told)
 
     def on_answer(self, received: room_links.Received) -> None:
