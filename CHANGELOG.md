@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.169.1 (2026-11-13)
+
+### Fixes
+
+- A Link marked as between your own Hermes is marked again on the other side after this Hermes' Linked Rooms files are restored from an older backup.
+
 ## 0.169.0 (2026-11-13)
 
 ### New and improved

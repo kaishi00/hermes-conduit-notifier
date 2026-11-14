@@ -1403,3 +1403,17 @@ def test_a_rooms_json_that_cant_be_read_keeps_the_rules(tmp_path, monkeypatch):
     _own(monkeypatch, {"own-link"}, Broken())
     assert rules.room_turn(REMOTE, home).with_others
     assert not rules.own_guest_room(tmp_path, "room-a")
+
+
+def test_past_chat_search_finds_a_room_from_your_own_other_hermes_while_the_link_is_marked(host, monkeypatch):
+    found = {"success": True, "mode": "discover", "query": "otter", "detail": "adaptive", "results": [
+        _entry(REMOTE, "bot_room", "Group: room-a"), _entry("s-chat", "tui", "Bike plans")],
+        "count": 2, "sessions_searched": 2, "link_hint": "..."}
+    _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    assert _search(found, query="otter") is None  # nothing withheld
+    read = {"success": True, "mode": "read", "session_id": REMOTE, "link": f"@session:default/{REMOTE}",
+            "session_meta": {"source": "bot_room", "title": "Group: room-a"}, "messages": []}
+    assert _search(read, session_id=REMOTE) is None
+    _own(monkeypatch, set(), _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    assert [entry["session_id"] for entry in json.loads(_search(found, query="otter"))["results"]] == ["s-chat"]
+    assert json.loads(_search(read, session_id=REMOTE))["success"] is False

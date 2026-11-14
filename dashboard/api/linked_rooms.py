@@ -370,8 +370,8 @@ async def put_room_link_own(request: Request, response: Response) -> Any:
     response.headers["Cache-Control"] = "no-store"
     body = _room_links_body(await core._read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
                             '{"link_id": ..., "own": true|false}')
-    if type(body.get("own")) is not bool:
-        raise HTTPException(status_code=400, detail="Expected own: true or false",
+    if not isinstance(body.get("link_id"), str) or type(body.get("own")) is not bool:
+        raise HTTPException(status_code=400, detail="Expected link_id and own: true or false",
                             headers={"Cache-Control": "no-store"})
 
     def mark(links: Any) -> Dict[str, Any]:
