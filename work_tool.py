@@ -3591,17 +3591,20 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
     if not ask:
         return STEP_BLOCK.format(tool=tool)
     title = _cut(" ".join(ask.split()[:6]), 60)
-    # Whole steps only, so every result below has its step above it.
-    lines, size = [], 0
+    # Whole steps only, and a tool_call batch's together, so every result
+    # below has its steps above it. The "(and N more)" line has its room.
+    lines, size, shown = [], 0, 0
     for n, step in enumerate(did, 1):
-        line = step[0]
-        size += len(f"{n}. {line}") + 1
-        if size > HANDOFF_STEPS_CHARS:
-            break
-        lines.append(f"{n}. {line}")
-    returned = _returned(did[: len(lines)])
-    if len(lines) < len(did):
-        lines.append(f"(and {len(did) - len(lines)} more)")
+        if step[2] and size <= HANDOFF_STEPS_CHARS - 20:
+            shown = n - 1  # everything before this call fits
+        size += len(f"{n}. {step[0]}") + 1
+        lines.append(f"{n}. {step[0]}")
+    if size <= HANDOFF_STEPS_CHARS:
+        shown = len(did)
+    del lines[shown:]
+    returned = _returned(did[:shown])
+    if shown < len(did):
+        lines.append(f"(and {len(did) - shown} more)")
     steps = "\n".join(lines)
     instructions = HANDOFF_INSTRUCTIONS.format(
         ask=_cut_keeping_lines(ask, HANDOFF_ASK_CHARS), did=steps or "- nothing",
@@ -3637,13 +3640,12 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
     return HANDED_OFF.format(tool=tool, ref=ref, title=shown)
 
 
-def _returned(did: list[list[str]]) -> str:
+def _returned(did: list[list[Any]]) -> str:
     """What a quick turn's steps returned, numbered as the steps are, for the
     workstream it hands on to: each cut to its share of HANDOFF_RESULTS_CHARS,
     credentials masked. Nothing when no result was kept (a Hermes with no
     post_tool_call)."""
-    kept = [(n, step[1], min(step[2] if len(step) > 2 else 1, len(did) - n + 1)) for n, step in enumerate(did, 1)
-            if step[1]]
+    kept = [(n, step[1], step[2]) for n, step in enumerate(did, 1) if step[1]]
     if not kept:
         return ""
     least, most = HANDOFF_RESULT_CHARS
@@ -3654,25 +3656,39 @@ def _returned(did: list[list[str]]) -> str:
                      for n, result, count in kept)
 
 
-def _result_text(result: Any) -> str:
+# What's read of a step's result, and what's kept of it for a hand-off.
+_RESULT_READ_CHARS = 200_000
+_RESULT_KEPT_CHARS = 4 * HANDOFF_RESULT_CHARS[1]
+
+
+def _result_kept(result: Any) -> str:
+    """A step's result as a hand-off keeps it: credentials masked before
+    it's cut, so no cut leaves the start of one unmasked, and cut with its
+    mark, so a result that fits its share later still shows it isn't whole."""
     if isinstance(result, str):
-        return result
-    try:
-        return json.dumps(result, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(result)
+        text = result
+    else:
+        try:
+            text = json.dumps(result, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(result)
+    if len(text) > _RESULT_READ_CHARS:
+        # Too long to mask whole: its last word, which the cut may have split, goes.
+        text = " ".join(text[:_RESULT_READ_CHARS].split()[:-1]) + " …"
+    return _cut(_masked(text), _RESULT_KEPT_CHARS)
 
 
 # Each quick turn's steps: (session, Hermes' turn id) -> (its first step's
 # time, how many it took), oldest first.
 _steps: dict[tuple[str, str], tuple[float, int]] = {}
 _steps_lock = threading.Lock()
-# What each quick turn's steps were and returned ([line, result]), for the
-# workstream it hands on to.
-_did: dict[tuple[str, str], list[list[str]]] = {}
+# What each quick turn's steps were and returned, for the workstream it hands
+# on to: [line, result, how many steps its call took (a tool_call batch's
+# first row has them all, and its result; the rest have 0)].
+_did: dict[tuple[str, str], list[list[Any]]] = {}
 # How long each quick turn's steps have run: key -> [the seconds of the ones
-# that ended, when the ones running now began, those: (call, first step's
-# place in _did, how many)]. Steps that run together count once.
+# that ended, when the ones running now began, those: [call, its rows in
+# _did]]. Steps that run together count once.
 _ran: dict[tuple[str, str], list] = {}
 # The workstream a quick turn handed its rest to: key -> (ref, title).
 _handed: dict[tuple[str, str], tuple[str, str]] = {}
@@ -3717,10 +3733,13 @@ def _take_steps(session_id: Any, turn_id: Any, count: int, most: int = QUICK_STE
         steps = _did.setdefault(key, [])
         if not ran[2]:
             ran[1] = now
-        running = (call, len(steps), count)
+        rows = [[line, "", 0] for line in did or ()]
+        if rows:
+            rows[0][2] = len(rows)
+        running = [call, rows]
         ran[2].append(running)
         _ran[key] = ran
-        steps.extend([line, ""] for line in did or ())
+        steps.extend(rows)
         while len(_steps) > _STEP_TURNS:
             del _steps[next(iter(_steps))]
         for kept in [kept for kept in _did if kept not in _steps]:
@@ -3746,15 +3765,13 @@ def step_ran(session_id: Any, turn_id: Any, tool_name: Any, tool_call_id: Any = 
         at = next((n for call in calls if call for n, running in enumerate(ran[2]) if running[0] == call), None)
         if at is None:
             return
-        _, place, count = ran[2].pop(at)
+        _, rows = ran[2].pop(at)
         if not ran[2]:
             ran[0] += max(now - ran[1], 0.0)
-        steps = _did.get(key) or []
-        if result is not None and place < len(steps):
+        if result is not None and rows:
             # A tool_call batch's answer holds all of its calls': kept with
-            # its first, for them all. Cut here with its mark, so a result
-            # that masking then shortens to its share still shows it isn't whole.
-            steps[place][1:] = [_cut(_result_text(result), 4 * HANDOFF_RESULT_CHARS[1]), count]
+            # its first, for them all.
+            rows[0][1] = _result_kept(result)
 
 
 def give_back_steps() -> None:
@@ -3768,20 +3785,15 @@ def give_back_steps() -> None:
         if key in _steps:
             first, taken = _steps[key]
             _steps[key] = (first, max(taken - count, 0))
+        # Nor does it run, nor is it among the steps a hand-off says already
+        # ran: this take's own entry and rows, whatever else was taken or
+        # handed back since.
         ran = _ran.get(key)
-        did = _did.get(key)
-        if ran and running in ran[2] and did is not None:
-            # Nor does it run, nor is it among the steps a hand-off says
-            # already ran: this take's own, whatever else was taken since.
-            ran[2].remove(running)
-            place = running[1]
-            del did[place: place + count]
-            ran[2][:] = [(call, at - count if at > place else at, n) for call, at, n in ran[2]]
-            return
+        if ran:
+            ran[2][:] = [other for other in ran[2] if other is not running]
         did = _did.get(key)
         if did:
-            # Nor is it among the steps a hand-off says already ran.
-            del did[-count:]
+            did[:] = [row for row in did if not any(row is own for own in running[1])]
 
 
 # Each home's memory provider and its tools, by config.yaml's mtime.

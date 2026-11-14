@@ -7345,6 +7345,19 @@ def test_a_slow_models_thinking_takes_none_of_a_quick_turns_time(on, home, herme
     work.step_ran(BOT_CHAT, "t4", "terminal", "b", "second's result")
     assert work._ran[(BOT_CHAT, "t4")][2] == [] and work._steps[(BOT_CHAT, "t4")][1] == 1
     assert [step[1] for step in work._did[(BOT_CHAT, "t4")]] == ["second's result"]
+    # Two refused on two threads, handed back in either order, while a third runs: only theirs go.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t5", user_message="Click through the wizard", platform="tui")
+    takes = []
+    for call in ("a", "b", "c"):
+        assert work.tool_block(BOT_CHAT, "terminal", {"command": call}, turn_id="t5", tool_call_id=call) is None
+        takes.append(work._last_take.taken)
+    for held in (takes[0], takes[1]):
+        work._last_take.taken = held
+        work.give_back_steps()
+    assert [running[0] for running in work._ran[(BOT_CHAT, "t5")][2]] == ["c"]
+    work.step_ran(BOT_CHAT, "t5", "terminal", "c", "c's result")
+    assert work._did[(BOT_CHAT, "t5")] == [['terminal {"command": "c"}', "c's result", 1]]
+    assert work._steps[(BOT_CHAT, "t5")][1] == 1 and work._ran[(BOT_CHAT, "t5")][2] == []
     # The bot's own tools take no step, so their end is nobody's.
     work.step_ran(BOT_CHAT, "t3", "work_list", "own", "{}")
     assert len(work._ran[(BOT_CHAT, "t3")][2]) == 1
@@ -7409,13 +7422,32 @@ def test_a_hand_off_carries_what_the_steps_returned(on, hermes, monkeypatch):
     listed = [line for line in briefs[-1].splitlines() if line[:1].isdigit() and "terminal" in line]
     assert 0 < len(listed) < 20 and f"(and {20 - len(listed)} more)" in briefs[-1]
     assert f"\n{len(listed)}. «result {len(listed) - 1}»" in briefs[-1] and f"«result {len(listed)}»" not in briefs[-1]
+    # A batch the list can't hold whole is left out whole, and a credential a cut would split is masked first.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="split", user_message="Survey the mirrors", platform="tui")
+    for n in range(7):
+        kwargs = {"session_id": BOT_CHAT, "turn_id": "split", "tool_name": "terminal",
+                  "args": {"command": f"mirror {n} " + "word " * 60}, "tool_call_id": f"s{n}"}
+        assert plugin._work_tool_block(kwargs) is None
+        plugin._post_tool_call(**kwargs, result=f"mirror {n} " + "line " * 1195 + bearer)
+    kwargs = {"session_id": BOT_CHAT, "turn_id": "split", "tool_name": "tool_call", "tool_call_id": "s7",
+              "args": {"calls": [{"name": "web_search", "arguments": {"query": f"q{n} " + "word " * 60}}
+                                 for n in range(3)]}}
+    assert plugin._work_tool_block(kwargs) is None
+    plugin._post_tool_call(**kwargs, result="the batch's answer")
+    for n in range(10):
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="split", tool_call_id=f"r{n}") is None
+    assert "W" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="split")["message"]
+    assert "7. terminal" in briefs[-1] and "8. web_search" not in briefs[-1] and "(and 13 more)" in briefs[-1]
+    assert "the batch's answer" not in briefs[-1] and bearer[:8] not in briefs[-1]
+    assert bearer[:8] not in work._did[(BOT_CHAT, "split")][0][1]
     on.set_quick_steps(5)
     monkeypatch.setattr(work, "_quick_steps_cache", {})
     # A Hermes that reports no step's end: the steps alone, as before.
     plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Renew the wildcard certificate", platform="tui")
     for n in range(work.QUICK_STEPS):
         assert work.tool_block(BOT_CHAT, "terminal", {"command": f"look {n}"}) is None
-    assert "W4" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"  # the bot's limit is reached by now
+    assert "Renew the wildcard certificate" in briefs[-1]
     assert "their results aren't here; run again what you need" in briefs[-1] and "«" not in briefs[-1]
 
 
