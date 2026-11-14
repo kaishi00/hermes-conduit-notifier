@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.172.2 (2026-11-14)
+
+### Fixes
+
+- A model you pick for a chat sticks. A chat that once ran a turn on a fallback model (a Bot Chat, say) went back to that fallback's provider whenever Hermes reopened it, so the model you picked was refused and the chat snapped back to the fallback model.
+
 ## 0.172.1 (2026-11-14)
 
 ### Fixes

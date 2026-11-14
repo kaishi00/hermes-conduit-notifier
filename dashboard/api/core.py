@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Optional, TypeVar
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.requests import HTTPConnection
 
-from . import link_status
+from . import link_status, session_route
 
 # The plugin's logger, under the name it always had (the module Hermes loads,
 # plugin_api.py): every module logs through it.
@@ -46,6 +46,8 @@ async def _note_conduit_request(connection: HTTPConnection) -> None:
     being seen, for the dashboard's Conduit card (see "Link status" in
     api/link_status.py). Defined before the router, which takes it."""
     link_status._note_app_request(connection)
+    # Before the app can pick a model, its pick sticks (api/session_route.py).
+    session_route.ensure_installed()
 
 
 router = APIRouter(dependencies=[Depends(_note_conduit_request)])

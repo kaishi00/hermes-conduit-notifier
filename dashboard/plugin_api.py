@@ -51,6 +51,8 @@ they run:
     link_status           Link status: the dashboard's Conduit card
     desktop_views         Desktop views: the chats Hermes Desktop or the web
                           dashboard has open
+    session_route         Session route: a chat's model pick keeps the route
+                          Hermes rebuilds it on (gateway_runtime)
     rooms                 Room files, room pictures and the room planner
     workspace             Artifacts and workspace files
     workstreams           Bot workstreams: the Work panel, and Reply, Stop,
