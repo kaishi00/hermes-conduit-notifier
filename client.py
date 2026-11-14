@@ -36,6 +36,7 @@ from hermes_constants import get_hermes_home
 
 from . import e2e, link_status
 from .events import PLUGIN_VERSION, redact_event
+from . import push_proxy
 from .keep_alive import KeepAliveHTTPSHandler
 from .relay_urls import check_claim_base, check_request_url, is_https, paired_relay_url, replaced_pairing_query
 
@@ -676,6 +677,12 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
 # HTTPS to the relay keeps its connection between requests (#562).
 _keep_alive = KeepAliveHTTPSHandler()
 _opener = urllib.request.build_opener(_RefuseRedirects, _keep_alive)
+
+
+def _proxied_opener(proxy: urllib.request.ProxyHandler) -> Any:
+    # CONDUIT_PUSH_PROXY (push_proxy.py): urllib's own handler tunnels each request.
+    return urllib.request.build_opener(_RefuseRedirects, proxy)
+
 # Plain HTTP (loopback, or a LAN/Tailscale pairing claim) never goes through
 # an HTTP(S)_PROXY, which would see the credential or pairing code in clear.
 _direct_opener = urllib.request.build_opener(_RefuseRedirects, urllib.request.ProxyHandler({}))
@@ -701,7 +708,7 @@ def _request(
         headers["Authorization"] = f"Bearer {credential}"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        opener = _opener if is_https(url) else _direct_opener
+        opener = push_proxy.opener(_opener, _proxied_opener) if is_https(url) else _direct_opener
         with opener.open(request, timeout=timeout) as response:
             _note_relay_clock(url, response.headers)
             raw = response.read(MAX_RESPONSE_BYTES + 1)

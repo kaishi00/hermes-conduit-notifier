@@ -401,7 +401,7 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
         return (_GPTLiveAnsweredError if answered else core.TokenError)(502, message + GPT_LIVE_NO_FALLBACK)
 
     try:
-        with gemini_qwen_live._opener.open(request, timeout=GPT_LIVE_TIMEOUT_S) as response:
+        with gemini_qwen_live._provider_opener().open(request, timeout=GPT_LIVE_TIMEOUT_S) as response:
             answered = 200 <= response.status < 300
             # An SDP answer is a few KB; one byte over the cap is refused, not buffered.
             answer = response.read(GPT_LIVE_MAX_ANSWER_BYTES + 1)

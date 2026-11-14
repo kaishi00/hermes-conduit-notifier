@@ -264,6 +264,7 @@ async def _connect_realtime(url: str, headers: Dict[str, str], max_size: int, op
     except ImportError:
         InvalidStatusCode = None  # type: ignore[assignment]
     try:
+        kwargs.update(core._proxy_websocket_kwargs(url, connect))
         return await connect(url, max_size=max_size, open_timeout=open_timeout, **kwargs)
     except Exception as exc:
         if InvalidStatus is not None and isinstance(exc, InvalidStatus):

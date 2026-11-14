@@ -13,11 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.171.1 (2026-11-14)
+## 0.172.1 (2026-11-14)
 
 ### Fixes
 
 - A Hermes chat that has no session yet, such as the terminal's, no longer has every tool held back with "This bot's coordinator settings couldn't be checked just now". It isn't a Bot Chat, so the coordinator's limits don't apply to it. The tools a script run with execute_code calls count as steps of the chat that ran it, so they no longer fail in every chat, and a Bot Chat's script stays within its turn's steps.
+
+## 0.172.0 (2026-11-14)
+
+### New and improved
+
+- A Hermes on a network without direct internet access can send this plugin's traffic through an HTTP proxy of its own with `CONDUIT_PUSH_PROXY`, without routing the rest of Hermes through it. Thanks to aminrpg for the idea and the first version.
 
 ## 0.171.0 (2026-11-14)
 

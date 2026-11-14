@@ -434,7 +434,8 @@ async def _local_live_front_stream(target: Tuple[str, str, str], messages: List[
         request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers,
                                          method="POST")
         try:
-            opener = _local_live_front_direct_opener if url.startswith("http:") else _local_live_front_opener
+            opener = _local_live_front_direct_opener if url.startswith("http:") \
+                else core._proxy_opener(_local_live_front_opener, gemini_qwen_live._proxied_opener)
             response = opener.open(request, timeout=LOCAL_LIVE_FRONT_TIMEOUT_S)
         except urllib.error.HTTPError as exc:
             exc.close()
