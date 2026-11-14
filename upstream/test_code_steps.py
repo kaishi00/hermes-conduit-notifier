@@ -46,8 +46,11 @@ code = (
     f"for n in range({sys.argv[3]}):\n"
     "    print(n, terminal(f'echo code-step-{n}'))\n"
 )
+# The tools the turn was given, as an agent's own tool list hands them to
+# execute_code. With none, Hermes (since its 2026-11-14 canary) grants the
+# script no tools, rather than every one (notifier#800).
 script = handle_function_call("execute_code", {"code": code}, task_id="task-784", session_id=sys.argv[2],
-                              turn_id="turn-784")
+                              turn_id="turn-784", enabled_tools=["execute_code", "terminal"])
 alone = handle_function_call("terminal", {"command": "echo no-session-784"}, task_id="other-task", session_id="")
 print(json.dumps({"script": script, "alone": alone}))
 """
