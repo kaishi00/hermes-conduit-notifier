@@ -134,6 +134,17 @@ def speech_server_drives(settings: Optional[Dict[str, Any]] = None) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() in _SPEECH_SERVER_TRUE)
 
 
+def speech_server_own_model(settings: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether this profile's speech server answers Live > Local calls with
+    its own model (``voice.speech_server.own_model``): it gets the call's
+    instructions and tools, as Grok Live's model does. Every other call on
+    it (Classic voice, the Watch) has the plugin run the turns."""
+    if settings is None:
+        settings = _speech_server_settings()
+    value = settings.get("own_model")
+    return value is True or (isinstance(value, str) and value.strip().lower() in _SPEECH_SERVER_TRUE)
+
+
 def speech_server_transcription_model(settings: Optional[Dict[str, Any]] = None) -> str:
     """The model a driven server is asked to transcribe with
     (``voice.speech_server.transcription_model``), or "" to ask for none: a
@@ -234,13 +245,39 @@ class SpeechServerDrive(SpeechServerSetup):
         return frame
 
 
+class SpeechServerOwnModel(SpeechServerDrive):
+    """A server whose own model answers a Live > Local call
+    (``voice.speech_server.own_model``). Only a call that brings
+    instructions and tools (the phone's, in agent mode) is answered by it:
+    on any other the plugin runs the turns, as a SpeechServerDrive."""
+
+    answers = True
+
+    def own_update(self, frame: Dict[str, Any], instructions: str, tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The call's session.update for a server that answers by itself:
+        the call's instructions and tools, with the set voice and
+        transcription model. Its turn detection stays the call's."""
+        session = frame.get("session")
+        if not isinstance(session, dict):
+            session = frame["session"] = {}
+        session["instructions"] = instructions
+        # Always the call's current tools: a setup sent again with none
+        # takes the earlier ones away.
+        session["tools"] = tools
+        session["tool_choice"] = "auto" if tools else "none"
+        return self.update(frame)
+
+
 def speech_server_drive(settings: Optional[Dict[str, Any]] = None) -> Optional[SpeechServerSetup]:
-    """What this profile's settings add to a session: a SpeechServerDrive
-    when the plugin runs the turns, a SpeechServerSetup when only a voice
-    is set, None when the server is left to itself."""
+    """What this profile's settings add to a session: a SpeechServerOwnModel
+    when the server's model answers Live > Local, a SpeechServerDrive when
+    the plugin runs the turns, a SpeechServerSetup when only a voice is
+    set, None when the server is left to itself."""
     if settings is None:
         settings = _speech_server_settings()
     voice = speech_server_voice(settings)
+    if speech_server_own_model(settings):
+        return SpeechServerOwnModel(speech_server_transcription_model(settings), voice)
     if speech_server_drives(settings):
         return SpeechServerDrive(speech_server_transcription_model(settings), voice)
     return SpeechServerSetup(voice) if voice else None
@@ -487,12 +524,13 @@ def speech_server_status() -> Dict[str, Any]:
         settings = _speech_server_settings()
     except core.TokenError as exc:
         return {"configured": False, "available": False, "url": None, "has_key": False, "drive_turns": False,
-                "model": None, "voice": None, "transcription_model": None, "reason": str(exc)}
+                "own_model": False, "model": None, "voice": None, "transcription_model": None, "reason": str(exc)}
     configured = bool(str(settings.get("url") or "").strip())
     status = {
         "configured": configured, "available": False, "url": None,
         "has_key": bool(str(settings.get("api_key") or "").strip() or str(settings.get("api_key_file") or "").strip()),
         "drive_turns": speech_server_drives(settings),
+        "own_model": speech_server_own_model(settings),
         "model": speech_server_model(settings) or None,
         "voice": speech_server_voice(settings) or None,
         "transcription_model": speech_server_transcription_model(settings) or None,

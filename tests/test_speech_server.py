@@ -165,7 +165,7 @@ def test_status_reports_configured_server(client, hermes):
     _settings(hermes, url="http://10.0.0.5:8765", api_key="secret")
     body = client.get(f"{BASE}/speech-server/status?profile=work").json()
     assert body == {"ok": True, "configured": True, "available": True,
-                    "url": "ws://10.0.0.5:8765/v1/realtime", "has_key": True, "drive_turns": False,
+                    "url": "ws://10.0.0.5:8765/v1/realtime", "has_key": True, "drive_turns": False, "own_model": False,
                     "model": None, "voice": None, "transcription_model": None, "reason": None}
     assert hermes.entered == ["work"]
 

@@ -1251,6 +1251,36 @@ on. Local Live's status has `answers_alone`: true once a call's response
 ended with the model address not asked since the call began and the switch
 off, which is how Conduit knows to offer it.
 
+### A speech server whose own model answers (plugin 0.175+)
+
+`voice.speech_server.own_model: true` (a Boolean, Conduit's "The speech
+server's own model answers" switch under Live > Local) has a hosted realtime
+model hold a Local Live call in agent mode itself, the way Grok Live's does.
+When the phone's call brings its agent setup (`conduit.agent`, which a
+current Conduit sends before the `session.update`), the plugin sends the
+server one `session.update` with the call's instructions and tools, the set
+voice and transcription model, and the call's own turn detection, so the
+server starts and interrupts its responses. From there:
+
+- The server's audio, transcripts and responses pass to the call unchanged.
+- A function call the server's model makes (`response.output_item.done` or
+  `response.function_call_arguments.done`, once per `call_id`) goes to the
+  phone as `conduit.tool.call`, and the phone's `conduit.tool.result` goes
+  back as a `function_call_output` item, followed by one `response.create`
+  once every call of the response has answered and no response is running.
+- `conduit.agent.note` becomes a user item the model keeps without answering.
+- The readiness check is still the phone's own turn. Its greeting, when
+  there is one, is read aloud as written (an out-of-band `response.create`
+  with the read-aloud instructions).
+
+A call that brings no agent setup (Classic's hands-free option, Classic's
+listen and speak sockets, the Watch) is run as with `drive_turns`: the
+plugin runs the turns and the server reads the replies aloud, so the server's
+model never answers without the call's instructions. The fast model isn't
+asked on either kind of call. The status routes report
+`speech_server.own_model`, and Local Live's `answers_alone` stays false while
+it is on.
+
 ### Local Live on a read-back speech server (plugin 0.50+)
 
 Some speech servers only listen and read text aloud, with no model of their
