@@ -1278,6 +1278,12 @@ def test_conduit_rooms_only_leaves_other_rooms_turns_as_hermes_runs_them(tmp_pat
     other = "room_" + "fedcba9876543210" * 2
     assert rules.room_turn(other, home).with_others
 
+    # Whether a session is in a room at all doesn't follow the setting
+    # (clarify_loop keeps every room's questions off the owner's card).
+    _conduit_rooms_only(home, True)
+    assert rules.in_a_room("s-desktop", home) and rules.in_a_room(REMOTE, home)
+    assert rules.in_a_room("s-conduit", home)
+
     _conduit_rooms_only(home, False)
     assert rules.room_turn("s-desktop", home).with_others
 
