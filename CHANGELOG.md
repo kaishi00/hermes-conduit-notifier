@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.168.9 (2026-11-14)
+
+### New and improved
+
+- Voice calls can receive current facts and due follow-ups from memory providers that explicitly support voice startup context, including Nyx 7.24.0. Existing providers keep their previous behavior. Requires the app to share Hermes memory with the call; this does not add per-turn recall.
+
 ## 0.168.8 (2026-11-13)
 
 ### Fixes

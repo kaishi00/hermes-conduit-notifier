@@ -748,9 +748,13 @@ saved call is written to memory once it ends instead, as a chat is (see
 `context` is the built-in `MEMORY.md` / `USER.md` snapshot Hermes puts in its
 own system prompt (respecting `memory.memory_enabled` and
 `memory.user_profile_enabled`), capped at 8,000 characters. An external
-provider named by `memory.provider` (Honcho, Mem0, Holographic, and so on) is
-reached through recall instead: its own prompt block mostly describes tools the
-voice model can't call. `provider` is
+provider named by `memory.provider` (Honcho, Mem0, Holographic, and so on) can
+optionally supply `voice_prompt_block()` with display-ready personal facts for
+the startup context. That block takes priority, with complete builtin note lines
+filling the remaining space inside the same 8,000-character cap. Nyx uses this
+capability for current profile facts and due follow-ups. Providers without it
+are reached through recall instead; their generic tool-oriented prompt block is
+never substituted. `provider` is
 `"builtin"`, the external provider's name, or `null`. When there is nothing to
 use, `available` is false with `reason` `"unsupported"` (a Hermes without the
 memory modules) or `"disabled"` (memory off, or nothing stored yet).
@@ -767,6 +771,13 @@ in the Hermes log. The provider is started once per profile (as the
 profile's memory routes answer 503 at once until it returns, and other profiles
 are unaffected. `?profile=<name>`
 reads that profile's memory, as the other routes do.
+
+GPT-Live's existing **Use Hermes memory** switch remains opt-in and takes effect
+on the next call. With a capable provider and this notifier implementation, the
+existing app can include those facts without a manual recall request or response
+schema change. This adds startup context, not automatic per-utterance recall or
+live writes. See [Nyx voice-context integration](docs/NYX_VOICE_CONTEXT.md) for
+requirements, sibling compatibility and validation limits.
 
 ## Personality for voice
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextvars
+import inspect
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -35,6 +36,9 @@ router = core.router
 # since initializing one can open network clients.
 
 MEMORY_CONTEXT_MAX_CHARS = 8000
+# Inspect a bounded prefix even if a provider or builtin store returns much
+# more text. The last line of a truncated prefix is never used as a fact.
+MEMORY_CONTEXT_INPUT_MAX_CHARS = 64_000
 MEMORY_RECALL_MAX_CHARS = 4000
 MEMORY_MAX_QUERY_CHARS = 500
 # A voice turn recalls at most once; cap a looping client well above that.
@@ -82,6 +86,58 @@ def _clip_block(value: Any, limit: int) -> str:
     """Like _clip, but keeps line structure: memory blocks are formatted text."""
     text = str(value or "").strip()
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _complete_memory_lines(blocks: tuple[str, ...], limit: int) -> str:
+    """Pack complete voice facts first, then builtin notes, without cutting a negation.
+
+    Voice providers opt in to supplying display-ready data. Oversized lines are
+    omitted rather than sliced; old providers keep the original snapshot path.
+    """
+    picked: list[str] = []
+    used = 0
+    for block in blocks:
+        view = block[:MEMORY_CONTEXT_INPUT_MAX_CHARS]
+        if len(block) > len(view):
+            # A qualifier may be beyond the inspected prefix. Keep only lines
+            # whose terminating newline was included, never its partial tail.
+            end = view.rfind("\n")
+            view = view[:end] if end >= 0 else ""
+        lines: list[str] = []
+        block_chars = 0
+        separator = 2 if picked else 0
+        for line in view.strip().splitlines():
+            added = len(line) + bool(lines)
+            if used + separator + block_chars + added <= limit:
+                lines.append(line)
+                block_chars += added
+        text = "\n".join(lines).strip()
+        if text:
+            picked.append(text)
+            used += separator + len(text)
+    return "\n\n".join(picked)
+
+
+def _provider_voice_context(entry: Any, deadline: float) -> Optional[str]:
+    """Read an explicitly offered voice data block, never a generic tool prompt."""
+    # Inspect without invoking __getattr__ or a property on legacy providers.
+    capability = inspect.getattr_static(entry.provider, "voice_prompt_block", None)
+    if not (callable(capability) or isinstance(capability, (classmethod, staticmethod))):
+        return None
+
+    def read() -> str:
+        block = entry.provider.voice_prompt_block()
+        if not isinstance(block, str):
+            raise TypeError("voice_prompt_block must return text")
+        return block.strip()
+
+    try:
+        return entry.call(read, deadline, "context")
+    except core.TokenError:
+        raise
+    except Exception:  # noqa: BLE001 — backend text can carry private hosts or credentials
+        logger.warning("Memory provider %r voice context for Conduit failed", entry.name, exc_info=True)
+        raise core.TokenError(502, _MEMORY_FAILURE)
 
 
 def _hermes_memory_config() -> Dict[str, Any]:
@@ -358,10 +414,13 @@ def memory_context(key: str = "", limiter_key: Optional[str] = None) -> Dict[str
             raise
         return {"available": False, "reason": "unsupported", "provider": None, "recall": False, "context": ""}
     entry = _memory_providers.get(key, name, deadline)
-    # Not the provider's system_prompt_block(): that is mostly instructions
-    # for its own tools, which the voice model can't call. Its memory is
-    # reached through recall instead.
-    context = _clip_block(builtin, MEMORY_CONTEXT_MAX_CHARS) if builtin else ""
+    # A voice-specific opt-in supplies facts without unreachable tool guidance.
+    # Never substitute a generic system_prompt_block or an empty-query recall.
+    voice = _provider_voice_context(entry, deadline) if entry is not None else None
+    if voice is None:
+        context = _clip_block(builtin, MEMORY_CONTEXT_MAX_CHARS) if builtin else ""
+    else:
+        context = _complete_memory_lines((voice, builtin), MEMORY_CONTEXT_MAX_CHARS)
     recall = entry is not None
     label = name if recall else ("builtin" if builtin else None)
     result: Dict[str, Any] = {"available": bool(context) or recall, "provider": label, "recall": recall, "context": context}
