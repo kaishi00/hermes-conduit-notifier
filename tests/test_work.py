@@ -7185,12 +7185,13 @@ def test_a_hand_off_lists_only_the_steps_that_ran_and_starts_over_with_a_new_ask
     bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
     for n in range(work.QUICK_STEPS):
         plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal",
-                              args={"command": f"step {n} -H 'Authorization: Bearer {bearer}'", "api_key": "sk-123"},
+                              args={"command": f"step {n} -H 'Authorization: Bearer {bearer}'", "api_key": "sk-123",
+                                    "body": {"password": "hunter2"}},
                               tool_call_id=f"c{n + 1}")
     assert "W1" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
     goal = on.get("W1").goal
     assert "computer_use" not in goal and "step 4" in goal
-    assert "sk-123" not in goal and "(left out)" in goal
+    assert "sk-123" not in goal and "hunter2" not in goal and "(left out)" in goal
     assert bearer not in goal, "a credential inside a command is masked too"
     # A new ask a moment later, with no turn id: a new turn, with its own steps and hand-off, not W1's.
     plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Book a dentist visit", platform="tui")
@@ -7204,4 +7205,19 @@ def test_a_hand_off_lists_only_the_steps_that_ran_and_starts_over_with_a_new_ask
         assert work.tool_block(BOT_CHAT, "terminal", {}) is None
     again = work.tool_block(BOT_CHAT, "terminal", {})["message"]
     assert again.startswith(work.STEP_BLOCK.format(tool="terminal")) and "W2" in again and on.get("W3") is None
+    # A new turn that comes in while the plugin starts the last one's workstream isn't told it's its own.
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Water the plants", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {})
+    real = work.handle
+
+    def start_meanwhile(name, args, **kwargs):
+        answer = real(name, args, **kwargs)
+        plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Tidy the inbox", platform="tui")
+        return answer
+
+    monkeypatch.setattr(work, "handle", start_meanwhile)
+    assert "W3" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    monkeypatch.setattr(work, "handle", real)
+    assert work._handed.get((BOT_CHAT, "")) is None
 

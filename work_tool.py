@@ -3417,10 +3417,19 @@ def _cut_keeping_lines(text: str, limit: int) -> str:
 _SECRET_ARG = re.compile(r"token|secret|passw|api_?key|auth|credential|cookie", re.IGNORECASE)
 
 
+def _without_secret_args(value: Any) -> Any:
+    """``value`` with secret-named arguments' values left out, nested ones too."""
+    if isinstance(value, dict):
+        return {key: "(left out)" if _SECRET_ARG.search(str(key)) else _without_secret_args(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_without_secret_args(item) for item in value]
+    return value
+
+
 def _step_line(name: str, args: Any) -> str:
     """One step a quick turn took, for the workstream it hands on to."""
-    if isinstance(args, dict):
-        args = {key: "(left out)" if _SECRET_ARG.search(str(key)) else value for key, value in args.items()}
+    args = _without_secret_args(args)
     try:
         shown = json.dumps(args, ensure_ascii=False, sort_keys=True) if args else ""
     except (TypeError, ValueError):
@@ -3497,6 +3506,10 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
         return STEP_BLOCK.format(tool=tool) + (f" (The plugin couldn't start it for you: {note})" if note else "")
     shown = str(answer.get("title") or title)
     with _steps_lock:
+        if _asks.get(key) != ask:
+            # A new turn came in while it started: this hand-off is the last
+            # turn's, and the new one's blocked calls mustn't be told it's theirs.
+            return HANDED_OFF.format(tool=tool, ref=ref, title=shown)
         _handed[key] = (ref, shown)
         while len(_handed) > _STEP_TURNS:
             del _handed[next(iter(_handed))]
