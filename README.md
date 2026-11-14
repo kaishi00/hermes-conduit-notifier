@@ -2938,10 +2938,13 @@ keep only that field.
   the phone, only when Conduit already has access). A phone or email that
   doesn't read as one is dropped. A person can carry a `message`, a text
   Hermes wrote for the user to send them (plugin 0.67+, only with their
-  `phone`): Conduit shows it with Send text, which opens Messages filled in,
-  and only the user's tap sends it. A Conduit that says `text-drafts` in its
-  exchange gets it; for any other, the tool leaves the text off the card and
-  tells Hermes to give it in its reply.
+  `phone`, or from plugin 0.176 with their `email` when they have no phone,
+  since Messages sends to an email address over iMessage): Conduit shows it
+  with Send text, which opens Messages filled in, and only the user's tap
+  sends it. A Conduit that says `text-drafts` in its exchange gets it; for
+  any other, the tool leaves the text off the card and tells Hermes to give
+  it in its reply. A text to an email goes only to a Conduit that also says
+  `email-texts`.
 - **`status`**: where something in progress stands (`state`, `phase`
   waiting/active/done/problem, `progress` 0–1, `detail`, `eta`,
   `milestones`).

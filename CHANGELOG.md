@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.176.0 (2026-11-14)
+
+### New and improved
+
+- Hermes can now write a text for someone who has only an email address: Send text opens Messages with their email as the iMessage recipient. Needs the Conduit update that adds it; an older Conduit gets the text in Hermes' reply instead.
+
 ## 0.175.0 (2026-11-14)
 
 ### New and improved

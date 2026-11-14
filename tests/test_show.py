@@ -601,6 +601,27 @@ def test_a_text_message_goes_only_to_a_conduit_that_offers_send_text(tool_home):
                       "markdown": "**Mei** · Wife  \n+86 139 6261 8677  \nText to send: Landed safe, see you soon"}
 
 
+EMAIL_TEXT = {"type": "contact", "people": [
+    {"name": "Mei", "phone": "+86 139 6261 8677", "message": "Landed safe"},
+    {"name": "Bo", "email": "bo@example.com", "message": "Running late"}]}
+
+
+def test_a_text_to_an_email_goes_only_to_a_conduit_that_sends_one(tool_home):
+    # hermes-conduit#2465: Messages takes an email as an iMessage recipient.
+    _exchange(PresentStore(tool_home), features=("chat-cards", "media-cards", tool.TEXT_DRAFTS_FEATURE))
+    answer = _call({"title": "Texts", "cards": [EMAIL_TEXT]})
+    mei, bo = answer["cards"][0]["people"]
+    assert mei["message"] == "Landed safe", "a text to a phone still goes"
+    assert "message" not in bo and bo["email"] == "bo@example.com", "an older Conduit keeps a text only with a phone"
+    assert tool.NO_EMAIL_TEXTS_NOTE in answer["note"] and tool.NO_TEXT_DRAFTS_NOTE not in answer["note"]
+    assert "Running late" not in answer["markdown"]
+    _exchange(PresentStore(tool_home), features=("chat-cards", "media-cards", tool.TEXT_DRAFTS_FEATURE,
+                                                 tool.EMAIL_TEXTS_FEATURE))
+    answer = _call({"title": "Texts", "cards": [EMAIL_TEXT]})
+    assert answer["cards"] == [EMAIL_TEXT] and answer["note"] == tool.IN_CHAT_NOTE
+    assert "Text to send: Running late" in answer["markdown"]
+
+
 def test_the_tool_says_a_text_is_sent_only_by_the_users_tap():
     description = tool.SCHEMA["description"]
     assert "Send text" in description and "never that it was sent" in description
