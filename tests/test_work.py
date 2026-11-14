@@ -616,6 +616,57 @@ def test_a_note_to_another_bot_opens_no_ask(bots, hermes, monkeypatch):
     assert "work_tell" in work.SCHEMAS and "work_tell" in work.TOOLS
 
 
+def test_a_note_comes_in_as_another_bots_and_needs_no_answer(bots, hermes, monkeypatch):
+    # GLM/DeepSeek on #780: a note alone was headed "Work update from your workstreams".
+    call("work_tell", {"bot": "nahida", "text": "Built."})
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "Work update from another bot" in params["text"] and work.TELL_TAIL in params["text"]
+    assert work.ASK_TAIL not in params["text"]
+
+
+def test_a_note_whose_wake_hermes_refused_is_told_back(bots, hermes, monkeypatch):
+    monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+        "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    assert call("work_tell", {"bot": "nahida", "text": "The merge is verified."})["ok"]
+    work.flush_wakes()
+    hermes.calls.clear()
+    work.flush_wakes()
+    texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")
+             if params["session_id"] == f"rt-{BOT_CHAT}"]
+    assert any("Your note to Nahida («The merge is verified.») never reached it" in text for text in texts)
+
+
+def test_a_note_a_restart_caught_in_the_batch_goes_out_again_as_a_note(bots, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends
+    assert call("work_tell", {"bot": "nahida", "text": "Built."})["ok"]
+    for pending in (work._wakes, work._wake_asks, work._wake_tells, work._wake_answers, work._wake_items):
+        for batch in list(pending.values()):
+            timer = batch[1] if isinstance(batch, tuple) else None
+            if hasattr(timer, "cancel"):
+                timer.cancel()
+        pending.clear()  # the process ended before the batch went
+    monkeypatch.setattr(work, "_PROCESS_STARTED", __import__("time").time() + 1)
+    nahida = store_mod.Store(bots["nahida"])
+    work._replay(bots["nahida"], nahida)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and "«Built.»" in params["text"]
+    assert "Work update from another bot" in params["text"] and work.TELL_TAIL in params["text"]
+    assert not [row for row in nahida.outbox_pending() if row["kind"] == "line_tell"]
+
+
+def test_the_loop_hint_never_offers_a_question_back_to_ask_about(bots, hermes, monkeypatch):
+    # DeepSeek on #780: Furina, waiting on Nahida's question back, was told to ask about it.
+    assert call("work_ask", {"bot": "nahida", "text": "The report?"})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_ask", {"bot": "Furina", "text": "Which?", "about": "A1"}, session_id=NAHIDA_CHAT)["ok"]
+    as_bot(monkeypatch, bots, "hermes")
+    loop = call("work_ask", {"bot": "nahida", "text": "Also?"})
+    assert loop["error"] == "loop" and "about set to" not in loop["note"]
+    assert "Nahida asked you A2 back about your ask; answer it with work_reply first." in loop["note"]
+
+
 def test_notes_and_asks_share_the_hourly_cap_and_the_limits(bots, hermes, monkeypatch):
     monkeypatch.setattr(work, "ASK_PAIR_PER_HOUR", 2)
     assert call("work_tell", {"bot": "nahida", "text": "One."})["ok"]
@@ -686,6 +737,57 @@ def test_an_ask_whose_wake_hermes_refused_fails_and_the_asker_hears_why(bots, he
     texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")
              if params["session_id"] == f"rt-{BOT_CHAT}"]
     assert any("A1: your ask “Can you book it?” never reached Nahida" in text for text in texts)
+
+
+def test_an_asks_line_kept_on_the_second_try_still_fails_it_when_refused(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_add
+    failed = []
+
+    def flaky(self, ref, kind, *rest, **kw):
+        if kind == "line_ask" and not failed:
+            failed.append(kind)
+            raise OSError("database is locked")
+        return real(self, ref, kind, *rest, **kw)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_add", flaky)
+    hermes.refuse["prompt.submit"] = {"code": 4130, "message": "Session has 23000 messages"}
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert failed and store_mod.Store(bots["hermes"]).get("A1").status == "failed"
+
+
+def test_a_wake_hermes_took_doesnt_hand_its_lines_over_again_when_a_write_fails(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_done
+
+    def broken(self, item, outcome):
+        if outcome == "queued":
+            raise OSError("disk full")
+        return real(self, item, outcome)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_done", broken)
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert len(hermes.named("prompt.submit")) == 1
+    # Delivered, not pending: a restart's replay doesn't ask Nahida twice.
+    assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
+
+
+def test_a_refused_wake_whose_write_fails_still_fails_the_ask(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_done
+
+    def broken(self, item, outcome):
+        if outcome == "rejected":
+            raise OSError("disk full")
+        return real(self, item, outcome)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_done", broken)
+    monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+        "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "failed"
+    assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
 
 
 def test_an_ask_to_a_bot_that_cant_take_it_is_refused(bots, hermes):

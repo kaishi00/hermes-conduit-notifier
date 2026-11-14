@@ -1567,7 +1567,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   open ask: the bot asked can ask the bot that asked it with `about` (A3),
   one level deep, and the first ask stays open until it answers.
   `work_tell` sends another bot's Bot Chat a note that needs no answer (a
-  status, a result), as a work update, without opening an ask.
+  status, a result), as a work update, without opening an ask. A note whose
+  wake Hermes refuses is told back to the bot that sent it.
 - Every new workstream's brief carries the coordinator's notes (`work_note`,
   kept in `<profile>/conduit/work-notes.md`, labelled as data, never as your
   go-ahead) and the message of yours the Bot Chat is answering, quoted as
