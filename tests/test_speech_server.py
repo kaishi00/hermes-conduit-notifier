@@ -185,7 +185,7 @@ def test_status_reports_the_model_voice_and_transcription_model(client, hermes):
     _settings(hermes, url="wss://voice.example.com", model="gpt-realtime", voice="marin",
               transcription_model="gpt-4o-mini-transcribe", drive_turns=True)
     body = client.get(f"{BASE}/speech-server/status").json()
-    assert body["url"] == "wss://voice.example.com/v1/realtime?model=gpt-realtime"
+    assert body["url"] == "wss://voice.example.com/v1/realtime"
     assert (body["model"], body["voice"], body["transcription_model"]) == ("gpt-realtime", "marin", "gpt-4o-mini-transcribe")
     assert body["drive_turns"] is True
 

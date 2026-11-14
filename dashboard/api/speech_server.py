@@ -488,10 +488,12 @@ def speech_server_status() -> Dict[str, Any]:
         "reason": None,
     }
     try:
-        url, _ = speech_server_target(settings)
+        speech_server_target(settings)
     except core.TokenError as exc:
         return {**status, "reason": str(exc)}
-    return {**status, "configured": True, "available": True, "url": url}
+    # The address as set, without the model the dial adds: Conduit shows it
+    # in the address field and saves it back.
+    return {**status, "configured": True, "available": True, "url": speech_server_url(settings.get("url"))}
 
 
 async def _connect_speech_server(url: str, headers: Dict[str, str]) -> Any:
