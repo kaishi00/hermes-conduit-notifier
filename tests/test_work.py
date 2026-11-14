@@ -7372,6 +7372,7 @@ def test_a_hand_off_carries_what_the_steps_returned(on, hermes, monkeypatch):
     long = next(line for line in brief.splitlines() if line.startswith("3. «"))
     assert 1000 < len(long) <= work.HANDOFF_RESULT_CHARS[1] + 6 and long.endswith("…»")
     assert on.get("W1").goal.startswith("The user asked this in the Bot Chat")
+    assert work._did[(BOT_CHAT, "")][2][1].endswith("…"), "cut as it's kept, with its mark"
     # A Hermes that reports no step's end: the steps alone, as before.
     plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Renew the wildcard certificate", platform="tui")
     for n in range(work.QUICK_STEPS):

@@ -3737,7 +3737,9 @@ def step_ran(session_id: Any, turn_id: Any, tool_name: Any, tool_call_id: Any = 
         steps = _did.get(key) or []
         if result is not None and place < len(steps):
             # A tool_call batch's answer holds all of its calls': kept with its first.
-            steps[place][1] = _result_text(result)[: 4 * HANDOFF_RESULT_CHARS[1]]
+            # Cut here with its mark, so a result that masking then shortens
+            # to its share still shows it isn't whole.
+            steps[place][1] = _cut(_result_text(result), 4 * HANDOFF_RESULT_CHARS[1])
 
 
 def give_back_steps() -> None:
