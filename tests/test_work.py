@@ -1742,6 +1742,23 @@ def test_the_plugins_tool_hooks_journal_a_workstream(on, hermes, monkeypatch):
     assert on.steps("W1", open_only=True) == []
 
 
+def test_the_plugins_tool_hooks_journal_a_workstreams_script_calls(on, hermes, monkeypatch):
+    # DeepSeek on notifier#795: both hooks read a script's call as its chat's.
+    start()
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    plugin._pre_tool_call(session_id="20261031_work_1", tool_name="execute_code", args={"code": "..."}, turn_id="t1",
+                          task_id="task-w", tool_call_id="c0")
+    plugin._pre_tool_call(session_id="", tool_name="terminal", args={"command": "ls"}, task_id="task-w",
+                          tool_call_id="c1")
+    assert "command: ls" in [step["summary"] for step in on.steps("W1", open_only=True)]
+    plugin._post_tool_call(session_id="", tool_name="terminal", task_id="task-w", tool_call_id="c1", status="ok")
+    assert "command: ls" not in [step["summary"] for step in on.steps("W1", open_only=True)]
+    assert "task-w" in work._code_cells  # only execute_code's own post releases it
+    plugin._post_tool_call(session_id="20261031_work_1", tool_name="execute_code", task_id="task-w",
+                           tool_call_id="c0", status="ok")
+    assert not work._code_cells and on.steps("W1", open_only=True) == []
+
+
 def test_the_cli_turns_it_on_and_off(home, monkeypatch, capsys):
     cli = _load("conduit_push.cli", ROOT / "cli.py")
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)

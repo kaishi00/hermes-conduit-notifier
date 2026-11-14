@@ -3298,7 +3298,8 @@ def _bridge_block(args: Any) -> str:
 # execute_code's script calls tools through Hermes with no session id, only
 # the task of the execute_code call it runs in (its RPC and its kernel both
 # pass that call's task_id). Each running execute_code, by task: its chat, its
-# turn, how many of its calls are running and when the first began.
+# turn, how many of its calls are running and when its script last called a
+# tool (or it began): the hour a cell is kept counts from then.
 _code_cells: dict[str, list] = {}
 _code_cells_lock = threading.Lock()
 CODE_CELL_KEEP_S = 3600.0

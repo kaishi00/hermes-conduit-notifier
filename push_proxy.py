@@ -50,7 +50,7 @@ def _check(raw: str) -> tuple[Optional[str], Optional[str]]:
     except ValueError:
         return None, "it isn't a URL"
     if parts.scheme.lower() not in ("http", "https"):
-        return None, "it must start with http:// or https:// (SOCKS isn't supported)"
+        return None, "it must start with http:// or https://, and SOCKS isn't supported"
     if not parts.hostname:
         return None, "it has no host"
     if parts.path not in ("", "/") or parts.query or parts.fragment:
