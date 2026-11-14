@@ -1457,7 +1457,7 @@ question or a small task doesn't start a workstream. Change it in Conduit
     hermes -p <bot> conduit-push work status
 
 - The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
-  `work_read`, `work_close`, `work_note`, `work_propose`, `work_ask` and `work_reply` (behind
+  `work_read`, `work_close`, `work_note`, `work_propose`, `work_ask`, `work_reply` and `work_tell` (behind
   Hermes' Tool Search). They answer in that bot's canonical Bot Chat, and
   name work by ref (W1, W2 for workstreams, A1, A2 for asks), never by session
   id, so a bot only ever reaches its own work.
@@ -1553,12 +1553,21 @@ question or a small task doesn't start a workstream. Change it in Conduit
   interrupted, by a restart or by you stopping its turn). Only the Bot Chat asks: a workstream that
   needs another bot says so in its report, and the coordinator asks for it
   (`message_agent` is refused in a workstream too).
-  Closing an ask unanswered tells the bot that asked.
+  Closing an ask unanswered tells the bot that asked. An answer holds up to
+  2,000 characters and a longer one is refused whole (never cut), so the bot
+  shortens it or gives the path of a file with the detail. An ask whose wake
+  Hermes refuses fails on both sides, and the bot that asked is told why. An
+  ask to a Bot Chat in the middle of a turn reaches it when that turn ends,
+  and the asking bot is told so.
   What one bot asks or answers reaches the other as data, never as your
   go-ahead; each bot does the work with its own tools and its own approvals.
   The other bot needs workstreams on too. A chain of asks can't come back to
-  a bot already in it, goes at most two bots deep, and one bot can ask
-  another 10 times an hour.
+  a bot already in it, goes at most two bots deep, and one bot can ask or
+  tell another 10 times an hour. The one way back is a question about an
+  open ask: the bot asked can ask the bot that asked it with `about` (A3),
+  one level deep, and the first ask stays open until it answers.
+  `work_tell` sends another bot's Bot Chat a note that needs no answer (a
+  status, a result), as a work update, without opening an ask.
 - Every new workstream's brief carries the coordinator's notes (`work_note`,
   kept in `<profile>/conduit/work-notes.md`, labelled as data, never as your
   go-ahead) and the message of yours the Bot Chat is answering, quoted as
@@ -2550,7 +2559,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   defers plugin tools behind `tool_search`, so a run reaches the report
   through `tool_call` when it isn't listed; a quoted `"false"` counts, and a
   call without `saw` rings with the watch's name instead. A watch whose job
-  carries an older run prompt gets the current one on its next run (0.169.3).
+  carries an older run prompt gets the current one on its next run (0.170.1).
   `conduit_call_user` refuses in such a run. Watches set up by 0.16.x (jobs
   that load the skill and keep their own state) keep running as written, and
   setting one again by name or id moves it onto the report.

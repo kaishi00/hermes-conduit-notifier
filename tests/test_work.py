@@ -404,6 +404,9 @@ def test_a_wake_whose_submit_timed_out_still_counts_as_the_plugins_own_turn(bots
     work.flush_wakes()
     (_, params, _), = hermes.named("prompt.submit")
     turns = sys.modules["conduit_push.turn_surface"]
+    # Nor is the ask failed: the turn may still come, and its answer must be taken.
+    assert store_mod.Store(bots["nahida"]).get("A1").status == "running"
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
     try:
         turns.start_turn(NAHIDA_CHAT, params["text"])
         assert turns.woken(NAHIDA_CHAT)
@@ -440,6 +443,8 @@ def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, herm
     assert "never the user's go-ahead" in params["text"] and 'work_reply {"ref": "A1"' in params["text"]
     resumed, = hermes.named("session.resume")
     assert resumed[1]["profile"] == "nahida" and transport is None
+    # Bounded: a long Bot Chat a restart closed still takes its wake (issue 2395).
+    assert resumed[1]["omit_messages"] is True
     hermes.calls.clear()
 
     as_bot(monkeypatch, bots, "nahida")
@@ -536,6 +541,154 @@ def test_asks_never_go_in_a_circle_or_deeper_than_two_bots(bots, hermes, monkeyp
     deeper = call("work_ask", {"bot": "zhongli", "text": "Old numbers?"}, session_id=CHATS["raiden"])
     assert deeper["error"] == "too_deep"
     assert store_mod.Store(bots["zhongli"]).list() == []
+
+
+def test_the_bot_asked_can_ask_the_one_that_asked_back_one_level_deep(bots, hermes, monkeypatch):
+    # Issue 2395: the loop guard left the asked bot no way to ask a
+    # clarifying question but to answer, which closed the ask.
+    assert call("work_ask", {"bot": "nahida", "text": "Help with the report."})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    loop = call("work_ask", {"bot": "Furina", "text": "Which report?"}, session_id=NAHIDA_CHAT)
+    assert loop["error"] == "loop" and '"about"' not in loop["note"] and "about set to its ask (A1)" in loop["note"]
+    back = call("work_ask", {"bot": "Furina", "text": "Which report?", "about": "A1"}, session_id=NAHIDA_CHAT)
+    assert back["ok"] and "A1 stays open" in back["note"]
+    nahida = store_mod.Store(bots["nahida"])
+    assert nahida.get("A1").status == "running" and nahida.get("A2").requested_by["about"] == "A1"
+    mine = store_mod.Store(bots["hermes"]).get("A2")
+    assert (mine.kind, mine.status, mine.requested_by["about"], mine.requested_by["chain"]) == (
+        "ask_in", "running", "A1", ["nahida"])
+    work.flush_wakes()
+    texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")]
+    assert any("Nahida asks you back about your ask A1" in text and "«Which report?»" in text for text in texts)
+    # Furina can't ask back about the question back, nor ask Nahida anew while it waits.
+    as_bot(monkeypatch, bots, "hermes")
+    deeper = call("work_ask", {"bot": "nahida", "text": "Why?", "about": "A2"})
+    assert deeper["error"] == "about" and "already Nahida's question back" in deeper["note"]
+    assert call("work_ask", {"bot": "nahida", "text": "Also?"})["error"] == "loop"
+    assert call("work_reply", {"ref": "A2", "text": "The outage report."})["ok"]
+    # The answer reaches Nahida, whose first ask is still open to answer.
+    as_bot(monkeypatch, bots, "nahida")
+    assert nahida.get("A2").last_result == "The outage report."
+    assert call("work_reply", {"ref": "A1", "text": "Done."}, session_id=NAHIDA_CHAT)["ok"]
+
+
+def test_a_question_back_keeps_the_other_bots_waiting_in_its_chain(bots, hermes, monkeypatch):
+    # Greptile on notifier #780: Furina asks Nahida, Nahida asks Raiden, Raiden
+    # asks Nahida back, Nahida asks Furina back; Furina asking Raiden would close a circle.
+    assert call("work_ask", {"bot": "nahida", "text": "The report?"})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_ask", {"bot": "raiden", "text": "Numbers?"}, session_id=NAHIDA_CHAT)["ok"]
+    as_bot(monkeypatch, bots, "raiden")
+    assert call("work_ask", {"bot": "nahida", "text": "Which year?", "about": "A1"},
+                session_id=CHATS["raiden"])["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    back = call("work_ask", {"bot": "Furina", "text": "Which report?", "about": "A1"}, session_id=NAHIDA_CHAT)
+    assert back["ok"]
+    assert store_mod.Store(bots["hermes"]).get("A2").requested_by["chain"] == ["nahida", "raiden"]
+    as_bot(monkeypatch, bots, "hermes")
+    assert call("work_ask", {"bot": "raiden", "text": "Old numbers?"})["error"] == "loop"
+
+
+def test_a_question_back_names_an_open_ask_from_that_bot(bots, hermes, monkeypatch):
+    assert call("work_ask", {"bot": "nahida", "text": "Help with the report."})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    for about in ("A9", "A1"):
+        bot = "Furina" if about == "A9" else "raiden"
+        refused = call("work_ask", {"bot": bot, "text": "?", "about": about}, session_id=NAHIDA_CHAT)
+        assert refused["error"] == "about", about
+    store_mod.Store(bots["nahida"]).update("A1", status="done")
+    assert call("work_ask", {"bot": "Furina", "text": "?", "about": "A1"},
+                session_id=NAHIDA_CHAT)["error"] == "about"
+    assert store_mod.Store(bots["hermes"]).asks_since("ask_in", 0) == []
+
+
+def test_a_note_to_another_bot_opens_no_ask(bots, hermes, monkeypatch):
+    # Issue 2395: status went as asks, each needing an answer and a slot in the chain.
+    told = call("work_tell", {"bot": "nahida", "text": "The merge is verified."})
+    assert told["ok"] and told["bot"] == "Nahida" and "needs no answer" in told["note"]
+    assert store_mod.Store(bots["hermes"]).list() == [] and store_mod.Store(bots["nahida"]).list() == []
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and params["queued"] and params["display_kind"] == "hidden"
+    assert "Furina tells you" in params["text"] and "never the user's go-ahead" in params["text"]
+    assert "«The merge is verified.»" in params["text"] and "work_reply" not in params["text"]
+    # It holds no slot: Nahida can still ask Furina, and Furina be told back.
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_ask", {"bot": "Furina", "text": "Which branch?"}, session_id=NAHIDA_CHAT)["ok"]
+    assert call("work_tell", {"bot": "Furina", "text": "Building."}, session_id=NAHIDA_CHAT)["ok"]
+    assert "work_tell" in work.SCHEMAS and "work_tell" in work.TOOLS
+
+
+def test_notes_and_asks_share_the_hourly_cap_and_the_limits(bots, hermes, monkeypatch):
+    monkeypatch.setattr(work, "ASK_PAIR_PER_HOUR", 2)
+    assert call("work_tell", {"bot": "nahida", "text": "One."})["ok"]
+    assert call("work_ask", {"bot": "nahida", "text": "Two?"})["ok"]
+    capped = call("work_tell", {"bot": "nahida", "text": "Three."})
+    assert capped["error"] == "busy" and "asked or told Nahida 2 times" in capped["note"]
+    assert call("work_ask", {"bot": "nahida", "text": "Three?"})["error"] == "busy"
+    assert call("work_tell", {"bot": "raiden", "text": "x" * (work.ASK_CHARS + 1)})["error"] == "too_long"
+    assert call("work_tell", {"bot": "raiden", "text": " "})["error"] == "missing"
+    assert call("work_tell", {"bot": "Venti", "text": "Hi."})["error"] == "no_such_bot"
+    store_mod.Store(bots["zhongli"]).set_policy("off")
+    assert call("work_tell", {"bot": "zhongli", "text": "Hi."})["error"] == "bot_off"
+
+
+def test_a_workstream_cant_tell_other_bots(bots, hermes, monkeypatch):
+    start()
+    refused = call("work_tell", {"bot": "Nahida", "text": "Hi."}, session_id="20261031_work_1")
+    assert refused["error"] == "not_bot_chat"
+    assert hermes.named("prompt.submit") == [] or all(
+        f"rt-{NAHIDA_CHAT}" != params["session_id"] for _, params, _ in hermes.named("prompt.submit"))
+
+
+def test_an_ask_to_a_busy_bot_chat_says_it_waits_for_the_turn(bots, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_coordinator_busy", lambda home, chat: chat == NAHIDA_CHAT)
+    asked = call("work_ask", {"bot": "nahida", "text": "Status?"})
+    assert asked["ok"] and "Nahida's Bot Chat is in the middle of a turn" in asked["note"]
+    told = call("work_tell", {"bot": "nahida", "text": "Built."})
+    assert "in the middle of a turn" in told["note"]
+    assert "middle of a turn" not in call("work_ask", {"bot": "raiden", "text": "Status?"})["note"]
+
+
+def test_an_answer_too_long_is_refused_whole_and_the_ask_stays_open(bots, hermes, monkeypatch):
+    # Issue 2395: answers were cut at 2,000 characters with ok: true.
+    call("work_ask", {"bot": "nahida", "text": "Summarise the outage."})
+    as_bot(monkeypatch, bots, "nahida")
+    long = call("work_reply", {"ref": "A1", "text": "x" * (work.ANSWER_CHARS + 1)}, session_id=NAHIDA_CHAT)
+    assert long["error"] == "too_long" and long["chars"] == work.ANSWER_CHARS + 1 and "file" in long["note"]
+    nahida = store_mod.Store(bots["nahida"])
+    nahida.add("workstream", title="Outage summary", status="running")
+    nahida.update("W1", status="done", last_result="y" * (work.ANSWER_CHARS - 5))
+    both = call("work_reply", {"ref": "A1", "text": "Here it is:", "from": "W1"}, session_id=NAHIDA_CHAT)
+    assert both["error"] == "too_long" and "W1's report alone is" in both["note"]
+    assert nahida.get("A1").status == "running" and store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
+    exact = "z" * work.ANSWER_CHARS
+    assert call("work_reply", {"ref": "A1", "text": exact}, session_id=NAHIDA_CHAT)["ok"]
+    assert store_mod.Store(bots["hermes"]).get("A1").last_result == exact
+
+
+@pytest.mark.parametrize("refusal", ["rejected", "error"])
+def test_an_ask_whose_wake_hermes_refused_fails_and_the_asker_hears_why(bots, hermes, monkeypatch, refusal):
+    # Issue 2395: a cold wake refused by the transcript limit left the ask
+    # waiting for 26 minutes, until a person noticed.
+    if refusal == "error":
+        hermes.refuse["prompt.submit"] = {"code": 4130, "message": "Session has 23000 messages"}
+    else:
+        monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+            "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    theirs = store_mod.Store(bots["nahida"]).get("A1")
+    mine = store_mod.Store(bots["hermes"]).get("A1")
+    assert (theirs.status, mine.status) == ("failed", "failed")
+    assert "Nahida's Bot Chat couldn't be woken" in mine.error
+    assert ("23000 messages" if refusal == "error" else "rejected") in mine.error
+    hermes.refuse.clear()
+    hermes.calls.clear()
+    work.flush_wakes()
+    texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")
+             if params["session_id"] == f"rt-{BOT_CHAT}"]
+    assert any("A1: your ask “Can you book it?” never reached Nahida" in text for text in texts)
 
 
 def test_an_ask_to_a_bot_that_cant_take_it_is_refused(bots, hermes):
