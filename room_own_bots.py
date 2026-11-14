@@ -196,23 +196,22 @@ class OwnBots:
         """Pushes the invites whose room.bring didn't come in time, and forgets room.brings past PENDING_S
         whose invite never came."""
         state = self.store.read()
-        if any(not isinstance(kept, dict) or kept.get("until", 0) <= now for kept in state["pending"].values()):
-            with self.store.update() as changing:
-                changing["pending"] = {key: kept for key, kept in changing["pending"].items()
-                                       if isinstance(kept, dict) and kept.get("until", 0) > now}
-        held = state["held"]
-        due = [key for key, until in held.items() if not isinstance(until, int) or until <= now]
-        if not due:
+        if not any(not _alive(kept, now) for kept in state["pending"].values()) \
+                and all(type(until) is int and until > now for until in state["held"].values()):
             return
-        with self.store.update() as state:
+        with self.store.update() as changing:
+            changing["pending"] = {key: kept for key, kept in changing["pending"].items() if _alive(kept, now)}
+            # Popped in the same update that finds them due, so a bring racing it pushes the invite at most once.
+            due = [key for key, until in changing["held"].items() if type(until) is not int or until <= now]
             for key in due:
-                state["held"].pop(key, None)
+                changing["held"].pop(key)
         for key in due:
             self._tell(key)
 
     def _tell(self, key: str) -> None:
         invite = self.rooms.store.read()["invites"].get(key)
-        if invite is not None and invite["status"] == "waiting":
+        # Not one that ran out while it waited for its bring: its answer would be refused.
+        if invite is not None and invite["status"] == "waiting" and int(self.clock()) < invite["expires_at"]:
             self.rooms.notify(dict(invite))
 
     def join_pending(self, key: str) -> bool:
@@ -308,6 +307,11 @@ class Store:
             raise
         self.path.chmod(0o600)
         room_identity._sync_directory(self.directory)
+
+
+def _alive(kept: Any, now: float) -> bool:
+    """A kept room.bring still within PENDING_S (one that can't be read isn't)."""
+    return isinstance(kept, dict) and type(kept.get("until")) is int and kept["until"] > now
 
 
 def _empty() -> dict[str, Any]:

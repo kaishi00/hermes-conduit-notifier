@@ -3129,6 +3129,32 @@ def test_a_bring_whose_invite_never_comes_is_forgotten(rooms, monkeypatch):
     assert store.read()["pending"] == {}
 
 
+def test_an_update_never_writes_over_a_file_it_failed_to_read(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    store = own_bots_module.Store(rooms.tmp_path / "laifu")
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.bring",
+                                 {"v": 1, "room_id": "conduit-x", "profiles": ["default"]}))
+    before = store.path.read_bytes()
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(PermissionError("EACCES"))
+                        if self == store.path else real(self))
+    with pytest.raises(PermissionError):
+        with store.update() as state:
+            state["pending"].clear()
+    monkeypatch.setattr(Path, "read_bytes", real)
+    assert store.path.read_bytes() == before
+
+
+def test_a_held_invite_that_ran_out_doesnt_push(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    room_id = draft(rooms, links=("link1",))["room_id"]
+    expires = rooms.laifu.store.read()["invites"][f"link1/{room_id}"]["expires_at"]
+    rooms.clock.now = expires
+    rooms.laifu.own_bots.pass_once()
+    assert rooms.notified["laifu"] == []
+    assert own_bots_module.Store(rooms.tmp_path / "laifu").read()["held"] == {}
+
+
 def test_a_bot_the_other_side_wouldnt_take_is_left_out_alone(rooms, monkeypatch):
     _own(rooms, monkeypatch)
     (rooms.tmp_path / "laifu" / "profiles" / "everyone").mkdir()
