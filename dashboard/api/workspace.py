@@ -194,10 +194,11 @@ def _artifact_pins() -> Any:
         return _artifact_pins_module
 
 
-def artifact_pins(action: str, body: Any = None) -> Dict[str, Any]:
+def artifact_pins(action: str, body: Any = None, profile: Optional[str] = None) -> Dict[str, Any]:
     """Runs inside the profile scope: the pins are the profile's."""
     module = _artifact_pins()
-    store = module.PinStore(core._calls_home(), sensitive=_secret_path)
+    store = module.PinStore(core._calls_home(), sensitive=_secret_path,
+                            source=_pin_source(profile) if action == "save" else (lambda path: (None, "unreadable")))
     try:
         if action == "save":
             return store.save(body)
@@ -206,6 +207,43 @@ def artifact_pins(action: str, body: Any = None) -> Dict[str, Any]:
         return store.view()
     except module.PinError as exc:
         raise core.TokenError(409 if exc.code == "too_many" else 400, str(exc))
+
+
+def _pin_source(profile: Optional[str]) -> Callable[[str], tuple]:
+    """Where on this host a saved file is read from for its copy: only a
+    file the Folder would open, as _host_file_check decides. A profile whose
+    files are on its SSH machine, or a path past a hosted install's folder,
+    is saved without a copy."""
+    try:
+        from hermes_cli.web_routers.files import _fs_backend, _fs_profile_home
+        remote = _fs_backend(profile) is not None
+        home = None if remote else _fs_profile_home(profile)
+    except Exception:
+        # Without Hermes' own routing an SSH profile's path would be read on
+        # this host: copy nothing.
+        return lambda path: (None, "unreadable")
+    if remote:
+        return lambda path: (None, "remote")
+    try:
+        from hermes_cli.web_server_files import _agent_fs_path
+    except Exception:
+        _agent_fs_path = None
+    try:
+        from hermes_cli.web_server_files import _managed_files_policy
+        locked = _managed_files_policy(None, create_root=False).locked_root
+        boundary = os.path.realpath(str(locked)) if locked is not None else None
+    except Exception:
+        boundary = None
+
+    def source(path: str) -> tuple:
+        target = str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
+        if boundary is not None:
+            real = os.path.realpath(target)
+            if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
+                return None, "outside"
+        return target, None
+
+    return source
 
 
 def _secret_path(path: str) -> bool:
@@ -244,7 +282,9 @@ async def _artifact_pins_route(profile: Optional[str], run: Callable[[], Dict[st
         def job() -> Dict[str, Any]:
             with state_lock:
                 if state["abandoned"]:
-                    raise core.TokenError(503, "The save was cancelled")
+                    # Nobody awaits this answer any more: say so without
+                    # raising, so no unretrieved exception is logged.
+                    return {"cancelled": True}
                 state["started"] = True
             try:
                 return limited()
@@ -279,7 +319,7 @@ async def get_artifact_pins(response: Response, profile: Optional[str] = None) -
 async def post_artifact_pin(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     body = await core._read_json_body(request, ARTIFACT_PINS_MAX_BODY_BYTES)
-    return await _artifact_pins_route(profile, lambda: artifact_pins("save", body), copies=True)
+    return await _artifact_pins_route(profile, lambda: artifact_pins("save", body, profile), copies=True)
 
 
 @router.delete("/artifacts/pins")

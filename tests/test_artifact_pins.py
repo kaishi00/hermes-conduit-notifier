@@ -162,8 +162,21 @@ def test_a_removed_row_never_deletes_outside_its_copies(tmp_path):
 # --- Routes ---------------------------------------------------------------------
 
 
+def _hermes_file_routes(monkeypatch, backend=None, locked_root=None):
+    """Hermes' own file routing, as a local install has it."""
+    files = types.ModuleType("hermes_cli.web_routers.files")
+    files._fs_backend = lambda profile: backend
+    files._fs_profile_home = lambda profile: None
+    files._is_sensitive_path = lambda path: False
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", files)
+    server_files = types.ModuleType("hermes_cli.web_server_files")
+    server_files._managed_files_policy = lambda *a, **k: types.SimpleNamespace(locked_root=locked_root)
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_files", server_files)
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
+    _hermes_file_routes(monkeypatch)
     monkeypatch.setattr(api.core, "_calls_home", lambda: tmp_path / "home")
     app = FastAPI()
     app.include_router(api.router, prefix=BASE)
@@ -288,3 +301,93 @@ def test_a_stray_temporary_at_the_root_never_sweeps_the_store(tmp_path):
     os.utime(stray, (1_000.0, 1_000.0))
     store._copies_size()
     assert kept.exists()
+
+
+def test_a_hosted_install_copies_nothing_past_its_folder(client, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "in.md").write_text("in")
+    (tmp_path / "outside.md").write_text("out")
+    (root / "link.md").symlink_to(tmp_path / "outside.md")
+    _hermes_file_routes(monkeypatch, locked_root=root)
+
+    def save(path):
+        return client.post(f"{BASE}/artifacts/pins", json={"item": _file_row(path)}).json()["pin"]
+
+    assert pathlib.Path(save(root / "in.md")["kept_path"]).read_text() == "in"
+    assert save(tmp_path / "outside.md")["not_kept"] == "outside"
+    assert save(root / "link.md")["not_kept"] == "outside", "a link inside to a file outside is outside"
+
+
+def test_an_ssh_profiles_file_is_saved_without_a_copy(client, tmp_path, monkeypatch):
+    (tmp_path / "same-name.md").write_text("this host's, not the profile's")
+    _hermes_file_routes(monkeypatch, backend=object())
+    pin = client.post(f"{BASE}/artifacts/pins", json={"item": _file_row(tmp_path / "same-name.md")}).json()["pin"]
+    assert pin["not_kept"] == "remote" and "kept_path" not in pin
+
+
+def test_without_hermes_routing_nothing_is_copied(client, tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_text("x")
+    monkeypatch.delitem(sys.modules, "hermes_cli.web_routers.files")
+    pin = client.post(f"{BASE}/artifacts/pins", json={"item": _file_row(tmp_path / "a.md")}).json()["pin"]
+    assert "kept_path" not in pin
+
+
+def test_saves_past_both_copy_slots_are_turned_away_and_slots_come_back(client, tmp_path):
+    original = tmp_path / "a.md"
+    original.write_text("x")
+    slots = api.workspace._artifact_pins_slots
+    assert slots.acquire(blocking=False) and slots.acquire(blocking=False)
+    try:
+        assert client.post(f"{BASE}/artifacts/pins", json={"item": _file_row(original)}).status_code == 503
+    finally:
+        slots.release()
+        slots.release()
+    assert client.post(f"{BASE}/artifacts/pins", json={"item": _file_row(original)}).status_code == 200
+    # Both free again: the save gave its slot back exactly once.
+    assert slots.acquire(blocking=False) and slots.acquire(blocking=False)
+    slots.release()
+    slots.release()
+    with pytest.raises(ValueError):
+        slots.release()
+
+
+def test_a_file_that_grows_while_it_copies_is_not_kept(tmp_path, monkeypatch):
+    original = tmp_path / "log.txt"
+    original.write_bytes(b"x" * 20)
+    real_stat = os.stat
+
+    def stale_stat(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if str(path) == str(original):
+            values = list(info)
+            values[6] = 10  # st_size, as it was before it grew
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(pins.os, "stat", stale_stat)
+    store = pins.PinStore(tmp_path / "home", clock=Clock())
+    assert store.save({"item": _file_row(original)})["pin"]["not_kept"] == "changing"
+    assert list(store.copies.iterdir()) == []
+    assert pins._reserved == {}
+
+
+def test_a_row_that_fails_to_write_takes_its_copy_with_it(tmp_path, monkeypatch):
+    original = tmp_path / "a.txt"
+    original.write_text("one")
+    store = pins.PinStore(tmp_path / "home", clock=Clock())
+
+    def fail(encoded):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "_save", fail)
+    with pytest.raises(OSError):
+        store.save({"item": _file_row(original)})
+    assert list(store.copies.iterdir()) == []
+
+
+def test_a_path_that_is_not_text_is_refused_before_anything_is_reserved(tmp_path):
+    store = pins.PinStore(tmp_path / "home", clock=Clock())
+    with pytest.raises(pins.PinError):
+        store.save({"item": _file_row(str(tmp_path) + "/bad\udcff.txt")})
+    assert pins._reserved == {}

@@ -89,15 +89,21 @@ class PinError(ValueError):
 class PinStore:
     """``sensitive`` says whether a path is a secret the Folder won't show
     (``.env``, keys, credentials); such a file is saved without a copy, so
-    its contents never land under another name."""
+    its contents never land under another name. ``source`` gives the path
+    on this host the Folder would open for an artifact's path (a Docker
+    profile's paths mapped, a hosted install's folder kept to), or None and
+    why there's none (``remote``: the profile's files are on its SSH
+    machine; ``outside``: past a hosted install's folder)."""
 
     def __init__(self, home: Path, clock: Callable[[], float] = time.time,
-                 sensitive: Callable[[str], bool] = lambda path: False) -> None:
+                 sensitive: Callable[[str], bool] = lambda path: False,
+                 source: Callable[[str], tuple] = lambda path: (path, None)) -> None:
         self.home = Path(home)
         self.path = self.home / FILE_NAME
         self.copies = self.home / COPY_DIR
         self.clock = clock
         self.sensitive = sensitive
+        self.source = source
 
     def view(self) -> dict[str, Any]:
         """Every saved artifact, the one saved last first, each saying whether
@@ -124,18 +130,30 @@ class PinStore:
         pin = {**item, "note": note, "pinned_at": self.clock(), "copy": None, "copy_reason": None}
         if "path" in item:
             pin["copy"], pin["copy_reason"] = self._copy(item["path"], key)
-        with self._locked() as state:
-            same = next((p for p in state["pins"] if _key(p) == key), None)
-            if same is not None:
-                # Saved by another device while this one copied.
+        kept, refused, answer = False, None, None
+        try:
+            with self._locked() as state:
+                same = next((p for p in state["pins"] if _key(p) == key), None)
+                if same is not None:
+                    # Saved by another device while this one copied.
+                    same["note"] = note
+                    answer = {"pin": self._described(same)}
+                elif len(state["pins"]) >= MAX_PINS:
+                    refused = PinError("too_many", f"At most {MAX_PINS} artifacts can be saved")
+                else:
+                    state["pins"].append(pin)
+                    kept = True
+                    answer = {"pin": self._described(pin)}
+        except BaseException:
+            kept = False  # the row wasn't written: its copy goes too
+            raise
+        finally:
+            # Outside the lock: a copy can be large.
+            if not kept:
                 self._remove_copy(pin)
-                same["note"] = note
-                return {"pin": self._described(same)}
-            if len(state["pins"]) >= MAX_PINS:
-                self._remove_copy(pin)
-                raise PinError("too_many", f"At most {MAX_PINS} artifacts can be saved")
-            state["pins"].append(pin)
-            return {"pin": self._described(pin)}
+        if refused is not None:
+            raise refused
+        return answer
 
     def remove(self, key: Any) -> dict[str, Any]:
         """Unsaves the artifact by its path or URL, and removes its copy."""
@@ -159,10 +177,16 @@ class PinStore:
     def _copy(self, path: str, key: str) -> tuple:
         """The copy's path, or None and why there's none. Each copy has a
         folder of its own, so two saves at once never share one."""
-        source = os.path.expanduser(path)
+        expanded = os.path.expanduser(path)
         try:
-            real = os.path.realpath(source)
-            if self.sensitive(source) or self.sensitive(real):
+            if self.sensitive(expanded) or self.sensitive(os.path.realpath(expanded)):
+                return None, "sensitive"
+            host, why = self.source(expanded)
+            if host is None:
+                return None, why or "unreadable"
+            # The file itself, not a link someone could swap meanwhile.
+            source = os.path.realpath(host)
+            if self.sensitive(source):
                 return None, "sensitive"
             info = os.stat(source)
         except (OSError, ValueError):
@@ -176,17 +200,22 @@ class PinStore:
             if self._copies_size() + _reserved.get(budget, 0) + info.st_size > MAX_TOTAL_COPY_BYTES:
                 return None, "no_room"
             _reserved[budget] = _reserved.get(budget, 0) + info.st_size
-        folder = self.copies / f"{hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]}-{uuid.uuid4().hex[:12]}"
-        name = _safe_name(re.split(r"[/\\]", path.rstrip("/\\"))[-1])
-        target = folder / name
+        folder = None
         try:
+            folder = self.copies / f"{hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]}-{uuid.uuid4().hex[:12]}"
+            name = _safe_name(re.split(r"[/\\]", path.rstrip("/\\"))[-1])
+            target = folder / name
             folder.mkdir(parents=True, exist_ok=True, mode=0o700)
             temporary = folder / f".{name}.tmp"
-            shutil.copyfile(source, temporary)
-            os.chmod(temporary, 0o600)
+            if not _copy_at_most(source, temporary, info.st_size):
+                # Grew while it copied (still being written): only what
+                # was reserved is ever kept.
+                shutil.rmtree(folder, ignore_errors=True)
+                return None, "changing"
             os.replace(temporary, target)
-        except OSError:
-            shutil.rmtree(folder, ignore_errors=True)
+        except (OSError, ValueError):
+            if folder is not None:
+                shutil.rmtree(folder, ignore_errors=True)
             return None, "unreadable"
         finally:
             with _reserved_lock:
@@ -280,11 +309,18 @@ class PinStore:
 
     def _save(self, encoded: str) -> None:
         temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(encoded)
-        temporary.chmod(0o600)
-        temporary.replace(self.path)
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
+            temporary.chmod(0o600)
+            temporary.replace(self.path)
+        except BaseException:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
         self.path.chmod(0o600)
 
 
@@ -360,6 +396,10 @@ def _item(raw: Any) -> dict:
     path = raw.get("path")
     if not isinstance(path, str) or not path or len(path) > MAX_PATH_CHARS or "\x00" in path:
         raise PinError("invalid", "A file needs its path")
+    try:
+        path.encode("utf-8")
+    except UnicodeEncodeError:
+        raise PinError("invalid", "A file's path must be text")
     if not (path.startswith(("/", "~/")) or re.match(r"^[A-Za-z]:[/\\]", path)):
         raise PinError("invalid", "A file's path must be absolute")
     item["path"] = path
@@ -379,6 +419,22 @@ def _safe_name(name: str) -> str:
     room = MAX_COPY_NAME_BYTES - (len(ext.encode("utf-8")) + 1 if ext else 0)
     stem = stem.encode("utf-8")[:room].decode("utf-8", "ignore") or "file"
     return f"{stem}.{ext}" if ext else stem
+
+
+def _copy_at_most(source: str, target: Path, size: int) -> bool:
+    """Copies ``source`` to a new private ``target``; False, leaving it
+    unfinished, when the source has more than ``size`` bytes."""
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with open(source, "rb") as reader, os.fdopen(descriptor, "wb") as writer:
+        left = size
+        while True:
+            chunk = reader.read(min(1024 * 1024, left + 1))
+            if not chunk:
+                return True
+            left -= len(chunk)
+            if left < 0:
+                return False
+            writer.write(chunk)
 
 
 def _file_size(path: str) -> Optional[int]:
