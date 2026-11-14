@@ -756,7 +756,20 @@ class _GptLiveWatchSession(_WatchAudioSession):
             finally:
                 self.live = False
                 await helper.close()
-        raise WatchAudioFailure("unreachable", "GPT-Live's audio connection didn't come up from the Hermes host")
+        raise self._unreachable()
+
+    def _unreachable(self) -> "WatchAudioFailure":
+        """The call never connected. Codex answers the offer for a voice the ChatGPT plan
+        doesn't offer and then never connects it, so a chosen voice is named (Conduit issue 2388)."""
+        message = "GPT-Live's audio connection didn't come up from the Hermes host"
+        try:
+            voice = gpt_live._clean_voice(self.request.get("voice"))
+        except core.TokenError:
+            voice = None
+        if voice:
+            message += (f". If your ChatGPT plan doesn't offer the voice {voice.capitalize()}, "
+                        "pick another in GPT-Live's settings")
+        return WatchAudioFailure("unreachable", message)
 
     async def _connect(self, helper: _GptLiveHelper, *, retry: bool) -> bool:
         """True once WebRTC is up; False to try again with STUN (or when stopped)."""
@@ -793,7 +806,7 @@ class _GptLiveWatchSession(_WatchAudioSession):
         if retry:
             logger.info("GPT-Live for the Watch didn't connect with host candidates; trying STUN")
             return False
-        raise WatchAudioFailure("unreachable", "GPT-Live's audio connection didn't come up from the Hermes host")
+        raise self._unreachable()
 
     async def _started(self, helper: _GptLiveHelper) -> None:
         await self.bridge.control(self.stream, _gpt_live_started(self.engine, self.answer))
