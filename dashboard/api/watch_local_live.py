@@ -1047,14 +1047,14 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
         profile = self.profile
         loop = self.loop = asyncio.get_running_loop()
 
-        def setup() -> Tuple[str, str]:
+        def setup() -> Tuple[str, str, Optional[speech_server.SpeechServerDrive]]:
             status = local_live_watch_status(profile)
             if status["runtime"] != "ready" and status["reason"] != LOCAL_LIVE_WATCH_NO_SESSIONS:
                 raise core.TokenError(503, str(status["reason"]))
-            return speech_server._speech_server_setup(profile)
+            return speech_server._speech_server_call_setup(profile)
 
         try:
-            url, key = await asyncio.wait_for(core._run_scoped(profile, setup, speech_server._speech_server_executor),
+            url, key, drive = await asyncio.wait_for(core._run_scoped(profile, setup, speech_server._speech_server_executor),
                                               timeout=speech_server.SPEECH_SERVER_SETUP_TIMEOUT_S)
             # Outside any profile's scope: importing it reads Hermes' home.
             server = await asyncio.wait_for(loop.run_in_executor(_local_live_watch_executor, _watch_chat_session_api),
@@ -1102,7 +1102,8 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
             if not local_live._local_live_register(call, self._rejoins):
                 raise watch_audio.WatchAudioFailure("busy", "A Local Live call is already running on this Hermes profile")
             pacer = self.pacer = watch_audio._WatchAudioPacer(self.send, LOCAL_LIVE_WATCH_RATE)
-            read_back = self.read_back = local_live_read_back._LocalLiveReadBack(call, self._to_watch_event, self._fail)
+            read_back = self.read_back = local_live_read_back._LocalLiveReadBack(call, self._to_watch_event, self._fail,
+                                                                                    drive=drive)
             read_back.attach(upstream.send)
             # Set first: the Watch answers "started" with its session.update.
             self.upstream = upstream

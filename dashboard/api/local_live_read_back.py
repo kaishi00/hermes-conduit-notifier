@@ -52,6 +52,16 @@ logger = core.logger
 # plugin finds out from the server's answer to that session.update: a server
 # that refuses create_response for that reason gets the same session.update
 # with automatic responses off, and the call goes on in read-back.
+#
+# A server with a model of its own (a hosted realtime model) never refuses:
+# left alone it answers the user itself, and Hermes never gets a turn. With
+# voice.speech_server.drive_turns the plugin runs the turns from the call's
+# first session.update instead (the relay's ``drive``): automatic responses
+# go off without waiting for a refusal, the session and every sentence tell
+# the server to read the words aloud as written rather than answer them, and
+# a response the server starts unasked is cancelled, never heard (a server
+# may not honour create_response false). The check that a sentence came back
+# as it was given still ends a call whose server answers instead.
 
 # A sentence goes to the server once this long (the first of a reply at any
 # length, so the reply starts sooner); shorter ones join the next.
@@ -302,15 +312,20 @@ class _LocalLiveReadBack:
     """
 
     def __init__(self, call: Any, to_client: Callable[[str], Awaitable[None]],
-                 fail: Callable[[str], Awaitable[None]], clock: Callable[[], float] = time.monotonic) -> None:
+                 fail: Callable[[str], Awaitable[None]], clock: Callable[[], float] = time.monotonic,
+                 drive: Any = None) -> None:
         self.call = call
+        # The profile has the plugin run the turns (speech_server's
+        # SpeechServerDrive): read-back from the start, on any server.
+        self.drive = drive
         self.to_client = to_client
         self.fail = fail
         self.clock = clock
         self.to_server: Optional[Callable[[str], Awaitable[None]]] = None
         self.close_server: Optional[Callable[[], Awaitable[None]]] = None
-        # Read-back is on: the server refused automatic responses.
-        self.on = False
+        # Read-back is on: the server refused automatic responses, or the
+        # profile has the plugin run the turns.
+        self.on = drive is not None
         # The call's session.update, until the server answers it.
         self.update: Optional[Dict[str, Any]] = None
         self.interrupts = True
@@ -326,6 +341,11 @@ class _LocalLiveReadBack:
         # server has started it.
         self.speaking: Optional[str] = None
         self.started = False
+        # The id of the response that started while it waited.
+        self.started_id: Optional[str] = None
+        # When the call opened: a response that ends with the model address
+        # not asked since is the server answering by itself.
+        self.opened_at = time.time()
         # When the server last sent anything for it.
         self.heard_at = 0.0
         # That response was cancelled: its audio and transcript stay here.
@@ -455,6 +475,8 @@ class _LocalLiveReadBack:
                 self.reply_said = True
             return text
         if not self.on and self.update is None:
+            if '"response.done"' in text:
+                self._note_who_answered()
             return text
         try:
             event = json.loads(text)
@@ -508,6 +530,19 @@ class _LocalLiveReadBack:
                     self._arm_watchdog(LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S)
                 return None
             response = event.get("response") if isinstance(event.get("response"), dict) else {}
+            if self.speaking is None and self.drive is not None:
+                # A driven server answering by itself (it didn't honour
+                # create_response false): its model isn't the call's, so the
+                # response is cancelled and nothing of it is heard. The
+                # sentences wait for its end, or for the server to say
+                # nothing more about it.
+                self.server_response = str(response.get("id") or f"resp_conduit_{uuid.uuid4().hex[:16]}")
+                self.filler_plays = False
+                self.muting = True
+                self.started = False
+                self._arm_watchdog(LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S)
+                await self._send_server(json.dumps({"type": "response.cancel"}))
+                return None
             if self.speaking is None:
                 # The server started a response of its own (a ConvFill filler):
                 # it opens the reply the call already sees, so its frames go
@@ -528,6 +563,7 @@ class _LocalLiveReadBack:
                     return text
                 return None
             self.started = True
+            self.started_id = str(response.get("id") or "") or None
             self.heard_at = self.clock()
             if self.reply_id is None:
                 self.reply_id = str(response.get("id") or f"resp_conduit_{uuid.uuid4().hex[:16]}")
@@ -609,6 +645,21 @@ class _LocalLiveReadBack:
             code = str(error.get("code") or "")
             if "cancel" in code:
                 # A cancel that found nothing running (a server may say so).
+                return None
+            if (self.drive is not None and code == "conversation_already_has_active_response"
+                    and self.speaking is not None and self.started and not self.muting):
+                # The response that started while this sentence waited was
+                # the driven server's own, begun before the sentence reached
+                # it: it is cancelled like any it starts unasked, and the
+                # sentence is said after it.
+                self.sentences.appendleft(self.speaking)
+                self.reply_sentences -= 1
+                self.speaking, self.started = None, False
+                self.server_response = self.started_id or f"resp_conduit_{uuid.uuid4().hex[:16]}"
+                self.filler_plays = False
+                self.muting = True
+                self._arm_watchdog(LOCAL_LIVE_READ_BACK_CANCEL_TIMEOUT_S)
+                await self._send_server(json.dumps({"type": "response.cancel"}))
                 return None
             if self.speaking is not None and not self.started:
                 # The server's answer to the response.create just sent.
@@ -784,8 +835,10 @@ class _LocalLiveReadBack:
             self.heard_at = self.clock()
             self._arm_watchdog(LOCAL_LIVE_READ_BACK_RESPONSE_TIMEOUT_S)
             item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": sentence}]}
-            await self._send_server(json.dumps({"type": "response.create",
-                                                "response": {"conversation": "none", "input": [item]}}))
+            create: Dict[str, Any] = {"type": "response.create", "response": {"conversation": "none", "input": [item]}}
+            if self.drive is not None:
+                create = self.drive.say(create)
+            await self._send_server(json.dumps(create))
             return
         if self.turn_over:
             await self._end_reply("completed")
@@ -836,8 +889,23 @@ class _LocalLiveReadBack:
             self.hold_timer.cancel()
             self.hold_timer = None
 
+    def _note_who_answered(self) -> None:
+        """A response ended on a server left to itself: whether it asked the
+        model address for the words, or answered with a model of its own
+        (what Local Live's settings then say, with the switch that has the
+        plugin run the turns)."""
+        profile = getattr(self.call, "profile", None)
+        if not isinstance(profile, str):
+            return
+        asked = local_live._local_live_last_request.get(profile, 0.0) >= self.opened_at
+        if asked:
+            local_live._local_live_answered_alone.pop(profile, None)
+        else:
+            local_live._local_live_answered_alone[profile] = time.time()
+
     def _response_over(self) -> None:
         self.speaking, self.started = None, False
+        self.started_id = None
         self.muting = False
         self.blocked = False
         self.server_response = None
@@ -869,6 +937,8 @@ class _LocalLiveReadBack:
 
     async def _send_update(self, update: Dict[str, Any]) -> None:
         changed, self.interrupts = _local_live_read_back_update(update)
+        if self.drive is not None:
+            changed = self.drive.update(changed)
         await self._send_server(json.dumps(changed))
 
     async def _send_server(self, text: str) -> None:

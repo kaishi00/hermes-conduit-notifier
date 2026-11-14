@@ -112,6 +112,101 @@ def _speech_server_settings() -> Dict[str, Any]:
     return server if isinstance(server, dict) else {}
 
 
+# What a speech server with a model of its own is told when the plugin runs
+# the turns (voice.speech_server.drive_turns): it is the voice, not the one
+# answering. It goes on the session and on every response that asks for
+# words to be said.
+SPEECH_SERVER_SAY_INSTRUCTIONS = (
+    "You are a text-to-speech voice, not an assistant. Each message you are given is text to read aloud. "
+    "Say it exactly as written, word for word, in the language it is written in. Never answer it, "
+    "translate it, shorten it, comment on it or add anything before or after it.")
+_SPEECH_SERVER_TRUE = ("1", "true", "yes", "on")
+SPEECH_SERVER_MAX_MODEL_NAME_CHARS = 128
+
+
+def speech_server_drives(settings: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether the plugin runs every turn on this profile's speech server
+    (``voice.speech_server.drive_turns``), whatever the server would do by
+    itself: one with a model of its own then only listens and reads aloud."""
+    if settings is None:
+        settings = _speech_server_settings()
+    value = settings.get("drive_turns")
+    return value is True or (isinstance(value, str) and value.strip().lower() in _SPEECH_SERVER_TRUE)
+
+
+def speech_server_transcription_model(settings: Optional[Dict[str, Any]] = None) -> str:
+    """The model a driven server is asked to transcribe with
+    (``voice.speech_server.transcription_model``), or "" to ask for none: a
+    hosted server may send no transcripts until one is named."""
+    if settings is None:
+        settings = _speech_server_settings()
+    value = settings.get("transcription_model")
+    name = value.strip() if isinstance(value, str) else ""
+    if len(name) > SPEECH_SERVER_MAX_MODEL_NAME_CHARS or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
+        return ""
+    return name
+
+
+class SpeechServerDrive:
+    """How the plugin drives a speech server's turns: what it adds to the
+    frames that set the session up and ask for words to be said."""
+
+    def __init__(self, transcription_model: str = "") -> None:
+        self.transcription_model = transcription_model
+
+    def update(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        """A session.update for a server that only listens and reads aloud:
+        told so, and asked for transcripts when a model is named. What the
+        frame already says stays."""
+        session = frame.get("session")
+        if not isinstance(session, dict):
+            return frame
+        session.setdefault("instructions", SPEECH_SERVER_SAY_INSTRUCTIONS)
+        if self.transcription_model:
+            audio = session.get("audio")
+            audio_input = audio.get("input") if isinstance(audio, dict) else None
+            if isinstance(audio_input, dict):
+                audio_input.setdefault("transcription", {"model": self.transcription_model})
+            else:
+                # The beta session shape.
+                session.setdefault("input_audio_transcription", {"model": self.transcription_model})
+        return frame
+
+    def say(self, frame: Dict[str, Any]) -> Dict[str, Any]:
+        """A response.create whose words are to be read aloud, not answered."""
+        response = frame.get("response")
+        if not isinstance(response, dict):
+            response = frame["response"] = {}
+        response.setdefault("instructions", SPEECH_SERVER_SAY_INSTRUCTIONS)
+        return frame
+
+    def client_frame(self, text: str) -> str:
+        """A frame from Conduit on a socket nothing else reads (Classic's
+        listen and speak sockets), as it goes on to the server."""
+        update = '"session.update"' in text
+        if not update and '"response.create"' not in text:
+            return text
+        try:
+            frame = json.loads(text)
+        except ValueError:
+            return text
+        kind = frame.get("type") if isinstance(frame, dict) else None
+        if kind == "session.update":
+            return json.dumps(self.update(frame))
+        if kind == "response.create":
+            return json.dumps(self.say(frame))
+        return text
+
+
+def speech_server_drive(settings: Optional[Dict[str, Any]] = None) -> Optional[SpeechServerDrive]:
+    """This profile's drive, or None when the server is left to itself."""
+    if settings is None:
+        settings = _speech_server_settings()
+    if not speech_server_drives(settings):
+        return None
+    return SpeechServerDrive(speech_server_transcription_model(settings))
+
+
 def _speech_server_host_is_private(host: str) -> bool:
     """Loopback, private, link-local or Tailscale (CGNAT) address, or a LAN-style name.
 
@@ -221,14 +316,17 @@ def speech_server_status() -> Dict[str, Any]:
     try:
         settings = _speech_server_settings()
     except core.TokenError as exc:
-        return {"configured": False, "available": False, "url": None, "has_key": False, "reason": str(exc)}
+        return {"configured": False, "available": False, "url": None, "has_key": False, "drive_turns": False,
+                "reason": str(exc)}
     configured = bool(str(settings.get("url") or "").strip())
     has_key = bool(str(settings.get("api_key") or "").strip() or str(settings.get("api_key_file") or "").strip())
+    drives = speech_server_drives(settings)
     try:
         url, _ = speech_server_target(settings)
     except core.TokenError as exc:
-        return {"configured": configured, "available": False, "url": None, "has_key": has_key, "reason": str(exc)}
-    return {"configured": True, "available": True, "url": url, "has_key": has_key, "reason": None}
+        return {"configured": configured, "available": False, "url": None, "has_key": has_key, "drive_turns": drives,
+                "reason": str(exc)}
+    return {"configured": True, "available": True, "url": url, "has_key": has_key, "drive_turns": drives, "reason": None}
 
 
 async def _connect_speech_server(url: str, headers: Dict[str, str]) -> Any:
@@ -269,6 +367,12 @@ def _speech_server_setup(profile: Optional[str]) -> Tuple[str, str]:
     target = speech_server_target()
     _speech_server_limiter.acquire(core._limiter_key(profile))
     return target
+
+
+def _speech_server_call_setup(profile: Optional[str]) -> Tuple[str, str, Optional[SpeechServerDrive]]:
+    """A relay's target, and its drive when the plugin runs the turns."""
+    url, key = _speech_server_setup(profile)
+    return url, key, speech_server_drive()
 
 
 @router.post("/speech-server/test")
@@ -331,7 +435,8 @@ async def post_speech_server_test(response: Response, profile: Optional[str] = N
 
 @router.websocket("/speech-server/socket")
 async def speech_server_socket(ws: WebSocket) -> None:
-    await _speech_server_socket(ws, lambda refuse, url, key, profile: _speech_server_relay(ws, refuse, url, key))
+    await _speech_server_socket(
+        ws, lambda refuse, url, key, profile, drive: _speech_server_relay(ws, refuse, url, key, drive=drive))
 
 
 async def _speech_server_socket(ws: WebSocket, relay: Callable[..., Any]) -> None:
@@ -360,8 +465,8 @@ async def _speech_server_socket(ws: WebSocket, relay: Callable[..., Any]) -> Non
         await refuse(SPEECH_SERVER_CLOSE_FAILED if exc.status_code >= 500 else SPEECH_SERVER_CLOSE_REFUSED, str(exc.detail))
         return
     try:
-        url, key = await asyncio.wait_for(
-            core._run_scoped(profile, lambda: _speech_server_setup(profile), _speech_server_executor),
+        url, key, drive = await asyncio.wait_for(
+            core._run_scoped(profile, lambda: _speech_server_call_setup(profile), _speech_server_executor),
             timeout=SPEECH_SERVER_SETUP_TIMEOUT_S)
     except asyncio.TimeoutError:
         await refuse(SPEECH_SERVER_CLOSE_UNREACHABLE, "The Hermes host timed out reading the speech server settings")
@@ -383,7 +488,7 @@ async def _speech_server_socket(ws: WebSocket, relay: Callable[..., Any]) -> Non
         await refuse(SPEECH_SERVER_CLOSE_RATE_LIMITED, "Too many speech server connections are open on this host")
         return
     try:
-        await relay(refuse, url, key, profile)
+        await relay(refuse, url, key, profile, drive)
     finally:
         _speech_server_give_open(open_key)
 
@@ -391,15 +496,19 @@ async def _speech_server_socket(ws: WebSocket, relay: Callable[..., Any]) -> Non
 async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any], url: str, key: str,
                                intercept: Optional[Callable[[str], Any]] = None,
                                send_lock: Optional[asyncio.Lock] = None,
-                               read_back: Optional["local_live_read_back._LocalLiveReadBack"] = None) -> None:
+                               read_back: Optional["local_live_read_back._LocalLiveReadBack"] = None,
+                               drive: Optional[SpeechServerDrive] = None) -> None:
     """One utterance's relay, from dialing the speech server to forwarding its close.
 
     ``intercept`` sees each text frame from Conduit first and returns True for
     one meant for the plugin, which then isn't forwarded (Local Live's turn
     frames). ``send_lock`` is held for each frame sent to Conduit, when
     something else sends on the same socket. ``read_back`` runs a Local Live
-    call's turns when the server turns out to only read text back: it sees
-    the text frames both ways.
+    call's turns when the server turns out to only read text back, or the
+    profile has the plugin run them: it sees the text frames both ways.
+    ``drive``, on a socket with no ``read_back`` (Classic's listen and speak
+    sockets), tells a server with a model of its own to read words aloud
+    rather than answer them.
     """
     send_lock = send_lock or asyncio.Lock()
     try:
@@ -427,8 +536,11 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
             if text is not None:
                 if intercept is not None and await intercept(text):
                     continue
-                if read_back is not None and await read_back.from_client(text):
-                    continue
+                if read_back is not None:
+                    if await read_back.from_client(text):
+                        continue
+                elif drive is not None:
+                    text = drive.client_frame(text)
                 await upstream.send(text)
             elif data is not None:
                 await upstream.send(data)

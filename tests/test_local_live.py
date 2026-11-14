@@ -118,6 +118,7 @@ def hermes(monkeypatch, tmp_path):
     monkeypatch.setattr(api.local_live, "_local_live_auth_state", {"ready": True, "reason": None, "started": True})
     monkeypatch.setattr(api.local_live, "_local_live_calls", {})
     monkeypatch.setattr(api.local_live, "_local_live_last_request", {})
+    monkeypatch.setattr(api.local_live, "_local_live_answered_alone", {})
     state.home = home
     return state
 
@@ -2096,3 +2097,196 @@ def test_every_dashboard_route_takes_conduit_profile(client, hermes, method, rou
                                        **({"json": {}} if method == "post" else {}))
     assert response.status_code == 400
     assert response.json()["detail"] == "profile and conduit_profile name different profiles"
+
+
+# --- The plugin runs the turns (voice.speech_server.drive_turns) ---------------
+
+SAY = api.speech_server.SPEECH_SERVER_SAY_INSTRUCTIONS
+
+
+def _drive(hermes, **more):
+    hermes.config["voice"]["speech_server"].update({"drive_turns": True, **more})
+
+
+def test_a_driven_server_gets_automatic_responses_off_from_the_first_update(client, hermes, server):
+    # A hosted model never refuses automatic responses, so nothing waits for
+    # a refusal: the call's first session.update already has them off, and
+    # tells the server it is the voice.
+    _drive(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream, greeting="Hi, I'm listening.")
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Turn on the lights"})
+        turn, _ = _next(ws, "conduit.turn")
+        assert turn["text"] == "Turn on the lights"
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"],
+                                 "text": "Done, the lights are on in the kitchen."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": turn["turn_id"]}))
+        _next(ws, "response.done")
+        _finish(ws)
+    updates = [frame for frame in upstream.sent if frame["type"] == "session.update"]
+    assert len(updates) == 1
+    session = updates[0]["session"]
+    assert session["audio"]["input"]["turn_detection"] == {"type": "server_vad", "create_response": False,
+                                                           "interrupt_response": False}
+    assert session["instructions"] == SAY
+    assert "transcription" not in session["audio"]["input"]
+    assert upstream.spoken() == ["Hi, I'm listening.", "Done, the lights are on in the kitchen."]
+    assert all(frame["response"]["instructions"] == SAY and frame["response"]["conversation"] == "none"
+               for frame in upstream.creates())
+
+
+def test_a_driven_server_is_asked_for_transcripts_with_the_model_named(client, hermes, server):
+    _drive(hermes, transcription_model="gpt-4o-transcribe")
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        _finish(ws)
+    update = next(frame for frame in upstream.sent if frame["type"] == "session.update")
+    assert update["session"]["audio"]["input"]["transcription"] == {"model": "gpt-4o-transcribe"}
+
+
+def test_a_response_a_driven_server_starts_by_itself_is_cancelled_and_never_heard(client, hermes, server):
+    # A server that doesn't honour create_response false answers the user
+    # with its own model: that reply is cancelled, nothing of it reaches the
+    # call, and Hermes' sentence is said once it has ended.
+    _drive(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        upstream.push({"type": "response.created", "response": {"id": "own1", "status": "in_progress"}})
+        upstream.push({"type": "response.output_audio_transcript.delta", "response_id": "own1", "delta": "Sure, I can"})
+        upstream.push({"type": "response.output_audio.delta", "response_id": "own1", "delta": PCM})
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "transcript": "What time is it"})
+        turn, seen = _next(ws, "conduit.turn")
+        assert [frame["type"] for frame in seen] == ["conversation.item.input_audio_transcription.completed", "conduit.turn"]
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"],
+                                 "text": "It is a quarter past nine in the evening."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": turn["turn_id"]}))
+        _wait_for(lambda: {"type": "response.cancel"} in upstream.sent)
+        # Its sentence waits for the server's own response to end.
+        assert upstream.creates() == []
+        upstream.push({"type": "response.done", "response": {"id": "own1", "status": "cancelled"}})
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert upstream.spoken() == ["It is a quarter past nine in the evening."]
+    assert "".join(frame["delta"] for frame in seen if frame["type"] == "response.output_audio_transcript.delta") == \
+        "It is a quarter past nine in the evening."
+    assert done["response"]["status"] == "completed"
+
+
+def test_a_driven_servers_own_response_that_beat_a_sentence_is_cancelled_and_the_sentence_said_after(client, hermes, server):
+    # The server's own response started while the sentence was on its way:
+    # the server answers the sentence with busy, which tells the two apart.
+    _drive(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        upstream.unstarted = True
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "transcript": "What time is it"})
+        turn, _ = _next(ws, "conduit.turn")
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"],
+                                 "text": "It is a quarter past nine in the evening."}))
+        ws.send_text(json.dumps({"type": "conduit.turn.done", "turn_id": turn["turn_id"]}))
+        _wait_for(lambda: len(upstream.creates()) == 1)
+        upstream.unstarted = False
+        upstream.push({"type": "response.created", "response": {"id": "own1", "status": "in_progress"}})
+        upstream.push({"type": "error", "error": {"code": "conversation_already_has_active_response"}})
+        _wait_for(lambda: {"type": "response.cancel"} in upstream.sent)
+        upstream.push({"type": "response.output_audio.delta", "response_id": "own1", "delta": PCM})
+        upstream.push({"type": "response.done", "response": {"id": "own1", "status": "cancelled"}})
+        done, seen = _next(ws, "response.done")
+        _finish(ws)
+    assert upstream.spoken() == ["It is a quarter past nine in the evening."] * 2
+    assert [frame["type"] for frame in seen].count("response.output_audio.delta") == 1
+    assert done["response"]["status"] == "completed"
+
+
+def test_a_driven_server_that_answers_instead_of_reading_ends_the_call(client, hermes, server):
+    _drive(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False, says="I am sorry, I cannot help with that request today.")
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _ready(ws, upstream)
+        upstream.push({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Tell me a story"})
+        turn, _ = _next(ws, "conduit.turn")
+        ws.send_text(json.dumps({"type": "conduit.turn.delta", "turn_id": turn["turn_id"],
+                                 "text": "Once upon a time, there was a small red fox. It lived at the edge of a quiet wood. "}))
+        with pytest.raises(WebSocketDisconnect) as closed:
+            while True:
+                ws.receive_text()
+    assert closed.value.code == api.speech_server.SPEECH_SERVER_CLOSE_REFUSED
+    assert closed.value.reason == api.local_live_read_back.LOCAL_LIVE_NOT_READ_BACK
+
+
+def test_classics_speak_socket_tells_a_driven_server_to_read_its_words_aloud(client, hermes, server):
+    _drive(hermes)
+    update = {"type": "session.update", "session": {"type": "realtime", "audio": {"input": {
+        "turn_detection": {"type": "server_vad", "create_response": False}}}}}
+    with client.websocket_connect(f"{BASE}/local-live/socket?mode=speak") as ws:
+        ws.send_text(json.dumps(update))
+        ws.send_text(json.dumps({"type": "response.create"}))
+        ws.send_text(json.dumps({"type": "input_audio_buffer.append", "audio": PCM}))
+        ws.send_text("finish")
+        with contextlib.suppress(Exception):
+            while True:
+                ws.receive_text()
+    sent = [json.loads(frame) for frame in server.upstream.sent if frame != "finish"]
+    assert sent[0]["session"]["instructions"] == SAY
+    assert sent[0]["session"]["audio"] == update["session"]["audio"]
+    assert sent[1] == {"type": "response.create", "response": {"instructions": SAY}}
+    assert sent[2] == {"type": "input_audio_buffer.append", "audio": PCM}
+
+
+def test_without_the_setting_a_socket_s_frames_go_on_unchanged(client, hermes, server):
+    with client.websocket_connect(f"{BASE}/local-live/socket?mode=speak") as ws:
+        ws.send_text(json.dumps({"type": "response.create"}))
+        ws.send_text("finish")
+        with contextlib.suppress(Exception):
+            while True:
+                ws.receive_text()
+    assert server.upstream.sent[0] == json.dumps({"type": "response.create"})
+
+
+def test_status_says_when_the_server_answered_a_call_by_itself(client, hermes, server):
+    # A response ended with the model address never asked: the server has a
+    # model of its own, and Hermes got no turn.
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    assert client.get(f"{BASE}/local-live/status").json()["answers_alone"] is False
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        ws.send_text(json.dumps(LIVE_UPDATE))
+        _next(ws, "session.updated")
+        upstream.push({"type": "response.created", "response": {"id": "own1"}})
+        upstream.push({"type": "response.done", "response": {"id": "own1", "status": "completed"}})
+        _next(ws, "response.done")
+        _finish(ws)
+    status = client.get(f"{BASE}/local-live/status").json()
+    assert status["answers_alone"] is True and status["speech_server"]["drive_turns"] is False
+    # Once the plugin runs the turns, it no longer does.
+    _drive(hermes)
+    status = client.get(f"{BASE}/local-live/status").json()
+    assert status["answers_alone"] is False and status["speech_server"]["drive_turns"] is True
+
+
+def test_a_server_that_asks_the_model_address_isnt_one_that_answers_by_itself(client, hermes, server):
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    api.local_live._local_live_answered_alone["default"] = 1.0
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        ws.send_text(json.dumps(LIVE_UPDATE))
+        _next(ws, "session.updated")
+        api.local_live._local_live_last_request[api.local_live._local_live_profile_key(None)] = time.time() + 1
+        upstream.push({"type": "response.done", "response": {"id": "r1", "status": "completed"}})
+        _next(ws, "response.done")
+        _finish(ws)
+    assert client.get(f"{BASE}/local-live/status").json()["answers_alone"] is False
+
+
+@pytest.mark.parametrize("value,drives", [(True, True), ("true", True), ("On", True), ("yes", True),
+                                          (False, False), ("false", False), ("", False), (None, False), (1, False)])
+def test_drive_turns_reads_a_switch_however_it_was_saved(value, drives):
+    assert api.speech_server.speech_server_drives({"drive_turns": value}) is drives
+
+
+def test_a_transcription_model_name_with_control_characters_is_ignored():
+    assert api.speech_server.speech_server_transcription_model({"transcription_model": " whisper-1 "}) == "whisper-1"
+    assert api.speech_server.speech_server_transcription_model({"transcription_model": "a\nb"}) == ""
+    assert api.speech_server.speech_server_transcription_model({"transcription_model": 5}) == ""
