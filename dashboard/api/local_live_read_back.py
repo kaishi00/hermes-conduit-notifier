@@ -319,7 +319,11 @@ class _LocalLiveReadBack:
         self.call = call
         # The profile has the plugin run the turns (speech_server's
         # SpeechServerDrive): read-back from the start, on any server.
-        self.drive = drive
+        self.drive = drive if getattr(drive, "drives", False) else None
+        # What the profile's settings add to a session.update either way
+        # (the voice): speech_server's SpeechServerSetup.
+        self.setup = drive
+        drive = self.drive
         self.to_client = to_client
         self.fail = fail
         self.clock = clock
@@ -420,6 +424,13 @@ class _LocalLiveReadBack:
             self.watchdog = None
 
     # The call's frames.
+
+    def passed_on(self, text: str) -> str:
+        """A frame from_client left to the relay, as it goes on to the server:
+        a call the server runs itself still gets the profile's voice."""
+        if self.setup is None or self.drive is not None:
+            return text
+        return self.setup.client_frame(text)
 
     async def from_client(self, text: str) -> bool:
         """True for a frame that stays here (a turn this runs instead)."""
@@ -971,8 +982,8 @@ class _LocalLiveReadBack:
 
     async def _send_update(self, update: Dict[str, Any]) -> None:
         changed, self.interrupts = _local_live_read_back_update(update)
-        if self.drive is not None:
-            changed = self.drive.update(changed)
+        if self.setup is not None:
+            changed = self.setup.update(changed)
         await self._send_server(json.dumps(changed))
 
     async def _send_server(self, text: str) -> None:

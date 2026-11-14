@@ -1036,6 +1036,8 @@ voice:
     api_key_file: ""                          # optional: read the key from this file instead
     drive_turns: false                        # true: Hermes answers on a server with a model of its own (plugin 0.173+) A YAML boolean, not 1.
     transcription_model: ""                   # optional, with drive_turns: the model the server transcribes with
+    model: ""                                 # optional: the model the address asks for (?model=), unless it names one (plugin 0.174+)
+    voice: ""                                 # optional: the voice each session is set to (plugin 0.174+)
 ```
 
 `api_key_file` names a file holding the key (an absolute path, or one starting
@@ -1054,8 +1056,9 @@ speech-to-speech has no authentication of its own, so keep it on your network.
 
 | Method | Path | Returns |
 |--------|------|---------|
-| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, drive_turns, reason}` |
-| POST | `/api/plugins/conduit_push/speech-server/test` | `{ok, connected, url, latency_ms, event, reason}`: dials the server from the host and waits for its first event |
+| GET | `/api/plugins/conduit_push/speech-server/status` | `{ok, configured, available, url, has_key, drive_turns, model, voice, transcription_model, reason}` |
+| POST | `/api/plugins/conduit_push/speech-server/test` | `{ok, connected, url, latency_ms, event, abilities, reason}`: dials the server from the host and waits for its first event |
+| GET | `/api/plugins/conduit_push/speech-server/presets` | `{ok, presets}`: the known servers Conduit can fill the settings in for (plugin 0.174+) |
 | WebSocket | `/api/plugins/conduit_push/speech-server/socket` | OpenAI Realtime events, relayed |
 
 The socket takes the dashboard's WebSocket credential (`?ticket=`) and an
@@ -1210,6 +1213,36 @@ server only listens and reads aloud:
 - The check below still applies: a server whose transcripts of two sentences
   in a row don't match them is answering, not reading, and the call ends with
   that reason.
+
+### A speech server is settings, not code (plugin 0.174+)
+
+What a server needs beyond its address is three optional names, so a new
+OpenAI Realtime server needs no plugin change:
+
+- `model` goes on the address as `?model=`, unless the address already
+  names one. The status's `url` is the address as dialed.
+- `voice` is set on every `session.update` that goes to the server
+  (`session.audio.output.voice`, or `session.voice` on a session in the older
+  shape), on Classic's sockets and Local Live calls, the Watch's included,
+  whether or not Hermes answers. A frame that names a voice keeps it.
+- `transcription_model`, as above.
+
+The servers Conduit offers by name are a file,
+`dashboard/speech_server_presets.json`, served by `/speech-server/presets`.
+An entry has an `id` and a `name`, a `url` (complete, saved as is) or a
+`url_hint` (an example to finish, such as one with a workspace in it),
+`needs_key`, `drive_turns` (the server has a model of its own, so Hermes
+answers is the setting to start from), and optionally `model`, `models`,
+`voice`, `voices`, `transcription_model` and `docs_url`. Picking one writes
+those into `voice.speech_server`; nothing else knows about presets, so a
+server that isn't listed works the same once its fields are filled in. An
+entry whose `url` can't be dialed, or that has no name, is left out.
+
+The test's `abilities` is what the server's first event says about it:
+`{model, voice, answers_alone}`, each null when the event doesn't say.
+`answers_alone` is true for a server that names a model and whose turn
+detection starts responses, which is the kind Hermes answers is for; Conduit
+offers the switch there without waiting for a call.
 
 `speech_server.drive_turns` in the status routes says whether the switch is
 on. Local Live's status has `answers_alone`: true once a call's response

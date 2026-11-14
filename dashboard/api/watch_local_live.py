@@ -1047,7 +1047,7 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
         profile = self.profile
         loop = self.loop = asyncio.get_running_loop()
 
-        def setup() -> Tuple[str, str, Optional[speech_server.SpeechServerDrive]]:
+        def setup() -> Tuple[str, str, Optional[speech_server.SpeechServerSetup]]:
             status = local_live_watch_status(profile)
             if status["runtime"] != "ready" and status["reason"] != LOCAL_LIVE_WATCH_NO_SESSIONS:
                 raise core.TokenError(503, str(status["reason"]))
@@ -1431,8 +1431,10 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
                 elif kind == "conduit.approval.answer" and self.cards and not self.finished:
                     local_live._local_live_spawn(self._answer_approval(frame))
                 return
-        if self.read_back is not None and await self.read_back.from_client(text):
-            return
+        if self.read_back is not None:
+            if await self.read_back.from_client(text):
+                return
+            text = self.read_back.passed_on(text)
         await self.send_asking(upstream, text)
 
 
