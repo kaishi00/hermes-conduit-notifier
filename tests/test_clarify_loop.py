@@ -1306,3 +1306,61 @@ def test_a_call_answer_wins_while_waiting_after_an_undelivered_original(monkeypa
     assert parsed["outcome"] == "submitted"
     assert [row["user_response"] for row in parsed["responses"]] == ["prod", ["ui"]]
     assert _wait_for_release(fake)
+
+
+def test_an_undelivered_original_in_a_group_room_returns_at_once(monkeypatch):
+    # Hermes declines questions in hosted rooms: the owner's card is no way
+    # to ask the room, so the card goes at once, as before.
+    fake = _FakeState([])  # pending forever
+    _install(fake)
+    monkeypatch.setattr(loop.room_rules, "room_turn", lambda session_id, home=None: object())
+    args = _batch_args()
+    started = time.monotonic()
+    result = loop.middleware(**_kwargs(_undelivered_original(), args))
+    assert time.monotonic() - started < 5
+    assert result == _undelivered_result(args)
+    assert _wait_for_release(fake)
+
+
+def test_an_undelivered_original_whose_room_cant_be_told_yet_returns_at_once(monkeypatch):
+    fake = _FakeState([])
+    _install(fake)
+
+    def unknown(session_id, home=None):
+        raise loop.room_rules.RoomStoreError("not titled yet")
+
+    monkeypatch.setattr(loop.room_rules, "room_turn", unknown)
+    result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
+    assert json.loads(result)["outcome"] == "undelivered"
+    assert _wait_for_release(fake)
+
+
+def test_an_undelivered_original_in_a_peers_forwarded_chat_returns_at_once(monkeypatch, tmp_path):
+    import sqlite3
+    db = tmp_path / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT)")
+        conn.execute("INSERT INTO sessions VALUES ('sess-1', 'a2a', '')")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: str(tmp_path), raising=False)
+    monkeypatch.setattr(loop.room_rules, "room_turn", lambda session_id, home=None: None)
+    assert loop._session_source("sess-1") == "a2a"
+    fake = _FakeState([])
+    _install(fake)
+    result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
+    assert json.loads(result)["outcome"] == "undelivered"
+    assert _wait_for_release(fake)
+
+
+def test_a_bot_chat_session_in_the_store_still_waits_for_the_card(monkeypatch, tmp_path):
+    import sqlite3
+    db = tmp_path / "state.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT)")
+        conn.execute("INSERT INTO sessions VALUES ('sess-1', 'cron', '')")
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: str(tmp_path), raising=False)
+    monkeypatch.setattr(loop.room_rules, "room_turn", lambda session_id, home=None: None)
+    fake = _FakeState([{"status": "pending"}, {"status": "answered", "answers": {"q0": "prod", "q1": '["ui"]'},
+                                               "remaining": []}])
+    _install(fake)
+    result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
+    assert [row["user_response"] for row in json.loads(result)["responses"]] == ["prod", ["ui"]]
