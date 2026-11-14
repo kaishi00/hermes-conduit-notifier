@@ -7168,3 +7168,28 @@ def test_unreadable_kept_cards_read_as_none(on):
     start()
     on.set_meta(work._SHOWN + "W1", "[" * 100000)
     assert work._shown(on, "W1") is None
+
+
+def test_a_hand_off_lists_only_the_steps_that_ran_and_starts_over_with_a_new_ask(on, hermes, monkeypatch):
+    # Review leftovers of notifier #782: a step the screen lock refused never ran, a new ask in a
+    # chat whose Hermes names no turn is a new turn, and secrets stay out of the instructions.
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    held = {"action": "block", "message": "another chat has the screen"}
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Rotate the router password", platform="tui")
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: held)
+    plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="computer_use", args={"action": "screenshot"},
+                          tool_call_id="c0")
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
+    for n in range(work.QUICK_STEPS):
+        plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal",
+                              args={"command": f"step {n}", "api_key": "sk-123"}, tool_call_id=f"c{n + 1}")
+    assert "W1" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    goal = on.get("W1").goal
+    assert "computer_use" not in goal and "step 4" in goal
+    assert "sk-123" not in goal and "(left out)" in goal
+    # A new ask a moment later, with no turn id: its own hand-off, not W1's.
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Book a dentist visit", platform="tui")
+    assert "W2" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    assert "step 4" not in on.get("W2").goal
+

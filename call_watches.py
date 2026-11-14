@@ -802,7 +802,8 @@ def run_note(session_id: Any, task_id: Any = None) -> str | None:
     with _one_setup_at_a_time():
         config = store.stale_prompts().get(job_id)
         if config is None:
-            return None
+            # Refreshed meanwhile, but this run started on the old prompt.
+            return RUN_NOTE
         if cronjob is not None and _call(cronjob, action="update", job_id=job_id,
                                          prompt=run_prompt(config)).get("success"):
             store.mark_prompt(job_id)

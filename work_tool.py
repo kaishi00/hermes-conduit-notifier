@@ -3412,8 +3412,15 @@ def _cut_keeping_lines(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+# Argument names whose values a hand-off leaves out of the workstream's
+# instructions, which are kept and shown in its chat.
+_SECRET_ARG = re.compile(r"token|secret|passw|api_?key|auth|credential|cookie", re.IGNORECASE)
+
+
 def _step_line(name: str, args: Any) -> str:
     """One step a quick turn took, for the workstream it hands on to."""
+    if isinstance(args, dict):
+        args = {key: "(left out)" if _SECRET_ARG.search(str(key)) else value for key, value in args.items()}
     try:
         shown = json.dumps(args, ensure_ascii=False, sort_keys=True) if args else ""
     except (TypeError, ValueError):
@@ -3436,7 +3443,12 @@ def note_turn_ask(session_id: Any, turn_id: Any, user_message: Any) -> None:
         return
     key = (str(session_id or ""), str(turn_id or ""))
     with _steps_lock:
-        _asks.pop(key, None)
+        if _asks.pop(key, None) != user_message.strip():
+            # A new ask is a new turn, even one Hermes names no id for (its
+            # key is the chat's alone): the last one's steps and hand-off
+            # aren't this one's.
+            _did.pop(key, None)
+            _handed.pop(key, None)
         _asks[key] = user_message.strip()
         while len(_asks) > _STEP_TURNS:
             del _asks[next(iter(_asks))]
@@ -3546,6 +3558,10 @@ def give_back_steps() -> None:
         if key in _steps:
             first, taken = _steps[key]
             _steps[key] = (first, max(taken - count, 0))
+        did = _did.get(key)
+        if did:
+            # Nor is it among the steps a hand-off says already ran.
+            del did[-count:]
 
 
 # Each home's memory provider and its tools, by config.yaml's mtime.
