@@ -236,11 +236,14 @@ def _pin_source(profile: Optional[str]) -> Callable[[str], tuple]:
         boundary = None
 
     def source(path: str) -> tuple:
-        target = str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
-        if boundary is not None:
-            real = os.path.realpath(target)
-            if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
-                return None, "outside"
+        try:
+            target = str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
+            if boundary is not None:
+                real = os.path.realpath(target)
+                if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
+                    return None, "outside"
+        except Exception:  # saved without a copy rather than not at all
+            return None, "unreadable"
         return target, None
 
     return source

@@ -314,14 +314,13 @@ class PinStore:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                 handle.write(encoded)
             temporary.chmod(0o600)
-            temporary.replace(self.path)
+            temporary.replace(self.path)  # already private: nothing after this can fail
         except BaseException:
             try:
                 temporary.unlink()
             except OSError:
                 pass
             raise
-        self.path.chmod(0o600)
 
 
 # --- Helpers ---------------------------------------------------------------------
@@ -424,17 +423,18 @@ def _safe_name(name: str) -> str:
 def _copy_at_most(source: str, target: Path, size: int) -> bool:
     """Copies ``source`` to a new private ``target``; False, leaving it
     unfinished, when the source has more than ``size`` bytes."""
-    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with open(source, "rb") as reader, os.fdopen(descriptor, "wb") as writer:
-        left = size
-        while True:
-            chunk = reader.read(min(1024 * 1024, left + 1))
-            if not chunk:
-                return True
-            left -= len(chunk)
-            if left < 0:
-                return False
-            writer.write(chunk)
+    with open(source, "rb") as reader:
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as writer:
+            left = size
+            while True:
+                chunk = reader.read(min(1024 * 1024, left + 1))
+                if not chunk:
+                    return True
+                left -= len(chunk)
+                if left < 0:
+                    return False
+                writer.write(chunk)
 
 
 def _file_size(path: str) -> Optional[int]:

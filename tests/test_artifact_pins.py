@@ -162,7 +162,7 @@ def test_a_removed_row_never_deletes_outside_its_copies(tmp_path):
 # --- Routes ---------------------------------------------------------------------
 
 
-def _hermes_file_routes(monkeypatch, backend=None, locked_root=None):
+def _hermes_file_routes(monkeypatch, backend=None, locked_root=None, agent_fs_path=None):
     """Hermes' own file routing, as a local install has it."""
     files = types.ModuleType("hermes_cli.web_routers.files")
     files._fs_backend = lambda profile: backend
@@ -171,6 +171,8 @@ def _hermes_file_routes(monkeypatch, backend=None, locked_root=None):
     monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", files)
     server_files = types.ModuleType("hermes_cli.web_server_files")
     server_files._managed_files_policy = lambda *a, **k: types.SimpleNamespace(locked_root=locked_root)
+    if agent_fs_path is not None:
+        server_files._agent_fs_path = agent_fs_path
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_files", server_files)
 
 
@@ -391,3 +393,37 @@ def test_a_path_that_is_not_text_is_refused_before_anything_is_reserved(tmp_path
     with pytest.raises(pins.PinError):
         store.save({"item": _file_row(str(tmp_path) + "/bad\udcff.txt")})
     assert pins._reserved == {}
+
+
+def test_a_docker_profiles_file_is_copied_from_where_the_host_keeps_it(client, tmp_path, monkeypatch):
+    host = tmp_path / "sandbox" / "workspace"
+    host.mkdir(parents=True)
+    (host / "out.csv").write_text("from the sandbox")
+
+    def mapped(path, profile_home=None):
+        return pathlib.Path(str(path).replace("/workspace", str(host), 1))
+
+    _hermes_file_routes(monkeypatch, agent_fs_path=mapped)
+    pin = client.post(f"{BASE}/artifacts/pins", json={"item": _file_row("/workspace/out.csv")}).json()["pin"]
+    assert pathlib.Path(pin["kept_path"]).read_text() == "from the sandbox"
+
+
+def test_a_mapping_that_fails_saves_without_a_copy(client, tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_text("x")
+
+    def broken(path, profile_home=None):
+        raise RuntimeError("no sandbox")
+
+    _hermes_file_routes(monkeypatch, agent_fs_path=broken)
+    answer = client.post(f"{BASE}/artifacts/pins", json={"item": _file_row(tmp_path / "a.md")})
+    assert answer.status_code == 200 and answer.json()["pin"]["not_kept"] == "unreadable"
+
+
+def test_a_source_gone_before_its_copy_leaves_no_descriptor(tmp_path):
+    target = tmp_path / "copy.tmp"
+    before = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+    with pytest.raises(OSError):
+        pins._copy_at_most(str(tmp_path / "gone.txt"), target, 10)
+    assert not target.exists()
+    if before is not None:
+        assert len(os.listdir("/proc/self/fd")) == before
