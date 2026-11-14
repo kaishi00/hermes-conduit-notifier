@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.1 (2026-11-14)
+
+### Fixes
+
+- A bot with workstreams turned off can be messaged by your other bots again. Before this, their asks and notes were refused and the bot could not be reached at all.
+
 ## 0.177.0 (2026-11-14)
 
 ### New and improved
