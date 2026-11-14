@@ -254,3 +254,24 @@ def test_a_copy_a_crash_cut_short_is_swept(tmp_path):
     os.utime(temporary, (1_000.0, 1_000.0))
     assert store._copies_size() == 0
     assert not stale.exists()
+
+
+def test_a_finished_copy_named_tmp_is_never_swept(tmp_path):
+    original = tmp_path / "render.tmp"
+    original.write_bytes(b"x" * 10)
+    clock = Clock()
+    store = pins.PinStore(tmp_path / "home", clock=clock)
+    kept = pathlib.Path(store.save({"item": _file_row(original)})["pin"]["kept_path"])
+    os.utime(kept, (1.0, 1.0))
+    clock.now = 1_000_000.0
+    assert store._copies_size() == 10
+    assert kept.exists()
+
+
+def test_a_running_copys_temporary_counts_by_its_reservation_only(tmp_path):
+    store = pins.PinStore(tmp_path / "home", clock=Clock(now=0.0))
+    running = store.copies / "abc-123"
+    running.mkdir(parents=True)
+    (running / ".big.mov.tmp").write_bytes(b"x" * 10)
+    assert store._copies_size() == 0
+    assert running.exists()

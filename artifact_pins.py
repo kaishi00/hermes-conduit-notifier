@@ -114,15 +114,13 @@ class PinStore:
         item = _item(body.get("item"))
         note = _note(body.get("note"))
         key = _key(item)
-        existing = next((pin for pin in self._load()["pins"] if _key(pin) == key), None)
-        if existing is not None:
-            with self._locked() as state:
-                for pin in state["pins"]:
-                    if _key(pin) == key:
-                        pin["note"] = note
-                        return {"pin": self._described(pin)}
-        if len(self._load()["pins"]) >= MAX_PINS:
-            raise PinError("too_many", f"At most {MAX_PINS} artifacts can be saved")
+        with self._locked() as state:
+            for pin in state["pins"]:
+                if _key(pin) == key:
+                    pin["note"] = note
+                    return {"pin": self._described(pin)}
+            if len(state["pins"]) >= MAX_PINS:
+                raise PinError("too_many", f"At most {MAX_PINS} artifacts can be saved")
         pin = {**item, "note": note, "pinned_at": self.clock(), "copy": None, "copy_reason": None}
         if "path" in item:
             pin["copy"], pin["copy_reason"] = self._copy(item["path"], key)
@@ -207,10 +205,13 @@ class PinStore:
                     path = os.path.join(root, name)
                     try:
                         info = os.lstat(path)
-                        # A copy a crash cut short: never finished, so it
-                        # goes rather than counting against the budget.
-                        if name.endswith(".tmp") and self.clock() - info.st_mtime > STALE_COPY_SECONDS:
-                            shutil.rmtree(root, ignore_errors=True)
+                        # This store's own temporary (hidden, ".tmp"): one
+                        # running is counted by its reservation, and one a
+                        # crash cut short goes rather than counting forever.
+                        # A finished copy keeps its name, whatever it ends in.
+                        if name.startswith(".") and name.endswith(".tmp"):
+                            if self.clock() - info.st_mtime > STALE_COPY_SECONDS:
+                                shutil.rmtree(root, ignore_errors=True)
                             continue
                         total += info.st_size
                     except OSError:

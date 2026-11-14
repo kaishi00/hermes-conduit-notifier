@@ -228,25 +228,45 @@ def _secret_path(path: str) -> bool:
 
 async def _artifact_pins_route(profile: Optional[str], run: Callable[[], Dict[str, Any]],
                                copies: bool = False) -> Dict[str, Any]:
+    job = core._limited(_artifact_pins_limiter, profile, run)
     executor = None
+    # A save holds its slot until its copy ends, as /artifacts holds its
+    # reader: freed by the job once it started, else by this request.
+    state = {"started": False, "abandoned": False}
+    state_lock = threading.Lock()
     if copies:
         if not _artifact_pins_slots.acquire(blocking=False):
             raise HTTPException(status_code=503, detail="Hermes is still saving artifacts; try again shortly",
                                 headers={"Cache-Control": "no-store"})
         executor = _artifact_pins_executor
+        limited = job
+
+        def job() -> Dict[str, Any]:
+            with state_lock:
+                if state["abandoned"]:
+                    raise core.TokenError(503, "The save was cancelled")
+                state["started"] = True
+            try:
+                return limited()
+            finally:
+                _artifact_pins_slots.release()
+
     try:
-        return {"ok": True, **(await core._run_scoped(profile, core._limited(_artifact_pins_limiter, profile, run),
-                                                      executor))}
-    except core.TokenError as exc:
-        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
-    except HTTPException as exc:
-        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
-        raise
-    except Exception as exc:
-        raise core._unexpected("pins", exc, feature="Saved artifacts")
-    finally:
+        return {"ok": True, **(await core._run_scoped(profile, job, executor))}
+    except BaseException as exc:
         if copies:
-            _artifact_pins_slots.release()
+            with state_lock:
+                if not state["started"]:
+                    state["abandoned"] = True
+                    _artifact_pins_slots.release()
+        if isinstance(exc, core.TokenError):
+            raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+        if isinstance(exc, HTTPException):
+            exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+            raise
+        if isinstance(exc, Exception):
+            raise core._unexpected("pins", exc, feature="Saved artifacts")
+        raise
 
 
 @router.get("/artifacts/pins")

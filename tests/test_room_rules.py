@@ -449,6 +449,10 @@ def host(tmp_path, monkeypatch):
     _room_session(home, REMOTE, "room-a")
     _session(home, "s-chat")
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
+    # The coordinator's checks read this host's home too, never the tests'
+    # shared HERMES_HOME, where another test's workstreams registry would
+    # hold this host's tools back (seen on CI with the workers' order).
+    monkeypatch.setattr(plugin.work_tool, "_pinned_home", home)
     return home
 
 
