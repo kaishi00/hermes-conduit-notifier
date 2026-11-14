@@ -1078,7 +1078,12 @@ class LinkLoop:
                 link = state["links"].get(link_id)
                 if link is not None and link["status"] == "linked":
                     known = link.get("peer_own") if isinstance(link.get("peer_own"), dict) else {}
-                    if said["seq"] > int(known.get("seq") or 0):
+                    held = int(known.get("seq") or 0)
+                    # A later seq wins. The same seq twice comes only from a
+                    # links.json restored on the other side within a second:
+                    # then unmarked wins, so the room rules come back rather
+                    # than stay lifted.
+                    if said["seq"] > held or (said["seq"] == held and not said["own"] and known.get("own") is True):
                         link["peer_own"] = {**said, "at": now}
             return True
         handler = HANDLERS.get(kind)
@@ -1399,10 +1404,13 @@ def _resend_own(state: dict[str, Any], link_id: str, link: dict[str, Any], now: 
 
 
 def _next_own_seq(link: dict[str, Any], now: int) -> int:
-    """The seq for this side's next link.own: past the last one and no lower
-    than the clock, so a links.json restored from a backup gets ahead of what
-    the other side already holds."""
-    return max(int(link.get("own_seq") or 0) + 1, int(now))
+    """The seq for this side's next link.own: past the last one and past the
+    clock's second, so a links.json restored from a backup gets ahead of what
+    the other side already holds, even a seq it took this same second. A seq
+    that isn't a number (a hand-edited file) counts as none."""
+    last = link.get("own_seq")
+    last = last if type(last) is int and last > 0 else 0
+    return max(last, int(now)) + 1
 
 
 def _their_own(link: dict[str, Any]) -> bool:
