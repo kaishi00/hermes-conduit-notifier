@@ -18,6 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 
 - Hermes can answer on a speech server that has a model of its own, such as a hosted realtime model. Turn on "Hermes answers" in Conduit's speech server settings (voice.speech_server.drive_turns) and the server only listens and reads the replies aloud, in Local Live, agent mode, Classic and on the Watch. Before, such a server answered by itself and Hermes never got a turn.
+
 ## 0.172.4 (2026-11-14)
 
 ### Fixes
