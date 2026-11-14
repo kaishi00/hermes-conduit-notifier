@@ -202,6 +202,16 @@ STEP_BLOCK = ("This is turning into longer work than the Bot Chat should hold up
               "Start a workstream for the rest with work_start, saying in its instructions what you've "
               "found or done so far, or send it to one that's already on it with work_send. Then tell the user in a "
               "line that it's running in the background.")
+# The step after a quick turn's budget, when the plugin started the workstream
+# for the rest itself (Eric 2026-11-13: a weaker model given STEP_BLOCK kept
+# retrying and told the user "the runtime is blocking" instead).
+HANDED_OFF = ("This is turning into longer work than the Bot Chat should hold up, so {tool} didn't run, and the "
+              "plugin started workstream {ref} ({title}) for the rest, with the user's ask and the steps this turn "
+              "took. Don't run any more tools for it here. Tell the user in a line that {ref} is on it in the "
+              "background and its result comes back here.")
+HANDOFF_INSTRUCTIONS = ("The user asked this in the Bot Chat:\n\n{ask}\n\nThe Bot Chat ran out of quick steps "
+                        "and handed you the rest. It had already run these (their results aren't here; run "
+                        "again what you need):\n{did}\n\nDo the whole task and report what you found or changed.")
 # A batch of calls through tool_call bigger than what's left of the budget:
 # Hermes runs a batch whole, so none of it ran, but single calls still fit.
 STEP_BATCH_BLOCK = ("That tool_call batch has {count} calls, more than the {left} quick steps this turn has left, so "
@@ -3253,23 +3263,90 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
             return {"action": "block", "message": POLICY_BLOCK.format(tool=called or "that tool")}
         steps.append(called)
     if steps:
-        left = _take_steps(session_id, turn_id, len(steps), quick_steps(home))
+        did = [_step_line(called, called_args) for called, called_args in calls if called in steps]
+        left = _take_steps(session_id, turn_id, len(steps), quick_steps(home), did)
         if left is not None:
             if len(steps) > 1 and left > 0:
                 return {"action": "block", "message": STEP_BATCH_BLOCK.format(count=len(steps), left=left)}
-            return {"action": "block", "message": STEP_BLOCK.format(tool=steps[0] or "that tool")}
+            return {"action": "block", "message": _hand_off(session_id, turn_id, steps[0] or "that tool")}
     return None
+
+
+def _step_line(name: str, args: Any) -> str:
+    """One step a quick turn took, for the workstream it hands on to."""
+    try:
+        shown = json.dumps(args, ensure_ascii=False, sort_keys=True) if args else ""
+    except (TypeError, ValueError):
+        shown = str(args)
+    return _cut(f"{name} {shown}".strip(), 300)
+
+
+# Each Bot Chat turn's ask, as Hermes gave it to pre_llm_call: (session,
+# Hermes' turn id) -> the user's message, newest last.
+_asks: dict[tuple[str, str], str] = {}
+
+
+def note_turn_ask(session_id: Any, turn_id: Any, user_message: Any) -> None:
+    """Keeps a turn's ask for the workstream its quick steps may hand on to."""
+    if not isinstance(user_message, str) or not user_message.strip():
+        return
+    key = (str(session_id or ""), str(turn_id or ""))
+    with _steps_lock:
+        _asks.pop(key, None)
+        _asks[key] = user_message.strip()
+        while len(_asks) > _STEP_TURNS:
+            del _asks[next(iter(_asks))]
+
+
+def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
+    """The step after a quick turn's budget: the plugin starts the workstream
+    for the rest itself, once a turn, with the turn's ask and the steps it
+    took, so the bot only has to say so. Where it can't (no ask kept, similar
+    open work, the bot's running limit, Ask Me First), the bot is told to, as
+    before, with why."""
+    key = (str(session_id or ""), str(turn_id or ""))
+    with _steps_lock:
+        ask = _asks.get(key, "")
+        handed = _handed.get(key)
+        did = list(_did.get(key, ()))
+    if handed is not None:
+        return HANDED_OFF.format(tool=tool, ref=handed[0], title=handed[1])
+    if not ask:
+        return STEP_BLOCK.format(tool=tool)
+    title = _cut(" ".join(ask.split()[:6]), 60)
+    instructions = HANDOFF_INSTRUCTIONS.format(ask=ask, did="\n".join(f"- {line}" for line in did) or "- nothing")
+    try:
+        answer = json.loads(handle("work_start", {"title": title, "instructions": instructions},
+                                   session_id=session_id))
+    except Exception:  # noqa: BLE001 — the bot is told to start it itself
+        logger.warning("conduit_push: couldn't hand a quick turn's rest to a workstream", exc_info=True)
+        return STEP_BLOCK.format(tool=tool)
+    ref = str(answer.get("ref") or "") if isinstance(answer, dict) else ""
+    if not (isinstance(answer, dict) and answer.get("ok") and ref):
+        note = str(answer.get("note") or "") if isinstance(answer, dict) else ""
+        return STEP_BLOCK.format(tool=tool) + (f" (The plugin couldn't start it for you: {note})" if note else "")
+    shown = str(answer.get("title") or title)
+    with _steps_lock:
+        _handed[key] = (ref, shown)
+        while len(_handed) > _STEP_TURNS:
+            del _handed[next(iter(_handed))]
+    return HANDED_OFF.format(tool=tool, ref=ref, title=shown)
 
 
 # Each quick turn's steps: (session, Hermes' turn id) -> (its first step's
 # time, how many it took), oldest first.
 _steps: dict[tuple[str, str], tuple[float, int]] = {}
 _steps_lock = threading.Lock()
+# What each quick turn's steps were, for the workstream it hands on to.
+_did: dict[tuple[str, str], list[str]] = {}
+# The workstream a quick turn handed its rest to: key -> (ref, title).
+_handed: dict[tuple[str, str], tuple[str, str]] = {}
 # The steps the hook's last tool_block took on this thread, for give_back_steps.
 _last_take = threading.local()
 
 
-def _take_steps(session_id: Any, turn_id: Any, count: int, most: int = QUICK_STEPS) -> Optional[int]:
+def _take_steps(session_id: Any, turn_id: Any, count: int, most: int = QUICK_STEPS,
+                did: Optional[list[str]] = None) -> Optional[int]:
     """Counts ``count`` more steps in the Bot Chat's turn if its budget
     holds them (``most``, the bot's setting, taken within QUICK_STEP_S each
     of the first) and answers None; else takes none and answers how many
@@ -3290,8 +3367,13 @@ def _take_steps(session_id: Any, turn_id: Any, count: int, most: int = QUICK_STE
         if taken + count > most:
             return max(most - taken, 0)
         _steps[key] = (first, taken + count)
+        if not taken:
+            _did.pop(key, None)
+        _did.setdefault(key, []).extend(did or ())
         while len(_steps) > _STEP_TURNS:
             del _steps[next(iter(_steps))]
+        for kept in [kept for kept in _did if kept not in _steps]:
+            del _did[kept]
     _last_take.taken = (key, count)
     return None
 
@@ -5089,8 +5171,8 @@ def digest(session_id: Any) -> Optional[str]:
                    "the user's health, location and inbox, places and directions) or a small task of a step or "
                    "two. Hand a workstream (work_start) work that takes longer: several steps, long commands, "
                    "or changes to the user's code or files beyond a quick edit; send follow-ups to the one "
-                   f"that's on it (work_send with its ref). After {quick_steps(home)} steps in one turn the rest "
-                   "goes to a workstream anyway, so start one as soon as you can tell a task is long. ")
+                   f"that's on it (work_send with its ref). After {quick_steps(home)} steps in one turn the plugin "
+                   "starts a workstream for the rest itself, so start one as soon as you can tell a task is long. ")
     elif mode == "open":
         routing = ("You coordinate this bot's work, and the user wants you to do it here: use your tools in this "
                    "turn. Start a workstream (work_start) only for a long task the user shouldn't wait on in "

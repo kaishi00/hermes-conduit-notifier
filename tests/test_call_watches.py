@@ -453,8 +453,20 @@ def test_report_outside_a_watch_run(home, hermes, clock):
     older = hermes.older("Call watch: site down")
     answer = _report(older, True)
     assert answer["ok"] is False and answer["error"] == "older_watch"
-    no_saw = json.loads(watches.report({"happening": True}, session_id=RUN.format(_homelab(hermes))))
-    assert no_saw["ok"] is False and "saw" in no_saw["note"]
+
+
+def test_a_report_without_saw_still_counts(home, hermes, clock):
+    """Hermes refuses a call missing a required argument before the plugin
+    sees it, so only happening is required; a missing saw never drops the
+    call a run owes, and the watch's name is said instead."""
+    assert watches.REPORT_SCHEMA["parameters"]["required"] == ["happening"]
+    assert "every time" in watches.run_prompt({"what": "site down", "how": "curl it", "unless": ""})
+    job_id = _homelab(hermes, for_minutes=0)
+    quiet = json.loads(watches.report({"happening": False}, session_id=RUN.format(job_id)))
+    assert quiet["ok"] is True and quiet["status"] == "quiet"
+    calling = json.loads(watches.report({"happening": True, "saw": "  "}, session_id=RUN.format(job_id)))
+    assert calling["ok"] is True and calling["status"] == "calling", calling
+    assert _rang(home)[0]["reason"] == "Your call watch went off: homelab down.", _rang(home)
 
 
 def test_conduit_call_user_sends_a_watch_run_to_its_report(home, hermes, clock, monkeypatch):
@@ -593,3 +605,31 @@ def test_an_unreadable_store_is_not_overwritten(home, hermes, clock, monkeypatch
         store.put("another-job", {"what": "Is the NAS up?"})
     monkeypatch.undo()
     assert store.path.read_text(encoding="utf-8") == saved
+
+
+def test_a_watch_on_an_older_prompt_gets_the_current_one_on_its_next_run(home, hermes, clock):
+    """Plugin tools are deferred behind tool_search in cron runs, and the
+    first prompt said to reply [SILENT] when the report wasn't listed, so
+    runs went quiet without reporting. The next run puts the current prompt
+    on the job and is told itself how to reach the report."""
+    job_id = _homelab(hermes)
+    assert watches.run_note(RUN.format(job_id)) is None, "a job set up now already has it"
+    state = json.loads((home / watches.FILE_NAME).read_text())
+    del state["watches"][job_id]["prompt"]  # as 0.169.0 and earlier kept it
+    (home / watches.FILE_NAME).write_text(json.dumps(state))
+    hermes.jobs[job_id]["prompt"] = "old prompt"
+    note = watches.run_note(None, task_id=f"cron:{job_id}:1")
+    assert note == watches.RUN_NOTE and "tool_call" in note
+    assert hermes.jobs[job_id]["prompt"] == watches.run_prompt(watches._store().configs()[job_id])
+    assert "through tool_call" in hermes.jobs[job_id]["prompt"]
+    assert watches.run_note(RUN.format(job_id)) is None, "once"
+    assert watches.run_note("chat-1") is None and watches.run_note(RUN.format("abcdef123456")) is None
+
+
+def test_a_quoted_happening_is_read(home, hermes, clock):
+    job_id = _homelab(hermes, for_minutes=0)
+    assert json.loads(watches.report({"happening": "False", "saw": "Fine."},
+                                     session_id=RUN.format(job_id)))["status"] == "quiet"
+    assert json.loads(watches.report({"happening": " true ", "saw": "Down."},
+                                     session_id=RUN.format(job_id)))["status"] == "calling"
+    assert json.loads(watches.report({"happening": "maybe"}, session_id=RUN.format(job_id)))["error"] == "invalid"

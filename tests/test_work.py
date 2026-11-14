@@ -159,6 +159,9 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_policy_cache", {})
     monkeypatch.setattr(work, "_quick_steps_cache", {})
     monkeypatch.setattr(work, "_steps", {})
+    monkeypatch.setattr(work, "_asks", {})
+    monkeypatch.setattr(work, "_did", {})
+    monkeypatch.setattr(work, "_handed", {})
     work._wakes.clear()
     work._wake_asks.clear()
     work._wake_held.clear()
@@ -1266,6 +1269,33 @@ def test_the_plugins_tool_hook_counts_the_steps_of_hermes_turn(on, hermes, monke
     block = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={"command": "ls"}, turn_id="t1",
                                   tool_call_id="c9")
     assert block["message"] == work.STEP_BLOCK.format(tool="terminal")
+
+
+def test_a_quick_turn_past_its_steps_hands_the_rest_to_a_workstream(on, hermes, monkeypatch):
+    # Eric's .52 (2026-11-13): a Pulse card's Do it ran out of Furina's 5 steps reading jobs.json, and
+    # the bot retried the edit five times and told him "the runtime is blocking" instead of calling
+    # work_start. Eric picked "Hand off automatically": the plugin starts the workstream itself.
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t1", user_message="Fix the missing saw argument",
+                         platform="tui")
+    for n in range(work.QUICK_STEPS):
+        assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={"command": f"cat {n}"},
+                                     turn_id="t1", tool_call_id=f"c{n}") is None
+    block = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="patch", args={"path": "jobs.json"},
+                                  turn_id="t1", tool_call_id="c9")
+    assert block["message"].startswith("This is turning into longer work") and "W1" in block["message"]
+    started = on.get("W1")
+    assert started.kind == "workstream" and started.title == "Fix the missing saw argument"
+    assert "Fix the missing saw argument" in started.goal and 'terminal {"command": "cat 4"}' in started.goal
+    assert "patch" not in started.goal, "the refused call never ran"
+    again = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={}, turn_id="t1",
+                                  tool_call_id="c10")
+    assert "W1" in again["message"] and on.get("W2") is None, "once a turn"
+    # Another turn with no ask kept (Hermes gave no message): told to start one, as before.
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")["message"] == work.STEP_BLOCK.format(tool="terminal")
 
 
 def test_a_call_the_screen_lock_refuses_takes_no_quick_step(on, hermes, monkeypatch):
