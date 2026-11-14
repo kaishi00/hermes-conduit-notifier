@@ -31,6 +31,7 @@ import shutil
 import stat
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
@@ -66,6 +67,13 @@ KINDS = ("image", "video", "audio", "page", "document", "file", "link")
 SOURCES = ("delivered", "preview", "written", "attached", "link")
 
 _thread_lock = threading.Lock()
+# Bytes being copied right now, by host folder: each copy reserves its size
+# before it starts, so saves at once can't pass the budget together.
+_reserved_lock = threading.Lock()
+_reserved: dict = {}
+# The longest copy name, in bytes, leaving room for the temporary suffix
+# under a 255-byte file name limit.
+MAX_COPY_NAME_BYTES = 150
 
 
 class PinError(ValueError):
@@ -77,11 +85,17 @@ class PinError(ValueError):
 
 
 class PinStore:
-    def __init__(self, home: Path, clock: Callable[[], float] = time.time) -> None:
+    """``sensitive`` says whether a path is a secret the Folder won't show
+    (``.env``, keys, credentials); such a file is saved without a copy, so
+    its contents never land under another name."""
+
+    def __init__(self, home: Path, clock: Callable[[], float] = time.time,
+                 sensitive: Callable[[str], bool] = lambda path: False) -> None:
         self.home = Path(home)
         self.path = self.home / FILE_NAME
         self.copies = self.home / COPY_DIR
         self.clock = clock
+        self.sensitive = sensitive
 
     def view(self) -> dict[str, Any]:
         """Every saved artifact, the one saved last first, each saying whether
@@ -97,7 +111,7 @@ class PinStore:
             raise PinError("invalid", "The body must be an object")
         item = _item(body.get("item"))
         note = _note(body.get("note"))
-        key = item["path"] if item["kind"] != "link" else item["url"]
+        key = _key(item)
         existing = next((pin for pin in self._load()["pins"] if _key(pin) == key), None)
         if existing is not None:
             with self._locked() as state:
@@ -108,7 +122,7 @@ class PinStore:
         if len(self._load()["pins"]) >= MAX_PINS:
             raise PinError("too_many", f"At most {MAX_PINS} artifacts can be saved")
         pin = {**item, "note": note, "pinned_at": self.clock(), "copy": None, "copy_reason": None}
-        if item["kind"] != "link":
+        if "path" in item:
             pin["copy"], pin["copy_reason"] = self._copy(item["path"], key)
         with self._locked() as state:
             same = next((p for p in state["pins"] if _key(p) == key), None)
@@ -143,9 +157,13 @@ class PinStore:
     # --- Copies ------------------------------------------------------------------
 
     def _copy(self, path: str, key: str) -> tuple:
-        """The copy's path, or None and why there's none."""
+        """The copy's path, or None and why there's none. Each copy has a
+        folder of its own, so two saves at once never share one."""
         source = os.path.expanduser(path)
         try:
+            real = os.path.realpath(source)
+            if self.sensitive(source) or self.sensitive(real):
+                return None, "sensitive"
             info = os.stat(source)
         except (OSError, ValueError):
             return None, "missing"
@@ -153,20 +171,30 @@ class PinStore:
             return None, "not_a_file"
         if info.st_size > MAX_COPY_BYTES:
             return None, "too_large"
-        if self._copies_size() + info.st_size > MAX_TOTAL_COPY_BYTES:
-            return None, "no_room"
-        folder = self.copies / hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+        budget = str(self.copies)
+        with _reserved_lock:
+            if self._copies_size() + _reserved.get(budget, 0) + info.st_size > MAX_TOTAL_COPY_BYTES:
+                return None, "no_room"
+            _reserved[budget] = _reserved.get(budget, 0) + info.st_size
+        folder = self.copies / f"{hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]}-{uuid.uuid4().hex[:12]}"
         name = _safe_name(re.split(r"[/\\]", path.rstrip("/\\"))[-1])
         target = folder / name
         try:
             folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-            temporary = folder / f".{name}.{os.getpid()}.{threading.get_ident()}.tmp"
+            temporary = folder / f".{name}.tmp"
             shutil.copyfile(source, temporary)
             os.chmod(temporary, 0o600)
             os.replace(temporary, target)
         except OSError:
             shutil.rmtree(folder, ignore_errors=True)
             return None, "unreadable"
+        finally:
+            with _reserved_lock:
+                left = _reserved.get(budget, 0) - info.st_size
+                if left > 0:
+                    _reserved[budget] = left
+                else:
+                    _reserved.pop(budget, None)
         return str(target), None
 
     def _copies_size(self) -> int:
@@ -194,7 +222,7 @@ class PinStore:
     def _described(self, pin: dict) -> dict:
         row = {key: value for key, value in pin.items() if value is not None and key != "copy_reason"}
         row.pop("copy", None)
-        if pin["kind"] != "link":
+        if "path" in pin:
             size = _file_size(pin["path"])
             row["exists"] = size is not None
             if size is not None:
@@ -252,7 +280,8 @@ class PinStore:
 
 
 def _key(pin: dict) -> str:
-    return pin["url"] if pin["kind"] == "link" else pin["path"]
+    """A link, or a picture on the web, by its URL; a file by its path."""
+    return pin["url"] if pin["source"] == "link" else pin["path"]
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -300,7 +329,8 @@ def _item(raw: Any) -> dict:
         "message_id": message_id,
         "timestamp": timestamp,
     }
-    if kind == "link":
+    if source == "link":
+        # A web link, or a picture a tool gave by URL (kind image).
         url = raw.get("url")
         if not isinstance(url, str) or len(url) > MAX_URL_CHARS:
             raise PinError("invalid", "A link needs its URL")
@@ -326,8 +356,17 @@ def _item(raw: Any) -> dict:
 
 
 def _safe_name(name: str) -> str:
-    name = re.sub(r"[\x00-\x1f/\\:*?\"<>|]", "_", name).strip(" .")
-    return (name or "file")[:120]
+    """A file name safe on every host, its extension kept, within
+    ``MAX_COPY_NAME_BYTES`` encoded."""
+    name = re.sub(r"[\x00-\x1f/\\:*?\"<>|]", "_", name).strip(" ") or "file"
+    if name.startswith("."):
+        name = "_" + name
+    stem, dot, ext = name.rpartition(".")
+    if not dot or len(ext.encode("utf-8")) > 20:
+        stem, ext = name, ""
+    room = MAX_COPY_NAME_BYTES - (len(ext.encode("utf-8")) + 1 if ext else 0)
+    stem = stem.encode("utf-8")[:room].decode("utf-8", "ignore") or "file"
+    return f"{stem}.{ext}" if ext else stem
 
 
 def _file_size(path: str) -> Optional[int]:

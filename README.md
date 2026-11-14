@@ -2443,7 +2443,7 @@ copies it into the profile's `conduit-saved-artifacts/` folder (a regular file
 up to 200 MB, every copy together up to 2 GB), and the row names the copy as
 `kept_path`, so it opens after the original, its chat or its session is gone;
 `not_kept` says why a file has none (`too_large`, `no_room`, `missing`,
-`not_a_file`, `unreadable`). Unsaving removes the copy. A link keeps its row
+`not_a_file`, `unreadable`, `sensitive` for a secret the Folder hides, such as `.env`). Unsaving removes the copy. A link keeps its row
 only. Capability `artifact-pins`.
 
 ## Workspace files (plugin 0.109+)

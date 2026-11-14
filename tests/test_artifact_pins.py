@@ -195,3 +195,50 @@ def test_route_refuses_a_bad_row(client):
 
 def test_capabilities_list_artifact_pins():
     assert "artifact-pins" in api.capabilities.ROUTE_CAPABILITIES
+
+
+def test_a_hosted_picture_is_saved_by_its_url(tmp_path):
+    store = pins.PinStore(tmp_path, clock=Clock())
+    row = {**_link_row("https://cdn.example.com/cat.png"), "kind": "image", "name": "cat.png"}
+    saved = store.save({"item": row})["pin"]
+    assert saved["kind"] == "image" and saved["url"] == "https://cdn.example.com/cat.png"
+    assert "kept_path" not in saved and "exists" not in saved
+    assert store.remove("https://cdn.example.com/cat.png") == {"removed": True}
+
+
+def test_a_secret_file_is_saved_without_a_copy(tmp_path):
+    secret = tmp_path / ".env"
+    secret.write_text("TOKEN=1")
+    link = tmp_path / "notes.txt"
+    link.symlink_to(secret)
+    store = pins.PinStore(tmp_path / "home", clock=Clock(),
+                          sensitive=lambda path: path.endswith(".env"))
+    assert store.save({"item": _file_row(secret)})["pin"]["not_kept"] == "sensitive"
+    assert store.save({"item": _file_row(link)})["pin"]["not_kept"] == "sensitive", "checked where it leads too"
+    assert not (tmp_path / "home" / pins.COPY_DIR).exists()
+
+
+def test_a_save_that_lost_a_race_removes_only_its_own_copy(tmp_path):
+    original = tmp_path / "a.txt"
+    original.write_text("one")
+    store = pins.PinStore(tmp_path / "home", clock=Clock())
+    first = store._copy(str(original), str(original))[0]
+    second = store._copy(str(original), str(original))[0]
+    assert pathlib.Path(first).parent != pathlib.Path(second).parent
+    store._remove_copy({"copy": second})
+    assert pathlib.Path(first).read_text() == "one"
+
+
+def test_copies_in_flight_count_against_the_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(pins, "MAX_TOTAL_COPY_BYTES", 15)
+    store = pins.PinStore(tmp_path / "home", clock=Clock())
+    (tmp_path / "b.txt").write_bytes(b"x" * 10)
+    monkeypatch.setitem(pins._reserved, str(store.copies), 10)
+    assert store.save({"item": _file_row(tmp_path / "b.txt")})["pin"]["not_kept"] == "no_room"
+
+
+def test_a_long_name_fits_with_its_extension():
+    name = pins._safe_name("é" * 200 + ".pdf")
+    assert name.endswith(".pdf")
+    assert len(name.encode("utf-8")) <= pins.MAX_COPY_NAME_BYTES
+    assert pins._safe_name(".env") == "_.env"

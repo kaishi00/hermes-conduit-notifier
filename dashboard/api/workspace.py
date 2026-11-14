@@ -173,6 +173,10 @@ ARTIFACT_PINS_MAX_BODY_BYTES = 32 * 1024
 _artifact_pins_limiter = core._MintLimiter(ARTIFACT_PINS_LIMIT, ARTIFACT_PINS_WINDOW_S,
                                            message="Too many saved-artifact requests; try again shortly")
 _artifact_pins_module: Any = None
+# Saves copy files: two at a time on workers of their own, so a slow copy
+# never holds the shared workers; a third is turned away rather than queued.
+_artifact_pins_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-artifact-pins")
+_artifact_pins_slots = threading.BoundedSemaphore(2)
 
 
 def _artifact_pins() -> Any:
@@ -193,7 +197,7 @@ def _artifact_pins() -> Any:
 def artifact_pins(action: str, body: Any = None) -> Dict[str, Any]:
     """Runs inside the profile scope: the pins are the profile's."""
     module = _artifact_pins()
-    store = module.PinStore(core._calls_home())
+    store = module.PinStore(core._calls_home(), sensitive=_secret_path)
     try:
         if action == "save":
             return store.save(body)
@@ -204,9 +208,35 @@ def artifact_pins(action: str, body: Any = None) -> Dict[str, Any]:
         raise core.TokenError(409 if exc.code == "too_many" else 400, str(exc))
 
 
-async def _artifact_pins_route(profile: Optional[str], run: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+def _secret_path(path: str) -> bool:
+    """A file the Folder won't show (``.env``, keys, credentials): saved
+    without a copy, so its contents never sit under another name."""
     try:
-        return {"ok": True, **(await core._run_scoped(profile, core._limited(_artifact_pins_limiter, profile, run)))}
+        if _workspace_files().default_sensitive(path):
+            return True
+    except Exception:  # without the denylist, nothing is copied
+        return True
+    try:
+        from hermes_cli.web_routers.files import _is_sensitive_path
+    except Exception:
+        return False
+    try:
+        return bool(_is_sensitive_path(Path(path)))
+    except Exception:
+        return True
+
+
+async def _artifact_pins_route(profile: Optional[str], run: Callable[[], Dict[str, Any]],
+                               copies: bool = False) -> Dict[str, Any]:
+    executor = None
+    if copies:
+        if not _artifact_pins_slots.acquire(blocking=False):
+            raise HTTPException(status_code=503, detail="Hermes is still saving artifacts; try again shortly",
+                                headers={"Cache-Control": "no-store"})
+        executor = _artifact_pins_executor
+    try:
+        return {"ok": True, **(await core._run_scoped(profile, core._limited(_artifact_pins_limiter, profile, run),
+                                                      executor))}
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -214,6 +244,9 @@ async def _artifact_pins_route(profile: Optional[str], run: Callable[[], Dict[st
         raise
     except Exception as exc:
         raise core._unexpected("pins", exc, feature="Saved artifacts")
+    finally:
+        if copies:
+            _artifact_pins_slots.release()
 
 
 @router.get("/artifacts/pins")
@@ -226,7 +259,7 @@ async def get_artifact_pins(response: Response, profile: Optional[str] = None) -
 async def post_artifact_pin(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     body = await core._read_json_body(request, ARTIFACT_PINS_MAX_BODY_BYTES)
-    return await _artifact_pins_route(profile, lambda: artifact_pins("save", body))
+    return await _artifact_pins_route(profile, lambda: artifact_pins("save", body), copies=True)
 
 
 @router.delete("/artifacts/pins")
