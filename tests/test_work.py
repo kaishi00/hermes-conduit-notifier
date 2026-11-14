@@ -616,6 +616,38 @@ def test_a_note_to_another_bot_opens_no_ask(bots, hermes, monkeypatch):
     assert "work_tell" in work.SCHEMAS and "work_tell" in work.TOOLS
 
 
+def test_a_note_comes_in_as_another_bots_and_needs_no_answer(bots, hermes, monkeypatch):
+    # GLM/DeepSeek on #780: a note alone was headed "Work update from your workstreams".
+    call("work_tell", {"bot": "nahida", "text": "Built."})
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "Work update from another bot" in params["text"] and work.TELL_TAIL in params["text"]
+    assert work.ASK_TAIL not in params["text"]
+
+
+def test_a_note_whose_wake_hermes_refused_is_told_back(bots, hermes, monkeypatch):
+    monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+        "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    assert call("work_tell", {"bot": "nahida", "text": "The merge is verified."})["ok"]
+    work.flush_wakes()
+    hermes.calls.clear()
+    work.flush_wakes()
+    texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")
+             if params["session_id"] == f"rt-{BOT_CHAT}"]
+    assert any("Your note to Nahida («The merge is verified.») never reached it" in text for text in texts)
+
+
+def test_the_loop_hint_never_offers_a_question_back_to_ask_about(bots, hermes, monkeypatch):
+    # DeepSeek on #780: Furina, waiting on Nahida's question back, was told to ask about it.
+    assert call("work_ask", {"bot": "nahida", "text": "The report?"})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_ask", {"bot": "Furina", "text": "Which?", "about": "A1"}, session_id=NAHIDA_CHAT)["ok"]
+    as_bot(monkeypatch, bots, "hermes")
+    loop = call("work_ask", {"bot": "nahida", "text": "Also?"})
+    assert loop["error"] == "loop" and "about set to" not in loop["note"]
+    assert "Nahida asked you A2 back about your ask; answer it with work_reply first." in loop["note"]
+
+
 def test_notes_and_asks_share_the_hourly_cap_and_the_limits(bots, hermes, monkeypatch):
     monkeypatch.setattr(work, "ASK_PAIR_PER_HOUR", 2)
     assert call("work_tell", {"bot": "nahida", "text": "One."})["ok"]

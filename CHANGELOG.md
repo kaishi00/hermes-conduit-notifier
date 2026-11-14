@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.170.1 (2026-11-14)
+
+### Fixes
+
+- A note one bot sent another that never reached it (its Bot Chat couldn't be woken) was lost without a word. The bot that sent it is now told.
+- A bot waiting on another's question back was told to ask about it, which couldn't work. It's now told to answer it first.
+
 ## 0.170.0 (2026-11-14)
 
 ### Fixes
