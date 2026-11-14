@@ -111,6 +111,8 @@ def ensure_installed() -> bool:
 
 def uninstall() -> None:
     """Puts the server's own function back (tests)."""
+    global _logged
+    _logged = False
     server = sys.modules.get(SERVER)
     current = getattr(server, METHOD, None) if server is not None else None
     if getattr(current, _GUARD_FLAG, False):
