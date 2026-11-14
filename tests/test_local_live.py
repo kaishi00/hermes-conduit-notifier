@@ -719,6 +719,8 @@ class ReadBackUpstream:
         self.unstarted = False
         # Answers the next response.create this many times with busy.
         self.busy = 0
+        # Its own response's start reaches the relay before that refusal.
+        self.busy_created_first = False
         # Leaves a held response's cancel unanswered until answer_cancel().
         self.defer_cancel = False
         self.deferred = None
@@ -762,6 +764,8 @@ class ReadBackUpstream:
         elif kind == "response.create":
             if self.busy:
                 self.busy -= 1
+                if self.busy_created_first:
+                    self.push({"type": "response.created", "response": {"id": "other"}})
                 self.push({"type": "error", "error": {"code": "conversation_already_has_active_response"}})
                 # The response it was busy with ends.
                 self.push({"type": "response.done", "response": {"id": "other", "status": "completed"}})
@@ -2510,6 +2514,38 @@ def test_a_refused_ask_for_the_tools_reply_is_made_again_when_the_server_is_free
         _wait_for(lambda: upstream.sent[-1].get("type") == "session.update")
         assert upstream.sent[-1]["session"]["tools"] == [] and upstream.sent[-1]["session"]["tool_choice"] == "none"
         _finish(ws)
+
+
+def test_a_refusal_that_follows_the_servers_own_response_start_still_has_the_reply_asked_again(client, hermes, server):
+    _own_model(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _own_ready(ws, upstream)
+        _function_call(upstream)
+        _next(ws, "conduit.tool.call")
+        upstream.busy, upstream.busy_created_first = 1, True
+        ws.send_text(json.dumps({"type": "conduit.tool.result", "call_id": "call_1", "output": "{}", "speak": False}))
+        _wait_for(lambda: upstream.sent.count({"type": "response.create"}) == 2)
+        # An error that isn't the busy one asks for nothing more.
+        upstream.push({"type": "error", "error": {"code": "invalid_value"}})
+        upstream.push({"type": "response.done", "response": {"id": "resp9", "status": "completed"}})
+        _next(ws, "error")
+        time.sleep(0.1)
+        assert upstream.sent.count({"type": "response.create"}) == 2
+        _finish(ws)
+
+
+def test_a_greeting_refused_by_a_busy_server_is_read_when_it_is_free(client, hermes, server):
+    _own_model(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    upstream.busy = 1
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _own_ready(ws, upstream, greeting="Hi, I'm listening.")
+        _wait_for(lambda: len([frame for frame in upstream.sent if frame["type"] == "response.create"]) == 2)
+        _next(ws, "response.output_audio.delta")
+        _finish(ws)
+    first, second = [frame for frame in upstream.sent if frame["type"] == "response.create"]
+    assert first == second and first["response"]["conversation"] == "none"
 
 
 def test_an_agent_setup_that_comes_after_the_session_update_still_hands_the_call_to_the_server(client, hermes, server):

@@ -85,6 +85,9 @@ class _LocalLiveOwnModel:
         self.pending = 0
         # When a response was last asked for, until the server starts it.
         self.asked_at: Optional[float] = None
+        # The ask not yet answered by a response, and a greeting to read.
+        self.asked: Optional[Dict[str, Any]] = None
+        self.greeting: Optional[Dict[str, Any]] = None
         # The latest call ids, so one the server names twice runs once.
         self.seen: "collections.OrderedDict[str, None]" = collections.OrderedDict()
         self.tasks: Set["asyncio.Task[None]"] = set()
@@ -167,6 +170,7 @@ class _LocalLiveOwnModel:
         if kind == "response.done":
             self.active = False
             self.asked_at = None
+            self.asked = None
             response = event.get("response") if isinstance(event.get("response"), dict) else {}
             output = response.get("output") if isinstance(response.get("output"), list) else []
             for item in output:
@@ -174,15 +178,22 @@ class _LocalLiveOwnModel:
             await self._settle()
             return text
         if kind == "error":
-            if self.asked_at is not None:
-                # The response.create for a tool's answer was refused: it is
-                # still owed. A server busy with a response it had started
-                # (the user spoke meanwhile) is asked again when that ends.
-                self.asked_at = None
-                self.owed = True
-                error = event.get("error") if isinstance(event.get("error"), dict) else {}
-                if error.get("code") == "conversation_already_has_active_response":
-                    self.active = True
+            error = event.get("error") if isinstance(event.get("error"), dict) else {}
+            if error.get("code") == "conversation_already_has_active_response":
+                # The server was busy with a response it had started (the
+                # user spoke meanwhile), whether or not its response.created
+                # got here first. Only this side asks for responses, so what
+                # it refused is the last ask: it goes again when that ends.
+                asked, self.asked, self.asked_at = self.asked, None, None
+                self.active = True
+                if asked is not None and asked.get("response"):
+                    self.greeting = asked
+                elif asked is not None:
+                    self.owed = True
+            elif self.asked_at is not None:
+                # Not known to be about the ask, so nothing is asked twice.
+                logger.warning("Local Live: the speech server sent an error after an ask for a response (%s)",
+                               str(error.get("code") or error.get("type") or "no code")[:80])
             return text
         if kind == "response.function_call_arguments.delta":
             return None
@@ -236,9 +247,10 @@ class _LocalLiveOwnModel:
         if greeting:
             item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": greeting}]}
             # Read aloud, never answered: no tool runs for it.
-            await self._send(self.setup.say({"type": "response.create",
-                                             "response": {"conversation": "none", "input": [item],
-                                                          "tool_choice": "none"}}))
+            self.greeting = self.setup.say({"type": "response.create",
+                                            "response": {"conversation": "none", "input": [item],
+                                                         "tool_choice": "none"}})
+            await self._settle()
             return
         response_id = f"resp_conduit_{uuid.uuid4().hex[:16]}"
         for frame in (local_live_read_back._local_live_read_back_response(None, response_id),
@@ -284,13 +296,21 @@ class _LocalLiveOwnModel:
     async def _settle(self) -> None:
         """Asks for the response that speaks the tools' answers, once all of
         them are in and the server is free."""
-        if self.closed or not self.owed or self.pending > 0 or self.active:
+        if self.closed or self.active:
             return
         if self.asked_at is not None and self.clock() - self.asked_at < LOCAL_LIVE_OWN_MODEL_ASK_S:
             return
-        self.owed = False
+        if self.greeting is not None:
+            # The greeting, read aloud first; a server busy with a response
+            # of its own reads it when that ends.
+            frame, self.greeting = self.greeting, None
+        elif self.owed and self.pending <= 0:
+            frame, self.owed = {"type": "response.create"}, False
+        else:
+            return
+        self.asked = frame
         self.asked_at = self.clock()
-        await self._send({"type": "response.create"})
+        await self._send(frame)
 
     # Plumbing.
 
