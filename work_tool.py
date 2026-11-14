@@ -3414,13 +3414,26 @@ def _cut_keeping_lines(text: str, limit: int) -> str:
 
 # Argument names whose values a hand-off leaves out of the workstream's
 # instructions, which are kept and shown in its chat.
-_SECRET_ARG = re.compile(r"token|secret|passw|api_?key|auth|credential|cookie", re.IGNORECASE)
+# Matched against the name's words (snake, kebab or camel case), so "author"
+# or "tokenizer" keep their values while "x-api-key" and "oauthToken" don't.
+_SECRET_WORDS = frozenset({"token", "tokens", "secret", "secrets", "password", "passwd", "passphrase",
+                           "pwd", "auth", "authorization", "oauth", "credential", "credentials", "cookie",
+                           "cookies", "apikey", "bearer", "jwt"})
+_SECRET_PAIRS = frozenset({("api", "key"), ("private", "key"), ("access", "key"), ("secret", "key"),
+                           ("client", "secret")})
+
+
+def _secret_arg(name: Any) -> bool:
+    """Whether an argument's name says its value is a credential."""
+    words = [word.lower() for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", str(name))]
+    return any(word in _SECRET_WORDS or word.endswith(("token", "secret", "password")) for word in words) or any(
+        pair in _SECRET_PAIRS for pair in zip(words, words[1:]))
 
 
 def _without_secret_args(value: Any) -> Any:
     """``value`` with secret-named arguments' values left out, nested ones too."""
     if isinstance(value, dict):
-        return {key: "(left out)" if _SECRET_ARG.search(str(key)) else _without_secret_args(item)
+        return {key: "(left out)" if _secret_arg(key) else _without_secret_args(item)
                 for key, item in value.items()}
     if isinstance(value, list):
         return [_without_secret_args(item) for item in value]
