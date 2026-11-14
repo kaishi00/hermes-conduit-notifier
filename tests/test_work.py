@@ -7451,6 +7451,21 @@ def test_a_hand_off_carries_what_the_steps_returned(on, hermes, monkeypatch):
     assert "their results aren't here; run again what you need" in briefs[-1] and "«" not in briefs[-1]
 
 
+def test_a_kept_result_is_masked_before_any_cut():
+    # Greptile on notifier #804: the cut of a result too long to mask whole, with a credential across it.
+    bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
+    short = work._result_kept("ok " * 10)
+    assert short == ("ok " * 10).strip() and "…" not in short
+    filler = "a " * ((work._RESULT_READ_CHARS - 10) // 2)
+    for text in (filler + bearer, "\n" * (work._RESULT_READ_CHARS - 10) + bearer + " tail"):
+        assert len(text) > work._RESULT_READ_CHARS
+        kept = work._result_kept(text)
+        assert bearer[:6] not in kept and kept.endswith("…") and len(kept) <= work._RESULT_KEPT_CHARS
+    whole = work._result_kept("a " * 2000 + bearer)  # under the read limit: masked whole, then cut
+    assert bearer[:6] not in whole
+    assert work._result_kept({"output": "x"}) == '{"output": "x"}'
+
+
 def test_a_hand_offs_secret_names_are_read_by_their_words():
     # Review leftovers of notifier #790: "x-api-key" or "privateKey" with a short value slipped past the
     # old substring match, which also dropped "author" and "tokenizer".
