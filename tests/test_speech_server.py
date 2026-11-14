@@ -241,6 +241,18 @@ def test_a_server_that_names_no_model_is_not_said_to_answer_alone(client, server
     assert api.speech_server.speech_server_abilities({"session": {"model": "m", "turn_detection": None}})["answers_alone"] is False
 
 
+def test_a_transcription_model_that_cant_be_used_is_logged_and_a_good_one_is_not(caplog):
+    with caplog.at_level("WARNING"):
+        assert api.speech_server.speech_server_transcription_model({"transcription_model": "gpt-4o-transcribe"}) == "gpt-4o-transcribe"
+        assert api.speech_server.speech_server_transcription_model({}) == ""
+    assert "transcription_model" not in caplog.text
+    for bad in ("x" * 200, "two\nlines", 123, True):
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert api.speech_server.speech_server_transcription_model({"transcription_model": bad}) == ""
+        assert "transcription_model" in caplog.text
+
+
 def test_status_without_a_server(client, hermes):
     hermes.config = {}
     body = client.get(f"{BASE}/speech-server/status").json()
