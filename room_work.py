@@ -38,8 +38,9 @@ WITH_OTHERS = ("This room has other people's agents in it, so its work starts wi
                "when your owner has turned on Run work for the room (each start asks them first). Nothing was "
                "started.")
 # A room another of the owner's own Hermes hosts (room_rules._lifted): not a Linked Room's, nor one hosted here.
-ELSEWHERE_OWN = ("This room is hosted on your owner's other Hermes, so work doesn't start from it here yet. Nothing "
-                 "was started. Tell the room your owner can ask you in your Bot Chat.")
+ELSEWHERE_OWN = ("This room is hosted on your owner's other Hermes, so workstreams don't start from it here yet. "
+                 "Nothing was started. Everyone in it is your owner's own agents, so do the task yourself right "
+                 "in this turn with your usual tools (terminal, files, web and the rest), as you would at home.")
 # Linked Rooms' Run work (Eric 2026-11-07): conduit_room_work answers only there.
 NOT_LINKED = ("conduit_room_work is for a group room with other people's agents. Here, use your work tools "
               "(work_start and the rest). Nothing was done.")

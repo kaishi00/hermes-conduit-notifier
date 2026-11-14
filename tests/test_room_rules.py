@@ -1342,6 +1342,13 @@ def test_a_room_whose_others_all_came_over_own_links_runs_as_your_own(tmp_path, 
     _room_session(home, "s-own", "room-own")
     turn = rules.room_turn("s-own", home)
     assert (turn.side, turn.with_others, turn.others) == ("home", False, ())
+    # Someone else's agent joining later brings the rules back, though the turn is remembered.
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("UPDATE hosted_rooms SET members_json = ? WHERE room_id = 'room-own'",
+                 (json.dumps([FURINA, laifu, LAIFU]),))
+    conn.commit()
+    conn.close()
+    assert rules.room_turn("s-own", home).with_others
     # Another person's agent beside it keeps the rules.
     _room(home / "state.db", "room-mixed", [FURINA, laifu, LAIFU])
     _room_session(home, "s-mixed", "room-mixed")
@@ -1378,7 +1385,7 @@ def test_a_members_hermes_runs_a_room_from_its_own_hermes_as_at_home(tmp_path, m
     _room_session(home, REMOTE, "room-a")
     _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
     assert rules.room_turn(REMOTE, home) == rules.RoomTurn(
-        room_id="room-a", side="member", with_others=False, session_id=REMOTE)
+        room_id="room-a", side="member", with_others=False, session_id=REMOTE, own=True)
     assert rules.own_guest_room(tmp_path, "room-a", "own-link")
     assert not rules.own_guest_room(tmp_path, "room-a", "another-link")
     # Someone else invited too, even by a name: the rules hold.
@@ -1417,3 +1424,30 @@ def test_past_chat_search_finds_a_room_from_your_own_other_hermes_while_the_link
     _own(monkeypatch, set(), _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
     assert [entry["session_id"] for entry in json.loads(_search(found, query="otter"))["results"]] == ["s-chat"]
     assert json.loads(_search(read, session_id=REMOTE))["success"] is False
+
+
+def test_a_room_of_your_own_hermes_tells_its_turn_to_use_its_home_tools(host, notes, monkeypatch):
+    # Seen on .52/.58 (2026-11-14): a far bot whose earlier turns ran under the room's rules kept reaching for the
+    # room's tools instead of its terminal, so the turn is told the rules are off, beside its usual notes.
+    _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    assert rules.room_turn(REMOTE, host).own
+    context = _context(REMOTE)
+    assert rules.OWN_FRAMING in context and rules.FRAMING_HEAD not in context
+    assert NOTES["conduit_first"] in context
+    _own(monkeypatch, set(), _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    context = _context(REMOTE)
+    assert rules.FRAMING_HEAD in context and rules.OWN_FRAMING not in context
+    # The pictures its messages name still reach it, since the peer route carries none.
+    peer_id = _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    picture = str(host / "conduit" / "room-files" / ("20261114-" + "a" * 32) / "shot.jpg")
+    result = plugin._pre_llm_call(session_id=REMOTE, turn_id="t2", platform="api_server",
+                                  user_message=f"look\n@file:{picture}", conversation_history=[])
+    assert rules.TURN_PICTURES_LINE.format(count="a picture", them="it") in result["context"]
+    # On the room's home too, when everyone from elsewhere came over an own Link.
+    laifu = {**LAIFU, "target": {**LAIFU["target"], "peer_id": peer_id("own-link")}}
+    _room(host / "state.db", "room-own", [FURINA, laifu])
+    _room_session(host, "s-own", "room-own")
+    context = _context("s-own")
+    assert rules.OWN_FRAMING in context and rules.FRAMING_HEAD not in context
+    # A home room with no one from another installation is no room of your own Hermes: no note.
+    assert rules.OWN_FRAMING not in _context("s-local") and rules.OWN_FRAMING not in _context("s-chat")

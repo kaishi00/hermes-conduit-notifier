@@ -4350,7 +4350,11 @@ A room whose members from other installations all came over own Links runs as
 a room of only your own agents: no owner rules, framing or reply scrub, its
 chats found by past-chat search, and on the Hermes your far agent lives on, no
 turns a day and no sitting out. The far agent works with its own tools, memory
-and approvals there, as at home. On the room's home that means every member
+and approvals there, as at home, and each turn is told so, since earlier turns
+in the same chat may have run under the rules. Workstreams don't start from
+such a room on the far Hermes yet; `conduit_room_work` and `conduit_ask_owner`
+answer there by telling the agent to do the task itself with its usual tools.
+On the room's home that means every member
 from elsewhere, and everyone in it with Just me, is over an own Link; on the
 other Hermes, that the room came over an own Link and its invite named no one
 else (a room with a third Hermes keeps the rules there, even another of yours,
