@@ -1991,6 +1991,16 @@ class PulseStore:
                                 "WHERE id=? AND dismissed_at IS NOT NULL AND rest_until IS ?",
                                 (card_id, rest_until)).rowcount > 0
 
+    def stay_away(self, card_id: int, rest_until: Optional[float]) -> bool:
+        """A card swiped away until a time stays away for good instead (a
+        whole report found out of date, which Done and Undo don't take:
+        Put back still brings it back); whether it changed. Only while
+        ``rest_until`` is still its time, as return_card."""
+        with _lock, self._connect() as conn:
+            return conn.execute("UPDATE cards SET rest_until=NULL "
+                                "WHERE id=? AND dismissed_at IS NOT NULL AND rest_until IS ?",
+                                (card_id, rest_until)).rowcount > 0
+
     def resting_items(self, now: float, rest_s: float) -> dict[int, float]:
         """Remembered items a card of was swiped away and still rests: while
         the card is away until a time (it comes back as new at that time,

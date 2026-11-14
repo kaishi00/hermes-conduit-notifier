@@ -1338,9 +1338,9 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         holds = follow_used < follow_cap and (bool(pulse_store.held_cards(1))
                                               or bool(followup.waiting_for_moment(pulse_store)))
         # Likewise a card swiped away until now, about something still open
-        # or found in a chat: with the budget spent it comes back unread
+        # or found in a chat, or a whole report's: with the budget spent it comes back unread
         # rather than late.
-        rests = any(followup.read_first(card) for card in pulse_store.rested_cards(now))
+        rests = any(followup.rest_read(card) for card in pulse_store.rested_cards(now))
         # A report item found in a chat is read again while it's new, last
         # and on what the follow-ups leave, so it never crowds out a reminder.
         founds = follow_used < follow_cap and bool(followup.found_due(pulse_store, now))

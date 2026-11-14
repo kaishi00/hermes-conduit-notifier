@@ -96,7 +96,7 @@ async def get_workstreams(request: Request, response: Response, profile: Optiona
     with its status, checklist, last result, the ``actions`` the user can
     take and how they can file it (``manage``: pin, unpin, resolve,
     reopen); ``counts`` for the Work strip (working, needs_you, ready,
-    waiting); ``resolved_count``; ``policy`` ("off" when the bot's
+    waiting, and questions: what the Bot Chat asked the user and waits on); ``resolved_count``; ``policy`` ("off" when the bot's
     workstreams are off), ``bot_chat``, ``bot_chat_agents`` (the background
     agents the Bot Chat itself started, for Bots Home) and ``coordination`` (its ``mode``
     and ``items``: what the watch flagged, what the Bot Chat sent on its own
@@ -199,7 +199,12 @@ async def post_workstream_action(ref: str, action: str, request: Request, respon
     approval its "Needs you" card shows); or ``pin``, ``unpin``, ``resolve`` (work
     still at it is refused, ``still_running``) and ``reopen``, for asks
     too. The answer has the row as it is now
-    (``work``); a refusal is a 4xx with ``code`` and ``detail``."""
+    (``work``); a refusal is a 4xx with ``code`` and ``detail``.
+
+    With a question's id for ``ref`` (P1, from ``coordination``'s items, whose
+    ``actions`` name these while it's open): ``approve`` or ``decline``, the
+    user's own answer to what the Bot Chat asked them. A yes goes to the Bot
+    Chat as a work update it acts on; the answer has ``id`` and ``status``."""
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
     body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)

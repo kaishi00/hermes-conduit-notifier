@@ -1,4 +1,5 @@
 import asyncio
+import json
 import contextlib
 import importlib.util
 import os
@@ -164,8 +165,105 @@ def test_status_reports_configured_server(client, hermes):
     _settings(hermes, url="http://10.0.0.5:8765", api_key="secret")
     body = client.get(f"{BASE}/speech-server/status?profile=work").json()
     assert body == {"ok": True, "configured": True, "available": True,
-                    "url": "ws://10.0.0.5:8765/v1/realtime", "has_key": True, "reason": None}
+                    "url": "ws://10.0.0.5:8765/v1/realtime", "has_key": True, "drive_turns": False, "own_model": False,
+                    "model": None, "voice": None, "transcription_model": None, "reason": None}
     assert hermes.entered == ["work"]
+
+
+# --- the server as data ----------------------------------------------------------
+
+def test_the_set_model_goes_on_the_address_unless_the_address_names_one(hermes):
+    _settings(hermes, url="wss://voice.example.com/v1/realtime?beta=1", model="gpt-realtime")
+    assert api.speech_server.speech_server_target()[0] == "wss://voice.example.com/v1/realtime?beta=1&model=gpt-realtime"
+    _settings(hermes, url="wss://voice.example.com/v1/realtime?model=mine", model="gpt-realtime")
+    assert api.speech_server.speech_server_target()[0] == "wss://voice.example.com/v1/realtime?model=mine"
+    _settings(hermes, url="wss://voice.example.com/v1/realtime", model="two words")
+    assert api.speech_server.speech_server_target()[0] == "wss://voice.example.com/v1/realtime"
+
+
+def test_a_model_or_voice_that_cant_be_given_to_a_server_is_logged(caplog):
+    with caplog.at_level("WARNING"):
+        assert api.speech_server.speech_server_model({"model": "gpt-realtime"}) == "gpt-realtime"
+        assert api.speech_server.speech_server_voice({}) == ""
+    assert "voice.speech_server" not in caplog.text
+    with caplog.at_level("WARNING"):
+        assert api.speech_server.speech_server_model({"model": "two words"}) == ""
+        assert api.speech_server.speech_server_voice({"voice": 7}) == ""
+    assert "voice.speech_server.model" in caplog.text and "voice.speech_server.voice" in caplog.text
+
+
+def test_status_reports_the_model_voice_and_transcription_model(client, hermes):
+    _settings(hermes, url="wss://voice.example.com", model="gpt-realtime", voice="marin",
+              transcription_model="gpt-4o-mini-transcribe", drive_turns=True)
+    body = client.get(f"{BASE}/speech-server/status").json()
+    assert body["url"] == "wss://voice.example.com/v1/realtime"
+    assert (body["model"], body["voice"], body["transcription_model"]) == ("gpt-realtime", "marin", "gpt-4o-mini-transcribe")
+    assert body["drive_turns"] is True
+
+
+def test_the_presets_that_ship_can_all_be_offered(client):
+    with open(api.speech_server.SPEECH_SERVER_PRESETS_PATH, encoding="utf-8") as handle:
+        shipped = json.load(handle)["presets"]
+    presets = client.get(f"{BASE}/speech-server/presets").json()["presets"]
+    assert [p["id"] for p in presets] == [p["id"] for p in shipped] and len(presets) >= 3
+    for preset in presets:
+        assert preset["name"] and isinstance(preset["drive_turns"], bool) and isinstance(preset["needs_key"], bool)
+        assert ("url" in preset) != ("url_hint" in preset)
+        if "voice" in preset:
+            assert preset["voice"] in preset["voices"]
+        if "models" in preset:
+            assert preset["model"] in preset["models"]
+    openai = next(p for p in presets if p["id"] == "openai-realtime")
+    assert openai["url"] == "wss://api.openai.com/v1/realtime" and openai["drive_turns"] is True
+
+
+def test_a_preset_that_cant_be_dialed_or_named_is_left_out(monkeypatch, tmp_path):
+    path = tmp_path / "presets.json"
+    path.write_text(json.dumps({"presets": [
+        {"id": "ok", "name": "Fine", "url": "wss://voice.example.com"},
+        {"id": "ok", "name": "Twice", "url": "wss://voice.example.com"},
+        {"id": "public-plain", "name": "Plain", "url": "ws://voice.example.com"},
+        {"id": "nameless", "url": "wss://voice.example.com"},
+        "not an entry",
+    ]}))
+    monkeypatch.setattr(api.speech_server, "SPEECH_SERVER_PRESETS_PATH", str(path))
+    monkeypatch.setattr(api.speech_server, "_speech_server_presets_cache", None)
+    assert api.speech_server.speech_server_presets() == [
+        {"id": "ok", "name": "Fine", "needs_key": False, "drive_turns": False, "url": "wss://voice.example.com/v1/realtime"}]
+    monkeypatch.setattr(api.speech_server, "SPEECH_SERVER_PRESETS_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setattr(api.speech_server, "_speech_server_presets_cache", None)
+    assert api.speech_server.speech_server_presets() == []
+
+
+def test_test_reports_what_the_server_says_it_is(client, server):
+    session = {"model": "gpt-realtime", "audio": {"input": {"turn_detection": {"type": "server_vad"}},
+                                                  "output": {"voice": "marin"}}}
+    server.upstream = FakeUpstream(frames=[json.dumps({"type": "session.created", "session": session})])
+    body = client.post(f"{BASE}/speech-server/test").json()
+    assert body["abilities"] == {"model": "gpt-realtime", "voice": "marin", "answers_alone": True}
+
+
+def test_a_server_that_names_no_model_is_not_said_to_answer_alone(client, server):
+    server.upstream = FakeUpstream(frames=['{"type":"session.created","session":{"voice":"af_heart"}}'])
+    assert client.post(f"{BASE}/speech-server/test").json()["abilities"] == {
+        "model": None, "voice": "af_heart", "answers_alone": None}
+    quiet = {"model": "m", "turn_detection": {"type": "server_vad", "create_response": False}}
+    assert api.speech_server.speech_server_abilities({"session": quiet})["answers_alone"] is False
+    assert api.speech_server.speech_server_abilities({"session": {"model": "m", "turn_detection": None}})["answers_alone"] is False
+    # A model named with nothing said about turn detection: not known.
+    assert api.speech_server.speech_server_abilities({"session": {"model": "m"}})["answers_alone"] is None
+
+
+def test_a_transcription_model_that_cant_be_used_is_logged_and_a_good_one_is_not(caplog):
+    with caplog.at_level("WARNING"):
+        assert api.speech_server.speech_server_transcription_model({"transcription_model": "gpt-4o-transcribe"}) == "gpt-4o-transcribe"
+        assert api.speech_server.speech_server_transcription_model({}) == ""
+    assert "transcription_model" not in caplog.text
+    for bad in ("x" * 200, "two\nlines", 123, True):
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert api.speech_server.speech_server_transcription_model({"transcription_model": bad}) == ""
+        assert "transcription_model" in caplog.text
 
 
 def test_status_without_a_server(client, hermes):
@@ -339,6 +437,19 @@ def test_socket_relays_both_ways(client, server):
     assert server.upstream.sent == ['{"type":"session.update"}', "finish"]
     assert close.code == 1000
     assert server.connects == [("ws://127.0.0.1:8765/v1/realtime", {})]
+
+
+def test_socket_tells_a_driven_server_to_read_aloud(client, hermes, server):
+    _settings(hermes, url="ws://127.0.0.1:8765", drive_turns=True, transcription_model="gpt-4o-mini-transcribe")
+    server.upstream = FakeUpstream(frames=['{"type":"session.created"}'])
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "session.update", "session": {"audio": {"input": {}}}}))
+        ws.send_text("finish")
+        _wait_close(ws)
+    session = json.loads(server.upstream.sent[0])["session"]
+    assert session["instructions"] == api.speech_server.SPEECH_SERVER_SAY_INSTRUCTIONS
+    assert session["audio"]["input"]["transcription"] == {"model": "gpt-4o-mini-transcribe"}
 
 
 def test_socket_without_a_server_closes_with_the_reason(client, hermes, server):

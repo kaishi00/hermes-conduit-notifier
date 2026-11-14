@@ -1400,12 +1400,14 @@ def test_fresh_status_asks_nothing_when_status_isnt_shared_or_the_relay_cant_be_
     monkeypatch.setattr(tool.client, "send_now", lambda event: (_ for _ in ()).throw(RuntimeError("down")))
     answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=lambda _: None)
     assert "couldn't be asked" in answer["fresh"] and answer["status"]["battery"] == "42%"
-    monkeypatch.setattr(tool, "_last_fresh", {})
+    # A wake that didn't go doesn't hold off the next ask.
+    assert tool._last_fresh == {}
     # The relay held the wake back: no wait for an answer that can't come.
     monkeypatch.setattr(tool.client, "send_now", lambda event: {"accepted": True, "delivered": False})
     waited = []
     answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=waited.append)
     assert "couldn't be woken" in answer["fresh"] and answer["fresh_result"] == "not_asked" and waited == []
+    assert tool._last_fresh == {}
     monkeypatch.setattr(tool.client, "load_state", lambda: None)
     answer = tool._phone({"action": "status", "fresh": True}, store=store, profile="work", sleep=lambda _: None)
     assert "isn't paired" in answer["fresh"]

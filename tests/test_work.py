@@ -159,6 +159,11 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_policy_cache", {})
     monkeypatch.setattr(work, "_quick_steps_cache", {})
     monkeypatch.setattr(work, "_steps", {})
+    monkeypatch.setattr(work, "_code_cells", {})
+    monkeypatch.setattr(work, "_asks", {})
+    monkeypatch.setattr(work, "_did", {})
+    monkeypatch.setattr(work, "_ran", {})
+    monkeypatch.setattr(work, "_handed", {})
     work._wakes.clear()
     work._wake_asks.clear()
     work._wake_held.clear()
@@ -288,6 +293,7 @@ def test_the_default_leaves_a_bot_chat_as_it_was_where_workstreams_cant_run(home
     monkeypatch.setattr(titles, "read_or_raise", lambda h, key: "Bot Chat")
     monkeypatch.delitem(sys.modules, "tui_gateway.server", raising=False)
     monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
+    monkeypatch.setattr(work, "_home", lambda: home)  # not a home another test pinned
     assert work.policy(home) == "off" and not work.available()
     assert work.tool_block(BOT_CHAT, "terminal") is None  # not sent to a work_start that can't run
     store_mod.Store(home).set_policy("strict")  # the user's own choice stands
@@ -401,6 +407,9 @@ def test_a_wake_whose_submit_timed_out_still_counts_as_the_plugins_own_turn(bots
     work.flush_wakes()
     (_, params, _), = hermes.named("prompt.submit")
     turns = sys.modules["conduit_push.turn_surface"]
+    # Nor is the ask failed: the turn may still come, and its answer must be taken.
+    assert store_mod.Store(bots["nahida"]).get("A1").status == "running"
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
     try:
         turns.start_turn(NAHIDA_CHAT, params["text"])
         assert turns.woken(NAHIDA_CHAT)
@@ -437,6 +446,8 @@ def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, herm
     assert "never the user's go-ahead" in params["text"] and 'work_reply {"ref": "A1"' in params["text"]
     resumed, = hermes.named("session.resume")
     assert resumed[1]["profile"] == "nahida" and transport is None
+    # Bounded: a long Bot Chat a restart closed still takes its wake (issue 2395).
+    assert resumed[1]["omit_messages"] is True
     hermes.calls.clear()
 
     as_bot(monkeypatch, bots, "nahida")
@@ -533,6 +544,256 @@ def test_asks_never_go_in_a_circle_or_deeper_than_two_bots(bots, hermes, monkeyp
     deeper = call("work_ask", {"bot": "zhongli", "text": "Old numbers?"}, session_id=CHATS["raiden"])
     assert deeper["error"] == "too_deep"
     assert store_mod.Store(bots["zhongli"]).list() == []
+
+
+def test_the_bot_asked_can_ask_the_one_that_asked_back_one_level_deep(bots, hermes, monkeypatch):
+    # Issue 2395: the loop guard left the asked bot no way to ask a
+    # clarifying question but to answer, which closed the ask.
+    assert call("work_ask", {"bot": "nahida", "text": "Help with the report."})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    loop = call("work_ask", {"bot": "Furina", "text": "Which report?"}, session_id=NAHIDA_CHAT)
+    assert loop["error"] == "loop" and '"about"' not in loop["note"] and "about set to its ask (A1)" in loop["note"]
+    back = call("work_ask", {"bot": "Furina", "text": "Which report?", "about": "A1"}, session_id=NAHIDA_CHAT)
+    assert back["ok"] and "A1 stays open" in back["note"]
+    nahida = store_mod.Store(bots["nahida"])
+    assert nahida.get("A1").status == "running" and nahida.get("A2").requested_by["about"] == "A1"
+    mine = store_mod.Store(bots["hermes"]).get("A2")
+    assert (mine.kind, mine.status, mine.requested_by["about"], mine.requested_by["chain"]) == (
+        "ask_in", "running", "A1", ["nahida"])
+    work.flush_wakes()
+    texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")]
+    assert any("Nahida asks you back about your ask A1" in text and "«Which report?»" in text for text in texts)
+    # Furina can't ask back about the question back, nor ask Nahida anew while it waits.
+    as_bot(monkeypatch, bots, "hermes")
+    deeper = call("work_ask", {"bot": "nahida", "text": "Why?", "about": "A2"})
+    assert deeper["error"] == "about" and "already Nahida's question back" in deeper["note"]
+    assert call("work_ask", {"bot": "nahida", "text": "Also?"})["error"] == "loop"
+    assert call("work_reply", {"ref": "A2", "text": "The outage report."})["ok"]
+    # The answer reaches Nahida, whose first ask is still open to answer.
+    as_bot(monkeypatch, bots, "nahida")
+    assert nahida.get("A2").last_result == "The outage report."
+    assert call("work_reply", {"ref": "A1", "text": "Done."}, session_id=NAHIDA_CHAT)["ok"]
+
+
+def test_a_question_back_keeps_the_other_bots_waiting_in_its_chain(bots, hermes, monkeypatch):
+    # Greptile on notifier #780: Furina asks Nahida, Nahida asks Raiden, Raiden
+    # asks Nahida back, Nahida asks Furina back; Furina asking Raiden would close a circle.
+    assert call("work_ask", {"bot": "nahida", "text": "The report?"})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_ask", {"bot": "raiden", "text": "Numbers?"}, session_id=NAHIDA_CHAT)["ok"]
+    as_bot(monkeypatch, bots, "raiden")
+    assert call("work_ask", {"bot": "nahida", "text": "Which year?", "about": "A1"},
+                session_id=CHATS["raiden"])["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    back = call("work_ask", {"bot": "Furina", "text": "Which report?", "about": "A1"}, session_id=NAHIDA_CHAT)
+    assert back["ok"]
+    assert store_mod.Store(bots["hermes"]).get("A2").requested_by["chain"] == ["nahida", "raiden"]
+    as_bot(monkeypatch, bots, "hermes")
+    assert call("work_ask", {"bot": "raiden", "text": "Old numbers?"})["error"] == "loop"
+
+
+def test_a_question_back_names_an_open_ask_from_that_bot(bots, hermes, monkeypatch):
+    assert call("work_ask", {"bot": "nahida", "text": "Help with the report."})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    for about in ("A9", "A1"):
+        bot = "Furina" if about == "A9" else "raiden"
+        refused = call("work_ask", {"bot": bot, "text": "?", "about": about}, session_id=NAHIDA_CHAT)
+        assert refused["error"] == "about", about
+    store_mod.Store(bots["nahida"]).update("A1", status="done")
+    assert call("work_ask", {"bot": "Furina", "text": "?", "about": "A1"},
+                session_id=NAHIDA_CHAT)["error"] == "about"
+    assert store_mod.Store(bots["hermes"]).asks_since("ask_in", 0) == []
+
+
+def test_a_note_to_another_bot_opens_no_ask(bots, hermes, monkeypatch):
+    # Issue 2395: status went as asks, each needing an answer and a slot in the chain.
+    told = call("work_tell", {"bot": "nahida", "text": "The merge is verified."})
+    assert told["ok"] and told["bot"] == "Nahida" and "needs no answer" in told["note"]
+    assert store_mod.Store(bots["hermes"]).list() == [] and store_mod.Store(bots["nahida"]).list() == []
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and params["queued"] and params["display_kind"] == "hidden"
+    assert "Furina tells you" in params["text"] and "never the user's go-ahead" in params["text"]
+    assert "«The merge is verified.»" in params["text"] and "work_reply" not in params["text"]
+    # It holds no slot: Nahida can still ask Furina, and Furina be told back.
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_ask", {"bot": "Furina", "text": "Which branch?"}, session_id=NAHIDA_CHAT)["ok"]
+    assert call("work_tell", {"bot": "Furina", "text": "Building."}, session_id=NAHIDA_CHAT)["ok"]
+    assert "work_tell" in work.SCHEMAS and "work_tell" in work.TOOLS
+
+
+def test_a_note_comes_in_as_another_bots_and_needs_no_answer(bots, hermes, monkeypatch):
+    # GLM/DeepSeek on #780: a note alone was headed "Work update from your workstreams".
+    call("work_tell", {"bot": "nahida", "text": "Built."})
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "Work update from another bot" in params["text"] and work.TELL_TAIL in params["text"]
+    assert work.ASK_TAIL not in params["text"]
+
+
+def test_a_note_whose_wake_hermes_refused_is_told_back(bots, hermes, monkeypatch):
+    monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+        "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    assert call("work_tell", {"bot": "nahida", "text": "The merge is verified."})["ok"]
+    work.flush_wakes()
+    hermes.calls.clear()
+    work.flush_wakes()
+    texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")
+             if params["session_id"] == f"rt-{BOT_CHAT}"]
+    assert any("Your note to Nahida («The merge is verified.») never reached it" in text for text in texts)
+
+
+def test_a_note_a_restart_caught_in_the_batch_goes_out_again_as_a_note(bots, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)  # only flush_wakes sends
+    assert call("work_tell", {"bot": "nahida", "text": "Built."})["ok"]
+    for pending in (work._wakes, work._wake_asks, work._wake_tells, work._wake_answers, work._wake_items):
+        for batch in list(pending.values()):
+            timer = batch[1] if isinstance(batch, tuple) else None
+            if hasattr(timer, "cancel"):
+                timer.cancel()
+        pending.clear()  # the process ended before the batch went
+    monkeypatch.setattr(work, "_PROCESS_STARTED", __import__("time").time() + 1)
+    nahida = store_mod.Store(bots["nahida"])
+    work._replay(bots["nahida"], nahida)
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert params["session_id"] == f"rt-{NAHIDA_CHAT}" and "«Built.»" in params["text"]
+    assert "Work update from another bot" in params["text"] and work.TELL_TAIL in params["text"]
+    assert not [row for row in nahida.outbox_pending() if row["kind"] == "line_tell"]
+
+
+def test_the_loop_hint_never_offers_a_question_back_to_ask_about(bots, hermes, monkeypatch):
+    # DeepSeek on #780: Furina, waiting on Nahida's question back, was told to ask about it.
+    assert call("work_ask", {"bot": "nahida", "text": "The report?"})["ok"]
+    as_bot(monkeypatch, bots, "nahida")
+    assert call("work_ask", {"bot": "Furina", "text": "Which?", "about": "A1"}, session_id=NAHIDA_CHAT)["ok"]
+    as_bot(monkeypatch, bots, "hermes")
+    loop = call("work_ask", {"bot": "nahida", "text": "Also?"})
+    assert loop["error"] == "loop" and "about set to" not in loop["note"]
+    assert "Nahida asked you A2 back about your ask; answer it with work_reply first." in loop["note"]
+
+
+def test_notes_and_asks_share_the_hourly_cap_and_the_limits(bots, hermes, monkeypatch):
+    monkeypatch.setattr(work, "ASK_PAIR_PER_HOUR", 2)
+    assert call("work_tell", {"bot": "nahida", "text": "One."})["ok"]
+    assert call("work_ask", {"bot": "nahida", "text": "Two?"})["ok"]
+    capped = call("work_tell", {"bot": "nahida", "text": "Three."})
+    assert capped["error"] == "busy" and "asked or told Nahida 2 times" in capped["note"]
+    assert call("work_ask", {"bot": "nahida", "text": "Three?"})["error"] == "busy"
+    assert call("work_tell", {"bot": "raiden", "text": "x" * (work.ASK_CHARS + 1)})["error"] == "too_long"
+    assert call("work_tell", {"bot": "raiden", "text": " "})["error"] == "missing"
+    assert call("work_tell", {"bot": "Venti", "text": "Hi."})["error"] == "no_such_bot"
+    store_mod.Store(bots["zhongli"]).set_policy("off")
+    assert call("work_tell", {"bot": "zhongli", "text": "Hi."})["error"] == "bot_off"
+
+
+def test_a_workstream_cant_tell_other_bots(bots, hermes, monkeypatch):
+    start()
+    refused = call("work_tell", {"bot": "Nahida", "text": "Hi."}, session_id="20261031_work_1")
+    assert refused["error"] == "not_bot_chat"
+    assert hermes.named("prompt.submit") == [] or all(
+        f"rt-{NAHIDA_CHAT}" != params["session_id"] for _, params, _ in hermes.named("prompt.submit"))
+
+
+def test_an_ask_to_a_busy_bot_chat_says_it_waits_for_the_turn(bots, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_coordinator_busy", lambda home, chat: chat == NAHIDA_CHAT)
+    asked = call("work_ask", {"bot": "nahida", "text": "Status?"})
+    assert asked["ok"] and "Nahida's Bot Chat is in the middle of a turn" in asked["note"]
+    told = call("work_tell", {"bot": "nahida", "text": "Built."})
+    assert "in the middle of a turn" in told["note"]
+    assert "middle of a turn" not in call("work_ask", {"bot": "raiden", "text": "Status?"})["note"]
+
+
+def test_an_answer_too_long_is_refused_whole_and_the_ask_stays_open(bots, hermes, monkeypatch):
+    # Issue 2395: answers were cut at 2,000 characters with ok: true.
+    call("work_ask", {"bot": "nahida", "text": "Summarise the outage."})
+    as_bot(monkeypatch, bots, "nahida")
+    long = call("work_reply", {"ref": "A1", "text": "x" * (work.ANSWER_CHARS + 1)}, session_id=NAHIDA_CHAT)
+    assert long["error"] == "too_long" and long["chars"] == work.ANSWER_CHARS + 1 and "file" in long["note"]
+    nahida = store_mod.Store(bots["nahida"])
+    nahida.add("workstream", title="Outage summary", status="running")
+    nahida.update("W1", status="done", last_result="y" * (work.ANSWER_CHARS - 5))
+    both = call("work_reply", {"ref": "A1", "text": "Here it is:", "from": "W1"}, session_id=NAHIDA_CHAT)
+    assert both["error"] == "too_long" and "W1's report alone is" in both["note"]
+    assert nahida.get("A1").status == "running" and store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
+    exact = "z" * work.ANSWER_CHARS
+    assert call("work_reply", {"ref": "A1", "text": exact}, session_id=NAHIDA_CHAT)["ok"]
+    assert store_mod.Store(bots["hermes"]).get("A1").last_result == exact
+
+
+@pytest.mark.parametrize("refusal", ["rejected", "error"])
+def test_an_ask_whose_wake_hermes_refused_fails_and_the_asker_hears_why(bots, hermes, monkeypatch, refusal):
+    # Issue 2395: a cold wake refused by the transcript limit left the ask
+    # waiting for 26 minutes, until a person noticed.
+    if refusal == "error":
+        hermes.refuse["prompt.submit"] = {"code": 4130, "message": "Session has 23000 messages"}
+    else:
+        monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+            "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    theirs = store_mod.Store(bots["nahida"]).get("A1")
+    mine = store_mod.Store(bots["hermes"]).get("A1")
+    assert (theirs.status, mine.status) == ("failed", "failed")
+    assert "Nahida's Bot Chat couldn't be woken" in mine.error
+    assert ("23000 messages" if refusal == "error" else "rejected") in mine.error
+    hermes.refuse.clear()
+    hermes.calls.clear()
+    work.flush_wakes()
+    texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")
+             if params["session_id"] == f"rt-{BOT_CHAT}"]
+    assert any("A1: your ask “Can you book it?” never reached Nahida" in text for text in texts)
+
+
+def test_an_asks_line_kept_on_the_second_try_still_fails_it_when_refused(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_add
+    failed = []
+
+    def flaky(self, ref, kind, *rest, **kw):
+        if kind == "line_ask" and not failed:
+            failed.append(kind)
+            raise OSError("database is locked")
+        return real(self, ref, kind, *rest, **kw)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_add", flaky)
+    hermes.refuse["prompt.submit"] = {"code": 4130, "message": "Session has 23000 messages"}
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert failed and store_mod.Store(bots["hermes"]).get("A1").status == "failed"
+
+
+def test_a_wake_hermes_took_doesnt_hand_its_lines_over_again_when_a_write_fails(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_done
+
+    def broken(self, item, outcome):
+        if outcome == "queued":
+            raise OSError("disk full")
+        return real(self, item, outcome)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_done", broken)
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert len(hermes.named("prompt.submit")) == 1
+    # Delivered, not pending: a restart's replay doesn't ask Nahida twice.
+    assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
+
+
+def test_a_refused_wake_whose_write_fails_still_fails_the_ask(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_done
+
+    def broken(self, item, outcome):
+        if outcome == "rejected":
+            raise OSError("disk full")
+        return real(self, item, outcome)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_done", broken)
+    monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+        "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "failed"
+    assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
 
 
 def test_an_ask_to_a_bot_that_cant_take_it_is_refused(bots, hermes):
@@ -1177,6 +1438,41 @@ def test_quick_counts_what_a_bridged_call_runs(on, hermes):
     assert bridged["action"] == "block" and "read_file didn't run" in bridged["message"]
 
 
+def test_quick_counts_what_execute_codes_script_runs(on, hermes):
+    # CodeRabbit on hermes-conduit#2434: Hermes names no session for a tool
+    # execute_code's script calls, only the execute_code call's task, so the
+    # script's calls are the Bot Chat's steps, not a chat with no session.
+    on.set_policy("lookups")
+    assert work.tool_block(BOT_CHAT, "execute_code", {"code": "..."}, turn_id="t1", task_id="task-1") is None
+    for _ in range(4):
+        assert work.tool_block("", "terminal", {}, task_id="task-1") is None
+    block = work.tool_block("", "web_search", {}, task_id="task-1")
+    assert block["action"] == "block" and "web_search didn't run" in block["message"]
+    assert work.tool_block(BOT_CHAT, "read_file", {}, turn_id="t1")["action"] == "block"  # the same turn's budget
+    work.code_ended("execute_code", "task-1")
+    assert work.tool_block("", "terminal", {}, task_id="task-1") is None  # it ended: no chat's any more
+    # Another chat's script runs as that chat does, bridged or not.
+    assert work.tool_block(OTHER_CHAT, "tool_call", {"name": "execute_code", "arguments": {}}, turn_id="t9",
+                           task_id="task-2") is None
+    assert all(work.tool_block("", "terminal", {}, task_id="task-2") is None for _ in range(8))
+    work.code_ended("tool_call", "task-2", {"name": "execute_code", "arguments": {}})
+    assert not work._code_cells
+
+
+def test_two_scripts_of_one_turn_keep_its_chat_until_both_end(on, hermes):
+    on.set_policy("lookups")
+    for _ in range(2):
+        assert work.tool_block(BOT_CHAT, "execute_code", {}, turn_id="t1", task_id="task-1") is None
+    work.code_ended("execute_code", "task-1")
+    # GLM on notifier#795: a script still calling tools outlives the hour.
+    work._code_cells["task-1"][3] -= work.CODE_CELL_KEEP_S + 1
+    assert work.tool_block("", "terminal", {}, task_id="task-1") is None
+    assert work.tool_block(OTHER_CHAT, "execute_code", {}, turn_id="t9", task_id="task-9") is None
+    for _ in range(2):
+        assert work.tool_block("", "terminal", {}, task_id="task-1") is None
+    assert work.tool_block("", "terminal", {}, task_id="task-1")["action"] == "block"  # still the Bot Chat's
+
+
 def test_quick_says_when_only_a_batch_is_too_big(on, hermes):
     # GLM's review: Hermes runs a batch whole, so one past what's left is refused whole,
     # and the bot is told single calls still fit rather than that the turn is done here.
@@ -1266,6 +1562,60 @@ def test_the_plugins_tool_hook_counts_the_steps_of_hermes_turn(on, hermes, monke
     block = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={"command": "ls"}, turn_id="t1",
                                   tool_call_id="c9")
     assert block["message"] == work.STEP_BLOCK.format(tool="terminal")
+
+
+def test_a_quick_turn_past_its_steps_hands_the_rest_to_a_workstream(on, hermes, monkeypatch):
+    # Eric's .52 (2026-11-13): a Pulse card's Do it ran out of Furina's 5 steps reading jobs.json, and
+    # the bot retried the edit five times and told him "the runtime is blocking" instead of calling
+    # work_start. Eric picked "Hand off automatically": the plugin starts the workstream itself.
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t1", user_message="Fix the missing saw argument",
+                         platform="tui")
+    for n in range(work.QUICK_STEPS):
+        assert plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={"command": f"cat {n}"},
+                                     turn_id="t1", tool_call_id=f"c{n}") is None
+    block = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="patch", args={"path": "jobs.json"},
+                                  turn_id="t1", tool_call_id="c9")
+    assert block["message"].startswith("This is turning into longer work") and "W1" in block["message"]
+    started = on.get("W1")
+    assert started.kind == "workstream" and started.title == "Fix the missing saw argument"
+    assert "Fix the missing saw argument" in started.goal and 'terminal {"command": "cat 4"}' in started.goal
+    assert "patch" not in started.goal, "the refused call never ran"
+    again = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={}, turn_id="t1",
+                                  tool_call_id="c10")
+    assert "W1" in again["message"] and on.get("W2") is None, "once a turn"
+    # Another turn's unrelated ask, with the same steps, isn't taken for the same task.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t3", user_message="Book a table for two", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {"command": f"cat {n}"}, turn_id="t3")
+    assert "W2" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3")["message"]
+    # The plugin's own turn (a work update, another bot's ask) is never handed off.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t5", user_message=work.WAKE.format(lines="W2 done"),
+                         platform="tui")
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t5")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t5")["message"] == work.STEP_BLOCK.format(tool="terminal")
+    # A Hermes that names no turn: each turn's fresh budget hands its own ask on.
+    clock = [time.monotonic()]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+    for n, ask in enumerate(("Plan the garden beds", "Sort the tax receipts")):
+        plugin._pre_llm_call(session_id=BOT_CHAT, user_message=ask, platform="tui")
+        for _ in range(work.QUICK_STEPS):
+            work.tool_block(BOT_CHAT, "terminal", {})
+        assert f"W{3 + n}" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+        clock[0] += work.QUICK_S + 1
+    assert on.get("W4").title == "Sort the tax receipts"
+    # The same ask again goes to the open work, by the bot.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t4", user_message="Fix the missing saw argument", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t4")
+    same = work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t4")["message"]
+    assert same.startswith(work.STEP_BLOCK.format(tool="terminal")) and "W1" in same and on.get("W5") is None
+    # Another turn with no ask kept (Hermes gave no message): told to start one, as before.
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")["message"] == work.STEP_BLOCK.format(tool="terminal")
 
 
 def test_a_call_the_screen_lock_refuses_takes_no_quick_step(on, hermes, monkeypatch):
@@ -1394,6 +1744,23 @@ def test_the_plugins_tool_hooks_journal_a_workstream(on, hermes, monkeypatch):
     assert on.steps("W1", open_only=True) == []
 
 
+def test_the_plugins_tool_hooks_journal_a_workstreams_script_calls(on, hermes, monkeypatch):
+    # DeepSeek on notifier#795: both hooks read a script's call as its chat's.
+    start()
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    plugin._pre_tool_call(session_id="20261031_work_1", tool_name="execute_code", args={"code": "..."}, turn_id="t1",
+                          task_id="task-w", tool_call_id="c0")
+    plugin._pre_tool_call(session_id="", tool_name="terminal", args={"command": "ls"}, task_id="task-w",
+                          tool_call_id="c1")
+    assert "command: ls" in [step["summary"] for step in on.steps("W1", open_only=True)]
+    plugin._post_tool_call(session_id="", tool_name="terminal", task_id="task-w", tool_call_id="c1", status="ok")
+    assert "command: ls" not in [step["summary"] for step in on.steps("W1", open_only=True)]
+    assert "task-w" in work._code_cells  # only execute_code's own post releases it
+    plugin._post_tool_call(session_id="20261031_work_1", tool_name="execute_code", task_id="task-w",
+                           tool_call_id="c0", status="ok")
+    assert not work._code_cells and on.steps("W1", open_only=True) == []
+
+
 def test_the_cli_turns_it_on_and_off(home, monkeypatch, capsys):
     cli = _load("conduit_push.cli", ROOT / "cli.py")
     monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: home)
@@ -1420,6 +1787,24 @@ def test_a_fork_of_the_bot_chat_keeps_to_the_policy(on, hermes, monkeypatch):
     block = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={"command": "ls"}, turn_id="t1",
                                   tool_call_id="c1")
     assert block and block["action"] == "block"
+
+
+def test_the_review_after_a_bot_chat_turn_keeps_the_bots_skills(on, hermes, monkeypatch):
+    """Hermes' review of a turn runs in a fork of the Bot Chat with the
+    skill tools only: they run there under every setting and take none of
+    the turn's quick steps, and the Bot Chat's own turn is held as before."""
+    for mode in ("strict", "lookups"):
+        on.set_policy(mode)
+        monkeypatch.setattr(work, "_in_fork", lambda: False)
+        if mode == "strict":
+            assert work.tool_block(BOT_CHAT, "skill_manage", {}, turn_id="t1")["action"] == "block"
+        monkeypatch.setattr(work, "_in_fork", lambda: True)
+        for name in ("skills_list", "skill_view", "skill_manage"):
+            assert work.tool_block(BOT_CHAT, name, {}, turn_id="t1") is None
+            assert work._last_take.taken is None
+    monkeypatch.setattr(work, "_in_fork", lambda: True)
+    on.set_policy("strict")
+    assert work.tool_block(BOT_CHAT, "terminal", {"command": "ls"}, turn_id="t3")["action"] == "block"
 
 
 def test_an_unreadable_registry_holds_the_bot_chat_to_strict(on, hermes, monkeypatch):
@@ -1601,6 +1986,30 @@ def test_a_chat_whose_title_cant_be_read_is_held_to_the_policy(on, hermes, monke
     assert work.tool_block(OTHER_CHAT, "terminal", {}) == {"action": "block", "message": work.CHECK_FAILED}
     assert work.tool_block(OTHER_CHAT, "work_list", {}) is None
     assert call("work_start", {"title": "x", "instructions": "y"})["error"] == "not_bot_chat"
+
+
+def test_a_call_that_names_no_chat_isnt_held_as_the_coordinators(on, hermes, home, monkeypatch):
+    # notifier#784: an agent with no session passes an empty id, which lost
+    # it every tool for good. So does execute_code's script, with a task no
+    # running execute_code has (a Bot Chat's is counted, above).
+    on.set_policy("lookups")
+    work._policy_cache.clear()
+    for no_id in ("", "  ", None):
+        assert work.tool_block(no_id, "web_search", {}) is None
+        assert work.tool_block(no_id, "terminal", {}) is None
+        assert work.tool_block(no_id, "message_agent", {}) is None
+        assert work.tool_block(no_id, "work_list", {}) is None
+        assert work.tool_block(no_id, "terminal", {}, task_id="no-such-task") is None
+    assert store_mod.exists(home)
+
+    def locked(h, key):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(titles, "read_or_raise", locked)
+    work._title_cache.clear()
+    assert work.tool_block("", "web_search", {}) is None
+    # A chat that is named and can't be read is still held.
+    assert work.tool_block(OTHER_CHAT, "web_search", {}) == {"action": "block", "message": work.CHECK_FAILED}
 
 
 def _state_db(home, rows):
@@ -1814,12 +2223,6 @@ def test_a_refused_send_puts_the_row_back(on, hermes):
     assert call("work_send", {"ref": "W1", "text": "More"})["error"] == "hermes"
     row = on.get("W1")
     assert row.status == "done" and row.closed_at == 5.0
-
-
-@pytest.mark.parametrize("session_id", [None, "", "  "])
-def test_a_call_naming_no_chat_keeps_to_the_policy(on, hermes, session_id):
-    assert work.tool_block(session_id, "terminal", {}) == {"action": "block", "message": work.CHECK_FAILED}
-    assert work.tool_block(session_id, "work_list", {}) is None
 
 
 def test_a_send_that_fails_unexpectedly_frees_the_slot(on, hermes, monkeypatch):
@@ -3697,6 +4100,17 @@ def test_lines_of_a_wake_hermes_rejected_arent_marked_delivered(on, hermes, monk
     assert outcomes["line"] == "refused" and outcomes["wake"] == "rejected" and rows == []
 
 
+def test_a_wake_the_gateway_started_at_once_counts_as_delivered(on, hermes, monkeypatch):
+    # The gateway's session authority answers "started" for a turn it runs now.
+    monkeypatch.setattr(work.work_broker.Broker, "wake", lambda self, coordinator, text: "started")
+    work._queue_wake(on.path.parent.parent, BOT_CHAT, "- W9 finished.")
+    work.flush_wakes()
+    with on._db() as con:
+        rows = {row["kind"]: (row["outcome"], row["accepted_at"])
+                for row in con.execute("SELECT kind, outcome, accepted_at FROM outbox")}
+    assert rows["line"][0] == "queued" and rows["wake"][0] == "queued" and rows["wake"][1]
+
+
 def test_update_lines_a_restart_caught_in_the_batch_go_out_again(on, hermes, monkeypatch):
     item = on.outbox_add("", "line", BOT_CHAT, "- W9 “Old job” finished. In short: all good.")
     restart(hermes, monkeypatch)
@@ -3796,7 +4210,7 @@ def test_the_work_panel_lists_work_with_its_counts_and_actions(on, hermes):
     on.update("W2", status="ready", last_result="The NAS has 12% free.")
     listed = work.app_list(on.home)
     assert listed["policy"] == "strict" and listed["bot"] == "Furina"
-    assert listed["counts"] == {"working": 1, "needs_you": 0, "ready": 1, "waiting": 0}
+    assert listed["counts"] == {"working": 1, "needs_you": 0, "ready": 1, "waiting": 0, "questions": 0}
     rows = {row["ref"]: row for row in listed["work"]}
     assert rows["W1"]["step"] == "terminal: command: dig login.example.com"
     assert rows["W1"]["checklist"][1] == {"step": "Time the DNS lookup", "state": "doing"}
@@ -4879,7 +5293,7 @@ def test_a_worktree_gives_a_workstream_its_own_branch(on, hermes, trees):
 
 
 def test_a_worktree_that_cant_be_made_starts_nothing(on, hermes, trees):
-    answer = start(cwd="/elsewhere", worktree=True)
+    answer = start(cwd=str(trees.root.parent), worktree=True)  # a folder that exists, outside the repository
     assert answer["error"] == "worktree" and "isn't in a git repository" in answer["note"]
     assert hermes.named("session.create") == [] and on.get("W1").status == "failed"
     trees.local = False
@@ -4940,6 +5354,21 @@ def test_a_hermes_that_cant_say_where_its_terminal_runs_makes_no_worktree(on, he
     answer = start(cwd=str(trees.root), worktree=True)
     assert answer["error"] == "worktree" and on.get("W1").status == "failed"
     assert hermes.named("session.create") == []
+
+
+def test_a_folder_that_isnt_there_is_refused_where_that_can_be_told(on, hermes, trees, monkeypatch):
+    """Hermes ignores a folder it can't find and works in its default one,
+    so the workstream would be somewhere else without knowing. Only on its
+    local terminal: a remote or container terminal's folders aren't here."""
+    gone = str(trees.root / "nowhere")
+    answer = start(cwd=gone)
+    assert answer["error"] == "no_such_folder" and gone in answer["note"]
+    assert on.list() == [] and hermes.named("session.create") == []
+    trees.local = False
+    assert start(cwd=gone)["ok"]
+    trees.local = True
+    monkeypatch.setattr(trees, "local_backend_active", lambda: 1 / 0)
+    assert start("Docs", "Write the docs.", cwd=gone, new=True)["ok"]  # no way to tell: as before
 
 
 def test_turning_approvals_back_on_stops_reopening_once_its_time_is_up(home, hermes, monkeypatch):
@@ -5696,6 +6125,11 @@ def test_a_room_with_other_peoples_agents_starts_no_work(on, hermes, room):
     assert refused["error"] == "room_with_others" and "other people's agents" in refused["note"]
     room["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=True, session_id=ROOM_CHAT)
     assert room_start()["error"] == "room_with_others"
+    # One of the owner's other Hermes hosts it (multi-instance plan, Rooms 1): an honest no, for now.
+    room["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=False, session_id=ROOM_CHAT)
+    elsewhere = room_start()
+    assert elsewhere["error"] == "room_elsewhere" and "other Hermes" in elsewhere["note"]
+    assert "usual tools" in elsewhere["note"] and "Bot Chat" not in elsewhere["note"]
     room["turn"] = room_rules.RoomTurn(room_id="", side="home", with_others=False, session_id=ROOM_CHAT)
     legacy = room_start()
     assert legacy["error"] == "legacy_group" and "other people" not in legacy["note"]
@@ -5932,6 +6366,11 @@ def test_a_linked_room_starts_work_only_once_the_owner_says_yes(on, hermes, link
     assert row.reply_to["linked"] is True and row.reply_to["side"] == "home"
     brief = _brief_text(hermes)
     assert "Linked Room" in brief and "OKd these instructions" in brief and "Map the park's shade." in brief
+    # Hermes' review of its turn, in a fork of its chat, keeps no skill from the room either.
+    assert work.tool_block(row.session_id, "skill_manage", {})["action"] == "block"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(work, "_in_fork", lambda: True)
+        assert work.tool_block(row.session_id, "skill_manage", {})["action"] == "block"
     # The room hears it privately, woken by a post that says nothing of it.
     assert any("started W1" in line for line in private_lines(on.home))
     posted, = linked["posted"]
@@ -5975,6 +6414,18 @@ def test_run_work_off_starts_nothing_and_asks_nobody(on, hermes, linked):
     linked["turn"] = room_rules.RoomTurn(room_id="room-1", side="home", with_others=False, session_id=ROOM_CHAT)
     assert room_work_call({"action": "list"})["error"] == "not_linked"
     assert json.loads(work.handle_room_work({"action": "list"}, session_id=BOT_CHAT))["error"] == "not_linked"
+    linked["turn"] = room_rules.RoomTurn(room_id="room-1", side="member", with_others=False, session_id=ROOM_CHAT)
+    assert room_work_call({"action": "list"})["error"] == "room_elsewhere"
+
+
+def test_work_for_a_room_now_on_your_own_other_hermes_says_why_it_cant_report(monkeypatch, tmp_path):
+    # A Link marked as your own while work for its room waits or runs (multi-instance plan, Rooms 1).
+    turn = room_rules.RoomTurn(room_id="room-1", side="member", with_others=False, session_id=ROOM_CHAT)
+    monkeypatch.setattr(room_rules, "room_turn", lambda session_id, home: turn)
+    for linked_work in (True, False):
+        why, handle = room_work.still_here({"linked": linked_work, "session": ROOM_CHAT, "room": "room-1"},
+                                           tmp_path, "default")
+        assert "own other Hermes" in why and handle == ""
 
 
 def test_a_yes_after_run_work_was_turned_off_does_nothing(on, hermes, linked):
@@ -6790,3 +7241,258 @@ def test_unreadable_kept_cards_read_as_none(on):
     start()
     on.set_meta(work._SHOWN + "W1", "[" * 100000)
     assert work._shown(on, "W1") is None
+
+
+def test_a_hand_off_lists_only_the_steps_that_ran_and_starts_over_with_a_new_ask(on, hermes, monkeypatch):
+    # Review leftovers of notifier #782: a step the screen lock refused never ran, each turn in a
+    # chat whose Hermes names no turn is a new one (the same words too), and secrets stay out of
+    # the instructions, inside a command as well.
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    held = {"action": "block", "message": "another chat has the screen"}
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Rotate the router password", platform="tui")
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: held)
+    plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="computer_use", args={"action": "screenshot"},
+                          tool_call_id="c0")
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
+    bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
+    for n in range(work.QUICK_STEPS):
+        plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal",
+                              args={"command": f"step {n} -H 'Authorization: Bearer {bearer}'", "api_key": "sk-123",
+                                    "body": {"password": "hunter2"}},
+                              tool_call_id=f"c{n + 1}")
+    assert "W1" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    goal = on.get("W1").goal
+    assert "computer_use" not in goal and "step 4" in goal
+    assert "sk-123" not in goal and "hunter2" not in goal and "(left out)" in goal
+    assert bearer not in goal, "a credential inside a command is masked too"
+    # A new ask a moment later, with no turn id: a new turn, with its own steps and hand-off, not W1's.
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Book a dentist visit", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        assert work.tool_block(BOT_CHAT, "terminal", {"command": f"look {n}"}) is None
+    assert "W2" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    assert "step 4" not in on.get("W2").goal
+    # The same words again, a new turn: not told W2 took it over, but pointed at W2 as open work like it.
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Book a dentist visit", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        assert work.tool_block(BOT_CHAT, "terminal", {}) is None
+    again = work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    assert again.startswith(work.STEP_BLOCK.format(tool="terminal")) and "W2" in again and on.get("W3") is None
+    # A new turn that comes in while the plugin starts the last one's workstream isn't told it's its own.
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Water the plants", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {})
+    real = work.handle
+
+    def start_meanwhile(name, args, **kwargs):
+        answer = real(name, args, **kwargs)
+        plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Tidy the inbox", platform="tui")
+        return answer
+
+    monkeypatch.setattr(work, "handle", start_meanwhile)
+    assert "W3" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    monkeypatch.setattr(work, "handle", real)
+    assert work._handed.get((BOT_CHAT, "")) is None
+
+
+
+def test_a_slow_models_thinking_takes_none_of_a_quick_turns_time(on, home, hermes, monkeypatch):
+    # Issue 2446: a reasoning model took 26 s a step, so the clock ended a "20 steps" turn at about 9.
+    # The time is what the steps took to run; the thinking between them takes none.
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    assert work.app_set_settings(home, {"quick_steps": 20})["quick_steps"] == 20
+    clock = [1000.0]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+
+    def step(turn, n, runs=1.0, thinks=26.0):
+        clock[0] += thinks
+        block = plugin._work_tool_block({"session_id": BOT_CHAT, "turn_id": turn, "tool_name": "terminal",
+                                         "args": {"command": f"look {n}"}, "tool_call_id": f"{turn}-{n}"})
+        if block is None:
+            clock[0] += runs
+            plugin._post_tool_call(session_id=BOT_CHAT, turn_id=turn, tool_name="terminal",
+                                   args={"command": f"look {n}"}, tool_call_id=f"{turn}-{n}", result=f"found {n}")
+        return block
+
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t1", user_message="Sort out the backups", platform="tui")
+    assert all(step("t1", n) is None for n in range(20)), "nine minutes of thinking, twenty seconds of tools"
+    assert "W1" in step("t1", 20)["message"]  # the step count still ends it
+    # Long steps still do: three one-minute commands are past 20 steps' four minutes on the fourth.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t2", user_message="Rebuild the photo index", platform="tui")
+    for n in range(5):
+        assert step("t2", n, runs=60.0) is None
+    assert "W2" in step("t2", 5)["message"]
+    # Steps that run together count once, and a step the screen lock refused never ran.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t3", user_message="Check the three mirrors", platform="tui")
+    for n in range(3):
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3", tool_call_id=f"p{n}") is None
+    clock[0] += 200.0
+    for n in range(3):
+        work.step_ran(BOT_CHAT, "t3", "terminal", f"p{n}", "ok")
+    assert work._ran[(BOT_CHAT, "t3")][0] == 200.0
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3", tool_call_id="held") is None
+    work.give_back_steps()
+    clock[0] += 500.0
+    assert work._ran[(BOT_CHAT, "t3")][2] == [] and work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3") is None
+    # Refused while a later one runs: its own entry and line go, and the later one's result is still kept.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t4", user_message="Compare the two reports", platform="tui")
+    assert work.tool_block(BOT_CHAT, "terminal", {"command": "first"}, turn_id="t4", tool_call_id="a") is None
+    held = work._last_take.taken
+    assert work.tool_block(BOT_CHAT, "terminal", {"command": "second"}, turn_id="t4", tool_call_id="b") is None
+    work._last_take.taken = held
+    work.give_back_steps()
+    work.step_ran(BOT_CHAT, "t4", "terminal", "b", "second's result")
+    assert work._ran[(BOT_CHAT, "t4")][2] == [] and work._steps[(BOT_CHAT, "t4")][1] == 1
+    assert [step[1] for step in work._did[(BOT_CHAT, "t4")]] == ["second's result"]
+    # Two refused on two threads, handed back in either order, while a third runs: only theirs go.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t5", user_message="Click through the wizard", platform="tui")
+    takes = []
+    for call in ("a", "b", "c"):
+        assert work.tool_block(BOT_CHAT, "terminal", {"command": call}, turn_id="t5", tool_call_id=call) is None
+        takes.append(work._last_take.taken)
+    for held in (takes[0], takes[1]):
+        work._last_take.taken = held
+        work.give_back_steps()
+    assert [running[0] for running in work._ran[(BOT_CHAT, "t5")][2]] == ["c"]
+    work.step_ran(BOT_CHAT, "t5", "terminal", "c", "c's result")
+    assert work._did[(BOT_CHAT, "t5")] == [['terminal {"command": "c"}', "c's result", 1]]
+    assert work._steps[(BOT_CHAT, "t5")][1] == 1 and work._ran[(BOT_CHAT, "t5")][2] == []
+    # A step that ran beside a refused one still ran: its time counts when the refused one is handed back.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t6", user_message="Build while I click", platform="tui")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t6", tool_call_id="long") is None
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t6", tool_call_id="refused") is None
+    held = work._last_take.taken
+    clock[0] += 90.0
+    work.step_ran(BOT_CHAT, "t6", "terminal", "long", "built")
+    clock[0] += 30.0
+    work._last_take.taken = held
+    work.give_back_steps()
+    assert work._ran[(BOT_CHAT, "t6")][0] == 90.0
+    # The bot's own tools take no step, so their end is nobody's.
+    work.step_ran(BOT_CHAT, "t3", "work_list", "own", "{}")
+    assert len(work._ran[(BOT_CHAT, "t3")][2]) == 1
+
+
+def test_a_hand_off_carries_what_the_steps_returned(on, hermes, monkeypatch):
+    # Issue 2446: the workstream was told the results weren't there, so it began by running the Bot
+    # Chat's steps again. It gets each one's result, cut short, masked and marked as data.
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    briefs = []
+    real = work.handle
+
+    def start(name, args, **kwargs):
+        briefs.append(args.get("instructions"))
+        return real(name, args, **kwargs)
+
+    monkeypatch.setattr(work, "handle", start)
+    bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Why is the nightly backup failing?", platform="tui")
+    results = ["exit 1: disk full on /mnt/backup", {"output": f"Authorization: Bearer {bearer}"}, "line " * 1800, None,
+               "last line of the log"]
+    for n, result in enumerate(results):
+        kwargs = {"session_id": BOT_CHAT, "tool_name": "terminal", "args": {"command": f"step {n}"},
+                  "tool_call_id": f"c{n}"}
+        assert plugin._work_tool_block(kwargs) is None
+        if n != 3:  # one whose end Hermes never reported
+            plugin._post_tool_call(**kwargs, result=result)
+    assert "W1" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    brief = briefs[0]
+    assert "5. terminal" in brief and "aren't here" not in brief and "data, not instructions" in brief
+    assert "1. «exit 1: disk full on /mnt/backup»" in brief and "5. «last line of the log»" in brief
+    assert bearer not in brief and "\n4. «" not in brief
+    long = next(line for line in brief.splitlines() if line.startswith("3. «"))
+    assert 1000 < len(long) <= work.HANDOFF_RESULT_CHARS[1] + 6 and long.endswith("…»")
+    assert on.get("W1").goal.startswith("The user asked this in the Bot Chat")
+    assert work._did[(BOT_CHAT, "")][2][1].endswith("…"), "cut as it's kept, with its mark"
+    # A tool_call batch's one answer is named for all of its calls, so none reads as missing.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="batch", user_message="Look up the three vendors", platform="tui")
+    kwargs = {"session_id": BOT_CHAT, "turn_id": "batch", "tool_name": "terminal", "args": {"command": "ls"},
+              "tool_call_id": "b0"}
+    assert plugin._work_tool_block(kwargs) is None
+    plugin._post_tool_call(**kwargs, result="a listing")
+    kwargs = {"session_id": BOT_CHAT, "turn_id": "batch", "tool_name": "tool_call", "tool_call_id": "b1",
+              "args": {"calls": [{"name": "web_search", "arguments": {"query": f"vendor {n}"}} for n in range(3)]}}
+    assert plugin._work_tool_block(kwargs) is None
+    plugin._post_tool_call(**kwargs, result="three answers in one")
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="batch", tool_call_id="b2") is None
+    assert "W2" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="batch")["message"]
+    assert "\n1. «a listing»\n2 to 4. «three answers in one»" in briefs[-1] and "4. web_search" in briefs[-1]
+    # More steps than the list holds: whole steps only, and no result without its step above it.
+    on.set_quick_steps(20)
+    monkeypatch.setattr(work, "_quick_steps_cache", {})
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="long", user_message="Audit every cron job", platform="tui")
+    for n in range(20):
+        kwargs = {"session_id": BOT_CHAT, "turn_id": "long", "tool_name": "terminal",
+                  "args": {"command": f"job {n} " + "word " * 60}, "tool_call_id": f"l{n}"}
+        assert plugin._work_tool_block(kwargs) is None
+        plugin._post_tool_call(**kwargs, result=f"result {n}")
+    assert "W" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="long")["message"]
+    listed = [line for line in briefs[-1].splitlines() if line[:1].isdigit() and "terminal" in line]
+    assert 0 < len(listed) < 20 and f"(and {20 - len(listed)} more)" in briefs[-1]
+    assert f"\n{len(listed)}. «result {len(listed) - 1}»" in briefs[-1] and f"«result {len(listed)}»" not in briefs[-1]
+    # A batch the list can't hold whole is left out whole, and a credential a cut would split is masked first.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="split", user_message="Survey the mirrors", platform="tui")
+    for n in range(7):
+        kwargs = {"session_id": BOT_CHAT, "turn_id": "split", "tool_name": "terminal",
+                  "args": {"command": f"mirror {n} " + "word " * 60}, "tool_call_id": f"s{n}"}
+        assert plugin._work_tool_block(kwargs) is None
+        plugin._post_tool_call(**kwargs, result=f"mirror {n} " + "line " * 1195 + bearer)
+    kwargs = {"session_id": BOT_CHAT, "turn_id": "split", "tool_name": "tool_call", "tool_call_id": "s7",
+              "args": {"calls": [{"name": "web_search", "arguments": {"query": f"q{n} " + "word " * 60}}
+                                 for n in range(3)]}}
+    assert plugin._work_tool_block(kwargs) is None
+    plugin._post_tool_call(**kwargs, result="the batch's answer")
+    for n in range(10):
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="split", tool_call_id=f"r{n}") is None
+    assert "W" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="split")["message"]
+    assert "7. terminal" in briefs[-1] and "8. web_search" not in briefs[-1] and "(and 13 more)" in briefs[-1]
+    assert "the batch's answer" not in briefs[-1] and bearer[:8] not in briefs[-1]
+    assert bearer[:8] not in work._did[(BOT_CHAT, "split")][0][1]
+    on.set_quick_steps(5)
+    monkeypatch.setattr(work, "_quick_steps_cache", {})
+    # A Hermes that reports no step's end: the steps alone, as before.
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Renew the wildcard certificate", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        assert work.tool_block(BOT_CHAT, "terminal", {"command": f"look {n}"}) is None
+    assert work.tool_block(BOT_CHAT, "terminal", {})["action"] == "block"  # the bot's limit is reached by now
+    assert "Renew the wildcard certificate" in briefs[-1]
+    assert "their results aren't here; run again what you need" in briefs[-1] and "«" not in briefs[-1]
+
+
+def test_a_kept_result_is_masked_before_any_cut():
+    # Greptile on notifier #804: the cut of a result too long to mask whole, with a credential across it.
+    bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
+    short = work._result_kept("ok " * 10)
+    assert short == ("ok " * 10).strip() and "…" not in short
+    filler = "a " * ((work._RESULT_READ_CHARS - 10) // 2)
+    for text in (filler + bearer, "\n" * (work._RESULT_READ_CHARS - 10) + bearer + " tail"):
+        assert len(text) > work._RESULT_READ_CHARS
+        kept = work._result_kept(text)
+        assert bearer[:6] not in kept and kept.endswith("…") and len(kept) <= work._RESULT_KEPT_CHARS
+    long = f"Authorization: Bearer {bearer} " + filler + "a b c d e f"
+    assert len(long) > work._RESULT_READ_CHARS
+    assert bearer[:6] not in work._result_kept(long)  # masked in the long path too
+    whole = work._result_kept("a " * 2000 + bearer)  # under the read limit: masked whole, then cut
+    assert bearer[:6] not in whole
+    assert work._result_kept({"output": "x"}) == '{"output": "x"}'
+    blob = work._result_kept("QUJD" * 60000 + " tail")  # one unbroken run keeps its (masked) start, not nothing
+    assert len(blob) > 3 and blob.endswith("…")
+
+
+def test_a_hand_offs_secret_names_are_read_by_their_words():
+    # Review leftovers of notifier #790: "x-api-key" or "privateKey" with a short value slipped past the
+    # old substring match, which also dropped "author" and "tokenizer".
+    for name in ("api_key", "apiKey", "x-api-key", "oauthToken", "Authorization", "db_password", "privateKey",
+                 "access_key", "client_secret", "cookie", "refresh_token", "passwords", "authentication",
+                 "api_keys", "privateKeys", "userPasswords", "privatekey", "secretkey", "accesskeys",
+                 "usercredentials", "dbcredentials"):
+        assert work._secret_arg(name), name
+    for name in ("author", "source", "tokenizer", "authority", "command", "path", "session_id", "passage",
+                 "monkey", "keys", "keyword"):
+        assert not work._secret_arg(name), name
+    line = work._step_line("http", {"headers": {"x-api-key": "k1"}, "passwords": ["hunter2"], "author": "Eric"})
+    assert "k1" not in line and "hunter2" not in line and "Eric" in line

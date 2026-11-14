@@ -26,7 +26,10 @@ watch_paths:
   - cron/scheduler_delivery_room.py
   - website/docs/user-guide/features/plugins.md
   - website/docs/user-guide/features/extending-the-dashboard.md
+  # session_route.py wraps tui_gateway.server._runtime_model_config through sys.modules,
+  # which the scanner can't see; a rename there brings back picks snapping back to an old provider.
   - tui_gateway/server.py
+  - tui_gateway/agent_factory*.py
   - tui_gateway/transport.py
   - tui_gateway/methods_session*.py
   - tui_gateway/methods_prompt.py
@@ -66,6 +69,16 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  Hermes version for Pulse's advice: >-
+    pulse_host.hermes_version reads hermes_cli.__version__ (feature map: "Pulse"). When Hermes can't
+    find Pulse's chat, a Hermes before 0.22.6 is told to update, since only 0.22.6 and newer hand a
+    chat Hermes Desktop made over to the gateway (issue 713). Without it, everyone gets the
+    set-it-up-again advice.
+  prediction fork lifecycle: >-
+    dashboard/api/chats.py uses agent.background_review.release_cache_parity_fork
+    when available to attribute prediction usage and release only fork clients
+    (feature map: "Predictions"). Without that helper it records usage and calls
+    release_clients directly; it must never close the shared chat's session resources.
   stopping a waiting workstream's agents: >-
     work_tool._stop_agents calls tools.delegate_tool_registry.interrupt_subagent with the
     child_subagent_id subagent_start reported (feature map: "Delegate agents a chat started"). Hermes
@@ -98,6 +111,12 @@ notes:
     HERMES_PLUGIN_HOST_PROCESS=1 marks a plugin host. The self-update refuses there, and the
     Linked Rooms setup saves without restarting the gateway: a restart from a plugin host brings
     the gateway back with the host's environment, this flag among it.
+  execute_code's tool calls: >-
+    Hermes calls pre_tool_call for each tool an execute_code script calls with no session_id, only
+    the task_id of the execute_code call (its RPC and its session kernel both pass it). work_tool
+    takes that call's chat from the task, so a Bot Chat's script keeps to its turn's steps (feature
+    map: "Bot workstreams"; upstream/test_code_steps.py). Without the task_id, or with another one,
+    the script's calls run as from an agent with no session, outside the coordinator's limits.
   dashboard websocket auth: >-
     hermes_cli.web_server_chat._ws_auth_ok and _ws_request_is_allowed sign in every plugin socket;
     without them the sockets fail closed.
@@ -140,6 +159,10 @@ notes:
     _methods with nothing bound for a session another client holds and for the hidden queued
     work-update turn, and _sessions (session_key, profile_home, running, pending_title) to find
     live sessions. upstream/test_bot_work.py runs it on the launch profile and a secondary one.
+    Where the gateway's own listener serves, it runs them on the session authority instead
+    (gateway_chats.session_api(), naming the bot's profile on every request, with liveness and
+    approvals read from resume snapshots and the authority's started counted as running), never
+    on the TUI registry a socket loads there; upstream/test_gateway_listener.py runs that leg.
     After a restart, tui_gateway.turn_marker (read_turn_marker, marker_writer_state,
     clear_turn_marker) retires Hermes' own re-run of a crash-killed workstream turn, so recovery
     decides from the journal instead; without it a cut-off step could run twice. The turn stopper
@@ -237,6 +260,14 @@ notes:
     memory_scan.py answers False for the plugin's own folders and leaves every other to Hermes.
     upstream/test_memory_scan.py checks Hermes alone (a known failure while it parses the
     plugin) and with the plugin loaded (none of its modules parsed).
+  a chat's model pick: >-
+    dashboard/api/session_route.py wraps tui_gateway.server._runtime_model_config, reached by name
+    through sys.modules (the split modules' functions are published onto the server and called
+    there), so the TUI's persist of a chat's live route writes it into model_config.gateway_runtime
+    too, which hermes_state's session_gateway_runtime reads before the top-level route (feature map:
+    "The Model sheet's settings"). Without it, a chat whose row has a gateway_runtime (a gateway or
+    fallback turn wrote one) rebuilds every pick on that old provider and snaps back.
+    upstream/test_session_route.py checks Hermes' own persist (a known failure) and the wrapped one.
   automation turns: >-
     _automation_turn in __init__.py keeps a turn in a session that isn't a conversation (a script's
     `hermes chat --source tool`, a one-shot `chat -q`/`-z`, a Kanban worker) from sending a reply or
@@ -253,6 +284,12 @@ known_failures:
     upstream: NousResearch/hermes-agent#140051
     since: v0.22.3 (da01ee9c3)
     workaround: ?conduit_profile= on the dashboard-process routes (notifier #412)
+  - test: test_hermes_rebuilds_a_pick_on_its_own_provider
+    signature: stale gateway_runtime wins
+    issue: kaishi00/hermes-conduit-notifier (session_route, 2026-11-14)
+    upstream: tui_gateway/agent_factory.py _runtime_model_config leaves model_config.gateway_runtime, which session_gateway_runtime reads first
+    since: v0.22.5
+    workaround: dashboard/api/session_route.py writes the TUI's live route into gateway_runtime too
   - test: test_hermes_counts_a_hidden_ask_after_a_handoff
     signature: hidden ask skipped
     issue: kaishi00/hermes-conduit-notifier (compaction_skip, 2026-11-06)
@@ -316,7 +353,7 @@ imports:
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
-    optional: ["active_sessions", "lifecycle"]
+    optional: ["__version__", "active_sessions", "lifecycle"]
   hermes_cli._launchers:
     optional: ["runtime_command"]
   hermes_cli.active_sessions:
@@ -486,6 +523,9 @@ module_paths:
 # The plugin's routes under /api/plugins/conduit_push/, from dashboard/.
 routes:
   - GET /artifacts
+  - DELETE /artifacts/pins
+  - GET /artifacts/pins
+  - POST /artifacts/pins
   - GET /boards/checklists
   - POST /boards/checklists
   - GET /boards/desktop
@@ -622,9 +662,11 @@ routes:
   - POST /rooms/links
   - DELETE /rooms/links/invites
   - POST /rooms/links/invites
+  - PUT /rooms/links/own
   - POST /rooms/links/preview
   - GET /rooms/looks
   - PUT /rooms/looks
+  - GET /rooms/own-bots
   - GET /rooms/people
   - DELETE /rooms/sessions
   - GET /rooms/setup
@@ -638,6 +680,7 @@ routes:
   - POST /sessions/history-page
   - POST /sessions/takeover
   - POST /side-question
+  - GET /speech-server/presets
   - WS /speech-server/socket
   - GET /speech-server/status
   - POST /speech-server/test

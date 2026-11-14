@@ -13,6 +13,303 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.0 (2026-11-14)
+
+### New and improved
+
+- Save an artifact in Conduit to keep it: it shows under Saved in Artifacts with an optional note, on every iPhone and iPad signed in, and a copy of the file stays on your host so it still opens after the original file or its chat is gone.
+
+## 0.176.0 (2026-11-14)
+
+### New and improved
+
+- Hermes can now write a text for someone who has only an email address: Send text opens Messages with their email as the iMessage recipient. Needs the Conduit update that adds it; an older Conduit gets the text in Hermes' reply instead.
+
+## 0.175.0 (2026-11-14)
+
+### New and improved
+
+- A hosted realtime speech server (OpenAI Realtime, Qwen Audio Realtime) can now answer Live > Local calls with its own model: it gets the call's instructions and tools, and hands the work to Hermes as jobs, like Grok Live. Turn it on in Conduit under Live > Local, or with voice.speech_server.own_model in the Hermes config. Classic voice and Apple Watch calls on that server still get Hermes' replies read aloud.
+
+## 0.174.2 (2026-11-14)
+
+### Fixes
+
+- When a Bot Chat hands a task to a workstream, a very long step result can no longer leave the first characters of a password or key in the workstream's instructions. Results are masked before they are cut, not after.
+- Two steps refused at the same moment (another chat had the bot's screen) no longer leave the turn's time limit counting the model's thinking again.
+
+## 0.174.1 (2026-11-14)
+
+### Fixes
+
+- Test connection no longer takes a speech server that says nothing about how it takes turns for one that leaves the answering to Hermes. Before, Conduit could miss telling you such a server has a model of its own.
+- A speech server model or voice name that can't be used (one with a space in it, say) is now named in the Hermes log. Before, it was dropped without a word and the server used its own.
+
+## 0.174.0 (2026-11-14)
+
+### New and improved
+
+- A speech server can be set up from a list of known ones (Hugging Face speech-to-speech, OpenAI Realtime, Qwen Audio Realtime) and given a model and a voice in Conduit's speech server settings, and Test connection says when the server has a model of its own. Needs the Conduit build that shows them; until then the settings work from the Hermes config (voice.speech_server.model and voice).
+
+## 0.173.0 (2026-11-14)
+
+### New and improved
+
+- Hermes can answer on a speech server that has a model of its own, such as a hosted realtime model. Turn on "Hermes answers" in Conduit's speech server settings (voice.speech_server.drive_turns) and the server only listens and reads the replies aloud, in Local Live, agent mode, Classic and on the Watch. Before, such a server answered by itself and Hermes never got a turn.
+
+## 0.172.4 (2026-11-14)
+
+### Fixes
+
+- On Quick Things Here, a slow model no longer has its Bot Chat turns ended well before the step count you picked. The time limit counted the model's thinking between steps, so a model that takes 26 seconds a step got about 9 of its 20 steps. It now counts only the time the steps themselves take to run.
+- When a Bot Chat hands the rest of a task to a workstream, the workstream gets what the Bot Chat's steps returned, cut short, and works from it. Before, it was told the results weren't there and began by running the same steps again.
+
+## 0.172.3 (2026-11-14)
+
+### Fixes
+
+- A Hermes chat that has no session yet, such as the terminal's, no longer has every tool held back with "This bot's coordinator settings couldn't be checked just now". It isn't a Bot Chat, so the coordinator's limits don't apply to it. The tools a script run with execute_code calls count as steps of the chat that ran it, so they no longer fail in every chat, and a Bot Chat's script stays within its turn's steps.
+
+## 0.172.2 (2026-11-14)
+
+### Fixes
+
+- A model you pick for a chat sticks. A chat that once ran a turn on a fallback model (a Bot Chat, say) went back to that fallback's provider whenever Hermes reopened it, so the model you picked was refused and the chat snapped back to the fallback model.
+
+## 0.172.1 (2026-11-14)
+
+### Fixes
+
+- `hermes conduit-push status` on a profile that isn't paired yet now also shows the `CONDUIT_PUSH_PROXY` in use, or why it was ignored, so a mistyped proxy that stopped pairing is easy to spot.
+
+## 0.172.0 (2026-11-14)
+
+### New and improved
+
+- A Hermes on a network without direct internet access can send this plugin's traffic through an HTTP proxy of its own with `CONDUIT_PUSH_PROXY`, without routing the rest of Hermes through it. Thanks to aminrpg for the idea and the first version.
+
+## 0.171.0 (2026-11-14)
+
+### New and improved
+
+- Your own Hermes tell each other which bots they have, so Conduit can offer your other Hermes' bots when you make a group chat, and those bots join by themselves, with no join card.
+
+## 0.170.7 (2026-11-14)
+
+### Fixes
+
+- A hand-off to a workstream also leaves out keys under one-word names like secretkey or usercredentials.
+
+## 0.170.6 (2026-11-14)
+
+### Fixes
+
+- When the Bot Chat hands the rest of a turn to a workstream, keys under names like x-api-key or privateKey are left out of its instructions too, while ordinary fields such as author are kept.
+
+## 0.170.5 (2026-11-14)
+
+### Fixes
+
+- When the Bot Chat hands the rest of a turn to a workstream, the workstream is no longer told about a step that never ran, a new request right after an earlier hand-off gets its own steps and hand-off (even the same words sent again, though if a workstream is already on it the bot is pointed there), and passwords, tokens and keys in the steps, commands included, are left out of its instructions.
+- A call watch whose job another run had just refreshed could miss how to report on that run. It now always hears how.
+
+## 0.170.4 (2026-11-14)
+
+### Fixes
+
+- A call watch could miss its call: its runs found the report tool hidden behind Hermes' tool search and went quiet without reporting. Runs now reach it, and watches you already have pick up the fix on their next run.
+- A call watch's report no longer fails when the model leaves out what it saw or writes "False" in quotes.
+- When the Bot Chat runs out of quick steps in a turn, the plugin now starts a workstream for the rest itself, instead of leaving the bot to do it (some models never did, and said they were blocked).
+
+## 0.170.3 (2026-11-14)
+
+### Fixes
+
+- A note one bot sent another that never reached it (its Bot Chat couldn't be woken) was lost without a word. The bot that sent it is now told.
+- A bot waiting on another's question back was told to ask about it, which couldn't work. It's now told to answer it first.
+- After a restart, an ask or a tapped yes that had already reached a Bot Chat could be handed to it a second time if saving that it arrived failed. It's now marked delivered.
+
+### New and improved
+
+- A note from another bot now arrives under its own heading, saying no answer is owed.
+
+## 0.170.2 (2026-11-14)
+
+### Fixes
+
+- In a room of only your own Hermes, your agent on the other Hermes is now told it can use its usual tools there, instead of trying to ask you or sending you to its Bot Chat, and still hears about pictures sent into the room.
+- A room of only your own Hermes that someone else's agent joins later goes back under your room rules from the next turn.
+
+## 0.170.1 (2026-11-14)
+
+### Fixes
+
+- A Watch GPT-Live call that never connects now says the chosen voice may not be on your ChatGPT plan, instead of only that the connection didn't come up.
+
+## 0.170.0 (2026-11-14)
+
+### Fixes
+
+- An answer one bot gave another over 2,000 characters was cut off without telling it. It's now refused whole, so the bot shortens it or points at a file.
+- An ask to a bot whose long Bot Chat Hermes wouldn't reopen after a restart stayed waiting until someone noticed. The Bot Chat now reopens the bounded way, and an ask that still can't reach it fails and tells the bot that asked why.
+
+### New and improved
+
+- A bot asked something by another can ask it a question back about that ask, and bots can send each other a note that needs no answer, so a long joint job no longer piles up open asks.
+
+## 0.169.2 (2026-11-14)
+
+### Fixes
+
+- A Link marked as between your own Hermes no longer stops this Hermes' Linked Rooms messages from going out when its Linked Rooms file was edited by hand.
+
+## 0.169.1 (2026-11-13)
+
+### Fixes
+
+- A Link marked as between your own Hermes is marked again on the other side after this Hermes' Linked Rooms files are restored from an older backup.
+
+## 0.169.0 (2026-11-13)
+
+### New and improved
+
+- Groundwork for using several of your own Hermes together: a Link both Hermes mark as your own (`hermes conduit-push links own`, and later Conduit by itself) makes a room with only your own Hermes in it a room of your own agents. The bots from your other Hermes work there with their own tools, memory and approvals, as at home, with no room rules or turn limits.
+
+## 0.168.10 (2026-11-13)
+
+### Fixes
+
+- On Windows, a dashboard restart that couldn't start the dashboard again now says why in the Hermes home's logs/dashboard-restart.log, and a dashboard a launcher started again with slightly different options is no longer started a second time.
+
+## 0.168.9 (2026-11-13)
+
+### Fixes
+
+- On Windows, an update from Conduit restarted the gateway but left the Hermes dashboard on the old plugin, and asked you to restart the dashboard by hand. The dashboard now restarts itself too, so the update finishes on its own (after this one).
+
+## 0.168.8 (2026-11-13)
+
+### Fixes
+
+- On a host where the gateway serves Conduit itself, a workstream's "Needs you" card could, for a few minutes, keep offering an approval that had just been answered or had timed out. It now drops it straight away.
+
+## 0.168.7 (2026-11-13)
+
+### Fixes
+
+- On a host where the gateway serves Conduit itself, an open Work panel re-read each waiting workstream's chat from Hermes on every refresh, which kept Hermes busy for as long as the panel stayed open. It now shows the approval it already heard about, and reads the chat again only now and then.
+
+## 0.168.6 (2026-11-13)
+
+### Fixes
+
+- Pulse: when Hermes couldn't find Pulse's chat, Settings › Pulse only said "not_found". It now starts with what to do: on a Hermes older than 0.22.6, where a chat Hermes Desktop made can't move to the gateway, update Hermes; otherwise set Pulse up again.
+
+## 0.168.5 (2026-11-13)
+
+### Fixes
+
+- Predictions: finishing a guess could close the terminal, browser and file state of the chat it read, and end that chat's memory provider. A guess now lets go of only its own connections, also when it fails.
+
+## 0.168.4 (2026-11-13)
+
+### Fixes
+
+- Pulse: a whole report you put off with Not now came back as new a week later without a check, even when every day it spoke of had passed. It's now read first, like other cards, and stays away when it's out of date.
+- Pulse: a card held for the brief, put off, or found on its own and still on your screen is also dropped when the day, time or deadline it was about has passed and nothing in it is left to do.
+
+## 0.168.3 (2026-11-13)
+
+### Fixes
+- A bot's question about the SQL bug was refused as already asked while
+  one about the CSS bug was open. A short name in capitals counts as
+  naming something, like a longer word.
+- On a busy day the Work panel could drop a question you answered last, if
+  the bot had asked it early. It keeps the ones you answered most recently.
+
+### New and improved
+- Sending to a workstream on the gateway reads its chat once instead of
+  twice.
+
+## 0.168.2 (2026-11-13)
+
+### Fixes
+- A bot's second question was refused as already asked when it only shared
+  its wording with an open one ("fix the login bug" and "fix the logout
+  bug"). Questions that name different things are different questions.
+- A question you had just answered could drop off the Work panel's list on
+  a busy day.
+
+## 0.168.1 (2026-11-13)
+
+### Fixes
+- After each turn in a Bot Chat, Hermes' skill review was refused every
+  tool, so it spent tokens and the bot learned no skill from what you told
+  it there. It runs now.
+- A workstream started in a folder that doesn't exist ran in Hermes' own
+  folder. It is refused, and the bot is told.
+- A question about work that was already resolved when the bot asked
+  ("start it over") was withdrawn before you saw it.
+- A bot could ask the same question twice when it was about work it would
+  start, and pile up questions without end. Nearly the same words are one
+  question, and a dozen open ones take no more.
+
+### New and improved
+- Work that finished more than six hours ago no longer counts as other work
+  the helper model checks new findings against (it was a day).
+
+## 0.168.0 (2026-11-13)
+
+### New and improved
+- Under Ask Me First, a question your bot asks you about its workstreams
+  can be answered with a tap: Approve or Decline on its card in the Work
+  panel, and on a yes the bot goes ahead. Open questions count as "needs
+  you". Needs the next Conduit build.
+- A question about work you've since resolved goes away by itself instead
+  of waiting on you.
+
+## 0.167.6 (2026-11-13)
+
+### Fixes
+- On a Hermes where the gateway serves Conduit's connection, the bot was
+  never told it could draw cards for your messages from Conduit, and
+  turning off Conduit replies in Settings > Notifications did nothing
+  there. Both now work for messages you send from Conduit.
+
+## 0.167.5 (2026-11-12)
+
+### New and improved
+- Just me: join a Linked Room someone else hosts without bringing any of your agents, to read it and post in it. The host's plugin needs this version too.
+
+## 0.167.4 (2026-11-12)
+
+### New and improved
+
+- When your Conduit plugin and a linked person's differ, Settings > Multiplayer says whose to update, instead of rooms quietly missing what the older one can't take.
+
+## 0.167.3 (2026-11-12)
+
+### Fixes
+- A bot in a room with other people's agents could answer as if a picture
+  sent there wasn't there. Each turn that names pictures now tells the bot
+  to look at them first.
+
+## 0.167.2 (2026-11-12)
+
+### Fixes
+- On a Hermes where the gateway serves Conduit's connection (one gateway for
+  every profile), tapping a workstream (W1, W2) showed "Failed to restore
+  this conversation: Hermes refused session.resume
+  (runtime_coordination_required)" instead of its chat. Workstreams now run
+  on the gateway like your other chats, so they open while they work.
+
+## 0.167.1 (2026-11-12)
+
+### Fixes
+- When Hermes asked your iPhone for a fresh reading and the wake couldn't
+  be sent, Hermes had to wait a minute before it could ask again. It can
+  now ask again straight away.
+
 ## 0.167.0 (2026-11-12)
 
 ### New and improved

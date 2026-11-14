@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 # Like the dashboard's takeover route: a lock holder that never lets go
 # can't stall the Pulse loop longer than this.
 TAKEOVER_TIMEOUT_S = 20.0
+# The first Hermes whose gateway takes over a chat another process made
+# (Hermes Desktop's, source desktop, with no gateway receipt) when Pulse opens
+# it there; before it, such a chat is not_found on the gateway (issue 713).
+HANDS_OVER_FROM = (0, 22, 6)
 # The one takeover worker that may still be waiting on Hermes' lock: while it
 # is, a new takeover waits for it instead of starting another thread.
 _worker: Optional[threading.Thread] = None
@@ -153,7 +157,7 @@ def send(chat_id: str, text: str, *, profile: str = "", model: Optional[dict] = 
         params["profile"] = profile
     resumed = methods[RESUME](rid, params)
     if not isinstance(resumed, dict) or "error" in resumed:
-        return Sent(False, "", f"couldn't open the chat: {_message(resumed)}")
+        return Sent(False, "", _open_refused(resumed))
     sid = ((resumed.get("result") or {}).get("session_id") or "") if isinstance(resumed.get("result"), dict) else ""
     if not sid:
         return Sent(False, "", "couldn't open the chat: no session id came back")
@@ -221,6 +225,41 @@ def _not_owned(response: Any) -> bool:
     return isinstance(data, dict) and data.get("reason") == "SESSION_NOT_OWNED"
 
 
+def _open_refused(response: Any) -> str:
+    """Why the chat didn't open, led by what to do when Hermes says it doesn't
+    exist (Settings > Pulse shows three lines of it). Pulse only sends to a
+    chat ``home_chat`` found in state.db, so a not_found here is a chat this
+    Hermes can't open from this process."""
+    if not _not_found(response):
+        return f"couldn't open the chat: {_message(response)}"
+    version = hermes_version()
+    if version is not None and version < HANDS_OVER_FROM:
+        return (f"Update Hermes to 0.22.6 or newer: {'.'.join(map(str, version))} can't move "
+                f"Hermes Desktop's chat to the gateway ({_message(response)})")
+    return f"Set Pulse up again in Settings > Pulse: Hermes couldn't open its chat ({_message(response)})"
+
+
+def _not_found(response: Any) -> bool:
+    error = response.get("error") if isinstance(response, dict) else None
+    if not isinstance(error, dict):
+        return False
+    data = error.get("data")
+    if isinstance(data, dict) and data.get("reason") == "not_found":
+        return True  # the gateway's session authority
+    message = str(error.get("message") or "")
+    return message == "not_found" or (error.get("code") == 4007 and "not found" in message)  # the session host's
+
+
+def hermes_version() -> Optional[tuple[int, int, int]]:
+    """The running Hermes' version as (major, minor, patch), or None."""
+    try:
+        from hermes_cli import __version__ as version
+        found = re.match(r"v?(\d+)\.(\d+)\.(\d+)", str(version or ""))
+    except Exception:  # noqa: BLE001 — no Hermes to read: no version advice
+        return None
+    return (int(found[1]), int(found[2]), int(found[3])) if found else None
+
+
 def _message(response: Any) -> str:
     error = response.get("error") if isinstance(response, dict) else None
     if isinstance(error, dict):
@@ -252,7 +291,7 @@ def _send_on_authority(chats: Any, chat_id: str, text: str, *, profile: str = ""
             params["profile"] = profile
         resumed = call(RESUME, params)
         if not isinstance(resumed, dict) or resumed.get("error"):
-            return Sent(False, "", f"couldn't open the chat: {_message(resumed)}")
+            return Sent(False, "", _open_refused(resumed))
         snapshot = resumed.get("result") if isinstance(resumed.get("result"), dict) else {}
         sid = str(snapshot.get("session_id") or "")
         if not sid:

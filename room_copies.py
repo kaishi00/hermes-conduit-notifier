@@ -599,17 +599,25 @@ def forget(root: Any, room_id: Any) -> dict[str, Any]:
 # --- Helpers -------------------------------------------------------------------------------
 
 
+def just_me(draft: dict[str, Any]) -> list[str]:
+    """The Links of the people in a room on the home with no agents ("Just me", room_invites.PERSON), who
+    haven't left it."""
+    return sorted(link_id for link_id, person in draft["links"].items()
+                  if person.get("just_me") is True and person["status"] == "joined")
+
+
 def _receiving(draft: dict[str, Any]) -> list[str]:
-    """The Links a started room's pages go to: each person with an agent still in it, and in a room that ended
-    (disbanded) each one until its copy has the end."""
+    """The Links a started room's pages go to: each person with an agent still in it or in it with Just me, and
+    in a room that ended (disbanded) each one until its copy has the end."""
     if draft.get("started_at") is None or draft["status"] not in ("started", "ended") or not draft.get("members"):
         return []
     if draft["status"] == "ended" and draft["reason"] not in ENDED:
         return []
     copies = draft.get("copies") or {}
-    links = sorted({member["link"] for member in draft["members"]
-                    if member["link"] is not None and member.get("status", "in") == "in"
-                    and not copies.get(member["link"], {}).get("gone")})
+    links = sorted({link_id for link_id in [*(member["link"] for member in draft["members"]
+                                              if member["link"] is not None and member.get("status", "in") == "in"),
+                                            *just_me(draft)]
+                    if not copies.get(link_id, {}).get("gone")})
     if draft["status"] == "ended":
         links = [link_id for link_id in links if not copies.get(link_id, {}).get("done")]
     return links
@@ -785,7 +793,9 @@ def _shown(row: sqlite3.Row, invite: Optional[dict[str, Any]]) -> dict[str, Any]
         if isinstance(member.get("member_id"), str) and member.get(OUT_MARK) in OUT_REASONS}
     members = [{key: value for key, value in member.items() if key not in (YOURS, OUT_MARK)} for member in members]
     return {"room_id": row["room_id"], "name": row["name"], "link": row["link"], "from": row["home_name"],
-            "members": members, "yours": yours, "out": out, "status": status, "reason": reason,
+            "members": members, "yours": yours, "out": out,
+            # In it with none of your agents (room_invites.PERSON): you read it and post in it.
+            "just_me": bool(invite and invite.get("just_me")), "status": status, "reason": reason,
             "started_at": started_at, "ended_at": ended_at, "state": state, "last_seq": int(row["last_seq"]),
             "latest_seq": int(row["latest_seq"]), "updated_at": float(row["updated_at"])}
 

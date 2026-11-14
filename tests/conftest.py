@@ -11,6 +11,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -33,6 +34,14 @@ _no_home_parent = os.path.join(os.environ["HERMES_HOME"], "not-a-folder")
 open(_no_home_parent, "w").close()
 os.environ["CONDUIT_TESTS_NO_HOME"] = os.path.join(_no_home_parent, "hermes")
 del _no_home_parent
+# The host's clock in UTC, as on CI's runners, whatever zone the machine is
+# in (notifier #742). Pulse falls back to the host's zone, and a fixture
+# that puts the morning brief out of reach does so in that zone; a test that
+# then sets Pulse's zone to UTC moved the brief into reach on a host east
+# of UTC (or late in the day west of it). Tests of a zone set one themselves.
+os.environ["TZ"] = "UTC"
+if hasattr(time, "tzset"):
+    time.tzset()
 
 
 @pytest.fixture(autouse=True)

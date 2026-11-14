@@ -211,6 +211,9 @@ ROUTE_CAPABILITIES = (
     "speech-server",
     "local-live-agent",
     "artifacts",
+    # /artifacts/pins: artifacts saved in Conduit, with a copy of each file
+    # kept on the host (hermes-conduit#2467).
+    "artifact-pins",
     # /workspace/*: the Folder tab's listings, search, recent files and file actions.
     "workspace-files",
     # GET /workspace/resolve: where a file a reply names by its name is, from
@@ -229,6 +232,13 @@ ROUTE_CAPABILITIES = (
     # /rooms/identity and /rooms/links: Links between this installation and
     # other people's, for Linked Rooms (no profile: they're the installation's).
     "room-links",
+    # PUT /rooms/links/own: a Link between your own Hermes; a room whose
+    # other installations all came over Links both sides marked runs without
+    # the owner's room rules (multi-instance plan, Rooms 1).
+    "room-own-links",
+    # GET /rooms/own-bots and /rooms/drafts' bring: your other Hermes' bots
+    # over an own Link, listed in New Group Chat and joining by themselves.
+    "room-own-bots",
     # GET/POST /rooms/setup: this Hermes' API server, a profile's room
     # ceiling and approvals, set up for Linked Rooms.
     "room-setup",

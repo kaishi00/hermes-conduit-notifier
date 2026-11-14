@@ -35,6 +35,7 @@ import time
 import uuid
 import weakref
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,14 @@ def _sibling(name: str) -> Any:
 
 
 AUTHORITY_RPC_TIMEOUT_S = 60.0
+# How long a link remembers that a prompt stopped waiting: longer than any
+# read that could have been in flight then (a call's budget, plus its thread's).
+SETTLED_KEPT_S = 2 * AUTHORITY_RPC_TIMEOUT_S
+# How long a view's own record of a chat's waiting approvals stands in for
+# reading the chat again (notifier #764). The view hears each prompt asked and
+# settled; Hermes prunes a prompt the native queue dropped only when the chat
+# is read, so a read this often catches what no event said.
+SEEN_APPROVALS_MAX_AGE_S = 300.0
 # Who the plugin's own chats act as: a sign-in acts for the host's owner, as
 # Conduit's socket on the Webapp's session token does, so the phone and the
 # Webapp open the chats the plugin starts.
@@ -84,6 +93,39 @@ def authority_session(session_id: Any) -> Optional[tuple]:
         if live is not None:
             return gateway, authority, live
     return None
+
+
+def authority_for_home(home: Any) -> Any:
+    """The session authority in this process serving the Hermes home ``home``
+    (a gateway serving several profiles has one per profile), else None."""
+    gateway = runner()
+    if gateway is None:
+        return None
+    try:
+        wanted = Path(home).resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+    for authority in _authorities(gateway):
+        try:
+            if Path(str(authority.profile_id)).resolve() == wanted:
+                return authority
+        except (OSError, TypeError, ValueError, AttributeError):
+            continue
+    return None
+
+
+def authority_session_ids(home: Any) -> Optional[set]:
+    """The chats the session authority serving ``home`` has open, or None when
+    no authority in this process serves it."""
+    authority = authority_for_home(home)
+    if authority is None:
+        return None
+    sessions = getattr(authority, "sessions", None)
+    try:
+        return {sid for sid in list(sessions.keys()) if isinstance(sid, str)}
+    except Exception:  # noqa: BLE001 — unreadable: the caller tries again later
+        logger.warning("Conduit: couldn't list the chats a session authority has open", exc_info=True)
+        return None
 
 
 def authority_scope(authority: Any) -> Any:
@@ -147,6 +189,30 @@ def _log_failed_close(future: Any) -> None:
         logger.debug("Conduit: closing an authority connection failed", exc_info=future.exception())
 
 
+def _prompt_text(prompt: dict, timed: bool = True) -> tuple:
+    """An approval prompt's (command, description, when it times out, when it
+    was heard), the times monotonic. ``timed`` when it was heard as Hermes
+    asked it, so its ``timeout_s`` runs from now."""
+    now = time.monotonic()
+    timeout = prompt.get("timeout_s")
+    expires = (now + timeout if timed and isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+               and timeout > 0 else None)
+    return str(prompt.get("command") or ""), str(prompt.get("description") or ""), expires, now
+
+
+def _viewing(home: Any, sid: str, subscription: str) -> bool:
+    """Whether the authority serving ``home`` still sends ``subscription``
+    the chat's events: a view it retired (its backlog overflowed, or the chat
+    was closed and opened again) hears nothing more."""
+    authority = authority_for_home(home)
+    try:
+        live = getattr(authority, "sessions", {}).get(sid) if authority is not None else None
+        return subscription in getattr(live, "subscribers", {})
+    except Exception:  # noqa: BLE001 — unreadable: the caller reads the chat instead
+        logger.debug("Conduit: couldn't read a chat's viewers", exc_info=True)
+        return False
+
+
 class AgentLookupError(RuntimeError):
     """The gateway's agent for a chat couldn't be read (not: it has none)."""
 
@@ -166,12 +232,26 @@ class _AuthorityLink:
         self.generations: Dict[str, int] = {}
         # Open approval prompts, oldest first: prompt id -> (session id, generation).
         self.prompts: Dict[str, tuple] = {}
+        # What each open prompt asks: prompt id -> (command, description, when it
+        # times out or None, when this link heard of it), the times monotonic.
+        self.prompt_texts: Dict[str, tuple] = {}
+        # session id -> when this link last read the chat (monotonic): its record of
+        # the chat's prompts is whole from then on while its view lasts.
+        self.viewed: Dict[str, float] = {}
+        # prompt id -> when this link stopped counting it as waiting (monotonic), so
+        # a read already in flight then doesn't bring it back. Kept a little past
+        # the longest call (SETTLED_KEPT_S).
+        self.settled: Dict[str, float] = {}
         # session id -> this connection's subscription to it (session.detach names it).
         self.subscriptions: Dict[str, str] = {}
         # session id -> the plugin's own turns a gateway restart lost there, as the
         # chat's ``pending`` last listed them: admission id -> the generation it ran as.
         # A chat this link has read (a snapshot or a ``session.info``) is a key.
         self.lost: Dict[str, Dict[str, int]] = {}
+        # session id -> the profile its requests named: on a gateway serving
+        # several profiles the authority finds a sibling profile's chat only
+        # by it, so the link's own reads of that chat name it too.
+        self.profiles: Dict[str, str] = {}
         self._closed = False
 
     @property
@@ -210,17 +290,18 @@ class _AuthorityLink:
             if kind == "approval.request" and isinstance(payload.get("prompt_id"), str):
                 asked = payload.get("execution_generation", generation)
                 self.prompts[payload["prompt_id"]] = (sid, asked if type(asked) is int else self.generations.get(sid, 0))
+                self.prompt_texts[payload["prompt_id"]] = _prompt_text(payload)
                 # The TUI gateway's name for the prompt's id.
                 payload = {**payload, "request_id": payload["prompt_id"]}
             elif kind == "approval.settled":
                 # Answered (here or by another client) or timed out: the TUI
                 # gateway's word for a prompt that is no longer waiting.
                 prompt_id = payload.get("prompt_id")
-                self.prompts.pop(prompt_id, None)
+                self._forget_prompt(prompt_id)
                 kind, payload = "approval.cancelled", {"request_ids": [prompt_id] if isinstance(prompt_id, str) else []}
             elif kind in ("message.complete", "error"):
                 for prompt_id in [key for key, (owner, _) in self.prompts.items() if owner == sid]:
-                    del self.prompts[prompt_id]
+                    self._forget_prompt(prompt_id)
         return {**frame, "params": {**params, "type": kind, "payload": payload}}
 
     # The plugin's requests.
@@ -230,9 +311,13 @@ class _AuthorityLink:
         params = dict(frame.get("params")) if isinstance(frame.get("params"), dict) else {}
         shaped: Any = None
         sid = params.get("session_id") if isinstance(params.get("session_id"), str) else ""
+        if sid and isinstance(params.get("profile"), str) and params["profile"]:
+            with self.lock:
+                self.profiles[sid] = params["profile"]
         # One budget for the whole call: the fence reads and the stale retry
         # come out of the caller's timeout, never on top of it.
-        deadline = time.monotonic() + timeout
+        asked_at = time.monotonic()
+        deadline = asked_at + timeout
 
         def left() -> float:
             return max(0.05, deadline - time.monotonic())
@@ -281,7 +366,7 @@ class _AuthorityLink:
             # surface line would wait for the next one. "queued", "started" and
             # "unknown" each have the turn still to run.
             self._drop_surface(method, params)
-        return self._answer(method, params, shaped, response)
+        return self._answer(method, params, shaped, response, asked_at)
 
     def _drop_surface(self, method: Any, params: Dict[str, Any]) -> None:
         if method == "prompt.submit":
@@ -308,22 +393,29 @@ class _AuthorityLink:
         # (Hermes' session_controls; a gateway restart restarts this process).
         return await connection.dispatch(request)
 
+    def _scoped(self, sid: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """``params`` naming the profile this link's requests named for the chat."""
+        with self.lock:
+            profile = self.profiles.get(sid)
+        return {**params, "profile": profile} if profile else params
+
     def _generation(self, sid: str, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> int:
         with self.lock:
             known = self.generations.get(sid)
         if known is None:
+            asked_at = time.monotonic()
             # Its own id: two chats' controls on one connection read their fences at once.
             try:
                 snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                           "id": f"conduit-fences-{uuid.uuid4().hex}",
                                                           "method": "session.resume",
-                                                          "params": {"session_id": sid, "omit_messages": True}}),
+                                                          "params": self._scoped(sid, {"session_id": sid, "omit_messages": True})}),
                                          timeout)
             except TimeoutError as exc:
                 # Nothing was sent for the control itself: not "may have started".
                 raise RuntimeError("Reading the chat's turn timed out; nothing was sent") from exc
             result = snapshot.get("result") if isinstance(snapshot, dict) else None
-            self._note_snapshot(result)
+            self._note_snapshot(result, asked_at)
             with self.lock:
                 known = self.generations.get(sid)
             if known is None:
@@ -338,16 +430,17 @@ class _AuthorityLink:
     def _still_running(self, sid: str, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> bool:
         """Whether the chat runs a turn now; one that can't be read counts as running,
         so a refusal is never reported as nothing to stop."""
+        asked_at = time.monotonic()
         try:
             snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                       "id": f"conduit-running-{uuid.uuid4().hex}",
                                                       "method": "session.resume",
-                                                      "params": {"session_id": sid, "omit_messages": True}}),
+                                                      "params": self._scoped(sid, {"session_id": sid, "omit_messages": True})}),
                                      timeout)
         except Exception:  # noqa: BLE001 — unknown reads as running
             return True
         result = snapshot.get("result") if isinstance(snapshot, dict) else None
-        self._note_snapshot(result)
+        self._note_snapshot(result, asked_at)
         return not (isinstance(result, dict) and result.get("running") is False)
 
     def _note_pending(self, sid: str, snapshot: Dict[str, Any]) -> None:
@@ -377,11 +470,12 @@ class _AuthorityLink:
         with self.lock:
             known = sid in self.lost
         if not known:
+            asked_at = time.monotonic()
             try:
                 snapshot = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                           "id": f"conduit-pending-{uuid.uuid4().hex}",
                                                           "method": "session.resume",
-                                                          "params": {"session_id": sid, "omit_messages": True}}),
+                                                          "params": self._scoped(sid, {"session_id": sid, "omit_messages": True})}),
                                          left() if left else AUTHORITY_RPC_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — the send goes on; a refused read is the send's to report
                 logger.debug("Conduit: reading a chat's queue before a send failed", exc_info=True)
@@ -389,7 +483,7 @@ class _AuthorityLink:
             result = snapshot.get("result") if isinstance(snapshot, dict) else None
             if not isinstance(result, dict) or result.get("session_id") != sid:
                 return  # Not read: the next send reads it again.
-            self._note_snapshot(result)
+            self._note_snapshot(result, asked_at)
             with self.lock:
                 # Read: a Hermes whose snapshot lists no queue isn't read again.
                 self.lost.setdefault(sid, {})
@@ -400,8 +494,9 @@ class _AuthorityLink:
                 answer = self.chats.run(self._dispatch({"jsonrpc": "2.0",
                                                         "id": f"conduit-discard-{uuid.uuid4().hex}",
                                                         "method": "prompt.resolve_unknown",
-                                                        "params": {"session_id": sid, "admission_id": admission_id,
-                                                                   "execution_generation": generation}}),
+                                                        "params": self._scoped(sid, {
+                                                            "session_id": sid, "admission_id": admission_id,
+                                                            "execution_generation": generation})}),
                                        left() if left else AUTHORITY_RPC_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — the send still goes; Hermes keeps it queued behind the lost turn
                 logger.debug("Conduit: discarding a chat's lost turn failed", exc_info=True)
@@ -415,14 +510,39 @@ class _AuthorityLink:
             with self.lock:
                 (self.lost.get(sid) or {}).pop(admission_id, None)
 
-    def _note_snapshot(self, result: Any) -> None:
+    def _note_snapshot(self, result: Any, asked_at: float) -> None:
+        """Notes a chat's snapshot, read by a request sent at ``asked_at``
+        (monotonic) or later."""
         if not isinstance(result, dict) or not isinstance(result.get("session_id"), str):
             return
         sid = result["session_id"]
+        listed = {prompt.get("prompt_id") for prompt in result.get("prompts") or () if isinstance(prompt, dict)}
         with self.lock:
             if type(result.get("execution_generation")) is int:
                 self.generations[sid] = result["execution_generation"]
             self._note_pending(sid, result)
+            for prompt_id in [key for key, (owner, _) in self.prompts.items() if owner == sid and key not in listed]:
+                # Settled before the read though this link never heard it (a
+                # retired view misses the event). One heard asked after the
+                # request went may be newer than the snapshot: its own events settle it.
+                heard = self.prompt_texts.get(prompt_id, (None, None, None, 0.0))[3]
+                if heard < asked_at:
+                    self._forget_prompt(prompt_id)
+            now = time.monotonic()
+            for prompt_id in [key for key, at in self.settled.items() if now - at > SETTLED_KEPT_S]:
+                del self.settled[prompt_id]
+            for prompt in result.get("prompts") or ():
+                # An approval still waiting when the chat was read: answerable by its id,
+                # though this link never saw it asked. One it heard settle after the
+                # request went out was read before it settled: it stays settled.
+                if (isinstance(prompt, dict) and prompt.get("kind") == "approval"
+                        and isinstance(prompt.get("prompt_id"), str) and type(prompt.get("execution_generation")) is int
+                        and self.settled.get(prompt["prompt_id"], -1.0) < asked_at):
+                    self.prompts.setdefault(prompt["prompt_id"], (sid, prompt["execution_generation"]))
+                    # No timeout of its own: Hermes counts it from when it asked, which
+                    # the snapshot doesn't say. The view's next read drops it once gone.
+                    self.prompt_texts.setdefault(prompt["prompt_id"], _prompt_text(prompt, timed=False))
+            self.viewed[sid] = now
             replaced = None
             if isinstance(result.get("subscription_id"), str):
                 replaced = self.subscriptions.get(sid)
@@ -432,13 +552,43 @@ class _AuthorityLink:
             # fences): the older one ends, so a close detaches all there is.
             self._detach_later(sid, replaced)
 
+    def _forget_prompt(self, prompt_id: Any) -> None:
+        # Called with the lock held. Kept as settled even when this link never
+        # noted it: a first read in flight may list it (its snapshot not noted yet).
+        self.prompts.pop(prompt_id, None)
+        self.prompt_texts.pop(prompt_id, None)
+        if isinstance(prompt_id, str) and prompt_id:
+            self.settled[prompt_id] = time.monotonic()
+
+    def seen_approvals(self, sid: str, viewing: Any) -> Optional[list]:
+        """The approvals ``sid`` waits on, oldest first, as this link's view of
+        the chat heard them asked and not settled; None when the view can't
+        say (never read, read too long ago, or ``viewing(subscription)`` finds
+        the authority no longer sends it the chat's events)."""
+        now = time.monotonic()
+        with self.lock:
+            subscription = self.subscriptions.get(sid)
+            viewed = self.viewed.get(sid)
+            if self._closed or not subscription or viewed is None or now - viewed > SEEN_APPROVALS_MAX_AGE_S:
+                return None
+            current = self.generations.get(sid)
+            rows = []
+            for prompt_id, (owner, generation) in self.prompts.items():
+                command, description, expires, _heard = self.prompt_texts.get(prompt_id, ("", "", None, 0.0))
+                if owner != sid or (current is not None and generation != current):
+                    continue
+                if expires is not None and now >= expires:
+                    continue  # timed out: Hermes stopped waiting on it
+                rows.append({"request_id": prompt_id, "command": command, "description": description})
+        return rows if viewing(subscription) else None
+
     def _detach_later(self, sid: str, subscription: str) -> None:
         connection = self.connection
         loop = getattr(self.chats.runner, "_gateway_loop", None)
         if connection is None or loop is None or loop.is_closed():
             return
         request = {"jsonrpc": "2.0", "id": f"conduit-detach-{uuid.uuid4().hex}", "method": "session.detach",
-                   "params": {"session_id": sid, "subscription_id": subscription}}
+                   "params": self._scoped(sid, {"session_id": sid, "subscription_id": subscription})}
         try:
             future = asyncio.run_coroutine_threadsafe(connection.dispatch(request), loop)
         except Exception:  # noqa: BLE001 — the view ends with the connection
@@ -459,6 +609,9 @@ class _AuthorityLink:
                 params["reasoning"] = params.pop("reasoning_effort")
             if params.pop("fast", None) is True:
                 params["service_tier"] = "fast"
+            if "idempotency_key" in params:
+                # The authority keeps a retried create to one chat by its request id.
+                params.setdefault("request_id", params.pop("idempotency_key"))
             return method, params
         if method == "prompt.submit":
             self._settle_lost(sid, left)
@@ -478,18 +631,22 @@ class _AuthorityLink:
                 prompt = self.prompts.get(wanted) if wanted else None
             if prompt is None:
                 return {"result": {"resolved": 0}}
-            return method, {"session_id": prompt[0], "execution_generation": prompt[1], "prompt_id": wanted,
-                            "choice": params.get("choice")}
+            return method, self._scoped(prompt[0], {"session_id": prompt[0], "execution_generation": prompt[1],
+                                                    "prompt_id": wanted, "choice": params.get("choice")})
         if method == "session.close":
-            # The authority keeps the chat; this connection stops viewing it.
+            # The authority keeps the chat; this connection stops viewing it, and
+            # what it followed of the chat goes with the view.
             with self.lock:
                 subscription = self.subscriptions.pop(sid, None)
+                self.viewed.pop(sid, None)
+                for prompt_id in [key for key, (owner, _) in self.prompts.items() if owner == sid]:
+                    self._forget_prompt(prompt_id)
             if not subscription:
                 return {"result": {}}
-            return "session.detach", {"session_id": sid, "subscription_id": subscription}
+            return "session.detach", self._scoped(sid, {"session_id": sid, "subscription_id": subscription})
         return method, params
 
-    def _answer(self, method: Any, params: Dict[str, Any], shaped: Any, response: dict) -> dict:
+    def _answer(self, method: Any, params: Dict[str, Any], shaped: Any, response: dict, asked_at: float) -> dict:
         error = response.get("error")
         reason = _reason(response)
         if method == "approval.respond":
@@ -497,7 +654,7 @@ class _AuthorityLink:
             if not error or reason == "stale_generation":
                 # Settled (or its turn ended); a refused answer keeps it to try again.
                 with self.lock:
-                    self.prompts.pop(prompt_id, None)
+                    self._forget_prompt(prompt_id)
             if reason == "stale_generation":
                 # The turn that asked has ended: nothing was waiting.
                 return {**response, "error": None, "result": {"resolved": 0}}
@@ -518,7 +675,12 @@ class _AuthorityLink:
                 with self.lock:
                     self.subscriptions.setdefault(params.get("session_id"), subscription)
         if not error and method in ("session.create", "session.resume"):
-            self._note_snapshot(response.get("result"))
+            made = response.get("result") if isinstance(response.get("result"), dict) else {}
+            if (method == "session.create" and isinstance(made.get("session_id"), str)
+                    and isinstance(params.get("profile"), str) and params["profile"]):
+                with self.lock:
+                    self.profiles[made["session_id"]] = params["profile"]
+            self._note_snapshot(made, asked_at)
         return response
 
     def close(self) -> None:
@@ -543,6 +705,9 @@ class _AuthorityChats:
     what the plugin's own chats (Watch jobs, a Watch call's Local Live chat,
     Pulse's turns) use. The calls block; run them off the gateway's loop."""
 
+    # What work_broker tells this API from the TUI gateway's module by.
+    serves_authority = True
+
     def __init__(self, runner: Any) -> None:
         self.runner = runner
         self._sessions = self
@@ -566,6 +731,15 @@ class _AuthorityChats:
 
     def dispatch(self, frame: dict, transport: Any, timeout: float = AUTHORITY_RPC_TIMEOUT_S) -> dict:
         return self.link(transport).call(frame, timeout)
+
+    def seen_approvals(self, transport: Any, home: Any, session_id: str) -> Optional[list]:
+        """The approvals a chat waits on as ``transport``'s view of it heard
+        them, without asking the authority; None when it has no such view,
+        and the caller reads the chat."""
+        link = getattr(transport, "_conduit_authority_link", None)
+        if link is None or link.closed or link.chats is not self:
+            return None
+        return link.seen_approvals(session_id, lambda subscription: _viewing(home, session_id, subscription))
 
     def get(self, session_id: Any, default: Any = None) -> Any:
         """As the TUI gateway's chat record, only which transport views the
@@ -633,6 +807,10 @@ class _AuthorityChats:
             return
         try:
             turn_surface = _sibling("turn_surface")
+            if surface not in turn_surface.SURFACES:
+                # The work broker's turns are from no screen: a report no
+                # turn would take would only crowd out real ones.
+                return
             turn_surface.record_for_authority(turn_surface.Report(
                 session_id, turn_surface.text_sha256(text), surface, getattr(transport, "conduit_input", None)))
         except Exception:  # noqa: BLE001 — no line for that turn

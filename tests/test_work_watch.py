@@ -76,6 +76,25 @@ def test_one_workstream_alone_is_not_read(on, hermes, home, told):
     assert batched() == []
 
 
+def test_work_that_finished_hours_ago_is_no_longer_other_work(on, hermes, home, told):
+    """One workstream working costs no read once the other settled longer
+    ago than work_start holds a new task against it (six hours); settled
+    more lately, a report may still break what it built."""
+    def settled(ago):
+        on.update("W2", status="done")
+        with on._db() as con:
+            con.execute("UPDATE work SET updated_at = ? WHERE ref = 'W2'", (time.time() - ago,))
+
+    two(on)
+    settled(3600)
+    call("work_progress", {"found": "GET /v1/users now returns 410 Gone"}, session_id=WORKER)
+    helper = Helper()
+    assert watch.check(home, ask=helper) is None and len(helper.read) == 1
+    settled(watch.SETTLED_AGE_S + 60)
+    call("work_progress", {"found": "the login page loads 4 MB of scripts"}, session_id=WORKER)
+    assert watch.check(home, ask=helper) is None and len(helper.read) == 1
+
+
 def test_nothing_to_flag_starts_no_turn_and_is_counted(on, hermes, home, told):
     two(on)
     call("work_progress", {"found": "the login page loads 4 MB of scripts"}, session_id=WORKER)

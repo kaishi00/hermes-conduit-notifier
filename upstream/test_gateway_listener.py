@@ -35,6 +35,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,6 +50,8 @@ from conftest import COPY_IGNORE, PLUGIN, READY_TIMEOUT_S, ROOT, FakeSpeechServe
 WORDS = 10
 WORD_DELAY_S = 0.4
 DRIVER = "conduit_listener_driver"
+# A second profile the gateway serves next to the launch one (multiplexed).
+SIBLING = "second"
 
 
 class _FakeModel(BaseHTTPRequestHandler):
@@ -341,6 +344,17 @@ def listener(tmp_path_factory: pytest.TempPathFactory):
             "model": {"default": "fake-model", "provider": "custom", "switch_context_confirm_tokens": 1,
                       "base_url": f"http://127.0.0.1:{model.server_address[1]}/v1", "api_key": "fake"},
         }))
+        # A second profile, so the gateway serves both (multiplex_profiles) and a
+        # request finds the sibling's chats only by the profile it names.
+        subprocess.run([hermes, "profile", "create", SIBLING], env=env, check=True, capture_output=True,
+                       timeout=180)
+        sibling = home / "profiles" / SIBLING
+        sibling_config = yaml.safe_load((sibling / "config.yaml").read_text()) if (sibling / "config.yaml").exists() else {}
+        launch_config = yaml.safe_load((home / "config.yaml").read_text())
+        (sibling / "config.yaml").write_text(yaml.safe_dump({
+            **(sibling_config or {}), "model": launch_config["model"], "plugins": {"enabled": [PLUGIN]}}))
+        (sibling / "plugins").mkdir(exist_ok=True)
+        (sibling / "plugins" / PLUGIN).symlink_to(home / "plugins" / PLUGIN, target_is_directory=True)
         proc = subprocess.Popen([hermes, "gateway", "run"], env=env, stdout=log, stderr=subprocess.STDOUT,
                                 start_new_session=True)
         deadline = time.monotonic() + READY_TIMEOUT_S
@@ -621,6 +635,38 @@ def test_a_turn_hears_where_in_conduit_its_message_was_sent(listener):
     assert told and "[Conduit: this message came from CarPlay in the user's car, spoken." in told[0], told
 
 
+def test_a_turn_conduit_reported_gets_conduits_board_rule(listener):
+    # The authority binds no client to a turn, so the plugin reads Conduit's
+    # report ahead of the send as where it came from.
+    text = "show me the build status"
+    # Paired for this test only, to a relay nothing answers, and a phone that draws boards.
+    pairing = listener.home / "conduit-push.json"
+    pairing.write_text(json.dumps({"credential": "test-only", "relay_url": "https://127.0.0.1:9"}))
+    try:
+        status, body = listener.plugin_call("present/exchange", {
+            "installation_id": "listener-phone", "features": ["chat-cards", "board-cards"], "results": []})
+        assert status == 200, body
+        _board_rule_turns(listener, text)
+    finally:
+        pairing.unlink()
+    told = _told(text)
+    assert told and "[Conduit draws boards" in told[0], told
+
+
+def _board_rule_turns(listener: "Listener", text: str) -> None:
+
+    async def script(sock: ConduitSocket) -> None:
+        sid = (await sock.result("session.create", _create()))["session_id"]
+        status, body = listener.plugin_call("turn-surface", {
+            "session_id": sid, "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            "surface": "iphone", "input": "typed"})
+        assert status == 200 and body.get("recorded") is True, body
+        await sock.result("prompt.submit", _submit(sid, text))
+        await sock.event(sid, "message.complete")
+
+    listener.run(script)
+
+
 def test_predictions_answer_for_a_chat_the_authority_runs(listener):
     sid = _turn(listener, "plan my week")
     status, body = listener.plugin_call("predict", {"session_id": sid, "kind": "replies", "count": 2, "wait_s": 30},
@@ -653,6 +699,68 @@ def test_watch_jobs_session_api_runs_its_chats_on_the_authority(listener):
         full = await sock.result("session.resume", _resume(out["session_id"], omit_messages=False))
         return [m.get("text") or m.get("content") for m in full["messages"] if m.get("role") == "user"]
     assert "RUN the job" in listener.run(script)
+
+
+@pytest.mark.parametrize("profile", ["", SIBLING])
+def test_a_workstream_runs_on_the_authority_so_the_phone_opens_it(listener, profile):
+    """A bot's workstream is one of the authority's chats, on the launch
+    profile or a sibling one: the broker starts, reads, answers, sends to and
+    stops it there, and the phone opens it. Run in the TUI gateway a gateway
+    process also loads, it held the chat, and the phone's resume was refused
+    (runtime_coordination_required)."""
+    async def connect(sock: ConduitSocket) -> None:
+        # A socket loads the TUI gateway's module into the gateway process,
+        # where the broker used to find it.
+        await sock.result("session.list", {"limit": 1})
+    listener.run(connect)
+    status, out = listener.plugin_call(f"work-run?bot={profile}", plugin=DRIVER, timeout=240)
+    assert status == 200, out
+    assert out["api"] == "_AuthorityChats", out
+    assert out["live_ids"] is True, out
+    assert out["approvals"][0]["command"], out
+    assert out["answered"] is True, out
+    assert out["idle_stop"] is False, out
+    assert out["sent"][0] in ("started", "queued") and out["sent"][1] == out["session_id"], out
+    assert out["stopped"] is True, out
+    assert out["woke"] in ("queued", "started", "streaming"), out
+    assert out["bypass_on"] == {"key": "yolo", "value": "1", "scope": "session"}, out
+    assert out["bypass_off"] is True, out
+    # The chosen folder and model reach the authority's session.
+    assert out["stored"] and out["stored"]["cwd"] == out["folder"], out
+    assert out["stored"]["model"] == "fake-model", out
+
+    params = {**_resume(out["session_id"], omit_messages=False), **({"profile": profile} if profile else {})}
+    query = urllib.parse.urlencode({"bot": profile, "session": out["session_id"], "text": "PING after the open"})
+
+    def users(snapshot: Dict[str, Any]) -> List[str]:
+        return [str(m.get("text") or m.get("content") or "") for m in snapshot["messages"] if m.get("role") == "user"]
+
+    async def script(sock: ConduitSocket) -> Dict[str, Any]:
+        # Conduit names the bot's profile on every request (#2262).
+        frame = await sock.call("session.resume", params)
+        assert "error" not in frame, frame["error"]
+        # With the phone (or the Webapp) holding it open, the chat has one
+        # writer: the broker's next message reaches the same conversation
+        # (issue 750), sent while this socket is still connected.
+        status, later = await asyncio.to_thread(listener.plugin_call, f"work-send?{query}", None, DRIVER, 180)
+        assert status == 200, later
+        assert later["sent"][1] == out["session_id"], later
+        # The message may wait behind the wake's turn: watch the chat until
+        # it's one of the conversation's messages, not a queued one.
+        deadline = time.monotonic() + 90
+        while True:
+            again = await sock.call("session.resume", params)
+            assert "error" not in again, again["error"]
+            if any("PING after the open" in text for text in users(again["result"])) or time.monotonic() > deadline:
+                return {"opened": frame["result"], "after": again["result"]}
+            await asyncio.sleep(1)
+    result = listener.run(script)
+    opened, after = result["opened"], result["after"]
+    assert opened["session_id"] == out["session_id"], opened
+    assert any("Brief: RUN the job" in text for text in users(opened)), users(opened)
+    assert any("a long follow up" in text for text in users(opened)), users(opened)
+    assert after["session_id"] == out["session_id"], after
+    assert any("PING after the open" in text for text in users(after)), users(after)
 
 
 def test_a_watch_calls_local_live_chat_runs_on_the_authority(listener):

@@ -24,6 +24,7 @@ the next pass. Envelopes of other kinds go to the handlers registered with
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -90,6 +91,24 @@ MAX_PAGES = 20
 HANDLER_TRIES = 3
 
 ACCEPT, CONFIRM, REMOVE = "link.accept", "link.confirm", "link.remove"
+# What each side's plugin is and the kinds it takes, so a Link whose plugins
+# differ says which one to update instead of dropping envelopes unseen. Sent
+# again when the plugin or its kinds change, and every HELLO_AGAIN_S, inside
+# the mailbox's hold, for a side that restored an older links.json.
+HELLO = "link.hello"
+HELLO_AGAIN_S = 6 * 24 * 3600
+# Your own Hermes on both ends (multi-instance plan, Rooms 1): each side says
+# whether it marked the Link as its owner's own, with a number that only grows,
+# so the later of two changes holds whatever order they arrive in. A Link is
+# its owner's own only while both sides say so (``own_links``); a plugin
+# before 0.169 drops it, and that side never says so. Sent again with each
+# hello, and when the other side's plugin changes, for a side that restored
+# an older links.json or was updated to take it.
+OWN = "link.own"
+# A kind this side couldn't take is shown for as long as the mailbox holds one.
+UNHEARD_S = 7 * 24 * 3600
+_PLUGIN = re.compile(r"^\d{1,6}(?:\.\d{1,6}){1,3}\Z")
+MAX_HELLO_KINDS = 128
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,48}\Z")
 _KEY = re.compile(r"^[A-Za-z0-9_-]{43}\Z")
@@ -409,6 +428,26 @@ class Links:
         self._flush_quietly()
         return {"cancelled": True}
 
+    def set_own(self, link_id: Any, own: Any) -> Optional[dict[str, Any]]:
+        """Marks a linked Link as this owner's own Hermes, or not, and tells
+        the other side: the Link as ``view`` shows it, None when there's no
+        such Link. Only a Link both sides marked is an own Link."""
+        if not isinstance(link_id, str) or type(own) is not bool:
+            return None
+        now = int(self.clock())
+        with self._store.update() as state:
+            link = state["links"].get(link_id)
+            if link is None or link.get("leaving"):
+                return None
+            if link["status"] != "linked":
+                raise LinkError("not_linked", "This Hermes isn't linked with that one yet", 409)
+            if bool(link.get("own")) != own or not link.get("own_seq"):
+                link["own"] = own
+                link["own_seq"] = _next_own_seq(link, now)
+                _queue_own(state, link_id, link, now)
+        self._flush_quietly()
+        return self.get(link_id)
+
     def send(self, link_id: str, kind: str, body: dict, message_id: Optional[str] = None) -> str:
         """Leaves an envelope of ``kind`` for the other side of a Link: its
         message id. The same message id again while the first waits stores no
@@ -429,6 +468,32 @@ class Links:
         except (room_mailbox.MailboxError, room_envelope.EnvelopeError) as exc:
             raise _link_error(exc) from None
         return message_id
+
+    def _say_hello(self) -> None:
+        """Queues a link.hello for each linked Link that hasn't had this plugin's version and kinds, or not for
+        HELLO_AGAIN_S. Its message id names what it says, so the other side, which keeps the ids it has seen,
+        takes a changed one."""
+        body = _hello_body()
+        said = [body["plugin"], body["kinds"]]
+        now = int(self.clock())
+        digest = hashlib.sha256(json.dumps([*said, now // HELLO_AGAIN_S]).encode()).hexdigest()[:16]
+        with self._store.update() as state:
+            for link_id, link in state["links"].items():
+                if link["status"] != "linked" or link.get("leaving"):
+                    continue
+                if link.get("hello") == said and now - int(link.get("hello_at") or 0) < HELLO_AGAIN_S:
+                    continue
+                state["outbox"] = [item for item in state["outbox"]
+                                   if not (item["kind"] == HELLO and item["link"] == link_id)]
+                item = _outgoing(HELLO, link_id, link, body, now)
+                item["id"] = f"hello.{link_id}.{digest}"
+                state["outbox"].append(item)
+                link.update(hello=said, hello_at=now)
+                if link.get("own_seq"):
+                    _resend_own(state, link_id, link, now)
+                # What it couldn't take before, this plugin may take now.
+                if isinstance(link.get("unheard"), dict) and link["unheard"].get("kind") in body["kinds"]:
+                    link.pop("unheard")
 
     def mailbox(self) -> room_mailbox.Mailbox:
         """This installation's own inbox."""
@@ -790,6 +855,7 @@ class LinkLoop:
         links._registered(mailbox)
         read_at = int(self.clock())
         drained = self._read(identity, mailbox, wait)
+        links._say_hello()
         links.flush()
         if drained and self._run_out(read_at):
             links.flush()
@@ -988,12 +1054,50 @@ class LinkLoop:
                 if link_id in state["links"]:
                     _forget(state, link_id, now)
             return True
+        if kind == HELLO:
+            peer = _peer_from(opened.body)
+            if peer is None:
+                logger.info("Linked Rooms dropped a link.hello from Link %s that isn't one", link_id)
+                return True
+            with store.update() as state:
+                link = state["links"].get(link_id)
+                if link is not None:
+                    before = link.get("peer") if isinstance(link.get("peer"), dict) else {}
+                    link["peer"] = {**peer, "at": now}
+                    if before.get("plugin") != peer["plugin"] and link.get("own_seq") \
+                            and link["status"] == "linked" and not link.get("leaving"):
+                        # Updated, it may take what its older plugin dropped.
+                        _resend_own(state, link_id, link, now)
+            return True
+        if kind == OWN:
+            said = _own_from(opened.body)
+            if said is None:
+                logger.info("Linked Rooms dropped a link.own from Link %s that isn't one", link_id)
+                return True
+            with store.update() as state:
+                link = state["links"].get(link_id)
+                if link is not None and link["status"] == "linked":
+                    known = link.get("peer_own") if isinstance(link.get("peer_own"), dict) else {}
+                    held = int(known.get("seq") or 0)
+                    # A later seq wins. The same seq twice comes only from a
+                    # links.json restored on the other side within a second:
+                    # then unmarked wins, so the room rules come back rather
+                    # than stay lifted.
+                    if said["seq"] > held or (said["seq"] == held and not said["own"] and known.get("own") is True):
+                        link["peer_own"] = {**said, "at": now}
+            return True
         handler = HANDLERS.get(kind)
         if link["status"] != "linked":
             logger.info("Linked Rooms dropped a %s envelope for Link %s, which isn't confirmed", kind, link_id)
             return True
         if handler is None:
             logger.info("Linked Rooms dropped a %s envelope: nothing on this Hermes handles that kind", kind)
+            if not kind.startswith("link."):
+                # A newer plugin's kind: the Link says to update this one (_behind).
+                with store.update() as state:
+                    known = state["links"].get(link_id)
+                    if known is not None:
+                        known["unheard"] = {"kind": kind, "at": now}
             return True
         if header.id in link.get("seen", {}):
             return True
@@ -1225,8 +1329,111 @@ def _senders(state: dict[str, Any], now: int) -> list[tuple[str, str]]:
 
 
 def _shown(link_id: str, link: dict[str, Any], now: int) -> dict[str, Any]:
+    peer = link.get("peer") if isinstance(link.get("peer"), dict) else None
     return {"id": link_id, "name": link["name"], "status": _status(link, now),
-            "words": _words(_key_of(link, "sign"), _key_of(link, "seal")), "created_at": link["created_at"]}
+            "words": _words(_key_of(link, "sign"), _key_of(link, "seal")), "created_at": link["created_at"],
+            "plugin": peer["plugin"] if peer else None, "kinds": list(peer["kinds"]) if peer else None,
+            "behind": _behind(link, now), "own": link.get("own") is True,
+            "their_own": _their_own(link), "own_link": _is_own(link)}
+
+
+def _behind(link: dict[str, Any], now: int) -> Optional[str]:
+    """Whose plugin to update for this Link to carry everything: ``theirs``
+    when the other side takes fewer kinds than this side said it takes (or
+    never said, before plugin 0.167.4), ``yours`` when it sent a kind this side
+    doesn't take, None when they match or the Link isn't linked yet. It reads
+    what the store keeps, so any process answers it, not only the one whose
+    loop registered the handlers."""
+    if link["status"] != "linked":
+        return None
+    hello = link.get("hello")
+    mine = set(hello[1]) if isinstance(hello, list) and len(hello) == 2 and isinstance(hello[1], list) else None
+    unheard = link.get("unheard")
+    if isinstance(unheard, dict) and (mine is None or unheard.get("kind") not in mine) \
+            and now - int(unheard.get("at") or 0) < UNHEARD_S:
+        return "yours"
+    peer = link.get("peer")
+    if not isinstance(peer, dict):
+        # Its hello goes on the first pass after the Link is made: give it a few minutes.
+        return "theirs" if now - link["created_at"] > 600 else None
+    return "theirs" if mine is not None and mine - set(peer["kinds"]) else None
+
+
+def _hello_body() -> dict[str, Any]:
+    from . import events  # noqa: PLC0415 - plugin.yaml's version, read once there
+
+    return {"v": VERSION, "plugin": events.PLUGIN_VERSION, "kinds": sorted({*HANDLERS, OWN})[:MAX_HELLO_KINDS]}
+
+
+def _peer_from(body: Any) -> Optional[dict[str, Any]]:
+    """What a link.hello says, or None for one that isn't."""
+    if not isinstance(body, dict) or set(body) != {"v", "plugin", "kinds"} or type(body["v"]) is not int:
+        return None
+    plugin, kinds = body["plugin"], body["kinds"]
+    if not isinstance(plugin, str) or not _PLUGIN.match(plugin) or not isinstance(kinds, list) \
+            or len(kinds) > MAX_HELLO_KINDS \
+            or not all(isinstance(kind, str) and room_envelope.KIND.match(kind) for kind in kinds):
+        return None
+    return {"plugin": plugin, "kinds": sorted(set(kinds))}
+
+
+def _own_from(body: Any) -> Optional[dict[str, Any]]:
+    """What a link.own says, or None for one that isn't."""
+    if not isinstance(body, dict) or set(body) != {"v", "own", "seq"} or type(body["v"]) is not int \
+            or type(body["own"]) is not bool or type(body["seq"]) is not int or body["seq"] < 1:
+        return None
+    return {"own": body["own"], "seq": body["seq"]}
+
+
+def _queue_own(state: dict[str, Any], link_id: str, link: dict[str, Any], now: int) -> None:
+    """Queues what this side says of the Link being its owner's own, in place of one still waiting."""
+    state["outbox"] = [item for item in state["outbox"] if not (item["kind"] == OWN and item["link"] == link_id)]
+    seq = int(link.get("own_seq") or 0)
+    item = _outgoing(OWN, link_id, link, {"v": VERSION, "own": link.get("own") is True, "seq": seq}, now)
+    item["id"] = f"own.{link_id}.{seq}.{now}"
+    state["outbox"].append(item)
+
+
+def _resend_own(state: dict[str, Any], link_id: str, link: dict[str, Any], now: int) -> None:
+    """Says this side's mark again under a fresh seq: the other side takes only a
+    later seq, and after an older links.json comes back the seq here may be
+    behind the one it already holds (it says the same mark, so a fresh seq
+    can't reorder anything)."""
+    link["own_seq"] = _next_own_seq(link, now)
+    _queue_own(state, link_id, link, now)
+
+
+def _next_own_seq(link: dict[str, Any], now: int) -> int:
+    """The seq for this side's next link.own: past the last one and past the
+    clock's second, so a links.json restored from a backup gets ahead of what
+    the other side already holds, even a seq it took this same second. A seq
+    that isn't a number (a hand-edited file) counts as none."""
+    last = link.get("own_seq")
+    last = last if type(last) is int and last > 0 else 0
+    return max(last, int(now)) + 1
+
+
+def _their_own(link: dict[str, Any]) -> bool:
+    peer_own = link.get("peer_own")
+    return isinstance(peer_own, dict) and peer_own.get("own") is True
+
+
+def _is_own(link: dict[str, Any]) -> bool:
+    """Whether both sides marked this Link as their owner's own Hermes."""
+    return link.get("status") == "linked" and not link.get("leaving") and link.get("own") is True \
+        and _their_own(link)
+
+
+def own_links(root: Any) -> frozenset[str]:
+    """The Links both sides marked as their owner's own Hermes. A links.json
+    that can't be read has none: the owner's room rules hold rather than lapse."""
+    try:
+        state = _Store(Path(root)).read()
+    except Exception:  # noqa: BLE001
+        logger.debug("conduit_push: couldn't read links.json for own Links", exc_info=True)
+        return frozenset()
+    return frozenset(link_id for link_id, link in state.get("links", {}).items()
+                     if isinstance(link, dict) and _is_own(link))
 
 
 def _words(sign: bytes, seal: bytes) -> list[str]:

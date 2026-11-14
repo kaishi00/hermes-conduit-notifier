@@ -51,6 +51,9 @@ SKILL_NAME = "drawing-boards"
 # A Conduit that offers Send text for a contact card's message says this in
 # its exchange (plugin 0.67+).
 TEXT_DRAFTS_FEATURE = "text-drafts"
+# Send text to a person with no phone, to their email over iMessage
+# (hermes-conduit#2465).
+EMAIL_TEXTS_FEATURE = "email-texts"
 # Conduit draws a room's boards under its agents' messages (room_boards).
 ROOM_BOARDS_FEATURE = "room-boards"
 TOOLSET = "conduit"
@@ -81,8 +84,8 @@ SCHEMA: dict[str, Any] = {
         "cards make a board: put a short title on each, use "
         "layout tabs for one card at a time, and give next: the follow-ups the user would likely send, which a tap "
         "sends. "
-        "When the user asks you to text someone, show a contact card for them with their phone and the message "
-        "you wrote: Conduit offers Send text, which opens Messages with it filled in, and the user taps Send there. "
+        "When the user asks you to text someone, show a contact card for them with their phone (or, when they "
+        "have none, the email they use for iMessage) and the message you wrote: Conduit offers Send text, which opens Messages with it filled in, and the user taps Send there. "
         "Say it's ready to send, never that it was sent. "
         "To keep a card up to date, give it a live name and show the whole card again with the same name as "
         "things change: it replaces the earlier one. For places, Conduit adds what Apple "
@@ -133,6 +136,8 @@ LEFT_OUT_NOTE = ("This version of Conduit can't draw {kinds} cards, so they were
                  "your reply.")
 NO_TEXT_DRAFTS_NOTE = ("This version of Conduit can't fill in a text message, so the message was left off the card: "
                        "give the user the text in your reply.")
+NO_EMAIL_TEXTS_NOTE = ("This version of Conduit can fill in a text only to a phone number, so the message to someone "
+                       "with just an email was left off the card: give the user the text in your reply.")
 SHOWN_NOTE = ("On the user's screen. Say in a sentence that it's there and give the gist; don't read it out or "
               "repeat it in your reply.")
 IN_CHAT_NOTE = ("The cards are shown in the chat; Markdown isn't, so put anything else in your reply. Give the "
@@ -819,11 +824,18 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
         cards = cards[:card_schema.LEGACY_MAX_CARDS]
     elif dropped_extras:
         problems[:0] = dropped_extras
-    no_texts = _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE)
-    if no_texts:
+    # What Hermes hears about a text left off the card, if one was.
+    no_texts = ""
+    if _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE):
+        no_texts = NO_TEXT_DRAFTS_NOTE
         # An older Conduit would show the person with no Send text, and
         # Hermes would think the message was waiting on the user's phone.
         cards = _without_messages(cards)
+    elif _has_messages(cards, email_only=True) and not store.has_feature_everywhere(EMAIL_TEXTS_FEATURE):
+        no_texts = NO_EMAIL_TEXTS_NOTE
+        # An older Conduit keeps a text only with a phone, and would show the
+        # person with no Send text while Hermes says it's ready.
+        cards = _without_messages(cards, email_only=True)
     fallback = bool(cards) and not given_markdown
     if fallback:
         markdown = _fallback(cards)
@@ -906,18 +918,24 @@ def _diffs_answered(cards: list[dict[str, Any]], keep_diff: Callable[[dict[str, 
     return answered
 
 
-def _with_left_out(note: str, left_out: list[str], no_texts: bool = False) -> str:
+def _with_left_out(note: str, left_out: list[str], no_texts: str = "") -> str:
     if left_out:
         note = f"{note} {LEFT_OUT_NOTE.format(kinds=', '.join(left_out))}"
-    return f"{note} {NO_TEXT_DRAFTS_NOTE}" if no_texts else note
+    return f"{note} {no_texts}" if no_texts else note
 
 
-def _has_messages(cards: list[dict[str, Any]]) -> bool:
-    return any("message" in person for card in cards if card["type"] == "contact" for person in card["people"])
+def _has_messages(cards: list[dict[str, Any]], email_only: bool = False) -> bool:
+    """Whether a contact card carries a text; with email_only, a text to
+    someone with no phone."""
+    return any("message" in person and not (email_only and "phone" in person)
+               for card in cards if card["type"] == "contact" for person in card["people"])
 
 
-def _without_messages(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{**card, "people": [{key: value for key, value in person.items() if key != "message"}
+def _without_messages(cards: list[dict[str, Any]], email_only: bool = False) -> list[dict[str, Any]]:
+    """The cards without their texts; with email_only, only the texts to
+    someone with no phone."""
+    return [{**card, "people": [person if email_only and "phone" in person
+                                else {key: value for key, value in person.items() if key != "message"}
                                 for person in card["people"]]} if card["type"] == "contact" else card
             for card in cards]
 

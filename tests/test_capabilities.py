@@ -146,12 +146,15 @@ def test_every_capability_names_a_served_route_family():
         # Agent mode: the call's tools for an engine with its own front model.
         "local-live-agent": "/local-live/v1/tools",
         "artifacts": "/artifacts",
+        "artifact-pins": "/artifacts/pins",
         "workspace-files": "/workspace/",
         "workspace-resolve": "/workspace/resolve",
         "workspace-copy": "/workspace/",
         "room-rules": "/rooms/",
         "room-forget": "/rooms/sessions",
         "room-links": "/rooms/links",
+        "room-own-links": "/rooms/links/own",
+        "room-own-bots": "/rooms/own-bots",
         "room-setup": "/rooms/setup",
         "room-invites": "/rooms/drafts",
         # ?conduit_profile= on the voice and Watch routes, Local Live's first.

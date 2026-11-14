@@ -200,6 +200,15 @@ _relay_opener = urllib.request.build_opener(_NoRedirectRelay)
 _direct_relay_opener = urllib.request.build_opener(_NoRedirectRelay, urllib.request.ProxyHandler({}))
 
 
+def _proxied_relay_opener(proxy: urllib.request.ProxyHandler) -> Any:
+    return urllib.request.build_opener(_NoRedirectRelay, proxy)
+
+
+def _https_relay_opener() -> Any:
+    """The opener for an HTTPS relay request: _relay_opener, or through CONDUIT_PUSH_PROXY when it's set."""
+    return core._proxy_opener(_relay_opener, _proxied_relay_opener)
+
+
 def _relay_request(url: str, method: str, credential: str, payload: Optional[Dict[str, Any]],
                    timeout: float) -> Tuple[int, Dict[str, Any]]:
     """One relay request: (status, JSON body). Network failures raise."""
@@ -211,7 +220,7 @@ def _relay_request(url: str, method: str, credential: str, payload: Optional[Dic
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         # Plain HTTP (only ever to this machine) skips any proxy, which would see the credential in clear.
-        opener = _relay_opener if pairing._relay_urls().is_https(url) else _direct_relay_opener
+        opener = _https_relay_opener() if pairing._relay_urls().is_https(url) else _direct_relay_opener
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(64 * 1024)
             status = response.status

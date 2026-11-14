@@ -550,3 +550,240 @@ def test_a_queue_read_hermes_refuses_is_read_again_at_the_next_send(gateway):
     _call(chats, transport, "prompt.submit", {"session_id": "lost-5", "text": "again"})
     assert [r["method"] for r in connections[0].requests] == [
         "session.resume", "prompt.submit", "session.resume", "prompt.submit"]
+
+
+def test_a_sibling_profiles_chat_is_read_and_answered_by_its_profile(gateway):
+    """On a gateway serving several profiles the authority finds a sibling's
+    chat only by the profile a request names, so the link's own reads (its
+    fences, its queue, its detach, an answer it builds) name it too."""
+    chats, answers, connections = gateway
+    answers["session.create"] = {"result": {"session_id": "w1", "subscription_id": "sub"}}
+    answers["session.resume"] = {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub",
+                                            "prompts": [{"kind": "approval", "prompt_id": "p9",
+                                                         "execution_generation": 5, "command": "rm x"},
+                                                        {"kind": "clarify", "prompt_id": "c1",
+                                                         "execution_generation": 5}]}}
+    answers["approval.respond"] = {"result": {"status": "resolved"}}
+    transport = Transport()
+    _call(chats, transport, "session.create", {"cols": 96, "source": "desktop", "idempotency_key": "k1",
+                                               "profile": "manager"})
+    # The create's idempotency key is the authority's request id.
+    assert connections[0].requests[0]["params"] == {"source": "gui", "request_id": "k1", "profile": "manager"}
+    # The fence read for an interrupt that names no profile still names the chat's.
+    chats.link(transport).generations.clear()
+    _call(chats, transport, "session.interrupt", {"session_id": "w1"})
+    fence, interrupt = connections[0].requests[-2:]
+    assert fence["method"] == "session.resume" and fence["params"]["profile"] == "manager"
+    # A snapshot's waiting approval is answerable by its id, though the link never saw it asked.
+    answered = _call(chats, transport, "approval.respond", {"session_id": "w1", "choice": "deny", "request_id": "p9"})
+    assert answered["result"] == {"resolved": 1}
+    assert connections[0].requests[-1]["params"] == {"session_id": "w1", "execution_generation": 5,
+                                                     "prompt_id": "p9", "choice": "deny", "profile": "manager"}
+    _call(chats, transport, "session.close", {"session_id": "w1"})
+    assert connections[0].requests[-1]["method"] == "session.detach"
+    assert connections[0].requests[-1]["params"]["profile"] == "manager"
+
+
+def test_a_views_own_record_answers_which_approvals_a_chat_waits_on(gateway, monkeypatch):
+    """The Work panel asks every poll which approval each waiting workstream
+    shows: the broker's view of the chat answers from the prompts it heard
+    asked and not settled, with no snapshot (notifier #764), and says it
+    can't once the authority stops sending it the chat's events."""
+    chats, answers, connections = gateway
+    answers["session.resume"] = {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub",
+                                            "prompts": [{"kind": "approval", "prompt_id": "p1", "execution_generation": 5,
+                                                         "command": "ls", "description": "list"}]}}
+    viewers = {"sub"}
+    monkeypatch.setattr(gateway_chats, "_viewing", lambda home, sid, subscription: subscription in viewers)
+    transport = Transport()
+    # Never read: the caller reads the chat.
+    assert chats.seen_approvals(transport, "/home", "w1") is None
+    _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
+    asked = len(connections[0].requests)
+    assert chats.seen_approvals(transport, "/home", "w1") == [{"request_id": "p1", "command": "ls", "description": "list"}]
+    link = chats.link(transport)
+    link.write(_event("w1", "approval.request", {"prompt_id": "p2", "command": "rm x", "description": "remove",
+                                                  "timeout_s": 300}, generation=5))
+    link.write(_event("w1", "approval.settled", {"prompt_id": "p1"}, generation=5))
+    assert chats.seen_approvals(transport, "/home", "w1") == [
+        {"request_id": "p2", "command": "rm x", "description": "remove"}]
+    # One Hermes stopped waiting on (it timed out) isn't offered.
+    link.prompt_texts["p2"] = link.prompt_texts["p2"][:2] + (0.0,) + link.prompt_texts["p2"][3:]
+    assert chats.seen_approvals(transport, "/home", "w1") == []
+    link.write(_event("w1", "approval.request", {"prompt_id": "p3", "command": "make"}, generation=5))
+    # The turn's end settles what it asked.
+    link.write(_event("w1", "message.complete", {}, generation=5))
+    assert chats.seen_approvals(transport, "/home", "w1") == []
+    assert link.prompt_texts == {}
+    # Nothing of that was asked of the authority.
+    assert len(connections[0].requests) == asked
+    # A view the authority retired, or one read too long ago, can't say.
+    viewers.clear()
+    assert chats.seen_approvals(transport, "/home", "w1") is None
+    viewers.add("sub")
+    monkeypatch.setattr(gateway_chats, "SEEN_APPROVALS_MAX_AGE_S", -1.0)
+    assert chats.seen_approvals(transport, "/home", "w1") is None
+    monkeypatch.undo()
+    monkeypatch.setattr(gateway_chats, "_viewing", lambda home, sid, subscription: True)
+    # A view that missed a settle (retired meanwhile) drops what the next read
+    # no longer lists, and keeps one heard asked after that read went out.
+    link.write(_event("w1", "approval.request", {"prompt_id": "p4", "command": "old"}, generation=5))
+    answers["session.resume"] = lambda request: (
+        link.write(_event("w1", "approval.request", {"prompt_id": "p5", "command": "new"}, generation=5)),
+        {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub", "prompts": []}})[1]
+    _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
+    assert [row["request_id"] for row in chats.seen_approvals(transport, "/home", "w1")] == ["p5"]
+    # One the snapshot lists that settles before the link notes the snapshot
+    # stays settled: the snapshot was taken before it settled.
+    answers["session.resume"] = lambda request: (
+        link.write(_event("w1", "approval.settled", {"prompt_id": "p5"}, generation=5)),
+        {"result": {"session_id": "w1", "execution_generation": 5, "subscription_id": "sub",
+                    "prompts": [{"kind": "approval", "prompt_id": "p5", "execution_generation": 5, "command": "new"},
+                                {"kind": "approval", "prompt_id": "p6", "execution_generation": 5,
+                                 "command": "late", "timeout_s": 300}]}})[1]
+    _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
+    assert [row["request_id"] for row in chats.seen_approvals(transport, "/home", "w1")] == ["p6"]
+    # A snapshot doesn't say when Hermes asked, so its timeout isn't counted from the read.
+    assert link.prompt_texts["p6"][2] is None
+    # The same on a first read, before the link knew the prompt at all.
+    answers["session.resume"] = lambda request: (
+        chats.link(fresh).write(_event("w2", "approval.settled", {"prompt_id": "q1"}, generation=1)),
+        {"result": {"session_id": "w2", "execution_generation": 1, "subscription_id": "sub2",
+                    "prompts": [{"kind": "approval", "prompt_id": "q1", "execution_generation": 1, "command": "x"}]}})[1]
+    fresh = Transport()
+    _call(chats, fresh, "session.resume", {"session_id": "w2", "omit_messages": True})
+    assert chats.seen_approvals(fresh, "/home", "w2") == []
+    # Closing the view forgets what it followed of the chat.
+    _call(chats, transport, "session.close", {"session_id": "w1"})
+    assert chats.seen_approvals(transport, "/home", "w1") is None
+    assert "w1" not in link.viewed and link.prompts == {}
+
+
+def test_a_view_counts_while_the_authority_still_sends_it_the_chat(monkeypatch):
+    live = types.SimpleNamespace(subscribers={"sub": "actor"})
+    authority = types.SimpleNamespace(sessions={"w1": live})
+    monkeypatch.setattr(gateway_chats, "authority_for_home", lambda home: authority)
+    assert gateway_chats._viewing("/home", "w1", "sub")
+    assert not gateway_chats._viewing("/home", "w1", "other")
+    assert not gateway_chats._viewing("/home", "w2", "sub")
+    monkeypatch.setattr(gateway_chats, "authority_for_home", lambda home: None)
+    assert not gateway_chats._viewing("/home", "w1", "sub")
+
+
+def test_the_work_panels_approval_read_takes_no_snapshot_the_view_can_answer(tmp_path, monkeypatch):
+    snapshot = {"result": {"session_id": "w1", "prompts": [{"kind": "approval", "prompt_id": "p1",
+                                                            "execution_generation": 2, "command": "ls"}]}}
+    broker, api = _broker(tmp_path, {"session.resume": snapshot}, {"w1"}, monkeypatch)
+    seen = {"rows": [{"request_id": "p1", "command": "ls", "description": ""}]}
+    api.seen_approvals = lambda transport, home, sid: seen["rows"]
+    assert broker.approvals("w1") == seen["rows"] and api.requests == []
+    # An Approve tap reads the chat itself, as does a poll the view can't answer.
+    assert broker.approvals("w1", fresh=True) == [{"request_id": "p1", "command": "ls", "description": ""}]
+    seen["rows"] = None
+    assert broker.approvals("w1") == [{"request_id": "p1", "command": "ls", "description": ""}]
+    assert [frame["method"] for frame in api.requests] == ["session.resume", "session.resume"]
+
+
+class _AuthorityApi:
+    """gateway_chats' session API as work_broker sees it: answers by method."""
+
+    serves_authority = True
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.requests = []
+
+    def dispatch(self, frame, transport, timeout=None):
+        self.requests.append(frame)
+        answer = self.answers.get(frame["method"], {"result": {}})
+        answer = answer(frame) if callable(answer) else answer
+        return {"jsonrpc": "2.0", "id": frame["id"], **answer}
+
+
+def _broker(tmp_path, answers, open_ids, monkeypatch):
+    from conduit_push import work_broker
+
+    monkeypatch.setattr(gateway_chats, "authority_session_ids", lambda home: set(open_ids))
+    api = _AuthorityApi(answers)
+    return work_broker.Broker(tmp_path / "profiles" / "manager", api), api
+
+
+def test_the_work_broker_runs_a_bots_workstreams_on_the_authority_by_its_profile(tmp_path, monkeypatch):
+    """Where the gateway's listener runs, a workstream is the authority's chat
+    (the phone opens it), and every request names the bot's profile."""
+    snapshot = {"result": {"session_id": "w1", "stored_session_id": "w1", "running": True,
+                           "prompts": [{"kind": "approval", "prompt_id": "p1", "execution_generation": 2,
+                                        "command": "ls", "description": "list"}]}}
+    answers = {"session.create": {"result": {"session_id": "w1", "stored_session_id": "w1"}},
+               "prompt.submit": {"result": {"status": "started"}},
+               "session.resume": snapshot,
+               "session.redirect": {"result": {"status": "redirected"}},
+               "approval.respond": {"result": {"resolved": 1}}}
+    broker, api = _broker(tmp_path, answers, {"w1"}, monkeypatch)
+    started = broker.start(title="W1", prompt="brief", idempotency_key="k")
+    assert (started.runtime_id, started.session_id, started.profile) == ("w1", "w1", "manager")
+    assert broker.live_session_ids() == {"w1"}
+    runtime_id, record = broker.live("w1")
+    assert (runtime_id, record["session_key"], record["running"]) == ("w1", "w1", True)
+    assert broker.approvals("w1") == [{"request_id": "p1", "command": "ls", "description": "list"}]
+    assert broker.answer_approval("w1", "p1", "deny") is True
+    # A running turn is redirected; the authority's "started" reads as running now.
+    resumes = sum(frame["method"] == "session.resume" for frame in api.requests)
+    assert broker.send("w1", "instead", "auto") == ("redirected", "w1")
+    # One snapshot for a send: its reopen says whether the turn runs (notifier #756).
+    assert sum(frame["method"] == "session.resume" for frame in api.requests) == resumes + 1
+    assert broker.send("w1", "later", "after") == ("started", "w1")
+    assert broker.stop("w1") is True
+    assert broker.wake("w1", "update") == "started"
+    assert all(frame["params"].get("profile") == "manager" for frame in api.requests), \
+        [frame for frame in api.requests if frame["params"].get("profile") != "manager"]
+    # A chat the authority doesn't have open isn't live, and nothing is asked.
+    asked = len(api.requests)
+    assert broker.live("w2") is None and broker.approvals("w2") == [] and broker.stop("w2") is False
+    assert len(api.requests) == asked
+
+
+def test_under_the_gateway_workstreams_never_use_the_listeners_tui_registry(monkeypatch):
+    from conduit_push import work_broker
+
+    server = types.SimpleNamespace(dispatch=lambda *a: None, _sessions={}, _methods={})
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=None))
+    assert work_broker.server() is server
+    # The listener runs here: its authority, else nothing.
+    runner = types.SimpleNamespace(session_authority=None)
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=runner))
+    assert work_broker.server() is None
+    runner.session_authority = object()
+    assert work_broker.on_authority(work_broker.server())
+
+
+def test_on_the_authority_the_bypass_is_the_sessions_and_a_timeout_says_it_may_have_gone(tmp_path, monkeypatch):
+    from conduit_push import work_broker
+
+    answers = {"session.resume": {"result": {"session_id": "w1", "running": False}},
+               "config.set": {"result": {"key": "yolo", "value": "0", "scope": "session"}},
+               "prompt.submit": {"error": {"code": -32000, "message": "prompt.submit timed out; it may still have started"}}}
+    broker, api = _broker(tmp_path, answers, {"w1"}, monkeypatch)
+    broker.end_bypass("w1")
+    # A scope there names the profile-wide switch: the session's has none.
+    sent = [frame["params"] for frame in api.requests if frame["method"] == "config.set"]
+    assert sent == [{"session_id": "w1", "key": "yolo", "value": "off", "profile": "manager"}]
+    with pytest.raises(work_broker.BrokerError) as raised:
+        broker.wake("w1", "update")
+    assert raised.value.timed_out is True
+
+
+def test_pulse_on_the_authority_names_the_update_for_a_desktop_chat(monkeypatch):
+    # Issue 713: the gateway answers not_found for a Desktop-made chat before Hermes 0.22.6.
+    class Chats:
+        def dispatch(self, frame, transport):
+            return {"error": {"code": 4004, "message": "not_found", "data": {"reason": "not_found"}}}
+
+        def release(self, transport):
+            pass
+
+    monkeypatch.setattr(pulse_host, "_authority_chats", lambda: Chats())
+    monkeypatch.setattr(pulse_host, "hermes_version", lambda: (0, 22, 5))
+    sent = pulse_host.send("pulse-1", "check in")
+    assert not sent.ok and sent.detail.startswith("Update Hermes to 0.22.6 or newer"), sent
