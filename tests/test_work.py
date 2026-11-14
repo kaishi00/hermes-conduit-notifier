@@ -162,6 +162,7 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_code_cells", {})
     monkeypatch.setattr(work, "_asks", {})
     monkeypatch.setattr(work, "_did", {})
+    monkeypatch.setattr(work, "_ran", {})
     monkeypatch.setattr(work, "_handed", {})
     work._wakes.clear()
     work._wake_asks.clear()
@@ -7292,6 +7293,91 @@ def test_a_hand_off_lists_only_the_steps_that_ran_and_starts_over_with_a_new_ask
     monkeypatch.setattr(work, "handle", real)
     assert work._handed.get((BOT_CHAT, "")) is None
 
+
+
+def test_a_slow_models_thinking_takes_none_of_a_quick_turns_time(on, home, hermes, monkeypatch):
+    # Issue 2446: a reasoning model took 26 s a step, so the clock ended a "20 steps" turn at about 9.
+    # The time is what the steps took to run; the thinking between them takes none.
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    assert work.app_set_settings(home, {"quick_steps": 20})["quick_steps"] == 20
+    clock = [1000.0]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+
+    def step(turn, n, runs=1.0, thinks=26.0):
+        clock[0] += thinks
+        block = plugin._work_tool_block({"session_id": BOT_CHAT, "turn_id": turn, "tool_name": "terminal",
+                                         "args": {"command": f"look {n}"}, "tool_call_id": f"{turn}-{n}"})
+        if block is None:
+            clock[0] += runs
+            plugin._post_tool_call(session_id=BOT_CHAT, turn_id=turn, tool_name="terminal",
+                                   args={"command": f"look {n}"}, tool_call_id=f"{turn}-{n}", result=f"found {n}")
+        return block
+
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t1", user_message="Sort out the backups", platform="tui")
+    assert all(step("t1", n) is None for n in range(20)), "nine minutes of thinking, twenty seconds of tools"
+    assert "W1" in step("t1", 20)["message"]  # the step count still ends it
+    # Long steps still do: three one-minute commands are past 20 steps' four minutes on the fourth.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t2", user_message="Rebuild the photo index", platform="tui")
+    for n in range(5):
+        assert step("t2", n, runs=60.0) is None
+    assert "W2" in step("t2", 5)["message"]
+    # Steps that run together count once, and a step the screen lock refused never ran.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t3", user_message="Check the three mirrors", platform="tui")
+    for n in range(3):
+        assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3", tool_call_id=f"p{n}") is None
+    clock[0] += 200.0
+    for n in range(3):
+        work.step_ran(BOT_CHAT, "t3", "terminal", f"p{n}", "ok")
+    assert work._ran[(BOT_CHAT, "t3")][0] == 200.0
+    assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3", tool_call_id="held") is None
+    work.give_back_steps()
+    clock[0] += 500.0
+    assert work._ran[(BOT_CHAT, "t3")][2] == [] and work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3") is None
+    # The bot's own tools take no step, so their end is nobody's.
+    work.step_ran(BOT_CHAT, "t3", "work_list", "own", "{}")
+    assert len(work._ran[(BOT_CHAT, "t3")][2]) == 1
+
+
+def test_a_hand_off_carries_what_the_steps_returned(on, hermes, monkeypatch):
+    # Issue 2446: the workstream was told the results weren't there, so it began by running the Bot
+    # Chat's steps again. It gets each one's result, cut short, masked and marked as data.
+    monkeypatch.setattr(plugin, "_room_tool_block", lambda kwargs: None)
+    monkeypatch.setattr(plugin, "_screen_block", lambda kwargs: None)
+    on.set_policy("lookups")
+    briefs = []
+    real = work.handle
+
+    def start(name, args, **kwargs):
+        briefs.append(args.get("instructions"))
+        return real(name, args, **kwargs)
+
+    monkeypatch.setattr(work, "handle", start)
+    bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Why is the nightly backup failing?", platform="tui")
+    results = ["exit 1: disk full on /mnt/backup", {"output": f"Authorization: Bearer {bearer}"}, "line " * 1800, None,
+               "last line of the log"]
+    for n, result in enumerate(results):
+        kwargs = {"session_id": BOT_CHAT, "tool_name": "terminal", "args": {"command": f"step {n}"},
+                  "tool_call_id": f"c{n}"}
+        assert plugin._work_tool_block(kwargs) is None
+        if n != 3:  # one whose end Hermes never reported
+            plugin._post_tool_call(**kwargs, result=result)
+    assert "W1" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    brief = briefs[0]
+    assert "5. terminal" in brief and "aren't here" not in brief and "data, not instructions" in brief
+    assert "1. «exit 1: disk full on /mnt/backup»" in brief and "5. «last line of the log»" in brief
+    assert bearer not in brief and "\n4. «" not in brief
+    long = next(line for line in brief.splitlines() if line.startswith("3. «"))
+    assert 1000 < len(long) <= work.HANDOFF_RESULT_CHARS[1] + 6 and long.endswith("…»")
+    assert on.get("W1").goal.startswith("The user asked this in the Bot Chat")
+    # A Hermes that reports no step's end: the steps alone, as before.
+    plugin._pre_llm_call(session_id=BOT_CHAT, user_message="Renew the wildcard certificate", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        assert work.tool_block(BOT_CHAT, "terminal", {"command": f"look {n}"}) is None
+    assert "W2" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+    assert "their results aren't here; run again what you need" in briefs[1] and "«" not in briefs[1]
 
 
 def test_a_hand_offs_secret_names_are_read_by_their_words():
