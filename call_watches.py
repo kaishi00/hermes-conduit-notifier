@@ -778,6 +778,9 @@ def _report(args: dict[str, Any], session_id: Any, task_id: Any = None) -> dict[
     answer = _place_call(store, job_id, session_id, saw)
     if answer["status"] != "busy" and decision.get("once"):
         # Its call is placed (or the user is told why not): it checks no more.
+        # Marked only now, so a list meanwhile can't remove a watch whose
+        # call may still be refused by a full queue and tried again.
+        store.finish(job_id)
         _pause(job_id)
         answer["note"] += (" This watch was for a one-time event, so it has stopped: say so in a few words.")
     return answer
@@ -912,6 +915,13 @@ class WatchStore:
             if incident is not None:
                 incident["called"] = False
 
+    def finish(self, job_id: str) -> None:
+        """A one-time watch had its call (or its run told the user why not)."""
+        with self._locked() as state:
+            entry = state["watches"].get(job_id)
+            if entry is not None:
+                entry["done"] = True
+
     def done(self) -> set[str]:
         """The one-time watches that have had their call."""
         return {job_id for job_id, entry in self._load()["watches"].items() if entry.get("done")}
@@ -935,6 +945,13 @@ class WatchStore:
                 return {"status": "done"}
             config = entry["config"]
             incident = entry["incident"]
+            if config["once"] and incident is not None and incident["called"]:
+                # Its event stays true once it came, and a run that later
+                # reads it as over ("the reminder was sent") would open a
+                # new incident and ring again (notifier #775). Also a watch
+                # changed to once after its call.
+                entry["done"] = True
+                return {"status": "done"}
             if not happening:
                 entry["incident"] = None
                 return {"status": "cleared" if incident and incident["called"] else "quiet"}
@@ -956,11 +973,6 @@ class WatchStore:
             if not in_hours(hours, when):
                 return {"status": "outside_hours", "hours": hours}
             incident["called"] = True
-            if config["once"]:
-                # Its event stays true once it came, and a run that later
-                # reads it as over ("the reminder was sent") would open a
-                # new incident and ring again (notifier #775).
-                entry["done"] = True
             return {"status": "call", "once": config["once"]}
 
     def _load(self, *, for_write: bool = False) -> dict[str, Any]:

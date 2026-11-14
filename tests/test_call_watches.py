@@ -616,6 +616,26 @@ def test_a_one_time_watch_with_calls_off_tells_the_user_once_and_stops(home, her
     assert _report(job_id, False)["status"] == "done"
 
 
+def test_a_watch_changed_to_once_after_its_call_stops(home, hermes, clock):
+    job_id = _reminder(hermes, once=False)
+    assert _report(job_id, True)["status"] == "calling"
+    assert _setup({"action": "set", "watch": REMINDER})["result"] == "changed"
+    for happening in (False, True):
+        assert _report(job_id, happening)["status"] == "done"
+    assert hermes.jobs[job_id]["state"] == "paused" and len(_rang(home)) == 1
+
+
+def test_a_list_while_a_one_time_call_is_being_queued_keeps_the_watch(home, hermes, clock, monkeypatch):
+    job_id = _reminder(hermes)
+
+    def full_after_a_list(*args, **kwargs):
+        assert _setup({"action": "list"})["watches"], "still listed while its call is queued"
+        raise ValueError("too_many")
+    monkeypatch.setattr(calls, "tool_watch", full_after_a_list)
+    assert _report(job_id, True)["status"] == "busy"
+    assert job_id in hermes.jobs and job_id in watches._store().configs()
+
+
 def test_once_is_true_or_false(home, hermes):
     answer = _setup({"action": "set", "watch": {**REMINDER, "once": "soon"}})
     assert answer["ok"] is False and "once" in answer["note"]
