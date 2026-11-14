@@ -209,6 +209,9 @@ HANDED_OFF = ("This is turning into longer work than the Bot Chat should hold up
               "plugin started workstream {ref} ({title}) for the rest, with the user's ask and the steps this turn "
               "took. Don't run any more tools for it here. Tell the user in a line that {ref} is on it in the "
               "background and its result comes back here.")
+# What a hand-off carries at most: the ask, and the steps taken (up to 20 of them).
+HANDOFF_ASK_CHARS = 4000
+HANDOFF_STEPS_CHARS = 2400
 HANDOFF_INSTRUCTIONS = ("The user asked this in the Bot Chat:\n\n{ask}\n\nThe Bot Chat ran out of quick steps "
                         "and handed you the rest. It had already run these (their results aren't here; run "
                         "again what you need):\n{did}\n\nDo the whole task and report what you found or changed.")
@@ -3272,6 +3275,10 @@ def tool_block(session_id: Any, tool_name: Any, args: Any = None,
     return None
 
 
+def _cut_keeping_lines(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def _step_line(name: str, args: Any) -> str:
     """One step a quick turn took, for the workstream it hands on to."""
     try:
@@ -3318,7 +3325,9 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
     if not ask:
         return STEP_BLOCK.format(tool=tool)
     title = _cut(" ".join(ask.split()[:6]), 60)
-    instructions = HANDOFF_INSTRUCTIONS.format(ask=ask, did="\n".join(f"- {line}" for line in did) or "- nothing")
+    steps = _cut(" | ".join(did), HANDOFF_STEPS_CHARS) if did else ""
+    instructions = HANDOFF_INSTRUCTIONS.format(ask=_cut_keeping_lines(ask, HANDOFF_ASK_CHARS),
+                                               did=f"- {steps}" if steps else "- nothing")
     try:
         home = _home()
         # Open work like it is judged by the ask alone: the wrapper and the
@@ -3380,7 +3389,10 @@ def _take_steps(session_id: Any, turn_id: Any, count: int, most: int = QUICK_STE
             return max(most - taken, 0)
         _steps[key] = (first, taken + count)
         if not taken:
+            # A fresh budget is a new turn (one Hermes names no id for
+            # shares its key): what the last one did and handed on is over.
             _did.pop(key, None)
+            _handed.pop(key, None)
         _did.setdefault(key, []).extend(did or ())
         while len(_steps) > _STEP_TURNS:
             del _steps[next(iter(_steps))]

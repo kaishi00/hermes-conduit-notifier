@@ -1303,12 +1303,22 @@ def test_a_quick_turn_past_its_steps_hands_the_rest_to_a_workstream(on, hermes, 
     for n in range(work.QUICK_STEPS):
         work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t5")
     assert work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t5")["message"] == work.STEP_BLOCK.format(tool="terminal")
+    # A Hermes that names no turn: each turn's fresh budget hands its own ask on.
+    clock = [time.monotonic()]
+    monkeypatch.setattr(work.time, "monotonic", lambda: clock[0])
+    for n, ask in enumerate(("Plan the garden beds", "Sort the tax receipts")):
+        plugin._pre_llm_call(session_id=BOT_CHAT, user_message=ask, platform="tui")
+        for _ in range(work.QUICK_STEPS):
+            work.tool_block(BOT_CHAT, "terminal", {})
+        assert f"W{3 + n}" in work.tool_block(BOT_CHAT, "terminal", {})["message"]
+        clock[0] += work.QUICK_S + 1
+    assert on.get("W4").title == "Sort the tax receipts"
     # The same ask again goes to the open work, by the bot.
     plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t4", user_message="Fix the missing saw argument", platform="tui")
     for n in range(work.QUICK_STEPS):
         work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t4")
     same = work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t4")["message"]
-    assert same.startswith(work.STEP_BLOCK.format(tool="terminal")) and "W1" in same and on.get("W3") is None
+    assert same.startswith(work.STEP_BLOCK.format(tool="terminal")) and "W1" in same and on.get("W5") is None
     # Another turn with no ask kept (Hermes gave no message): told to start one, as before.
     for n in range(work.QUICK_STEPS):
         work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")
