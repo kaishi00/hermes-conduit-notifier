@@ -1,4 +1,5 @@
 import asyncio
+import json
 import contextlib
 import importlib.util
 import os
@@ -164,7 +165,8 @@ def test_status_reports_configured_server(client, hermes):
     _settings(hermes, url="http://10.0.0.5:8765", api_key="secret")
     body = client.get(f"{BASE}/speech-server/status?profile=work").json()
     assert body == {"ok": True, "configured": True, "available": True,
-                    "url": "ws://10.0.0.5:8765/v1/realtime", "has_key": True, "reason": None}
+                    "url": "ws://10.0.0.5:8765/v1/realtime", "has_key": True, "drive_turns": False,
+                    "reason": None}
     assert hermes.entered == ["work"]
 
 
@@ -339,6 +341,19 @@ def test_socket_relays_both_ways(client, server):
     assert server.upstream.sent == ['{"type":"session.update"}', "finish"]
     assert close.code == 1000
     assert server.connects == [("ws://127.0.0.1:8765/v1/realtime", {})]
+
+
+def test_socket_tells_a_driven_server_to_read_aloud(client, hermes, server):
+    _settings(hermes, url="ws://127.0.0.1:8765", drive_turns=True, transcription_model="gpt-4o-mini-transcribe")
+    server.upstream = FakeUpstream(frames=['{"type":"session.created"}'])
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "session.update", "session": {"audio": {"input": {}}}}))
+        ws.send_text("finish")
+        _wait_close(ws)
+    session = json.loads(server.upstream.sent[0])["session"]
+    assert session["instructions"] == api.speech_server.SPEECH_SERVER_SAY_INSTRUCTIONS
+    assert session["audio"]["input"]["transcription"] == {"model": "gpt-4o-mini-transcribe"}
 
 
 def test_socket_without_a_server_closes_with_the_reason(client, hermes, server):

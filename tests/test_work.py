@@ -7472,6 +7472,8 @@ def test_a_kept_result_is_masked_before_any_cut():
         assert len(text) > work._RESULT_READ_CHARS
         kept = work._result_kept(text)
         assert bearer[:6] not in kept and kept.endswith("…") and len(kept) <= work._RESULT_KEPT_CHARS
+    inside = work._result_kept(f"Authorization: Bearer {bearer} " + filler + "a b c d e f")  # masked in the long path too
+    assert len(f"Authorization: Bearer {bearer} " + filler) > work._RESULT_READ_CHARS - 12 and bearer[:6] not in inside
     whole = work._result_kept("a " * 2000 + bearer)  # under the read limit: masked whole, then cut
     assert bearer[:6] not in whole
     assert work._result_kept({"output": "x"}) == '{"output": "x"}'

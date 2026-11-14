@@ -13,12 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.172.5 (2026-11-14)
+## 0.173.1 (2026-11-14)
 
 ### Fixes
 
 - When a Bot Chat hands a task to a workstream, a very long step result can no longer leave the first characters of a password or key in the workstream's instructions. Results are masked before they are cut, not after.
 - Two steps refused at the same moment (another chat had the bot's screen) no longer leave the turn's time limit counting the model's thinking again.
+
+## 0.173.0 (2026-11-14)
+
+### New and improved
+
+- Hermes can answer on a speech server that has a model of its own, such as a hosted realtime model. Turn on "Hermes answers" in Conduit's speech server settings (voice.speech_server.drive_turns) and the server only listens and reads the replies aloud, in Local Live, agent mode, Classic and on the Watch. Before, such a server answered by itself and Hermes never got a turn.
 
 ## 0.172.4 (2026-11-14)
 

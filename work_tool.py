@@ -3595,8 +3595,9 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
     # Whole steps only, and a tool_call batch's together, so every result
     # below has its steps above it. The "(and N more)" line has its room.
     lines, size, shown = [], 0, 0
+    room = HANDOFF_STEPS_CHARS - len(HANDOFF_MORE.format(count=len(did))) - 1
     for n, step in enumerate(did, 1):
-        if step[2] and size <= HANDOFF_STEPS_CHARS - len(HANDOFF_MORE.format(count=len(did))) - 1:
+        if step[2] and size <= room:
             shown = n - 1  # everything before this call fits
         size += len(f"{n}. {step[0]}") + 1
         lines.append(f"{n}. {step[0]}")
