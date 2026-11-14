@@ -1430,5 +1430,17 @@ def test_a_room_of_your_own_hermes_tells_its_turn_to_use_its_home_tools(host, no
     _own(monkeypatch, set(), _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
     context = _context(REMOTE)
     assert rules.FRAMING_HEAD in context and rules.OWN_FRAMING not in context
+    # The pictures its messages name still reach it, since the peer route carries none.
+    peer_id = _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    picture = str(host / "conduit" / "room-files" / ("20261114-" + "a" * 32) / "shot.jpg")
+    result = plugin._pre_llm_call(session_id=REMOTE, turn_id="t2", platform="api_server",
+                                  user_message=f"look\n@file:{picture}", conversation_history=[])
+    assert rules.TURN_PICTURES_LINE.format(count="a picture", them="it") in result["context"]
+    # On the room's home too, when everyone from elsewhere came over an own Link.
+    laifu = {**LAIFU, "target": {**LAIFU["target"], "peer_id": peer_id("own-link")}}
+    _room(host / "state.db", "room-own", [FURINA, laifu])
+    _room_session(host, "s-own", "room-own")
+    context = _context("s-own")
+    assert rules.OWN_FRAMING in context and rules.FRAMING_HEAD not in context
     # A home room with no one from another installation is no room of your own Hermes: no note.
     assert rules.OWN_FRAMING not in _context("s-local") and rules.OWN_FRAMING not in _context("s-chat")
