@@ -3145,6 +3145,17 @@ def test_an_update_never_writes_over_a_file_it_failed_to_read(rooms, monkeypatch
     assert store.path.read_bytes() == before
 
 
+def test_an_invite_whose_hold_cant_be_kept_pushes_at_once(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+
+    def broken(key):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rooms.laifu.own_bots, "hold", broken)
+    room_id = draft(rooms, links=("link1",))["room_id"]
+    assert [told["room_id"] for told in rooms.notified["laifu"]] == [room_id]
+
+
 def test_a_held_invite_that_ran_out_doesnt_push(rooms, monkeypatch):
     _own(rooms, monkeypatch)
     room_id = draft(rooms, links=("link1",))["room_id"]
