@@ -832,14 +832,18 @@ def test_a_bot_with_workstreams_off_is_messaged_with_message_agent(bots, hermes)
     assert held["message"] == work.MESSAGE_AGENT_IN_WORKSTREAM
 
 
-def test_a_message_to_a_bot_with_workstreams_off_takes_no_step(bots, hermes):
-    store_mod.Store(bots["hermes"]).set_policy("lookups")
+@pytest.mark.parametrize("mode", ["strict", "lookups", "open"])
+def test_a_message_to_a_bot_with_workstreams_off_takes_no_step(bots, hermes, mode):
+    store_mod.Store(bots["hermes"]).set_policy(mode)
     store_mod.Store(bots["zhongli"]).set_policy("off")
     for turn in range(work.QUICK_STEPS + 2):
         assert work.tool_block(BOT_CHAT, "message_agent", {"target": "zhongli", "message": str(turn)},
                                turn_id="t1") is None
-    for step in range(work.QUICK_STEPS):
-        assert work.tool_block(BOT_CHAT, "terminal", {"command": "ls"}, turn_id="t1") is None, step
+    assert "work_ask" in work.tool_block(BOT_CHAT, "message_agent", {"target": "nahida", "message": "hi"},
+                                         turn_id="t1")["message"]
+    if mode == "lookups":
+        for step in range(work.QUICK_STEPS):
+            assert work.tool_block(BOT_CHAT, "terminal", {"command": "ls"}, turn_id="t1") is None, step
 
 
 def test_each_pair_of_bots_has_an_hourly_cap(bots, hermes, monkeypatch):

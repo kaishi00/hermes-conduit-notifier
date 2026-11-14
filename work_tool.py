@@ -3414,7 +3414,8 @@ def _tool_block(session_id: Any, tool_name: Any, args: Any = None,
     doesn't run itself, else None. Strict runs only its own tools; quick
     (lookups) runs any other for the bot's quick_steps of a turn (``turn_id``,
     Hermes' id for the turn), delegate_task never; open runs everything but
-    message_agent. Outside a coordinator it blocks only a workstream's
+    message_agent, which every setting runs only to a bot whose workstreams
+    are off (``_to_bots_off``). Outside a coordinator it blocks only a workstream's
     message_agent (other bots are asked through the Bot Chat) and its memory
     (the coordinator keeps what it reports)."""
     _last_take.taken = None
