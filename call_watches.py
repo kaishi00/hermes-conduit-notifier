@@ -794,12 +794,18 @@ def run_note(session_id: Any, task_id: Any = None) -> str | None:
     if job_id is None:
         return None
     store = _store()
-    config = store.stale_prompts().get(job_id)
-    if config is None:
+    if job_id not in store.stale_prompts():
         return None
     cronjob = _cronjob()
-    if cronjob is not None and _call(cronjob, action="update", job_id=job_id, prompt=run_prompt(config)).get("success"):
-        store.mark_prompt(job_id)
+    # Under the setup lock, read again: a set or sync meanwhile wrote the
+    # current prompt with its new config, which this mustn't put back.
+    with _one_setup_at_a_time():
+        config = store.stale_prompts().get(job_id)
+        if config is None:
+            return None
+        if cronjob is not None and _call(cronjob, action="update", job_id=job_id,
+                                         prompt=run_prompt(config)).get("success"):
+            store.mark_prompt(job_id)
     return RUN_NOTE
 
 

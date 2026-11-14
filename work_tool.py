@@ -3316,7 +3316,15 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
     title = _cut(" ".join(ask.split()[:6]), 60)
     instructions = HANDOFF_INSTRUCTIONS.format(ask=ask, did="\n".join(f"- {line}" for line in did) or "- nothing")
     try:
-        answer = json.loads(handle("work_start", {"title": title, "instructions": instructions},
+        home = _home()
+        # Open work like it is judged by the ask alone: the wrapper and the
+        # steps' paths, the same in every hand-off, would match each other.
+        alike = _related(work_store.Store(home), title, ask, "") if home is not None else []
+        if alike:
+            named = "; ".join(f"{work.ref} ({why})" for work, why in alike[:3])
+            return STEP_BLOCK.format(tool=tool) + (f" (The plugin didn't start one for you: open work looks like "
+                                                   f"this task: {named}.)")
+        answer = json.loads(handle("work_start", {"title": title, "instructions": instructions, "new": True},
                                    session_id=session_id))
     except Exception:  # noqa: BLE001 — the bot is told to start it itself
         logger.warning("conduit_push: couldn't hand a quick turn's rest to a workstream", exc_info=True)

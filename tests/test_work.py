@@ -1292,6 +1292,17 @@ def test_a_quick_turn_past_its_steps_hands_the_rest_to_a_workstream(on, hermes, 
     again = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={}, turn_id="t1",
                                   tool_call_id="c10")
     assert "W1" in again["message"] and on.get("W2") is None, "once a turn"
+    # Another turn's unrelated ask, with the same steps, isn't taken for the same task.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t3", user_message="Book a table for two", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {"command": f"cat {n}"}, turn_id="t3")
+    assert "W2" in work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t3")["message"]
+    # The same ask again goes to the open work, by the bot.
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t4", user_message="Fix the missing saw argument", platform="tui")
+    for n in range(work.QUICK_STEPS):
+        work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t4")
+    same = work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t4")["message"]
+    assert same.startswith(work.STEP_BLOCK.format(tool="terminal")) and "W1" in same and on.get("W3") is None
     # Another turn with no ask kept (Hermes gave no message): told to start one, as before.
     for n in range(work.QUICK_STEPS):
         work.tool_block(BOT_CHAT, "terminal", {}, turn_id="t2")
