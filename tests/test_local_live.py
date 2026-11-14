@@ -2526,12 +2526,30 @@ def test_a_refusal_that_follows_the_servers_own_response_start_still_has_the_rep
         upstream.busy, upstream.busy_created_first = 1, True
         ws.send_text(json.dumps({"type": "conduit.tool.result", "call_id": "call_1", "output": "{}", "speak": False}))
         _wait_for(lambda: upstream.sent.count({"type": "response.create"}) == 2)
-        # An error that isn't the busy one asks for nothing more.
+        _finish(ws)
+
+
+def test_an_error_that_is_not_the_busy_one_has_the_tools_reply_asked_for_once(client, hermes, server):
+    _own_model(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _own_ready(ws, upstream)
+        _function_call(upstream)
+        _next(ws, "conduit.tool.call")
+        # The ask is taken, and its response hasn't started when another
+        # frame is refused.
+        upstream.unstarted = True
+        ws.send_text(json.dumps({"type": "conduit.tool.result", "call_id": "call_1", "output": "{}", "speak": False}))
+        _wait_for(lambda: upstream.sent[-1] == {"type": "response.create"})
         upstream.push({"type": "error", "error": {"code": "invalid_value"}})
-        upstream.push({"type": "response.done", "response": {"id": "resp9", "status": "completed"}})
-        _next(ws, "error")
+        while _next(ws, "error")[0]["error"].get("code") != "invalid_value":
+            pass
+        upstream.push({"type": "response.created", "response": {"id": "spoken"}})
+        upstream.push({"type": "response.done", "response": {"id": "spoken", "status": "completed"}})
+        while _next(ws, "response.done")[0]["response"]["id"] != "spoken":
+            pass
         time.sleep(0.1)
-        assert upstream.sent.count({"type": "response.create"}) == 2
+        assert upstream.sent.count({"type": "response.create"}) == 1
         _finish(ws)
 
 
