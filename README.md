@@ -1679,10 +1679,13 @@ question or a small task doesn't start a workstream. Change it in Conduit
   and code prompts (`browser_vault`). Strict ("Only Coordinates") leaves it
   only those. Lookups ("Quick Things Here") also runs any other tool, reads
   and changes alike, under the bot's usual approvals, for 5 steps of a turn
-  or a minute after the turn's first (the user can pick 10 or 20 steps per
-  bot, `quick_steps`, with 12 seconds for each); the step after that doesn't
+  or a minute of those steps running (the user can pick 10 or 20 steps per
+  bot, `quick_steps`, with 12 seconds for each; only the time the tools take
+  counts, never the model's thinking between them, so a slow model gets its
+  whole step count, plugin 0.172.4+); the step after that doesn't
   run, and the plugin starts a workstream for the rest itself, with the turn's
-  ask and the steps it took, so the bot only says so (when it can't, similar
+  ask, the steps it took and what each returned, cut short (0.172.4+), so
+  the bot only says so (when it can't, similar
   open work or the running limit, say, the bot is told to), and `delegate_task`
   always goes to a workstream. Open ("Everything Here") runs everything in
   the Bot Chat and starts workstreams when it judges the work long or you ask.
