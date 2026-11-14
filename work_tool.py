@@ -5755,7 +5755,11 @@ def _queue_wake(home: Path, coordinator: str, line: str, kind: str = "work", ite
             _check_call_hold(home, coordinator, first=True)
         return
     kind = "work" if kind == "call" else kind
-    if not item:
+    # Twice: an ask's row is how a refused wake finds it, so one passing
+    # failure shouldn't leave the asking bot waiting.
+    for _attempt in range(2):
+        if item:
+            break
         try:
             item = work_store.Store(home).outbox_add(
                 ref, {"ask": "line_ask", "answer": "line_answer", "tell": "line_tell"}.get(kind, "line"),
@@ -5887,12 +5891,13 @@ def _send_wake(home: Path, coordinator: str) -> None:
             _asks_unreached(home, store, items, f"Hermes answered {outcome}")
     except Exception as error:  # noqa: BLE001 — the digest still carries it on the next turn
         # Not sent: none of it comes back as news after a restart. A write
-        # that failed after Hermes took it leaves the rows as they are.
-        for row in ([item] if item else []) + items if not sent else []:
+        # that failed after Hermes took it tries once more to mark the rows
+        # delivered, so a restart doesn't hand the same ask or yes over twice.
+        for row in ([item] if item else []) + items:
             try:
-                store.outbox_done(row, "refused")
+                store.outbox_done(row, "accepted" if sent else "refused")
             except Exception:  # noqa: BLE001
-                logger.debug("conduit_push: couldn't mark an update row refused", exc_info=True)
+                logger.debug("conduit_push: couldn't mark an update row", exc_info=True)
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
         # Only when Hermes is known not to have taken it: a submit that timed
         # out may still queue the turn, and a write after the send changes nothing.

@@ -720,6 +720,40 @@ def test_an_ask_whose_wake_hermes_refused_fails_and_the_asker_hears_why(bots, he
     assert any("A1: your ask “Can you book it?” never reached Nahida" in text for text in texts)
 
 
+def test_an_asks_line_kept_on_the_second_try_still_fails_it_when_refused(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_add
+    failed = []
+
+    def flaky(self, ref, kind, *rest, **kw):
+        if kind == "line_ask" and not failed:
+            failed.append(kind)
+            raise OSError("database is locked")
+        return real(self, ref, kind, *rest, **kw)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_add", flaky)
+    hermes.refuse["prompt.submit"] = {"code": 4130, "message": "Session has 23000 messages"}
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert failed and store_mod.Store(bots["hermes"]).get("A1").status == "failed"
+
+
+def test_a_wake_hermes_took_doesnt_hand_its_lines_over_again_when_a_write_fails(bots, hermes, monkeypatch):
+    real = store_mod.Store.outbox_done
+
+    def broken(self, item, outcome):
+        if outcome == "queued":
+            raise OSError("disk full")
+        return real(self, item, outcome)
+
+    monkeypatch.setattr(store_mod.Store, "outbox_done", broken)
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert len(hermes.named("prompt.submit")) == 1
+    # Delivered, not pending: a restart's replay doesn't ask Nahida twice.
+    assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
+
+
 def test_an_ask_to_a_bot_that_cant_take_it_is_refused(bots, hermes):
     store_mod.Store(bots["zhongli"]).set_policy("off")
     assert call("work_ask", {"bot": "zhongli", "text": "?"})["error"] == "bot_off"
