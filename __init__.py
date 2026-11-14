@@ -133,7 +133,8 @@ def register(ctx: Any) -> None:
     try:
         ctx.register_hook("post_tool_call", _post_tool_call)
     except Exception:  # noqa: BLE001
-        logger.warning("conduit_push: post_tool_call hook unavailable; Pulse records no tool outcomes", exc_info=True)
+        logger.warning("conduit_push: post_tool_call hook unavailable; Pulse records no tool outcomes, and a quick "
+                       "turn's time runs from each step's start, its hand-off without the steps' results", exc_info=True)
     ctx.register_hook("subagent_start", _subagent_start)
     ctx.register_hook("subagent_stop", _subagent_stop)
     # A call held over a restart goes out when its hold runs out (#449).

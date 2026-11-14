@@ -3591,8 +3591,17 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
     if not ask:
         return STEP_BLOCK.format(tool=tool)
     title = _cut(" ".join(ask.split()[:6]), 60)
-    steps = _cut_keeping_lines("\n".join(f"{n}. {line}" for n, (line, _) in enumerate(did, 1)), HANDOFF_STEPS_CHARS)
-    returned = _returned(did)
+    # Whole steps only, so every result below has its step above it.
+    lines, size = [], 0
+    for n, (line, _) in enumerate(did, 1):
+        size += len(f"{n}. {line}") + 1
+        if size > HANDOFF_STEPS_CHARS:
+            break
+        lines.append(f"{n}. {line}")
+    returned = _returned(did[: len(lines)])
+    if len(lines) < len(did):
+        lines.append(f"(and {len(did) - len(lines)} more)")
+    steps = "\n".join(lines)
     instructions = HANDOFF_INSTRUCTIONS.format(
         ask=_cut_keeping_lines(ask, HANDOFF_ASK_CHARS), did=steps or "- nothing",
         results=HANDOFF_RESULTS if returned else HANDOFF_NO_RESULTS,
@@ -3703,7 +3712,8 @@ def _take_steps(session_id: Any, turn_id: Any, count: int, most: int = QUICK_STE
         steps = _did.setdefault(key, [])
         if not ran[2]:
             ran[1] = now
-        ran[2].append((call, len(steps), count))
+        running = (call, len(steps), count)
+        ran[2].append(running)
         _ran[key] = ran
         steps.extend([line, ""] for line in did or ())
         while len(_steps) > _STEP_TURNS:
@@ -3712,7 +3722,7 @@ def _take_steps(session_id: Any, turn_id: Any, count: int, most: int = QUICK_STE
             del _did[kept]
         for kept in [kept for kept in _ran if kept not in _steps]:
             del _ran[kept]
-    _last_take.taken = (key, count)
+    _last_take.taken = (key, count, running)
     return None
 
 
@@ -3748,14 +3758,21 @@ def give_back_steps() -> None:
     took, _last_take.taken = getattr(_last_take, "taken", None), None
     if took is None:
         return
-    key, count = took
+    key, count, running = took
     with _steps_lock:
         if key in _steps:
             first, taken = _steps[key]
             _steps[key] = (first, max(taken - count, 0))
         ran = _ran.get(key)
-        if ran and ran[2]:
-            ran[2].pop()  # nor does it run: the last one taken, on this thread just now
+        did = _did.get(key)
+        if ran and running in ran[2] and did is not None:
+            # Nor does it run, nor is it among the steps a hand-off says
+            # already ran: this take's own, whatever else was taken since.
+            ran[2].remove(running)
+            place = running[1]
+            del did[place: place + count]
+            ran[2][:] = [(call, at - count if at > place else at, n) for call, at, n in ran[2]]
+            return
         did = _did.get(key)
         if did:
             # Nor is it among the steps a hand-off says already ran.
