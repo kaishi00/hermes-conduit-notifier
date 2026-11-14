@@ -111,6 +111,12 @@ notes:
     HERMES_PLUGIN_HOST_PROCESS=1 marks a plugin host. The self-update refuses there, and the
     Linked Rooms setup saves without restarting the gateway: a restart from a plugin host brings
     the gateway back with the host's environment, this flag among it.
+  execute_code's tool calls: >-
+    Hermes calls pre_tool_call for each tool an execute_code script calls with no session_id, only
+    the task_id of the execute_code call (its RPC and its session kernel both pass it). work_tool
+    takes that call's chat from the task, so a Bot Chat's script keeps to its turn's steps (feature
+    map: "Bot workstreams"; upstream/test_code_steps.py). Without the task_id, or with another one,
+    the script's calls run as from an agent with no session, outside the coordinator's limits.
   dashboard websocket auth: >-
     hermes_cli.web_server_chat._ws_auth_ok and _ws_request_is_allowed sign in every plugin socket;
     without them the sockets fail closed.

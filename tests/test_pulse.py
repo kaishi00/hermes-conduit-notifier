@@ -841,6 +841,24 @@ def test_a_pulse_turn_gets_its_note_and_no_tools(live, db):
     assert plugin._pre_tool_call(session_id=SID, turn_id="t2", tool_name="read_file", args={}) is None
 
 
+def test_another_chats_script_isnt_held_while_a_pulse_turn_runs(live, db):
+    # DeepSeek on notifier#795: a tool an execute_code script calls comes
+    # with no session id, which Pulse holds while any attempt is in flight;
+    # its task names the chat it's from, which isn't Pulse's.
+    db.session()
+    live.store.set("enabled", True)
+    pulse.tick()
+    plugin._pre_llm_call(session_id=SID, turn_id="t1", user_message=live.sent()[0], conversation_history=[])
+    assert plugin._pre_tool_call(session_id="", tool_name="read_file", args={}) == {
+        "action": "block", "message": pulse.HELD_MESSAGE}
+    assert plugin._pre_tool_call(session_id="elsewhere", turn_id="e1", task_id="task-e", tool_name="execute_code",
+                                 args={}) is None
+    assert plugin._pre_tool_call(session_id="", task_id="task-e", tool_name="read_file", args={}) is None
+    plugin._post_tool_call(session_id="elsewhere", task_id="task-e", tool_name="execute_code", args={}, result="{}")
+    assert plugin._pre_tool_call(session_id="", task_id="task-e", tool_name="read_file", args={}) == {
+        "action": "block", "message": pulse.HELD_MESSAGE}
+
+
 def test_a_lookalike_tag_is_not_a_pulse_turn(live, db):
     db.session()
     live.store.set("enabled", True)

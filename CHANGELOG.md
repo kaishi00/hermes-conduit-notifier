@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.172.3 (2026-11-14)
+
+### Fixes
+
+- A Hermes chat that has no session yet, such as the terminal's, no longer has every tool held back with "This bot's coordinator settings couldn't be checked just now". It isn't a Bot Chat, so the coordinator's limits don't apply to it. The tools a script run with execute_code calls count as steps of the chat that ran it, so they no longer fail in every chat, and a Bot Chat's script stays within its turn's steps.
+
 ## 0.172.2 (2026-11-14)
 
 ### Fixes

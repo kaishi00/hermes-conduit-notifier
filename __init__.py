@@ -265,6 +265,12 @@ def _point_profiles_here() -> None:
 
 
 def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
+    # A tool an execute_code script calls comes with no session id, only the
+    # execute_code call's task: every rule below reads it as that call's chat
+    # and turn (notifier#784).
+    session_id, turn_id = work_tool.code_chat(kwargs.get("session_id"), kwargs.get("turn_id"), kwargs.get("task_id"))
+    if session_id != kwargs.get("session_id") or turn_id != kwargs.get("turn_id"):
+        kwargs = {**kwargs, "session_id": session_id, "turn_id": turn_id}
     # The owner's rules for a room with other people's agents come first: they
     # hold for every call a room turn makes, the background review's (it keeps
     # the room session's id) and a delegated child's (room_rules follows it to
@@ -366,7 +372,7 @@ def _screen_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
     try:
         return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"),
-                                    turn_id=kwargs.get("turn_id"))
+                                    turn_id=kwargs.get("turn_id"), task_id=kwargs.get("task_id"))
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
         # Only a bot that has had work (on by default otherwise) is held when its check fails.
@@ -374,6 +380,10 @@ def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 
 
 def _post_tool_call(**kwargs: Any) -> None:
+    session_id, turn_id = work_tool.code_chat(kwargs.get("session_id"), kwargs.get("turn_id"), kwargs.get("task_id"))
+    if session_id != kwargs.get("session_id") or turn_id != kwargs.get("turn_id"):
+        kwargs = {**kwargs, "session_id": session_id, "turn_id": turn_id}  # as _pre_tool_call reads it
+    _quietly(work_tool.code_ended, kwargs.get("tool_name"), kwargs.get("task_id"), kwargs.get("args"))
     if not forks.inside():
         if kwargs.get("tool_name") == "clarify":
             _quietly(work_tool.answered, _text(kwargs.get("session_id")))
