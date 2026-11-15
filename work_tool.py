@@ -6546,7 +6546,9 @@ def _summary(args: Any) -> str:
 # An Authorization header's credential, and any long token-like run: masked
 # whole by the plugin itself before Hermes' redactor sees the text.
 _AUTH_HEADER = re.compile(r"(?i)(authorization\s*[:=]\s*[\"']?(?:[a-z]+\s+)?)[^\s\"',]{8,}")
-_BEARER = re.compile(r"(?i)\b(bearer\s+)(?=\S*\d)[A-Za-z0-9_\-+/=.~]{8,}")
+# A bearer credential: one with a digit from 8 characters, any from 16, so
+# prose ("bearer tokens") stays as written.
+_BEARER = re.compile(r"(?i)\b(bearer\s+)(?:(?=\S*\d)[A-Za-z0-9_\-+/=.~]{8,}|[A-Za-z0-9_\-+/=.~]{16,})")
 _TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=]{24,}")
 
 

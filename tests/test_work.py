@@ -7665,6 +7665,7 @@ def test_a_hand_off_masks_credentials_whole_under_hermes_redactor(monkeypatch):
     assert calls[-1] == {"force": True}, "an older Hermes is asked without the options it doesn't take"
     assert bearer[:6] not in work._result_kept(f"line line {bearer}")
     assert bearer[:6] not in work._masked(f"curl -H 'authorization: token {bearer[:12]}'")
+    assert "abcdef" not in work._masked("Bearer abcdefghijklmnop"), "letters only, no digit"
     # Prose that only mentions a scheme stays as written.
     assert work._masked("basic configuration and bearer tokens") == "basic configuration and bearer tokens"
 
