@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.5 (2026-11-15)
+
+### Fixes
+
+- When Hermes Desktop closed several chats at once (after it reloaded or lost its connection), a turn still running in one of them could keep its Lock Screen card and the bot's screen until they timed out. That turn now ends as stopped when its chat closes.
+
 ## 0.177.3 (2026-11-15)
 
 ### Fixes

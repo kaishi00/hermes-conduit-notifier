@@ -127,6 +127,14 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
+    # A chat's close also says it ended on_session_finalize, which Hermes runs
+    # on its own thread, ungated: the one end a turn still running then gets
+    # when Hermes skips its on_session_end (notifier issue 820).
+    try:
+        ctx.register_hook("on_session_finalize", _on_session_finalize)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: on_session_finalize hook unavailable; a chat closed mid-turn ends its turn "
+                       "only through on_session_end", exc_info=True)
     ctx.register_hook("pre_approval_request", _pre_approval_request)
     # Pulse's outcome ledger: every tool call's outcome while Pulse is on.
     # Optional: a Hermes without the hook records nothing.
@@ -948,6 +956,8 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     if _is_child(session_id):
         return
+    if _session_closed_after_turn(session_id, kwargs):
+        return
     # Its turn is over: the screen is free for the bot's other chats.
     _quietly(work_tool.screen_turn_ended, session_id)
     _end_parent_turn(session_id)
@@ -1038,6 +1048,34 @@ def _on_session_end(**kwargs: Any) -> None:
     if calls.failed_turn(session_id, profile=_profile, fallback=failed, turn_id=kwargs.get("turn_id")):
         return
     enqueue(failed)
+
+
+def _session_closed_after_turn(session_id: str, kwargs: dict[str, Any]) -> bool:
+    """Whether this end is a chat's close (Hermes' session finalize: stopped,
+    no turn named) with none of its turns running: the last turn's own end
+    already settled everything, so it is not a stopped turn of its own
+    (notifier issue 820). A Hermes without pre_llm_call never says when a
+    turn starts, so its ends count as before."""
+    if not pulse.turns_marked or not kwargs.get("interrupted"):
+        return False
+    turn_id = kwargs.get("turn_id")
+    if isinstance(turn_id, str) and turn_id:
+        return False
+    return not _turn_running(session_id)
+
+
+def _on_session_finalize(**kwargs: Any) -> None:
+    """A chat closed (Desktop let it go, /new, Hermes exiting). Hermes said
+    so on_session_end just before, but skips that call when another chat's
+    close is still in it: both name no turn, so its gate takes them for one
+    call (NousResearch/hermes-agent#104865). A turn still running here then
+    ends stopped, as on_session_end would have ended it; one that call
+    already ended isn't running, so nothing happens twice."""
+    session_id = _text(kwargs.get("session_id"))
+    if not session_id or forks.inside() or _is_child(session_id) or not _turn_running(session_id):
+        return None
+    _on_session_end(session_id=session_id, completed=False, interrupted=True, platform=kwargs.get("platform"))
+    return None
 
 
 def _pre_approval_request(**kwargs: Any) -> None:
