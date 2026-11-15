@@ -941,3 +941,25 @@ def test_a_cron_report_a_compaction_folded_its_summary_into_still_lists_its_file
         ("delivered", "image", "/cam/now.jpg"),
         ("delivered", "image", "/cards/quiz.png"),
     ]
+
+
+def test_a_folded_picture_only_report_and_a_long_one_still_list(tmp_path, monkeypatch):
+    # A folded report whose one file is a picture, under a summary that
+    # names no file: only the query's cron term finds the row. And a
+    # summary or a report longer than the scan reads doesn't turn the
+    # row's files into the user's.
+    _no_gateway(monkeypatch)
+    picture = (f"Earlier they talked.\n\n{index.SUMMARY_END_MARKER}\n\n"
+               '[Cron job "Cam" report: shown in the chat, no reply asked for]\n\n@image:/cam/now.jpg')
+    filler = "x" * (index.MAX_SCAN_CHARS + 10)
+    long_summary = (f"@file:/root/uploads/old.pdf {filler}\n\n{index.SUMMARY_END_MARKER}\n\n"
+                    '[Cron job "Late" report: shown in the chat, no reply asked for]\n\n@file:/var/late.pdf')
+    long_report = (f"{index.MERGED_PRIOR_HEADER}\n"
+                   '[Cron job "Long" report: shown in the chat, no reply asked for]\n\n@file:/var/long.pdf\n'
+                   f"{filler}\n\n{index.MERGED_SUMMARY_DELIMITER}\n\nsummary\n\n{index.SUMMARY_END_MARKER}")
+    conn = _db(tmp_path, [("s1", "user", picture), ("s1", "user", long_summary), ("s1", "user", long_report)])
+    assert sorted((i["source"], i["kind"], i["path"]) for i in _list(conn)["items"]) == [
+        ("delivered", "document", "/var/late.pdf"),
+        ("delivered", "document", "/var/long.pdf"),
+        ("delivered", "image", "/cam/now.jpg"),
+    ]

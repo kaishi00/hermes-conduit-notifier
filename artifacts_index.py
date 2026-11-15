@@ -214,23 +214,27 @@ def assistant_items(text: str) -> Iterable[tuple]:
 
 
 def _own_text(text: str) -> str:
-    """A user row's own text when a compaction folded its summary into the
-    row: a cron note there is still the run's report, and the summary's
-    words are nobody's attachments."""
+    """A user row's own text, as far as the scan reads, when a compaction
+    folded its summary into the row: a cron note there is still the run's
+    report, and the summary's words are nobody's attachments. The markers
+    are found in the whole row (a search copies nothing), so a long summary
+    or report doesn't hide where the row's own text is."""
     if text.startswith(MERGED_PRIOR_HEADER):
         end = text.find(MERGED_SUMMARY_DELIMITER)
         if end >= 0:
-            return text[len(MERGED_PRIOR_HEADER):end].strip()
+            start = len(MERGED_PRIOR_HEADER)
+            return text[start:min(end, start + MAX_SCAN_CHARS)].strip()
     cut = text.find(SUMMARY_END_MARKER)
-    return text[cut + len(SUMMARY_END_MARKER):].lstrip() if cut >= 0 else text
+    if cut < 0:
+        return text[:MAX_SCAN_CHARS]
+    start = cut + len(SUMMARY_END_MARKER)
+    return text[start:start + MAX_SCAN_CHARS].lstrip()
 
 
 def user_items(text: str) -> Iterable[tuple]:
     # Clipped once, so a huge one-line row that looks like a note's header
     # is matched only as far as the scan reads.
-    # Hermes' wrapper is looked for within the same limit, so a huge row
-    # costs no more than it did.
-    text = _own_text((text or "")[:MAX_SCAN_CHARS])
+    text = _own_text(text or "")
     if text.startswith(CRON_NOTE_PREFIX) and _CRON_NOTE_HEADER_RE.match(text):
         # A cron report's files are the run's deliveries, as its MEDIA tags
         # were in Hermes' own turn (issue 581), never files the user sent.

@@ -388,6 +388,15 @@ def cancel_alerts(session_id: str, kind: str | None = None) -> None:
         logger.warning("Conduit could not cancel an alert call", exc_info=True)
 
 
+def forget_waiting_card(request_id: str) -> None:
+    """A question's card can no longer be answered (``CallStore.forget_waiting_card``):
+    the Needs you list stops handing it to Conduit. Never raises."""
+    try:
+        _store(get_hermes_home()).forget_waiting_card(request_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not take a question's card off the waiting list", exc_info=True)
+
+
 def note_waiting(session_id: str, kind: str, *, turn_session_id: str = "", **detail: Any) -> bool:
     """Keeps what Hermes waits on (``CallStore.note_waiting``) for Conduit's
     "Needs you" list, and for a call to read and answer: True when a call

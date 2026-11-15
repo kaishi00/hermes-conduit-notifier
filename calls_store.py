@@ -522,13 +522,15 @@ class CallStore:
 
     def note_waiting(self, session_id: str | list[str], kind: str, *, request_id: str = "",
                      questions: Any = None, description: Any = "", command: Any = "",
-                     title: Any = "", room: Any = "") -> bool:
+                     title: Any = "", room: Any = "", decision: Any = None) -> bool:
         """Hermes waits on the user in ``session_id`` (or the ids its session
         goes by, the chat titled ``title``): a question batch (``request_id``,
         the clarify loop's own decision id, and ``questions``) or an approval
         (``description`` and ``command``), in the group room ``room`` this
         Hermes hosts when it's a room member's turn (hermes-conduit#2064:
-        Needs you opens the room). Kept for Conduit's "Needs you"
+        Needs you opens the room). ``decision`` is a question's card as its
+        push carried it, which the list hands Conduit so an open app can draw
+        it (hermes-conduit#2556). Kept for Conduit's "Needs you"
         list always, and so a call about it can read and answer it with no
         chat open while alert calls are on: True only then (the wait is
         ``followed``). A newer wait of the same kind in the session replaces
@@ -545,7 +547,8 @@ class CallStore:
         entry = _waiting_entry({
             "id": secrets.token_hex(12), "session_ids": ids, "kind": kind, "at": self.clock(),
             "followed": followed, "title": title, "room": room,
-            "request_id": request_id, "questions": questions, "description": description,
+            "request_id": request_id, "questions": questions, "decision": decision,
+            "description": description,
             "command": command if isinstance(command, str) else "",
             "command_sha": hashlib.sha256(command.encode("utf-8")).hexdigest() if isinstance(command, str) and command else "",
             "cut": isinstance(command, str) and len(command) > MAX_WAITING_COMMAND_CHARS,
@@ -580,6 +583,28 @@ class CallStore:
             state["waiting"] = kept
             return removed
 
+    def forget_waiting_card(self, request_id: Any) -> bool:
+        """The question ``request_id`` can no longer be answered on its card
+        (the relay released it, or never showed it), though Hermes may still
+        wait on its own prompt: the wait stays listed, without the card, so
+        Conduit draws none that would refuse the answer. True when one was
+        dropped."""
+        if not isinstance(request_id, str) or not request_id or not self.path.exists():
+            return False
+
+        def carried(item: dict[str, Any]) -> bool:
+            return item["kind"] == "question" and item["request_id"] == request_id and "decision" in item
+
+        if not any(carried(item) for item in self._load()["waiting"]):
+            return False
+        with self._locked() as state:
+            dropped = False
+            for item in state["waiting"]:
+                if carried(item):
+                    del item["decision"]
+                    dropped = True
+            return dropped
+
     def waiting_for(self, session_id: Any) -> dict[str, Any] | None:
         """What Hermes waits on in ``session_id``, as a call reads it: the
         newest wait, with its questions numbered and the ones answered from a
@@ -597,8 +622,10 @@ class CallStore:
         Conduit's "Needs you" list: each wait's kind, the ids its chat goes
         by, the chat's title, a line saying what it waits on and when it
         began. A wait older than ``max_age`` for its kind (Hermes gives up
-        on it then) and a chat in ``leave_out`` (a bot's workstreams, which
-        their Work panel shows) are left out. Never answers anything."""
+        on it then) and an approval in a chat in ``leave_out`` (a bot's
+        workstreams, whose Work panel answers it) are left out; a
+        workstream's question is listed, since only its chat's card answers
+        it (Eric, 2026-11-15, hermes-conduit#2556). Never answers anything."""
         if not self.path.exists():
             return []
         now = self.clock()
@@ -609,7 +636,7 @@ class CallStore:
             limit = ages.get(item["kind"])
             if limit is not None and now - item["at"] >= limit:
                 continue
-            if hidden & set(item["session_ids"]):
+            if item["kind"] == "approval" and hidden & set(item["session_ids"]):
                 continue
             out.append(_listed_waiting(item))
         return sorted(out, key=lambda entry: entry["at"], reverse=True)
@@ -1352,7 +1379,45 @@ def _waiting_entry(raw: dict[str, Any], now: float) -> dict[str, Any] | None:
     if not questions:
         return None
     entry.update({"request_id": request_id, "questions": questions})
+    decision = _waiting_decision(raw.get("decision"), request_id)
+    if decision:
+        entry["decision"] = decision
     return entry
+
+
+def _waiting_decision(raw: Any, request_id: str) -> dict[str, Any] | None:
+    """A question's card as its push carried it (events.sanitize_decision's
+    shape, kept field by field), or None when it isn't this wait's."""
+    if not isinstance(raw, dict) or raw.get("kind") != "clarify" or raw.get("request_id") != request_id:
+        return None
+    question = raw.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return None
+
+    def labels(value: Any) -> list[str]:
+        return [label[:MAX_WAITING_CHOICE_CHARS] for label in value if isinstance(label, str) and label.strip()
+                ][:MAX_WAITING_CHOICES] if isinstance(value, list) else []
+
+    decision: dict[str, Any] = {"kind": "clarify", "request_id": request_id,
+                                "question": question[:MAX_WAITING_TEXT_CHARS]}
+    if labels(raw.get("choices")):
+        decision["choices"] = labels(raw.get("choices"))
+    questions = []
+    for item in raw.get("questions") if isinstance(raw.get("questions"), list) else []:
+        if not isinstance(item, dict) or len(questions) >= MAX_WAITING_QUESTIONS:
+            continue
+        qid, text = item.get("qid"), item.get("question")
+        if not isinstance(qid, str) or not qid or len(qid) > 128 or not isinstance(text, str) or not text.strip():
+            continue
+        entry: dict[str, Any] = {"qid": qid, "question": text[:MAX_WAITING_TEXT_CHARS]}
+        if labels(item.get("choices")):
+            entry["choices"] = labels(item.get("choices"))
+        if item.get("multi_select") is True:
+            entry["multi_select"] = True
+        questions.append(entry)
+    if questions:
+        decision["questions"] = questions
+    return decision
 
 
 def _complete(item: dict[str, Any], request_id: str) -> bool:
@@ -1375,7 +1440,8 @@ def _public_question(entry: dict[str, Any], index: int, form: bool) -> dict[str,
 
 def _listed_waiting(item: dict[str, Any]) -> dict[str, Any]:
     """A wait as the "Needs you" list shows it: never a command, and only
-    the first question of a batch, with how many there are."""
+    the first question of a batch, with how many there are, then the
+    question's whole card when its push carried one."""
     if item["kind"] == "approval":
         summary, count = item["description"], 1
     else:
@@ -1384,7 +1450,10 @@ def _listed_waiting(item: dict[str, Any]) -> dict[str, Any]:
             "title": item["title"], "summary": " ".join(summary.split())[:MAX_WAITING_SUMMARY_CHARS],
             "questions": count if item["kind"] == "question" else 0, "at": item["at"],
             # A wait in a group room this Hermes hosts opens the room (hermes-conduit#2064).
-            **({"room": item["room"]} if item.get("room") else {})}
+            **({"room": item["room"]} if item.get("room") else {}),
+            # A question's card, for a Conduit on screen to draw in its chat
+            # when Hermes drew none there (hermes-conduit#2556).
+            **({"decision": item["decision"]} if item.get("decision") else {})}
 
 
 def _public_waiting(item: dict[str, Any]) -> dict[str, Any]:
