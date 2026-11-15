@@ -19,8 +19,9 @@ Around the tools, the plugin's hooks:
   turn, so routing never depends on the coordinator remembering a transcript.
 - ``pre_tool_call``: the bot's policy for its Bot Chat (strict: its own tools
   and what shows or asks the user; lookups, "Quick Things Here": any tool for
-  a few steps a turn; open: everything), and the step journal for its
-  workstreams.
+  a few steps a turn; open: everything but ``message_agent``, which every
+  setting lets through only to a bot whose workstreams are off), and the step
+  journal for its workstreams.
 - ``post_tool_call``: closes the journal's step.
 - ``post_llm_call``: a workstream's turn ended, so its row takes the result
   and the Bot Chat gets a hidden, queued "work update" turn (batched).
@@ -3414,7 +3415,8 @@ def _tool_block(session_id: Any, tool_name: Any, args: Any = None,
     doesn't run itself, else None. Strict runs only its own tools; quick
     (lookups) runs any other for the bot's quick_steps of a turn (``turn_id``,
     Hermes' id for the turn), delegate_task never; open runs everything but
-    message_agent. Outside a coordinator it blocks only a workstream's
+    message_agent, which every setting runs only to a bot whose workstreams
+    are off (``_to_bots_off``). Outside a coordinator it blocks only a workstream's
     message_agent (other bots are asked through the Bot Chat) and its memory
     (the coordinator keeps what it reports)."""
     _last_take.taken = None
