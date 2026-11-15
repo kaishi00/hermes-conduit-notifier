@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.13 (2026-11-15)
+
+### Fixes
+
+- Since 0.177.12, a hand-off to a workstream showed long file paths and branch names as *** along with credentials, so the workstream had to look them up again. They are kept now, while hashes, tokens split by dots, a quoted Authorization header and a value under a signature-named argument are masked.
+
 ## 0.177.12 (2026-11-15)
 
 ### Security

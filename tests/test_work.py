@@ -7668,6 +7668,21 @@ def test_a_hand_off_masks_credentials_whole_under_hermes_redactor(monkeypatch):
     assert "abcdef" not in work._masked("Bearer abcdefghijklmnop"), "letters only, no digit"
     # Prose that only mentions a scheme stays as written.
     assert work._masked("basic configuration and bearer tokens") == "basic configuration and bearer tokens"
+    # Reviews of notifier #835: paths, files and branch names the workstream needs stay; a hash, a token
+    # split by dots, a quoted Authorization and a value under a signature-named argument don't.
+    for kept in ("/home/user/project/src/auth/callback.py", "/Users/Eric/Projects/MyApp/Sources/AppDelegate.swift",
+                 "feature/issue-2542-handoff-masking", "really_long_module_name_here.py"):
+        assert work._masked(f"read {kept}") == f"read {kept}"
+    assert "4f2a9c1e" not in work._masked("commit 4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39")
+    assert "Zk3uQ9" not in work._masked("key Zk3uQ9wLm2Rt.7Yb4Nc8Vd1Xe6Hf5Ja0P")
+    assert "dXNlcjpwYXNz" not in work._masked('{"Authorization": "Basic dXNlcjpwYXNz"}')
+    assert "s3cr3t" not in work._step_line("http", {"signature": "s3cr3t"})
+    # A current Hermes is asked for its forced, non-reusable masking.
+    calls.clear()
+    monkeypatch.setitem(sys.modules, "agent.redact",
+                        types.SimpleNamespace(redact_sensitive_text=lambda text, **kw: calls.append(kw) or text))
+    work._masked("anything")
+    assert calls == [{"force": True, "file_read": True, "secret_file": True}]
 
 
 def test_a_hand_off_from_a_scheduled_job_is_titled_by_the_job_and_its_output():
