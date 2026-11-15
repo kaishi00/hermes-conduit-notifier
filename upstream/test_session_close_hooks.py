@@ -33,20 +33,24 @@ from hermes_cli import lifecycle, plugins
 
 manager = plugins.get_plugin_manager()
 manager.discover_and_load()
-seen = {"end": [], "finalize": []}
+seen = {"end": [], "finalize": [], "first_inside": False}
 inside = threading.Event()
 release = threading.Event()
+running = threading.Event()  # chat-a's close is in its callback
 
 
 def on_end(**kwargs):
     seen["end"].append(kwargs.get("session_id"))
     if kwargs.get("session_id") == "chat-a":
+        running.set()
         inside.set()
         release.wait(10)
+        running.clear()
 
 
 def on_finalize(**kwargs):
-    seen["finalize"].append([kwargs.get("session_id"), threading.current_thread() is threading.main_thread()])
+    seen["finalize"].append([kwargs.get("session_id"), threading.current_thread() is threading.main_thread(),
+                             running.is_set()])
 
 
 manager._hooks.setdefault("on_session_end", []).append(on_end)
@@ -54,7 +58,7 @@ manager._hooks.setdefault("on_session_finalize", []).append(on_finalize)
 first = threading.Thread(target=lambda: lifecycle.invoke_hook(
     "on_session_end", session_id="chat-a", completed=False, interrupted=True, platform="tui"))
 first.start()
-inside.wait(10)
+seen["first_inside"] = inside.wait(10)
 # chat-b closes while chat-a's close is still in its on_session_end.
 lifecycle.invoke_hook("on_session_end", session_id="chat-b", completed=False, interrupted=True, platform="tui")
 lifecycle.finalize_session(session_id="chat-b", platform="tui")
@@ -75,11 +79,16 @@ def _closes(tmp_path: Path) -> dict[str, Any]:
 
 def test_a_chats_finalize_reaches_the_plugin_while_another_close_runs(tmp_path: Path) -> None:
     seen = _closes(tmp_path)
-    # On the caller's thread, so no gate stands between it and the plugin.
-    assert seen["finalize"] == [["chat-b", True]]
+    assert seen["first_inside"]
+    # On the caller's thread while chat-a's close is still running: no gate,
+    # and no wait for the other close, stands between it and the plugin.
+    assert seen["finalize"] == [["chat-b", True, True]]
 
 
 def test_concurrent_chat_closes_all_reach_on_session_end(tmp_path: Path, known_failure: Any) -> None:
     seen = _closes(tmp_path)
-    known_failure(sorted(seen["end"]) == ["chat-a", "chat-b"], "second close skipped",
+    assert seen["first_inside"]
+    # Only the gate's skip is the known failure; anything else fails as itself.
+    signature = "second close skipped" if seen["end"] == ["chat-a"] else f"on_session_end reached {seen['end']!r}"
+    known_failure(sorted(seen["end"]) == ["chat-a", "chat-b"], signature,
                   f"on_session_end reached {seen['end']!r}")
