@@ -875,3 +875,156 @@ def test_a_flood_is_turned_away_before_its_body_is_read(tree, client, monkeypatc
     assert client.post(f"{BASE}/workspace/mkdir", json=body).status_code == 200
     assert client.post(f"{BASE}/workspace/mkdir", json={**body, "name": "b"}).status_code == 429
     assert len(read) == 1
+
+
+# --- Notifier issue 834 ----------------------------------------------------------
+
+
+def _hermes_files(monkeypatch, policy):
+    files = types.ModuleType("hermes_cli.web_routers.files")
+    files._fs_backend = lambda profile: None
+    files._fs_profile_home = lambda profile: None
+    files._is_sensitive_path = lambda path: False
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_routers.files", files)
+    server_files = types.ModuleType("hermes_cli.web_server_files")
+    if policy is not None:
+        server_files._managed_files_policy = policy
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_files", server_files)
+
+
+def test_a_files_policy_hermes_cant_read_refuses_rather_than_lifting_the_limit(tree, monkeypatch):
+    monkeypatch.setattr(api.workspace, "_workspace_files", lambda: wf)
+
+    def unreadable(*args, **kwargs):
+        raise OSError("policy file unreadable")
+
+    _hermes_files(monkeypatch, unreadable)
+    with pytest.raises(api.core.TokenError) as exc:
+        api.workspace._workspace(None)
+    assert exc.value.status == 503
+    # Neither a tapped file name nor a saved artifact's copy reads a file meanwhile.
+    assert api.workspace._host_file_check(None)(str(tree / "notes.txt")) is False
+    assert api.workspace._pin_source(None)(str(tree / "notes.txt")) == (None, "unreadable")
+    # A policy whose answer has another shape is as unknown.
+    _hermes_files(monkeypatch, lambda *a, **k: object())
+    with pytest.raises(api.core.TokenError):
+        api.workspace._workspace(None)
+
+
+def test_a_hermes_from_before_the_files_policy_or_with_no_locked_folder_has_no_limit(tree, monkeypatch):
+    monkeypatch.setattr(api.workspace, "_workspace_files", lambda: wf)
+    _hermes_files(monkeypatch, None)
+    assert names(api.workspace._workspace(None).list_dir(str(tree), str(tree))) == ["docs", "notes.txt"]
+    _hermes_files(monkeypatch, lambda *a, **k: types.SimpleNamespace(locked_root=None))
+    assert api.workspace._host_file_check(None)(str(tree / "notes.txt")) is True
+    _hermes_files(monkeypatch, lambda *a, **k: types.SimpleNamespace(locked_root=tree / "docs"))
+    with pytest.raises(wf.WorkspaceError) as exc:
+        api.workspace._workspace(None).list_dir(str(tree), str(tree))
+    assert exc.value.status == 403
+
+
+def test_a_save_refuses_an_edit_that_landed_while_it_was_writing(tree, monkeypatch):
+    target = tree / "notes.txt"
+    read_at = target.stat().st_mtime
+    write_temp = wf._write_temp
+
+    def edited_meanwhile(folder, data):
+        temp = write_temp(folder, data)
+        target.write_text("the agent's edit\n")
+        os.utime(target, (read_at, read_at))  # even with the date it had
+        return temp
+
+    monkeypatch.setattr(wf, "_write_temp", edited_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().save(str(tree), str(target), "mine\n", read_at)
+    assert exc.value.status == 409 and target.read_text() == "the agent's edit\n"
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_a_copy_never_lands_on_a_file_that_appeared_meanwhile(tree, monkeypatch):
+    copy2 = wf.shutil.copy2
+
+    def taken_meanwhile(source, target, **kwargs):
+        (tree / "notes copy.txt").write_text("someone else's\n")
+        return copy2(source, target, **kwargs)
+
+    monkeypatch.setattr(wf.shutil, "copy2", taken_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().duplicate(str(tree), str(tree / "notes.txt"))
+    assert exc.value.status == 409 and (tree / "notes copy.txt").read_text() == "someone else's\n"
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_a_change_that_outlasts_its_wait_says_it_may_still_finish(tree, client, monkeypatch):
+    import threading
+    release = threading.Event()
+
+    class Slow(wf.LocalWorkspace):
+        def mkdir(self, *args, **kwargs):
+            release.wait(5)
+            return super().mkdir(*args, **kwargs)
+
+    monkeypatch.setattr(api.workspace, "_workspace", lambda profile: Slow())
+    monkeypatch.setattr(api.workspace, "WORKSPACE_TIMEOUT_S", 0.2)
+    late = client.post(f"{BASE}/workspace/mkdir", json={"root": str(tree), "path": str(tree), "name": "late"})
+    release.set()
+    assert late.status_code == 504 and "may still finish" in late.json()["detail"]
+
+
+def test_a_folder_copy_that_fails_or_finds_its_name_taken_removes_nothing_it_didnt_make(tree, monkeypatch):
+    copytree = wf.shutil.copytree
+
+    def taken_meanwhile(source, target, **kwargs):
+        (tree / "docs copy").mkdir()
+        (tree / "docs copy" / "theirs.md").write_text("someone else's\n")
+        return copytree(source, target, **kwargs)
+
+    monkeypatch.setattr(wf.shutil, "copytree", taken_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().duplicate(str(tree), str(tree / "docs"))
+    assert exc.value.status == 409
+    assert os.listdir(tree / "docs copy") == ["theirs.md"]
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_an_ssh_save_refuses_an_edit_made_in_the_same_second_while_it_was_writing(tree, monkeypatch):
+    target = tree / "notes.txt"
+    read_at = target.stat().st_mtime
+    workspace = ssh(tree)
+    run = workspace._run
+
+    def edited_meanwhile(script, **kwargs):
+        # As the new text is written beside the file: an edit with the same whole-second date.
+        marker = 'chmod "${m:-'
+        if marker not in script:
+            return run(script, **kwargs)
+        edit = f"printf 'the agent'\\''s edit\\n' > \"$t\"; touch -d @{int(read_at)} \"$t\" 2>/dev/null || true\n"
+        return run(script.replace(marker, edit + marker, 1), **kwargs)
+
+    monkeypatch.setattr(workspace, "_run", edited_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        workspace.save(str(tree.resolve()), str(target.resolve()), "mine\n", read_at)
+    assert exc.value.status == 409 and target.read_text() == "the agent's edit\n"
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_an_ssh_folder_copy_is_made_out_of_sight_and_never_lands_on_a_name_taken_meanwhile(tree, monkeypatch):
+    workspace = ssh(tree)
+    run = workspace._run
+
+    def taken_meanwhile(script, **kwargs):
+        marker = 'mv -n -- "$d/c" "$t"'
+        if marker not in script:
+            return run(script, **kwargs)
+        # Right before the copy lands: someone else's folder under its name.
+        taken = 'mkdir -- "$t" && echo theirs > "$t/theirs.md"\n'
+        landing = 'if [ -e "$t" ] || [ -L "$t" ]; then rm -rf -- "$d"'
+        assert landing in script
+        return run(script.replace(landing, taken + landing, 1), **kwargs)
+
+    monkeypatch.setattr(workspace, "_run", taken_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        workspace.duplicate(str(tree.resolve()), str((tree / "docs").resolve()))
+    assert exc.value.status == 409
+    assert os.listdir(tree / "docs copy") == ["theirs.md"]
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]

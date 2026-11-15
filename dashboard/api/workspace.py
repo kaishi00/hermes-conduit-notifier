@@ -209,6 +209,37 @@ def artifact_pins(action: str, body: Any = None, profile: Optional[str] = None) 
         raise core.TokenError(409 if exc.code == "too_many" else 400, str(exc))
 
 
+
+class _BoundaryUnknown(Exception):
+    """Hermes has a managed-files policy but couldn't say what it is."""
+
+
+def _managed_boundary() -> Optional[str]:
+    """The one folder a hosted or locked install keeps its files under, as
+    Hermes' own file routes do there (its real path), or None on an install
+    with none: a personal one, or a Hermes from before the policy existed.
+    A policy Hermes has but can't read (an unreadable file, an upstream
+    change) raises _BoundaryUnknown: an unknown limit is never no limit
+    (notifier issue 834)."""
+    try:
+        from hermes_cli.web_server_files import _managed_files_policy
+    except ImportError:
+        return None
+    try:
+        locked = _managed_files_policy(None, create_root=False).locked_root
+        return os.path.realpath(str(locked)) if locked is not None else None
+    except Exception as exc:
+        global _boundary_unknown_logged
+        if not _boundary_unknown_logged:
+            _boundary_unknown_logged = True
+            logger.warning("Conduit workspace files: Hermes' managed-files policy couldn't be read (%s); "
+                           "workspace files are refused until it can", type(exc).__name__)
+        raise _BoundaryUnknown() from exc
+
+
+_boundary_unknown_logged = False
+
+
 def _pin_source(profile: Optional[str]) -> Callable[[str], tuple]:
     """Where on this host a saved file is read from for its copy: only a
     file the Folder would open, as _host_file_check decides. A profile whose
@@ -229,11 +260,10 @@ def _pin_source(profile: Optional[str]) -> Callable[[str], tuple]:
     except Exception:
         _agent_fs_path = None
     try:
-        from hermes_cli.web_server_files import _managed_files_policy
-        locked = _managed_files_policy(None, create_root=False).locked_root
-        boundary = os.path.realpath(str(locked)) if locked is not None else None
-    except Exception:
-        boundary = None
+        boundary = _managed_boundary()
+    except _BoundaryUnknown:
+        # Saved without a copy: where the copy may come from isn't known.
+        return lambda path: (None, "unreadable")
 
     def source(path: str) -> tuple:
         try:
@@ -404,11 +434,12 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
     boundary = None
     if not remote:
         try:
-            from hermes_cli.web_server_files import _managed_files_policy
-            locked = _managed_files_policy(None, create_root=False).locked_root
-            boundary = os.path.realpath(str(locked)) if locked is not None else None
-        except Exception:
-            boundary = None
+            boundary = _managed_boundary()
+        except _BoundaryUnknown:
+            # No file is one the Folder would open while its limit is unknown.
+            unknown = lambda path: False
+            unknown.checks_host = True  # type: ignore[attr-defined]
+            return unknown
 
     def exists(path: str) -> bool:
         try:
@@ -554,15 +585,15 @@ def _workspace(profile: Optional[str]) -> Any:
     # A hosted or locked install keeps its files under one folder, as
     # Hermes' own file routes do there; a personal install has none.
     try:
-        from hermes_cli.web_server_files import _managed_files_policy
-        boundary = _managed_files_policy(None, create_root=False).locked_root
-    except Exception:
-        boundary = None
-    return module.LocalWorkspace(resolve, sensitive, boundary=str(boundary) if boundary is not None else None)
+        boundary = _managed_boundary()
+    except _BoundaryUnknown:
+        raise core.TokenError(503, "Hermes couldn't read which folder its files are kept in; "
+                                   "check the host's files settings and try again")
+    return module.LocalWorkspace(resolve, sensitive, boundary=boundary)
 
 
 async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, Any]], *, walks: bool = False,
-                          name: str = "request", limited: bool = False) -> Dict[str, Any]:
+                          name: str = "request", limited: bool = False, changes: bool = False) -> Dict[str, Any]:
     no_store = {"Cache-Control": "no-store"}
     if not limited:
         await core._scoped_acquire(_workspace_limiter, profile)
@@ -602,6 +633,13 @@ async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, 
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
     except asyncio.TimeoutError:
+        # A change that started keeps running on its thread and may still
+        # land: the answer says so, and Conduit reads the folder again
+        # rather than repeating a change whose result it doesn't know
+        # (notifier issue 834).
+        if changes and state["started"]:
+            raise HTTPException(status_code=504, detail="That's taking too long and may still finish; "
+                                                        "check the folder before trying again", headers=no_store)
         raise HTTPException(status_code=504, detail="That took too long; try again", headers=no_store)
     except Exception as exc:
         workspace_error = getattr(_workspace_module, "WorkspaceError", None)
@@ -701,4 +739,4 @@ async def post_workspace(action: str, request: Request, response: Response,
         except (ValueError, binascii.Error):
             raise HTTPException(status_code=400, detail="data must be base64", headers=no_store)
         op = lambda ws: ws.upload(root, folder, name, data, overwrite)
-    return await _workspace_call(profile, op, name=action, limited=True)
+    return await _workspace_call(profile, op, name=action, limited=True, changes=True)

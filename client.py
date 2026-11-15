@@ -6,6 +6,7 @@ import atexit
 import contextvars
 import hashlib
 import hmac
+import itertools
 import json
 import logging
 import os
@@ -46,7 +47,16 @@ DEFAULT_RELAY_URL = "https://push.milim.dev"
 # (no second hand-synchronized constant).
 USER_AGENT = f"Hermes-Conduit-Notifier/{PLUGIN_VERSION}"
 logger = logging.getLogger("hermes.plugins.conduit_push")
-_events: queue.Queue[tuple[contextvars.Context, dict[str, Any]]] = queue.Queue(maxsize=128)
+# Queued deliveries, the ones somebody is waiting on first (_URGENT), then in
+# the order they came: (rank, order, context, event, pairing, generation).
+# One failing event can use up RETRY_BUDGET before the next starts, so an
+# approval or a question never waits behind a queue of finished-turn notices
+# (notifier issue 834). ``pairing`` and ``generation`` are the pairing and the
+# plugin load that accepted the event: it goes out only under both.
+_events: queue.PriorityQueue[tuple[Any, ...]] = queue.PriorityQueue(maxsize=128)
+_URGENT = frozenset({"approval.needed", "input.needed"})
+_WAKE = (-1, 0)  # stop()'s wake-up, ahead of everything
+_order = itertools.count(1)
 _worker_started = False
 _worker: threading.Thread | None = None
 _worker_lock = threading.Lock()
@@ -306,17 +316,32 @@ def enqueue(event: dict[str, Any]) -> bool:
     if _paused_until(state) > time.monotonic():
         logger.info("Conduit notification dropped for %s: %s", event.get("type", "event"), _pause_reason(state))
         return False
-    _start_worker()
-    try:
-        # Hermes can serve several profiles in one process, each through a
-        # context variable for its home that a new thread doesn't inherit.
-        # The event goes out under the profile that accepted it here: its
-        # pairing, credential and encryption key, not the launch profile's.
-        _events.put_nowait((contextvars.copy_context(), event))
-    except queue.Full:
-        logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
-        return False
+    # Hermes can serve several profiles in one process, each through a
+    # context variable for its home that a new thread doesn't inherit.
+    # The event goes out under the profile that accepted it here: its
+    # pairing, credential and encryption key, not the launch profile's.
+    context = contextvars.copy_context()
+    rank = 0 if event.get("type") in _URGENT else 1
+    # With stop(), so an event is never accepted by a plugin that stopped
+    # meanwhile and left queued with no worker.
+    with _worker_lock:
+        if _stopped.is_set():
+            return False
+        try:
+            _events.put_nowait((rank, next(_order), context, event, _pairing_of(state), _generation))
+        except queue.Full:
+            logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
+            return False
+        _start_worker_locked()
     return True
+
+
+def _pairing_of(state: dict[str, Any]) -> tuple[str, str, str]:
+    """Which pairing ``state`` is, whatever its keys: a key rotation keeps
+    it, pairing again (even with the same phone) doesn't. Held by the
+    credential's digest, never the credential."""
+    return (hashlib.sha256(str(state.get("credential")).encode()).hexdigest(),
+            str(state.get("installation_id") or ""), str(state.get("gateway_id") or ""))
 
 
 def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
@@ -819,15 +844,19 @@ def sealing_time(state: dict[str, Any], *, now: float | None = None) -> float:
 
 
 def _start_worker() -> None:
-    global _worker_started, _worker
     if _worker_started:
         return
     with _worker_lock:
-        if _worker_started or _stopped.is_set():
-            return
-        _worker = threading.Thread(target=_delivery_worker, args=(_generation,), name="conduit-push", daemon=True)
-        _worker.start()
-        _worker_started = True
+        _start_worker_locked()
+
+
+def _start_worker_locked() -> None:
+    global _worker_started, _worker
+    if _worker_started or _stopped.is_set():
+        return
+    _worker = threading.Thread(target=_delivery_worker, args=(_generation,), name="conduit-push", daemon=True)
+    _worker.start()
+    _worker_started = True
 
 
 def start() -> None:
@@ -858,7 +887,7 @@ def stop(timeout: float = 1.0) -> None:
             _events.task_done()
             dropped += 1
         if running is not None:
-            _events.put_nowait(None)  # wakes the worker; the queue was just emptied
+            _events.put_nowait(_WAKE)  # wakes the worker; the queue was just emptied
     if dropped:
         logger.info("Conduit dropped %d queued notification(s): the plugin was unloaded", dropped)
     if running is not None:
@@ -966,16 +995,17 @@ def _delivery_worker(generation: int = 0) -> None:
     while generation == _generation:
         item = _events.get()
         try:
-            if item is None:  # stop()'s wake-up
+            if item is None or len(item) < 6:  # stop()'s wake-up
                 continue
             if generation != _generation:
                 # Queued for the worker started after a stop(): hand it back.
                 _requeue(item)
                 continue
-            context, event = item
-            context.run(_deliver, event)
+            _, _, context, event, pairing, accepted = item
+            context.run(lambda: _deliver(event, pairing=pairing, generation=accepted))
         except Exception as error:  # the worker thread must outlive any one event
-            logger.warning("Conduit notification delivery failed for %s: %s", event.get("type", "event"), error)
+            logger.warning("Conduit notification delivery failed for %s: %s",
+                           item[3].get("type", "event") if item and len(item) >= 6 else "event", error)
         finally:
             _events.task_done()
 
@@ -1011,7 +1041,7 @@ def _requeue(item: Any) -> None:
     try:
         _events.put_nowait(item)
     except queue.Full:
-        logger.warning("Conduit notification queue is full; dropping %s", item[1].get("type", "event"))
+        logger.warning("Conduit notification queue is full; dropping %s", item[3].get("type", "event"))
 
 
 def _pause(seconds: float) -> None:
@@ -1020,15 +1050,29 @@ def _pause(seconds: float) -> None:
 
 
 def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
-             clock: Callable[[], float] = time.monotonic) -> bool:
-    started, generation = clock(), _generation
+             clock: Callable[[], float] = time.monotonic, pairing: tuple[str, str, str] | None = None,
+             generation: int | None = None) -> bool:
+    """Sends ``event``, with retries. ``pairing`` and ``generation`` are the
+    pairing and the plugin load that accepted it (enqueue): every attempt
+    checks both again, so what one pairing accepted never reaches a device
+    paired since, and a load that was stopped never retries into the next
+    one (notifier issue 834)."""
+    started = clock()
+    generation = _generation if generation is None else generation
     for delay in (*RETRY_DELAYS, None):
-        if _stopped.is_set():
+        # The generation too: start() may have cleared the flag meanwhile.
+        if _stopped.is_set() or generation != _generation:
             logger.info("Conduit notification dropped for %s: the plugin was unloaded", event.get("type", "event"))
             return False
         state = load_state()
         if not state:
             logger.warning("Conduit notification dropped for %s: this profile is no longer paired", event.get("type", "event"))
+            return False
+        if pairing is None:
+            pairing = _pairing_of(state)  # a direct call: the pairing of its first attempt
+        elif _pairing_of(state) != pairing:
+            logger.info("Conduit notification dropped for %s: this profile was paired again since it was queued",
+                        event.get("type", "event"))
             return False
         paused_until, now = _paused_until(state), clock()
         if now < paused_until:
