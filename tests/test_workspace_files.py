@@ -899,9 +899,13 @@ def test_a_files_policy_hermes_cant_read_refuses_rather_than_lifting_the_limit(t
         raise OSError("policy file unreadable")
 
     _hermes_files(monkeypatch, unreadable)
+    degraded = api.core._plugin_package_module("degraded")
+    monkeypatch.setitem(sys.modules, degraded._HOLDER, types.ModuleType(degraded._HOLDER))
     with pytest.raises(api.core.TokenError) as exc:
         api.workspace._workspace(None)
     assert exc.value.status == 503
+    # Conduit's plugin page says so (the capabilities route's `degraded`), until the policy reads again.
+    assert degraded.current() == ["workspace-files"]
     # Neither a tapped file name nor a saved artifact's copy reads a file meanwhile.
     assert api.workspace._host_file_check(None)(str(tree / "notes.txt")) is False
     assert api.workspace._pin_source(None)(str(tree / "notes.txt")) == (None, "unreadable")
@@ -909,6 +913,9 @@ def test_a_files_policy_hermes_cant_read_refuses_rather_than_lifting_the_limit(t
     _hermes_files(monkeypatch, lambda *a, **k: object())
     with pytest.raises(api.core.TokenError):
         api.workspace._workspace(None)
+    _hermes_files(monkeypatch, lambda *a, **k: types.SimpleNamespace(locked_root=tree))
+    api.workspace._workspace(None)
+    assert degraded.current() == []
 
 
 def test_a_hermes_from_before_the_files_policy_or_with_no_locked_folder_has_no_limit(tree, monkeypatch):
@@ -1027,4 +1034,24 @@ def test_an_ssh_folder_copy_is_made_out_of_sight_and_never_lands_on_a_name_taken
         workspace.duplicate(str(tree.resolve()), str((tree / "docs").resolve()))
     assert exc.value.status == 409
     assert os.listdir(tree / "docs copy") == ["theirs.md"]
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_an_ssh_copy_isnt_swallowed_by_a_folder_that_appears_as_it_lands(tree, monkeypatch):
+    workspace = ssh(tree)
+    run = workspace._run
+
+    def taken_at_the_move(script, **kwargs):
+        # After the last look at the name, before the move: mv would put the copy inside their folder.
+        landing = 'mv -n -- "$d/c" "$t" 2>/dev/null\n'
+        if landing not in script:
+            return run(script, **kwargs)
+        return run(script.replace(landing, 'mkdir -- "$t" && echo theirs > "$t/theirs.md"\n' + landing, 1), **kwargs)
+
+    monkeypatch.setattr(workspace, "_run", taken_at_the_move)
+    for source, copy in (("docs", "docs copy"), ("notes.txt", "notes copy.txt")):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            workspace.duplicate(str(tree.resolve()), str((tree / source).resolve()))
+        assert exc.value.status == 409
+        assert os.listdir(tree / copy) == ["theirs.md"]
     assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]

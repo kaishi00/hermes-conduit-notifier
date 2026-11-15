@@ -6903,6 +6903,26 @@ def test_a_restart_keeps_watching_a_waiting_share_ask_with_workstreams_off(on, h
     assert watched and [row["kind"] for row in on.outbox_pending()] == ["share_ask"]
 
 
+def test_a_hermes_whose_turn_stopper_moved_is_said_on_the_plugin_page_until_its_found(on, hermes, monkeypatch):
+    # Notifier issue 834: the host's log alone used to say it.
+    monkeypatch.setitem(sys.modules, work.degraded._HOLDER, types.ModuleType(work.degraded._HOLDER))
+    threads = []
+    monkeypatch.setattr(work.threading, "Thread", lambda *a, **k: threads.append(k) or types.SimpleNamespace(
+        start=lambda: None))
+    monkeypatch.setattr(work.work_broker, "server", lambda: object())
+    monkeypatch.delitem(sys.modules, "tui_gateway.session_reaper", raising=False)
+    monkeypatch.setitem(sys.modules, "tui_gateway.session_reaper", types.ModuleType("tui_gateway.session_reaper"))
+    work.start_recovery(on.home)
+    threads[0]["target"]()
+    assert work.degraded.current() == ["workstream-recovery"]
+    hermes_stops_turns(monkeypatch, lambda: None)
+    server = types.ModuleType("tui_gateway.server")
+    server._stop_turns_before_exit = lambda: None
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", server)
+    work._watch_shutdown()  # as each workstream turn does
+    assert work.degraded.current() == []
+
+
 def test_a_run_work_ask_is_watched_at_load_once_the_session_host_is_up(on, hermes, linked, monkeypatch):
     room_work_call({"action": "start", "title": "Picnic map", "instructions": "Map it."})
     on.set_policy("off")

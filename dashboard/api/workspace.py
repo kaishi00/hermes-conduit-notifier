@@ -227,17 +227,31 @@ def _managed_boundary() -> Optional[str]:
         return None
     try:
         locked = _managed_files_policy(None, create_root=False).locked_root
-        return os.path.realpath(str(locked)) if locked is not None else None
+        boundary = os.path.realpath(str(locked)) if locked is not None else None
     except Exception as exc:
+        # On Conduit's plugin page too, until the policy reads again.
+        _note_degraded(True)
         global _boundary_unknown_logged
         if not _boundary_unknown_logged:
             _boundary_unknown_logged = True
             logger.warning("Conduit workspace files: Hermes' managed-files policy couldn't be read (%s); "
                            "workspace files are refused until it can", type(exc).__name__)
         raise _BoundaryUnknown() from exc
+    _note_degraded(False)
+    return boundary
 
 
 _boundary_unknown_logged = False
+
+
+def _note_degraded(unknown: bool) -> None:
+    """Whether the Folder is refusing for an unreadable files policy, for
+    the capabilities route's ``degraded`` (degraded.py); never fails a read."""
+    try:
+        module = core._plugin_package_module("degraded")
+        (module.note if unknown else module.clear)(module.WORKSPACE_FILES)
+    except Exception:  # noqa: BLE001 — a plugin folder without degraded.py
+        logger.debug("Conduit workspace files: couldn't note the Folder's state", exc_info=True)
 
 
 def _pin_source(profile: Optional[str]) -> Callable[[str], tuple]:

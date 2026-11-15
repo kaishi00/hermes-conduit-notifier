@@ -65,7 +65,7 @@ from typing import Any, Callable, Optional
 import uuid
 from urllib.parse import quote, unquote
 
-from . import room_rules, room_work, screen_lock, work_broker, work_coord, work_store, work_trees, work_watch
+from . import degraded, room_rules, room_work, screen_lock, work_broker, work_coord, work_store, work_trees, work_watch
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -3288,6 +3288,8 @@ def _watch_shutdown() -> bool:
 
         stopping._conduit_watch = True  # type: ignore[attr-defined]
         setattr(module, _SHUTDOWN_HOOK, stopping)
+    if watched:
+        degraded.clear(degraded.WORKSTREAM_RECOVERY)
     return watched
 
 
@@ -3318,6 +3320,8 @@ def start_recovery(home: Optional[Path] = None) -> None:
             time.sleep(RECOVERY_POLL_S)
         # Whatever the policy: turning workstreams off doesn't stop one that's running.
         if not _watch_shutdown():
+            # For Conduit's plugin page too, until a later turn finds it.
+            degraded.note(degraded.WORKSTREAM_RECOVERY)
             logger.warning("conduit_push: Hermes' turn stopper wasn't found, so a workstream a clean restart "
                            "stops is left interrupted rather than recovered")
         # A room's asks still waiting for the owner are watched again whatever the policy (Ask me first needs no
