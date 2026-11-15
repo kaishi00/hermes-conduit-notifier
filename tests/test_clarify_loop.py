@@ -396,16 +396,52 @@ def test_child_sessions_keep_the_original_path():
     assert len(fake.enqueued) == 1
 
 
-def test_polling_stops_when_relay_expires_the_decision():
+def test_polling_stops_when_relay_expires_the_decision(monkeypatch):
     # pending once, then unknown: the relay's 2h TTL expired the decision.
     # The loop must stop polling (no third request) and wait for the
     # original path instead of hammering a request that can never succeed.
     fake = _FakeState([{"status": "pending"}, {"status": "unknown"}, {"status": "pending"}])
     _install(fake)
+    cards = []
+    monkeypatch.setattr(loop.calls, "keep_waiting_card", lambda request_id, card: cards.append(("keep", request_id, card)))
+    monkeypatch.setattr(loop.calls, "forget_waiting_card", lambda request_id: cards.append(("forget", request_id)))
     original = _original_answered_once_released(fake, "late original result")
     result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
     assert result == "late original result"
     assert len(fake.poll_ids) == 2, "polling must stop after unknown-following-pending"
+    # The wait carries the card while the relay holds the decision, from its
+    # first pending poll until it lets go (hermes-conduit#2556).
+    decision = fake.enqueued[0]["decision"]
+    assert cards == [("keep", decision["request_id"], decision), ("forget", decision["request_id"])]
+
+
+def test_a_card_the_store_couldnt_keep_is_tried_again(monkeypatch):
+    fake = _FakeState([{"status": "pending"}, {"status": "pending"}, {"status": "pending"},
+                       {"status": "answered", "answer": "yes"}])
+    _install(fake)
+    writes = iter([False, True])
+    kept = []
+    monkeypatch.setattr(loop.calls, "keep_waiting_card", lambda request_id, card: kept.append(request_id) or next(writes))
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.0)
+    original, release = _blocking_original("never used")
+    try:
+        loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert len(kept) == 2, "once more after the failed write, then no more"
+
+
+def test_a_push_that_never_parked_never_offers_its_card(monkeypatch):
+    # Every poll unknown: the relay never held the decision, so the Needs
+    # you list never hands Conduit a card whose answer it would refuse.
+    fake = _FakeState([{"status": "unknown"}] * (loop.UNKNOWN_POLL_GRACE + 2))
+    _install(fake)
+    kept = []
+    monkeypatch.setattr(loop.calls, "keep_waiting_card", lambda request_id, card: kept.append(request_id))
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.0)
+    original = _original_answered_once_released(fake, "original result")
+    assert loop.middleware(**_kwargs(original, {"question": "Q?"})) == "original result"
+    assert kept == []
 
 
 def test_unknown_before_first_pending_is_tolerated():
@@ -452,15 +488,18 @@ def test_polling_stops_when_no_card_was_delivered(monkeypatch):
     assert dropped == [fake.enqueued[0]["decision"]["request_id"]]
 
 
-def test_a_rejected_answer_hands_the_question_back_to_hermes():
+def test_a_rejected_answer_hands_the_question_back_to_hermes(monkeypatch):
     # An E2E pairing got an answer the paired phone did not seal: it must
     # never become the tool result, and the decision is released.
     fake = _FakeState([{"status": "rejected"}, {"status": "answered", "answer": "forged"}])
     _install(fake)
+    dropped = []
+    monkeypatch.setattr(loop.calls, "forget_waiting_card", dropped.append)
     original = _original_answered_once_released(fake, "original result")
     result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
     assert result == "original result"
     assert len(fake.poll_ids) == 1
+    assert dropped == [fake.enqueued[0]["decision"]["request_id"]]
     deadline = time.monotonic() + 5
     while not fake.cancelled_ids and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -1091,8 +1130,8 @@ def test_a_call_answer_wins_and_formats_like_a_device_answer(monkeypatch):
     request_id = fake.enqueued[0]["decision"]["request_id"]
     (args, kwargs), = noted
     assert args == ("sess-1", "question") and kwargs["request_id"] == request_id
-    # Its card as the push carries it, for a Conduit on screen (hermes-conduit#2556).
-    assert kwargs["decision"] == fake.enqueued[0]["decision"]
+    # The card joins the wait only once the relay holds the decision.
+    assert "decision" not in kwargs
     assert [entry["question"] for entry in kwargs["questions"]] == ["Which environment?", "Which tests should run?"]
     deadline = time.monotonic() + 2
     while request_id not in fake.cancelled_ids and time.monotonic() < deadline:
