@@ -3558,7 +3558,9 @@ def _cut_keeping_lines(text: str, limit: int) -> str:
 # or "tokenizer" keep their values while "x-api-key" and "oauthToken" don't.
 _SECRET_WORDS = frozenset({"token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passphrase",
                            "pwd", "auth", "authn", "authz", "authorization", "authentication", "oauth",
-                           "credential", "credentials", "cookie", "cookies", "apikey", "apikeys", "bearer", "jwt"})
+                           "credential", "credentials", "cookie", "cookies", "apikey", "apikeys", "bearer", "jwt",
+                           "signature", "signatures", "passcode", "passcodes", "otp", "otps", "totp", "pin",
+                           "pins", "pincode", "cvv", "cvc", "mfa"})
 _SECRET_PAIRS = frozenset((first, key) for first in ("api", "private", "access", "secret")
                           for key in ("key", "keys")) | {("client", "secret")}
 
@@ -6545,11 +6547,35 @@ def _summary(args: Any) -> str:
 
 # An Authorization header's credential, and any long token-like run: masked
 # whole by the plugin itself before Hermes' redactor sees the text.
-_AUTH_HEADER = re.compile(r"(?i)(authorization\s*[:=]\s*[\"']?(?:[a-z]+\s+)?)[^\s\"',]{8,}")
+_AUTH_HEADER = re.compile(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:[a-z]+\s+)?)[^\s\"',]{8,}")
 # A bearer credential: one with a digit from 8 characters, any from 16, so
 # prose ("bearer tokens") stays as written.
 _BEARER = re.compile(r"(?i)\b(bearer\s+)(?:(?=\S*\d)[A-Za-z0-9_\-+/=.~]{8,}|[A-Za-z0-9_\-+/=.~]{16,})")
-_TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=]{24,}")
+_TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=.~]{24,}")
+# A long run made of words stays: a path, a file or a branch name, whose
+# pieces are short words or numbers (the workstream
+# needs them to carry on). A token has a long piece or one of letters and
+# digits mixed; a hash is one long piece and a UUID's pieces mix them, so
+# both are masked too. A run of only punctuation (a line of dots) stays.
+_RUN_PIECES = re.compile(r"[/._~\-]+")
+# A word, a number, or a word with a short number after it (python3, v2,
+# x64, sha256); letters and digits mixed any other way read as a token.
+_WORD_PIECE = re.compile(r"[A-Za-z]+[0-9]{0,5}|[0-9]+")
+
+
+def _plugin_masked(text: str) -> str:
+    """``text`` with the credentials the plugin's own patterns know masked
+    whole: an Authorization header's value, a bearer token, a long
+    token-like run."""
+    text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}***", text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)}***", text)
+    return _TOKENISH.sub(lambda m: m.group(0) if _worded(m.group(0)) or not re.search(r"[A-Za-z0-9]", m.group(0))
+                         else "***", text)
+
+
+def _worded(run: str) -> bool:
+    pieces = [piece for piece in _RUN_PIECES.split(run) if piece]
+    return bool(pieces) and all(len(piece) <= 16 and _WORD_PIECE.fullmatch(piece) for piece in pieces)
 
 
 def _masked(text: str) -> str:
@@ -6560,9 +6586,7 @@ def _masked(text: str) -> str:
     there is one, then catches what it knows by name (``api_key=...``), on
     even when the host turned redaction off, and with its sentinel rather
     than a head and tail where this Hermes has one."""
-    text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}***", text)
-    text = _BEARER.sub(lambda m: f"{m.group(1)}***", text)
-    text = _TOKENISH.sub("***", text)
+    text = _plugin_masked(text)
     try:
         from agent.redact import redact_sensitive_text
     except Exception:  # noqa: BLE001 — no redactor here: the plugin's masking is all

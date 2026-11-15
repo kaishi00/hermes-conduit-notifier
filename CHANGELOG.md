@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.177.13 (2026-11-15)
+## 0.177.15 (2026-11-15)
 
 ### Security
 
@@ -27,6 +27,13 @@ checks it). The format is fixed, because Conduit reads it:
 - When the relay was unreachable, approvals and questions waited behind every finished-turn notice still being retried. They now go first.
 - A notification could be retried by a plugin that had been turned off and on again, or accepted just as it was turned off and never sent.
 - A Folder change that takes over 30 seconds now says it may still finish, and Conduit reads the folder again instead of leaving you to repeat it.
+
+## 0.177.14 (2026-11-15)
+
+### Fixes
+
+- Since 0.177.12, a hand-off to a workstream showed long file paths and branch names as *** along with credentials, so the workstream had to look them up again. They are kept now, while hashes, UUIDs, long tokens with dots in them, a quoted Authorization header and values under signature, PIN, CVV and one-time-code arguments are masked.
+
 ## 0.177.12 (2026-11-15)
 
 ### Security
