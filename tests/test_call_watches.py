@@ -471,6 +471,7 @@ def test_a_report_without_saw_still_counts(home, hermes, clock):
     # The call shown whole, with both arguments, for a run where it's behind Tool Search
     # (Furina's W21, 2026-11-15: a weak model called it by name, or skipped to [SILENT]).
     assert watches.REPORT_EXAMPLE in prompt and watches.REPORT_EXAMPLE in watches.RUN_NOTE
+    assert "argument is missing" in prompt and "argument is missing" in watches.RUN_NOTE
     example = json.loads(watches.REPORT_EXAMPLE.removeprefix("tool_call "))
     assert example["calls"][0]["name"] == watches.REPORT_TOOL
     assert set(example["calls"][0]["arguments"]) == {"happening", "saw"}

@@ -130,6 +130,21 @@ def test_a_refused_submit_leaves_no_surface_for_the_next_turn(gateway):
     assert turn_surface.note(False, "again", session_id="drop-1")
 
 
+def test_a_submit_the_owner_couldnt_confirm_keeps_its_surface(gateway):
+    """Issue 2522: SESSION_OWNER_UNCONFIRMED may already be queued, so its
+    turn keeps its surface line; a busy owner sent nothing, so it drops."""
+    chats, answers, _connections = gateway
+    transport = Transport()
+    answers["prompt.submit"] = {"error": {"code": 4090, "message": "may already be queued",
+                                          "data": {"reason": "SESSION_OWNER_UNCONFIRMED"}}}
+    assert _call(chats, transport, "prompt.submit", {"session_id": "unsure-1", "text": "maybe"})["error"]
+    assert turn_surface.note(False, "maybe", session_id="unsure-1")
+    answers["prompt.submit"] = {"error": {"code": 4090, "message": "mid-turn",
+                                          "data": {"reason": "SESSION_OWNER_BUSY"}}}
+    assert _call(chats, transport, "prompt.submit", {"session_id": "busy-1", "text": "later"})["error"]
+    assert turn_surface.note(False, "later", session_id="busy-1") is None
+
+
 def test_a_turn_the_authority_starts_at_once_keeps_its_surface(gateway):
     chats, answers, _connections = gateway
     answers["prompt.submit"] = {"result": {"status": "started"}}

@@ -21,6 +21,19 @@ checks it). The format is fixed, because Conduit reads it:
 - A workstream the Bot Chat handed its quick steps to showed only as a name in the reply, with no card to open it. The bot now gets its link, so the card shows as for any other workstream.
 - A call watch's run could leave out its report, or call it the wrong way, and go silent. Its prompt now shows the report call whole and asks for it before the reply, and each watch picks it up on its next run.
 
+## 0.177.6 (2026-11-15)
+
+### Fixes
+
+- When Hermes Desktop closed several chats at once (after it reloaded or lost its connection), a turn still running in one of them could keep its Lock Screen card and the bot's screen until they timed out. That turn now ends as stopped when its chat closes.
+
+## 0.177.5 (2026-11-15)
+
+### Fixes
+
+- A message to a workstream that timed out while its chat was reopening was reported as possibly already queued, so the bot never sent it again. It's now reported as not sent.
+- A work update held for a busy Bot Chat left a refused copy in the plugin's records on every retry. Only the update that goes out is kept now.
+
 ## 0.177.4 (2026-11-15)
 
 ### Fixes

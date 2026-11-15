@@ -867,7 +867,8 @@ def _place_call(store: "WatchStore", job_id: str, session_id: Any, saw: str, *, 
 
 
 RUN_NOTE = (f"Report before you reply. If {REPORT_TOOL} isn't among your tools, call it through tool_call: "
-            f"{REPORT_EXAMPLE} Never reply [SILENT] only because it isn't listed: report first.")
+            f"{REPORT_EXAMPLE} If its answer says an argument is missing, send the same call once more with it "
+            "filled in. Never reply [SILENT] only because it isn't listed: report first.")
 
 
 def run_note(session_id: Any, task_id: Any = None) -> str | None:

@@ -145,7 +145,7 @@ def mode(store: work_store.Store) -> str:
         return "off"
 
 
-def ask_wake_sent(store: work_store.Store, item: str) -> None:
+def ask_wake_sent(store: work_store.Store, item: str) -> list[str]:
     """Notes that this work update (its outbox row) carried another bot's
     ask, or the user's yes tapped on a question's card: either makes its
     turn someone's to have acted on, not one the Bot Chat started itself."""
@@ -153,8 +153,22 @@ def ask_wake_sent(store: work_store.Store, item: str) -> None:
         kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
     except ValueError:
         kept = []
-    kept = ([name for name in kept if isinstance(name, str)] + [item])[-_ASK_WAKES_KEPT:]
-    store.set_meta(_ASK_WAKES, json.dumps(kept))
+    before = [name for name in kept if isinstance(name, str)] if isinstance(kept, list) else []
+    store.set_meta(_ASK_WAKES, json.dumps((before + [item])[-_ASK_WAKES_KEPT:]))
+    return before
+
+
+def ask_wake_unsent(store: work_store.Store, item: str, before: list[str]) -> None:
+    """Takes back ask_wake_sent for an update that never went out: ``before``
+    (what ask_wake_sent returned) comes back, so a full list loses none of
+    the real updates that one pushed out."""
+    try:
+        kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
+    except ValueError:
+        kept = []
+    now = [name for name in kept if isinstance(name, str) and name != item] if isinstance(kept, list) else []
+    restored = [name for name in before if name not in now] + now
+    store.set_meta(_ASK_WAKES, json.dumps(restored[-_ASK_WAKES_KEPT:]))
 
 
 def _carries_ask(store: Optional[work_store.Store], content: str) -> bool:
@@ -206,11 +220,12 @@ def _turn_prompts(home: Path, session_id: Any) -> Optional[list[tuple[str, Any]]
         db.close()
     # What Hermes writes itself is nobody's message.
     return [(content, shown) for content, shown in ((text if isinstance(text, str) else "", kind) for text, kind in rows)
-            if not hermes_own(content)]
+            if shown == "steer" or not hermes_own(content)]
 
 
 def hermes_own(content: str) -> bool:
-    """Whether a saved user row is one Hermes wrote itself (_HERMES_ROWS)."""
+    """Whether a saved user row is one Hermes wrote itself (_HERMES_ROWS).
+    Hermes saves those with no display kind, so a steer is never one."""
     return content.lstrip().startswith(_HERMES_ROWS)
 
 
@@ -326,8 +341,8 @@ def read_user_words(home: Path, store: work_store.Store, work: work_store.Work) 
     for row_id, content, display_kind, stamp in rows:
         if not isinstance(content, str) or display_kind not in (None, "steer"):
             continue
-        if hermes_own(content):
-            continue
+        if display_kind != "steer" and hermes_own(content):
+            continue  # a steer is the user's, whatever it starts with
         text = content
         if display_kind == "steer":
             text = _STEER_OPEN.sub("", text).replace(_STEER_CLOSE, "")

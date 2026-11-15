@@ -1628,6 +1628,9 @@ def test_a_quick_turn_past_its_steps_hands_the_rest_to_a_workstream(on, hermes, 
                                   tool_call_id="c10")
     assert "W1" in again["message"] and on.get("W2") is None, "once a turn"
     assert "[Open W1](conduit://session/" in again["message"]
+    assert work._handed_off("patch", "W7", "Tidy up", "") == work.HANDED_OFF.format(
+        tool="patch", ref="W7", title="Tidy up", link=""), "no link: no \"with its link\" clause"
+    assert "with its link" not in work._handed_off("patch", "W7", "Tidy up", "")
     # Another turn's unrelated ask, with the same steps, isn't taken for the same task.
     plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t3", user_message="Book a table for two", platform="tui")
     for n in range(work.QUICK_STEPS):
@@ -3260,6 +3263,12 @@ def test_a_send_carries_the_users_words_as_theirs(on, hermes, home, monkeypatch)
     hermes.calls.clear()
     call("work_send", {"ref": "W1", "text": "More."})
     assert "More." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
+    # Nor is Hermes' own request for a final answer at the iteration limit the user's words.
+    _chat_db(home, [(BOT_CHAT, "user", "You've reached the maximum number of tool-calling iterations allowed. "
+                                       "Please provide a final response summarizing what you've found.", None)])
+    hermes.calls.clear()
+    call("work_send", {"ref": "W1", "text": "Again."})
+    assert "Again." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
 
 
 def _timed_chat_db(home, rows):
@@ -3582,6 +3591,21 @@ def test_a_4090_send_says_what_hermes_refused(on, hermes, monkeypatch, reason, e
     assert not [row for row in on.outbox_pending() if row["kind"] == "send"]  # never replayed
 
 
+def test_a_send_that_timed_out_reopening_isnt_reported_as_maybe_sent(on, hermes, monkeypatch):
+    """DeepSeek on #824: a timeout may come before anything was submitted
+    (the reopen), so it's never told as possibly queued."""
+    start()
+    work.turn_ended(WORKER_1, "Done.")
+    broker = sys.modules["conduit_push.work_broker"]
+
+    def timed_out(self, *args, **kwargs):
+        raise broker.BrokerError("session.resume timed out; it may still have started", timed_out=True)
+
+    monkeypatch.setattr(broker.Broker, "send", timed_out)
+    refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert refused.get("error") == "hermes", refused
+
+
 def test_a_4090_without_a_reason_is_still_another_windows_hold():
     """An older Hermes words SESSION_NOT_OWNED in the message only."""
     broker = sys.modules["conduit_push.work_broker"]
@@ -3613,6 +3637,8 @@ def test_a_wake_the_bot_chats_busy_owner_refused_goes_after_its_turn(bots, herme
              if params["session_id"] == f"rt-{NAHIDA_CHAT}"]
     assert "Can you book it?" in wake["text"]
     assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
+    # The refused try left no row behind: only the update that went out.
+    assert len(store_mod.Store(bots["nahida"]).outbox_rows("", "wake")) == 1
 
 
 def test_a_wake_the_bot_chats_owner_couldnt_confirm_doesnt_fail_the_ask(bots, hermes, monkeypatch):
