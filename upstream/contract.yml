@@ -313,6 +313,12 @@ known_failures:
     upstream: NousResearch/hermes-agent#80622's guard counts no display_kind row as an ask
     since: v0.22.3
     workaround: compaction_skip.py lets a hidden turn's own ask through Hermes' check
+  - test: test_hermes_keeps_a_notes_type_through_a_compaction
+    signature: folded note untyped
+    issue: kaishi00/hermes-conduit (cron report drawn as the user's bubble, 2026-11-15)
+    upstream: agent/compaction_display.py project_compaction_message_for_display drops the display_kind of a note whose row carries the summary
+    since: the canary with gateway/session_cron.py's local-chat note
+    workaround: Conduit reads the note by its metadata or first line (MessageNormalizer.isUntypedNote); artifacts_index.py _own_text reads the stored row
 
   - test: test_hermes_lists_memory_providers_without_parsing_the_plugin
     signature: plugin parsed

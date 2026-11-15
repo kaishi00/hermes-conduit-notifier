@@ -919,3 +919,25 @@ def test_a_cron_report_with_only_a_picture_lists_it(tmp_path, monkeypatch):
     assert [(i["source"], i["kind"], i["path"]) for i in _list(conn)["items"]] == [
         ("delivered", "image", "/cam/now.jpg"),
     ]
+
+
+def test_a_cron_report_a_compaction_folded_its_summary_into_still_lists_its_files(tmp_path, monkeypatch):
+    # Hermes folds a compaction's summary into the first row it keeps when
+    # no role alternates, and a cron note is often that row: its files are
+    # still the run's deliveries, and a file the summary names is nobody's
+    # attachment. Both shapes Hermes writes, and a user's own folded turn.
+    _no_gateway(monkeypatch)
+    summary = "Earlier the user sent @file:/root/uploads/old.pdf and asked about @image:/root/old.png"
+    after = (f"{index.MERGED_PRIOR_HEADER}\n"
+             '[Cron job "Quiz" report: shown in the chat, no reply asked for]\n\n@image:/cards/quiz.png\n'
+             f"@file:/var/quiz.pdf\n\n{index.MERGED_SUMMARY_DELIMITER}\n\n{summary}\n\n{index.SUMMARY_END_MARKER}")
+    before = (f"{summary}\n\n{index.SUMMARY_END_MARKER}\n\n"
+              '[Cron job "Cam" report: shown in the chat, no reply asked for]\n\n@image:/cam/now.jpg')
+    own = f"{summary}\n\n{index.SUMMARY_END_MARKER}\n\nread @file:/root/uploads/mine.txt please"
+    conn = _db(tmp_path, [("s1", "user", after), ("s1", "user", before), ("s1", "user", own)])
+    assert sorted((i["source"], i["kind"], i["path"]) for i in _list(conn)["items"]) == [
+        ("attached", "document", "/root/uploads/mine.txt"),
+        ("delivered", "document", "/var/quiz.pdf"),
+        ("delivered", "image", "/cam/now.jpg"),
+        ("delivered", "image", "/cards/quiz.png"),
+    ]

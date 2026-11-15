@@ -222,3 +222,57 @@ def test_a_job_that_lets_the_bot_act_keeps_hermes_turn(ran: Dict[str, Any]) -> N
     assert any("[Cronjob" in text and "REPORT-acte" in text for text in _users(ran["requests"])), _users(ran["requests"])
     assert any(row.get("role") == "assistant" and "BOT-ACTED" in _text_of(row) for row in ran["rows"])
     assert not any(_text_of(row).startswith('[Cron job "Probe acted"') for row in ran["rows"])
+
+
+NOTE = ('[Cron job "Quiz" report: shown in the chat, no reply asked for]\n\n'
+        "@image:/cards/quiz.png\n@file:/var/quiz.pdf")
+
+
+def _folded(force_user_leading: bool) -> Dict[str, Any]:
+    """The note as Hermes stores it once a compaction folds its summary into
+    the note's row (no role alternates there): Hermes' own merge."""
+    from agent.context_compressor import ContextCompressor
+
+    compressor = ContextCompressor.__new__(ContextCompressor)
+    compressor._summary_has_user_turn = True
+    row = {"role": "user", "content": NOTE, "display_kind": "internal_notification",
+           "display_metadata": {"completion_note": ["cron:quiz"]}}
+    compressor._merge_summary_into_tail_row(
+        row, "Earlier the user sent @file:/root/uploads/old.pdf", "user", force_user_leading)
+    return row
+
+
+@pytest.mark.skipif(not _shows_reports(), reason="this Hermes writes no cron note into a chat")
+def test_hermes_keeps_a_notes_type_through_a_compaction(known_failure: Any) -> None:
+    # A note whose row took a compaction's summary is still a note to the
+    # chat's readers. Hermes' display projection hands it back as the
+    # user's own row, so Conduit drew the report as the user's bubble
+    # (2026-11-15); the app reads the note by its metadata or first line.
+    from agent.compaction_display import project_compaction_message_for_display
+
+    kinds = [project_compaction_message_for_display(_folded(force)).get("display_kind") for force in (False, True)]
+    known_failure(kinds == ["internal_notification"] * 2, "folded note untyped", f"display kinds {kinds!r}")
+
+
+@pytest.mark.skipif(not _shows_reports(), reason="this Hermes writes no cron note into a chat")
+def test_the_artifacts_list_reads_a_note_a_compaction_folded() -> None:
+    # The Artifacts list reads the stored row, Hermes' wrapper and all: the
+    # report's files stay the run's deliveries, in both shapes Hermes
+    # writes, and the summary's file is nobody's.
+    import importlib.util
+    import sys
+
+    from agent import context_compressor
+
+    spec = importlib.util.spec_from_file_location("conduit_artifacts_index", ROOT / "artifacts_index.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    assert module.MERGED_PRIOR_HEADER == context_compressor._MERGED_PRIOR_CONTEXT_HEADER
+    assert module.MERGED_SUMMARY_DELIMITER == context_compressor._MERGED_SUMMARY_DELIMITER
+    assert module.SUMMARY_END_MARKER == context_compressor._SUMMARY_END_MARKER
+    for force in (False, True):
+        assert sorted(module.user_items(_folded(force)["content"])) == [
+            ("delivered", "document", "/var/quiz.pdf", ""),
+            ("delivered", "image", "/cards/quiz.png", ""),
+        ], f"force_user_leading={force}"
