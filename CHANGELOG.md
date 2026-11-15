@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.177.13 (2026-11-15)
+## 0.177.14 (2026-11-15)
 
 ### Fixes
 
