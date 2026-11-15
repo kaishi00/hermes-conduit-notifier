@@ -13,12 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.177.6 (2026-11-15)
+## 0.177.7 (2026-11-15)
 
 ### Fixes
 
 - A message to a workstream that Hermes didn't answer in time was reported as refused, though it might have arrived. The bot now hears that it isn't known, and checks before sending it again.
 - When two work updates for a busy Bot Chat were refused at once, one could bring back the other's record, so a later ask in the Bot Chat could be taken as the bot's own idea and held. Each now takes back only its own.
+
+## 0.177.6 (2026-11-15)
+
+### Fixes
+
+- When Hermes Desktop closed several chats at once (after it reloaded or lost its connection), a turn still running in one of them could keep its Lock Screen card and the bot's screen until they timed out. That turn now ends as stopped when its chat closes.
 
 ## 0.177.5 (2026-11-15)
 
