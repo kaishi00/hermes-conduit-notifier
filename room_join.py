@@ -202,16 +202,23 @@ class Hermes:
 
     def config(self, profile: str) -> Mapping[str, Any]:
         """The profile's config.yaml as Hermes reads it (its managed settings and env references in)."""
+        from . import room_setup
+
         load = self._need("hermes_cli.config_effective", "load_user_config_effective")
-        return load(self._home(profile) / "config.yaml")
+        with room_setup.profile_scope(profile):
+            return load(self._home(profile) / "config.yaml")
 
     def ready(self, profile: str) -> bool:
         from . import room_setup
 
-        return bool(room_setup.state(self._setup_calls(), self._home(profile), profile)["ready"])
+        with room_setup.profile_scope(profile):
+            return bool(room_setup.state(self._setup_calls(), self._home(profile), profile)["ready"])
 
     def policy_digest(self, profile: str) -> str:
-        return self._setup_calls().policy(profile, self._home(profile))["policy_digest"]
+        from . import room_setup
+
+        with room_setup.profile_scope(profile):
+            return self._setup_calls().policy(profile, self._home(profile))["policy_digest"]
 
     def installation(self) -> str:
         return self._need("gateway.hosted_rooms", "local_authority_gateway_id")()

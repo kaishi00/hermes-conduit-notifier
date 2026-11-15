@@ -193,6 +193,7 @@ def hermes(tmp_path, monkeypatch):
     fake = FakeHermes(root)
     fake.ports = Ports()
     monkeypatch.setattr(setup, "_answers", fake.ports.answers)
+    monkeypatch.setattr(setup, "_policy_failures", {})
     monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
     return fake
 
@@ -1095,6 +1096,25 @@ def test_the_policy_is_null_when_hermes_cant_read_it(hermes, caplog):
     with caplog.at_level(logging.WARNING):
         assert _state(hermes)["policy"] is None
     assert "RuntimeError" in caplog.text
+
+
+def test_a_policy_that_keeps_failing_is_logged_once_until_it_reads_again(hermes, caplog):
+    # The own-bots check reads each profile's state every minute: .52 logged one failure 1,300 times
+    # (2026-11-15).
+    hermes.policy_fails = True
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert _state(hermes)["policy"] is None
+        assert _state(hermes, "laifu")["policy"] is None
+    told = [record for record in caplog.records if "room policy" in record.getMessage()]
+    assert [record.getMessage().split("profile ")[1].split("'")[0] for record in told] == ["default", "laifu"]
+    caplog.clear()
+    hermes.policy_fails = False
+    with caplog.at_level(logging.WARNING):
+        assert _state(hermes)["policy"] is not None
+        hermes.policy_fails = True
+        assert _state(hermes)["policy"] is None
+    assert caplog.text.count("room policy") == 1
 
 
 # --- Hermes without these calls ---------------------------------------------------------
