@@ -466,7 +466,15 @@ def test_a_report_without_saw_still_counts(home, hermes, clock):
     sees it, so only happening is required; a missing saw never drops the
     call a run owes, and the watch's name is said instead."""
     assert watches.REPORT_SCHEMA["parameters"]["required"] == ["happening"]
-    assert "every time" in watches.run_prompt({"what": "site down", "how": "curl it", "unless": ""})
+    prompt = watches.run_prompt({"what": "site down", "how": "curl it", "unless": ""})
+    assert "every time" in prompt
+    # The call shown whole, with both arguments, for a run where it's behind Tool Search
+    # (Furina's W21, 2026-11-15: a weak model called it by name, or skipped to [SILENT]).
+    assert watches.REPORT_EXAMPLE in prompt and watches.REPORT_EXAMPLE in watches.RUN_NOTE
+    example = json.loads(watches.REPORT_EXAMPLE.removeprefix("tool_call "))
+    assert example["calls"][0]["name"] == watches.REPORT_TOOL
+    assert set(example["calls"][0]["arguments"]) == {"happening", "saw"}
+    assert prompt.index("Report before you reply") < prompt.index("reply [SILENT]")
     job_id = _homelab(hermes, for_minutes=0)
     quiet = json.loads(watches.report({"happening": False}, session_id=RUN.format(job_id)))
     assert quiet["ok"] is True and quiet["status"] == "quiet"

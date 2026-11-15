@@ -77,6 +77,13 @@ def test_the_users_words_in_a_workstreams_chat_are_told_from_the_plugins(on, her
         (WORKER, "user", "Use the staging key", None),
         (WORKER, "user", "Work update: hidden scaffolding", "hidden"),
         (WORKER, "user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted", None),
+        # Hermes' own rows (Furina's W21, 2026-11-15: its iteration limit passed for the user writing).
+        (WORKER, "user", "You've reached the maximum number of tool-calling iterations allowed. Please provide a "
+                         "final response summarizing what you've found and accomplished so far, without calling "
+                         "any more tools.", None),
+        (WORKER, "user", "[System: Continue now. Execute the required tool calls and only send your final answer "
+                         "after completing the task.]", None),
+        (WORKER, "user", "[IMPORTANT: Background process proc_1 completed (exit code 0).]", None),
         (WORKER, "assistant", "On it.", None)])
     with sqlite3.connect(home / "state.db") as con:
         con.execute("INSERT INTO messages (session_id, role, content, active) VALUES (?, 'user', 'A queued copy', 0)",
@@ -279,6 +286,12 @@ def test_a_turn_is_the_users_when_any_of_its_messages_is(on, hermes, home):
     with sqlite3.connect(home / "state.db") as con:  # Hermes' summary of the chat isn't the user's message
         con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', '[CONTEXT COMPACTION] earlier work')",
                     (BOT_CHAT,))
+    assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:  # nor its request for a final answer at the iteration limit
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
+                    (BOT_CHAT, "You've reached the maximum number of tool-calling iterations allowed. Please provide "
+                               "a final response summarizing what you've found and accomplished so far, without "
+                               "calling any more tools."))
     assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
     with sqlite3.connect(home / "state.db") as con:  # a long turn's tool calls don't hide its prompt
         con.executemany("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",

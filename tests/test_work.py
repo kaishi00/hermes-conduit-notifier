@@ -1619,12 +1619,15 @@ def test_a_quick_turn_past_its_steps_hands_the_rest_to_a_workstream(on, hermes, 
                                   turn_id="t1", tool_call_id="c9")
     assert block["message"].startswith("This is turning into longer work") and "W1" in block["message"]
     started = on.get("W1")
+    # Its link, as work_start answers with it: the bot gives it, and Conduit draws the step as W1's card.
+    assert f"[Open W1](conduit://session/{started.session_id}" in block["message"], block["message"]
     assert started.kind == "workstream" and started.title == "Fix the missing saw argument"
     assert "Fix the missing saw argument" in started.goal and 'terminal {"command": "cat 4"}' in started.goal
     assert "patch" not in started.goal, "the refused call never ran"
     again = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={}, turn_id="t1",
                                   tool_call_id="c10")
     assert "W1" in again["message"] and on.get("W2") is None, "once a turn"
+    assert "[Open W1](conduit://session/" in again["message"]
     # Another turn's unrelated ask, with the same steps, isn't taken for the same task.
     plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t3", user_message="Book a table for two", platform="tui")
     for n in range(work.QUICK_STEPS):

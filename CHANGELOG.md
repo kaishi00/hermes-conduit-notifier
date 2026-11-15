@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.6 (2026-11-15)
+
+### Fixes
+
+- When a workstream ran out of tool steps, Hermes' own "reached the maximum" note in its chat passed for you writing there, so the Bot Chat thought you'd already seen the result and said nothing. Hermes' own notes no longer count as yours.
+- A workstream the Bot Chat handed its quick steps to showed only as a name in the reply, with no card to open it. The bot now gets its link, so the card shows as for any other workstream.
+- A call watch's run could leave out its report, or call it the wrong way, and go silent. Its prompt now shows the report call whole and asks for it before the reply, and each watch picks it up on its next run.
+
 ## 0.177.4 (2026-11-15)
 
 ### Fixes

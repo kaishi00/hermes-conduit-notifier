@@ -58,7 +58,18 @@ _APP_TAPPED = "The user tapped "
 _WORDS_AT = "words_at:"
 _STEER_OPEN = re.compile(r"\[OUT-OF-BAND USER MESSAGE[^\]\n]*\]")
 _STEER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
-_SUMMARIES = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:")
+# User rows Hermes writes itself, nobody's message: its summary of the chat
+# so far, the request for a final answer when a turn runs out of
+# iterations, its continue and recovery nudges ("[System: ..."), and its
+# notes that a background process or subagent finished. A workstream that
+# ran out of iterations once passed for the user writing in its chat, so its
+# Bot Chat answered [SILENT] to the result (2026-11-15, Furina's W21).
+_HERMES_ROWS = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:",
+                "You've reached the maximum number of tool-calling iterations",
+                "Continue from the compressed conversation context above.", "[System: ",
+                "[IMPORTANT: Background process ", "[ASYNC COMPLETE", "[ASYNC DELEGATION", "[ASYNC BATCH",
+                "A background subagent you dispatched earlier has finished.",
+                "A background fan-out of ")
 _WAKE_STARTS = "Work update from "
 # The work updates that carried another bot's ask (their outbox rows):
 # answering it, with a workstream when it takes one, is what that turn is
@@ -193,9 +204,14 @@ def _turn_prompts(home: Path, session_id: Any) -> Optional[list[tuple[str, Any]]
         return None
     finally:
         db.close()
-    # Hermes' own summary of the chat so far is nobody's message.
+    # What Hermes writes itself is nobody's message.
     return [(content, shown) for content, shown in ((text if isinstance(text, str) else "", kind) for text, kind in rows)
-            if not content.lstrip().startswith(_SUMMARIES)]
+            if not hermes_own(content)]
+
+
+def hermes_own(content: str) -> bool:
+    """Whether a saved user row is one Hermes wrote itself (_HERMES_ROWS)."""
+    return content.lstrip().startswith(_HERMES_ROWS)
 
 
 def _users_own(prompt: tuple[str, Any]) -> bool:
@@ -310,7 +326,7 @@ def read_user_words(home: Path, store: work_store.Store, work: work_store.Work) 
     for row_id, content, display_kind, stamp in rows:
         if not isinstance(content, str) or display_kind not in (None, "steer"):
             continue
-        if content.lstrip().startswith(_SUMMARIES):
+        if hermes_own(content):
             continue
         text = content
         if display_kind == "steer":

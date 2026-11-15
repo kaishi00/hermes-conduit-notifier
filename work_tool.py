@@ -224,7 +224,7 @@ STEP_BLOCK = ("This is turning into longer work than the Bot Chat should hold up
 HANDED_OFF = ("This is turning into longer work than the Bot Chat should hold up, so {tool} didn't run, and the "
               "plugin started workstream {ref} ({title}) for the rest, with the user's ask, the steps this turn "
               "took and what they returned. Don't run any more tools for it here. Tell the user in a line that {ref} is on it in the "
-              "background and its result comes back here.")
+              "background and its result comes back here, with its link: {link}")
 # What a hand-off carries at most: the ask, the steps taken (up to 20 of
 # them) and what each returned, cut short, so the workstream doesn't start by
 # running them all again (issue 2446: minutes of a slow model's work, twice).
@@ -1665,8 +1665,8 @@ def _users_words(home: Path, coordinator: str) -> str:
         db.close()
     if not row or row[1] is not None or not isinstance(row[0], str):
         return ""  # a hidden turn, or another kind of row: not the user's words
-    if row[0].startswith("Work update from "):
-        return ""  # a work update stored without its hidden mark
+    if row[0].startswith("Work update from ") or work_coord.hermes_own(row[0]):
+        return ""  # a work update stored without its hidden mark, or a row Hermes wrote
     return row[0].strip()
 
 
@@ -3632,7 +3632,7 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
         handed = _handed.get(key)
         did = [list(step) for step in _did.get(key, ())]
     if handed is not None:
-        return HANDED_OFF.format(tool=tool, ref=handed[0], title=handed[1])
+        return _handed_off(tool, *handed)
     if not ask:
         return STEP_BLOCK.format(tool=tool)
     title = _cut(" ".join(ask.split()[:6]), 60)
@@ -3675,15 +3675,24 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
         note = str(answer.get("note") or "") if isinstance(answer, dict) else ""
         return STEP_BLOCK.format(tool=tool) + (f" (The plugin couldn't start it for you: {note})" if note else "")
     shown = str(answer.get("title") or title)
+    link = str(answer.get("link") or "")
     with _steps_lock:
         if _asks.get(key) != ask:
             # A new turn came in while it started: this hand-off is the last
             # turn's, and the new one's blocked calls mustn't be told it's theirs.
-            return HANDED_OFF.format(tool=tool, ref=ref, title=shown)
-        _handed[key] = (ref, shown)
+            return _handed_off(tool, ref, shown, link)
+        _handed[key] = (ref, shown, link)
         while len(_handed) > _STEP_TURNS:
             del _handed[next(iter(_handed))]
-    return HANDED_OFF.format(tool=tool, ref=ref, title=shown)
+    return _handed_off(tool, ref, shown, link)
+
+
+def _handed_off(tool: str, ref: str, title: str, link: str) -> str:
+    """HANDED_OFF, with the workstream's link: the bot gives it as written,
+    and Conduit draws the blocked step as the workstream's card ("Started
+    W3: ..."), as it does a work_start the bot called itself, by the link."""
+    text = HANDED_OFF.format(tool=tool, ref=ref, title=title, link=link or ref)
+    return text + " " + LINK_RULE if link else text
 
 
 def _returned(did: list[list[Any]]) -> str:
@@ -3739,8 +3748,8 @@ _did: dict[tuple[str, str], list[list[Any]]] = {}
 # that ended, when the ones running now began, those: [call, its rows in
 # _did], when one of them last ended]. Steps that run together count once.
 _ran: dict[tuple[str, str], list] = {}
-# The workstream a quick turn handed its rest to: key -> (ref, title).
-_handed: dict[tuple[str, str], tuple[str, str]] = {}
+# The workstream a quick turn handed its rest to: key -> (ref, title, link).
+_handed: dict[tuple[str, str], tuple[str, str, str]] = {}
 # The steps the hook's last tool_block took on this thread, for give_back_steps.
 _last_take = threading.local()
 
