@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.5 (2026-11-15)
+
+### Fixes
+
+- A message to a workstream that timed out while its chat was reopening was reported as possibly already queued, so the bot never sent it again. It's now reported as not sent.
+- A work update held for a busy Bot Chat left a refused copy in the plugin's records on every retry. Only the update that goes out is kept now.
+
 ## 0.177.4 (2026-11-15)
 
 ### Fixes

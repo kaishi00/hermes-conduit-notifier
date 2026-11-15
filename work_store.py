@@ -933,6 +933,13 @@ class Store:
             con.execute("UPDATE outbox SET accepted_at = ?, outcome = ? WHERE id = ?",
                         (time.time() if outcome in ("accepted", "queued") else 0.0, outcome, item))
 
+    def outbox_drop(self, item: str) -> None:
+        """Forgets a row that never went out and is tried again as a new one
+        (a work update held for a busy Bot Chat's turn), so the retries
+        leave no trail of refused copies."""
+        with self._db() as con:
+            con.execute("DELETE FROM outbox WHERE id = ? AND accepted_at = 0", (item,))
+
     def outbox_rows(self, ref: str, kind: str) -> list[dict]:
         if not self.path.is_file():
             return []
