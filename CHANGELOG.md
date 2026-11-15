@@ -13,6 +13,18 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.16 (2026-11-15)
+
+### Fixes
+
+- Duplicating a file on an SSH workspace could put the copy inside a folder that appeared under its name in the same moment. The copy is now refused and nothing of theirs changes.
+- Saving a file from the Folder could still overwrite an edit of the same length made in the same moment. The save now sees it.
+- Searching the Folder could answer "Hermes is still searching" until the dashboard restarted, after two searches failed to start.
+
+### New and improved
+
+- When the plugin can't do something on this Hermes, such as picking a workstream up again after a restart, Conduit now says so on the plugin's page in Settings. Before, only the host's log did.
+
 ## 0.177.15 (2026-11-15)
 
 ### Security

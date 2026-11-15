@@ -65,7 +65,7 @@ from typing import Any, Callable, Optional
 import uuid
 from urllib.parse import quote, unquote
 
-from . import room_rules, room_work, screen_lock, work_broker, work_coord, work_store, work_trees, work_watch
+from . import degraded, room_rules, room_work, screen_lock, work_broker, work_coord, work_store, work_trees, work_watch
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -3288,6 +3288,10 @@ def _watch_shutdown() -> bool:
 
         stopping._conduit_watch = True  # type: ignore[attr-defined]
         setattr(module, _SHUTDOWN_HOOK, stopping)
+    # On Conduit's plugin page too (the capabilities route's `degraded`),
+    # until a later turn finds it. Both callers ask once the session host is
+    # up, when the stopper is there if this Hermes has it where we look.
+    (degraded.clear if watched else degraded.note)(degraded.WORKSTREAM_RECOVERY)
     return watched
 
 

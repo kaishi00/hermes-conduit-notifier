@@ -1,4 +1,6 @@
 import importlib.util
+import sys
+import types
 import json
 import re
 from pathlib import Path
@@ -240,3 +242,21 @@ def test_a_host_that_keeps_disbanded_rooms_chats_says_so(monkeypatch):
 
     monkeypatch.setattr(settings, "cleanup_disbanded", broken)
     assert "room_chats_kept" not in _client().get(f"{BASE}/capabilities").json()
+
+
+def test_what_the_plugin_cant_do_on_this_hermes_is_listed_until_it_can(monkeypatch):
+    # Notifier issue 834: a state the host's log alone used to say.
+    degraded = api.core._plugin_package_module("degraded")
+    monkeypatch.setitem(sys.modules, degraded._HOLDER, types.ModuleType(degraded._HOLDER))
+    assert "degraded" not in _client().get(f"{BASE}/capabilities").json()
+    degraded.note(degraded.WORKSTREAM_RECOVERY)
+    degraded.note(degraded.WORKSPACE_FILES)
+    assert _client().get(f"{BASE}/capabilities").json()["degraded"] == ["workspace-files", "workstream-recovery"]
+    degraded.clear(degraded.WORKSPACE_FILES)
+    assert _client().get(f"{BASE}/capabilities").json()["degraded"] == ["workstream-recovery"]
+
+    def broken():
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(degraded, "current", broken)
+    assert "degraded" not in _client().get(f"{BASE}/capabilities").json()
