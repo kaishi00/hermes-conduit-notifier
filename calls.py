@@ -388,6 +388,16 @@ def cancel_alerts(session_id: str, kind: str | None = None) -> None:
         logger.warning("Conduit could not cancel an alert call", exc_info=True)
 
 
+def keep_waiting_card(request_id: str, decision: Any) -> None:
+    """The relay holds a question and takes answers for it
+    (``CallStore.keep_waiting_card``): the Needs you list hands Conduit its
+    card from now on. Never raises."""
+    try:
+        _store(get_hermes_home()).keep_waiting_card(request_id, decision)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not keep a question's card on the waiting list", exc_info=True)
+
+
 def forget_waiting_card(request_id: str) -> None:
     """A question's card can no longer be answered (``CallStore.forget_waiting_card``):
     the Needs you list stops handing it to Conduit. Never raises."""

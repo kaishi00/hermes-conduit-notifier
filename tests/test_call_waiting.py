@@ -154,6 +154,13 @@ def test_a_questions_row_carries_its_card_as_the_push_did(store):
         "questions": [{"qid": "q0", "question": "Which environment?", "choices": ["staging", "production"]},
                       {"qid": "q1", "question": "Which tests?", "choices": ["unit", "ui"], "multi_select": True}]}
     assert all("decision" not in listed[key] for key in ("s2", "s3", "s4"))
+    # The relay holds a question: its wait takes the card then, and only
+    # its own.
+    assert store.keep_waiting_card("conduit-push-c", {**card, "request_id": "conduit-push-c"}) is True
+    assert store.keep_waiting_card("conduit-push-b", card) is False
+    assert store.keep_waiting_card("conduit-push-zz", {**card, "request_id": "conduit-push-zz"}) is False
+    listed = {item["session_ids"][0]: item for item in store.waiting_list()}
+    assert listed["s3"]["decision"]["request_id"] == "conduit-push-c" and "decision" not in listed["s2"]
     # The relay let the question go while Hermes still waits on its own
     # prompt: listed, without a card that would refuse the answer.
     assert store.forget_waiting_card("conduit-push-a") is True

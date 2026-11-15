@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.18 (2026-11-15)
+
+### Fixes
+
+- When a question's notification never reached the relay, Conduit could show a card for it that refused your answer for a few minutes. The card now shows only once the relay can take the answer.
+
 ## 0.177.17 (2026-11-15)
 
 ### Fixes
