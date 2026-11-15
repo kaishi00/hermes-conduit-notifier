@@ -1563,3 +1563,58 @@ def test_the_plugins_own_work_update_isnt_at_a_screen_because_desktop_has_it_ope
         assert calls._at_screen(home, ["st-1"]) is False
     finally:
         calls.turn_surface.start_turn("st-1")
+
+
+# A chat's close (notifier issue 820): Hermes says on_session_end with no turn
+# named, and skips it while another chat's close holds its gate.
+@pytest.fixture
+def turns_marked(monkeypatch):
+    monkeypatch.setattr(sys.modules["conduit_push.pulse"], "turns_marked", True)
+
+
+def test_a_chat_closed_after_its_turn_ended_stops_nothing(home, fake, turns_marked):
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", turn_id="t1", completed=True, failed=False, interrupted=False)
+    _watch(home, "rt-1")
+    # Hermes' finalize, then on_session_finalize: the turn's own end settled
+    # it, so the close is no stopped turn of its own.
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    plugin._on_session_finalize(session_id="rt-1")
+    assert fake.sent == []
+    assert fake.enqueued == []
+
+
+def test_a_chat_closed_mid_turn_ends_it_stopped_once(home, fake, turns_marked):
+    _watch(home, "rt-1")
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    plugin._on_session_finalize(session_id="rt-1")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_chat_closed_mid_turn_ends_it_when_hermes_skipped_on_session_end(home, fake, turns_marked):
+    _watch(home, "rt-1")
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    # The gate skipped this chat's on_session_end: only the finalize arrives.
+    plugin._on_session_finalize(session_id="rt-1", platform="tui")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+    plugin._on_session_finalize(session_id="rt-1", platform="tui")
+    assert len(fake.sent) == 1
+
+
+def test_a_hermes_that_marks_no_turns_still_stops_on_a_close(home, fake, monkeypatch):
+    monkeypatch.setattr(sys.modules["conduit_push.pulse"], "turns_marked", False)
+    _watch(home, "rt-1")
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_turn_whose_start_was_forgotten_still_ends_on_its_close(home, fake, turns_marked):
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", turn_id="t1", completed=True, failed=False, interrupted=False)
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t2", conversation_history=[])
+    # Hours in, or past the cap: its start is gone, but its end never came.
+    plugin._end_parent_turn("rt-1")
+    _watch(home, "rt-1")
+    plugin._on_session_finalize(session_id="rt-1")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
