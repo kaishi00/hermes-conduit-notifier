@@ -583,6 +583,28 @@ class CallStore:
             state["waiting"] = kept
             return removed
 
+    def forget_waiting_card(self, request_id: Any) -> bool:
+        """The question ``request_id`` can no longer be answered on its card
+        (the relay released it, or never showed it), though Hermes may still
+        wait on its own prompt: the wait stays listed, without the card, so
+        Conduit draws none that would refuse the answer. True when one was
+        dropped."""
+        if not isinstance(request_id, str) or not request_id or not self.path.exists():
+            return False
+
+        def carried(item: dict[str, Any]) -> bool:
+            return item["kind"] == "question" and item["request_id"] == request_id and "decision" in item
+
+        if not any(carried(item) for item in self._load()["waiting"]):
+            return False
+        with self._locked() as state:
+            dropped = False
+            for item in state["waiting"]:
+                if carried(item):
+                    del item["decision"]
+                    dropped = True
+            return dropped
+
     def waiting_for(self, session_id: Any) -> dict[str, Any] | None:
         """What Hermes waits on in ``session_id``, as a call reads it: the
         newest wait, with its questions numbered and the ones answered from a

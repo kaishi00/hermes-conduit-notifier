@@ -154,6 +154,12 @@ def test_a_questions_row_carries_its_card_as_the_push_did(store):
         "questions": [{"qid": "q0", "question": "Which environment?", "choices": ["staging", "production"]},
                       {"qid": "q1", "question": "Which tests?", "choices": ["unit", "ui"], "multi_select": True}]}
     assert all("decision" not in listed[key] for key in ("s2", "s3", "s4"))
+    # The relay let the question go while Hermes still waits on its own
+    # prompt: listed, without a card that would refuse the answer.
+    assert store.forget_waiting_card("conduit-push-a") is True
+    assert store.forget_waiting_card("conduit-push-a") is False
+    listed = {item["session_ids"][0]: item for item in store.waiting_list()}
+    assert "decision" not in listed["s1"] and listed["s1"]["kind"] == "question"
     # A legacy one-question call's card stays scalar.
     store.note_waiting("s5", "question", request_id="conduit-push-e", questions=BATCH,
                        decision={"kind": "clarify", "request_id": "conduit-push-e", "question": "Go on?"})
