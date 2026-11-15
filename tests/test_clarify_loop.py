@@ -1377,14 +1377,26 @@ def test_a_half_answered_card_that_times_out_keeps_the_locked_answers(monkeypatc
 
 
 def test_an_answer_locked_during_the_last_sleep_of_the_unattended_wait_still_counts(monkeypatch):
-    # Pending at every poll the deadline allows, then the answer arrives in
-    # the last backoff sleep: the one more poll at the deadline reads it.
-    fake = _FakeState([{"status": "pending"},
+    # The card is pending at every poll the deadline allows, then the answer
+    # arrives in the last backoff sleep: the one more poll at the deadline
+    # reads it. The first poll waits for Hermes' undelivered result, and the
+    # first sleep is short, so the wait is unattended before the deadline.
+    fake = _FakeState([{"status": "pending"}, {"status": "pending"},
                        {"status": "answered", "answers": {"q0": "prod", "q1": '["ui"]'}, "remaining": []}])
     _install(fake)
-    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 0.05)
-    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.2)
-    parsed = json.loads(loop.middleware(**_kwargs(_undelivered_original(), _batch_args())))
+    returned = threading.Event()
+    polled = fake.poll_decision
+
+    def poll_after_original(request_id):
+        if not fake.poll_ids:
+            returned.wait(5)
+            time.sleep(0.02)
+        return polled(request_id)
+
+    loop.client.poll_decision = poll_after_original
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 0.3)
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.05 if polls == 1 else 0.5)
+    parsed = json.loads(loop.middleware(**_kwargs(_undelivered_original(returned), _batch_args())))
     assert parsed["outcome"] == "submitted"
     assert [row["user_response"] for row in parsed["responses"]] == ["prod", ["ui"]]
 
