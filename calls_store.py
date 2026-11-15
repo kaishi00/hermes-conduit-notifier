@@ -583,6 +583,23 @@ class CallStore:
             state["waiting"] = kept
             return removed
 
+    def keep_waiting_card(self, request_id: Any, decision: Any) -> bool:
+        """The relay holds the question ``request_id`` and takes answers for
+        it: its wait now carries the card (``decision``, as the push carried
+        it) for the Needs you list to hand Conduit. True when it was kept."""
+        if not isinstance(request_id, str) or not request_id or not self.path.exists():
+            return False
+        card = _waiting_decision(decision, request_id)
+        if card is None:
+            return False
+        with self._locked() as state:
+            kept = False
+            for item in state["waiting"]:
+                if item["kind"] == "question" and item["request_id"] == request_id:
+                    item["decision"] = card
+                    kept = True
+            return kept
+
     def forget_waiting_card(self, request_id: Any) -> bool:
         """The question ``request_id`` can no longer be answered on its card
         (the relay released it, or never showed it), though Hermes may still

@@ -178,11 +178,11 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     # answered with no chat open (the Watch) to
     # read out and answer; the answers come back through
     # ``calls.taken_answers``.
-    # Its card too, as the push carries it: a Conduit on screen gets no
-    # notification to tap, so it draws the card from the list
-    # (hermes-conduit#2556).
+    # Its card joins the wait once the relay holds the decision
+    # (``_first_answer_wins``): a Conduit on screen gets no notification to
+    # tap, so it draws the card from the list (hermes-conduit#2556).
     calls.note_waiting(session_id, "question", request_id=request_id, questions=batch,
-                       title=chat_title(session_id), decision=push.get("decision"))
+                       title=chat_title(session_id))
     calls.alert(session_id, "question", reason, profile=profile)
     try:
         return _first_answer_wins(
@@ -192,6 +192,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
             args=args,
             batch=batch,
             batch_protocol=batch_protocol,
+            card=push.get("decision"),
         )
     finally:
         calls.cancel_alerts(session_id, "question")
@@ -205,8 +206,13 @@ def _first_answer_wins(
     args: dict[str, Any],
     batch: list[dict[str, Any]],
     batch_protocol: bool,
+    card: Any = None,
 ) -> Any:
     """Race the original clarify call against the relay answer poll.
+
+    ``card`` is the question's card as its push carried it. The wait carries
+    it for the Needs you list only while the relay holds the decision and
+    takes answers for it: from the first ``pending`` poll until polling stops.
 
     Single-question decisions resolve on one relay answer, exactly as before.
     Batch-protocol decisions (a non-empty original ``questions`` array —
@@ -252,6 +258,8 @@ def _first_answer_wins(
     started = time.monotonic()
     deadline = started + _clarify_poll_budget()
     saw_pending = False
+    # The wait carries the card for the Needs you list.
+    saw_card = False
     expired = False
     # The unattended wait's deadline passed: one more poll, so an answer
     # locked during the last backoff sleep still reaches Hermes.
@@ -345,6 +353,12 @@ def _first_answer_wins(
                 # this notification): nobody can answer by id. Stop polling
                 # and let the original path's timeout conclude the race.
                 break
+            if not saw_card and card is not None:
+                # The relay holds the decision and takes answers for it: the
+                # Needs you list may hand Conduit its card now, never before
+                # (a push that never parked would refuse the answer).
+                # A write that failed is tried again on the next poll.
+                saw_card = calls.keep_waiting_card(request_id, card) is not False
             if batch_protocol and isinstance(status.get("answers"), dict):
                 locked_answers = dict(status["answers"])
             remaining = status.get("remaining")
