@@ -72,6 +72,8 @@ _thread_lock = threading.Lock()
 _setup_thread_lock = threading.Lock()
 # What the store keeps of a watch.
 CONFIG_KEYS = ("what", "how", "for_minutes", "every_minutes", "hours", "unless", "once")
+# What counts as happening: a change to one starts an open incident over.
+EVENT_KEYS = ("what", "how", "for_minutes", "hours", "unless")
 
 _WATCH_FIELDS: dict[str, Any] = {
     "id": {"type": "string", "description": "To change an existing watch: its id, from list."},
@@ -331,7 +333,9 @@ def _list(cronjob: Callable[..., str]) -> dict[str, Any]:
     if finished & {job["job_id"] for job, _ in found}:
         note += (" Finished ones were one-time watches that already called and stopped: setting one again starts "
                  "it over, and the user can have you remove them.")
-    if any(_toolsets_with_conduit(job) is not None for job, _ in found):
+    # A finished watch's runs are paused: setting it again to fix them
+    # would start it over and ring again for an event that's over.
+    if any(_toolsets_with_conduit(job) is not None for job, _ in found if job["job_id"] not in finished):
         note += (f" Some can't report: their runs don't get the {TOOLSET} tools. Set each of those again to fix "
                  "it (the same watch is fine).")
     return {"ok": True, "watches": watches, "note": note}
@@ -450,13 +454,23 @@ def _apply(cronjob: Callable[..., str], watch: dict[str, Any],
     job_id = job["job_id"]
     summary = _summary(job_id, config, state=job.get("state"))
     if job_id in finished:
-        if not restart and stored == config:
+        if not restart and stored is not None and all(stored.get(key) == config[key] for key in EVENT_KEYS):
+            # The note still describes the same event (how often it checks
+            # aside): it already called about it.
             return {"result": "unchanged", "watch": {**summary, "finished": True}}, None
+        if len([other for other, _ in existing if other["job_id"] not in finished]) >= MAX_WATCHES:
+            return {}, f"There are already {MAX_WATCHES} call watches. Ask the user which one to stop first."
         # Set again: it checks from now on, as a new watch.
         answer = _call(cronjob, action="update", job_id=job_id, **fields)
-        if not answer.get("success") or not _call(cronjob, action="resume", job_id=job_id).get("success"):
-            return {}, f"The job couldn't be changed: {answer.get('error') or 'it could not be resumed'}."
-        _store().put(job_id, config, reset=True)
+        if not answer.get("success"):
+            return {}, f"The job couldn't be changed: {answer.get('error') or 'unknown error'}."
+        store = _store()
+        if not _call(cronjob, action="resume", job_id=job_id).get("success"):
+            # The job has the new details but stays paused: so does the store.
+            store.put(job_id, config, reset=True)
+            store.finish(job_id)
+            return {}, "The job was changed but couldn't be resumed, so it stays stopped. Tell the user."
+        store.put(job_id, config, reset=True)
         summary.pop("state", None)
         return {"result": "changed", "watch": summary}, None
     if stored == config and job.get("name") == fields["name"] and toolsets is None:
@@ -469,8 +483,7 @@ def _apply(cronjob: Callable[..., str], watch: dict[str, Any],
     if not answer.get("success"):
         return {}, f"The job couldn't be changed: {answer.get('error') or 'unknown error'}."
     # What counts as happening changed: an open incident starts over.
-    _store().put(job_id, config, reset=stored is None or any(
-        stored.get(key) != config[key] for key in ("what", "how", "for_minutes", "hours", "unless")))
+    _store().put(job_id, config, reset=stored is None or any(stored.get(key) != config[key] for key in EVENT_KEYS))
     return {"result": "changed", "watch": summary}, None
 
 

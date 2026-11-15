@@ -609,6 +609,50 @@ def test_a_sync_of_a_note_that_still_describes_a_finished_one_time_watch_leaves_
     assert _report(job_id, True)["status"] == "calling"
 
 
+def test_a_sync_that_only_changes_how_often_or_drops_once_leaves_a_finished_watch_finished(home, hermes, clock):
+    job_id = _reminder(hermes, every_minutes=240)
+    assert _report(job_id, True)["status"] == "calling"
+    no_cadence = {key: value for key, value in REMINDER.items() if key != "once"}
+    synced = _setup({"action": "sync", "watches": [no_cadence]})
+    assert synced["unchanged"] and synced["unchanged"][0]["finished"] is True
+    assert hermes.jobs[job_id]["state"] == "paused"
+    assert _report(job_id, True)["status"] == "done"
+
+
+def test_a_finished_watch_set_again_counts_toward_the_cap(home, hermes, clock):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    for index in range(watches.MAX_WATCHES):
+        assert _setup({"action": "set", "watch": {**HOMELAB, "what": f"host {index} down"}})["ok"]
+    again = _setup({"action": "set", "watch": REMINDER})
+    assert again["ok"] is False and "Ask the user which one to stop" in again["note"]
+    assert hermes.jobs[job_id]["state"] == "paused"
+
+
+def test_a_finished_watch_that_cant_be_resumed_stays_finished(home, hermes, clock, monkeypatch):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    real = hermes.__call__
+
+    def no_resume(action, *args, **kwargs):
+        if action == "resume":
+            return json.dumps({"success": False, "error": "locked"})
+        return real(action, *args, **kwargs)
+    monkeypatch.setattr(watches, "_cronjob", lambda: no_resume)
+    changed = {**REMINDER, "how": "the local time is 13:00 or later"}
+    assert _setup({"action": "set", "watch": changed})["ok"] is False
+    [listed] = _setup({"action": "list"})["watches"]
+    assert listed["finished"] is True and listed["how"] == changed["how"]
+    assert _report(job_id, True)["status"] == "done"
+
+
+def test_the_list_never_asks_to_set_a_finished_watch_again_to_fix_its_tools(home, hermes, clock, monkeypatch):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    monkeypatch.setattr(watches, "_toolsets_with_conduit", lambda job: ["web"] if job else None)
+    assert "can't report" not in _setup({"action": "list"})["note"]
+
+
 def test_a_finished_one_time_watch_can_be_removed_by_id_and_leaves_room_under_the_cap(home, hermes, clock):
     job_id = _reminder(hermes)
     assert _report(job_id, True)["status"] == "calling"
