@@ -14,6 +14,9 @@ another chat's close is still in ``on_session_end`` (what the workaround
 needs), and two concurrent closes both reach ``on_session_end`` (the upstream
 bug, a known failure until it is fixed; the workaround can then go).
 
+The callbacks go straight into the plugin manager's hooks (`_hooks`), a
+private attribute (hermes_cli/plugins*.py is watched).
+
 Run in a child with a Hermes home of its own, since Hermes reads its home
 from the environment as its modules load.
 """
