@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.12 (2026-11-15)
+
+### Security
+
+- When a Bot Chat handed its work to a workstream, the steps and results it passed on could carry the start and end of a token (a bearer header showed as its first 6 and last 4 characters), or a token with no known prefix whole. Credentials in a hand-off are now masked whole.
+
 ## 0.177.11 (2026-11-15)
 
 ### Fixes
