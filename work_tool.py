@@ -2245,6 +2245,12 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "maybe_sent",
                     "note": f"Hermes couldn't confirm {work.ref} took it: it may already be queued there. Don't "
                             "send it again; its next update says whether it ran."}
+        if error.timed_out:
+            # It may have timed out reopening the chat (nothing sent) or
+            # submitting (maybe queued): neither "refused" nor "queued".
+            return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
+                    "note": f"Hermes didn't answer in time, so it isn't known whether {work.ref} got it. Look at "
+                            "its latest update or work_list before sending it again."}
         if error.owner_busy:
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "mid_turn",
                     "note": f"{work.ref} is in the middle of a turn in another Hermes process, which takes nothing "

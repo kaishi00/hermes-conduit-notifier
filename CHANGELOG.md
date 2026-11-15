@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.6 (2026-11-15)
+
+### Fixes
+
+- A message to a workstream that Hermes didn't answer in time was reported as refused, though it might have arrived. The bot now hears that it isn't known, and checks before sending it again.
+
 ## 0.177.5 (2026-11-15)
 
 ### Fixes

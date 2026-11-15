@@ -3592,6 +3592,7 @@ def test_a_send_that_timed_out_reopening_isnt_reported_as_maybe_sent(on, hermes,
     monkeypatch.setattr(broker.Broker, "send", timed_out)
     refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
     assert refused.get("error") == "hermes", refused
+    assert "isn't known" in refused["note"] and "refused" not in refused["note"]
 
 
 def test_a_4090_without_a_reason_is_still_another_windows_hold():
