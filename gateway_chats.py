@@ -47,6 +47,28 @@ def _sibling(name: str) -> Any:
     return importlib.import_module(f"{package}.{name}" if package else name)
 
 
+# Hermes' longest session title (SessionDB.MAX_TITLE_LENGTH); a longer one refuses the create.
+AUTHORITY_TITLE_CHARS = 100
+
+
+def own_title(title: str, request_id: Any = None) -> str:
+    """The title a plugin create asks the authority for. Its titled create is
+    resolve-or-create (Hermes' session_controls._create): a title another chat
+    holds, or that chat's latest "<title> #N", opens that chat instead of
+    making one, so a workstream, Watch job or Watch call titled like an
+    earlier one went into it (issue 2521). Every create the plugin sends
+    means a new chat, so its title ends in its request's tag, which no other
+    chat holds; an exact retry (the same request id) asks for the same title
+    and resolves to its own chat. "Bot Chat" stays as it is: that title is
+    the bot's one chat, found by name."""
+    text = " ".join(title.split())
+    if not text or text.casefold() == _sibling("session_titles").BOT_CHAT_TITLE.casefold():
+        return title
+    key = request_id if isinstance(request_id, str) and request_id else uuid.uuid4().hex
+    tag = f" · {key[-6:]}"
+    return text[:AUTHORITY_TITLE_CHARS - len(tag)].rstrip() + tag
+
+
 AUTHORITY_RPC_TIMEOUT_S = 60.0
 # How long a link remembers that a prompt stopped waiting: longer than any
 # read that could have been in flight then (a call's budget, plus its thread's).
@@ -612,6 +634,8 @@ class _AuthorityLink:
             if "idempotency_key" in params:
                 # The authority keeps a retried create to one chat by its request id.
                 params.setdefault("request_id", params.pop("idempotency_key"))
+            if isinstance(params.get("title"), str):
+                params["title"] = own_title(params["title"], params.get("request_id"))
             return method, params
         if method == "prompt.submit":
             self._settle_lost(sid, left)

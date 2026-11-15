@@ -90,7 +90,8 @@ def test_a_create_takes_the_authoritys_shape_and_keeps_its_fences(gateway):
                     {"cols": 96, "source": "desktop", "title": "Job", "reasoning_effort": "low", "fast": True})
     assert created["result"]["session_id"] == "s1"
     sent = connections[0].requests[0]["params"]
-    assert sent == {"source": "gui", "title": "Job", "reasoning": "low", "service_tier": "fast"}
+    assert sent.pop("title").startswith("Job · ")  # issue 2521: never another chat's title
+    assert sent == {"source": "gui", "reasoning": "low", "service_tier": "fast"}
     assert chats._sessions.get("s1") == {"transport": transport}
     # A steer names the turn by its generation.
     _call(chats, transport, "session.steer", {"session_id": "s1", "text": "more"})
@@ -550,6 +551,31 @@ def test_a_queue_read_hermes_refuses_is_read_again_at_the_next_send(gateway):
     _call(chats, transport, "prompt.submit", {"session_id": "lost-5", "text": "again"})
     assert [r["method"] for r in connections[0].requests] == [
         "session.resume", "prompt.submit", "session.resume", "prompt.submit"]
+
+
+def test_a_titled_create_never_opens_another_chat_by_its_title(gateway):
+    """Issue 2521: the authority's titled create resolves an existing chat by
+    title (or its latest "<title> #N"), so two workstreams titled alike shared
+    one session. The plugin's creates ask for a title no other chat holds:
+    the request's tag at its end, the same on an exact retry."""
+    chats, answers, connections = gateway
+    answers["session.create"] = {"result": {"session_id": "w1", "subscription_id": "sub"}}
+    transport = Transport()
+    for _ in range(2):
+        _call(chats, transport, "session.create", {"title": "Login bug", "idempotency_key": "conduit-work-0a1b2c3d4e5f"})
+    first, retry = (request["params"] for request in connections[0].requests)
+    assert first["title"] == retry["title"] == "Login bug · 3d4e5f"
+    assert first["request_id"] == "conduit-work-0a1b2c3d4e5f"
+    # A create with no request id (a Watch call's) is tagged afresh each time.
+    _call(chats, transport, "session.create", {"title": "Watch call"})
+    _call(chats, transport, "session.create", {"title": "Watch call"})
+    calls = [request["params"]["title"] for request in connections[0].requests[2:]]
+    assert all(title.startswith("Watch call · ") and len(title) == len("Watch call · ") + 6 for title in calls)
+    assert calls[0] != calls[1]
+    # Within Hermes' 100 characters, the tag kept; the bot's one chat keeps its name.
+    assert len(gateway_chats.own_title("x" * 120, "k" * 10)) == 100
+    assert gateway_chats.own_title("x" * 120, "abcdef123456").endswith("x · 123456")
+    assert gateway_chats.own_title("Bot Chat", "k1") == "Bot Chat"
 
 
 def test_a_sibling_profiles_chat_is_read_and_answered_by_its_profile(gateway):
