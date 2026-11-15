@@ -18,6 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 
 - A message to a workstream that Hermes didn't answer in time was reported as refused, though it might have arrived. The bot now hears that it isn't known, and checks before sending it again.
+- When two work updates for a busy Bot Chat were refused at once, one could bring back the other's record, so a later ask in the Bot Chat could be taken as the bot's own idea and held. Each now takes back only its own.
 
 ## 0.177.5 (2026-11-15)
 

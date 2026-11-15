@@ -3611,8 +3611,18 @@ def test_a_wake_the_bot_chats_busy_owner_refused_goes_after_its_turn(bots, herme
     it ran a turn (nothing sent). It's held and goes once the turn ends,
     rather than dropped, and the ask isn't failed meanwhile."""
     timers = []
-    monkeypatch.setattr(work.threading, "Timer", lambda delay, fn, args=(): timers.append(delay) or
-                        types.SimpleNamespace(daemon=True, start=lambda: None, cancel=lambda: None))
+    real = work.threading
+
+    class OnlyTimersHeld:  # this module's timers only: the shared threading module stays as it is
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        @staticmethod
+        def Timer(delay, fn, args=()):
+            timers.append(delay)
+            return types.SimpleNamespace(daemon=True, start=lambda: None, cancel=lambda: None)
+
+    monkeypatch.setattr(work, "threading", OnlyTimersHeld())
     hermes.refuse["prompt.submit"] = {"code": 4090, "message": "The gateway is running a turn in this chat.",
                                       "data": {"reason": "SESSION_OWNER_BUSY"}}
     call("work_ask", {"bot": "nahida", "text": "Can you book it?"})

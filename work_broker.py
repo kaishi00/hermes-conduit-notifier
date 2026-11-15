@@ -291,7 +291,7 @@ class Broker:
                 if response is None:
                     # A slow method answers from Hermes' worker pool.
                     if not done.wait(timeout):
-                        raise BrokerError(f"{method} timed out")
+                        raise BrokerError(f"{method} timed out", timed_out=True)
                     response = box[0]
                 return response
             finally:
