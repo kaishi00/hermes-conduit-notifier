@@ -523,28 +523,23 @@ class LocalWorkspace:
         name = copy_name(os.path.basename(source), lambda candidate: os.path.lexists(os.path.join(folder, candidate)),
                          keep_name=keep)
         target = os.path.join(folder, name)
-        # Never over something that appeared since the name was picked, as
-        # the SSH copy lands: a folder claims its name with mkdir, anything
-        # else is copied beside it and lands only where nothing is
-        # (notifier issue 834).
+        # Never over something that appeared since the name was picked: the
+        # copy is made in a private folder beside it and lands only where
+        # nothing is, so one that fails partway leaves nothing behind and
+        # removes nothing it didn't make (notifier issue 834).
         try:
-            if os.path.isdir(source) and not os.path.islink(source):
-                os.mkdir(target)
-                try:
-                    shutil.copytree(source, target, symlinks=True, dirs_exist_ok=True,
+            box = tempfile.mkdtemp(prefix=".conduit-", dir=folder)
+            try:
+                copy = os.path.join(box, "c")
+                if os.path.isdir(source) and not os.path.islink(source):
+                    shutil.copytree(source, copy, symlinks=True,
                                     ignore=lambda folder, names: [n for n in names if self._sensitive(os.path.join(folder, n))])
-                except BaseException:
-                    shutil.rmtree(target, ignore_errors=True)
-                    raise
-            else:
-                box = tempfile.mkdtemp(prefix=".conduit-", dir=folder)
-                try:
-                    copy = os.path.join(box, "c")
+                else:
                     # A link stays a link, as the SSH copy keeps it.
                     shutil.copy2(source, copy, follow_symlinks=False)
-                    _rename_no_replace(copy, target)
-                finally:
-                    shutil.rmtree(box, ignore_errors=True)
+                _rename_no_replace(copy, target)
+            finally:
+                shutil.rmtree(box, ignore_errors=True)
         except FileExistsError:
             # Taken between choosing the name and copying.
             raise WorkspaceError(409, "Something with that name is already there")
@@ -1005,9 +1000,15 @@ class SshWorkspace:
                       'if [ -L "$t" ]; then t="$r"; fi\n')
         stale = again = ""
         if expected_mtime is not None:
-            again = (f'set -- $(meta "$t"); [ "$1" = "{int(expected_mtime)}" ] || '
-                     f'{{ rm -f "$tmp"; echo {_ERROR}ESTALE; exit 1; }}\n')
-            stale = _STAT + again
+            # The date is whole seconds: the file as it is now (its inode,
+            # size and date to the nanosecond, GNU's stat or BSD's) is what
+            # the look right before landing compares.
+            stale = (_STAT + f'set -- $(meta "$t"); [ "$1" = "{int(expected_mtime)}" ] || '
+                     f'{{ echo {_ERROR}ESTALE; exit 1; }}\n'
+                     'snap() { stat -c \'%i %s %y\' -- "$1" 2>/dev/null || stat -f \'%i %z %Fm\' -- "$1" 2>/dev/null; }\n'
+                     'was=$(snap "$t")\n')
+            again = f'[ "$(snap "$t")" = "$was" ] || {{ rm -f "$tmp"; echo {_ERROR}ESTALE; exit 1; }}\n'
+
         self._run(self._guard(root) + f't={shlex.quote(target)}\n'
                   f'[ -d "$(dirname -- "$t")" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'

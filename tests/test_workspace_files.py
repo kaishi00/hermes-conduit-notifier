@@ -969,3 +969,40 @@ def test_a_change_that_outlasts_its_wait_says_it_may_still_finish(tree, client, 
     late = client.post(f"{BASE}/workspace/mkdir", json={"root": str(tree), "path": str(tree), "name": "late"})
     release.set()
     assert late.status_code == 504 and "may still finish" in late.json()["detail"]
+
+
+def test_a_folder_copy_that_fails_or_finds_its_name_taken_removes_nothing_it_didnt_make(tree, monkeypatch):
+    copytree = wf.shutil.copytree
+
+    def taken_meanwhile(source, target, **kwargs):
+        (tree / "docs copy").mkdir()
+        (tree / "docs copy" / "theirs.md").write_text("someone else's\n")
+        return copytree(source, target, **kwargs)
+
+    monkeypatch.setattr(wf.shutil, "copytree", taken_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().duplicate(str(tree), str(tree / "docs"))
+    assert exc.value.status == 409
+    assert os.listdir(tree / "docs copy") == ["theirs.md"]
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_an_ssh_save_refuses_an_edit_made_in_the_same_second_while_it_was_writing(tree, monkeypatch):
+    target = tree / "notes.txt"
+    read_at = target.stat().st_mtime
+    workspace = ssh(tree)
+    run = workspace._run
+
+    def edited_meanwhile(script, **kwargs):
+        # As the new text is written beside the file: an edit with the same whole-second date.
+        marker = 'chmod "${m:-'
+        if marker not in script:
+            return run(script, **kwargs)
+        edit = f"printf 'the agent'\\''s edit\\n' > \"$t\"; touch -d @{int(read_at)} \"$t\" 2>/dev/null || true\n"
+        return run(script.replace(marker, edit + marker, 1), **kwargs)
+
+    monkeypatch.setattr(workspace, "_run", edited_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        workspace.save(str(tree.resolve()), str(target.resolve()), "mine\n", read_at)
+    assert exc.value.status == 409 and target.read_text() == "the agent's edit\n"
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
