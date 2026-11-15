@@ -1945,7 +1945,9 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   offers nothing until its first turn begins, and Stop once it has been
   starting for two minutes since its chat was made.
 - A refusal has `code` and `detail`: a 4xx for `no_such_work`, `not_now`,
-  `starting`, `still_running`, `busy`, `open_elsewhere`, `off`, `taken`, `missing`, `unknown_action`
+  `starting`, `still_running`, `busy`, `open_elsewhere` (another window holds it), `mid_turn`
+  (the process that holds it is mid-turn; nothing was sent), `maybe_sent` (Hermes may already have it
+  queued; not sent again), `off`, `taken`, `missing`, `unknown_action`
   and `too_long`, a 502 (`hermes`) when Hermes refused it, and a 503
   (`unavailable`) when the session API isn't in this process.
 

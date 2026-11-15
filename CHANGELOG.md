@@ -13,12 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.177.4 (2026-11-15)
+## 0.177.5 (2026-11-15)
 
 ### Fixes
 
 - On a host where Conduit connects to the Hermes gateway (the Webapp), a new workstream, Watch job or Watch call chat with the same title as an earlier one went into that earlier chat instead of a new one. Its questions and progress then showed on the old workstream, where nobody was looking. Each now gets its own chat.
 - A workstream a Bot Chat handed off from a scheduled job's report is named after the job and what it reported, instead of "[Cronjob ... scheduled job,".
+
+## 0.177.4 (2026-11-15)
+
+### Fixes
+
+- A message to a workstream that was busy with a turn on another Hermes process was reported as "open in another Hermes window", so the bot asked you to close a window that didn't exist. It now says the workstream is mid-turn, and a send Hermes couldn't confirm is no longer sent twice.
+- A work update the Bot Chat refused while it ran a turn on another Hermes process was dropped. It now waits for that turn to end and goes then.
 
 ## 0.177.3 (2026-11-15)
 

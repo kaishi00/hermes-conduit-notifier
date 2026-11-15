@@ -3560,6 +3560,71 @@ def test_a_send_hermes_refused_leaves_the_host(on, hermes, monkeypatch):
     assert on.get("W1").host == other
 
 
+@pytest.mark.parametrize("reason, error", [("SESSION_OWNER_BUSY", "mid_turn"),
+                                           ("SESSION_OWNER_UNCONFIRMED", "maybe_sent")])
+def test_a_4090_send_says_what_hermes_refused(on, hermes, monkeypatch, reason, error):
+    """Issue 2522: Hermes words several refusals with 4090. Only
+    SESSION_NOT_OWNED is another window's hold; a busy owner sent nothing,
+    and an unconfirmed send may already be queued, so it isn't sent again."""
+    start()
+    work.turn_ended(WORKER_1, "Done.")
+    refused_with = {"code": 4090, "message": "The gateway is running a turn in this chat.",
+                    "data": {"reason": reason}}
+    for method in ("prompt.submit", "session.steer", "session.redirect"):
+        hermes.refuse[method] = refused_with
+    refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert refused.get("error") == error, refused
+    assert "another Hermes window" not in refused["note"]
+    assert ("Don't send it again" in refused["note"]) == (error == "maybe_sent")
+    assert not [row for row in on.outbox_pending() if row["kind"] == "send"]  # never replayed
+
+
+def test_a_4090_without_a_reason_is_still_another_windows_hold():
+    """An older Hermes words SESSION_NOT_OWNED in the message only."""
+    broker = sys.modules["conduit_push.work_broker"]
+    assert broker.BrokerError("This chat is open in another Hermes window.", code=4090).not_owned
+    assert broker.BrokerError("held (SESSION_NOT_OWNED)", code=4090, reason="SESSION_NOT_OWNED").not_owned
+    busy = broker.BrokerError("busy (SESSION_OWNER_BUSY)", code=4090, reason="SESSION_OWNER_BUSY")
+    assert busy.owner_busy and not busy.not_owned and not busy.uncertain
+    unsure = broker.BrokerError("x", code=4090, reason="SESSION_OWNER_UNCONFIRMED")
+    assert unsure.uncertain and not unsure.not_owned
+
+
+def test_a_wake_the_bot_chats_busy_owner_refused_goes_after_its_turn(bots, hermes, monkeypatch):
+    """Issue 2522: the process holding the Bot Chat refused the update while
+    it ran a turn (nothing sent). It's held and goes once the turn ends,
+    rather than dropped, and the ask isn't failed meanwhile."""
+    timers = []
+    monkeypatch.setattr(work.threading, "Timer", lambda delay, fn, args=(): timers.append(delay) or
+                        types.SimpleNamespace(daemon=True, start=lambda: None, cancel=lambda: None))
+    hermes.refuse["prompt.submit"] = {"code": 4090, "message": "The gateway is running a turn in this chat.",
+                                      "data": {"reason": "SESSION_OWNER_BUSY"}}
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert timers[-1] == work.WAKE_OWNER_BUSY_RETRY_S
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
+    hermes.refuse.clear()
+    hermes.calls.clear()
+    work.flush_wakes()
+    wake, = [params for _, params, _ in hermes.named("prompt.submit")
+             if params["session_id"] == f"rt-{NAHIDA_CHAT}"]
+    assert "Can you book it?" in wake["text"]
+    assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
+
+
+def test_a_wake_the_bot_chats_owner_couldnt_confirm_doesnt_fail_the_ask(bots, hermes, monkeypatch):
+    """SESSION_OWNER_UNCONFIRMED may already be queued: as a timed-out
+    submit, it's neither sent again nor taken as never reaching the bot."""
+    hermes.refuse["prompt.submit"] = {"code": 4090, "message": "may already be queued",
+                                      "data": {"reason": "SESSION_OWNER_UNCONFIRMED"}}
+    call("work_ask", {"bot": "nahida", "text": "Can you book it?"})
+    work.flush_wakes()
+    assert store_mod.Store(bots["hermes"]).get("A1").status == "waiting"
+    hermes.calls.clear()
+    work.flush_wakes()
+    assert not hermes.named("prompt.submit")
+
+
 def test_a_calls_job_kept_mid_turn_is_hosted_here(on, hermes, monkeypatch):
     """Its turn began before its row, so the turn's start stamped nothing."""
     monkeypatch.setattr(work, "_asked_in", lambda home, session: True)
