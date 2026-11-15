@@ -62,14 +62,20 @@ def own_title(title: str, request_id: Any = None) -> str:
     earlier one went into it (issue 2521). Every create the plugin sends
     means a new chat, so its title ends in its request's tag (the end of its
     request id), which no other chat holds; an exact retry (the same request id) asks for the same title
-    and resolves to its own chat. "Bot Chat" stays as it is: that title is
-    the bot's one chat, found by name."""
+    and resolves to its own chat. "Bot Chat" is tagged too: no plugin create
+    means the bot's one chat (the app makes that one itself), and a Watch job
+    titled so would have run in it. A title too long for the tag is cut at
+    its last whole word."""
     text = " ".join(title.split())
-    if not text or text.casefold() == _sibling("session_titles").BOT_CHAT_TITLE.casefold():
+    if not text:
         return title
     key = request_id if isinstance(request_id, str) and request_id else uuid.uuid4().hex
     tag = f" · {key[-TITLE_TAG_CHARS:]}"
-    return text[:AUTHORITY_TITLE_CHARS - len(tag)].rstrip() + tag
+    room = AUTHORITY_TITLE_CHARS - len(tag)
+    if len(text) > room:
+        cut = text[:room + 1].rsplit(" ", 1)[0] if " " in text[:room + 1] else ""
+        text = cut if cut else text[:room]
+    return text.rstrip() + tag
 
 
 AUTHORITY_RPC_TIMEOUT_S = 60.0

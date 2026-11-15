@@ -13,12 +13,19 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.177.5 (2026-11-15)
+## 0.177.6 (2026-11-15)
 
 ### Fixes
 
 - On a host where Conduit connects to the Hermes gateway (the Webapp), a new workstream, Watch job or Watch call chat with the same title as an earlier one went into that earlier chat instead of a new one. Its questions and progress then showed on the old workstream, where nobody was looking. Each now gets its own chat.
 - A workstream a Bot Chat handed off from a scheduled job's report is named after the job and what it reported, instead of "[Cronjob ... scheduled job,".
+
+## 0.177.5 (2026-11-15)
+
+### Fixes
+
+- A message to a workstream that timed out while its chat was reopening was reported as possibly already queued, so the bot never sent it again. It's now reported as not sent.
+- A work update held for a busy Bot Chat left a refused copy in the plugin's records on every retry. Only the update that goes out is kept now.
 
 ## 0.177.4 (2026-11-15)
 

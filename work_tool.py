@@ -2238,8 +2238,10 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
             logger.warning("conduit_push: sending to a workstream failed", exc_info=True)
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
                     "note": f"Hermes couldn't take it: {type(error).__name__}"}
-        if error.uncertain:
+        if error.reason == work_broker.OWNER_UNCONFIRMED:
             # Hermes may already have it queued: sent again, it would run twice.
+            # (A timeout isn't this: it may have come before anything was
+            # submitted, while reopening the session.)
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "maybe_sent",
                     "note": f"Hermes couldn't confirm {work.ref} took it: it may already be queued there. Don't "
                             "send it again; its next update says whether it ran."}
@@ -3622,7 +3624,7 @@ def note_turn_ask(session_id: Any, turn_id: Any, user_message: Any) -> None:
 
 # Hermes' wrapper on a scheduled job's output delivered into a Bot Chat
 # (cron/scheduler_delivery.py's bot_chat_message).
-_CRON_WRAPPER = re.compile(r'\A\s*\[Cronjob "(?P<job>[^"\n]*)" output\b[^\]]*\]\s*')
+_CRON_WRAPPER = re.compile(r'\A\s*\[Cronjob "(?P<job>[^\n]*?)" output\b[^\]]*\]\s*')
 
 
 def _hand_off_title(ask: str) -> str:
@@ -6287,11 +6289,12 @@ def _send_wake(home: Path, coordinator: str) -> None:
     sent = False
     outcome = ""
     told = False
+    marked_before: Optional[list[str]] = None
     try:
         item = store.outbox_add("", "wake", coordinator, text)
         if asks or answers:
             # Theirs to have acted on: not a turn the Bot Chat started itself.
-            work_coord.ask_wake_sent(store, item)
+            marked_before = work_coord.ask_wake_sent(store, item)
         status = work_broker.Broker(home).wake(coordinator, text)
         sent = True
         outcome = "queued" if status in ("queued", "streaming", "started") else status or "accepted"
@@ -6303,15 +6306,19 @@ def _send_wake(home: Path, coordinator: str) -> None:
             _asks_unreached(home, store, items, f"Hermes answered {outcome}")
             told = True
     except Exception as error:  # noqa: BLE001 — the digest still carries it on the next turn
-        if not sent and holding and getattr(error, "owner_busy", False):
+        broker_error = error if isinstance(error, work_broker.BrokerError) else None
+        if not sent and holding and broker_error is not None and broker_error.owner_busy:
             # The process that holds the Bot Chat is mid-turn and sent
             # nothing (issue 2522): held for its turn's end, as a busy Bot
-            # Chat here is. Its lines stay undelivered until then.
+            # Chat here is. Its lines stay undelivered until then, and the
+            # update's row goes: the next try writes its own.
             try:
                 if item:
-                    store.outbox_done(item, "refused")
+                    if marked_before is not None:
+                        work_coord.ask_wake_unsent(store, item, marked_before)
+                    store.outbox_drop(item)
             except Exception:  # noqa: BLE001
-                logger.debug("conduit_push: couldn't mark an update row", exc_info=True)
+                logger.debug("conduit_push: couldn't drop an update row", exc_info=True)
             _hold_wake(home, coordinator, lines, asks, answers, tells, items, held_since or now,
                        WAKE_OWNER_BUSY_RETRY_S)
             return
@@ -6326,7 +6333,7 @@ def _send_wake(home: Path, coordinator: str) -> None:
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
         # Only when Hermes is known not to have taken it: a submit that timed
         # out may still queue the turn, and a write after the send changes nothing.
-        if not sent and not (getattr(error, "uncertain", False) or getattr(error, "timed_out", False)):
+        if not sent and not (broker_error is not None and broker_error.uncertain):
             _asks_unreached(home, store, items, str(error) or type(error).__name__)
         elif sent and not told and outcome and outcome not in ("queued", "accepted"):
             # Refused, and a write on the way failed: the asks still fail.

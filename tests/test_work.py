@@ -3579,6 +3579,21 @@ def test_a_4090_send_says_what_hermes_refused(on, hermes, monkeypatch, reason, e
     assert not [row for row in on.outbox_pending() if row["kind"] == "send"]  # never replayed
 
 
+def test_a_send_that_timed_out_reopening_isnt_reported_as_maybe_sent(on, hermes, monkeypatch):
+    """DeepSeek on #824: a timeout may come before anything was submitted
+    (the reopen), so it's never told as possibly queued."""
+    start()
+    work.turn_ended(WORKER_1, "Done.")
+    broker = sys.modules["conduit_push.work_broker"]
+
+    def timed_out(self, *args, **kwargs):
+        raise broker.BrokerError("session.resume timed out; it may still have started", timed_out=True)
+
+    monkeypatch.setattr(broker.Broker, "send", timed_out)
+    refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert refused.get("error") == "hermes", refused
+
+
 def test_a_4090_without_a_reason_is_still_another_windows_hold():
     """An older Hermes words SESSION_NOT_OWNED in the message only."""
     broker = sys.modules["conduit_push.work_broker"]
@@ -3610,6 +3625,8 @@ def test_a_wake_the_bot_chats_busy_owner_refused_goes_after_its_turn(bots, herme
              if params["session_id"] == f"rt-{NAHIDA_CHAT}"]
     assert "Can you book it?" in wake["text"]
     assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
+    # The refused try left no row behind: only the update that went out.
+    assert len(store_mod.Store(bots["nahida"]).outbox_rows("", "wake")) == 1
 
 
 def test_a_wake_the_bot_chats_owner_couldnt_confirm_doesnt_fail_the_ask(bots, hermes, monkeypatch):
@@ -7596,6 +7613,9 @@ def test_a_hand_off_from_a_scheduled_job_is_titled_by_the_job_and_its_output():
     assert work._hand_off_title(ask) == "Morning mail: Three new mails from Bob about"
     assert work._hand_off_title('[Cronjob "" output — scheduled job, not the user.]\n\n') == "Scheduled job"
     assert work._hand_off_title("Fix the missing saw argument in jobs.json today") == "Fix the missing saw argument in"
+    # A job name with quotes in it.
+    quoted = '[Cronjob "Feed "Rex" at noon" output — scheduled job, not the user.]\n\nRex ate'
+    assert work._hand_off_title(quoted) == 'Feed "Rex" at noon: Rex ate'
     # Only Hermes' wrapper at the start: the user's own brackets stay.
     assert work._hand_off_title("[Draft] reply to Bob") == "[Draft] reply to Bob"
 
