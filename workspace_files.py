@@ -677,7 +677,12 @@ def _rename_no_replace(source: str, target: str) -> None:
     if os.path.isdir(source) and not os.path.islink(source):
         if os.path.lexists(target):
             raise FileExistsError(target)
-        os.rename(source, target)
+        try:
+            os.rename(source, target)
+        except OSError as error:
+            if error.errno in (errno.ENOTEMPTY, errno.EEXIST):  # a folder that appeared just now
+                raise FileExistsError(target) from error
+            raise
         return
     try:
         os.link(source, target, follow_symlinks=False)
@@ -1005,7 +1010,8 @@ class SshWorkspace:
             # the look right before landing compares.
             stale = (_STAT + f'set -- $(meta "$t"); [ "$1" = "{int(expected_mtime)}" ] || '
                      f'{{ echo {_ERROR}ESTALE; exit 1; }}\n'
-                     'snap() { stat -c \'%i %s %y\' -- "$1" 2>/dev/null || stat -f \'%i %z %Fm\' -- "$1" 2>/dev/null; }\n'
+                     'snap() { stat -c \'%i %s %y %z\' -- "$1" 2>/dev/null || stat -f \'%i %z %Fm %Fc\' -- "$1" 2>/dev/null'
+                     ' || ls -lin -- "$1"; }\n'
                      'was=$(snap "$t")\n')
             again = f'[ "$(snap "$t")" = "$was" ] || {{ rm -f "$tmp"; echo {_ERROR}ESTALE; exit 1; }}\n'
 
@@ -1099,24 +1105,26 @@ class SshWorkspace:
                   f'[ -n "$t" ] || {{ echo {_ERROR}EEXIST; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                   'printf \'%s\' "$t" | base64 | tr -d \'\\r\\n\'; echo\n'
-                  # A copy that fails partway, or can't lose its secrets, goes.
-                  # Never over something that appeared since the name was
-                  # picked: a folder claims its name with mkdir, anything else
-                  # lands with mv -n from a private folder beside it.
+                  # Made in a private folder beside it, where a copy that
+                  # fails partway, or can't lose its secrets, goes, and landed
+                  # with mv -n: never over something that appeared since the
+                  # name was picked, and nothing the copy didn't make is
+                  # removed (notifier issue 834).
+                  f'd=$(mktemp -d "$f/.conduit-XXXXXXXX") || {{ echo {_ERROR}EACCES; exit 1; }}\n'
                   'if [ -d "$s" ] && [ ! -L "$s" ]; then\n'
-                  f'  mkdir -- "$t" 2>/dev/null || {{ if [ -e "$t" ] || [ -L "$t" ]; then echo {_ERROR}EEXIST;'
-                  f' else echo {_ERROR}EACCES; fi; exit 1; }}\n'
-                  f'  cp -R -P -p -- "$s"/. "$t"/ || {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}\n'
+                  f'  mkdir -- "$d/c" && cp -R -P -p -- "$s"/. "$d/c"/ || {{ rm -rf -- "$d"; echo {_ERROR}EACCES; exit 1; }}\n'
+                  f'  find "$d/c" -mindepth 1 \\( {secrets_in_copy} \\) -prune -exec rm -rf -- {{}} +\n'
+                  f'  [ -z "$(find "$d/c" -mindepth 1 \\( {secrets_in_copy} \\) -print 2>/dev/null | head -n 1)" ] ||'
+                  f' {{ rm -rf -- "$d"; echo {_ERROR}EACCES; exit 1; }}\n'
                   'else\n'
-                  f'  d=$(mktemp -d "$f/.conduit-XXXXXXXX") || {{ echo {_ERROR}EACCES; exit 1; }}\n'
                   f'  cp -P -p -- "$s" "$d/c" || {{ rm -rf -- "$d"; echo {_ERROR}EACCES; exit 1; }}\n'
-                  '  mv -n -- "$d/c" "$t" 2>/dev/null\n'
-                  f'  if [ -e "$d/c" ] || [ -L "$d/c" ]; then rm -rf -- "$d"; echo {_ERROR}EEXIST; exit 1; fi\n'
-                  '  rm -rf -- "$d"\n'
                   'fi\n'
-                  f'if [ -d "$t" ] && [ ! -L "$t" ]; then find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -prune -exec rm -rf -- {{}} +;'
-                  f' [ -z "$(find "$t" -mindepth 1 \\( {secrets_in_copy} \\) -print 2>/dev/null | head -n 1)" ] ||'
-                  f' {{ rm -rf -- "$t"; echo {_ERROR}EACCES; exit 1; }}; fi; exit 0')
+                  # mv -n into a folder that appeared would move the copy
+                  # inside it: a name taken by then is refused first.
+                  f'if [ -e "$t" ] || [ -L "$t" ]; then rm -rf -- "$d"; echo {_ERROR}EEXIST; exit 1; fi\n'
+                  'mv -n -- "$d/c" "$t" 2>/dev/null\n'
+                  f'if [ -e "$d/c" ] || [ -L "$d/c" ]; then rm -rf -- "$d"; echo {_ERROR}EEXIST; exit 1; fi\n'
+                  'rm -rf -- "$d"; exit 0')
         try:
             target = base64.b64decode(next(line for line in lines if line.strip()).strip(), validate=True).decode("utf-8")
         except (StopIteration, ValueError, binascii.Error):

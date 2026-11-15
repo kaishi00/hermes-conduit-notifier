@@ -1006,3 +1006,25 @@ def test_an_ssh_save_refuses_an_edit_made_in_the_same_second_while_it_was_writin
         workspace.save(str(tree.resolve()), str(target.resolve()), "mine\n", read_at)
     assert exc.value.status == 409 and target.read_text() == "the agent's edit\n"
     assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_an_ssh_folder_copy_is_made_out_of_sight_and_never_lands_on_a_name_taken_meanwhile(tree, monkeypatch):
+    workspace = ssh(tree)
+    run = workspace._run
+
+    def taken_meanwhile(script, **kwargs):
+        marker = 'mv -n -- "$d/c" "$t"'
+        if marker not in script:
+            return run(script, **kwargs)
+        # Right before the copy lands: someone else's folder under its name.
+        taken = 'mkdir -- "$t" && echo theirs > "$t/theirs.md"\n'
+        landing = 'if [ -e "$t" ] || [ -L "$t" ]; then rm -rf -- "$d"'
+        assert landing in script
+        return run(script.replace(landing, taken + landing, 1), **kwargs)
+
+    monkeypatch.setattr(workspace, "_run", taken_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        workspace.duplicate(str(tree.resolve()), str((tree / "docs").resolve()))
+    assert exc.value.status == 409
+    assert os.listdir(tree / "docs copy") == ["theirs.md"]
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
