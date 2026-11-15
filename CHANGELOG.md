@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.17 (2026-11-15)
+
+### Fixes
+
+- A question Hermes couldn't show in the chat had no card to answer it while Conduit was open, and ran out unanswered. Conduit now gets the card with its Needs you list and shows it in the chat (with a Conduit update).
+- A workstream's question now shows in Needs you and its banner, not only on the Work panel.
+
 ## 0.177.16 (2026-11-15)
 
 ### Fixes

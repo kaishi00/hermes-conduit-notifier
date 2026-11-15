@@ -178,8 +178,11 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     # answered with no chat open (the Watch) to
     # read out and answer; the answers come back through
     # ``calls.taken_answers``.
+    # Its card too, as the push carries it: a Conduit on screen gets no
+    # notification to tap, so it draws the card from the list
+    # (hermes-conduit#2556).
     calls.note_waiting(session_id, "question", request_id=request_id, questions=batch,
-                       title=chat_title(session_id))
+                       title=chat_title(session_id), decision=push.get("decision"))
     calls.alert(session_id, "question", reason, profile=profile)
     try:
         return _first_answer_wins(
@@ -382,7 +385,10 @@ def _first_answer_wins(
     # Polling stopped (budget spent, card not shown, relay gone, an
     # interrupt): fall back to whatever the original path produces, waiting
     # for it if necessary. The parked decision is released first so late
-    # device answers are rejected.
+    # device answers are rejected. The wait's card goes with it: the Needs
+    # you list must not hand Conduit a card whose answer the relay refuses
+    # while Hermes still waits on its own prompt (hermes-conduit#2556).
+    calls.forget_waiting_card(request_id)
     _release_decision(request_id, relay_won)
     if unattended:
         if expired and saw_pending and batch_protocol:

@@ -436,15 +436,20 @@ def test_poll_budget_coerces_string_timeout():
         sys.modules.pop("tools.clarify_gateway", None)
 
 
-def test_polling_stops_when_no_card_was_delivered():
+def test_polling_stops_when_no_card_was_delivered(monkeypatch):
     # deliverable:false means device preferences suppressed the card; nobody
     # can answer by id, so the first poll result ends the polling.
     fake = _FakeState([{"status": "pending", "deliverable": False}, {"status": "pending"}])
     _install(fake)
+    dropped = []
+    monkeypatch.setattr(loop.calls, "forget_waiting_card", dropped.append)
     original = _original_answered_once_released(fake, "original result")
     result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
     assert result == "original result"
     assert len(fake.poll_ids) == 1
+    # The Needs you list stops handing Conduit a card the relay would refuse
+    # (hermes-conduit#2556).
+    assert dropped == [fake.enqueued[0]["decision"]["request_id"]]
 
 
 def test_a_rejected_answer_hands_the_question_back_to_hermes():
@@ -1086,6 +1091,8 @@ def test_a_call_answer_wins_and_formats_like_a_device_answer(monkeypatch):
     request_id = fake.enqueued[0]["decision"]["request_id"]
     (args, kwargs), = noted
     assert args == ("sess-1", "question") and kwargs["request_id"] == request_id
+    # Its card as the push carries it, for a Conduit on screen (hermes-conduit#2556).
+    assert kwargs["decision"] == fake.enqueued[0]["decision"]
     assert [entry["question"] for entry in kwargs["questions"]] == ["Which environment?", "Which tests should run?"]
     deadline = time.monotonic() + 2
     while request_id not in fake.cancelled_ids and time.monotonic() < deadline:

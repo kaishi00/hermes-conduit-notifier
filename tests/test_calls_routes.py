@@ -345,6 +345,13 @@ def test_the_waiting_list_names_every_chat_hermes_waits_on_but_workstreams(paire
     assert [(item["title"], item["summary"], item["kind"]) for item in listed] == [
         ("Release prep", "Run the migration?", "approval")]
     assert "command" not in listed[0]
+    # A workstream's question is listed, with its card (hermes-conduit#2556).
+    card = {"kind": "clarify", "request_id": "conduit-push-w", "question": "Which?", "choices": ["a", "b"]}
+    store.note_waiting("w-1", "question", request_id="conduit-push-w", decision=card, questions=[
+        {"qid": "q0", "question": "Which?", "choices": ["a", "b"], "multi_select": False}])
+    listed = http.get(f"{BASE}/waiting").json()["waiting"]
+    assert [(item["kind"], item.get("decision")) for item in listed] == [("question", card), ("approval", None)]
+    store.forget_waiting("w-1", "question")
     # Hermes gave up on it: gone from the list.
     monkeypatch.setattr(api.watch_local_live, "_hermes_approval_timeout", lambda: -1000.0)
     assert http.get(f"{BASE}/waiting").json() == {"ok": True, "waiting": []}

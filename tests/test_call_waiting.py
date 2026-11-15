@@ -126,8 +126,45 @@ def test_the_needs_you_list_drops_waits_hermes_gave_up_on_and_workstreams(store)
     listed = store.waiting_list(max_age={"approval": 330.0}, leave_out=["w1"])
     assert [item["session_ids"] for item in listed] == [["s2"]]
     assert [item["session_ids"] for item in store.waiting_list(leave_out=["w1"])] == [["s2"], ["s1"]]
+    # A workstream's question is listed: only its chat's card answers it
+    # (hermes-conduit#2556).
+    store.note_waiting("w1", "question", request_id="conduit-push-w", questions=BATCH)
+    assert [item["session_ids"] for item in store.waiting_list(leave_out=["w1"])] == [["s2"], ["w1"], ["s1"]]
     # With alert calls on they stay a call's to read too.
     assert store.waiting_for("s1")["kind"] == "approval"
+
+
+def test_a_questions_row_carries_its_card_as_the_push_did(store):
+    # hermes-conduit#2556: a Conduit on screen draws the card from the list.
+    card = {"kind": "clarify", "request_id": "conduit-push-a", "question": "Which environment?",
+            "choices": ["staging", "production"],
+            "questions": [{"qid": "q0", "question": "Which environment?", "choices": ["staging", "production"]},
+                          {"qid": "q1", "question": "Which tests?", "choices": ["unit", "ui"], "multi_select": True},
+                          {"qid": "", "question": "No id"}, "junk"],
+            "extra": "dropped"}
+    store.note_waiting("s1", "question", request_id="conduit-push-a", questions=BATCH, decision=card)
+    # Another wait's card, or a malformed one, isn't kept.
+    store.note_waiting("s2", "question", request_id="conduit-push-b", questions=BATCH, decision=card)
+    store.note_waiting("s3", "question", request_id="conduit-push-c", questions=BATCH, decision="card")
+    store.note_waiting("s4", "approval", description="Run it?", decision=card)
+    listed = {item["session_ids"][0]: item for item in store.waiting_list()}
+    assert listed["s1"]["decision"] == {
+        "kind": "clarify", "request_id": "conduit-push-a", "question": "Which environment?",
+        "choices": ["staging", "production"],
+        "questions": [{"qid": "q0", "question": "Which environment?", "choices": ["staging", "production"]},
+                      {"qid": "q1", "question": "Which tests?", "choices": ["unit", "ui"], "multi_select": True}]}
+    assert all("decision" not in listed[key] for key in ("s2", "s3", "s4"))
+    # The relay let the question go while Hermes still waits on its own
+    # prompt: listed, without a card that would refuse the answer.
+    assert store.forget_waiting_card("conduit-push-a") is True
+    assert store.forget_waiting_card("conduit-push-a") is False
+    listed = {item["session_ids"][0]: item for item in store.waiting_list()}
+    assert "decision" not in listed["s1"] and listed["s1"]["kind"] == "question"
+    # A legacy one-question call's card stays scalar.
+    store.note_waiting("s5", "question", request_id="conduit-push-e", questions=BATCH,
+                       decision={"kind": "clarify", "request_id": "conduit-push-e", "question": "Go on?"})
+    assert next(item for item in store.waiting_list() if item["session_ids"] == ["s5"])["decision"] == {
+        "kind": "clarify", "request_id": "conduit-push-e", "question": "Go on?"}
 
 
 def test_a_wait_kept_before_the_list_still_reads_as_a_calls(tmp_path):
