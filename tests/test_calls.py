@@ -1607,3 +1607,14 @@ def test_a_hermes_that_marks_no_turns_still_stops_on_a_close(home, fake, monkeyp
     _watch(home, "rt-1")
     plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
     assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_turn_whose_start_was_forgotten_still_ends_on_its_close(home, fake, turns_marked):
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", turn_id="t1", completed=True, failed=False, interrupted=False)
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t2", conversation_history=[])
+    # Hours in, or past the cap: its start is gone, but its end never came.
+    plugin._end_parent_turn("rt-1")
+    _watch(home, "rt-1")
+    plugin._on_session_finalize(session_id="rt-1")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]

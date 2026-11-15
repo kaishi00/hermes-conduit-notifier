@@ -57,6 +57,9 @@ _unnamed_ends: dict[str, tuple[object, Any]] = {}
 # time.monotonic()): a subagent that finishes inside it is part of its reply.
 _parent_turns: dict[str, tuple[str, float]] = {}
 _parent_turns_lock = threading.Lock()
+# Sessions whose last turn's end was handled, until their next turn starts:
+# a chat's close after that end is no stopped turn of its own (issue 820).
+_ended_turns: dict[str, None] = {}
 PARENT_TURN_MAX_S = 6 * 3600.0
 # Predictive's fast model (dashboard/api/chats.py, PREDICT_TASK) as one of
 # Hermes' helper model slots, so Conduit's Models & providers and Hermes'
@@ -958,6 +961,7 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     if _session_closed_after_turn(session_id, kwargs):
         return
+    _note_turn_ended(session_id)
     # Its turn is over: the screen is free for the bot's other chats.
     _quietly(work_tool.screen_turn_ended, session_id)
     _end_parent_turn(session_id)
@@ -1052,27 +1056,32 @@ def _on_session_end(**kwargs: Any) -> None:
 
 def _session_closed_after_turn(session_id: str, kwargs: dict[str, Any]) -> bool:
     """Whether this end is a chat's close (Hermes' session finalize: stopped,
-    no turn named) with none of its turns running: the last turn's own end
-    already settled everything, so it is not a stopped turn of its own
-    (notifier issue 820). A Hermes without pre_llm_call never says when a
-    turn starts, so its ends count as before."""
+    no turn named) after its last turn's own end was handled, with no turn
+    started since: that end already settled everything, so the close is no
+    stopped turn of its own (notifier issue 820). Only a handled end counts,
+    never a start that is old or forgotten: a turn running for hours still
+    ends on its close. A Hermes without pre_llm_call never says when a turn
+    starts, so its ends count as before."""
     if not pulse.turns_marked or not kwargs.get("interrupted"):
         return False
     turn_id = kwargs.get("turn_id")
     if isinstance(turn_id, str) and turn_id:
         return False
-    return not _turn_running(session_id)
+    return _turn_end_handled(session_id)
 
 
 def _on_session_finalize(**kwargs: Any) -> None:
     """A chat closed (Desktop let it go, /new, Hermes exiting). Hermes said
     so on_session_end just before, but skips that call when another chat's
     close is still in it: both name no turn, so its gate takes them for one
-    call (NousResearch/hermes-agent#104865). A turn still running here then
-    ends stopped, as on_session_end would have ended it; one that call
-    already ended isn't running, so nothing happens twice."""
+    call (NousResearch/hermes-agent#104865). A turn whose end wasn't handled
+    then ends stopped, as on_session_end would have ended it; one whose end
+    that call (or the turn's own) handled is left alone, so nothing happens
+    twice. A Hermes without pre_llm_call can't say a new turn started, so
+    there on_session_end stays the only close."""
     session_id = _text(kwargs.get("session_id"))
-    if not session_id or forks.inside() or _is_child(session_id) or not _turn_running(session_id):
+    if (not session_id or not pulse.turns_marked or forks.inside() or _is_child(session_id)
+            or _turn_end_handled(session_id)):
         return None
     _on_session_end(session_id=session_id, completed=False, interrupted=True, platform=kwargs.get("platform"))
     return None
@@ -1335,6 +1344,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         # only one that started after its attempt (pulse._held_home_turn).
         _quietly(pulse.note_started, session_id, kwargs.get("turn_id"))
     pulse_note = None if child else _pulse_note(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
+    if not child and not forks.inside():
+        _note_turn_starting(session_id)
     if pulse_note:
         # Pulse's own turn: no Lock Screen progress, and only its note.
         _note_turn_start(kwargs.get("turn_id"))
@@ -1848,6 +1859,28 @@ def _start_parent_turn(session_id: str, turn_id: Any) -> None:
         _parent_turns[session_id] = (turn_id if isinstance(turn_id, str) else "", time.monotonic())
         while len(_parent_turns) > MAX_TURN_STARTS:
             _parent_turns.pop(next(iter(_parent_turns)))
+
+
+def _note_turn_starting(session_id: str) -> None:
+    with _parent_turns_lock:
+        _ended_turns.pop(session_id, None)
+
+
+def _note_turn_ended(session_id: str) -> None:
+    """This session's turn end is handled. Evicted when there are many,
+    which only lets a later close run as a stopped turn, as before."""
+    if not session_id:
+        return
+    with _parent_turns_lock:
+        _ended_turns.pop(session_id, None)
+        _ended_turns[session_id] = None
+        while len(_ended_turns) > MAX_TURN_STARTS:
+            _ended_turns.pop(next(iter(_ended_turns)))
+
+
+def _turn_end_handled(session_id: str) -> bool:
+    with _parent_turns_lock:
+        return session_id in _ended_turns
 
 
 def _end_parent_turn(session_id: str) -> None:
