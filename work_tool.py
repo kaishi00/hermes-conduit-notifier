@@ -2238,13 +2238,18 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
             logger.warning("conduit_push: sending to a workstream failed", exc_info=True)
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
                     "note": f"Hermes couldn't take it: {type(error).__name__}"}
-        if error.reason == work_broker.OWNER_UNCONFIRMED:
+        if error.reason == work_broker.OWNER_UNCONFIRMED or (error.timed_out and error.submitted):
             # Hermes may already have it queued: sent again, it would run twice.
-            # (A timeout isn't this: it may have come before anything was
-            # submitted, while reopening the session.)
+            # (A timeout while reopening the session isn't this: nothing was
+            # submitted yet.)
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "maybe_sent",
                     "note": f"Hermes couldn't confirm {work.ref} took it: it may already be queued there. Don't "
                             "send it again; its next update says whether it ran."}
+        if error.timed_out:
+            # Timed out reopening the chat, before anything was submitted.
+            return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
+                    "note": f"Hermes didn't answer in time while opening {work.ref}'s chat, so nothing was sent. "
+                            "Try again in a moment."}
         if error.owner_busy:
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "mid_turn",
                     "note": f"{work.ref} is in the middle of a turn in another Hermes process, which takes nothing "

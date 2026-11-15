@@ -1949,7 +1949,7 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
   `starting`, `still_running`, `busy`, `open_elsewhere` (another window holds it), `mid_turn`
   (the process that holds it is mid-turn; nothing was sent), `maybe_sent` (Hermes may already have it
   queued; not sent again), `off`, `taken`, `missing`, `unknown_action`
-  and `too_long`, a 502 (`hermes`) when Hermes refused it, and a 503
+  and `too_long`, a 502 (`hermes`) when Hermes refused it or didn't answer in time, and a 503
   (`unavailable`) when the session API isn't in this process.
 
 ## Chat takeover
