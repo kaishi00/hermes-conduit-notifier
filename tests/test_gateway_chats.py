@@ -564,17 +564,17 @@ def test_a_titled_create_never_opens_another_chat_by_its_title(gateway):
     for _ in range(2):
         _call(chats, transport, "session.create", {"title": "Login bug", "idempotency_key": "conduit-work-0a1b2c3d4e5f"})
     first, retry = (request["params"] for request in connections[0].requests)
-    assert first["title"] == retry["title"] == "Login bug · 3d4e5f"
+    assert first["title"] == retry["title"] == "Login bug · 0a1b2c3d4e5f"
     assert first["request_id"] == "conduit-work-0a1b2c3d4e5f"
     # A create with no request id (a Watch call's) is tagged afresh each time.
     _call(chats, transport, "session.create", {"title": "Watch call"})
     _call(chats, transport, "session.create", {"title": "Watch call"})
     calls = [request["params"]["title"] for request in connections[0].requests[2:]]
-    assert all(title.startswith("Watch call · ") and len(title) == len("Watch call · ") + 6 for title in calls)
+    assert all(title.startswith("Watch call · ") and len(title) == len("Watch call · ") + 12 for title in calls)
     assert calls[0] != calls[1]
     # Within Hermes' 100 characters, the tag kept; the bot's one chat keeps its name.
     assert len(gateway_chats.own_title("x" * 120, "k" * 10)) == 100
-    assert gateway_chats.own_title("x" * 120, "abcdef123456").endswith("x · 123456")
+    assert gateway_chats.own_title("x" * 120, "conduit-abcdef123456").endswith("x · abcdef123456")
     assert gateway_chats.own_title("Bot Chat", "k1") == "Bot Chat"
 
 

@@ -49,6 +49,9 @@ def _sibling(name: str) -> Any:
 
 # Hermes' longest session title (SessionDB.MAX_TITLE_LENGTH); a longer one refuses the create.
 AUTHORITY_TITLE_CHARS = 100
+# A title's tag: 12 hex characters, so even every Watch call's "Watch call" never meets
+# an earlier one's tag (six gave a 3% chance of a repeat within 1,000 calls).
+TITLE_TAG_CHARS = 12
 
 
 def own_title(title: str, request_id: Any = None) -> str:
@@ -57,15 +60,15 @@ def own_title(title: str, request_id: Any = None) -> str:
     holds, or that chat's latest "<title> #N", opens that chat instead of
     making one, so a workstream, Watch job or Watch call titled like an
     earlier one went into it (issue 2521). Every create the plugin sends
-    means a new chat, so its title ends in its request's tag, which no other
-    chat holds; an exact retry (the same request id) asks for the same title
+    means a new chat, so its title ends in its request's tag (the end of its
+    request id), which no other chat holds; an exact retry (the same request id) asks for the same title
     and resolves to its own chat. "Bot Chat" stays as it is: that title is
     the bot's one chat, found by name."""
     text = " ".join(title.split())
     if not text or text.casefold() == _sibling("session_titles").BOT_CHAT_TITLE.casefold():
         return title
     key = request_id if isinstance(request_id, str) and request_id else uuid.uuid4().hex
-    tag = f" · {key[-6:]}"
+    tag = f" · {key[-TITLE_TAG_CHARS:]}"
     return text[:AUTHORITY_TITLE_CHARS - len(tag)].rstrip() + tag
 
 
