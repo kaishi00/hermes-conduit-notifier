@@ -228,7 +228,9 @@ def _own_text(text: str) -> str:
 def user_items(text: str) -> Iterable[tuple]:
     # Clipped once, so a huge one-line row that looks like a note's header
     # is matched only as far as the scan reads.
-    text = _own_text(text or "")[:MAX_SCAN_CHARS]
+    # Hermes' wrapper is looked for within the same limit, so a huge row
+    # costs no more than it did.
+    text = _own_text((text or "")[:MAX_SCAN_CHARS])
     if text.startswith(CRON_NOTE_PREFIX) and _CRON_NOTE_HEADER_RE.match(text):
         # A cron report's files are the run's deliveries, as its MEDIA tags
         # were in Hermes' own turn (issue 581), never files the user sent.
