@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.11 (2026-11-15)
+
+### Fixes
+
+- On a Hermes with several profiles, a bot there that your other Hermes brought into a room didn't join by itself, and its join card asked you instead, because its room settings were read outside its profile. Each profile's settings are now read as that profile's.
+- The same failure filled the plugin's log with a line every minute for each profile. A room setting that can't be read is now logged once.
+
 ## 0.177.10 (2026-11-15)
 
 ### Fixes
