@@ -2238,8 +2238,10 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
             logger.warning("conduit_push: sending to a workstream failed", exc_info=True)
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
                     "note": f"Hermes couldn't take it: {type(error).__name__}"}
-        if error.uncertain:
+        if error.reason == work_broker.OWNER_UNCONFIRMED:
             # Hermes may already have it queued: sent again, it would run twice.
+            # (A timeout isn't this: it may have come before anything was
+            # submitted, while reopening the session.)
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "maybe_sent",
                     "note": f"Hermes couldn't confirm {work.ref} took it: it may already be queued there. Don't "
                             "send it again; its next update says whether it ran."}

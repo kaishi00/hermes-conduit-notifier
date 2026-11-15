@@ -3579,6 +3579,21 @@ def test_a_4090_send_says_what_hermes_refused(on, hermes, monkeypatch, reason, e
     assert not [row for row in on.outbox_pending() if row["kind"] == "send"]  # never replayed
 
 
+def test_a_send_that_timed_out_reopening_isnt_reported_as_maybe_sent(on, hermes, monkeypatch):
+    """DeepSeek on #824: a timeout may come before anything was submitted
+    (the reopen), so it's never told as possibly queued."""
+    start()
+    work.turn_ended(WORKER_1, "Done.")
+    broker = sys.modules["conduit_push.work_broker"]
+
+    def timed_out(self, *args, **kwargs):
+        raise broker.BrokerError("session.resume timed out; it may still have started", timed_out=True)
+
+    monkeypatch.setattr(broker.Broker, "send", timed_out)
+    refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert refused.get("error") == "hermes", refused
+
+
 def test_a_4090_without_a_reason_is_still_another_windows_hold():
     """An older Hermes words SESSION_NOT_OWNED in the message only."""
     broker = sys.modules["conduit_push.work_broker"]
