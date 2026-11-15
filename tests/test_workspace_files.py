@@ -899,9 +899,13 @@ def test_a_files_policy_hermes_cant_read_refuses_rather_than_lifting_the_limit(t
         raise OSError("policy file unreadable")
 
     _hermes_files(monkeypatch, unreadable)
+    degraded = api.core._plugin_package_module("degraded")
+    monkeypatch.setitem(sys.modules, degraded._HOLDER, types.ModuleType(degraded._HOLDER))
     with pytest.raises(api.core.TokenError) as exc:
         api.workspace._workspace(None)
     assert exc.value.status == 503
+    # Conduit's plugin page says so (the capabilities route's `degraded`), until the policy reads again.
+    assert degraded.current() == ["workspace-files"]
     # Neither a tapped file name nor a saved artifact's copy reads a file meanwhile.
     assert api.workspace._host_file_check(None)(str(tree / "notes.txt")) is False
     assert api.workspace._pin_source(None)(str(tree / "notes.txt")) == (None, "unreadable")
@@ -909,6 +913,9 @@ def test_a_files_policy_hermes_cant_read_refuses_rather_than_lifting_the_limit(t
     _hermes_files(monkeypatch, lambda *a, **k: object())
     with pytest.raises(api.core.TokenError):
         api.workspace._workspace(None)
+    _hermes_files(monkeypatch, lambda *a, **k: types.SimpleNamespace(locked_root=tree))
+    api.workspace._workspace(None)
+    assert degraded.current() == []
 
 
 def test_a_hermes_from_before_the_files_policy_or_with_no_locked_folder_has_no_limit(tree, monkeypatch):
@@ -1028,3 +1035,62 @@ def test_an_ssh_folder_copy_is_made_out_of_sight_and_never_lands_on_a_name_taken
     assert exc.value.status == 409
     assert os.listdir(tree / "docs copy") == ["theirs.md"]
     assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_an_ssh_copy_isnt_swallowed_by_a_folder_that_appears_as_it_lands(tree, monkeypatch):
+    workspace = ssh(tree)
+    run = workspace._run
+
+    def taken_at_the_move(script, **kwargs):
+        # After the last look at the name, before the move: mv would put the copy inside their folder.
+        landing = 'mv -n -- "$d/c" "$t" 2>/dev/null\n'
+        if landing not in script:
+            return run(script, **kwargs)
+        return run(script.replace(landing, 'mkdir -- "$t" && echo theirs > "$t/theirs.md"\n' + landing, 1), **kwargs)
+
+    monkeypatch.setattr(workspace, "_run", taken_at_the_move)
+    for source, copy in (("docs", "docs copy"), ("notes.txt", "notes copy.txt")):
+        with pytest.raises(wf.WorkspaceError) as exc:
+            workspace.duplicate(str(tree.resolve()), str((tree / source).resolve()))
+        assert exc.value.status == 409
+        assert os.listdir(tree / copy) == ["theirs.md"]
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_an_ssh_copy_of_a_name_with_a_line_break_lands(tree):
+    (tree / "two\nlines.txt").write_text("both\n")
+    made = ssh(tree).duplicate(str(tree.resolve()), str((tree / "two\nlines.txt").resolve()))["entry"]
+    assert made["name"] == "two\nlines copy.txt" and (tree / "two\nlines copy.txt").read_text() == "both\n"
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_a_save_refuses_an_edit_of_the_same_length_with_its_old_date_put_back(tree, monkeypatch):
+    target = tree / "notes.txt"
+    before = target.stat()
+    write_temp = wf._write_temp
+
+    def edited_meanwhile(folder, data):
+        temp = write_temp(folder, data)
+        time.sleep(0.02)  # past the clock tick the file was made in
+        with open(target, "r+") as handle:
+            handle.write("edited here!\n")  # in place, as long as it was
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return temp
+
+    monkeypatch.setattr(wf, "_write_temp", edited_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().save(str(tree), str(target), "mine\n", before.st_mtime)
+    assert exc.value.status == 409 and target.read_text() == "edited here!\n"
+
+
+def test_a_search_that_never_ran_gives_its_slot_back(tree, client, monkeypatch):
+    import threading
+
+    def missing():
+        raise api.core.TokenError(503, "Workspace files aren't installed on this host")
+
+    monkeypatch.setattr(api.workspace, "_workspace_files", missing)
+    monkeypatch.setattr(api.workspace, "_workspace_walks", threading.BoundedSemaphore(1))
+    for _ in range(3):
+        answer = client.get(f"{BASE}/workspace/search", params={"root": str(tree), "q": "x"})
+        assert answer.status_code == 503 and "installed" in answer.json()["detail"]

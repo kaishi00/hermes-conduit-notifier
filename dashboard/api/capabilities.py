@@ -390,7 +390,21 @@ async def get_capabilities(response: Response) -> Dict[str, Any]:
             body["managed_by"] = managed
     if _room_chats_kept():
         body["room_chats_kept"] = True
+    degraded = _degraded()
+    if degraded:
+        body["degraded"] = degraded
     return body
+
+
+def _degraded() -> list:
+    """What the plugin can't do on this Hermes right now (degraded.py's
+    codes: `workstream-recovery`, `workspace-files`), so Conduit's plugin
+    page says what otherwise only the host's log does. None when that
+    can't be read."""
+    try:
+        return [code for code in core._plugin_package_module("degraded").current() if isinstance(code, str)]
+    except Exception:  # noqa: BLE001 — the capabilities answer never fails for it
+        return []
 
 
 def _room_chats_kept() -> bool:

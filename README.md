@@ -2565,7 +2565,7 @@ and the dashboard routes under one file lock, so they survive restarts:
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
 | GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered, may_leave_blank}]}` (`may_leave_blank` 0.82+) or `{kind: "approval", description, command, command_cut, answered}` |
 | POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "too_late" or "failed" or "unconfirmed", message}` |
-| GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at, room?, decision?}]}`, newest first (`room` 0.150.1+, `decision` 0.177.16+) |
+| GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at, room?, decision?}]}`, newest first (`room` 0.150.1+, `decision` 0.177.17+) |
 
 - Every chat Hermes waits on the user in is listed by `/waiting` (0.131+),
   one profile at a time, for Conduit's Needs you list, the counts on its
@@ -2573,10 +2573,10 @@ and the dashboard routes under one file lock, so they survive restarts:
   description or a batch's first question, and when it began. A wait in a
   group room this Hermes hosts also names the room's id (`room`, 0.150.1+),
   so its row opens the room, where its card is answered. A question's row
-  carries its card as the push did (`decision`, 0.177.16+), which a Conduit
+  carries its card as the push did (`decision`, 0.177.17+), which a Conduit
   on screen draws in the chat when Hermes drew none there. Never a
   command, never a workstream's approval (its Work panel answers it; a
-  workstream's question is listed, 0.177.16+), and a
+  workstream's question is listed, 0.177.17+), and a
   wait goes once it's answered anywhere or Hermes gave up on it. The list
   only reads; an approval is answered on its chat's card.
 - With alert calls on, what Hermes waits on is kept too (0.70+): a question
@@ -5372,6 +5372,15 @@ gateway (`POST /api/gateway/restart`), then this dashboard:
 - `GET /capabilities` also reports `loaded_version` (the version this
   dashboard process imported), `restart_needed` (the version on disk is
   different) and `boot_id` (new with every dashboard process).
+- `GET /capabilities` lists under `degraded` what the plugin can't do on this
+  Hermes right now, and leaves the field out when there is nothing (plugin
+  0.177.16+). Conduit shows each as a line on the plugin's page in Settings,
+  so it isn't only in the host's log. `workstream-recovery`: Hermes' turn
+  stopper wasn't found where the plugin looks, so a workstream a clean
+  restart stops is left interrupted instead of picked up again.
+  `workspace-files`: Hermes has a managed-files policy and couldn't say which
+  folder it keeps files in, so the Folder refuses until it can. Both clear
+  by themselves, and a new process starts with none.
 - `POST /api/plugins/conduit_push/self/restart` answers
   `{ok, restarting, boot_id, loaded_version, version}` and a second later
   re-executes the dashboard with the command line it started with, keeping its
