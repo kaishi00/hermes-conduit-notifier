@@ -250,6 +250,9 @@ def _first_answer_wins(
     deadline = started + _clarify_poll_budget()
     saw_pending = False
     expired = False
+    # The unattended wait's deadline passed: one more poll, so an answer
+    # locked during the last backoff sleep still reaches Hermes.
+    last_look = False
     consecutive_unproductive = 0
     unanswered_polls = 0
     previous_remaining: int | None = None
@@ -258,8 +261,10 @@ def _first_answer_wins(
     locked_answers: dict[str, Any] = {}
     while True:
         if time.monotonic() >= deadline:
-            expired = True
-            break
+            if not unattended or last_look:
+                expired = True
+                break
+            last_look = True
         if (not unattended and "original" in outcome and _undelivered(outcome["original"])
                 and _card_asks_instead(session_id)):
             # The host could not show the question: not an answer. Keep it
@@ -364,9 +369,16 @@ def _first_answer_wins(
             consecutive_unproductive += 1
             if consecutive_unproductive >= UNKNOWN_POLL_GRACE:
                 break
+        if last_look:
+            expired = True
+            break
         unanswered_polls += 1
         _sleep_until_call_answers(request_id, _poll_delay(unanswered_polls))
 
+    if last_look:
+        # The wait had already run out when its one more poll stopped it:
+        # it ends as an expired wait whatever stopped it, as before that poll.
+        expired = True
     # Polling stopped (budget spent, card not shown, relay gone, an
     # interrupt): fall back to whatever the original path produces, waiting
     # for it if necessary. The parked decision is released first so late
