@@ -146,6 +146,16 @@ def ask_wake_sent(store: work_store.Store, item: str) -> None:
     store.set_meta(_ASK_WAKES, json.dumps(kept))
 
 
+def ask_wake_unsent(store: work_store.Store, item: str) -> None:
+    """Takes back ask_wake_sent for an update that never went out."""
+    try:
+        kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
+    except ValueError:
+        return
+    if isinstance(kept, list) and item in kept:
+        store.set_meta(_ASK_WAKES, json.dumps([name for name in kept if name != item]))
+
+
 def _carries_ask(store: Optional[work_store.Store], content: str) -> bool:
     """Whether this saved message holds a work update the plugin sent with
     another bot's ask or the user's tapped yes in it, whole."""

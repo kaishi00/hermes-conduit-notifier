@@ -3610,6 +3610,8 @@ def test_a_wake_the_bot_chats_busy_owner_refused_goes_after_its_turn(bots, herme
              if params["session_id"] == f"rt-{NAHIDA_CHAT}"]
     assert "Can you book it?" in wake["text"]
     assert not [row for row in store_mod.Store(bots["nahida"]).outbox_pending() if row["kind"] == "line_ask"]
+    # The refused try left no row behind: only the update that went out.
+    assert len(store_mod.Store(bots["nahida"]).outbox_rows("", "wake")) == 1
 
 
 def test_a_wake_the_bot_chats_owner_couldnt_confirm_doesnt_fail_the_ask(bots, hermes, monkeypatch):
