@@ -21,6 +21,13 @@ checks it). The format is fixed, because Conduit reads it:
 - A workstream the Bot Chat handed its quick steps to showed only as a name in the reply, with no card to open it. The bot now gets its link, so the card shows as for any other workstream.
 - A call watch's run could leave out its report, or call it the wrong way, and go silent. Its prompt now shows the report call whole and asks for it before the reply, and each watch picks it up on its next run.
 
+## 0.177.7 (2026-11-15)
+
+### Fixes
+
+- On a host where Conduit connects to the Hermes gateway (the Webapp), a new workstream, Watch job or Watch call chat with the same title as an earlier one went into that earlier chat instead of a new one. Its questions and progress then showed on the old workstream, where nobody was looking. Each now gets its own chat.
+- A workstream a Bot Chat handed off from a scheduled job's report is named after the job and what it reported, instead of "[Cronjob ... scheduled job,".
+
 ## 0.177.6 (2026-11-15)
 
 ### Fixes

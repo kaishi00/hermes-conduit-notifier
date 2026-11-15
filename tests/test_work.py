@@ -7617,6 +7617,21 @@ def test_a_kept_result_is_masked_before_any_cut():
     assert len(blob) > 3 and blob.endswith("…")
 
 
+def test_a_hand_off_from_a_scheduled_job_is_titled_by_the_job_and_its_output():
+    # Issue 2521: every hand-off from a cron-delivered Bot Chat turn was titled
+    # '[Cronjob "<job>" output — scheduled job,', the wrapper's first six words.
+    ask = ('[Cronjob "Morning mail" output — scheduled job, not the user. Review it, act on anything that '
+           'needs action, and summarize for the chat.]\n\nThree new mails from Bob about the invoice and more')
+    assert work._hand_off_title(ask) == "Morning mail: Three new mails from Bob about"
+    assert work._hand_off_title('[Cronjob "" output — scheduled job, not the user.]\n\n') == "Scheduled job"
+    assert work._hand_off_title("Fix the missing saw argument in jobs.json today") == "Fix the missing saw argument in"
+    # A job name with quotes in it.
+    quoted = '[Cronjob "Feed "Rex" at noon" output — scheduled job, not the user.]\n\nRex ate'
+    assert work._hand_off_title(quoted) == 'Feed "Rex" at noon: Rex ate'
+    # Only Hermes' wrapper at the start: the user's own brackets stay.
+    assert work._hand_off_title("[Draft] reply to Bob") == "[Draft] reply to Bob"
+
+
 def test_a_hand_offs_secret_names_are_read_by_their_words():
     # Review leftovers of notifier #790: "x-api-key" or "privateKey" with a short value slipped past the
     # old substring match, which also dropped "author" and "tokenizer".
