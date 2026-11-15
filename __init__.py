@@ -1080,7 +1080,7 @@ def _on_session_finalize(**kwargs: Any) -> None:
     twice. A Hermes without pre_llm_call can't say a new turn started, so
     there on_session_end stays the only close."""
     session_id = _text(kwargs.get("session_id"))
-    if (not session_id or not pulse.turns_marked or forks.inside() or _is_child(session_id)
+    if (not session_id or not pulse.turns_marked or _is_child(session_id)
             or _turn_end_handled(session_id)):
         return None
     _on_session_end(session_id=session_id, completed=False, interrupted=True, platform=kwargs.get("platform"))

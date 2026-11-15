@@ -361,10 +361,12 @@ class _AuthorityLink:
             self._drop_surface(method, params)
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"{method} gave no answer"}}
         result = response.get("result") if isinstance(response.get("result"), dict) else {}
-        if method == "prompt.submit" and (response.get("error") or str(result.get("status") or "").lower() == "terminal"):
+        if method == "prompt.submit" and _reason(response) != "SESSION_OWNER_UNCONFIRMED" \
+                and (response.get("error") or str(result.get("status") or "").lower() == "terminal"):
             # No turn of that text is coming (refused, or settled without one): its
             # surface line would wait for the next one. "queued", "started" and
-            # "unknown" each have the turn still to run.
+            # "unknown" each have the turn still to run, as may a send the
+            # chat's owner couldn't confirm (issue 2522).
             self._drop_surface(method, params)
         return self._answer(method, params, shaped, response, asked_at)
 

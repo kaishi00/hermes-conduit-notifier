@@ -123,6 +123,9 @@ WAKE_BATCH_S = 3.0
 # this often, for at most this long, then sent queued anyway.
 WAKE_BUSY_RETRY_S = 2.0
 WAKE_BUSY_MAX_S = 600.0
+# A Bot Chat whose owner (another Hermes process) refused a wake mid-turn
+# (SESSION_OWNER_BUSY) can't be watched from here: tried again this often.
+WAKE_OWNER_BUSY_RETRY_S = 10.0
 # How long a Bot Chat's updates wait for the call kept with it to be saved
 # (its workstreams' results are the call's to speak first); after that they go.
 CALL_HOLD_MAX_S = 2 * 3600.0
@@ -2235,6 +2238,16 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
             logger.warning("conduit_push: sending to a workstream failed", exc_info=True)
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
                     "note": f"Hermes couldn't take it: {type(error).__name__}"}
+        if error.uncertain:
+            # Hermes may already have it queued: sent again, it would run twice.
+            return {"ok": False, "ref": work.ref, "title": work.title, "error": "maybe_sent",
+                    "note": f"Hermes couldn't confirm {work.ref} took it: it may already be queued there. Don't "
+                            "send it again; its next update says whether it ran."}
+        if error.owner_busy:
+            return {"ok": False, "ref": work.ref, "title": work.title, "error": "mid_turn",
+                    "note": f"{work.ref} is in the middle of a turn in another Hermes process, which takes nothing "
+                            "new until it ends. Nothing was sent; send it again once its update says the turn "
+                            "ended."}
         if error.not_owned:
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "open_elsewhere",
                     "note": f"{work.ref} is open in another Hermes window, which holds it. Nothing was sent; the "
@@ -6234,25 +6247,9 @@ def _send_wake(home: Path, coordinator: str) -> None:
     if not lines:
         return
     now = time.monotonic()
-    if _coordinator_busy(home, coordinator) and now - (held_since or now) < WAKE_BUSY_MAX_S:
-        with _wake_lock:
-            # Lines queued meanwhile join these; their own timer (if any) finds them gone.
-            more, timer = _wakes.pop(key, ([], None))
-            if timer is not None:
-                timer.cancel()
-            retry = threading.Timer(WAKE_BUSY_RETRY_S, _send_wake, args=(home, coordinator))
-            retry.daemon = True
-            _wakes[key] = (lines + more, retry)
-            if asks:
-                _wake_asks.setdefault(key, set()).update(asks)
-            if answers:
-                _wake_answers.setdefault(key, set()).update(answers)
-            if tells:
-                _wake_tells.setdefault(key, set()).update(tells)
-            if items:
-                _wake_items[key] = items + _wake_items.get(key, [])
-            _wake_held[key] = held_since or now
-            retry.start()
+    holding = now - (held_since or now) < WAKE_BUSY_MAX_S
+    if holding and _coordinator_busy(home, coordinator):
+        _hold_wake(home, coordinator, lines, asks, answers, tells, items, held_since or now, WAKE_BUSY_RETRY_S)
         return
     # A turn that starts between the check and the send still gets this
     # queued into it (the window is small); the hold narrows the duplicate
@@ -6288,6 +6285,18 @@ def _send_wake(home: Path, coordinator: str) -> None:
             _asks_unreached(home, store, items, f"Hermes answered {outcome}")
             told = True
     except Exception as error:  # noqa: BLE001 — the digest still carries it on the next turn
+        if not sent and holding and getattr(error, "owner_busy", False):
+            # The process that holds the Bot Chat is mid-turn and sent
+            # nothing (issue 2522): held for its turn's end, as a busy Bot
+            # Chat here is. Its lines stay undelivered until then.
+            try:
+                if item:
+                    store.outbox_done(item, "refused")
+            except Exception:  # noqa: BLE001
+                logger.debug("conduit_push: couldn't mark an update row", exc_info=True)
+            _hold_wake(home, coordinator, lines, asks, answers, tells, items, held_since or now,
+                       WAKE_OWNER_BUSY_RETRY_S)
+            return
         # Not sent: none of it comes back as news after a restart. A write
         # that failed after Hermes took it tries once more to mark the rows
         # delivered, so a restart doesn't hand the same ask or yes over twice.
@@ -6299,11 +6308,36 @@ def _send_wake(home: Path, coordinator: str) -> None:
         logger.warning("conduit_push: couldn't wake the Bot Chat with a work update: %s", error)
         # Only when Hermes is known not to have taken it: a submit that timed
         # out may still queue the turn, and a write after the send changes nothing.
-        if not sent and not getattr(error, "timed_out", False):
+        if not sent and not (getattr(error, "uncertain", False) or getattr(error, "timed_out", False)):
             _asks_unreached(home, store, items, str(error) or type(error).__name__)
         elif sent and not told and outcome and outcome not in ("queued", "accepted"):
             # Refused, and a write on the way failed: the asks still fail.
             _asks_unreached(home, store, items, f"Hermes answered {outcome}")
+
+
+def _hold_wake(home: Path, coordinator: str, lines: list[str], asks: set[str], answers: set[str],
+               tells: set[str], items: list[str], held_since: float, delay: float) -> None:
+    """Puts a wake's lines back to go in ``delay`` seconds, with whatever
+    was queued meanwhile, keeping when they were first held."""
+    key = (str(home), coordinator)
+    with _wake_lock:
+        # Lines queued meanwhile join these; their own timer (if any) finds them gone.
+        more, timer = _wakes.pop(key, ([], None))
+        if timer is not None:
+            timer.cancel()
+        retry = threading.Timer(delay, _send_wake, args=(home, coordinator))
+        retry.daemon = True
+        _wakes[key] = (lines + more, retry)
+        if asks:
+            _wake_asks.setdefault(key, set()).update(asks)
+        if answers:
+            _wake_answers.setdefault(key, set()).update(answers)
+        if tells:
+            _wake_tells.setdefault(key, set()).update(tells)
+        if items:
+            _wake_items[key] = items + _wake_items.get(key, [])
+        _wake_held[key] = held_since
+        retry.start()
 
 
 def _asks_unreached(home: Path, store: work_store.Store, items: list[str], reason: str) -> None:
