@@ -3622,6 +3622,24 @@ def note_turn_ask(session_id: Any, turn_id: Any, user_message: Any) -> None:
             del _asks[next(iter(_asks))]
 
 
+# Hermes' wrapper on a scheduled job's output delivered into a Bot Chat
+# (cron/scheduler_delivery.py's bot_chat_message).
+_CRON_WRAPPER = re.compile(r'\A\s*\[Cronjob "(?P<job>[^\n]*?)" output\b[^\]]*\]\s*')
+
+
+def _hand_off_title(ask: str) -> str:
+    """A hand-off's title: the ask's first words. A scheduled job's output
+    leaves out Hermes' wrapper, the same on every delivery, and names the job
+    instead, so its hand-offs don't all read "[Cronjob ... scheduled job,"
+    (issue 2521)."""
+    found = _CRON_WRAPPER.match(ask)
+    if found is None:
+        return _cut(" ".join(ask.split()[:6]), 60)
+    job = " ".join(found["job"].split()) or "Scheduled job"
+    words = " ".join(ask[found.end():].split()[:6])
+    return _cut(f"{job}: {words}" if words else job, 60)
+
+
 def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
     """The step after a quick turn's budget: the plugin starts the workstream
     for the rest itself, once a turn, with the turn's ask and the steps it
@@ -3637,7 +3655,7 @@ def _hand_off(session_id: Any, turn_id: Any, tool: str) -> str:
         return HANDED_OFF.format(tool=tool, ref=handed[0], title=handed[1])
     if not ask:
         return STEP_BLOCK.format(tool=tool)
-    title = _cut(" ".join(ask.split()[:6]), 60)
+    title = _hand_off_title(ask)
     # Whole steps only, and a tool_call batch's together, so every result
     # below has its steps above it. The "(and N more)" line has its room.
     lines, size, shown = [], 0, 0
