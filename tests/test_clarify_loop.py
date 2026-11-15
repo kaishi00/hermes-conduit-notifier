@@ -415,6 +415,22 @@ def test_polling_stops_when_relay_expires_the_decision(monkeypatch):
     assert cards == [("keep", decision["request_id"], decision), ("forget", decision["request_id"])]
 
 
+def test_a_card_the_store_couldnt_keep_is_tried_again(monkeypatch):
+    fake = _FakeState([{"status": "pending"}, {"status": "pending"}, {"status": "pending"},
+                       {"status": "answered", "answer": "yes"}])
+    _install(fake)
+    writes = iter([False, True])
+    kept = []
+    monkeypatch.setattr(loop.calls, "keep_waiting_card", lambda request_id, card: kept.append(request_id) or next(writes))
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.0)
+    original, release = _blocking_original("never used")
+    try:
+        loop.middleware(**_kwargs(original, {"question": "Q?"}))
+    finally:
+        release.set()
+    assert len(kept) == 2, "once more after the failed write, then no more"
+
+
 def test_a_push_that_never_parked_never_offers_its_card(monkeypatch):
     # Every poll unknown: the relay never held the decision, so the Needs
     # you list never hands Conduit a card whose answer it would refuse.

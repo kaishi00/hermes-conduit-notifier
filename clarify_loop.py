@@ -357,8 +357,8 @@ def _first_answer_wins(
                 # The relay holds the decision and takes answers for it: the
                 # Needs you list may hand Conduit its card now, never before
                 # (a push that never parked would refuse the answer).
-                saw_card = True
-                calls.keep_waiting_card(request_id, card)
+                # A write that failed is tried again on the next poll.
+                saw_card = calls.keep_waiting_card(request_id, card) is not False
             if batch_protocol and isinstance(status.get("answers"), dict):
                 locked_answers = dict(status["answers"])
             remaining = status.get("remaining")
