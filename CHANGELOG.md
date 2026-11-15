@@ -13,6 +13,21 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.12 (2026-11-15)
+
+### Security
+
+- On a hosted or locked Hermes, the Folder could open any folder on the host when Hermes failed to load its files policy. It now refuses until the policy can be read.
+- A notification still being retried when you paired again could reach the newly paired device. It now goes only to the pairing it was made for.
+
+### Fixes
+
+- Saving a file from the Folder could overwrite an edit Hermes made in the same moment. The save now checks the file again right before replacing it and tells you it changed.
+- Duplicating a file could overwrite one that appeared under the copy's name in the same moment. The copy now never replaces anything.
+- When the relay was unreachable, approvals and questions waited behind every finished-turn notice still being retried. They now go first.
+- A notification could be retried by a plugin that had been turned off and on again, or accepted just as it was turned off and never sent.
+- A Folder change that takes over 30 seconds now says it may still finish, and Conduit reads the folder again instead of leaving you to repeat it.
+
 ## 0.177.11 (2026-11-15)
 
 ### Fixes

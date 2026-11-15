@@ -32,6 +32,7 @@ import shlex
 import shutil
 import stat as stat_module
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -372,21 +373,30 @@ class LocalWorkspace:
         data = (content or "").encode("utf-8")
         if len(data) > SAVE_MAX_BYTES:
             raise WorkspaceError(413, "That's too much text to save")
-        current = os.stat(target).st_mtime
-        if expected_mtime is not None and (not math.isfinite(float(expected_mtime))
-                                           or abs(current - float(expected_mtime)) > 0.001):
-            raise WorkspaceError(409, "This file changed since you opened it")
-        temp = None
-        try:
-            temp = _write_temp(os.path.dirname(target), data)
-            shutil.copymode(target, temp)
-            os.replace(temp, target)
+        # Saves of one file through the plugin go one at a time, and the file
+        # is looked at again once the new text is written beside it, right
+        # before it replaces the file: an edit that landed meanwhile (the
+        # agent's, say) is refused rather than lost (notifier issue 834).
+        with _file_lock(target):
+            before = os.stat(target)
+            if expected_mtime is not None and (not math.isfinite(float(expected_mtime))
+                                               or abs(before.st_mtime - float(expected_mtime)) > 0.001):
+                raise WorkspaceError(409, "This file changed since you opened it")
             temp = None
-        except PermissionError:
-            raise WorkspaceError(403, "Hermes can't write this file")
-        finally:
-            if temp is not None and os.path.lexists(temp):
-                os.unlink(temp)
+            try:
+                temp = _write_temp(os.path.dirname(target), data)
+                shutil.copymode(target, temp)
+                if expected_mtime is not None and _changed(before, target):
+                    raise WorkspaceError(409, "This file changed since you opened it")
+                os.replace(temp, target)
+                temp = None
+            except FileNotFoundError:
+                raise WorkspaceError(409, "This file changed since you opened it")
+            except PermissionError:
+                raise WorkspaceError(403, "Hermes can't write this file")
+            finally:
+                if temp is not None and os.path.lexists(temp):
+                    os.unlink(temp)
         return {"entry": self._entry(target)}
 
     def move(self, root_raw: Any, path: Any, folder: Any, name: Any, overwrite: bool = False) -> Dict[str, Any]:
@@ -513,13 +523,28 @@ class LocalWorkspace:
         name = copy_name(os.path.basename(source), lambda candidate: os.path.lexists(os.path.join(folder, candidate)),
                          keep_name=keep)
         target = os.path.join(folder, name)
+        # Never over something that appeared since the name was picked, as
+        # the SSH copy lands: a folder claims its name with mkdir, anything
+        # else is copied beside it and lands only where nothing is
+        # (notifier issue 834).
         try:
             if os.path.isdir(source) and not os.path.islink(source):
-                shutil.copytree(source, target, symlinks=True,
-                                ignore=lambda folder, names: [n for n in names if self._sensitive(os.path.join(folder, n))])
+                os.mkdir(target)
+                try:
+                    shutil.copytree(source, target, symlinks=True, dirs_exist_ok=True,
+                                    ignore=lambda folder, names: [n for n in names if self._sensitive(os.path.join(folder, n))])
+                except BaseException:
+                    shutil.rmtree(target, ignore_errors=True)
+                    raise
             else:
-                # A link stays a link, as the SSH copy keeps it.
-                shutil.copy2(source, target, follow_symlinks=False)
+                box = tempfile.mkdtemp(prefix=".conduit-", dir=folder)
+                try:
+                    copy = os.path.join(box, "c")
+                    # A link stays a link, as the SSH copy keeps it.
+                    shutil.copy2(source, copy, follow_symlinks=False)
+                    _rename_no_replace(copy, target)
+                finally:
+                    shutil.rmtree(box, ignore_errors=True)
         except FileExistsError:
             # Taken between choosing the name and copying.
             raise WorkspaceError(409, "Something with that name is already there")
@@ -605,9 +630,55 @@ class _Budget(Exception):
     """The walk ran out of its file or time budget."""
 
 
+_FILE_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _file_lock(path: str) -> threading.Lock:
+    """The lock this process's writes of ``path`` share."""
+    return _FILE_LOCKS[hash(path) % len(_FILE_LOCKS)]
+
+
+def _changed(before: os.stat_result, path: str) -> bool:
+    """Whether ``path`` is no longer the file ``before`` describes."""
+    after = os.stat(path)
+    return (after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_ino, before.st_size, before.st_mtime_ns)
+
+
+def _rename_exclusive(source: str, target: str) -> bool:
+    """Rename that never replaces: the kernel's own no-replace rename
+    (Linux renameat2, macOS renamex_np). False where neither is there."""
+    import ctypes
+    import ctypes.util
+    import sys
+    if not sys.platform.startswith("linux") and sys.platform != "darwin":
+        return False
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or None, use_errno=True)
+        src, dst = os.fsencode(source), os.fsencode(target)
+        if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+            result = libc.renameat2(-100, src, -100, dst, 1)  # AT_FDCWD, RENAME_NOREPLACE
+        elif sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+            result = libc.renamex_np(src, dst, 0x4)  # RENAME_EXCL
+        else:
+            return False
+    except (OSError, AttributeError):
+        return False
+    if result == 0:
+        return True
+    code = ctypes.get_errno()
+    if code == errno.EEXIST:
+        raise FileExistsError(errno.EEXIST, os.strerror(code), target)
+    if code in (errno.ENOSYS, errno.EINVAL, getattr(errno, "ENOTSUP", errno.EINVAL)):
+        return False  # a filesystem without it
+    raise OSError(code, os.strerror(code), source)
+
+
 def _rename_no_replace(source: str, target: str) -> None:
-    """Rename, failing when ``target`` appears meanwhile (a hard link then an
-    unlink, where the filesystem has them)."""
+    """Rename, failing when ``target`` appears meanwhile (the kernel's
+    no-replace rename, else a hard link then an unlink, where the
+    filesystem has them)."""
+    if _rename_exclusive(source, target):
+        return
     if os.path.isdir(source) and not os.path.islink(source):
         if os.path.lexists(target):
             raise FileExistsError(target)
@@ -932,10 +1003,11 @@ class SshWorkspace:
                       f'follows "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
                       # Through a link to its file, as this host's save writes: the link stays.
                       'if [ -L "$t" ]; then t="$r"; fi\n')
-        stale = ""
+        stale = again = ""
         if expected_mtime is not None:
-            stale = (_STAT + f'set -- $(meta "$t"); [ "$1" = "{int(expected_mtime)}" ] || '
-                     f'{{ echo {_ERROR}ESTALE; exit 1; }}\n')
+            again = (f'set -- $(meta "$t"); [ "$1" = "{int(expected_mtime)}" ] || '
+                     f'{{ rm -f "$tmp"; echo {_ERROR}ESTALE; exit 1; }}\n')
+            stale = _STAT + again
         self._run(self._guard(root) + f't={shlex.quote(target)}\n'
                   f'[ -d "$(dirname -- "$t")" ] || {{ echo {_ERROR}ENOENT; exit 1; }}\n'
                   f'inside "$t" || {{ echo {_ERROR}EOUTSIDE; exit 1; }}\n'
@@ -947,6 +1019,9 @@ class SshWorkspace:
                   # mktemp's file is private: give it the file's own mode, or a new file's.
                   'm=$(stat -c %a -- "$t" 2>/dev/null || stat -f %Lp -- "$t" 2>/dev/null)\n'
                   'chmod "${m:-$(printf %o $((0666 & ~0$(umask))))}" "$tmp" 2>/dev/null\n' +
+                  # Looked at again once the text is written, right before it
+                  # lands: an edit made meanwhile is refused, not lost.
+                  again +
                   (f'mv -f -- "$tmp" "$t" || {{ rm -f "$tmp"; echo {_ERROR}EACCES; exit 1; }}' if overwrite and not create else
                    # Never replaces what appeared since the check: mv -n leaves
                    # the temp file behind instead.
