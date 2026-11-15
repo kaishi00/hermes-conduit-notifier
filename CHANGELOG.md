@@ -18,6 +18,8 @@ checks it). The format is fixed, because Conduit reads it:
 ### Fixes
 
 - Duplicating a file on an SSH workspace could put the copy inside a folder that appeared under its name in the same moment. The copy is now refused and nothing of theirs changes.
+- Saving a file from the Folder could still overwrite an edit of the same length made in the same moment. The save now sees it.
+- Searching the Folder could answer "Hermes is still searching" until the dashboard restarted, after two searches failed to start.
 
 ### New and improved
 

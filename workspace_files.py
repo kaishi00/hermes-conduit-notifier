@@ -636,7 +636,10 @@ def _file_lock(path: str) -> threading.Lock:
 def _changed(before: os.stat_result, path: str) -> bool:
     """Whether ``path`` is no longer the file ``before`` describes."""
     after = os.stat(path)
-    return (after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_ino, before.st_size, before.st_mtime_ns)
+    # The change time too: an edit of the same length whose writer put the
+    # old date back still moves it.
+    return ((after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            != (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns))
 
 
 def _rename_exclusive(source: str, target: str) -> bool:

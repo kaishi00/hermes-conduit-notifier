@@ -630,7 +630,14 @@ async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, 
                 _workspace_walks.release()
 
     try:
-        _workspace_files()  # loaded first, so its error type is known below
+        try:
+            _workspace_files()  # loaded first, so its error type is known below
+        except BaseException:
+            # No walk ran to free its slot: two such failures would
+            # otherwise refuse every search until the dashboard restarts.
+            if walks:
+                _workspace_walks.release()
+            raise
         try:
             result = await asyncio.wait_for(core._run_scoped(profile, job, _workspace_executor),
                                             timeout=WORKSPACE_TIMEOUT_S)

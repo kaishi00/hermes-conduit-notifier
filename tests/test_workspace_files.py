@@ -1055,3 +1055,35 @@ def test_an_ssh_copy_isnt_swallowed_by_a_folder_that_appears_as_it_lands(tree, m
         assert exc.value.status == 409
         assert os.listdir(tree / copy) == ["theirs.md"]
     assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
+def test_a_save_refuses_an_edit_of_the_same_length_with_its_old_date_put_back(tree, monkeypatch):
+    target = tree / "notes.txt"
+    before = target.stat()
+    write_temp = wf._write_temp
+
+    def edited_meanwhile(folder, data):
+        temp = write_temp(folder, data)
+        time.sleep(0.02)  # past the clock tick the file was made in
+        with open(target, "r+") as handle:
+            handle.write("edited here!\n")  # in place, as long as it was
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return temp
+
+    monkeypatch.setattr(wf, "_write_temp", edited_meanwhile)
+    with pytest.raises(wf.WorkspaceError) as exc:
+        ws().save(str(tree), str(target), "mine\n", before.st_mtime)
+    assert exc.value.status == 409 and target.read_text() == "edited here!\n"
+
+
+def test_a_search_that_never_ran_gives_its_slot_back(tree, client, monkeypatch):
+    import threading
+
+    def missing():
+        raise api.core.TokenError(503, "Workspace files aren't installed on this host")
+
+    monkeypatch.setattr(api.workspace, "_workspace_files", missing)
+    monkeypatch.setattr(api.workspace, "_workspace_walks", threading.BoundedSemaphore(1))
+    for _ in range(3):
+        answer = client.get(f"{BASE}/workspace/search", params={"root": str(tree), "q": "x"})
+        assert answer.status_code == 503 and "installed" in answer.json()["detail"]
