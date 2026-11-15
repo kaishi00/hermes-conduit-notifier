@@ -15,13 +15,13 @@ checks it). The format is fixed, because Conduit reads it:
 
 ## 0.177.16 (2026-11-15)
 
-### New and improved
-
-- When the plugin can't do something on this Hermes, such as picking a workstream up again after a restart, Conduit now says so on the plugin's page in Settings. Before, only the host's log did.
-
 ### Fixes
 
 - Duplicating a file on an SSH workspace could put the copy inside a folder that appeared under its name in the same moment. The copy is now refused and nothing of theirs changes.
+
+### New and improved
+
+- When the plugin can't do something on this Hermes, such as picking a workstream up again after a restart, Conduit now says so on the plugin's page in Settings. Before, only the host's log did.
 
 ## 0.177.15 (2026-11-15)
 
