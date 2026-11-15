@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.19 (2026-11-15)
+
+### Fixes
+
+- After Hermes compacted a Bot Chat, a cron report's file could list in Artifacts as a file you sent, or not at all. It lists as the run's delivery again.
+
 ## 0.177.18 (2026-11-15)
 
 ### Fixes

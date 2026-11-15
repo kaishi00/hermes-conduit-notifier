@@ -89,6 +89,15 @@ CRON_NOTE_PREFIX = '[Cron job "'
 # Its whole first line, so a message that only starts like one isn't read
 # as a report.
 _CRON_NOTE_HEADER_RE = re.compile(r'\[Cron job ".*" report: shown in the chat, no reply asked for\]$', re.MULTILINE)
+# Hermes' compaction folds its summary into the first row it keeps when no
+# role alternates (agent/context_compressor.py, _merge_summary_into_tail_row),
+# and a cron note is often that row: the stored text is then the note
+# between a header and a delimiter with the summary after, or the summary,
+# an end marker and the note. Hermes' own words, held equal by
+# upstream/test_cron_bot_chat.py.
+MERGED_PRIOR_HEADER = "[PRIOR CONTEXT \u2014 for reference only; not a new message]"
+MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT \u2014 COMPACTION SUMMARY BELOW]"
+SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY \u2014 respond to the message below, not the summary above ---"
 _MD_LINK_RE = re.compile(r"(!?)\[([^\]\n]{0,300})\]\((https?://[^\s)<>]+)\)")
 _BARE_URL_RE = re.compile(r"(?<![(\[<\"'=])\bhttps?://[^\s<>\"'`)\]]+")
 _FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
@@ -204,10 +213,28 @@ def assistant_items(text: str) -> Iterable[tuple]:
             yield ("link", "link", url, "")
 
 
+def _own_text(text: str) -> str:
+    """A user row's own text, as far as the scan reads, when a compaction
+    folded its summary into the row: a cron note there is still the run's
+    report, and the summary's words are nobody's attachments. The markers
+    are found in the whole row (a search copies nothing), so a long summary
+    or report doesn't hide where the row's own text is."""
+    if text.startswith(MERGED_PRIOR_HEADER):
+        end = text.find(MERGED_SUMMARY_DELIMITER)
+        if end >= 0:
+            start = len(MERGED_PRIOR_HEADER)
+            return text[start:min(end, start + MAX_SCAN_CHARS)].strip()
+    cut = text.find(SUMMARY_END_MARKER)
+    if cut < 0:
+        return text[:MAX_SCAN_CHARS]
+    start = cut + len(SUMMARY_END_MARKER)
+    return text[start:start + MAX_SCAN_CHARS].lstrip()
+
+
 def user_items(text: str) -> Iterable[tuple]:
     # Clipped once, so a huge one-line row that looks like a note's header
     # is matched only as far as the scan reads.
-    text = (text or "")[:MAX_SCAN_CHARS]
+    text = _own_text(text or "")
     if text.startswith(CRON_NOTE_PREFIX) and _CRON_NOTE_HEADER_RE.match(text):
         # A cron report's files are the run's deliveries, as its MEDIA tags
         # were in Hermes' own turn (issue 581), never files the user sent.
@@ -360,7 +387,9 @@ def _candidate_sql(columns: set) -> str:
     parts = [
         "(m.role = 'assistant' AND (m.content LIKE '%MEDIA:%' OR m.content LIKE '%::preview%'"
         " OR m.content LIKE '%http%'))",
-        "(m.role = 'user' AND (m.content LIKE '%@file:%' OR m.content LIKE '[Cron job \"%@image:%'))",
+        # Unanchored: a note a compaction folded its summary into starts
+        # with Hermes' words (user_items reads the row's own text).
+        "(m.role = 'user' AND (m.content LIKE '%@file:%' OR m.content LIKE '%[Cron job \"%@image:%'))",
         # Every key in _PRODUCER_KEYS has one of these in it.
         "(m.role = 'tool' AND (m.content LIKE '%path%' OR m.content LIKE '%_file%'"
         " OR m.content LIKE '%saved_to%' OR m.content LIKE '%files_%' OR m.content LIKE '%\"image\"%'))",
