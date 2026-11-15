@@ -6552,9 +6552,10 @@ _AUTH_HEADER = re.compile(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:[a-z]+\s+
 _BEARER = re.compile(r"(?i)\b(bearer\s+)(?:(?=\S*\d)[A-Za-z0-9_\-+/=.~]{8,}|[A-Za-z0-9_\-+/=.~]{16,})")
 _TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=.~]{24,}")
 # A long run made of words stays: a path, a file or a branch name, whose
-# pieces are short and each all letters or all lowercase (the workstream
-# needs them to carry on). A token has a long piece or one of mixed case
-# and digits; a hash is one long piece, so it's masked too.
+# pieces are short and each all letters or all digits (the workstream
+# needs them to carry on). A token has a long piece or one of letters and
+# digits mixed; a hash is one long piece and a UUID's pieces mix them, so
+# both are masked too.
 _RUN_PIECES = re.compile(r"[/._~\-]+")
 
 
@@ -6569,7 +6570,7 @@ def _plugin_masked(text: str) -> str:
 
 def _worded(run: str) -> bool:
     pieces = [piece for piece in _RUN_PIECES.split(run) if piece]
-    return bool(pieces) and all(len(piece) <= 16 and (piece.isalpha() or piece == piece.lower()) for piece in pieces)
+    return bool(pieces) and all(len(piece) <= 16 and (piece.isalpha() or piece.isdigit()) for piece in pieces)
 
 
 def _masked(text: str) -> str:

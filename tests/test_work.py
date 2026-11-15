@@ -7674,6 +7674,7 @@ def test_a_hand_off_masks_credentials_whole_under_hermes_redactor(monkeypatch):
                  "feature/issue-2542-handoff-masking", "really_long_module_name_here.py"):
         assert work._masked(f"read {kept}") == f"read {kept}"
     assert "4f2a9c1e" not in work._masked("commit 4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39")
+    assert "e89b" not in work._masked("key 123e4567-e89b-12d3-a456-426614174000"), "a UUID can be a credential"
     assert "Zk3uQ9" not in work._masked("key Zk3uQ9wLm2Rt.7Yb4Nc8Vd1Xe6Hf5Ja0P")
     assert "dXNlcjpwYXNz" not in work._masked('{"Authorization": "Basic dXNlcjpwYXNz"}')
     assert "s3cr3t" not in work._step_line("http", {"signature": "s3cr3t"})
