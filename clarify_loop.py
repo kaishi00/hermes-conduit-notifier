@@ -375,6 +375,10 @@ def _first_answer_wins(
         unanswered_polls += 1
         _sleep_until_call_answers(request_id, _poll_delay(unanswered_polls))
 
+    if last_look:
+        # The wait had already run out when its one more poll stopped it:
+        # it ends as an expired wait whatever stopped it, as before that poll.
+        expired = True
     # Polling stopped (budget spent, card not shown, relay gone, an
     # interrupt): fall back to whatever the original path produces, waiting
     # for it if necessary. The parked decision is released first so late
