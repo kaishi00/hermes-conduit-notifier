@@ -7671,13 +7671,16 @@ def test_a_hand_off_masks_credentials_whole_under_hermes_redactor(monkeypatch):
     # Reviews of notifier #835: paths, files and branch names the workstream needs stay; a hash, a token
     # split by dots, a quoted Authorization and a value under a signature-named argument don't.
     for kept in ("/home/user/project/src/auth/callback.py", "/Users/Eric/Projects/MyApp/Sources/AppDelegate.swift",
-                 "feature/issue-2542-handoff-masking", "really_long_module_name_here.py"):
+                 "feature/issue-2542-handoff-masking", "really_long_module_name_here.py",
+                 "/home/u/proj/venv/lib/python3.11/site-packages/requests/api.py", "feature/v2-authentication-flow",
+                 "." * 30):
         assert work._masked(f"read {kept}") == f"read {kept}"
     assert "4f2a9c1e" not in work._masked("commit 4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39")
     assert "e89b" not in work._masked("key 123e4567-e89b-12d3-a456-426614174000"), "a UUID can be a credential"
     assert "Zk3uQ9" not in work._masked("key Zk3uQ9wLm2Rt.7Yb4Nc8Vd1Xe6Hf5Ja0P")
     assert "dXNlcjpwYXNz" not in work._masked('{"Authorization": "Basic dXNlcjpwYXNz"}')
     assert "s3cr3t" not in work._step_line("http", {"signature": "s3cr3t"})
+    assert "4321" not in work._step_line("http", {"pin": "4321", "cvv": "123"}) and "123" not in work._step_line("http", {"cvv": "123"})
     # A current Hermes is asked for its forced, non-reusable masking.
     calls.clear()
     monkeypatch.setitem(sys.modules, "agent.redact",

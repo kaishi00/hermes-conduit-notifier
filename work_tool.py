@@ -3559,7 +3559,8 @@ def _cut_keeping_lines(text: str, limit: int) -> str:
 _SECRET_WORDS = frozenset({"token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passphrase",
                            "pwd", "auth", "authn", "authz", "authorization", "authentication", "oauth",
                            "credential", "credentials", "cookie", "cookies", "apikey", "apikeys", "bearer", "jwt",
-                           "signature", "signatures", "passcode", "otp", "totp"})
+                           "signature", "signatures", "passcode", "passcodes", "otp", "otps", "totp", "pin",
+                           "pins", "pincode", "cvv", "cvc", "mfa"})
 _SECRET_PAIRS = frozenset((first, key) for first in ("api", "private", "access", "secret")
                           for key in ("key", "keys")) | {("client", "secret")}
 
@@ -6552,11 +6553,14 @@ _AUTH_HEADER = re.compile(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:[a-z]+\s+
 _BEARER = re.compile(r"(?i)\b(bearer\s+)(?:(?=\S*\d)[A-Za-z0-9_\-+/=.~]{8,}|[A-Za-z0-9_\-+/=.~]{16,})")
 _TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=.~]{24,}")
 # A long run made of words stays: a path, a file or a branch name, whose
-# pieces are short and each all letters or all digits (the workstream
+# pieces are short words or numbers (the workstream
 # needs them to carry on). A token has a long piece or one of letters and
 # digits mixed; a hash is one long piece and a UUID's pieces mix them, so
-# both are masked too.
+# both are masked too. A run of only punctuation (a line of dots) stays.
 _RUN_PIECES = re.compile(r"[/._~\-]+")
+# A word, a number, or a word with a short number after it (python3, v2,
+# x64, sha256); letters and digits mixed any other way read as a token.
+_WORD_PIECE = re.compile(r"[A-Za-z]+[0-9]{0,5}|[0-9]+")
 
 
 def _plugin_masked(text: str) -> str:
@@ -6565,12 +6569,13 @@ def _plugin_masked(text: str) -> str:
     token-like run."""
     text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}***", text)
     text = _BEARER.sub(lambda m: f"{m.group(1)}***", text)
-    return _TOKENISH.sub(lambda m: m.group(0) if _worded(m.group(0)) else "***", text)
+    return _TOKENISH.sub(lambda m: m.group(0) if _worded(m.group(0)) or not re.search(r"[A-Za-z0-9]", m.group(0))
+                         else "***", text)
 
 
 def _worded(run: str) -> bool:
     pieces = [piece for piece in _RUN_PIECES.split(run) if piece]
-    return bool(pieces) and all(len(piece) <= 16 and (piece.isalpha() or piece.isdigit()) for piece in pieces)
+    return bool(pieces) and all(len(piece) <= 16 and _WORD_PIECE.fullmatch(piece) for piece in pieces)
 
 
 def _masked(text: str) -> str:
