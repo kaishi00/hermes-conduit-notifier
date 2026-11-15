@@ -20,6 +20,12 @@ checks it). The format is fixed, because Conduit reads it:
 - On a host where Conduit connects to the Hermes gateway (the Webapp), a new workstream, Watch job or Watch call chat with the same title as an earlier one went into that earlier chat instead of a new one. Its questions and progress then showed on the old workstream, where nobody was looking. Each now gets its own chat.
 - A workstream a Bot Chat handed off from a scheduled job's report is named after the job and what it reported, instead of "[Cronjob ... scheduled job,".
 
+## 0.177.6 (2026-11-15)
+
+### Fixes
+
+- When Hermes Desktop closed several chats at once (after it reloaded or lost its connection), a turn still running in one of them could keep its Lock Screen card and the bot's screen until they timed out. That turn now ends as stopped when its chat closes.
+
 ## 0.177.5 (2026-11-15)
 
 ### Fixes
