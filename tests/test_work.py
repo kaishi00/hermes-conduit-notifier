@@ -1619,12 +1619,18 @@ def test_a_quick_turn_past_its_steps_hands_the_rest_to_a_workstream(on, hermes, 
                                   turn_id="t1", tool_call_id="c9")
     assert block["message"].startswith("This is turning into longer work") and "W1" in block["message"]
     started = on.get("W1")
+    # Its link, as work_start answers with it: the bot gives it, and Conduit draws the step as W1's card.
+    assert f"[Open W1](conduit://session/{started.session_id}" in block["message"], block["message"]
     assert started.kind == "workstream" and started.title == "Fix the missing saw argument"
     assert "Fix the missing saw argument" in started.goal and 'terminal {"command": "cat 4"}' in started.goal
     assert "patch" not in started.goal, "the refused call never ran"
     again = plugin._pre_tool_call(session_id=BOT_CHAT, tool_name="terminal", args={}, turn_id="t1",
                                   tool_call_id="c10")
     assert "W1" in again["message"] and on.get("W2") is None, "once a turn"
+    assert "[Open W1](conduit://session/" in again["message"]
+    assert work._handed_off("patch", "W7", "Tidy up", "") == work.HANDED_OFF.format(
+        tool="patch", ref="W7", title="Tidy up", link=""), "no link: no \"with its link\" clause"
+    assert "with its link" not in work._handed_off("patch", "W7", "Tidy up", "")
     # Another turn's unrelated ask, with the same steps, isn't taken for the same task.
     plugin._pre_llm_call(session_id=BOT_CHAT, turn_id="t3", user_message="Book a table for two", platform="tui")
     for n in range(work.QUICK_STEPS):
@@ -3257,6 +3263,12 @@ def test_a_send_carries_the_users_words_as_theirs(on, hermes, home, monkeypatch)
     hermes.calls.clear()
     call("work_send", {"ref": "W1", "text": "More."})
     assert "More." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
+    # Nor is Hermes' own request for a final answer at the iteration limit the user's words.
+    _chat_db(home, [(BOT_CHAT, "user", "You've reached the maximum number of tool-calling iterations allowed. "
+                                       "Please provide a final response summarizing what you've found.", None)])
+    hermes.calls.clear()
+    call("work_send", {"ref": "W1", "text": "Again."})
+    assert "Again." in hermes.calls[-1][1]["text"] and "«" not in hermes.calls[-1][1]["text"]
 
 
 def _timed_chat_db(home, rows):
