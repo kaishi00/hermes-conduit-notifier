@@ -7643,6 +7643,32 @@ def test_a_kept_result_is_masked_before_any_cut():
     assert len(blob) > 3 and blob.endswith("…")
 
 
+def test_a_hand_off_masks_credentials_whole_under_hermes_redactor(monkeypatch):
+    # Issue 2542: Hermes' redactor keeps a token's first 6 and last 4 characters, leaves an unprefixed one
+    # alone and masks a JSON value named like a secret, so a hand-off carried the start of a bearer token,
+    # a bare one whole, and lost the "(left out)" that says a secret argument was dropped.
+    bearer = "Zk3uQ9wLm2Rt7Yb4Nc8Vd1Xe6Hf5Ja0P"
+    calls = []
+
+    def redact(text, **kwargs):
+        calls.append(kwargs)
+        if "file_read" in kwargs:
+            raise TypeError("an older Hermes")
+        text = re.sub(r"(Bearer )(\S{6})\S+(\S{4})", r"\1\2...\3", text)
+        return re.sub(r'("(?:api_key|password|token)": )"[^"]*"', r'\1"***"', text)
+
+    monkeypatch.setitem(sys.modules, "agent.redact", types.SimpleNamespace(redact_sensitive_text=redact))
+    line = work._step_line("terminal", {"command": f"curl -H 'Authorization: Bearer {bearer}' x", "api_key": "sk-1",
+                                        "token": f"plain {bearer}"})
+    assert bearer[:6] not in line and bearer[-4:] not in line and "sk-1" not in line
+    assert '"api_key": "(left out)"' in line and "curl -H" in line
+    assert calls[-1] == {"force": True}, "an older Hermes is asked without the options it doesn't take"
+    assert bearer[:6] not in work._result_kept(f"line line {bearer}")
+    assert bearer[:6] not in work._masked(f"curl -H 'authorization: token {bearer[:12]}'")
+    # Prose that only mentions a scheme stays as written.
+    assert work._masked("basic configuration and bearer tokens") == "basic configuration and bearer tokens"
+
+
 def test_a_hand_off_from_a_scheduled_job_is_titled_by_the_job_and_its_output():
     # Issue 2521: every hand-off from a cron-delivered Bot Chat turn was titled
     # '[Cronjob "<job>" output — scheduled job,', the wrapper's first six words.
