@@ -701,9 +701,9 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
                  needs=needs, blockers=blockers, changed=changed)
 
 
-# The profiles whose room policy read failed, and how, so one that keeps failing (the own-bots check reads
-# each profile's every minute) is logged once, and again only once it read and failed anew.
-_policy_failures: dict[str, str] = {}
+# The profiles whose room policy read failed, so one that keeps failing (the own-bots check reads each
+# profile's every minute), however it fails, is logged once, and again only once it read and failed anew.
+_policy_failures: set[str] = set()
 _policy_failures_lock = threading.Lock()
 
 
@@ -713,8 +713,8 @@ def _policy(hermes: Hermes, home: Path, profile: str) -> Optional[dict]:
     except Exception as exc:  # noqa: BLE001 - the state still answers, without the policy
         why = type(exc).__name__
         with _policy_failures_lock:
-            told = _policy_failures.get(profile) == why
-            _policy_failures[profile] = why
+            told = profile in _policy_failures
+            _policy_failures.add(profile)
         if told:
             logger.debug("Linked Rooms setup still can't read profile %s's room policy (%s)", profile, why)
         else:
@@ -722,7 +722,7 @@ def _policy(hermes: Hermes, home: Path, profile: str) -> Optional[dict]:
                            exc_info=True)
         return None
     with _policy_failures_lock:
-        _policy_failures.pop(profile, None)
+        _policy_failures.discard(profile)
     return policy
 
 
