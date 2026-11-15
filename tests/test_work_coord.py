@@ -2,6 +2,7 @@
 ledger with who said what, the board in the Bot Chat's note, whether a
 message arrived, and how independently the Bot Chat acts in a turn the user
 didn't start (Coordination: Off, Ask or Automatic, and Leave alone)."""
+import json
 import sqlite3
 import time
 
@@ -705,3 +706,14 @@ def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
     assert same["error"] == "already_asked" and same["id"] == asked
     assert call("work_propose", {"text": "Начать работу над переводом документации."})["ok"]
     assert call("work_propose", {"text": "Начать работу над переводом документации?"})["error"] == "already_asked"
+
+
+def test_an_update_that_never_went_out_gives_back_the_marks_it_pushed_out(on):
+    """Greptile on #827: a refused try on a full list takes back its own
+    mark and restores the oldest real one it pushed out."""
+    real = [f"real-{n}" for n in range(coord._ASK_WAKES_KEPT)]
+    on.set_meta(coord._ASK_WAKES, json.dumps(real))
+    before = coord.ask_wake_sent(on, "refused")
+    assert "real-0" not in json.loads(on.get_meta(coord._ASK_WAKES))
+    coord.ask_wake_unsent(on, "refused", before)
+    assert json.loads(on.get_meta(coord._ASK_WAKES)) == real

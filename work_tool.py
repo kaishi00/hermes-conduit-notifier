@@ -6271,11 +6271,12 @@ def _send_wake(home: Path, coordinator: str) -> None:
     sent = False
     outcome = ""
     told = False
+    marked_before: Optional[list[str]] = None
     try:
         item = store.outbox_add("", "wake", coordinator, text)
         if asks or answers:
             # Theirs to have acted on: not a turn the Bot Chat started itself.
-            work_coord.ask_wake_sent(store, item)
+            marked_before = work_coord.ask_wake_sent(store, item)
         status = work_broker.Broker(home).wake(coordinator, text)
         sent = True
         outcome = "queued" if status in ("queued", "streaming", "started") else status or "accepted"
@@ -6295,8 +6296,8 @@ def _send_wake(home: Path, coordinator: str) -> None:
             # update's row goes: the next try writes its own.
             try:
                 if item:
-                    if asks or answers:
-                        work_coord.ask_wake_unsent(store, item)
+                    if marked_before is not None:
+                        work_coord.ask_wake_unsent(store, item, marked_before)
                     store.outbox_drop(item)
             except Exception:  # noqa: BLE001
                 logger.debug("conduit_push: couldn't drop an update row", exc_info=True)

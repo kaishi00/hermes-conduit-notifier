@@ -134,7 +134,7 @@ def mode(store: work_store.Store) -> str:
         return "off"
 
 
-def ask_wake_sent(store: work_store.Store, item: str) -> None:
+def ask_wake_sent(store: work_store.Store, item: str) -> list[str]:
     """Notes that this work update (its outbox row) carried another bot's
     ask, or the user's yes tapped on a question's card: either makes its
     turn someone's to have acted on, not one the Bot Chat started itself."""
@@ -142,18 +142,22 @@ def ask_wake_sent(store: work_store.Store, item: str) -> None:
         kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
     except ValueError:
         kept = []
-    kept = ([name for name in kept if isinstance(name, str)] + [item])[-_ASK_WAKES_KEPT:]
-    store.set_meta(_ASK_WAKES, json.dumps(kept))
+    before = [name for name in kept if isinstance(name, str)] if isinstance(kept, list) else []
+    store.set_meta(_ASK_WAKES, json.dumps((before + [item])[-_ASK_WAKES_KEPT:]))
+    return before
 
 
-def ask_wake_unsent(store: work_store.Store, item: str) -> None:
-    """Takes back ask_wake_sent for an update that never went out."""
+def ask_wake_unsent(store: work_store.Store, item: str, before: list[str]) -> None:
+    """Takes back ask_wake_sent for an update that never went out: ``before``
+    (what ask_wake_sent returned) comes back, so a full list loses none of
+    the real updates that one pushed out."""
     try:
         kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
     except ValueError:
-        return
-    if isinstance(kept, list) and item in kept:
-        store.set_meta(_ASK_WAKES, json.dumps([name for name in kept if name != item]))
+        kept = []
+    now = [name for name in kept if isinstance(name, str) and name != item] if isinstance(kept, list) else []
+    restored = [name for name in before if name not in now] + now
+    store.set_meta(_ASK_WAKES, json.dumps(restored[-_ASK_WAKES_KEPT:]))
 
 
 def _carries_ask(store: Optional[work_store.Store], content: str) -> bool:
