@@ -1411,7 +1411,8 @@ Watch runs the phone's Local Live session through the call grant's audio
 bridge (engine `local_live`, capability `watch-local-live`), and this host
 relays its audio and events to the speech server. When the server asks the
 model address for a reply, the turn goes to the Watch's call, and this host
-runs it as a spoken turn in a chat of the call's own ("Watch call"), since a
+runs it as a spoken turn in a chat of the call's own ("Watch call", with a
+short tag after it on the gateway's listener), since a
 Watch can't run a Hermes turn. Only the readiness check's ask goes to the
 Watch, which answers it with its greeting. A Watch that rejoins on the same
 grant sends `resume_session_id` (from `started.session_id`) and carries on in

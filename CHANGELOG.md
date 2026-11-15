@@ -20,6 +20,13 @@ checks it). The format is fixed, because Conduit reads it:
 - A message to a workstream that Hermes didn't answer in time was reported as refused, though it might have arrived. A message that went out and only got a late answer is now reported as maybe already queued, so the bot doesn't send it twice; one that timed out before going out says nothing was sent.
 - When two work updates for a busy Bot Chat were refused at once, one could bring back the other's record, so a later ask in the Bot Chat could be taken as the bot's own idea and held. Each now takes back only its own.
 
+## 0.177.7 (2026-11-15)
+
+### Fixes
+
+- On a host where Conduit connects to the Hermes gateway (the Webapp), a new workstream, Watch job or Watch call chat with the same title as an earlier one went into that earlier chat instead of a new one. Its questions and progress then showed on the old workstream, where nobody was looking. Each now gets its own chat.
+- A workstream a Bot Chat handed off from a scheduled job's report is named after the job and what it reported, instead of "[Cronjob ... scheduled job,".
+
 ## 0.177.6 (2026-11-15)
 
 ### Fixes
