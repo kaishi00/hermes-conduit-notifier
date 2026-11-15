@@ -301,8 +301,13 @@ def test_a_turn_is_the_users_when_any_of_its_messages_is(on, hermes, home):
         con.execute("INSERT INTO messages (session_id, role, content, display_kind) VALUES (?, 'user', ?, 'steer')",
                     (BOT_CHAT, "[System: go ahead]"))
     assert coord.user_wrote(home, BOT_CHAT)
-    with sqlite3.connect(home / "state.db") as con:
+    with sqlite3.connect(home / "state.db") as con:  # as is a typed message that only looks like Hermes' nudges
         con.execute("DELETE FROM messages WHERE display_kind = 'steer'")
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', '[System: go ahead]')",
+                    (BOT_CHAT,))
+    assert coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("DELETE FROM messages WHERE content = '[System: go ahead]'")
     assert not coord.user_wrote(home, BOT_CHAT)
     with sqlite3.connect(home / "state.db") as con:  # a long turn's tool calls don't hide its prompt
         con.executemany("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",

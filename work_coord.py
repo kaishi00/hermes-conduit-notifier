@@ -60,13 +60,14 @@ _STEER_OPEN = re.compile(r"\[OUT-OF-BAND USER MESSAGE[^\]\n]*\]")
 _STEER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
 # User rows Hermes writes itself, nobody's message: its summary of the chat
 # so far, the request for a final answer when a turn runs out of
-# iterations, its continue and recovery nudges ("[System: ..."), and its
+# iterations, its continue and recovery nudges ("[System: Your previous ..."), and its
 # notes that a background process or subagent finished. A workstream that
 # ran out of iterations once passed for the user writing in its chat, so its
 # Bot Chat answered [SILENT] to the result (2026-11-15, Furina's W21).
 _HERMES_ROWS = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:",
                 "You've reached the maximum number of tool-calling iterations",
-                "Continue from the compressed conversation context above.", "[System: ",
+                "Continue from the compressed conversation context above.",
+                "[System: Your previous ", "[System: The previous response ", "[System: Continue now.",
                 "[IMPORTANT: Background process ", "[ASYNC COMPLETE", "[ASYNC DELEGATION", "[ASYNC BATCH",
                 "A background subagent you dispatched earlier has finished.",
                 "A background fan-out of ")
