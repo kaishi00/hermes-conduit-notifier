@@ -280,6 +280,15 @@ def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
     return _lifted(_in_scope(_lookup(str(session_id or ""), home_path), home_path), home_path)
 
 
+def in_a_room(session_id: Any, home: Any = None) -> bool:
+    """Whether this session's turns are in a group room, whoever hosts it,
+    including a room the room settings keep the plugin's rules out of
+    (room_settings.conduit_rooms_only), which room_turn leaves out. Raises
+    as room_turn does."""
+    home_path = Path(home) if home is not None else _hermes_home()
+    return _lookup(str(session_id or ""), home_path) is not None
+
+
 def _lookup(value: str, home_path: Optional[Path]) -> Optional[RoomTurn]:
     """room_turn before the room settings: a room they leave out comes back
     unread (with_others False), never remembered."""

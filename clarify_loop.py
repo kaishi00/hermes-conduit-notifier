@@ -10,6 +10,11 @@ wraps clarify execution with ``tool_execution`` middleware:
   the gateway's own ``clarify.request`` is completely unchanged),
 * poll the relay for the device's answer while both wait,
 * first answer wins; the loser resolves into a discarded result.
+  One exception: an original call the host could not show (outcome
+  ``undelivered``, e.g. a Bot Chat's automation turn with nobody looking) is
+  no answer, so the device card keeps waiting, for at most
+  ``MAX_UNATTENDED_WAIT_SECONDS``. Not in a group room or a peer's forwarded
+  conversation, where the owner's card is no way to ask (``_card_asks_instead``).
 
 The tool result is built by the built-in ``clarify_tool``'s own result helper
 when it is importable (a local mirror otherwise), so the agent cannot tell the
@@ -21,12 +26,14 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import sqlite3
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
-from . import calls, client
+from . import calls, client, room_rules
 from .session_titles import bot_name, title as chat_title, titled
 from .events import (
     card_choice_labels,
@@ -61,6 +68,10 @@ MAX_POLL_SECONDS = 24 * 60 * 60.0
 # decision costs ~a handful of requests per minute instead of 30+, and a
 # gateway's concurrent loops stay well under the relay's shared poll budget.
 MAX_POLL_BACKOFF_SECONDS = 10.0
+# Longest wait for the device card once the host could not show the question
+# (the original call came back ``undelivered``): the turn is blocked meanwhile,
+# so an unlimited or long clarify timeout must not hold it for hours.
+MAX_UNATTENDED_WAIT_SECONDS = 30 * 60
 
 # Set by register() so pushes carry the profile the rest of the plugin uses.
 profile = "default"
@@ -173,6 +184,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     try:
         return _first_answer_wins(
             request_id=request_id,
+            session_id=session_id,
             next_call=kwargs["next_call"],
             args=args,
             batch=batch,
@@ -185,6 +197,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
 def _first_answer_wins(
     *,
     request_id: str,
+    session_id: str = "",
     next_call: Any,
     args: dict[str, Any],
     batch: list[dict[str, Any]],
@@ -198,9 +211,17 @@ def _first_answer_wins(
     through the relay and format the built-in batch result shape; a native
     (desktop/CLI) completion of the whole original call wins instead,
     releases the parked decision, and the losing path is discarded.
+
+    An original that ends ``undelivered`` (the host could not show the
+    question) is not a win: it is kept as the fallback while the device card,
+    then the only way to ask, waits up to ``MAX_UNATTENDED_WAIT_SECONDS``; an
+    interrupt ends that wait. If the shown card times out, a batch call gets a
+    ``timed_out`` result saying so.
     """
     outcome: dict[str, Any] = {}
     relay_won = False
+    # The original came back undelivered: outcome["original"] is the fallback.
+    unattended = False
 
     def _run_original() -> None:
         try:
@@ -225,13 +246,29 @@ def _first_answer_wins(
         daemon=True,
     ).start()
 
-    deadline = time.monotonic() + _clarify_poll_budget()
+    started = time.monotonic()
+    deadline = started + _clarify_poll_budget()
     saw_pending = False
+    expired = False
     consecutive_unproductive = 0
     unanswered_polls = 0
     previous_remaining: int | None = None
-    while time.monotonic() < deadline:
-        if "original" in outcome or "original_error" in outcome:
+    # A batch's answers locked so far, from the last pending poll: a card
+    # that times out half answered still hands Hermes those answers.
+    locked_answers: dict[str, Any] = {}
+    while True:
+        if time.monotonic() >= deadline:
+            expired = True
+            break
+        if (not unattended and "original" in outcome and _undelivered(outcome["original"])
+                and _card_asks_instead(session_id)):
+            # The host could not show the question: not an answer. Keep it
+            # as the fallback and wait for the device card, capped.
+            unattended = True
+            deadline = min(deadline, started + MAX_UNATTENDED_WAIT_SECONDS)
+        if unattended and _interrupted():
+            break
+        if not unattended and ("original" in outcome or "original_error" in outcome):
             # The native path resolved the whole call first (desktop/CLI
             # answered through the gateway). Release the parked decision so
             # a late device answer is rejected (409) instead of being
@@ -300,6 +337,8 @@ def _first_answer_wins(
                 # this notification): nobody can answer by id. Stop polling
                 # and let the original path's timeout conclude the race.
                 break
+            if batch_protocol and isinstance(status.get("answers"), dict):
+                locked_answers = dict(status["answers"])
             remaining = status.get("remaining")
             if isinstance(remaining, list):
                 # Batch progress (a shrinking remaining set means another qid
@@ -328,10 +367,20 @@ def _first_answer_wins(
         unanswered_polls += 1
         _sleep_until_call_answers(request_id, _poll_delay(unanswered_polls))
 
-    # Poll budget exhausted (unlimited clarify timeout): fall back to whatever
-    # the original path produces, waiting for it if necessary. The parked
-    # decision is released first so late device answers are rejected.
+    # Polling stopped (budget spent, card not shown, relay gone, an
+    # interrupt): fall back to whatever the original path produces, waiting
+    # for it if necessary. The parked decision is released first so late
+    # device answers are rejected.
     _release_decision(request_id, relay_won)
+    if unattended:
+        if expired and saw_pending and batch_protocol:
+            # The card was shown and nobody answered it in time.
+            minutes = max(1, int((deadline - started) // 60))
+            return _format_batch_result(
+                batch, locked_answers, outcome="timed_out",
+                notice=f"[the question was shown on the Conduit device but not answered within {minutes} min]",
+            )
+        return outcome["original"]
     if "original_error" in outcome:
         raise outcome["original_error"]
     while "original" not in outcome and "original_error" not in outcome:
@@ -371,6 +420,73 @@ def _call_answer_result(batch: list[dict[str, Any]], batch_protocol: bool, answe
     entry = batch[0]
     return _format_result(question=entry["question"], offered=list(entry["choices"]),
                           answer=str(answers.get(entry["qid"]) or ""), multi_select=entry["multi_select"])
+
+
+def _undelivered(result: Any) -> bool:
+    """Whether the original clarify result says the host could not show the
+    question (Hermes' ``outcome: "undelivered"``, whatever its notice)."""
+    if not isinstance(result, str):
+        return False
+    try:
+        parsed = json.loads(result)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("outcome") == "undelivered"
+
+
+# Hermes' session source for a peer's conversation forwarded over A2A, whose
+# author is someone else (gateway.session_a2a.is_forward_policy).
+A2A_SOURCE = "a2a"
+
+
+def _card_asks_instead(session_id: str) -> bool:
+    """Whether the owner's card is the way to ask a question Hermes could not
+    show in this chat. Not in a group room, whoever hosts it (Hermes
+    declines questions there, and the turn answers the room's people, not the
+    owner alone), nor in a peer's conversation forwarded over A2A (its author is
+    another person). A session whose room can't be told yet counts as a
+    room's: the card is still released at once there, as before."""
+    try:
+        if room_rules.in_a_room(session_id):
+            return False
+    except room_rules.RoomStoreError:
+        return False
+    except Exception:  # noqa: BLE001 - logged by room_rules; an unknown session is a chat's
+        pass
+    return _session_source(session_id) != A2A_SOURCE
+
+
+def _session_source(session_id: str) -> str:
+    """The session's ``source`` in Hermes' state.db, or "" when it can't be read."""
+    if not session_id:
+        return ""
+    try:
+        from hermes_constants import get_hermes_home
+
+        path = Path(get_hermes_home()) / room_rules.STATE_DB
+        if not path.exists():
+            return ""
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=room_rules.READ_TIMEOUT)
+        try:
+            row = conn.execute("SELECT source FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - an unreadable store answers as a chat would
+        return ""
+    return str(row[0] or "").strip().lower() if row else ""
+
+
+def _interrupted() -> bool:
+    """Whether the agent's turn was interrupted (/stop). The middleware runs
+    on the agent's thread, which is the one Hermes marks."""
+    try:
+        from tools.interrupt import is_interrupted
+    except Exception:
+        return False
+    try:
+        return bool(is_interrupted())
+    except Exception:
+        return False
 
 
 def _release_decision(request_id: str, relay_won: bool) -> None:
@@ -441,7 +557,8 @@ def _format_result(*, question: str, offered: list[str], answer: str, multi_sele
     )
 
 
-def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any]) -> str:
+def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any], *, outcome: str = "submitted",
+                         notice: str | None = None) -> str:
     """Build the JSON the built-in clarify_tool returns for a batch.
 
     Uses Hermes' own ``tools.clarify_tool._result`` when it is importable, so
@@ -450,7 +567,8 @@ def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any]) -
     ``user_response`` that is null unless answered, plus ``outcome``. A qid
     the relay never locked (only through the legacy collapsed-answer path) is
     left out of the answers, so it comes back unanswered. ``_local_result``
-    mirrors it for a Hermes without the helper.
+    mirrors it for a Hermes without the helper. ``outcome`` and ``notice``
+    say how the wait ended when it wasn't answered (a shown card timing out).
 
     A card shows each choice cut to its label length; an answer made from a
     cut label is mapped back to the full choice first (``_full_choice``), so
@@ -471,8 +589,10 @@ def _format_batch_result(batch: list[dict[str, Any]], answers: dict[str, Any]) -
             for entry in batch
             if entry["qid"] in answers
         },
-        "outcome": "submitted",
+        "outcome": outcome,
     }
+    if notice:
+        reply["notice"] = notice
     try:
         from tools.clarify_tool import _result
     except ImportError:

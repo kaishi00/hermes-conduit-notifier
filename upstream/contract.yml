@@ -85,6 +85,10 @@ notes:
     stops a chat's delegate agents only with its running turn, so a workstream stopped while it waits
     for them stops them itself. Without it they run on, and the turns their results start are
     stopped instead.
+  stopping a clarify the host couldn't show: >-
+    clarify_loop._interrupted calls tools.interrupt.is_interrupted on the agent's thread while the
+    device card waits for a question Hermes answered "undelivered" (a Bot Chat turn with nobody
+    looking). Without it /stop doesn't end that wait, which still ends at the 30-minute cap.
   old Bot Chat move: >-
     bot_chat_adopt.py moves a pre-gateway Bot Chat under its profile's gateway (feature map: "Bot
     mentions and teammate messages"): a child with that profile's HERMES_HOME calls
@@ -434,6 +438,8 @@ imports:
     optional: ["cronjob"]
   tools.delegate_tool_registry:
     optional: ["interrupt_subagent"]
+  tools.interrupt:
+    optional: ["is_interrupted"]
   tools.memory_tool:
     required: ["MemoryStore", "get_builtin_memory_config", "get_builtin_memory_store_flags", "get_memory_dir"]
   tools.tool_backend_helpers:
@@ -512,6 +518,7 @@ module_paths:
   - tools/clarify_tool
   - tools/cronjob_tools
   - tools/delegate_tool_registry
+  - tools/interrupt
   - tools/memory_tool
   - tools/tool_backend_helpers
   - tools/voice_live

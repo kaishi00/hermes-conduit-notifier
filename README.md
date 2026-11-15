@@ -1696,7 +1696,11 @@ question or a small task doesn't start a workstream. Change it in Conduit
   and the asking bot is told so.
   What one bot asks or answers reaches the other as data, never as your
   go-ahead; each bot does the work with its own tools and its own approvals.
-  The other bot needs workstreams on too. A chain of asks can't come back to
+  The other bot needs workstreams on too: a bot whose workstreams are off
+  has no coordinator to take an ask or a note, so the Bot Chat messages it
+  with Hermes' own `message_agent`, which the policy lets through to such a
+  bot (and only to one the plugin can name on this Hermes), and `work_ask`
+  and `work_tell` say so when they're refused (notifier#799). A chain of asks can't come back to
   a bot already in it, goes at most two bots deep, and one bot can ask or
   tell another 10 times an hour. The one way back is a question about an
   open ask: the bot asked can ask the bot that asked it with `about` (A3),
@@ -1803,7 +1807,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   always goes to a workstream. Open ("Everything Here") runs everything in
   the Bot Chat and starts workstreams when it judges the work long or you ask.
   Calls through `tool_call` count by what they call. `message_agent` is
-  refused there in favour of `work_ask`.
+  refused there in favour of `work_ask`, except to a bot whose workstreams
+  are off, which takes no asks (it takes no step either).
 - A workstream writes its report for you, in its own chat, which you can open
   and answer. The Bot Chat's update carries a short line of it and the chat's
   link (`work_read` gives the coordinator up to 2,000 characters of it).
@@ -2703,7 +2708,7 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   every few hours through `every_minutes`. A `once` watch stops after its
   call (its job is paused and listed as finished; a sync of a note that
   still describes it leaves it so, and setting it again starts it over), so
-  a later run that reads the event as over and then as back can't ring again (0.177.1, from sixgodgit's #775). The tools steer Hermes
+  a later run that reads the event as over and then as back can't ring again (0.177.3, from sixgodgit's #775). The tools steer Hermes
   to a call watch (or a place rule with a call) for any call about
   something after the turn, rather than a job that only sends a message,
   since `conduit_call_user` rings only when its own turn ends. The same

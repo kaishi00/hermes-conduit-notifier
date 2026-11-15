@@ -13,11 +13,23 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.177.1 (2026-11-15)
+## 0.177.3 (2026-11-15)
 
 ### Fixes
 
 - A call watch for one time or one event ("call me at 12:46") could ring again hours later, when one check read it as over and the next as back. Such a watch now stops after its call.
+
+## 0.177.2 (2026-11-14)
+
+### Fixes
+
+- A question a Bot Chat asks while nobody has it open, such as during a scheduled task, waits for your answer on the Conduit card instead of going on at once without one. It waits as long as Hermes waits for any answer (its clarify timeout), never more than 30 minutes, and stopping the chat ends the wait.
+
+## 0.177.1 (2026-11-14)
+
+### Fixes
+
+- A bot with workstreams turned off can be messaged by your other bots again. Before this, their asks and notes were refused and the bot could not be reached at all.
 
 ## 0.177.0 (2026-11-14)
 
