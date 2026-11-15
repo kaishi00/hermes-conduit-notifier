@@ -69,6 +69,12 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  chat close hooks: >-
+    tui_gateway's _finalize_session says a chat closed with on_session_end (no turn_id) and then
+    on_session_finalize. The plugin's _on_session_finalize ends a turn still running there as
+    stopped (its Lock Screen card, the bot's screen, its held reply and room asks), since Hermes'
+    gate skips concurrent turn-less on_session_end calls (issue 820,
+    upstream/test_session_close_hooks.py).
   Hermes version for Pulse's advice: >-
     pulse_host.hermes_version reads hermes_cli.__version__ (feature map: "Pulse"). When Hermes can't
     find Pulse's chat, a Hermes before 0.22.6 is told to update, since only 0.22.6 and newer hand a
@@ -282,6 +288,12 @@ notes:
 # A listed test xfails while it fails with this signature, and fails when it
 # passes (upstream fixed it: review the workaround) or fails differently.
 known_failures:
+  - test: test_concurrent_chat_closes_all_reach_on_session_end
+    signature: second close skipped
+    issue: kaishi00/hermes-conduit-notifier#820
+    upstream: NousResearch/hermes-agent#104865
+    since: v0.23.1
+    workaround: __init__.py _on_session_finalize ends a close's running turn (notifier #826)
   - test: test_upstream_profile_socket_reaches_profile
     signature: HTTP 501
     issue: kaishi00/hermes-conduit#1336
