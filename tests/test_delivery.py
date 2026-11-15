@@ -719,8 +719,11 @@ def test_an_approval_goes_out_ahead_of_finished_turn_notices_queued_before_it(pa
     paired([200, 200, 200])
     sent = []
     monkeypatch.setattr(client, "_deliver", lambda event, **kwargs: sent.append(event["type"]) or True)
+    # No worker left running by an earlier test: this one starts once all
+    # three are queued.
+    client.stop()
+    client.start()
     start_worker, held = client._start_worker_locked, [True]
-    # The worker starts once all three are queued.
     monkeypatch.setattr(client, "_start_worker_locked", lambda: None if held[0] else start_worker())
     for kind in ("response.ready", "response.ready", "approval.needed"):
         assert client.enqueue({**_event(), "type": kind})
