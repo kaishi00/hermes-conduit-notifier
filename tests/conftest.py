@@ -92,6 +92,17 @@ def _plugin_copies_found(names):
 
 
 @pytest.fixture(autouse=True)
+def _nothing_degraded_before_the_test(monkeypatch):
+    # degraded.py keeps its codes on one object in sys.modules for every copy
+    # of the plugin in the process, and so for every test: a test whose
+    # Hermes has no turn stopper would leave its code in a later test's
+    # /capabilities. Each test starts with none.
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, "_conduit_push_degraded", types.ModuleType("_conduit_push_degraded"))
+
+
+@pytest.fixture(autouse=True)
 def _guards_come_off_with_the_test():
     yield
     for module in _plugin_copies(_GUARDS):

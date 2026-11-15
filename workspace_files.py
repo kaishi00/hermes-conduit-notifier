@@ -637,7 +637,8 @@ def _changed(before: os.stat_result, path: str) -> bool:
     """Whether ``path`` is no longer the file ``before`` describes."""
     after = os.stat(path)
     # The change time too: an edit of the same length whose writer put the
-    # old date back still moves it.
+    # old date back still moves it. (On Windows st_ctime is when the file
+    # was made, so there the check is the inode, size and date alone.)
     return ((after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
             != (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns))
 
@@ -1125,14 +1126,16 @@ class SshWorkspace:
                   # mv -n into a folder that appeared would move the copy
                   # inside it: a name taken by then is refused first.
                   f'if [ -e "$t" ] || [ -L "$t" ]; then rm -rf -- "$d"; echo {_ERROR}EEXIST; exit 1; fi\n'
-                  'i=$(ls -di -- "$d/c" | awk \'{print $1}\')\n'
+                  'i=$(ls -di -- "$d/c" | awk \'NR==1{print $1}\')\n'
                   'mv -n -- "$d/c" "$t" 2>/dev/null\n'
                   f'if [ -e "$d/c" ] || [ -L "$d/c" ]; then rm -rf -- "$d"; echo {_ERROR}EEXIST; exit 1; fi\n'
+                  # (The first line only: ls prints the name too, and a
+                  # name may hold a line break.)
                   # A folder that appeared between that look and the move
                   # took the copy in as its "c": what's under the name isn't
                   # the copy, so the copy comes back out and goes.
-                  'if [ "$(ls -di -- "$t" 2>/dev/null | awk \'{print $1}\')" != "$i" ]; then\n'
-                  '  [ "$(ls -di -- "$t/c" 2>/dev/null | awk \'{print $1}\')" = "$i" ] && mv -- "$t/c" "$d/c"\n'
+                  'if [ "$(ls -di -- "$t" 2>/dev/null | awk \'NR==1{print $1}\')" != "$i" ]; then\n'
+                  '  [ "$(ls -di -- "$t/c" 2>/dev/null | awk \'NR==1{print $1}\')" = "$i" ] && mv -- "$t/c" "$d/c"\n'
                   f'  rm -rf -- "$d"; echo {_ERROR}EEXIST; exit 1\n'
                   'fi\n'
                   'rm -rf -- "$d"; exit 0')

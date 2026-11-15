@@ -3288,8 +3288,10 @@ def _watch_shutdown() -> bool:
 
         stopping._conduit_watch = True  # type: ignore[attr-defined]
         setattr(module, _SHUTDOWN_HOOK, stopping)
-    if watched:
-        degraded.clear(degraded.WORKSTREAM_RECOVERY)
+    # On Conduit's plugin page too (the capabilities route's `degraded`),
+    # until a later turn finds it. Both callers ask once the session host is
+    # up, when the stopper is there if this Hermes has it where we look.
+    (degraded.clear if watched else degraded.note)(degraded.WORKSTREAM_RECOVERY)
     return watched
 
 
@@ -3320,8 +3322,6 @@ def start_recovery(home: Optional[Path] = None) -> None:
             time.sleep(RECOVERY_POLL_S)
         # Whatever the policy: turning workstreams off doesn't stop one that's running.
         if not _watch_shutdown():
-            # For Conduit's plugin page too, until a later turn finds it.
-            degraded.note(degraded.WORKSTREAM_RECOVERY)
             logger.warning("conduit_push: Hermes' turn stopper wasn't found, so a workstream a clean restart "
                            "stops is left interrupted rather than recovered")
         # A room's asks still waiting for the owner are watched again whatever the policy (Ask me first needs no

@@ -6915,6 +6915,10 @@ def test_a_hermes_whose_turn_stopper_moved_is_said_on_the_plugin_page_until_its_
     work.start_recovery(on.home)
     threads[0]["target"]()
     assert work.degraded.current() == ["workstream-recovery"]
+    # A profile with no work yet skips the load's look: its first workstream turn says it too.
+    work.degraded.clear(work.degraded.WORKSTREAM_RECOVERY)
+    work._watch_shutdown()
+    assert work.degraded.current() == ["workstream-recovery"]
     hermes_stops_turns(monkeypatch, lambda: None)
     server = types.ModuleType("tui_gateway.server")
     server._stop_turns_before_exit = lambda: None

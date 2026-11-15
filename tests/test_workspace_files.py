@@ -1057,6 +1057,13 @@ def test_an_ssh_copy_isnt_swallowed_by_a_folder_that_appears_as_it_lands(tree, m
     assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
 
 
+def test_an_ssh_copy_of_a_name_with_a_line_break_lands(tree):
+    (tree / "two\nlines.txt").write_text("both\n")
+    made = ssh(tree).duplicate(str(tree.resolve()), str((tree / "two\nlines.txt").resolve()))["entry"]
+    assert made["name"] == "two\nlines copy.txt" and (tree / "two\nlines copy.txt").read_text() == "both\n"
+    assert not [name for name in os.listdir(tree) if name.startswith(".conduit-")]
+
+
 def test_a_save_refuses_an_edit_of_the_same_length_with_its_old_date_put_back(tree, monkeypatch):
     target = tree / "notes.txt"
     before = target.stat()
