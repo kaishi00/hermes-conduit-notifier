@@ -27,6 +27,11 @@ checks it). The format is fixed, because Conduit reads it:
 - When the relay was unreachable, approvals and questions waited behind every finished-turn notice still being retried. They now go first.
 - A notification could be retried by a plugin that had been turned off and on again, or accepted just as it was turned off and never sent.
 - A Folder change that takes over 30 seconds now says it may still finish, and Conduit reads the folder again instead of leaving you to repeat it.
+## 0.177.12 (2026-11-15)
+
+### Security
+
+- When a Bot Chat handed its work to a workstream, the steps and results it passed on could carry the start and end of a token (a bearer header showed as its first 6 and last 4 characters), or a token with no known prefix whole. Credentials in a hand-off are now masked whole.
 
 ## 0.177.11 (2026-11-15)
 

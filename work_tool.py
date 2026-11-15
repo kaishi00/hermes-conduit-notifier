@@ -3577,12 +3577,17 @@ def _secret_arg(name: Any) -> bool:
 
 
 def _without_secret_args(value: Any) -> Any:
-    """``value`` with secret-named arguments' values left out, nested ones too."""
+    """``value`` with secret-named arguments' values left out, nested ones
+    too, and credentials inside the rest masked (a command's bearer header).
+    Each value is masked on its own, so Hermes' redactor never masks the
+    "(left out)" that says a secret-named one was dropped."""
     if isinstance(value, dict):
         return {key: "(left out)" if _secret_arg(key) else _without_secret_args(item)
                 for key, item in value.items()}
     if isinstance(value, list):
         return [_without_secret_args(item) for item in value]
+    if isinstance(value, str):
+        return _masked(value)
     return value
 
 
@@ -3592,9 +3597,8 @@ def _step_line(name: str, args: Any) -> str:
     try:
         shown = json.dumps(args, ensure_ascii=False, sort_keys=True) if args else ""
     except (TypeError, ValueError):
-        shown = str(args)
-    # Credentials inside ordinary values too (a command's bearer header).
-    return _cut(_masked(f"{name} {shown}".strip()), 300)
+        shown = _masked(str(args))
+    return _cut(f"{name} {shown}".strip(), 300)
 
 
 # Each Bot Chat turn's ask, as Hermes gave it to pre_llm_call: (session,
@@ -6539,15 +6543,38 @@ def _summary(args: Any) -> str:
     return _masked(_raw_summary(args))
 
 
+# An Authorization header's credential, and any long token-like run: masked
+# whole by the plugin itself before Hermes' redactor sees the text.
+_AUTH_HEADER = re.compile(r"(?i)(authorization\s*[:=]\s*[\"']?(?:[a-z]+\s+)?)[^\s\"',]{8,}")
+# A bearer credential: one with a digit from 8 characters, any from 16, so
+# prose ("bearer tokens") stays as written.
+_BEARER = re.compile(r"(?i)\b(bearer\s+)(?:(?=\S*\d)[A-Za-z0-9_\-+/=.~]{8,}|[A-Za-z0-9_\-+/=.~]{16,})")
+_TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=]{24,}")
+
+
 def _masked(text: str) -> str:
-    """Text with credential-shaped runs masked, by Hermes' redactor where
-    there is one."""
+    """Text with credentials masked whole, for a hand-off and the steps
+    shown with it (issue 2542). Hermes' redactor shows a token's first 6
+    and last 4 characters and leaves an unprefixed one alone, so the plugin
+    masks auth headers and long token-like runs first; the redactor, where
+    there is one, then catches what it knows by name (``api_key=...``), on
+    even when the host turned redaction off, and with its sentinel rather
+    than a head and tail where this Hermes has one."""
+    text = _AUTH_HEADER.sub(lambda m: f"{m.group(1)}***", text)
+    text = _BEARER.sub(lambda m: f"{m.group(1)}***", text)
+    text = _TOKENISH.sub("***", text)
     try:
         from agent.redact import redact_sensitive_text
-
-        return redact_sensitive_text(text)
-    except Exception:  # noqa: BLE001 — no redactor here: long token-like runs are masked instead
-        return re.sub(r"[A-Za-z0-9_\-+/=]{24,}", "***", text)
+    except Exception:  # noqa: BLE001 — no redactor here: the plugin's masking is all
+        return text
+    for kwargs in ({"force": True, "file_read": True, "secret_file": True}, {"force": True}, {}):
+        try:
+            return redact_sensitive_text(text, **kwargs)
+        except TypeError:
+            continue  # an older Hermes without these options
+        except Exception:  # noqa: BLE001 — a redactor that fails leaves the plugin's masking
+            return text
+    return text
 
 
 def _raw_summary(args: Any) -> str:
