@@ -3589,10 +3589,25 @@ def test_a_send_that_timed_out_reopening_isnt_reported_as_maybe_sent(on, hermes,
     def timed_out(self, *args, **kwargs):
         raise broker.BrokerError("session.resume timed out; it may still have started", timed_out=True)
 
-    monkeypatch.setattr(broker.Broker, "send", timed_out)
+    monkeypatch.setattr(broker.Broker, "_open", timed_out)
     refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
     assert refused.get("error") == "hermes", refused
-    assert "isn't known" in refused["note"] and "refused" not in refused["note"]
+    assert "nothing was sent" in refused["note"] and "may still have started" not in refused["note"]
+
+
+def test_a_submit_that_timed_out_after_the_reopen_is_maybe_sent(on, hermes, monkeypatch):
+    """#825's review: the words went out and only the answer was late, so
+    sent again they could run twice."""
+    start()
+    work.turn_ended(WORKER_1, "Done.")
+    broker = sys.modules["conduit_push.work_broker"]
+
+    def late(self, *args, **kwargs):
+        raise broker.BrokerError("prompt.submit timed out; it may still have started", timed_out=True)
+
+    monkeypatch.setattr(broker.Broker, "_send_words", late)
+    refused = call("work_send", {"ref": "W1", "text": "Also check the logs."})
+    assert refused.get("error") == "maybe_sent", refused
 
 
 def test_a_4090_without_a_reason_is_still_another_windows_hold():

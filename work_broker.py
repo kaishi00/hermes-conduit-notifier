@@ -77,6 +77,9 @@ class BrokerError(Exception):
         self.timed_out = timed_out
         # Hermes' data.reason, the refusal's machine-readable word.
         self.reason = reason
+        # Raised while sending the words themselves (Broker.send), not while
+        # reopening the session before them.
+        self.submitted = False
 
     @property
     def not_owned(self) -> bool:
@@ -471,6 +474,16 @@ class Broker:
         if running is None:
             found = self.live(tip) or self.live(session_id)
             running = bool(found and found[1].get("running"))
+        try:
+            return self._send_words(call, runtime_id, tip, text, how, running)
+        except BrokerError as error:
+            # Only now did the words go out: a timeout from here on may
+            # still have them queued, unlike one while reopening (issue 2522).
+            error.submitted = True
+            raise
+
+    def _send_words(self, call: Callable[..., dict], runtime_id: str, tip: str, text: str, how: str,
+                    running: bool) -> tuple[str, str]:
         if how == "after" or (running and how not in ("auto", "add")):
             status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
             return ("started" if status in RUNNING_NOW else "queued"), tip
