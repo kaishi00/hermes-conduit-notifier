@@ -1086,6 +1086,8 @@ def test_a_call_answer_wins_and_formats_like_a_device_answer(monkeypatch):
     request_id = fake.enqueued[0]["decision"]["request_id"]
     (args, kwargs), = noted
     assert args == ("sess-1", "question") and kwargs["request_id"] == request_id
+    # Its card as the push carries it, for a Conduit on screen (hermes-conduit#2556).
+    assert kwargs["decision"] == fake.enqueued[0]["decision"]
     assert [entry["question"] for entry in kwargs["questions"]] == ["Which environment?", "Which tests should run?"]
     deadline = time.monotonic() + 2
     while request_id not in fake.cancelled_ids and time.monotonic() < deadline:

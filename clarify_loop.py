@@ -178,8 +178,11 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     # answered with no chat open (the Watch) to
     # read out and answer; the answers come back through
     # ``calls.taken_answers``.
+    # Its card too, as the push carries it: a Conduit on screen gets no
+    # notification to tap, so it draws the card from the list
+    # (hermes-conduit#2556).
     calls.note_waiting(session_id, "question", request_id=request_id, questions=batch,
-                       title=chat_title(session_id))
+                       title=chat_title(session_id), decision=push.get("decision"))
     calls.alert(session_id, "question", reason, profile=profile)
     try:
         return _first_answer_wins(
