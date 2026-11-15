@@ -155,14 +155,16 @@ def ask_wake_sent(store: work_store.Store, item: str) -> list[str]:
     except ValueError:
         kept = []
     before = [name for name in kept if isinstance(name, str)] if isinstance(kept, list) else []
-    store.set_meta(_ASK_WAKES, json.dumps((before + [item])[-_ASK_WAKES_KEPT:]))
-    return before
+    marks = before + [item]
+    store.set_meta(_ASK_WAKES, json.dumps(marks[-_ASK_WAKES_KEPT:]))
+    return marks[:-_ASK_WAKES_KEPT]  # what this pushed out
 
 
 def ask_wake_unsent(store: work_store.Store, item: str, before: list[str]) -> None:
     """Takes back ask_wake_sent for an update that never went out: ``before``
-    (what ask_wake_sent returned) comes back, so a full list loses none of
-    the real updates that one pushed out."""
+    (the marks ask_wake_sent pushed out, which it returned) comes back, so a
+    full list loses none of the real updates that one pushed out, and no
+    other update's mark comes back with it."""
     try:
         kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
     except ValueError:

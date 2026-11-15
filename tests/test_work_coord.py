@@ -743,5 +743,17 @@ def test_an_update_that_never_went_out_gives_back_the_marks_it_pushed_out(on):
     on.set_meta(coord._ASK_WAKES, json.dumps(real))
     before = coord.ask_wake_sent(on, "refused")
     assert "real-0" not in json.loads(on.get_meta(coord._ASK_WAKES))
+    assert before == ["real-0"]
     coord.ask_wake_unsent(on, "refused", before)
     assert json.loads(on.get_meta(coord._ASK_WAKES)) == real
+
+
+def test_two_refused_updates_give_back_only_their_own_marks(on):
+    """DeepSeek on #827: one update's mark, taken back, never returns with
+    another's."""
+    on.set_meta(coord._ASK_WAKES, json.dumps(["real"]))
+    first = coord.ask_wake_sent(on, "a")
+    second = coord.ask_wake_sent(on, "b")
+    coord.ask_wake_unsent(on, "a", first)
+    coord.ask_wake_unsent(on, "b", second)
+    assert json.loads(on.get_meta(coord._ASK_WAKES)) == ["real"]
