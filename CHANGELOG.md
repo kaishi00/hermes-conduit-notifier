@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.3 (2026-11-15)
+
+### Fixes
+
+- A call watch for one time or one event ("call me at 12:46") could ring again hours later, when one check read it as over and the next as back. Such a watch now stops after its call.
+
 ## 0.177.2 (2026-11-14)
 
 ### Fixes
