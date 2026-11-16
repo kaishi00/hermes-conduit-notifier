@@ -13,6 +13,20 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.21 (2026-11-16)
+
+### Fixes
+
+- In a group room with other people's agents, a bot's turn named only the agents that were there when the room was first read: someone who joined later wasn't named. It now names who is in the room.
+- On Windows, a dashboard that a supervisor starts again with an extra option of its own was started a second time, which then failed. It's now recognized and left to run.
+- A saved artifact whose path couldn't be resolved said it couldn't be read, rather than that it's outside the folder Conduit may copy from.
+
+### New and improved
+
+- Group rooms on hosts with own Links: each tool call in a room no longer reads the Links file, the rooms file and the room stores again. What it found is kept for a couple of seconds, or until either file changes.
+- A Windows dashboard restart that gives up because the old dashboard never exited now says so in dashboard-restart.log.
+- A prediction whose cleanup can't release its clients now says so in the host's log.
+
 ## 0.177.20 (2026-11-16)
 
 ### Security

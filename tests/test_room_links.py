@@ -2366,6 +2366,24 @@ def test_link_own_heals_after_an_older_links_json_comes_back(home, monkeypatch):
 
 
 @needs_node
+def test_a_hand_edited_own_seq_still_lets_the_hello_go(home, monkeypatch):
+    # Hermes-conduit issue 2405: a links.json whose own_seq isn't a number
+    # still flushes the hello's mark, and the other side takes it.
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)
+    _run(eric, mona)
+    with mona._store.update() as state:
+        state["links"][link_id].pop("peer_own")
+    with eric._store.update() as state:
+        state["links"][link_id]["own_seq"] = "x"
+    clock.now += links_module.HELLO_AGAIN_S
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is True
+    assert type(eric._store.read()["links"][link_id]["own_seq"]) is int
+
+
+@needs_node
 def test_an_unmark_with_the_seq_already_held_still_ends_the_own_link(home, monkeypatch):
     _kinds(monkeypatch, "test.echo")
     eric, mona, link_id, clock = _clocked_link(home)
@@ -2386,6 +2404,11 @@ def test_the_next_own_seq_is_past_the_last_and_the_clock():
     assert links_module._next_own_seq({"own_seq": 500}, 100) == 501
     assert links_module._next_own_seq({"own_seq": "x"}, 100) == 101  # a hand-edited file doesn't stop the hello
     assert links_module._next_own_seq({"own_seq": True}, 100) == 101
+    # With the clock at 0 the clock can't hide what a bad seq counts as.
+    assert links_module._next_own_seq({"own_seq": True}, 0) == 1
+    assert links_module._next_own_seq({"own_seq": 0}, 0) == 1
+    assert links_module._next_own_seq({"own_seq": -5}, 0) == 1
+    assert links_module._next_own_seq({"own_seq": 7}, 0) == 8
 
 
 def test_set_own_needs_a_linked_link(home):

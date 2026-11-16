@@ -1336,12 +1336,22 @@ class _Rooms:
         return self.state
 
 
+def _seconds_later():
+    """OWN_VERDICT_TTL_S on: what _lifted kept for a room is read again."""
+    with rules._lock:
+        for key, (until, inputs, lifted, others) in list(rules._own_verdicts.items()):
+            rules._own_verdicts[key] = (until - rules.OWN_VERDICT_TTL_S - 1, inputs, lifted, others)
+
+
 def _own(monkeypatch, links, rooms=None, just_me=()):
     from conduit_push import room_invites, room_links
 
     monkeypatch.setattr(room_links, "own_links", lambda root: frozenset(links))
     monkeypatch.setattr(room_invites, "Store", rooms or _Rooms())
     monkeypatch.setattr(rules, "_just_me_links", lambda room_id, home: just_me)
+    # Marking or unmarking a Link writes links.json, which ends what _lifted
+    # kept; these stand-ins write nothing, so they end it here.
+    rules._own_verdicts.clear()
     return room_invites.peer_id
 
 
@@ -1359,6 +1369,7 @@ def test_a_room_whose_others_all_came_over_own_links_runs_as_your_own(tmp_path, 
                  (json.dumps([FURINA, laifu, LAIFU]),))
     conn.commit()
     conn.close()
+    _seconds_later()
     assert rules.room_turn("s-own", home).with_others
     # Another person's agent beside it keeps the rules.
     _room(home / "state.db", "room-mixed", [FURINA, laifu, LAIFU])
@@ -1462,3 +1473,45 @@ def test_a_room_of_your_own_hermes_tells_its_turn_to_use_its_home_tools(host, no
     assert rules.OWN_FRAMING in context and rules.FRAMING_HEAD not in context
     # A home room with no one from another installation is no room of your own Hermes: no note.
     assert rules.OWN_FRAMING not in _context("s-local") and rules.OWN_FRAMING not in _context("s-chat")
+
+
+def test_a_rooms_own_links_verdict_is_kept_until_links_json_changes_or_seconds_pass(tmp_path, monkeypatch):
+    # Notifier issue 821: every tool call in a group room read links.json and
+    # the room stores again. What _lifted found is kept while links.json and
+    # rooms.json are unchanged, for seconds at most.
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-b", [FURINA, LAIFU])
+    _room_session(home, "s-b", "room-b")
+    reads = []
+    real_members = rules._room_members
+    monkeypatch.setattr(rules, "_room_members", lambda room_id, at: reads.append(room_id) or real_members(room_id, at))
+    assert rules.room_turn("s-b", home).with_others
+    first = len(reads)
+    for _ in range(5):
+        assert rules.room_turn("s-b", home).with_others
+    assert len(reads) == first, "nothing read again while nothing changed"
+    links = home / "conduit-rooms" / "links.json"
+    links.parent.mkdir(parents=True, exist_ok=True)
+    links.write_text('{"links": {}}')
+    assert rules.room_turn("s-b", home).with_others
+    assert len(reads) == first + 1, "a write to links.json is seen on the next call"
+    _seconds_later()
+    rules.room_turn("s-b", home)
+    assert len(reads) == first + 2, "and the roster again seconds later"
+
+
+def test_a_later_joiner_is_named_in_the_rooms_framing(tmp_path):
+    # Notifier issue 788: the remembered turn named the first roster's others.
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-j", [FURINA, LAIFU])
+    _room_session(home, "s-j", "room-j")
+    assert rules.room_turn("s-j", home).others == ("laifu",)
+    newcomer = {**LAIFU, "member_id": "kirara", "handle": "kirara", "display_name": "Kirara"}
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("UPDATE hosted_rooms SET members_json = ? WHERE room_id = 'room-j'",
+                 (json.dumps([FURINA, LAIFU, newcomer]),))
+    conn.commit()
+    conn.close()
+    _seconds_later()
+    turn = rules.room_turn("s-j", home)
+    assert turn.with_others and turn.others == ("laifu", "kirara")

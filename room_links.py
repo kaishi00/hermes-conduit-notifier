@@ -1407,7 +1407,7 @@ def _next_own_seq(link: dict[str, Any], now: int) -> int:
     """The seq for this side's next link.own: past the last one and past the
     clock's second, so a links.json restored from a backup gets ahead of what
     the other side already holds, even a seq it took this same second. A seq
-    that isn't a number (a hand-edited file) counts as none."""
+    that isn't a positive int (a hand-edited file) counts as none."""
     last = link.get("own_seq")
     last = last if type(last) is int and last > 0 else 0
     return max(last, int(now)) + 1

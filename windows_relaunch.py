@@ -61,20 +61,30 @@ def wait_for_exit(pid: int, timeout: float = EXIT_WAIT_S) -> bool:
 
 
 def _same_command(cmdline: List[str], command: List[str]) -> bool:
-    """Whether `cmdline` ends with what `command` runs: the interpreter, and anything a launcher
-    puts before the dashboard's own arguments (a flag, its own name), can differ."""
+    """Whether `cmdline` runs what `command` runs: the dashboard's own arguments, in order and
+    together. The interpreter, and anything a launcher puts before them (a flag, its own name) or a
+    supervisor adds after them (`--supervised`), can differ."""
     tail = [os.path.normcase(a) for a in command[1:]]
-    return bool(tail) and len(cmdline) >= len(tail) and \
-        [os.path.normcase(a) for a in cmdline[-len(tail):]] == tail
+    if not tail:
+        return False
+    line = [os.path.normcase(a) for a in cmdline]
+    return any(line[start:start + len(tail)] == tail for start in range(len(line) - len(tail) + 1))
 
 
-def started_by_someone_else(command: List[str], own_pid: Optional[int] = None) -> bool:
-    """Whether another process now runs this command: the dashboard, started again by its supervisor."""
+def _psutil() -> Any:
+    """psutil, or None when it isn't installed."""
     try:
         import psutil
     except ImportError:
-        print("windows_relaunch: no psutil, so a dashboard started again by something else can't be seen",
-              file=sys.stderr)
+        return None
+    return psutil
+
+
+def started_by_someone_else(command: List[str], own_pid: Optional[int] = None) -> bool:
+    """Whether another process now runs this command: the dashboard, started again by its supervisor.
+    Without psutil nothing can be seen, so nothing is (main says so, once)."""
+    psutil = _psutil()
+    if psutil is None:
         return False
     own_pid = os.getpid() if own_pid is None else own_pid
     for process in psutil.process_iter(["pid", "cmdline"]):
@@ -114,7 +124,13 @@ def start(command: List[str], log_path: str, popen: Callable[..., Any] = subproc
 def main(argv: List[str]) -> int:
     pid, command, log_path = int(argv[1]), json.loads(argv[2]), argv[3]
     if not wait_for_exit(pid):
+        # Its stderr goes to dashboard-restart.log.
+        print(f"windows_relaunch: the old dashboard (pid {pid}) didn't exit within {EXIT_WAIT_S:.0f}s, "
+              "so no second one was started", file=sys.stderr)
         return 1
+    if _psutil() is None:
+        print("windows_relaunch: no psutil, so a dashboard started again by something else can't be seen",
+              file=sys.stderr)
     deadline = time.monotonic() + OTHER_START_GRACE_S
     while time.monotonic() < deadline:
         if started_by_someone_else(command):

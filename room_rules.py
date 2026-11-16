@@ -263,6 +263,16 @@ class RoomTurn:
 
 _lock = threading.Lock()
 _remembered: "OrderedDict[tuple[str, str], Optional[RoomTurn]]" = OrderedDict()
+# What ``_lifted`` found for a room with other people's agents, by home, room
+# and side: (until, links.json's and rooms.json's size and time, lifted, the
+# roster's handles when the home read them). Kept while both files are
+# unchanged, so marking or unmarking a Link, or a Just me change, holds from
+# the next call, and for at most OWN_VERDICT_TTL_S, so someone joining the
+# room's store counts within it (notifier issue 821: every tool call in a
+# group room read them all again).
+OWN_VERDICT_TTL_S = 2.0
+MAX_OWN_VERDICTS = 1024
+_own_verdicts: "OrderedDict[tuple[str, str, str], tuple[float, tuple, bool, Optional[tuple[str, ...]]]]" = OrderedDict()
 _MISSING = object()
 _warned: dict[str, int] = {}
 
@@ -786,6 +796,7 @@ def forget() -> None:
     """Drops what room_turn remembers (tests, the plugin unloading)."""
     with _lock:
         _remembered.clear()
+        _own_verdicts.clear()
         _warned.clear()
 
 
@@ -1089,21 +1100,72 @@ def _lifted(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn
     """The turn as a room without other people's agents when everyone in it
     from another installation came over a Link both sides marked as the
     owner's own Hermes (room_links.own_links; the multi-instance plan's Rooms
-    1, Eric 2026-11-13): its far bots get what they have at home. Read each
-    time, after what's remembered, so unmarking a Link brings the rules back
-    from the next call. Anything that can't be read keeps the rules."""
+    1, Eric 2026-11-13): its far bots get what they have at home. Read after
+    what's remembered, and kept only while links.json and rooms.json are
+    unchanged and for OWN_VERDICT_TTL_S at most (``_own_verdicts``), so
+    unmarking a Link brings the rules back from the next call and someone
+    joining within seconds. On the home, the same read names the room's
+    others as they are now, not as the first read found them (notifier
+    issue 788). Anything that can't be read keeps the rules."""
     if turn is None or not turn.with_others or not turn.room_id or home is None:
         return turn
+    key = (str(home), turn.room_id, turn.side)
+    inputs = _own_inputs(home)
+    now = time.monotonic()
+    with _lock:
+        known = _own_verdicts.get(key)
+    if known is not None and known[0] > now and known[1] == inputs:
+        lifted, others = known[2], known[3]
+    else:
+        lifted, others = _own_verdict(turn, home)
+        with _lock:
+            _own_verdicts[key] = (now + OWN_VERDICT_TTL_S, inputs, lifted, others)
+            _own_verdicts.move_to_end(key)
+            while len(_own_verdicts) > MAX_OWN_VERDICTS:
+                _own_verdicts.popitem(last=False)
+    if lifted:
+        return replace(turn, with_others=False, others=(), own=True)
+    if others and others != turn.others:
+        return replace(turn, others=others)
+    return turn
+
+
+def _own_inputs(home: Path) -> tuple:
+    """links.json's and rooms.json's size and time: a write to either changes them."""
+    from . import room_identity, room_invites, room_links
+    root = room_identity.root_home(home)
+
+    def stamp(path: Path) -> tuple:
+        try:
+            info = path.stat()
+        except OSError:
+            return (None, None)
+        return (info.st_mtime_ns, info.st_size)
+
+    return (stamp(root / room_links.DIRECTORY / room_links.FILE_NAME),
+            stamp(root / room_invites.DIRECTORY / room_invites.FILE_NAME))
+
+
+def _own_verdict(turn: RoomTurn, home: Path) -> tuple[bool, Optional[tuple[str, ...]]]:
+    """Whether the room is only the owner's own Hermes, and on the home the
+    roster's handles as read now (None when they weren't read)."""
+    members: Any = _UNREAD
+    others: Optional[tuple[str, ...]] = None
     try:
-        lifted = _own_only(turn, home)
+        if turn.side == "home":
+            members = _room_members(turn.room_id, home)
+            others = _others(members) if members is not None else None
+        return _own_only(turn, home, members), others
     except Exception:  # noqa: BLE001 - unknown, so the owner's rules hold
         logger.debug("conduit_push: couldn't tell whether room %s is only the owner's own Hermes", turn.room_id,
                      exc_info=True)
-        lifted = False
-    return replace(turn, with_others=False, others=(), own=True) if lifted else turn
+        return False, others
 
 
-def _own_only(turn: RoomTurn, home: Path) -> bool:
+_UNREAD = object()
+
+
+def _own_only(turn: RoomTurn, home: Path, members: Any = _UNREAD) -> bool:
     from . import room_identity, room_invites, room_links  # room_invites imports far more than the rules need
     root = room_identity.root_home(home)
     own = room_links.own_links(root)
@@ -1111,8 +1173,9 @@ def _own_only(turn: RoomTurn, home: Path) -> bool:
         return False
     if turn.side == "home":
         # Read again, not taken from the remembered turn: someone else's agent or person joining later brings
-        # the rules back from the next call.
-        members = _room_members(turn.room_id, home)
+        # the rules back (``_lifted`` keeps this for seconds at most).
+        if members is _UNREAD:
+            members = _room_members(turn.room_id, home)
         just_me = _just_me_links(turn.room_id, home)
         if members is None or just_me is None or not set(just_me) <= own:
             return False
