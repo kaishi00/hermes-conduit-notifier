@@ -13,6 +13,7 @@ copy of work_tool Hermes loaded for that bot, whose hooks see its turns.
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from pathlib import Path
 
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -52,6 +53,68 @@ def workstreams_list(resolved: bool = False, before: Optional[float] = None) -> 
 
 def workstreams_act(ref: str, action: str, body: Optional[dict]) -> Dict[str, Any]:
     return _work_tool().app_act(core._calls_home(), ref, action, body)
+
+
+def _grant_actor(request: Request, profile: Optional[str]) -> dict:
+    """Core-authenticated owner, with an explicit same-origin browser event.
+
+    Native tickets, service tokens and the anonymous standalone HTML bootstrap
+    token do not establish interactive owner authentication.
+    """
+    no_store = {"Cache-Control": "no-store"}
+    if (getattr(request.state, "native_http_principal", None) is not None
+            or getattr(request.state, "token_authenticated", False)):
+        raise HTTPException(403, "Scoped consent needs a dashboard owner session", headers=no_store)
+    origin = request.headers.getlist("origin")
+    if ((request.method != "GET" and len(origin) != 1)
+            or (origin and (len(origin) != 1 or origin[0] != f"{request.url.scheme}://{request.url.netloc}"))
+            or any(value != "same-origin" for value in request.headers.getlist("sec-fetch-site"))):
+        raise HTTPException(403, "Scoped consent needs this dashboard's own origin", headers=no_store)
+    try:
+        from hermes_cli.web_server_sessions import _session_mutation_context
+        from gateway.owner_identity import host_owner_subject
+
+        session = getattr(request.state, "session", None)
+        if session is not None:
+            from hermes_cli.dashboard_auth.middleware import peek_session
+            from hermes_cli.dashboard_auth.registry import list_interactive_providers
+
+            # Revalidate through the gate, including its Webapp cookie binding.
+            verified = peek_session(request)
+            provider = str(getattr(session, "provider", ""))
+            if (provider in {"local", "session-token", "server-internal"}
+                    or provider not in {p.name for p in list_interactive_providers()}
+                    or verified is None
+                    or any(getattr(verified, key, None) != getattr(session, key, None)
+                           for key in ("provider", "user_id", "issuer"))):
+                raise HTTPException(403, "Unsupported scoped consent identity", headers=no_store)
+            source = "dashboard_session"
+        else:
+            raise HTTPException(401, "Dashboard authentication required", headers=no_store)
+        authority, actor = _session_mutation_context(request, profile)
+        expected = (str(Path(core._calls_home()).resolve()) if authority is None else authority.profile_id)
+        if (actor.subject != host_owner_subject() or actor.transport_id != "http"
+                or actor.profile_id != expected
+                or (authority is not None and Path(authority.db.db_path).parent.resolve()
+                    != Path(core._calls_home()).resolve())):
+            raise HTTPException(403, "Scoped consent profile mismatch", headers=no_store)
+        return {"subject": actor.subject, "profile_id": actor.profile_id, "source": source}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(403, "Core cannot validate dashboard owner consent", headers=no_store)
+
+
+@router.get("/workstreams/grants")
+async def get_work_grants(request: Request, response: Response, profile: Optional[str] = None) -> Any:
+    """Authenticated immutable full snapshots for the dashboard's Approve once cards."""
+    response.headers["Cache-Control"] = "no-store"
+    profile = await core._conduit_route_profile_no_store(request, profile)
+    def preview() -> dict:
+        _grant_actor(request, profile)
+        tool = _work_tool()
+        return tool.work_grants.cards(core._calls_home())
+    return await _workstreams_route("scoped task preview", profile, preview)
 
 
 def workstreams_settings() -> Dict[str, Any]:
@@ -210,5 +273,11 @@ async def post_workstream_action(ref: str, action: str, request: Request, respon
     body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object", headers={"Cache-Control": "no-store"})
+    if action in {"grant_approve", "grant_decline", "grant_revoke"}:
+        def consent() -> dict:
+            actor = _grant_actor(request, profile)
+            tool = _work_tool()
+            return tool.work_grants.act(tool, core._calls_home(), ref, action, body, actor)
+        return await _workstreams_route("scoped task consent", profile, consent, _workstream_actions_limiter)
     return await _workstreams_route("workstream action", profile, lambda: workstreams_act(ref, action, body),
                                     _workstream_actions_limiter)

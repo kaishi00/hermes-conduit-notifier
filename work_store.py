@@ -108,6 +108,25 @@ REF = re.compile(r"^([WA])(\d{1,6})$")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS task_grants (
+    id TEXT PRIMARY KEY,
+    snapshot TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    actor TEXT NOT NULL DEFAULT '{}',
+    revoked_by TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    acted_at REAL NOT NULL DEFAULT 0,
+    work_ref TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS task_grant_sessions (
+    grant_id TEXT PRIMARY KEY,
+    profile TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    work_ref TEXT NOT NULL,
+    work_key TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_grant_session ON task_grant_sessions (profile, session_id);
 CREATE TABLE IF NOT EXISTS work (
     ref TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -333,7 +352,12 @@ class Store:
     def set_policy(self, policy: str) -> None:
         if policy not in POLICIES:
             raise ValueError(f"policy must be one of {', '.join(POLICIES)}")
-        self.set_meta("policy", policy)
+        with self._db() as con:
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('policy', ?)", (policy,))
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('grant_policy_epoch', ?)", (uuid.uuid4().hex,))
+        from . import work_grants
+
+        work_grants.invalidate(self.home)
 
     def max_running(self) -> int:
         try:
@@ -631,7 +655,16 @@ class Store:
                 args.extend(only_if)
             changed = con.execute(f"UPDATE work SET {', '.join(f'{key} = ?' for key in values)} WHERE {where}",
                                   (*values.values(), *args)).rowcount
+            if changed and (fields.get("status") in ("stopped", "interrupted")
+                            or fields.get("left_alone_at") or fields.get("closed_at")):
+                con.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                            ("grant_work_epoch:" + ref, uuid.uuid4().hex))
             row = con.execute("SELECT * FROM work WHERE ref = ?", (ref,)).fetchone() if changed else None
+        if changed and (fields.get("status") in ("stopped", "interrupted")
+                        or fields.get("left_alone_at") or fields.get("closed_at")):
+            from . import work_grants
+
+            work_grants.invalidate(self.home, ref)
         return _work(row) if row else None
 
     def mark_seen(self, refs: list[str]) -> None:

@@ -401,7 +401,7 @@ def test_a_waiter_put_back_keeps_its_place(home):
 
 
 def test_a_waiter_the_registry_couldnt_read_stays_waiting(home, monkeypatch):
-    monkeypatch.setattr(work, "_lookup", lambda session_id, home=None: (home, None, True))
+    monkeypatch.setattr(work, "_lookup", lambda session_id, home=None: (home, None, True, False))
     assert work._still_waits({"session_id": "any", "home": str(home)})
 
 

@@ -1697,6 +1697,15 @@ question or a small task doesn't start a workstream. Change it in Conduit
   and the asking bot is told so.
   What one bot asks or answers reaches the other as data, never as your
   go-ahead; each bot does the work with its own tools and its own approvals.
+  For an explicit one-time delegation, `work_ask` can include `scope`: the exact
+  task and scope wait for an interactively logged-in dashboard owner's review
+  and **Approve once** (the anonymous standalone bootstrap token is not enough).
+  No recipient turn is queued before that event. The dashboard shows the full
+  snapshot and offers Decline and Revoke and stop. This starts one recipient
+  workstream, preserves native command approvals, and cannot authorize further
+  delegation or a resumed turn. See [scoped task grants](docs/scoped-task-grants.md)
+  for supported authentication and runtime limits. Existing app cards remain
+  ordinary data-only asks; this consent flow is dashboard-only.
   The other bot needs workstreams on too: a bot whose workstreams are off
   has no coordinator to take an ask or a note, so the Bot Chat messages it
   with Hermes' own `message_agent`, which the policy lets through to such a

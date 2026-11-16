@@ -120,21 +120,69 @@
       };
     }, []);
 
-    // Nothing to say on a host no Conduit has used.
-    if (!status || (status.app.state === "never" && status.push.state === "not_paired")) return null;
     if (!ui.Card || !ui.CardHeader || !ui.CardTitle || !ui.CardContent) return null;
-    var title = status.push.gateway_name ? "Conduit · " + status.push.gateway_name : "Conduit";
-    return h(
-      ui.Card,
-      null,
-      h(ui.CardHeader, null, h(ui.CardTitle, { className: "text-base" }, title)),
-      h(
-        ui.CardContent,
-        { className: "grid gap-3" },
-        h(Row, { label: "App", row: appRow(status.app) }),
-        h(Row, { label: "Push notifications", row: pushRow(status.push) })
-      )
-    );
+    var linked = status && !(status.app.state === "never" && status.push.state === "not_paired");
+    var title = linked && status.push.gateway_name ? "Conduit · " + status.push.gateway_name : "Conduit";
+    return h("div", { className: "grid gap-3" },
+      linked ? h(ui.Card, null,
+        h(ui.CardHeader, null, h(ui.CardTitle, { className: "text-base" }, title)),
+        h(ui.CardContent, { className: "grid gap-3" },
+          h(Row, { label: "App", row: appRow(status.app) }),
+          h(Row, { label: "Push notifications", row: pushRow(status.push) }))) : null,
+      h(ScopedTasks));
+  }
+
+  function ScopedTasks() {
+    var state = useState([]), cards = state[0], setCards = state[1];
+    var pending = useState(false), busy = pending[0], setBusy = pending[1];
+    var errors = useState(""), error = errors[0], setError = errors[1];
+    var base = "/api/plugins/conduit_push/workstreams";
+    function load() {
+      return SDK.fetchJSON(base + "/grants").then(function (body) {
+        setCards(body.grants || []);
+      });
+    }
+    useEffect(function () {
+      var stopped = false;
+      function refresh() {
+        SDK.fetchJSON(base + "/grants").then(function (body) {
+          if (!stopped) setCards(body.grants || []);
+        }).catch(function () { if (!stopped) setCards([]); });
+      }
+      refresh();
+      var timer = setInterval(refresh, POLL_MS);
+      return function () { stopped = true; clearInterval(timer); };
+    }, []);
+    function act(card, action) {
+      setBusy(true);
+      setError("");
+      // The handler closes over the complete snapshot actually rendered.
+      // No automatic retries: an uncertain response may already have consumed it.
+      SDK.fetchJSON(base + "/" + encodeURIComponent(card.id) + "/" + action, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ digest: card.digest })
+      }).then(load).catch(function () {
+        setError("The action could not be confirmed. Refresh to check its state; approval is never retried automatically.");
+      }).finally(function () { setBusy(false); });
+    }
+    if (!cards.length && !error) return null;
+    return h(ui.Card, null,
+      h(ui.CardHeader, null, h(ui.CardTitle, { className: "text-base" }, "Scoped delegations")),
+      h(ui.CardContent, { className: "grid gap-3" },
+      error ? h("p", { role: "alert" }, error) : null,
+      cards.map(function (card) {
+        return h("section", { key: card.id, className: "border border-border p-3 grid gap-2" },
+          h("strong", null, "Scoped delegation · " + card.status),
+          h("p", null, "Review the complete task and scope. Approve once starts one task on the recipient bot. Commands still follow native approval settings."),
+          h("pre", { style: { whiteSpace: "pre-wrap", overflowWrap: "anywhere" } },
+            JSON.stringify({ id: card.id, digest: card.digest, snapshot: card.snapshot }, null, 2)),
+          card.status === "pending" ? h("div", { className: "flex gap-3" },
+            h("button", { disabled: busy, onClick: function () { act(card, "grant_approve"); } }, "Approve once"),
+            h("button", { disabled: busy, onClick: function () { act(card, "grant_decline"); } }, "Decline")) : null,
+          card.status === "pending" || card.status === "consumed" ?
+            h("button", { disabled: busy, onClick: function () { act(card, "grant_revoke"); } }, "Revoke and stop") : null
+        );
+      })));
   }
 
   plugins.registerSlot("conduit_push", "sessions:top", ConduitCard);

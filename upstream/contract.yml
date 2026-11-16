@@ -70,6 +70,14 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  scoped dashboard consent: >-
+    dashboard/api/workstreams.py revalidates the actual interactive owner request with
+    dashboard_auth.middleware.peek_session and registry.list_interactive_providers,
+    then web_server_sessions._session_mutation_context
+    and gateway.owner_identity.host_owner_subject. These supply the owner and selected profile
+    for a distinct full-snapshot Approve once event. Anonymous standalone HTML bootstrap
+    tokens, native tickets, noninteractive providers and service-token identities cannot
+    list or issue scoped grants. Missing functions fail closed.
   chat close hooks: >-
     tui_gateway's _finalize_session says a chat closed with on_session_end (no turn_id) and then
     on_session_finalize. The plugin's _on_session_finalize ends a turn still running there as
@@ -361,6 +369,8 @@ imports:
     optional: ["trigger_job"]
   gateway.config:
     optional: ["Platform"]
+  gateway.owner_identity:
+    optional: ["host_owner_subject"]
   gateway.platforms.base:
     optional: ["BasePlatformAdapter"]
   gateway.response_filters:
@@ -396,6 +406,10 @@ imports:
     optional: ["registry", "token_auth"]
   hermes_cli.dashboard_auth.base:
     required: ["DashboardAuthProvider", "TokenPrincipal"]
+  hermes_cli.dashboard_auth.middleware:
+    optional: ["peek_session"]
+  hermes_cli.dashboard_auth.registry:
+    optional: ["list_interactive_providers"]
   hermes_cli.gateway:
     optional: ["_installed_service_kind_for", "_select_systemd_scope", "_systemctl_cmd", "get_service_name", "supports_systemd_services"]
   hermes_cli.gateway_lifecycle_guards:
@@ -424,6 +438,8 @@ imports:
     optional: ["_agent_fs_path", "_managed_files_policy"]
   hermes_cli.web_server_profiles:
     optional: ["_config_profile_scope"]
+  hermes_cli.web_server_sessions:
+    optional: ["_session_mutation_context"]
   hermes_constants:
     required: ["*", "get_hermes_home"]
     optional: ["get_default_hermes_root"]
@@ -492,6 +508,7 @@ module_paths:
   - cron
   - cron/jobs
   - gateway/config
+  - gateway/owner_identity
   - gateway/platforms/base
   - gateway/response_filters
   - gateway/restart
@@ -509,6 +526,8 @@ module_paths:
   - hermes_cli/config_effective
   - hermes_cli/dashboard_auth
   - hermes_cli/dashboard_auth/base
+  - hermes_cli/dashboard_auth/middleware
+  - hermes_cli/dashboard_auth/registry
   - hermes_cli/gateway
   - hermes_cli/gateway_lifecycle_guards
   - hermes_cli/gateway_runtime_start
@@ -522,6 +541,7 @@ module_paths:
   - hermes_cli/web_server_dashboard
   - hermes_cli/web_server_files
   - hermes_cli/web_server_profiles
+  - hermes_cli/web_server_sessions
   - hermes_constants
   - hermes_state
   - hermes_state_ids
@@ -737,6 +757,7 @@ routes:
   - GET /workstreams
   - POST /workstreams/adopt
   - POST /workstreams/call-ended
+  - GET /workstreams/grants
   - GET /workstreams/settings
   - POST /workstreams/settings
   - POST /workstreams/{ref}/{action}

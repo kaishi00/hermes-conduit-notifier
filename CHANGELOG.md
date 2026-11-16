@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.27 (2026-11-16)
+
+### New and improved
+
+- Review an explicit scoped task between local bots in the dashboard, approve it once, decline it, or revoke and stop it. Ordinary bot asks and native command approvals keep their existing behavior.
+
 ## 0.177.26 (2026-11-16)
 
 ### Fixes
