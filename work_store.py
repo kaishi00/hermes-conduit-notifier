@@ -473,6 +473,22 @@ class Store:
                               "ORDER BY created_at LIMIT 1", (session_id,)).fetchone()
         return _work(row) if row else None
 
+    def titles(self, refs: Any) -> dict[str, str]:
+        """``{ref: title}`` for these refs, open or closed, reading only those
+        two columns of only those rows (the Work panel's poll names the work
+        its coordination items cite, notifier issue 822)."""
+        wanted = sorted({str(ref) for ref in refs if ref})
+        if not wanted or not self.path.is_file():
+            return {}
+        out: dict[str, str] = {}
+        with self._db(write=False) as con:
+            for start in range(0, len(wanted), 500):
+                chunk = wanted[start:start + 500]
+                for row in con.execute(f"SELECT ref, title FROM work WHERE ref IN ({', '.join('?' * len(chunk))})",
+                                       chunk):
+                    out[row["ref"]] = row["title"] or ""
+        return out
+
     def list(self, *, active_only: bool = False, include_closed: bool = False, limit: int = 50,
              active_or_changed: bool = False, changed_since: float | None = None,
              by_change: bool = False, calls: Optional[bool] = None) -> list[Work]:

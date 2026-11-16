@@ -461,6 +461,10 @@ def test_one_question_per_workstream_a_no_stands_and_one_question_covers_related
     item, = [item for item in work.work_coord.app_items(on, {"W1": "Login bug", "W2": "Invoice count"})
              if item["id"] == "P1"]
     assert item["ref"] == "W1" and item["refs"] == ["W1", "W2"] and item["title"] == "Login bug · Invoice count"
+    # Without titles passed, the panel reads the titles of only the work its items cite (notifier issue 822).
+    item, = [item for item in work.work_coord.app_items(on) if item["id"] == "P1"]
+    assert item["title"] == " · ".join(on.titles(["W1", "W2"])[ref] for ref in ("W1", "W2"))
+    assert set(on.titles(["W1", "W2", "W9", ""])) == {"W1", "W2"}
 
 
 def test_a_question_about_three_workstreams_names_all_three(on, hermes, home):

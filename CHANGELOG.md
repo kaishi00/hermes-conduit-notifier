@@ -13,6 +13,22 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.20 (2026-11-16)
+
+### Security
+
+- A hand-off could carry a short secret into a workstream's instructions when its argument name was one glued-together word, such as sessioncookie, dbpasswd, licensekey or pincodes. Those are now left out too.
+
+### Fixes
+
+- A C++ include path in a hand-off was masked as if it were a token. It now stays as written.
+- When a note to another bot never arrived, the report back could be lost if a second note failed with it, and was headed as an update from your own workstreams. Each note is now reported on its own, as news from another bot.
+- When Hermes didn't answer in time while setting a workstream's approvals, the note said it was opening the chat. It now says the message hadn't gone out yet.
+
+### New and improved
+
+- The Work panel's poll reads only the titles of the work it shows, instead of every workstream the bot ever had, so it stays quick on a long-running bot.
+
 ## 0.177.19 (2026-11-15)
 
 ### Fixes

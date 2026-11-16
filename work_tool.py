@@ -2246,9 +2246,11 @@ def _deliver(store: work_store.Store, broker: work_broker.Broker, work: work_sto
                     "note": f"Hermes couldn't confirm {work.ref} took it: it may already be queued there. Don't "
                             "send it again; its next update says whether it ran."}
         if error.timed_out:
-            # Timed out reopening the chat, before anything was submitted.
+            # Timed out before anything was submitted: reopening the chat, or
+            # setting its approvals (_set_yolo) on a chat already open.
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "hermes",
-                    "note": f"Hermes didn't answer in time while opening {work.ref}'s chat, so nothing was sent. "
+                    "note": f"Hermes didn't answer in time before the message went out to {work.ref}, so nothing "
+                            "was sent. "
                             "Try again in a moment."}
         if error.owner_busy:
             return {"ok": False, "ref": work.ref, "title": work.title, "error": "mid_turn",
@@ -3564,21 +3566,26 @@ _SECRET_WORDS = frozenset({"token", "tokens", "secret", "secrets", "password", "
                            "pwd", "auth", "authn", "authz", "authorization", "authentication", "oauth",
                            "credential", "credentials", "cookie", "cookies", "apikey", "apikeys", "bearer", "jwt",
                            "signature", "signatures", "passcode", "passcodes", "otp", "otps", "totp", "pin",
-                           "pins", "pincode", "cvv", "cvc", "mfa"})
+                           "pins", "pincode", "mfacode", "cvv", "cvc", "mfa"})
 _SECRET_PAIRS = frozenset((first, key) for first in ("api", "private", "access", "secret")
                           for key in ("key", "keys")) | {("client", "secret")}
 
 
-# One-word spellings: "usercredentials", "secretkey", "privatekeys".
-_SECRET_ENDINGS = ("token", "tokens", "secret", "secrets", "password", "passwords", "credential", "credentials")
+# One-word spellings: "usercredentials", "secretkey", "privatekeys",
+# "sessioncookie", "dbpasswd".
+_SECRET_ENDINGS = ("token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passphrase",
+                   "passcode", "passcodes", "credential", "credentials", "cookie", "cookies")
 _SECRET_COMPOUNDS = frozenset({"apikey", "privatekey", "secretkey", "accesskey", "masterkey", "authkey",
-                               "securitykey", "signingkey", "encryptionkey", "recoverykey", "sessionkey"})
+                               "securitykey", "signingkey", "encryptionkey", "recoverykey", "sessionkey",
+                               "licensekey", "verificationkey", "backupkey"})
 
 
 def _secret_arg(name: Any) -> bool:
     """Whether an argument's name says its value is a credential."""
     words = [word.lower() for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", str(name))]
-    return any(word in _SECRET_WORDS or word.endswith(_SECRET_ENDINGS) or word.rstrip("s") in _SECRET_COMPOUNDS for word in words) or any(
+    return any(word in _SECRET_WORDS or word.endswith(_SECRET_ENDINGS)
+               or word.removesuffix("s") in _SECRET_WORDS or word.removesuffix("s") in _SECRET_COMPOUNDS
+               for word in words) or any(
         pair in _SECRET_PAIRS for pair in zip(words, words[1:]))
 
 
@@ -5188,8 +5195,8 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     out["coordination"] = {"mode": setting, "items": []}
     if mode != "off" and setting != "off":
         try:
-            titles = {work.ref: work.title for work in store.list(limit=-1, include_closed=True)}
-            out["coordination"]["items"] = work_coord.app_items(store, titles, asked)
+            # Titles of only the work the items cite (notifier issue 822).
+            out["coordination"]["items"] = work_coord.app_items(store, asked=asked)
         except Exception:  # noqa: BLE001 — the panel still shows the work
             logger.debug("conduit_push: couldn't read the coordination list", exc_info=True)
     return out
@@ -6432,12 +6439,18 @@ def _asks_unreached(home: Path, store: work_store.Store, items: list[str], reaso
         # A note opens no ask, so only the bot that sent it is told.
         try:
             teller_home = _home_of(home, sender)
-            chat = _bot_chat_of(teller_home) if teller_home is not None else ""
+            if teller_home is None:
+                continue
+            chat = _bot_chat_of(teller_home)
             if not chat:
+                # A note opens no work row, so no coordinator to fall back on.
+                logger.warning("conduit_push: couldn't find %s's Bot Chat to say a note never arrived", sender)
                 continue
             said = line.split("«", 1)[-1].rsplit("»", 1)[0] if "«" in line else line
+            # Headed as news from another bot, not the sender's own workstreams;
+            # no sender named, so a refused wake of it tells nobody back.
             _queue_wake(teller_home, chat, f"- Your note to {name} («{_cut(said, 120)}») never reached it: "
-                                           f"{why}. Send it again later if it still matters.")
+                                           f"{why}. Send it again later if it still matters.", kind=TELL_KIND)
         except Exception:  # noqa: BLE001 — the next note's sender is still told
             logger.warning("conduit_push: couldn't tell a bot its note never arrived", exc_info=True)
 
@@ -6559,12 +6572,13 @@ _TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=.~]{24,}")
 # A long run made of words stays: a path, a file or a branch name, whose
 # pieces are short words or numbers (the workstream
 # needs them to carry on). A token has a long piece or one of letters and
-# digits mixed; a hash is one long piece and a UUID's pieces mix them, so
+# digits mixed any other way; a hash is one long piece and a UUID's pieces mix them, so
 # both are masked too. A run of only punctuation (a line of dots) stays.
 _RUN_PIECES = re.compile(r"[/._~\-]+")
 # A word, a number, or a word with a short number after it (python3, v2,
-# x64, sha256); letters and digits mixed any other way read as a token.
-_WORD_PIECE = re.compile(r"[A-Za-z]+[0-9]{0,5}|[0-9]+")
+# x64, sha256), or one ending in "++" (a C++ include path's c++); letters
+# and digits mixed any other way read as a token.
+_WORD_PIECE = re.compile(r"[A-Za-z]+[0-9]{0,5}(?:\+\+)?|[0-9]+")
 
 
 def _plugin_masked(text: str) -> str:

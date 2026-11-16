@@ -641,6 +641,35 @@ def test_a_note_whose_wake_hermes_refused_is_told_back(bots, hermes, monkeypatch
     texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")
              if params["session_id"] == f"rt-{BOT_CHAT}"]
     assert any("Your note to Nahida («The merge is verified.») never reached it" in text for text in texts)
+    # Notifier issue 789: the report-back is headed as another bot's news, not the sender's workstreams.
+    told, = [text for text in texts if "never reached it" in text]
+    assert "Work update from another bot" in told and "from your workstreams" not in told
+
+
+def test_each_note_in_a_refused_wake_is_told_back_on_its_own(bots, hermes, monkeypatch):
+    # Notifier issue 789: one note's report failing doesn't drop the next one's.
+    monkeypatch.setattr(hermes, "prompt_submit", lambda params: {
+        "status": "rejected" if params["session_id"] == f"rt-{NAHIDA_CHAT}" else "queued"}, raising=False)
+    assert call("work_tell", {"bot": "nahida", "text": "First note."})["ok"]
+    assert call("work_tell", {"bot": "nahida", "text": "Second note."})["ok"]
+    queue = work._queue_wake
+    reports: list[str] = []
+
+    def failing_first(home, coordinator, line, *args, **kwargs):
+        if "never reached it" in line:
+            reports.append(line)
+            if len(reports) == 1:
+                raise RuntimeError("store away")
+        return queue(home, coordinator, line, *args, **kwargs)
+
+    monkeypatch.setattr(work, "_queue_wake", failing_first)
+    work.flush_wakes()
+    hermes.calls.clear()
+    work.flush_wakes()
+    texts = [params["text"] for _, params, _ in hermes.named("prompt.submit")
+             if params["session_id"] == f"rt-{BOT_CHAT}"]
+    assert len(reports) == 2
+    assert sum("never reached it" in text for text in texts) == 1
 
 
 def test_a_note_a_restart_caught_in_the_batch_goes_out_again_as_a_note(bots, hermes, monkeypatch):
@@ -7697,7 +7726,7 @@ def test_a_hand_off_masks_credentials_whole_under_hermes_redactor(monkeypatch):
     for kept in ("/home/user/project/src/auth/callback.py", "/Users/Eric/Projects/MyApp/Sources/AppDelegate.swift",
                  "feature/issue-2542-handoff-masking", "really_long_module_name_here.py",
                  "/home/u/proj/venv/lib/python3.11/site-packages/requests/api.py", "feature/v2-authentication-flow",
-                 "." * 30):
+                 "/usr/include/c++/12/bits/stl_vector.h", "." * 30):
         assert work._masked(f"read {kept}") == f"read {kept}"
     assert "4f2a9c1e" not in work._masked("commit 4f2a9c1e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39")
     assert "e89b" not in work._masked("key 123e4567-e89b-12d3-a456-426614174000"), "a UUID can be a credential"
@@ -7734,10 +7763,29 @@ def test_a_hand_offs_secret_names_are_read_by_their_words():
     for name in ("api_key", "apiKey", "x-api-key", "oauthToken", "Authorization", "db_password", "privateKey",
                  "access_key", "client_secret", "cookie", "refresh_token", "passwords", "authentication",
                  "api_keys", "privateKeys", "userPasswords", "privatekey", "secretkey", "accesskeys",
-                 "usercredentials", "dbcredentials"):
+                 "usercredentials", "dbcredentials",
+                 # Notifier #837's words and their plurals (issue 838), and one-word compounds (issue 794).
+                 "passcode", "passcodes", "otp", "otps", "totp", "mfa", "mfas", "pin", "pins", "pincode",
+                 "pincodes", "mfacode", "cvc", "licensekey", "verificationkey", "backupkey", "backupkeys",
+                 "sessioncookie", "dbpasswd", "userPassphrase"):
         assert work._secret_arg(name), name
     for name in ("author", "source", "tokenizer", "authority", "command", "path", "session_id", "passage",
-                 "monkey", "keys", "keyword"):
+                 "monkey", "keys", "keyword", "authors", "pinned", "spins", "options"):
         assert not work._secret_arg(name), name
     line = work._step_line("http", {"headers": {"x-api-key": "k1"}, "passwords": ["hunter2"], "author": "Eric"})
     assert "k1" not in line and "hunter2" not in line and "Eric" in line
+
+
+def test_a_worker_pool_answer_that_never_comes_times_out(monkeypatch, tmp_path):
+    # Notifier issue 831: Hermes answers a slow method from its worker pool (dispatch returns None); one
+    # that never arrives raises a timeout the hand-off can read, never a hang or a plain failure.
+    broker_module = work.work_broker
+
+    class Pool:
+        def dispatch(self, request, transport):
+            return None
+
+    broker = broker_module.Broker(tmp_path, api=Pool())
+    with pytest.raises(broker_module.BrokerError) as raised:
+        broker._dispatch("session.resume", {"session_id": "w1"}, timeout=0.05)
+    assert raised.value.timed_out and "session.resume timed out" in str(raised.value)
