@@ -546,11 +546,13 @@ def _pair_gateway_name(raw: Any, profile: Optional[str]) -> str:
     cleaned = "".join(c for c in raw if c.isprintable()).strip() if isinstance(raw, str) else ""
     if cleaned:
         return cleaned[:80]
-    # The bot's name, as the CLI's pairing names it (client.default_gateway_name,
-    # issue 2540); a bot with none keeps the host's name and its profile.
-    bot = self_update._bot_name(self_update._plugin_client())
-    if bot:
-        return bot[:80]
+    # The bot's name, else the host's and the profile, as the CLI's pairing
+    # names it (client.default_gateway_name, issue 2540). A plugin that won't
+    # load still pairs, by the host's name.
+    try:
+        return self_update._plugin_client().default_gateway_name(profile or "")
+    except Exception:  # noqa: BLE001 - a name is never worth the pairing
+        logger.debug("Conduit plugin: no bot name for the pairing", exc_info=True)
     import socket
 
     name = f"{socket.gethostname()} Hermes"
