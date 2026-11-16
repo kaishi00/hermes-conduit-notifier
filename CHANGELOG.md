@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.22 (2026-11-16)
+
+### Fixes
+
+- On a host with very many group rooms, a room in use keeps its remembered check of whether it's only your own Hermes, so its links and stores aren't read again on every tool call.
+
 ## 0.177.21 (2026-11-16)
 
 ### Fixes

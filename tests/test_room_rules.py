@@ -5,6 +5,7 @@ import json
 import logging
 import pathlib
 import sqlite3
+import time
 import sys
 import types
 
@@ -1498,6 +1499,31 @@ def test_a_rooms_own_links_verdict_is_kept_until_links_json_changes_or_seconds_p
     _seconds_later()
     rules.room_turn("s-b", home)
     assert len(reads) == first + 2, "and the roster again seconds later"
+
+
+def test_a_room_in_use_keeps_its_verdict_at_the_cap(tmp_path, monkeypatch):
+    # The cap drops the room used longest ago, not the one written first.
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-h", [FURINA, LAIFU])
+    _room_session(home, "s-h", "room-h")
+    monkeypatch.setattr(rules, "MAX_OWN_VERDICTS", 2)
+    assert rules.room_turn("s-h", home).with_others
+    hot = (str(home), "room-h", "home")
+    inputs = rules._own_inputs(home)
+    far = time.monotonic() + 60
+    with rules._lock:
+        rules._own_verdicts[("x", "older", "home")] = (far, inputs, False, None)
+        rules._own_verdicts.move_to_end(hot, last=False)
+    reads = []
+    real_members = rules._room_members
+    monkeypatch.setattr(rules, "_room_members", lambda room_id, at: reads.append(room_id) or real_members(room_id, at))
+    rules.room_turn("s-h", home)
+    with rules._lock:
+        rules._own_verdicts[("x", "newer", "home")] = (far, inputs, False, None)
+        while len(rules._own_verdicts) > rules.MAX_OWN_VERDICTS:
+            rules._own_verdicts.popitem(last=False)
+        assert hot in rules._own_verdicts and ("x", "older", "home") not in rules._own_verdicts
+    assert reads == []
 
 
 def test_a_later_joiner_is_named_in_the_rooms_framing(tmp_path):
