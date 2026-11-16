@@ -561,9 +561,8 @@ class _AuthorityLink:
                 heard = self.prompt_texts.get(prompt_id, (None, None, None, 0.0))[3]
                 if heard < asked_at:
                     self._forget_prompt(prompt_id)
+            self._sweep_settled()
             now = time.monotonic()
-            for prompt_id in [key for key, at in self.settled.items() if now - at > SETTLED_KEPT_S]:
-                del self.settled[prompt_id]
             for prompt in result.get("prompts") or ():
                 # An approval still waiting when the chat was read: answerable by its id,
                 # though this link never saw it asked. One it heard settle after the
@@ -592,6 +591,15 @@ class _AuthorityLink:
         self.prompt_texts.pop(prompt_id, None)
         if isinstance(prompt_id, str) and prompt_id:
             self.settled[prompt_id] = time.monotonic()
+        # Swept where it grows too, so a link that hears settles and never
+        # reads the chat again keeps no entry past SETTLED_KEPT_S (notifier 773).
+        self._sweep_settled()
+
+    def _sweep_settled(self) -> None:
+        # Called with the lock held.
+        now = time.monotonic()
+        for prompt_id in [key for key, at in self.settled.items() if now - at > SETTLED_KEPT_S]:
+            del self.settled[prompt_id]
 
     def seen_approvals(self, sid: str, viewing: Any) -> Optional[list]:
         """The approvals ``sid`` waits on, oldest first, as this link's view of

@@ -7,6 +7,7 @@ import asyncio
 import pathlib
 import sys
 import threading
+import time
 import types
 
 import pytest
@@ -699,6 +700,18 @@ def test_a_views_own_record_answers_which_approvals_a_chat_waits_on(gateway, mon
     fresh = Transport()
     _call(chats, fresh, "session.resume", {"session_id": "w2", "omit_messages": True})
     assert chats.seen_approvals(fresh, "/home", "w2") == []
+    # A settled record runs out (notifier 773): once older than SETTLED_KEPT_S it stops masking a
+    # snapshot that lists the prompt, and a settle heard later sweeps it without another read.
+    stale = time.monotonic() - gateway_chats.SETTLED_KEPT_S - 1
+    link.settled["p5"] = stale
+    link.settled["gone"] = stale
+    link.write(_event("w1", "approval.settled", {"prompt_id": "p6"}, generation=5))
+    assert "gone" not in link.settled and "p5" not in link.settled and "p6" in link.settled
+    answers["session.resume"] = lambda request: {"result": {
+        "session_id": "w1", "execution_generation": 5, "subscription_id": "sub",
+        "prompts": [{"kind": "approval", "prompt_id": "p5", "execution_generation": 5, "command": "new"}]}}
+    _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
+    assert [row["request_id"] for row in chats.seen_approvals(transport, "/home", "w1")] == ["p5"]
     # Closing the view forgets what it followed of the chat.
     _call(chats, transport, "session.close", {"session_id": "w1"})
     assert chats.seen_approvals(transport, "/home", "w1") is None

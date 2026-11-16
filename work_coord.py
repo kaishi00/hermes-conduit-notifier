@@ -753,7 +753,8 @@ APP_WHY_BEFORE_S = 1800.0
 _FAILED = ("lost", "refused", "expired", "dropped")
 
 
-def app_items(store: work_store.Store, titles: dict[str, str], asked: Optional[list[dict]] = None) -> list[dict]:
+def app_items(store: work_store.Store, titles: Optional[dict[str, str]] = None,
+              asked: Optional[list[dict]] = None) -> list[dict]:
     """What the Bot Chat did to keep the work in step over the last day,
     newest first, for the Work panel: what the watch flagged, what the Bot
     Chat sent from turns it started itself (with how far each got) and what
@@ -761,19 +762,31 @@ def app_items(store: work_store.Store, titles: dict[str, str], asked: Optional[l
     with who said each. A flag's are the lines the watch read; a send's are
     what the board had in the half hour before it, which is what the Bot
     Chat could see, not a record of what it weighed. ``asked`` is
-    ``open_questions(store)`` when the caller has read it already."""
+    ``open_questions(store)`` when the caller has read it already.
+    ``titles`` defaults to the titles of the work the items cite, read
+    for those refs only (notifier issue 822)."""
     now = time.time()
     since = now - BOARD_AGE_S
     known = store.ledger(since=since - APP_WHY_BEFORE_S, kinds=("found", "assumes", "changed", "user", "flag"),
                          limit=400)
     by_id = {event["id"]: event for event in known}
+    listed = store.ledger(since=since, kinds=("flag", "sent"), limit=200)
+    # Every open question is listed, past both limits: each is counted as
+    # needing the user (counts.questions), so each has its card to answer on.
+    if asked is None:
+        asked = open_questions(store)  # one about resolved work is off the list
+    # The answered ones have their own dozen, the latest answered: one asked
+    # long ago and answered just now is among them.
+    answered = store.proposals_answered(since=since, limit=PROPOSALS_SHOWN)
+    if titles is None:
+        titles = store.titles([event["ref"] for event in known + listed]
+                              + [ref for row in asked + answered for ref in work_store.proposal_refs(row)])
 
     def line(event: dict) -> dict:
         return {"ref": event["ref"], "title": titles.get(event["ref"], ""), "kind": event["kind"],
                 "text": event["text"], "at": event["at"]}
 
     items: list[dict] = []
-    listed = store.ledger(since=since, kinds=("flag", "sent"), limit=200)
     states = store.outbox_states_of([event["source"].split(":")[1] for event in listed
                                      if event["kind"] == "sent" and event["source"].count(":") >= 2])
     for event in listed:
@@ -799,13 +812,6 @@ def app_items(store: work_store.Store, titles: dict[str, str], asked: Optional[l
                                    "not_arrived" if state.get("outcome") in _FAILED else "waiting"),
                          "why": [line(known_event) for known_event in before[-APP_WHY_ITEMS:]]})
         items.append(item)
-    # Every open question is listed, past both limits: each is counted as
-    # needing the user (counts.questions), so each has its card to answer on.
-    if asked is None:
-        asked = open_questions(store)  # one about resolved work is off the list
-    # The answered ones have their own dozen, the latest answered: one asked
-    # long ago and answered just now is among them.
-    answered = store.proposals_answered(since=since, limit=PROPOSALS_SHOWN)
     cards = []
     for row in asked + answered:
         refs = work_store.proposal_refs(row)
