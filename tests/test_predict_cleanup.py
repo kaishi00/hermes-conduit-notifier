@@ -116,3 +116,39 @@ def test_bad_usage_snapshot_does_not_skip_client_release(fork_runtime, has_helpe
     assert state.released == 1
     assert state.usage == []
     assert state.whitelist is None
+
+
+def test_a_failed_teardown_step_is_logged_and_never_fails_the_answer(fork_runtime, caplog):
+    # Issue 771: both releases failing leaves the fork's clients open, said
+    # at warning; a usage step's failure is a debug line.
+    parent, fork, review, state = fork_runtime
+
+    def release(agent, child, *, task):
+        raise RuntimeError("helper broke")
+
+    def release_clients():
+        raise RuntimeError("clients stuck")
+
+    review.release_cache_parity_fork = release
+    fork.release_clients = release_clients
+    caplog.set_level("DEBUG", logger=api.chats.logger.name)
+    assert api.chats._predict_fork_answer(parent, [], "What next?", {}) == "prediction"
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1 and "clients may stay open" in warnings[0].getMessage()
+    assert any("helper broke" in record.getMessage() for record in caplog.records if record.levelname == "DEBUG")
+    assert parent.resources_alive
+
+
+def test_a_helper_that_fails_after_releasing_is_released_again_harmlessly(fork_runtime):
+    # If the helper ever raised after releasing, the fallback releases once
+    # more: the answer stands and the chat stays open.
+    parent, fork, review, state = fork_runtime
+
+    def release(agent, child, *, task):
+        child.release_clients()
+        raise RuntimeError("after release")
+
+    review.release_cache_parity_fork = release
+    assert api.chats._predict_fork_answer(parent, [], "What next?", {}) == "prediction"
+    assert state.released == 2
+    assert parent.resources_alive and parent.memory_shutdowns == 0

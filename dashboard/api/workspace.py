@@ -282,12 +282,17 @@ def _pin_source(profile: Optional[str]) -> Callable[[str], tuple]:
     def source(path: str) -> tuple:
         try:
             target = str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
-            if boundary is not None:
-                real = os.path.realpath(target)
-                if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
-                    return None, "outside"
         except Exception:  # saved without a copy rather than not at all
             return None, "unreadable"
+        if boundary is not None:
+            # A path that can't be resolved can't be shown to be inside the
+            # folder: it says so, rather than that it can't be read.
+            try:
+                real = os.path.realpath(target)
+            except (OSError, ValueError):
+                return None, "outside"
+            if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
+                return None, "outside"
         return target, None
 
     return source

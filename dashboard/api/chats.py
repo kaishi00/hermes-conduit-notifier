@@ -414,24 +414,35 @@ def _predict_fork_answer(agent: Any, history: List[Dict[str, Any]], question: st
         # The fork shares the chat's session ID. Full teardown can release
         # the chat's memory, terminal, browser and file state too.
         release = getattr(background_review, "release_cache_parity_fork", None)
-        steps = [clear_thread_tool_whitelist]
+        # (what it does, the step, whether a failure can leave the fork's
+        # clients open). Each is logged when it fails, at warning when
+        # clients may stay open; none fails the answer.
+        steps = [("clear the tool whitelist", clear_thread_tool_whitelist, False)]
         if callable(release):
             def release_fork():
                 try:
                     release(agent, fork, task=PREDICT_TASK)
-                except Exception:
-                    # A bad usage snapshot can fail before the helper releases clients.
+                except Exception as exc:  # noqa: BLE001
+                    # A bad usage snapshot can fail before the helper releases
+                    # clients. In Hermes it releases last, so this never
+                    # releases twice; a second release is harmless anyway.
+                    logger.debug("Prediction fork release failed, releasing its clients: %s", exc)
                     fork.release_clients()
-            steps.append(release_fork)
+            steps.append(("release the fork", release_fork, True))
         else:
             # Older Hermes: keep usage attribution and release only clients.
-            steps.extend((lambda: _record_review_usage_to_parent(agent, _snapshot_review_usage(fork)),
-                          lambda: fork.release_clients()))
-        for step in steps:
+            steps.extend((
+                ("record the fork's usage", lambda: _record_review_usage_to_parent(agent, _snapshot_review_usage(fork)), False),
+                ("release the fork's clients", lambda: fork.release_clients(), True),
+            ))
+        for what, step, frees_clients in steps:
             try:
                 step()
-            except Exception:  # noqa: BLE001 — teardown never fails the answer
-                pass
+            except Exception as exc:  # noqa: BLE001 — teardown never fails the answer
+                if frees_clients:
+                    logger.warning("Prediction fork teardown couldn't %s; its clients may stay open: %s", what, exc)
+                else:
+                    logger.debug("Prediction fork teardown couldn't %s: %s", what, exc)
 
 
 def _predict_request(body: Any) -> Tuple[Any, Any, dict, Any]:

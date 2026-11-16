@@ -427,3 +427,48 @@ def test_a_source_gone_before_its_copy_leaves_no_descriptor(tmp_path):
     assert not target.exists()
     if before is not None:
         assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_a_row_whose_private_mode_fails_leaves_the_store_and_takes_its_copy(tmp_path, monkeypatch):
+    # Nothing that can fail runs after the store file is replaced (issue
+    # 813): a failure before it leaves the store as it was, the row's
+    # copy goes, and the save raises.
+    first = tmp_path / "a.txt"
+    first.write_text("one")
+    second = tmp_path / "b.txt"
+    second.write_text("two")
+    store = pins.PinStore(tmp_path / "home", clock=Clock())
+    kept = pathlib.Path(store.save({"item": _file_row(first)})["pin"]["kept_path"])
+    before = store.path.read_bytes()
+    real_chmod = pathlib.Path.chmod
+
+    def chmod(self, mode, *args, **kwargs):
+        if self.name.startswith(f".{store.path.name}."):
+            raise OSError("chmod refused")
+        return real_chmod(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "chmod", chmod)
+    with pytest.raises(OSError):
+        store.save({"item": _file_row(second)})
+    assert store.path.read_bytes() == before
+    assert [path for path in store.copies.rglob("*") if path.is_file()] == [kept]
+    assert not list(store.path.parent.glob(f".{store.path.name}.*.tmp"))
+
+
+def test_a_path_that_cannot_be_resolved_is_outside_not_unreadable(tmp_path, monkeypatch):
+    # Only the mapping's failure reads as unreadable (issue 813): a path the
+    # boundary check can't resolve can't be shown inside the folder.
+    root = tmp_path / "root"
+    root.mkdir()
+    _hermes_file_routes(monkeypatch, locked_root=root)
+    source = api.workspace._pin_source(None)
+    assert source(str(root / "in.md")) == (str(root / "in.md"), None)
+    real_realpath = os.path.realpath
+
+    def realpath(path, *args, **kwargs):
+        if str(path).endswith("odd.md"):
+            raise ValueError("can't resolve")
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(os.path, "realpath", realpath)
+    assert source(str(root / "odd.md")) == (None, "outside")

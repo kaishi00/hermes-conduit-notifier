@@ -75,6 +75,10 @@ def test_the_same_command_matches_whatever_launches_it():
     assert not relaunch._same_command([*COMMAND[:-1], "9120"], COMMAND)
     assert not relaunch._same_command(["python.exe"], COMMAND)
     assert not relaunch._same_command(["python.exe", "x"], ["python.exe"])
+    # A supervisor that adds its own after them (issue 778), or both sides.
+    assert relaunch._same_command(["python.exe", *COMMAND[1:], "--supervised"], COMMAND)
+    assert relaunch._same_command(["python.exe", "-I", *COMMAND[1:], "--supervised"], COMMAND)
+    assert not relaunch._same_command(["python.exe", *COMMAND[1:3], "--other", *COMMAND[3:]], COMMAND)
 
 
 def test_a_log_whose_header_cant_be_written_is_closed(monkeypatch, tmp_path):
@@ -137,3 +141,18 @@ def test_an_old_dashboard_that_never_exits_is_not_joined_by_a_second(monkeypatch
     monkeypatch.setattr(relaunch, "wait_for_exit", lambda pid: False)
     monkeypatch.setattr(relaunch, "start", lambda *a: pytest.fail("started while the old one runs"))
     assert relaunch.main(["windows_relaunch.py", "321", json.dumps(COMMAND), str(tmp_path / "log")]) == 1
+
+
+def test_an_old_dashboard_that_never_exits_says_so(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(relaunch, "wait_for_exit", lambda pid: False)
+    assert relaunch.main(["windows_relaunch.py", "321", json.dumps(COMMAND), str(tmp_path / "log")]) == 1
+    assert "pid 321" in capsys.readouterr().err
+
+
+def test_without_psutil_the_note_is_said_once(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(relaunch, "wait_for_exit", lambda pid: True)
+    monkeypatch.setattr(relaunch, "_psutil", lambda: None)
+    monkeypatch.setattr(relaunch, "OTHER_START_GRACE_S", 1.2)
+    monkeypatch.setattr(relaunch, "start", lambda command, log: None)
+    assert relaunch.main(["windows_relaunch.py", "321", json.dumps(COMMAND), str(tmp_path / "log")]) == 0
+    assert capsys.readouterr().err.count("no psutil") == 1
