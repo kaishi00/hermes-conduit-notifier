@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException, Request, Response
 
-from . import capabilities, core, watch_tools
+from . import capabilities, core, self_update, watch_tools
 
 logger = core.logger
 router = core.router
@@ -546,6 +546,11 @@ def _pair_gateway_name(raw: Any, profile: Optional[str]) -> str:
     cleaned = "".join(c for c in raw if c.isprintable()).strip() if isinstance(raw, str) else ""
     if cleaned:
         return cleaned[:80]
+    # The bot's name, as the CLI's pairing names it (client.default_gateway_name,
+    # issue 2540); a bot with none keeps the host's name and its profile.
+    bot = self_update._bot_name(self_update._plugin_client())
+    if bot:
+        return bot[:80]
     import socket
 
     name = f"{socket.gethostname()} Hermes"

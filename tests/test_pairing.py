@@ -81,6 +81,17 @@ def test_a_named_profile_is_in_the_gateway_name(tmp_path):
     assert calls[0][2].endswith("Hermes (coder)")
 
 
+def test_an_unnamed_pairing_takes_the_bots_name(tmp_path, monkeypatch):
+    # Not the container's id a Docker host's name is (issue 2540).
+    monkeypatch.setattr(api.self_update, "_bot_name", lambda client: "Cortana")
+    calls = []
+    api.pairing.pair_profile({"pairing_code": CODE}, profile="coder", path=tmp_path / "s.json", claim=_recording_claim(calls))
+    assert calls[0][2] == "Cortana"
+    api.pairing.pair_profile({"pairing_code": CODE, "gateway_name": "Studio"}, path=tmp_path / "s.json",
+                             claim=_recording_claim(calls))
+    assert calls[1][2] == "Studio", "a name the pairing gives wins"
+
+
 def test_without_a_relay_url_the_current_then_default_relay_is_used(tmp_path):
     path = tmp_path / "s.json"
     calls = []

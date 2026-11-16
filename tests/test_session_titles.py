@@ -235,3 +235,14 @@ def test_a_reply_and_its_call_carry_the_bots_name(sent, monkeypatch, tmp_path):
     event = calls.call_event({"id": "w" * 12, "title": "Deploy", "session_ids": ["s1"]}, "done", session_id="s1", profile="default")
     assert event["profile"] == "default"
     assert event["profile_name"] == "Nova"
+    # The call says who's calling (issue 2540), and what it waits on.
+    assert event["title"] == "Nova wants to talk"
+    asked = calls.call_event({"id": "q" * 12, "title": "", "session_ids": ["s1"]}, "question", session_id="s1", profile="default")
+    assert asked["body"] == "Nova has a question for you."
+    (tmp_path / "profile.yaml").write_text("display_name: default\n", encoding="utf-8")
+    titles._names.clear()
+    unnamed = calls.call_event({"id": "u" * 12, "title": "", "session_ids": ["s1"]}, "approval", session_id="s1", profile="default")
+    assert unnamed["title"] == "Hermes wants to talk", "an unnamed main bot is Hermes, as Conduit names it"
+    assert unnamed["body"] == "Hermes needs your OK."
+    assert titles.shown_name("", "research") == "Research"
+    assert titles.shown_name("research", "research") == "Research", "a name that is only the id"

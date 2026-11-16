@@ -2644,7 +2644,7 @@ test('phone changes: an alert notifies, a background change wakes silently, and 
     assert.deepEqual(await send('phone:ch_000000000000000001'), { status: 202, json: { accepted: true, delivered: true } });
     const [alert] = captured();
     assert.equal(alert.notification.payload.aps.category, 'PHONE_CHANGE');
-    assert.equal(alert.notification.payload.aps.alert.title, 'Hermes has a change for you');
+    assert.equal(alert.notification.payload.aps.alert.title, 'Work has a change for you');
     assert.equal(alert.notification.pushType, undefined, 'an ordinary alert');
 
     assert.deepEqual(await send('phone:ch_000000000000000002', { mode: 'background' }),

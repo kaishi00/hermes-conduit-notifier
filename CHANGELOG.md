@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.24 (2026-11-16)
+
+### New and improved
+
+- Calls and notifications use your bot's name instead of "Hermes", as in "Cortana wants to talk". Pairing names this host after the bot too, rather than after its computer (which in Docker is a random container id).
+
 ## 0.177.23 (2026-11-16)
 
 ### Fixes
