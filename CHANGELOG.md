@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.23 (2026-11-16)
+
+### Fixes
+
+- A finished room invite you remove from Group Chats stays removed on every phone, rather than coming back on another one.
+
 ## 0.177.22 (2026-11-16)
 
 ### Fixes

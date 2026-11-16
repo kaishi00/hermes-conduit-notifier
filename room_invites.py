@@ -422,6 +422,24 @@ class Rooms:
         self.flush()
         return self._shown_invite(self.store.read()["invites"][key])
 
+    def remove_invite(self, link_id: Any, room_id: Any) -> dict[str, Any]:
+        """Takes the invite to ``room_id`` over the Link ``link_id`` off Group Chats on every phone of this
+        installation: one that started, ran out, or was cancelled or ended. It stays kept (a started room's copy and
+        its agents' grants are as they were) and shows with ``removed`` true until it's forgotten. One still waiting
+        on an answer or on its room stays (``not_finished``). Returns the invite as the join card shows it."""
+        key = f"{link_id}/{room_id}"
+        with self._answering():
+            invite = self.store.read()["invites"].get(key) if isinstance(link_id, str) and isinstance(
+                room_id, str) else None
+            if invite is None:
+                raise RoomsError("no_invite", "This Hermes wasn't invited to that room over that Link", 404)
+            if _invite_status(invite, int(self.clock())) in ("waiting", "joined"):
+                raise RoomsError("not_finished", "An invite waiting on an answer or on its room can't be removed", 409)
+            if not invite.get("removed"):
+                with self.store.update() as state:
+                    state["invites"][key]["removed"] = True
+            return self._shown_invite(self.store.read()["invites"][key])
+
     def leave(self, link_id: Any, room_id: Any, profiles: Any = None) -> dict[str, Any]:
         """Takes this installation's agents out of the started room ``room_id`` the Link ``link_id`` invited it to
         (R6): those of ``profiles``, or every one still in (None). Each is undone here (unbound, its grant's scope
@@ -1260,6 +1278,8 @@ class Rooms:
                           "choices": self._filled(profile, invite["room_id"], people).as_dict()}
                          for profile in self._profiles()],
             "reason": invite["reason"],
+            # Taken off Group Chats on every phone (remove_invite).
+            "removed": bool(invite.get("removed")),
             # Joined with no agents, and whether the home's plugin takes that (PERSON).
             "just_me": bool(invite.get("just_me")),
             "just_me_offered": PERSON in ((self.link(invite["link"]) or {}).get("kinds") or ())
