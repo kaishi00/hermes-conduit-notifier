@@ -558,6 +558,19 @@ async def post_room_invite_answer(request: Request, response: Response) -> Any:
         mailbox=True)
 
 
+@router.post("/rooms/invites/remove")
+async def post_room_invite_remove(request: Request, response: Response) -> Any:
+    """Takes the invite to ``room_id`` over the Link ``link`` off Group
+    Chats on every phone: one that started, ran out, or was cancelled or
+    ended. It's kept, shown with ``removed`` true; one still waiting on an
+    answer or on its room stays."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await core._read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"link": ..., "room_id": ...}')
+    return await _room_invites_route(None, lambda rooms: {"invite": rooms.remove_invite(
+        body.get("link"), body.get("room_id"))}, "remove")
+
+
 @router.post("/rooms/leave")
 async def post_room_leave(request: Request, response: Response) -> Any:
     """Takes your agents out of the started room ``room_id`` the Link

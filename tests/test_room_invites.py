@@ -1251,6 +1251,30 @@ def test_a_withdrawn_draft_tells_everyone_who_hasnt_declined_and_their_joins_are
     assert refused.value.code == "not_waiting"
 
 
+def test_a_finished_invite_removed_is_kept_and_shows_removed_on_every_phone(rooms):
+    room_id = draft(rooms)["room_id"]
+
+    def refused(link_id):
+        with pytest.raises(invites_module.RoomsError) as refusal:
+            rooms.laifu.remove_invite(link_id, room_id)
+        return refusal.value.code, refusal.value.status
+
+    # Waiting on an answer, then on its room: it stays.
+    assert refused("link1") == ("not_finished", 409)
+    answer(rooms, "laifu", room_id, "link1", LAIFUS)
+    assert refused("link1") == ("not_finished", 409)
+    assert refused("link9") == ("no_invite", 404)
+    assert invite_of(rooms, "laifu", room_id)["removed"] is False
+    rooms.furina.withdraw(room_id)
+
+    shown = rooms.laifu.remove_invite("link1", room_id)
+
+    assert (shown["status"], shown["reason"], shown["removed"]) == ("cancelled", "withdrawn", True)
+    assert invite_of(rooms, "laifu", room_id)["removed"] is True
+    # Again is the same.
+    assert rooms.laifu.remove_invite("link1", room_id)["removed"] is True
+
+
 def test_a_draft_that_lapsed_tells_who_hasnt_declined_and_their_joins_are_undone(rooms):
     room_id = draft(rooms)["room_id"]
     answer(rooms, "laifu", room_id, "link1", LAIFUS)

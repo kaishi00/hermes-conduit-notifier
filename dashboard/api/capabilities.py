@@ -245,6 +245,9 @@ ROUTE_CAPABILITIES = (
     # /rooms/drafts, /rooms/invites and /rooms/people: rooms with people
     # you've linked, from the draft to the start (Linked Rooms).
     "room-invites",
+    # POST /rooms/invites/remove: a finished invite taken off Group Chats on
+    # every phone, shown with removed true (hermes-conduit#2644).
+    "room-invites-remove",
     # ?conduit_profile= on the routes that need the dashboard process (Local
     # Live, the speech server and Grok Live sockets, Watch grants, chat
     # takeover, Desktop views, predictions): any profile's, on a Hermes that

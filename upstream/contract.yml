@@ -682,6 +682,7 @@ routes:
   - GET /rooms/identity
   - GET /rooms/invites
   - POST /rooms/invites/answer
+  - POST /rooms/invites/remove
   - POST /rooms/leave
   - DELETE /rooms/links
   - GET /rooms/links
