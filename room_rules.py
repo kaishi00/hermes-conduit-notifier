@@ -1114,6 +1114,9 @@ def _lifted(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn
     now = time.monotonic()
     with _lock:
         known = _own_verdicts.get(key)
+        if known is not None:
+            # Least recently used goes first at the cap, not first written.
+            _own_verdicts.move_to_end(key)
     if known is not None and known[0] > now and known[1] == inputs:
         lifted, others = known[2], known[3]
     else:
