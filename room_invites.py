@@ -437,8 +437,13 @@ class Rooms:
                 raise RoomsError("not_finished", "An invite waiting on an answer or on its room can't be removed", 409)
             if not invite.get("removed"):
                 with self.store.update() as state:
-                    state["invites"][key]["removed"] = True
-            return self._shown_invite(self.store.read()["invites"][key])
+                    invite = state["invites"].get(key)
+                    if invite is not None:
+                        invite["removed"] = True
+            invite = self.store.read()["invites"].get(key)
+            if invite is None:
+                raise RoomsError("no_invite", "This Hermes wasn't invited to that room over that Link", 404)
+            return self._shown_invite(invite)
 
     def leave(self, link_id: Any, room_id: Any, profiles: Any = None) -> dict[str, Any]:
         """Takes this installation's agents out of the started room ``room_id`` the Link ``link_id`` invited it to
