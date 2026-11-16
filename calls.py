@@ -45,7 +45,10 @@ from .events import push_event
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
-CALL_TITLE = "Hermes wants to talk"
+# A call's title names the bot that calls, as the ring does (issue 2540):
+# "Cortana wants to talk", and "Hermes wants to talk" for a main bot nobody
+# named. Conduit writes its own from the push's `profile_name`.
+CALL_TITLE = "{name} wants to talk"
 # Seconds to wait before each delivery attempt.
 DELIVERY_DELAYS_S = (0.0, 2.0, 4.0)
 # How long a turn's end waits for its call requests to reach the relay. A cron
@@ -762,11 +765,13 @@ def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile:
     title = str(watch.get("title") or "")
     reason = str(watch.get("reason") or "")
     subject = f"“{title}”" if title else "Your job"
+    given = session_titles.bot_name()
+    name = session_titles.shown_name(given, profile)
     if outcome in ("approval", "question"):
-        lead = "Hermes needs your OK" if outcome == "approval" else "Hermes has a question for you"
+        lead = f"{name} needs your OK" if outcome == "approval" else f"{name} has a question for you"
         body = f"{lead}: {reason}" if reason else f"{lead}."
     elif watch.get("origin") == "alert":
-        body = "Hermes ran into a problem with your request."
+        body = f"{name} ran into a problem with your request."
     else:
         # What Hermes said it calls about, else how the job ended.
         body = reason or {
@@ -785,8 +790,8 @@ def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile:
         identifier=f"call:{watch['id']}",
         session_id=session_id,
         profile=profile,
-        profile_name=session_titles.bot_name(),
-        title=CALL_TITLE,
+        profile_name=given,
+        title=CALL_TITLE.format(name=name),
         title_label="call.requested",
         body=body,
         call=call,

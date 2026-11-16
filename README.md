@@ -2522,7 +2522,8 @@ it's done". Conduit asks this profile right away to watch the job's own
 Hermes session, held while the call goes on. The first time a turn of that
 session ends after you hang up, the plugin sends a **call request** through
 the relay instead of the usual "Response ready" or "Turn failed" push: a
-"Hermes wants to talk" notification whose Talk button opens Live Voice in the
+"Hermes wants to talk" notification, named for the bot that calls ("Cortana
+wants to talk"), whose Talk button opens Live Voice in the
 job's chat, where Hermes opens with how the job went. With relay 0.9+ and a
 Conduit build that rings, it arrives as a native incoming call (CallKit)
 instead, and the notification is the fallback. With relay 0.10+ and a Watch
@@ -5360,7 +5361,8 @@ family adds its name here.
 makes the same claim as `hermes conduit-push pair` for that profile and saves
 the credential in its `conduit-push.json`. `relay_url` is optional (the
 profile's current relay, else push.milim.dev) and must be a bare http(s) URL;
-the claim carries only the code and the gateway name, never follows redirects,
+the claim carries only the code and the gateway name (the profile's bot's name
+when the body names none, else the host's name and the profile), never follows redirects,
 and the answer never includes the credential:
 `{ok, paired, installation_id, gateway_id, gateway_name, relay_url}`. A
 re-pair keeps the profile's redaction choice; it keeps the encryption key when

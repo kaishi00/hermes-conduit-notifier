@@ -98,8 +98,15 @@ def _bot_name(home: Any) -> str:
     one. A name that is only the id names it no more than the id (Conduit's
     BotProfile.displayLabel). A name given the main bot in Conduit stays on
     the phone, so the push says Hermes and the phone swaps the name in."""
-    given = _given_name(home)
-    profile = _profile_of(home)
+    return shown_name(_given_name(home), _profile_of(home))
+
+
+def shown_name(given: str, profile: str) -> str:
+    """_bot_name's rule for a name already read (bot_name()) and its profile
+    id: the given name, else the id capitalized, and "Hermes" for the main
+    bot. Calls and the pairing's default name say it (issue 2540)."""
+    given = " ".join(str(given or "").split())
+    profile = str(profile or "").strip() or "default"
     if given and given != profile:
         return given
     if profile.lower() == "default":

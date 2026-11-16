@@ -219,13 +219,27 @@ def remove_state(credential: str | None = None, *, unpaired: bool = False) -> No
             pass
 
 
+def default_gateway_name() -> str:
+    """What a pairing names this gateway at the relay, and so in Conduit's
+    list, when nobody named it: the profile's bot's name, else the host's,
+    which in Docker is only the container's id (issue 2540)."""
+    try:
+        from . import session_titles
+
+        bot = session_titles.bot_name()
+    except Exception:  # noqa: BLE001 - a name is never worth the pairing
+        logger.debug("No bot name for the pairing", exc_info=True)
+        bot = ""
+    return bot or f"{socket.gethostname()} Hermes"
+
+
 def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: str = "") -> dict[str, Any]:
     """Claim a pairing code and save the pairing (rules in relay_urls.py).
 
     A bad relay URL raises RelayURLError (a ValueError) before the code is sent.
     """
     base = check_claim_base(relay_url)
-    name = gateway_name.strip() or f"{socket.gethostname()} Hermes"
+    name = gateway_name.strip() or default_gateway_name()
     body = _request(
         f"{base}/v1/pairings/claim",
         method="POST",
