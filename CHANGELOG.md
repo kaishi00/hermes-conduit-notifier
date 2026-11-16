@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.25 (2026-11-16)
+
+### Fixes
+
+- A call or a calendar change from a named bot no longer says the bot's name twice in one notification.
+- Pairing from Conduit still works when the bot's name can't be read, and Conduit and `hermes conduit-push pair` name this host the same way.
+
 ## 0.177.24 (2026-11-16)
 
 ### New and improved

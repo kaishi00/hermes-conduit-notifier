@@ -759,6 +759,13 @@ test('a call names the bot that calls, with previews off too (issue 2540)', () =
   assert.match(payload.aps.alert.body, /^Tap to talk to Cortana\.\nSession: /, 'the profile line would only say it again');
   const scout = notificationFor(validateEvent({ ...callBody, profile: 'scout' }), { show_previews: false }, { id: 'gw-1' }).payload;
   assert.equal(scout.aps.alert.title, 'Scout wants to talk', 'a bot with no name by its profile, as Conduit shows it');
+  const full = notificationFor(named, { show_previews: true }, { id: 'gw-1' }).payload;
+  assert.deepEqual(full.aps.alert, { title: 'Cortana wants to talk', body: '“Check the server” finished.' }, 'no subtitle saying it again');
+  const older = notificationFor(validateEvent({ ...callBody, profile_name: 'Cortana' }), { show_previews: true }, { id: 'gw-1' }).payload;
+  assert.equal(older.aps.alert.subtitle, 'Cortana', "an older plugin's Hermes title keeps the subtitle");
+  const change = notificationFor(validateEvent({ ...phoneBody, profile_name: 'Cortana' }), {}, { id: 'gw-1' }).payload;
+  assert.equal(change.aps.alert.title, 'Cortana has a change for you');
+  assert.doesNotMatch(change.aps.alert.body, /Profile:/, 'a title that names the bot drops the profile line too');
   const done = notificationFor(validateEvent({ ...callBody, type: 'background_task.finished', profile_name: 'Cortana' }), { show_previews: false }, { id: 'gw-1' }).payload;
   assert.match(done.aps.alert.body, /Profile: Cortana/, 'copy that names no bot keeps the profile line');
 });

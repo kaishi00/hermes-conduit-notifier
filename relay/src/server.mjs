@@ -1136,7 +1136,10 @@ function notificationFor(event, preferences, gateway = undefined) {
   const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event, namesBot(event.type));
   // With the reply as the body, the profile moves to the subtitle, as
   // Conduit's own copy shows it.
-  const subtitle = preferences.show_previews && event.body ? profileLine(event, title) : '';
+  // A call's title names its bot ("Cortana wants to talk", issue 2540); an
+  // older plugin's "Hermes wants to talk" keeps the subtitle.
+  const callNamesBot = event.type === 'call.requested' && String(title).startsWith(`${profileName(event)} `);
+  const subtitle = preferences.show_previews && event.body && !callNamesBot ? profileLine(event, title) : '';
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
   // Approval, clarify and call pushes wait on the user, so they chime by
   // default: `!== false` keeps installations whose stored preferences predate
@@ -1573,9 +1576,11 @@ function genericCopy(type, name = 'Hermes') {
   return { title: 'Response ready', body: `${name} has finished responding.` };
 }
 
-// Whether a type's generic body names the bot.
+// Whether a type's generic copy names the bot, in its title or its body.
 function namesBot(type) {
-  return genericCopy(type, 'A').body !== genericCopy(type, 'B').body;
+  const a = genericCopy(type, 'A');
+  const b = genericCopy(type, 'B');
+  return a.title !== b.title || a.body !== b.body;
 }
 
 // A kind the phone's preferences don't name yet (stored before it existed)
