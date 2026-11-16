@@ -101,8 +101,7 @@ def test_an_unnamed_pairing_takes_the_bots_name(tmp_path, monkeypatch):
     assert client.default_gateway_name("coder") == "Cortana"
     sent = []
     monkeypatch.setattr(client, "_request", lambda url, **kwargs: sent.append(kwargs["payload"]) or {"credential": "c", "installation_id": "i"})
-    monkeypatch.setattr(client, "save_state", lambda state: None)
-    monkeypatch.setattr(client, "load_state", lambda: None)
+    monkeypatch.setattr(client, "state_path", lambda: tmp_path / "cli-pairing.json")
     client.claim_pairing(CODE, relay_url="https://relay.example")
     assert sent[-1]["gateway_name"] == "Cortana"
     client.claim_pairing(CODE, relay_url="https://relay.example", gateway_name="Studio")

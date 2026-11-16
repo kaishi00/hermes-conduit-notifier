@@ -224,23 +224,27 @@ def default_gateway_name(profile: str | None = None) -> str:
     list, when nobody named it: the profile's bot's name, else the host's,
     which in Docker is only the container's id (issue 2540), with the
     profile when it isn't the main one. Conduit's Pair names it the same
-    (dashboard/api/pairing.py). `profile`: this home's when not given."""
+    (dashboard/api/pairing.py). `profile`: this home's when not given, or
+    "current"."""
     bot = ""
     try:
         from . import session_titles
 
-        if profile is None:
+        # None, "" or "current": the profile whose home this runs in (the
+        # dashboard scopes its home to the pairing's profile).
+        if profile is None or profile.strip().lower() in ("", "current"):
             home = session_titles._home()
             profile = session_titles._profile_of(home) if home is not None else ""
         bot = session_titles.bot_name()
     except Exception:  # noqa: BLE001 - a name is never worth the pairing
         logger.debug("No bot name for the pairing", exc_info=True)
     scoped = (profile or "").strip()
+    main = scoped.lower() in ("", "default", "current")
     # A name that is only the profile id names it no more than the id.
-    if bot and bot.lower() != (scoped or "default").lower():
+    if bot and bot.lower() != ("default" if main else scoped).lower():
         return bot[:80]
     name = f"{socket.gethostname()} Hermes"
-    return (name if scoped.lower() in ("", "default") else f"{name} ({scoped})")[:80]
+    return (name if main else f"{name} ({scoped})")[:80]
 
 
 def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: str = "") -> dict[str, Any]:

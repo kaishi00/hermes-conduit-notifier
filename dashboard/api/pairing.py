@@ -550,7 +550,7 @@ def _pair_gateway_name(raw: Any, profile: Optional[str]) -> str:
     # names it (client.default_gateway_name, issue 2540). A plugin that won't
     # load still pairs, by the host's name.
     try:
-        return self_update._plugin_client().default_gateway_name(profile or "")
+        return self_update._plugin_client().default_gateway_name(profile)
     except Exception:  # noqa: BLE001 - a name is never worth the pairing
         logger.debug("Conduit plugin: no bot name for the pairing", exc_info=True)
     import socket
