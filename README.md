@@ -4977,7 +4977,14 @@ installation's):
   `disbanded`). `profiles` are each of this Hermes' profiles with its choices
   for the room. `just_me` is true once you joined with no agents, and
   `just_me_offered` whether their plugin takes that and the room could
-  start that way (0.167.5+).
+  start that way (0.167.5+). `removed` is true once it was taken off Group
+  Chats (0.177.23+).
+- `POST /rooms/invites/remove` with `{"link", "room_id"}` (capability
+  `room-invites-remove`, 0.177.23+): takes a finished invite (started, ran
+  out, cancelled or ended) off Group Chats on every phone, answering
+  `{"invite": ...}` with `removed` true. It's kept until it's forgotten a
+  month after it ended. One still waiting on an answer or on its room is
+  refused with `not_finished` (409).
 - `POST /rooms/invites/answer` with `{"link", "room_id", "agents": [...]}`:
   `{"invite": ...}`. No agents declines, and the same answer again is the
   first. With `"just_me": true` and no agents, you join with none of your

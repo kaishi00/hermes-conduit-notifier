@@ -2208,6 +2208,8 @@ def test_routes_start_now_and_take_a_draft_back(routes):
      "no_invite"),
     ("furina", "POST", "/rooms/drafts/remove", {"room_id": "conduit-nope", "member": "laifu"}, None, 404,
      "no_draft"),
+    ("laifu", "POST", "/rooms/invites/remove", {"link": "link1", "room_id": "conduit-nope"}, None, 404,
+     "no_invite"),
 ])
 def test_routes_refuse_with_the_reasons_code(routes, name, method, path, body, params, status, code):
     refused = routes.call(name, method, path, json=body, params=params)
@@ -2217,7 +2219,7 @@ def test_routes_refuse_with_the_reasons_code(routes, name, method, path, body, p
 
 
 @pytest.mark.parametrize("path", ["/rooms/drafts", "/rooms/drafts/start", "/rooms/invites/answer", "/rooms/leave",
-                                  "/rooms/drafts/remove"])
+                                  "/rooms/drafts/remove", "/rooms/invites/remove"])
 def test_routes_refuse_a_body_that_isnt_an_object(routes, path):
     refused = routes.call("furina", "POST", path, json=["Zoo trip"])
     assert refused.status_code == 400 and refused.headers["cache-control"] == "no-store"
