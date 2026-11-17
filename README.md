@@ -1704,8 +1704,11 @@ question or a small task doesn't start a workstream. Change it in Conduit
   snapshot and offers Decline and Revoke and stop. This starts one recipient
   workstream, preserves native command approvals, and cannot authorize further
   delegation or a resumed turn. See [scoped task grants](docs/scoped-task-grants.md)
-  for supported authentication and runtime limits. Existing app cards remain
-  ordinary data-only asks; this consent flow is dashboard-only.
+  for supported authentication and runtime limits. A compatible companion app also
+  offers a dedicated full-snapshot card after explicit owner enrollment of this
+  phone’s separate signing key. Generic app cards and ordinary asks remain data
+  only; notification encryption alone is not consent. Phone source requires
+  macOS/iPhone validation before this draft contribution is ready.
   The other bot needs workstreams on too: a bot whose workstreams are off
   has no coordinator to take an ask or a note, so the Bot Chat messages it
   with Hermes' own `message_agent`, which the policy lets through to such a

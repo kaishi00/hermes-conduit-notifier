@@ -119,6 +119,18 @@ CREATE TABLE IF NOT EXISTS task_grants (
     acted_at REAL NOT NULL DEFAULT 0,
     work_ref TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS consent_devices (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    record TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS consent_challenges (
+    id TEXT PRIMARY KEY,
+    message TEXT NOT NULL,
+    expires REAL NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS task_grant_sessions (
     grant_id TEXT PRIMARY KEY,
     profile TEXT NOT NULL,

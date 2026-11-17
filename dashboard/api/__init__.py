@@ -46,6 +46,7 @@ MODULES = (
     "rooms",
     "workspace",
     "workstreams",
+    "phone_consent",
     "waiting",
     "boards",
     "capabilities",

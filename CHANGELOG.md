@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### New and improved
 
-- Review an explicit scoped task between local bots in the dashboard, approve it once, decline it, or revoke and stop it. Ordinary bot asks and native command approvals keep their existing behavior.
+- Review an explicit scoped task between local bots in the dashboard or a compatible owner-enrolled phone, approve it once, decline it, or revoke and stop it. Phone receipts use a separate signing key and one-use challenges; pairing encryption alone grants no consent. Ordinary bot asks and native command approvals keep their existing behavior.
 
 ## 0.177.26 (2026-11-16)
 

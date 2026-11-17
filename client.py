@@ -134,6 +134,7 @@ def save_state(value: dict[str, Any]) -> None:
     path = state_path()
     with state_file_lock(path):
         _write_state(value, path)
+    _consent_pairing_changed(path)
 
 
 def update_state(change: Callable[[dict[str, Any]], bool | None]) -> bool:
@@ -147,6 +148,7 @@ def update_state(change: Callable[[dict[str, Any]], bool | None]) -> bool:
         if not state or change(state) is False:
             return False
         _write_state(state, path)
+    _consent_pairing_changed(path)
     return True
 
 
@@ -217,6 +219,13 @@ def remove_state(credential: str | None = None, *, unpaired: bool = False) -> No
             path.unlink()
         except FileNotFoundError:
             pass
+    _consent_pairing_changed(path)
+
+
+def _consent_pairing_changed(path: Path) -> None:
+    from . import phone_consent
+
+    phone_consent.pairing_file_changed(path)
 
 
 def default_gateway_name(profile: str | None = None) -> str:
@@ -280,6 +289,7 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
         if previous.get("redact_key"):
             state["redact_key"] = previous["redact_key"]
         _write_state(state, path)
+    _consent_pairing_changed(path)
     _revoke_replaced(previous, state["credential"], state)
     return state
 

@@ -70,6 +70,13 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  scoped phone consent: >-
+    dashboard/api/phone_consent.py reuses workstreams._grant_actor without widening native auth.
+    Owner-enrolled Ed25519 keys, current-pairing bindings and one-use signed challenges adapt
+    deliberate phone taps to the same immutable grant CAS. Worker hooks and native session
+    interruption remain required; notification encryption, generic taps and bot tokens cannot
+    issue consent. Native password/cookie and provider-verified bearer coverage is in
+    tests/native_phone_consent_auth.py; Swift/rendered/physical validation remains a draft gate.
   scoped dashboard consent: >-
     dashboard/api/workstreams.py revalidates the actual interactive owner request with
     dashboard_auth.middleware.peek_session and registry.list_interactive_providers,
@@ -643,6 +650,10 @@ routes:
   - PUT /notifications/reply-sources
   - POST /pair
   - GET /personality
+  - GET /phone-consent
+  - POST /phone-consent/challenge
+  - POST /phone-consent/receipt
+  - POST /phone-consent/revoke-device
   - POST /phone/exchange
   - POST /phone/ingest
   - POST /phone/key

@@ -166,6 +166,10 @@ def capable(tool: Any, target: Path | None = None) -> bool:
 def act(tool: Any, home: Path, grant_id: str, action: str, body: dict, actor: dict) -> dict:
     if action not in ACTIONS or set(body) != {"digest"} or not isinstance(body.get("digest"), str):
         return {"ok": False, "error": "invalid", "note": "Send only the displayed snapshot digest."}
+    from . import phone_consent
+
+    if not phone_consent.actor_valid(home, actor):
+        return refused("This phone enrollment is no longer valid.")
     grant = get(home, grant_id)
     if grant is None or body["digest"] != grant["digest"] or digest(grant["snapshot"]) != grant["digest"]:
         return refused("The displayed scoped task does not match this request.")
@@ -204,7 +208,7 @@ def act(tool: Any, home: Path, grant_id: str, action: str, body: dict, actor: di
     # persisted grant and participants again before broker prompt submission;
     # worker hooks and _start's late-stop path cover an interrupt racing it.
     try:
-        if get(home, grant_id)["status"] != "consumed":
+        if get(home, grant_id)["status"] != "consumed" or not phone_consent.actor_valid(home, actor):
             return refused()
         sender, target = validate(tool, home, snapshot)
         target_store = work_store.Store(target)
@@ -343,6 +347,10 @@ def worker_valid(tool: Any, home: Path, worker: Any) -> bool:
         if (not grant or grant["status"] != "consumed" or not binding
                 or not registration_matches(binding, worker)
                 or worker.status not in ("starting", "running", "needs_you")):
+            return False
+        from . import phone_consent
+
+        if not phone_consent.actor_valid(home, grant["actor"]):
             return False
         _, target = validate(tool, home, grant["snapshot"])
         return (target.resolve() == home.resolve() and worker.goal == grant["snapshot"]["task"]

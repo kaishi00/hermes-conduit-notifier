@@ -59,6 +59,7 @@ they run:
     workstreams           Bot workstreams: the Work panel, and Reply, Stop,
                           Continue and Check first on a workstream, and
                           the bot's work settings (Edit Bot > Work)
+    phone_consent         Owner-enrolled phone receipts for exact scoped tasks
     waiting               Hermes is waiting on you: every chat with an
                           approval or a question waiting, for the Needs you
                           list

@@ -20,6 +20,7 @@ router = core.router
 # stable feature ids, one per route family; add one with every new route.
 
 ROUTE_CAPABILITIES = (
+    "phone-scoped-consent-v1",
     "gemini-live",
     "qwen-live",
     "web-search",

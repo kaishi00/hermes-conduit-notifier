@@ -176,6 +176,7 @@ def test_every_capability_names_a_served_route_family():
         "room-run-work": "/rooms/choices",
         "link-asks": "/links/rules",
         "bot-workstreams": "/workstreams",
+        "phone-scoped-consent-v1": "/phone-consent",
         "waiting-list": "/waiting",
         "bot-work-settings": "/workstreams/settings",
         "work-adopt": "/workstreams/adopt",

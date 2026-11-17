@@ -706,6 +706,7 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
                 if field in previous:
                     state[field] = previous[field]
         _save_pairing_state(path, state)
+    core._plugin_package_module("phone_consent").pairing_file_changed(path)
     old_credential, old_relay = previous.get("credential"), previous.get("relay_url")
     if isinstance(old_credential, str) and old_credential and old_credential != state["credential"] \
             and isinstance(old_relay, str) and old_relay:

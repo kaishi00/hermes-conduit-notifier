@@ -30,7 +30,7 @@ from test_work import ROOT, hermes, on, bots, work, call, BOT_CHAT, store_mod
 from test_work_grants import recipient_sessions, TASK, SCOPE, BASE
 
 
-def main():
+def main(after=None):
     home = HOME
     mp = pytest.MonkeyPatch()
     fake = hermes.__wrapped__(home, mp)
@@ -101,6 +101,8 @@ def main():
                       "cross_origin": 403, "replay": 409, "revoke": 200, "worker_status": "stopped",
                       "session_creates": 1, "prompt_submits": 1, "approval_responses": 0, "config_writes": 0,
                       "auth": "native unchanged core", "rpc": "FakeHermes", "real_browser_or_model": False}))
+    if after is not None:
+        after(home, api, owner, client, fake, homes)
     mp.undo()
 
 

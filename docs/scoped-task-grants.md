@@ -21,9 +21,9 @@ The scoped workstream's brief identifies this newly approved exact task and scop
 
 ## Alternatives and compatibility
 
-Reading existing proposal status is rejected: machine and human answers share it. Rewriting global data-only prompts is rejected: it turns unrelated reports into instructions. Native-client/core changes are unnecessary for a dashboard-only explicit issuance flow and are out of scope. Existing clients continue to use ordinary asks and their current cards unchanged.
+Reading existing proposal status is rejected: machine and human answers share it. Rewriting global data-only prompts is rejected: it turns unrelated reports into instructions. Core changes are unnecessary: the owner authentication boundary is revalidated unchanged. A companion source change adds typed, signed phone consent; existing clients continue to use ordinary asks and their current cards unchanged.
 
-The upstream feature-map entry is **Bot workstreams**, especially asks/notes, workstream briefs, work routes, and tapped questions. Existing iOS cards remain ordinary data-only asks; scoped consent is dashboard-only. A companion feature-map documentation update in the app repository is a maintainer follow-up, not silently included in this plugin-only patch.
+The companion feature-map entries are **Bot workstreams** and **Hermes is waiting on you**. The dedicated typed phone card is not a generic conduit_show tap. See [phone scoped consent](phone-scoped-consent.md) for enrollment, receipts, sibling status and the mandatory macOS/iPhone validation gate.
 
 ## Verification contract
 
@@ -41,7 +41,7 @@ bounded to the existing ask limit; task whitespace is preserved internally and
 leading/trailing task whitespace is refused rather than silently changed.
 
 The two ask rows stay in `needs_you`. Neither a wake nor actionable recipient
-instructions are sent. The digest labels scoped asks as dashboard/backend-only;
+instructions are sent. The digest labels scoped asks as explicit owner-consent/backend-only;
 `work_reply` cannot settle them. Ordinary asks are unchanged.
 
 `GET /api/plugins/conduit_push/workstreams/grants` returns the complete immutable
@@ -119,10 +119,11 @@ Never-admitted cards surviving a crash still require explicit human review.
 
 Feature-map **Bot workstreams** siblings: work_ask/schema, pending asks, scoped
 worker brief/restrictions, paired results, dashboard work routes and Sessions card,
-README and protocol documentation are implemented here. Existing iOS work
-cards, briefs and native clients need no code change for ordinary asks. The
-companion app's feature-map documentation update remains an explicit maintainer
-gap: this patch makes no cross-repository edits.
+README and protocol documentation are implemented here. The companion change
+adds a separate typed phone consent section, signing-key enrollment and tests;
+its feature map tracks every sibling. Ordinary app work cards, briefs and native
+command approval paths retain their existing behavior. Phone compilation,
+rendering and physical validation are unexecuted draft gates, not source-test passes.
 
 ## Reproduction
 
