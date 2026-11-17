@@ -3074,6 +3074,8 @@ def test_pulse_reply_schemas_take_the_replies_the_parsers_take():
         (candidates.SCHEMA, {"found": [{"kind": "date", "due": None}]}),
         (candidates.SCHEMA, {"remembered": None, "found": []}),
         (ahead.SCHEMA, {"dates": [], "ahead": None}),
+        (candidates.SCHEMA, {"remembered": "none", "found": []}),
+        (ahead.SCHEMA, {"dates": "none", "ahead": []}),
         (memory.SCHEMA, {"items": [], "closed": None, "claims": "none"}),
         (ahead.SCHEMA, {"dates": [{"ref": "D1", "bring_up": True}], "ahead": []}),
         (followup.CHECK_SCHEMA, {"decision": "tell", "news": "x", "why": "y", "check_again_hours": None,
