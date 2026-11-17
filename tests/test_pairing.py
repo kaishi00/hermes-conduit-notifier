@@ -1,4 +1,5 @@
 import os
+import importlib
 import importlib.util
 import io
 import json
@@ -84,7 +85,7 @@ def test_a_named_profile_is_in_the_gateway_name(tmp_path):
 def test_an_unnamed_pairing_takes_the_bots_name(tmp_path, monkeypatch):
     # Not the container's id a Docker host's name is (issue 2540).
     client = api.self_update._plugin_client()
-    titles = sys.modules[f"{client.__package__}.session_titles"]
+    titles = importlib.import_module(f"{client.__package__}.session_titles")
     monkeypatch.setattr(titles, "bot_name", lambda: "Cortana")
     calls = []
     api.pairing.pair_profile({"pairing_code": CODE}, profile="coder", path=tmp_path / "s.json", claim=_recording_claim(calls))
@@ -111,7 +112,7 @@ def test_an_unnamed_pairing_takes_the_bots_name(tmp_path, monkeypatch):
 def test_an_unnamed_profile_comes_from_the_dashboards_home(tmp_path, monkeypatch):
     # A dashboard scoped to a named profile names the gateway as the CLI does.
     client = api.self_update._plugin_client()
-    titles = sys.modules[f"{client.__package__}.session_titles"]
+    titles = importlib.import_module(f"{client.__package__}.session_titles")
     monkeypatch.setattr(titles, "bot_name", lambda: "")
     monkeypatch.setattr(titles, "_home", lambda: tmp_path / "profiles" / "work")
     calls = []
