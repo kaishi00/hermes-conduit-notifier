@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.28 (2026-11-17)
+
+### Fixes
+
+- When one bot gets two asks from your other bots at once, the work it starts for them no longer takes your message from one ask for the other.
+
 ## 0.177.27 (2026-11-17)
 
 ### Fixes

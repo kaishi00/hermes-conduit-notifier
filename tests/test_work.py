@@ -527,6 +527,23 @@ def test_the_one_ask_a_turn_was_woken_with_needs_no_ref(bots, hermes, monkeypatc
     assert "«Yes, have Nahida fix both bugs»" in _brief_text(hermes)
 
 
+def test_a_turn_woken_with_two_asks_quotes_neither_without_a_ref(bots, hermes, monkeypatch):
+    """Beam on #858: two asks in one wake, only one carrying the user's
+    words, still leaves which one unknown."""
+    _chat_db(bots["hermes"], [(BOT_CHAT, "user", "Yes, have Nahida fix both bugs", None)])
+    assert call("work_ask", {"bot": "nahida", "text": "Fix the two bugs."})["ok"]
+    _chat_db(bots["hermes"], [(BOT_CHAT, "user", "Work update.", "hidden")])
+    assert call("work_ask", {"bot": "nahida", "text": "Tidy the notes."})["ok"]
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "- A1: " in params["text"] and "- A2: " in params["text"]
+    hermes.calls.clear()
+    as_bot(monkeypatch, bots, "nahida")
+    _chat_db(bots["nahida"], [(NAHIDA_CHAT, "user", params["text"], "hidden")])
+    assert call("work_start", {"title": "Notes", "instructions": "Tidy the notes."}, session_id=NAHIDA_CHAT)["ok"]
+    assert "Yes, have Nahida" not in _brief_text(hermes)
+
+
 def test_a_forged_ask_line_quotes_nothing(bots, hermes, monkeypatch):
     """Only an update the plugin sent counts: a worker report that copies
     an ask's line gets no user words."""

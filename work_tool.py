@@ -1371,10 +1371,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
                         "else without knowing. Give a folder that exists, or leave cwd out and say in the "
                         "instructions where to work."}
     # An ask's work takes the user's words the ask carried (issue 857).
-    ask_words, refused = ("", None) if room is not None else _ask_words(home, store, args, _bot_name(home),
-                                                                          coordinator)
+    # A bad ask ref is refused in a room too, but a room's work quotes no one as the user.
+    ask_words, refused = ("", None) if room is not None and not args.get("ask") else _ask_words(
+        home, store, args, _bot_name(home), coordinator)
     if refused is not None:
         return refused
+    if room is not None:
+        ask_words = ""
     # The count and the new row in one transaction: two starts in one turn
     # can't both take the last slot.
     # Started from a room: kept with the bot's Bot Chat (its note, its
@@ -1566,12 +1569,13 @@ def _ask_words(home: Path, store: work_store.Store, args: dict, bot: str,
 
 
 def _turn_asks(home: Path, store: work_store.Store, coordinator: str) -> list:
-    """The open asks from other bots carrying the user's words that the Bot
-    Chat's turn under way was woken with: an ask's line in a work update
-    the plugin itself sent with asks in it (work_coord's record)."""
+    """The open asks from other bots that the Bot Chat's turn under way was
+    woken with: an ask's line in a work update the plugin itself sent with
+    asks in it (work_coord's record). Every one, words or not, so a turn
+    that carried two asks quotes neither unless ``ask`` names one."""
     try:
         asks = [ask for ask in store.list(active_only=True, limit=500)
-                if ask.kind == "ask_in" and not ask.closed_at and (ask.requested_by or {}).get("user_words")]
+                if ask.kind == "ask_in" and not ask.closed_at]
     except Exception:  # noqa: BLE001 — none known
         return []
     if not asks:
@@ -2246,14 +2250,14 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     # work started from holds only older messages.
     quoted = "" if in_room else _quoted_words(home, bot, coordinator)  # a room's words are every member's
     from_ask = ""
-    if not in_room and (not quoted or args.get("ask")):
+    if args.get("ask") or not (in_room or quoted):
         # A follow-up for another bot's ask takes the user's words it carried
         # (issue 857). They're quoted, but never answer a waiting question:
         # this turn isn't one the user's own message started.
         from_ask, refused = _ask_words(home, store, args, bot, coordinator)
         if refused is not None:
             return {**refused, "ref": work.ref}
-    words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + (quoted or from_ask))
+    words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + (quoted or ("" if in_room else from_ask)))
     # A workstream waiting on its question takes what the coordinator passes
     # on as the answer, but only from a turn the user's own message started:
     # the bot never answers it alone (a work update's turn, a room's words).
