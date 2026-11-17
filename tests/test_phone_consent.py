@@ -265,6 +265,28 @@ def test_enrollment_is_one_use_and_old_pending_replacement_cannot_roll_back(phon
     assert receipt(phone, second, b).status_code == 409
 
 
+@pytest.mark.parametrize("already_enrolled,transition", [(True, "revoke"), (True, "repair"), (True, "unpair"),
+                                                        (False, "repair"), (False, "unpair")])
+def test_pending_initial_enrollment_cannot_survive_enroll_then_retire(phone, bots, transition, already_enrolled):
+    old_key = Ed25519PrivateKey.generate()
+    stale = challenge(phone, {"action": "enroll", "public_key": public(old_key),
+        "installation_id": "phone-installation", "gateway_id": "gateway-1"})
+    current = enroll(phone)[1] if already_enrolled or transition == "revoke" else None
+    if transition == "revoke":
+        assert phone.post(PHONE + "/revoke-device", headers=HEADERS, json={"device": current}).status_code == 200
+    else:
+        path = bots["hermes"] / "conduit-push.json"
+        original = path.read_text()
+        if transition == "unpair":
+            path.unlink()
+        else:
+            path.write_text(json.dumps({**json.loads(original), "credential": "replacement"}))
+        work.phone_consent.pairing_changed(bots["hermes"], work)
+        path.write_text(original)
+    assert receipt(phone, old_key, stale).status_code == 409
+    assert phone.get(PHONE, headers=HEADERS).json()["device"] is None
+
+
 @pytest.mark.parametrize("value", ["a", "!" * 43, [], None, "A" * 42 + "B"])
 def test_malformed_public_key_is_a_refusal(phone, value):
     assert challenge(phone, {"action": "enroll", "installation_id": "phone-installation", "gateway_id": "gateway-1",

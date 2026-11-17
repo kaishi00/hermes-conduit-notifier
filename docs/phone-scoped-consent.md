@@ -64,8 +64,9 @@ The message contains a random 128-bit nonce, 60-second expiry, installation
 identity, owner, exact profile, current pairing fingerprint, device enrollment,
 public key, explicit action and (for grant actions) grant ID and snapshot digest.
 The pairing fingerprint includes the local relay credential and IDs but exposes
-only a SHA-256 digest, never the credential. Enrollment also binds the previous
-enrollment so a delayed candidate cannot roll a newer enrollment back.
+only a SHA-256 digest, never the credential. Enrollment also binds a durable
+per-profile enrollment/revocation epoch, including when no device is active, so a
+delayed initial or replacement candidate cannot roll across enroll/revoke/re-pair.
 
 `consent_devices` and `consent_challenges` live in the existing installation grant
 registry. Enrollment/replacement/revocation audit retains owner, public key,

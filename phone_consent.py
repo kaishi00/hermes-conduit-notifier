@@ -55,6 +55,11 @@ def _device(db, profile_id: str):
     return json.loads(row[0]) if row else None
 
 
+def _epoch(db, profile_id: str) -> str:
+    row = db.execute("SELECT value FROM meta WHERE key = ?", ("consent_epoch:" + profile_id,)).fetchone()
+    return row[0] if row else ""
+
+
 def _matches(home: Path, device: dict) -> bool:
     try:
         return device["pairing"] == pairing(home)
@@ -83,6 +88,8 @@ def _retire(db, devices: list[dict], audit: dict) -> list[dict]:
         retired = {**device, "revoked_at": time.time(), "revoked_by": audit}
         db.execute("UPDATE consent_devices SET active = 0, record = ? WHERE id = ?",
                    (work_grants.canonical(retired), device["id"]))
+        db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                   ("consent_epoch:" + device["profile_id"], uuid.uuid4().hex))
         rows = db.execute("SELECT * FROM task_grants WHERE status IN ('pending', 'consumed') "
                           "AND json_extract(actor, '$.source') = 'phone_consent' "
                           "AND json_extract(actor, '$.device') = ?", (device["id"],)).fetchall()
@@ -106,8 +113,20 @@ def pairing_changed(home: Path, tool) -> bool:
     store = work_grants.registry(home)
     if not store.path.exists():
         return True
+    profile_id = str(Path(home).resolve())
+    try:
+        current = pairing(home)["binding"]
+    except Refusal:
+        current = ""
     with store._db() as db:
-        device = _device(db, str(Path(home).resolve()))
+        key = "consent_pairing:" + profile_id
+        previous = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        if previous and previous[0] != current:
+            # Also fence initial enrollment challenges when no device is active.
+            db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                       ("consent_epoch:" + profile_id, uuid.uuid4().hex))
+        db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, current))
+        device = _device(db, profile_id)
         retired = _retire(db, [device], {"source": "pairing_changed"}) if device and not _matches(home, device) else []
     return _interrupt(home, tool, retired)
 
@@ -158,10 +177,10 @@ def challenge(home: Path, tool, actor: dict, body: dict) -> dict:
     if not all(isinstance(value, str) for value in body.values()):
         raise Refusal(400, "Phone consent fields must be strings.")
     action = body.get("action")
-    pairing_changed(home, tool)
     pair = pairing(home)
     store = work_grants.registry(home)
     installation = work_grants.identity(store)
+    pairing_changed(home, tool)
     with store._db() as db:
         device = _device(db, actor["profile_id"])
         if action == "enroll":
@@ -171,7 +190,7 @@ def challenge(home: Path, tool, actor: dict, body: dict) -> dict:
             if any(body[k] != pair[k] for k in ("installation_id", "gateway_id")):
                 raise Refusal(409, "This profile is paired with another phone.")
             context = {"public_key": body["public_key"], "device": uuid.uuid4().hex,
-                       "previous": device["id"] if device else None}
+                       "previous": _epoch(db, actor["profile_id"])}
         elif action in work_grants.ACTIONS:
             if set(body) != {"action", "device", "grant", "digest"}:
                 raise Refusal(400, "Send only the displayed grant and device enrollment.")
@@ -224,13 +243,15 @@ def receipt(home: Path, tool, actor: dict, body: dict) -> dict:
             raise Refusal(403, "Phone consent signature did not verify.")
         device = _device(db, actor["profile_id"])
         if context["action"] == "enroll":
-            if (device["id"] if device else None) != context["previous"]:
+            if _epoch(db, actor["profile_id"]) != context["previous"]:
                 raise Refusal(409, "Device enrollment changed; refresh first.")
             retired = _retire(db, [device] if device else [], {**actor, "source": "phone_device_replacement"})
             record = {"id": context["device"], "owner": actor["subject"], "profile_id": actor["profile_id"],
                       "public_key": context["public_key"], "pairing": context["pairing"], "enrolled_at": time.time()}
             db.execute("INSERT INTO consent_devices VALUES (?, ?, ?, 1)",
                        (record["id"], actor["profile_id"], work_grants.canonical(record)))
+            db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                       ("consent_epoch:" + actor["profile_id"], record["id"]))
         elif (not device or device["id"] != context["device"] or device["owner"] != actor["subject"]
               or device["public_key"] != context["public_key"]):
             raise Refusal(409, "This phone's enrollment was revoked or replaced.")
