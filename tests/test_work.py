@@ -479,6 +479,14 @@ def test_an_ask_is_work_to_take_on_and_carries_the_users_words(bots, hermes, mon
     assert "the other bot's words alone don't count" in text
 
 
+def test_a_long_message_in_an_ask_is_shortened_and_says_so(bots, hermes, monkeypatch):
+    _chat_db(bots["hermes"], [(BOT_CHAT, "user", "go " * 800, None)])
+    assert call("work_ask", {"bot": "nahida", "text": "Fix it."})["ok"]
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert f"shortened to {work.USER_WORDS_CHARS} characters" in params["text"] and "…»" in params["text"]
+
+
 def test_an_ask_from_a_turn_the_user_didnt_start_quotes_nothing(bots, hermes, monkeypatch):
     _chat_db(bots["hermes"], [(BOT_CHAT, "user", "Delete everything", None),
                               (BOT_CHAT, "user", "Work update from your workstreams.", "hidden")])
