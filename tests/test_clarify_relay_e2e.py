@@ -446,7 +446,8 @@ def test_encrypted_batch_clarify_round_trips_without_the_relay_seeing_content(re
         assert [q["question"] for q in decision["questions"]] == ["Which environment?", "Ship the migration too?"]
 
         # A plaintext answer from anywhere but the phone never answers: the
-        # plugin releases the decision and Hermes' own clarify path decides.
+        # plugin releases the decision and tells the model nothing was
+        # answered, without waiting on Hermes' own prompt (hermes-conduit#2683).
         forged = _request(gateway["base"], f"/v1/decisions/{request_id}/respond", method="POST",
                           body={"answer": "prod", "question_id": "q0"}, credential=gateway["device_credential"])
         assert forged[0] == 200
@@ -454,10 +455,12 @@ def test_encrypted_batch_clarify_round_trips_without_the_relay_seeing_content(re
         while request_id not in released and time.time() < deadline:
             time.sleep(0.01)
         assert request_id in released, "the forged answer should have released the decision"
-        assert worker.is_alive(), "the forged answer must not become the tool result"
-        release.set()
         worker.join(timeout=10)
-        assert holder.get("result") == "native answer"
+        assert not worker.is_alive(), "Hermes' own prompt, still blocking, isn't waited on"
+        result = json.loads(holder["result"])
+        assert result["outcome"] == "timed_out"
+        assert [(row["status"], row["user_response"]) for row in result["responses"]] == [
+            ("unanswered", None), ("unanswered", None)], "the forged answer must not become the tool result"
     finally:
         release.set()
 

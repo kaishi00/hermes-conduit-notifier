@@ -13,12 +13,30 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.177.31 (2026-11-17)
+## 0.177.33 (2026-11-17)
 
 ### Fixes
 
 - With a Claude subscription model, Pulse and the work watch no longer fail every time they ask it something: Pulse's reports, memory and follow-ups work again, and the watch tells your Bot Chat when one workstream may affect another.
 - The work watch on a model that thinks before it answers no longer runs out of room and says nothing.
+
+## 0.177.32 (2026-11-17)
+
+### Fixes
+
+- When an answer that wasn't encrypted by your phone is refused, the answers you gave to the form's other questions, even in the same moment, still count, and Hermes is told only the unanswered questions need asking again.
+
+## 0.177.31 (2026-11-17)
+
+### Fixes
+
+- With notification encryption on, answering a question on the card Conduit shows in the open chat no longer sends your answer unencrypted (with the matching Conduit update), and an answer the plugin refuses no longer leaves Hermes waiting 10 minutes with the alert calls still ringing: Hermes hears at once that nothing was answered, and keeps the answers already given.
+
+## 0.177.30 (2026-11-17)
+
+### Fixes
+
+- A notification Hermes writes that runs past 60 characters of title or 300 of text is shortened with "…" instead of refused, so a scheduled job's notification is no longer lost.
 
 ## 0.177.29 (2026-11-17)
 

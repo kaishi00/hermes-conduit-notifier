@@ -6,7 +6,9 @@ The waits are the ones the hooks keep in the profile's conduit-calls.json
 (calls_store.note_waiting), for every chat now, whether or not alert calls
 are on. The list only reads: an approval is answered on its chat's own card,
 and a question on the card Conduit draws from the row's ``decision`` when
-Hermes drew none in the chat (hermes-conduit issue 2556).
+Hermes drew none in the chat (hermes-conduit issue 2556). The list names the
+profile's relay gateway (``gateway_id``), so that card's answer is sealed for
+the pairing like a notification's (hermes-conduit issue 2683).
 """
 
 from __future__ import annotations
@@ -63,7 +65,15 @@ def waiting_list() -> Dict[str, Any]:
     if clarify is not None:
         ages["question"] = clarify + WAITING_GRACE_S
     store = hermes_calls._calls_store().CallStore(home)
-    return {"waiting": store.waiting_list(max_age=ages, leave_out=_workstream_sessions(home))}
+    listed: Dict[str, Any] = {"waiting": store.waiting_list(max_age=ages, leave_out=_workstream_sessions(home))}
+    # The relay gateway this profile pairs through: a question's card drawn
+    # from its row answers through the relay, sealed for this gateway's key
+    # on an end-to-end encrypted pairing, and the card came from no push
+    # that would have named it (hermes-conduit#2683).
+    gateway_id = (core._load_pairing_state(core._pairing_state_path()) or {}).get("gateway_id")
+    if isinstance(gateway_id, str) and gateway_id.strip():
+        listed["gateway_id"] = gateway_id.strip()
+    return listed
 
 
 @router.get("/waiting")

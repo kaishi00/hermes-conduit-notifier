@@ -354,7 +354,13 @@ def test_the_waiting_list_names_every_chat_hermes_waits_on_but_workstreams(paire
     store.forget_waiting("w-1", "question")
     # Hermes gave up on it: gone from the list.
     monkeypatch.setattr(api.watch_local_live, "_hermes_approval_timeout", lambda: -1000.0)
-    assert http.get(f"{BASE}/waiting").json() == {"ok": True, "waiting": []}
+    assert http.get(f"{BASE}/waiting").json() == {"ok": True, "waiting": [], "gateway_id": "g"}
+
+
+def test_the_waiting_list_names_no_gateway_for_an_unpaired_profile(home):
+    # The card's answer can't be sealed without it: Conduit then uses the
+    # gateway the host reported for the profile (hermes-conduit#2683).
+    assert _http().get(f"{BASE}/waiting").json() == {"ok": True, "waiting": []}
 
 
 def test_the_waiting_list_reads_an_unreadable_registry_as_no_workstreams(paired, monkeypatch):
