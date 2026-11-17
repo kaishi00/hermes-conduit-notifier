@@ -3063,7 +3063,7 @@ def test_pulse_calls_send_their_replys_shape_never_json_mode(remembering):
 def test_pulse_reply_schemas_take_the_replies_the_parsers_take():
     # Hermes checks a reply against its schema (with jsonschema installed): a
     # schema tighter than the parser would fail a reply Pulse used to take.
-    jsonschema = pytest.importorskip("jsonschema")
+    import jsonschema  # tests/requirements.txt: Hermes checks replies with it
     followup = sys.modules["conduit_push.pulse_followup"]
     ahead = sys.modules["conduit_push.pulse_ahead"]
     taken = [
@@ -3074,7 +3074,7 @@ def test_pulse_reply_schemas_take_the_replies_the_parsers_take():
         (candidates.SCHEMA, {"found": [{"kind": "date", "due": None}]}),
         (candidates.SCHEMA, {"remembered": None, "found": []}),
         (ahead.SCHEMA, {"dates": [], "ahead": None}),
-        (memory.SCHEMA, {"items": [], "closed": None, "claims": None}),
+        (memory.SCHEMA, {"items": [], "closed": None, "claims": "none"}),
         (ahead.SCHEMA, {"dates": [{"ref": "D1", "bring_up": True}], "ahead": []}),
         (followup.CHECK_SCHEMA, {"decision": "tell", "news": "x", "why": "y", "check_again_hours": None,
                                  "when": None, "urgent": False, "pick": None}),

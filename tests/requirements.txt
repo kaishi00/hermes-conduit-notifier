@@ -10,3 +10,4 @@ cryptography==50.0.2
 websockets==17.3
 pyyaml==6.0.3
 psutil==7.2.2
+jsonschema==4.26.0

@@ -197,7 +197,7 @@ def test_the_watch_sends_its_answers_shape_never_json_mode(monkeypatch):
     assert asked["json_schema"] is watch.SCHEMA and "json_mode" not in asked
     assert asked["max_tokens"] == watch.MAX_TOKENS >= 1_000  # room for a reasoning model to answer
     # Hermes checks the answer against the schema: what check() takes passes.
-    jsonschema = pytest.importorskip("jsonschema")
+    import jsonschema  # tests/requirements.txt: Hermes checks replies with it
     for answer in (FLAG, {"flag": False}, {"flag": False, "between": None, "why": None}, {},
                    {"flag": "true", "between": "W1"}):
         jsonschema.validate(answer, watch.SCHEMA)
