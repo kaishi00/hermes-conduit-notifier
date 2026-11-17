@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.26 (2026-11-16)
+
+### Fixes
+
+- Pairing from Conduit on a dashboard started under another profile names this host the same way `hermes conduit-push pair` does.
+
 ## 0.177.25 (2026-11-16)
 
 ### Fixes
