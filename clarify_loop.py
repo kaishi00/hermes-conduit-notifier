@@ -382,7 +382,9 @@ def _first_answer_wins(
             # model why, so it can ask again.
             calls.forget_waiting_card(request_id)
             _release_decision(request_id, relay_won)
-            return _format_batch_result(batch, {}, outcome="timed_out", notice=REJECTED_ANSWER_NOTICE)
+            # A batch's answers the paired phone sealed before still count.
+            return _format_batch_result(batch, locked_answers if batch_protocol else {},
+                                        outcome="timed_out", notice=REJECTED_ANSWER_NOTICE)
         elif state == "unknown" and saw_pending:
             # unknown-after-pending: the relay expired the decision (2h TTL,
             # far under an unlimited clarify timeout).

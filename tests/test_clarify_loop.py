@@ -515,7 +515,8 @@ def test_a_rejected_answer_ends_the_wait_with_a_notice(monkeypatch):
 
 
 def test_a_rejected_batch_answer_ends_the_wait_and_its_alert_calls(monkeypatch):
-    fake = _FakeState([{"status": "pending", "answers": {}}, {"status": "rejected"}])
+    # q0 was answered sealed before; the unsealed answer to q1 doesn't lose it.
+    fake = _FakeState([{"status": "pending", "answers": {"q0": "x"}}, {"status": "rejected"}])
     _install(fake)
     cancelled = []
     monkeypatch.setattr(loop.calls, "cancel_alerts", lambda session_id, kind: cancelled.append(kind))
@@ -527,7 +528,8 @@ def test_a_rejected_batch_answer_ends_the_wait_and_its_alert_calls(monkeypatch):
     finally:
         release.set()
     assert result["outcome"] == "timed_out" and result["notice"] == loop.REJECTED_ANSWER_NOTICE
-    assert [row["status"] for row in result["responses"]] == ["unanswered", "unanswered"]
+    assert [row["status"] for row in result["responses"]] == ["answered", "unanswered"]
+    assert result["responses"][0]["user_response"] == "x"
     assert cancelled == ["question"]
 
 
