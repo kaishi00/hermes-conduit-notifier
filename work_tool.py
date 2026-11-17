@@ -1561,7 +1561,7 @@ def _ask_words(home: Path, store: work_store.Store, args: dict, bot: str,
     words = str((ask.requested_by or {}).get("user_words") or "")
     if not words:
         return "", None
-    cut = f", shortened to {USER_WORDS_CHARS} characters" if len(words) >= USER_WORDS_CHARS else ""
+    cut = f", shortened to {USER_WORDS_CHARS} characters" if (ask.requested_by or {}).get("user_words_cut") else ""
     return ASK_WORK_WORDS.format(asker=_ask_bot(ask), bot=bot, ref=ask.ref, cut=cut, words=words), None
 
 
@@ -2022,7 +2022,8 @@ def _ask(home: Path, store: work_store.Store, args: dict, coordinator: str) -> d
             requested_by={"bot": me, "name": my_name, "ref": asked.ref, "chain": chain,
                           **({"about": theirs_about} if about is not None else {}),
                           # Kept so a workstream started or sent to for this ask gets them too.
-                          **({"user_words": words[:USER_WORDS_CHARS]} if words else {})},
+                          **({"user_words": words[:USER_WORDS_CHARS - 1].rstrip() + "…", "user_words_cut": True}
+                             if len(words) > USER_WORDS_CHARS else {"user_words": words} if words else {})},
             executor={"bot": profile, "name": name}, reply_to={"bot": me, "ref": asked.ref}, ask_id=ask_id,
             status="running")
     except Exception as error:  # noqa: BLE001 — the other bot's registry couldn't take it
@@ -2244,12 +2245,15 @@ def _send(home: Path, store: work_store.Store, broker: work_broker.Broker, work:
     # from the Bot Chat this call came from: after a compression the one the
     # work started from holds only older messages.
     quoted = "" if in_room else _quoted_words(home, bot, coordinator)  # a room's words are every member's
-    if not in_room and not quoted:
-        # A follow-up for another bot's ask takes the user's words it carried (issue 857).
-        quoted, refused = _ask_words(home, store, args, bot, coordinator)
+    from_ask = ""
+    if not in_room and (not quoted or args.get("ask")):
+        # A follow-up for another bot's ask takes the user's words it carried
+        # (issue 857). They're quoted, but never answer a waiting question:
+        # this turn isn't one the user's own message started.
+        from_ask, refused = _ask_words(home, store, args, bot, coordinator)
         if refused is not None:
             return {**refused, "ref": work.ref}
-    words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + quoted)
+    words = _with_unsent_brief(store, work, FOLLOW_UP.format(bot=bot, text=text) + (quoted or from_ask))
     # A workstream waiting on its question takes what the coordinator passes
     # on as the answer, but only from a turn the user's own message started:
     # the bot never answers it alone (a work update's turn, a room's words).

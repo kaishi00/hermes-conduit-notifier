@@ -549,6 +549,28 @@ def test_a_follow_up_for_an_ask_gets_the_users_words(bots, hermes, monkeypatch):
     assert any("«Yes, have Nahida fix both bugs»" in text and "Re-review" in text for text in texts)
 
 
+def test_an_asks_words_never_answer_a_waiting_question(bots, hermes, monkeypatch):
+    """GLM on #858: the ask's quote goes along, but a work_send in the ask's
+    turn isn't the user's answer to a workstream's question."""
+    _asked_with_words(bots, hermes, monkeypatch)
+    assert call("work_start", {"title": "Ship", "instructions": "Ship it.", "ask": "A1"}, session_id=NAHIDA_CHAT)["ok"]
+    store_mod.Store(bots["nahida"]).update("W1", status="needs_you")
+    seen = {}
+    real = work._deliver
+
+    def deliver(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(work, "_deliver", deliver)
+    # As if the wake row carried a time: the ask's turn still answers nothing.
+    monkeypatch.setattr(work, "_users_message_at", lambda home, chat: 1e12)
+    sent = call("work_send", {"ref": "W1", "text": "Push to main.", "ask": "A1"}, session_id=NAHIDA_CHAT)
+    assert sent["ok"], sent
+    assert seen["answer"] == "" and seen["since"] == 0.0
+    assert call("work_send", {"ref": "W1", "text": "x", "ask": "A9"}, session_id=NAHIDA_CHAT)["error"] == "ask"
+
+
 def test_an_answer_for_a_workstream_goes_into_it(bots, hermes, monkeypatch):
     start()
     asked = call("work_ask", {"bot": "Nahida", "text": "Research the login library.", "for": "w1"})
