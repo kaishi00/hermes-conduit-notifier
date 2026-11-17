@@ -83,7 +83,8 @@ QUOTE_LIMIT = 160
 DATE_SKIPS = ("done", "covered", "raised")
 
 # The reply's shape (pulse_memory.SCHEMA says why it's loose).
-SCHEMA = {"type": "object", "properties": {key: {"type": ["array", "null"]} for key in ("dates", "ahead")}}
+# Untyped, as pulse_candidates.SCHEMA: run() wants one real list.
+SCHEMA = {"type": "object", "properties": {"dates": {}, "ahead": {}}}
 
 INSTRUCTIONS = """You look two weeks ahead for the user. Pulse is the part of Hermes (an AI assistant) that speaks up on its own: once a day, before the user's morning brief, it looks at what's coming in the next two weeks, so the user hears in time about what needs getting ready for.
 
