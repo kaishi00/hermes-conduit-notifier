@@ -197,7 +197,7 @@ def test_busy_is_an_event_on_now_driving_or_a_focus_that_holds_calls(tmp_path):
 # Follow-ups ---------------------------------------------------------------------
 
 def test_a_check_says_when_news_is_useful_and_whether_its_urgent():
-    told = lambda **reply: followup.check(lambda instructions, text: (
+    told = lambda **reply: followup.check(lambda instructions, text, schema=None: (
         {"decision": "tell", "news": "n", "why": "w", **reply}, 1), "material")[0]
     assert (told()["when"], told()["urgent"]) == ("any", False)
     assert (told(when="office_hours", urgent=True)["when"], told(urgent=True)["urgent"]) == ("office_hours", True)

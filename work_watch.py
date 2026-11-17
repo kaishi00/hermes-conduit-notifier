@@ -52,7 +52,15 @@ FLAGS_PER_HOUR = 12
 # workstream working alone costs no read.
 SETTLED_AGE_S = 6 * 3600.0
 CALL_TIMEOUT_S = 60.0
-MAX_TOKENS = 300
+# A reasoning model can spend 300 tokens thinking and answer nothing
+# (notifier issue 848); an answer is a few dozen, and only what's used is paid.
+MAX_TOKENS = 1_000
+# The answer's shape, sent as the reply's JSON schema, never json_mode (see
+# pulse.structured_args). Loose, since Hermes checks the reply against it:
+# nothing required (check() reads a missing flag as no flag), nulls allowed.
+SCHEMA = {"type": "object", "properties": {
+    "flag": {"type": ["boolean", "null"]}, "between": {"type": ["array", "null"], "items": {"type": "string"}},
+    "why": {"type": ["string", "null"]}}}
 KINDS = ("found", "assumes", "changed", "user")
 _CURSOR = "watch_at"
 _CAP_SAID = "watch_cap_said"
@@ -160,7 +168,7 @@ def _ask(instructions: str, text: str) -> tuple[Any, int]:
         raise RuntimeError("this Hermes gives plugins no model access")
     with _profile_scope():
         result = llm.complete_structured(
-            instructions=instructions, input=[{"type": "text", "text": text}], json_mode=True,
+            instructions=instructions, input=[{"type": "text", "text": text}], json_schema=SCHEMA,
             task=TASK if _task else None, purpose="conduit work watch", timeout=CALL_TIMEOUT_S,
             max_tokens=MAX_TOKENS)
     usage = getattr(result, "usage", None)

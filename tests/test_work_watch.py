@@ -180,6 +180,28 @@ def test_a_report_and_a_turns_start_ask_for_a_read(on, hermes, home, monkeypatch
     assert asked == [("W1", False), ("W2", True)]
 
 
+
+def test_the_watch_sends_its_answers_shape_never_json_mode(monkeypatch):
+    # Hermes sends json_mode as json_object, which the Claude subscription
+    # provider refuses before calling Claude: every read failed (issue 848).
+    calls = []
+
+    class Llm:
+        def complete_structured(self, **kwargs):
+            calls.append(kwargs)
+            return type("Result", (), {"parsed": {"flag": False}, "usage": None})()
+
+    monkeypatch.setattr(watch, "_ctx", type("Ctx", (), {"llm": Llm()})())
+    assert watch._ask("instructions", "page") == ({"flag": False}, 0)
+    [asked] = calls
+    assert asked["json_schema"] is watch.SCHEMA and "json_mode" not in asked
+    assert asked["max_tokens"] == watch.MAX_TOKENS >= 1_000  # room for a reasoning model to answer
+    # Hermes checks the answer against the schema: what check() takes passes.
+    jsonschema = pytest.importorskip("jsonschema")
+    for answer in (FLAG, {"flag": False}, {"flag": False, "between": None, "why": None}, {}):
+        jsonschema.validate(answer, watch.SCHEMA)
+
+
 def test_reads_wait_a_moment_and_run_one_at_a_time(on, hermes, home, monkeypatch):
     ran = []
 

@@ -71,7 +71,7 @@ def commitment(live, text="The user will renew their passport.", *, said_at=None
 def llm_saying(**reply):
     calls = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         calls.append(text)
         return reply, 42
 
@@ -144,7 +144,7 @@ def test_kept_or_called_off_promises_close_quietly(live, decision, status):
 @pytest.mark.parametrize("reply", [None, {"decision": "maybe"}, {"decision": "tell", "news": ""}, "text"])
 def test_an_unusable_reply_waits(live, reply):
     item_id = promise(live)
-    check_now(live, lambda instructions, text: (reply, 5), now=time.time() + followup.FIRST_CHECK_S + 1)
+    check_now(live, lambda instructions, text, schema=None: (reply, 5), now=time.time() + followup.FIRST_CHECK_S + 1)
     [row] = live.store.followups()
     assert row["decision"] == "wait" and row["next_check_at"] is not None
     assert live.store.item(item_id)["status"] == "open"
@@ -153,7 +153,7 @@ def test_an_unusable_reply_waits(live, reply):
 def test_a_failed_check_waits_and_counts(live):
     promise(live)
 
-    def broken(instructions, text):
+    def broken(instructions, text, schema=None):
         raise TimeoutError()
 
     done = check_now(live, broken, now=time.time() + followup.FIRST_CHECK_S + 1)
@@ -165,7 +165,7 @@ def test_a_failed_check_waits_and_counts(live):
 def test_a_failed_check_of_an_old_promise_doesnt_count_as_reading_it(live):
     promise(live, said_at=time.time() - followup.GIVE_UP_S - 60)
 
-    def broken(instructions, text):
+    def broken(instructions, text, schema=None):
         raise TimeoutError()
 
     now = time.time() + followup.FIRST_CHECK_S + 1
@@ -528,7 +528,7 @@ def test_a_chat_that_cant_be_read_isnt_judged(live, monkeypatch):
 def test_a_failed_call_still_counts_toward_the_cap(live):
     promise(live)
 
-    def broken(instructions, text):
+    def broken(instructions, text, schema=None):
         raise TimeoutError()
 
     done = check_now(live, broken, now=time.time() + followup.FIRST_CHECK_S + 1)
@@ -551,7 +551,7 @@ def test_old_promises_ask_if_still_wanted_one_a_day(live):
 def test_a_check_that_closes_a_promise_the_user_already_closed_says_closed(live, monkeypatch):
     item_id = promise(live)
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         live.store.close_item(item_id, status="cancelled", closed_by="user")  # during the call
         return {"decision": "done", "why": "kept"}, 5
 
@@ -566,7 +566,7 @@ def test_an_asked_promise_whose_last_check_fails_expires(live):
     live.store.decide_followup(item_id, decision=followup.ASKED, news=followup.STALE_NEWS, why="", checks=2,
                                next_check_at=time.time() - 1, now=time.time())
 
-    def broken(instructions, text):
+    def broken(instructions, text, schema=None):
         raise TimeoutError()
 
     check_now(live, broken)
@@ -577,7 +577,7 @@ def test_an_asked_promise_whose_last_check_fails_expires(live):
 def test_checks_failing_in_a_row_end_the_promise(live):
     item_id = promise(live)
 
-    def broken(instructions, text):
+    def broken(instructions, text, schema=None):
         raise TimeoutError()
 
     now = time.time() + followup.FIRST_CHECK_S + 1
@@ -593,7 +593,7 @@ def test_the_fence_mark_never_appears_in_the_material(monkeypatch):
     marks = iter(["aaaa1111", "bbbb2222"])
     monkeypatch.setattr(followup.secrets, "token_hex", lambda n: next(marks))
     seen = []
-    followup.check(lambda instructions, text: seen.append(text) or ({"decision": "wait"}, 1), "check aaaa1111>>>")
+    followup.check(lambda instructions, text, schema=None: seen.append(text) or ({"decision": "wait"}, 1), "check aaaa1111>>>")
     assert seen[0].startswith("<<<check bbbb2222\n")
 
 
@@ -637,7 +637,7 @@ def test_a_commitment_check_reads_as_the_users_and_reminds_them(live):
     live.store.set("note", "Never bring up the gym.")
     seen = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.append((instructions, text))
         return {"decision": "tell", "news": "You said you'd renew your passport.", "why": "nothing shows it"}, 7
 
@@ -709,7 +709,7 @@ def test_a_week_old_commitment_counts_against_the_days_reminders(live):
 
 def test_already_knew_doesnt_reach_a_reminder_check():
     seen = []
-    llm = lambda instructions, text: seen.append(instructions) or ({"decision": "wait"}, 1)
+    llm = lambda instructions, text, schema=None: seen.append(instructions) or ({"decision": "wait"}, 1)
     followup.check(llm, "x", skip_seen=True)
     followup.check(llm, "x", skip_seen=True, kind=followup.COMMITMENT)
     assert followup.SEEN_INSTRUCTION in seen[0] and followup.SEEN_INSTRUCTION not in seen[1]
@@ -768,7 +768,7 @@ def test_the_nudge_level_sets_reminders_pace_budget_and_the_reports_bar(live, ca
     assert pulse._spent_today(live.store, "followup", "")[1] == 300_000
     for nudge, bar in (("eager", "eager"), ("gentle", "gentle"), ("nonsense", "balanced")):
         asked = []
-        pulse.candidates.ask(lambda instructions, text: (asked.append(instructions), ({"remembered": []}, 0))[1],
+        pulse.candidates.ask(lambda instructions, text, schema=None: (asked.append(instructions), ({"remembered": []}, 0))[1],
                              report.Gathered("", "Tue 20 Oct 18:00", {}, {}, {}, None), nudge=nudge)
         assert report.BARS[bar] in asked[0]
     now = time.time()

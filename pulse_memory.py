@@ -174,8 +174,17 @@ Note each thing once, as the kind that fits it best: one plan is an intention or
 
 Leave out small talk, questions answered on the spot, details of the task being worked on in the conversation, what someone other than the user or Hermes will do, and anything only in tool lines. That an app, connector or account isn't connected or set up is never an item: that's the user's choice. A user line that hands Hermes a job to run by its rules (a script, a poller, a scheduled job or a webhook passing on new mail, alerts or records, with which tool to use, how to sort or label them and when to notify) is that job's instructions, not the user telling Hermes about themselves: nothing in it is an item, and neither is what Hermes reports back about what it processed. Texts, emails and notifications from other people that Hermes read out or quoted are never items: not their words, and not facts about the sender, unless the user asks Hermes to remember it: then its evidence is the user's line asking, never the line Hermes read it out on. A line marked "Pulse's reminder" is a reminder from Pulse, the part of Hermes that speaks up on its own, that the user sent on, and one marked "answering Pulse's reminder" is Hermes's answer to it: neither is ever an item, though either can show a remembered thing done or called off."""
 
-# (instructions, conversation text) -> (the reply's parsed JSON, tokens used)
-Llm = Callable[[str, str], tuple[Any, int]]
+# (instructions, text, schema=the reply's JSON schema) -> (the reply's parsed JSON,
+# tokens used). The schema goes to Hermes as the reply's shape: a Claude route
+# takes no schema-less JSON mode (notifier issue 848).
+Llm = Callable[..., tuple[Any, int]]
+# The replies' shapes. Loose on purpose: nothing is required and a list's
+# entries are left open (the instructions give their fields), since Hermes
+# checks the reply against the schema and a tight one would fail a reply the
+# parser takes.
+_LIST = {"type": "array"}
+SCHEMA = {"type": "object", "properties": {"items": _LIST, "closed": _LIST, "claims": _LIST}}
+INBOX_SCHEMA = {"type": "object", "properties": {"deadlines": _LIST, "closed": _LIST}}
 
 _CODE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 _ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…)\s*")
@@ -669,7 +678,7 @@ def extract(llm: Llm, chunk: Sequence[Any], zone: tzinfo, outcomes: Sequence[dic
     # is charged its input, not output it never produced.
     estimate = (len(instructions) + len(text)) // 4
     try:
-        parsed, tokens = llm(instructions, text)
+        parsed, tokens = llm(instructions, text, schema=SCHEMA)
     except Exception as error:  # noqa: BLE001 — a model or network failure
         raise ChunkFailed(type(error).__name__, estimate) from error
     tokens = tokens if isinstance(tokens, int) and tokens > 0 else estimate + MAX_TOKENS
@@ -1051,7 +1060,7 @@ def extract_inbox(llm: Llm, events: Sequence[dict], zone: tzinfo, remembered: Se
             f"<<<logged {mark}\n{logged_text}\nlogged {mark}>>>")
     estimate = (len(instructions) + len(text)) // 4
     try:
-        parsed, tokens = llm(instructions, text)
+        parsed, tokens = llm(instructions, text, schema=INBOX_SCHEMA)
     except Exception as error:  # noqa: BLE001 — a model or network failure
         raise ChunkFailed(type(error).__name__, estimate) from error
     tokens = tokens if isinstance(tokens, int) and tokens > 0 else estimate + MAX_TOKENS
