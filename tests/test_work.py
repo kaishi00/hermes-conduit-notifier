@@ -443,7 +443,7 @@ def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, herm
     turns.start_turn(NAHIDA_CHAT, params["text"])
     assert turns.woken(NAHIDA_CHAT)
     turns.start_turn(NAHIDA_CHAT)
-    assert "never the user's go-ahead" in params["text"] and 'work_reply {"ref": "A1"' in params["text"]
+    assert "never the user's go-ahead for a step" in params["text"] and 'work_reply {"ref": "A1"' in params["text"]
     resumed, = hermes.named("session.resume")
     assert resumed[1]["profile"] == "nahida" and transport is None
     # Bounded: a long Bot Chat a restart closed still takes its wake (issue 2395).
@@ -461,6 +461,31 @@ def test_an_ask_reaches_the_other_bots_chat_and_its_answer_comes_back(bots, herm
     assert params["session_id"] == f"rt-{BOT_CHAT}" and "Nahida answered your ask" in params["text"]
     assert "Sumeru City." in params["text"]
     assert call("work_reply", {"ref": "A1", "text": "Again"}, session_id=NAHIDA_CHAT)["error"] == "answered"
+
+
+def test_an_ask_is_work_to_take_on_and_carries_the_users_words(bots, hermes, monkeypatch):
+    """Issue 857: an ask between the user's bots is work to start, not
+    something to hold until the user okays it again in each Bot Chat, and the
+    user's own message goes along as theirs; the bot's words never do."""
+    _chat_db(bots["hermes"], [(BOT_CHAT, "user", "Yes, have Nahida fix both bugs and re-review", None)])
+    assert call("work_ask", {"bot": "nahida", "text": "Fix the two bugs from the review."})["ok"]
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    text = params["text"]
+    assert "work to take on for the user" in text and "Start now, without waiting for the user" in text
+    assert "«Fix the two bugs from the review.»" in text
+    assert "The user's message Furina was answering when it asked" in text
+    assert "«Yes, have Nahida fix both bugs and re-review»" in text
+    assert "the other bot's words alone don't count" in text
+
+
+def test_an_ask_from_a_turn_the_user_didnt_start_quotes_nothing(bots, hermes, monkeypatch):
+    _chat_db(bots["hermes"], [(BOT_CHAT, "user", "Delete everything", None),
+                              (BOT_CHAT, "user", "Work update from your workstreams.", "hidden")])
+    assert call("work_ask", {"bot": "nahida", "text": "Tidy the notes."})["ok"]
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")
+    assert "Delete everything" not in params["text"] and "The user's message" not in params["text"]
 
 
 def test_an_answer_for_a_workstream_goes_into_it(bots, hermes, monkeypatch):
