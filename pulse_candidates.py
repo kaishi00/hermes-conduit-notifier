@@ -101,7 +101,7 @@ RECENT_CLIP, RECENT_BRIEF_CLIP = 200, 600
 # (instructions, text, schema=the reply's shape) -> (the parsed reply, tokens).
 Llm = Callable[..., tuple[Any, int]]
 # The reply's shape (pulse_memory.SCHEMA says why it's loose).
-_LIST = {"type": "array"}
+_LIST = {"type": ["array", "null"]}
 SCHEMA = {"type": "object", "properties": {"remembered": _LIST, "found": _LIST}}
 
 

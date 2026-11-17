@@ -143,11 +143,10 @@ WHY_LIMIT = 300
 # (instructions, text, schema=the reply's shape) -> (the parsed reply, tokens).
 Llm = Callable[..., tuple[Any, int]]
 # The replies' shapes (pulse_memory.SCHEMA says why they're loose).
-_FIELD: dict = {}
-CHECK_SCHEMA = {"type": "object", "properties": dict.fromkeys(
-    ("decision", "news", "why", "check_again_hours", "when", "urgent"), _FIELD)}
-ACT_SCHEMA = {"type": "object", "properties": {"done": _FIELD, "why": _FIELD}}
-STALE_SCHEMA = {"type": "object", "properties": {"stale": _FIELD, "why": _FIELD}}
+CHECK_SCHEMA = {"type": "object", "properties": {
+    key: {} for key in ("decision", "news", "why", "check_again_hours", "when", "urgent")}}
+ACT_SCHEMA = {"type": "object", "properties": {"done": {}, "why": {}}}
+STALE_SCHEMA = {"type": "object", "properties": {"stale": {}, "why": {}}}
 
 # Every check reads Hermes's scheduled jobs (pulse_report.cron_jobs), each
 # with how it's been running: a failing one covers nothing.

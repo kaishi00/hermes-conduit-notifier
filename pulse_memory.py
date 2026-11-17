@@ -178,11 +178,12 @@ Leave out small talk, questions answered on the spot, details of the task being 
 # tokens used). The schema goes to Hermes as the reply's shape: a Claude route
 # takes no schema-less JSON mode (notifier issue 848).
 Llm = Callable[..., tuple[Any, int]]
-# The replies' shapes. Loose on purpose: nothing is required and a list's
-# entries are left open (the instructions give their fields), since Hermes
-# checks the reply against the schema and a tight one would fail a reply the
-# parser takes.
-_LIST = {"type": "array"}
+# The replies' shapes. Loose on purpose: nothing is required, a list may be
+# null and its entries are left open (the instructions give their fields),
+# since Hermes checks the reply against the schema and a tight one would fail
+# a reply the parser takes. Only a reply that isn't an object at all now fails
+# at Hermes' check rather than in the parser.
+_LIST = {"type": ["array", "null"]}
 SCHEMA = {"type": "object", "properties": {"items": _LIST, "closed": _LIST, "claims": _LIST}}
 INBOX_SCHEMA = {"type": "object", "properties": {"deadlines": _LIST, "closed": _LIST}}
 

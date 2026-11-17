@@ -57,10 +57,9 @@ CALL_TIMEOUT_S = 60.0
 MAX_TOKENS = 1_000
 # The answer's shape, sent as the reply's JSON schema, never json_mode (see
 # pulse.structured_args). Loose, since Hermes checks the reply against it:
-# nothing required (check() reads a missing flag as no flag), nulls allowed.
-SCHEMA = {"type": "object", "properties": {
-    "flag": {"type": ["boolean", "null"]}, "between": {"type": ["array", "null"], "items": {"type": "string"}},
-    "why": {"type": ["string", "null"]}}}
+# nothing required and no field typed, so a missing or mistyped value is
+# check()'s to read as no flag, as before; the instructions give the types.
+SCHEMA = {"type": "object", "properties": {"flag": {}, "between": {}, "why": {}}}
 KINDS = ("found", "assumes", "changed", "user")
 _CURSOR = "watch_at"
 _CAP_SAID = "watch_cap_said"

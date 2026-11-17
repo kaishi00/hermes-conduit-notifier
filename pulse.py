@@ -1536,7 +1536,7 @@ def structured_args(schema: Optional[dict]) -> dict[str, Any]:
     calling Claude (only a schema goes), so every read failed on a Claude route
     (notifier issue 848). Hermes sends a schema with ``strict`` off and checks
     the reply against it; Pulse's and the watch's are loose for that."""
-    return {"json_schema": schema or {"type": "object"}}
+    return {"json_schema": schema if schema is not None else {"type": "object"}}
 
 
 def _on_route(route: Optional[dict[str, str]]) -> Any:
