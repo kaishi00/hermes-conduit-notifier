@@ -420,6 +420,14 @@ def test_sealed_batch_answers_open_per_question():
     assert opened["answers"] == {"q0": "Red", "q1": "Blue"}
 
 
+def test_a_rejected_batch_poll_keeps_the_answers_the_phone_sealed():
+    # hermes-conduit#2683: one unsealed answer refuses the poll, not the
+    # batch's sealed ones, which the clarify loop hands to Hermes.
+    status = {"status": "pending", "answers": {"q0": _answer("Red", "q0"), "q1": "Blue"}, "remaining": ["q2"]}
+    assert client.opened_answers(status, _state(), "conduit-push-abc123def456") == {
+        "status": "rejected", "answers": {"q0": "Red"}}
+
+
 # A sealed answer is random each time it's made, so the ids are fixed:
 # pytest-xdist's workers must collect the same test ids.
 @pytest.mark.parametrize("answer", [
