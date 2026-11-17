@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.33 (2026-11-17)
+
+### Fixes
+
+- With a Claude subscription model, Pulse and the work watch no longer fail every time they ask it something: Pulse's reports, memory and follow-ups work again, and the watch tells your Bot Chat when one workstream may affect another.
+- The work watch on a model that thinks before it answers no longer runs out of room and says nothing.
+
 ## 0.177.32 (2026-11-17)
 
 ### Fixes

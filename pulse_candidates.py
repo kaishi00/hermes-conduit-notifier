@@ -98,7 +98,10 @@ RECENT_KINDS = (store.NOTICED, "followup", "brief")
 # A brief's card is its summary and its lines, so it keeps more of them.
 RECENT_CLIP, RECENT_BRIEF_CLIP = 200, 600
 
-Llm = Callable[[str, str], tuple[Any, int]]
+# (instructions, text, schema=the reply's shape) -> (the parsed reply, tokens).
+Llm = Callable[..., tuple[Any, int]]
+# The reply's shape (pulse_memory.SCHEMA says why it's loose).
+SCHEMA = {"type": "object", "properties": {key: {"type": ["array", "null"]} for key in ("remembered", "found")}}
 
 
 class BadReply(ValueError):
@@ -266,7 +269,7 @@ def ask(llm: Llm, gathered: report.Gathered, *, nudge: str, note: str = "",
                                        found=MAX_FOUND, kinds=", ".join(report.LIST_KINDS), areas=", ".join(AREAS),
                                        next=MAX_NEXT, lessons=lessons, picks=pulse_picks.rules(drawn))
     reply, tokens = llm(instructions + report.note_block(note),
-                        TEXT.format(since=gathered.since, fence=fence, context=gathered.text))
+                        TEXT.format(since=gathered.since, fence=fence, context=gathered.text), schema=SCHEMA)
     if not isinstance(reply, dict) or not any(isinstance(reply.get(key), list) for key in ("remembered", "found")):
         raise BadReply(f"no candidate list in the reply ({type(reply).__name__})")
     return parse(reply, gathered, drawn=drawn), tokens

@@ -65,7 +65,7 @@ def test_a_next_step_keeps_what_it_follows():
 def test_the_list_asks_which_reminder_each_is_about():
     seen = {}
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.update(instructions=instructions)
         return {"remembered": [], "found": []}, 1
 

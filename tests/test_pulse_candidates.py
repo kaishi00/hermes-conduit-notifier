@@ -89,7 +89,7 @@ def test_the_report_marks_a_reminder_sent_on_with_do_it(live):
 def test_the_list_call_fences_its_context_and_names_the_bar():
     seen = {}
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.update(instructions=instructions, text=text)
         return {"remembered": [], "found": []}, 9
 
@@ -109,7 +109,7 @@ def test_the_list_call_fences_its_context_and_names_the_bar():
 @pytest.mark.parametrize("reply", [None, [], {"items": []}, "text", {"remembered": "all of them"}])
 def test_a_reply_that_isnt_a_list_is_a_bad_reply(reply):
     with pytest.raises(candidates.BadReply):
-        candidates.ask(lambda instructions, text: (reply, 1), gathered(), nudge="balanced")
+        candidates.ask(lambda instructions, text, schema=None: (reply, 1), gathered(), nudge="balanced")
 
 
 def test_every_remembered_item_shown_is_answered_for_or_marked_unanswered():
@@ -551,7 +551,9 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
     assert (run["state"], run["tokens"], run["since"]) == (pulse.RUN_READY, 321, report._local(
         now - report.WINDOW_S, pulse.report_zone(live.store, live.home)))
     [call] = live.llm.calls
-    assert (call["purpose"], call["max_tokens"], call["json_mode"]) == ("pulse report", candidates.REPLY_TOKENS, True)
+    # The reply's shape goes as a schema, never json_mode (issue 848).
+    assert (call["purpose"], call["max_tokens"], call["json_schema"]) == (
+        "pulse report", candidates.REPLY_TOKENS, candidates.SCHEMA) and "json_mode" not in call
     asked = call["input"][0]["text"]
     assert f"#{item_id} [commitment]" in asked and "### Deploy (c1)" in asked and "flaky deploy" in asked
     pulse.tick(now + 1)

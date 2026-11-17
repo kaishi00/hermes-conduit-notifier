@@ -64,7 +64,7 @@ class Model:
         self.replies = list(replies)
         self.asked = []
 
-    def __call__(self, instructions, text):
+    def __call__(self, instructions, text, schema=None):
         self.asked.append((instructions, text))
         reply = self.replies.pop(0) if self.replies else {"dates": [], "ahead": []}
         if isinstance(reply, Exception):
@@ -389,7 +389,7 @@ def test_the_memory_run_looks_ahead_once_a_day_on_the_follow_up_budget(live, mon
          "anniversary")
     asked = []
     monkeypatch.setattr(pulse.memory, "run", lambda *args, **kwargs: None)
-    monkeypatch.setattr(pulse, "_memory_llm", lambda instructions, text, purpose="", route=None: (
+    monkeypatch.setattr(pulse, "_memory_llm", lambda instructions, text, purpose="", route=None, schema=None: (
         asked.append(purpose), ({"dates": [], "ahead": []}, 70))[1])
     monkeypatch.setattr(pulse, "_leads", lambda pulse_store: True)
     if datetime.fromtimestamp(now + 1800, timezone.utc).date() != today:

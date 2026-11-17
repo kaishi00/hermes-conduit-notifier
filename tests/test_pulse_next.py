@@ -135,7 +135,7 @@ def test_a_promise_resting_on_a_job_that_failed_its_last_3_runs_comes_up(live):
     failing_jobs(live.home)
     asked = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         # A model that does as it's told: a job covers the promise unless it's marked failing.
         asked.append((instructions, text))
         failing = "[failing: failed its last 3 runs: Provider returned 503]" in text
@@ -471,7 +471,7 @@ def test_the_list_parses_next_steps_against_what_it_showed():
 def test_the_list_asks_for_next_steps_and_what_each_follows():
     seen = {}
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.update(instructions=instructions)
         return {"remembered": [], "found": []}, 1
 

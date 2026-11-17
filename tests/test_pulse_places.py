@@ -249,7 +249,7 @@ def test_arriving_makes_what_waits_for_the_place_due_and_its_check_knows_it(wher
     assert followup.moment_due(where.store, now) == [item_id]
     seen = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.append((instructions, text))
         return {"decision": "tell", "news": "You're at Costco: batteries.", "why": "nothing shows it's done"}, 9
 
@@ -382,7 +382,7 @@ def test_a_failed_or_waiting_check_waits_for_the_next_time_there(where, reply):
     followup.schedule(where.store, time.time())
     arrive(where, moment())
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         if isinstance(reply, Exception):
             raise reply
         return {"decision": "wait", "news": "", "why": "they said not this week"}, 5
@@ -433,7 +433,7 @@ def test_the_memory_run_checks_moments_first_whatever_the_budget(where, monkeypa
     where.store.set("memory_today", {"day": day, "tokens": 10_000_000})
     asked, woken = [], []
     monkeypatch.setattr(pulse.memory, "run", lambda *args, **kwargs: None)
-    monkeypatch.setattr(pulse, "_memory_llm", lambda instructions, text, purpose="", route=None: (
+    monkeypatch.setattr(pulse, "_memory_llm", lambda instructions, text, purpose="", route=None, schema=None: (
         asked.append(purpose),
         ({"decision": "tell", "news": "You're at Costco: batteries.", "why": "not done"}, 30))[1])
     monkeypatch.setattr(pulse, "_leads", lambda pulse_store: True)
@@ -625,7 +625,7 @@ def test_what_pulse_remembers_about_the_place_joins_the_check_it_makes_due(where
     where.store.close_item(returns, status="done", closed_by="user")
     seen = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.append((instructions, text))
         return {"decision": "tell", "news": "You're at Costco: batteries. The tyre centre shuts at 6.",
                 "why": "nothing shows it's done"}, 9

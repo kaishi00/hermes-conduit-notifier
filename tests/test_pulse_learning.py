@@ -221,7 +221,7 @@ def test_already_knew_asks_checks_to_skip_what_the_user_saw(live):
     seen = []
     promise(live, "Hermes will watch the queue.")
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.append(instructions)
         return {"decision": "wait", "why": "nothing"}, 1
 
@@ -1577,7 +1577,7 @@ def test_the_held_card_check_reads_the_note_to_pulse(live):
     live.store.set("note", "Never bring up the gym.")
     seen = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.append(instructions)
         return {"stale": False, "why": "still stands"}, 7
 
@@ -1600,7 +1600,7 @@ def test_the_rested_card_check_reads_the_note_to_pulse(live):
     back_at = live.store.card(card_id)["rest_until"]
     seen = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.append(instructions)
         return {"stale": False, "why": "still stands"}, 7
 
@@ -1764,7 +1764,7 @@ def test_a_failed_held_check_tries_again_next_run(live):
     learning.add_card(live.store, kind="followup", item=live.store.item(item_id), level_name="brief",
                       news="Waiting on the deploy.", why="", chat_title="Deploy", now=time.time() - 3600)
 
-    def broken(instructions, text):
+    def broken(instructions, text, schema=None):
         raise RuntimeError("model down")
     now = time.time()
     assert run_held(live, broken, now)["failed"] == 1
@@ -1884,7 +1884,7 @@ def test_a_failed_found_card_check_tries_again_after_a_while(live):
     card_id = found_card(live, chat_id=CHAT, news="Look at the flaky deploy")
     now = live.store.card(card_id)["created_at"] + followup.FOUND_EVERY_S
 
-    def broken(instructions, text):
+    def broken(instructions, text, schema=None):
         raise RuntimeError("model down")
     assert run_found(live, broken, now)["failed"] == 1
     said = llm_saying(stale=False, why="still open")
@@ -1900,7 +1900,7 @@ def test_the_found_card_check_keeps_the_times_another_process_stored_meanwhile(l
                       came=now - followup.FOUND_EVERY_S - 60)
     failed = found_card(live, chat_id=CHAT, news="Look at the flaky deploy", came=now - followup.FOUND_EVERY_S - 60)
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         if "flaky deploy" in text:
             raise RuntimeError("model down")
         return {"stale": False, "why": "still open"}, 42
@@ -1924,7 +1924,7 @@ def test_the_found_card_check_reads_the_note_to_pulse(live):
     live.store.set("note", "Never bring up the gym.")
     seen = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.append(instructions)
         return {"stale": False, "why": "still stands"}, 7
 
@@ -2017,7 +2017,7 @@ def test_a_whole_report_put_off_is_read_before_it_comes_back_and_stays_away_once
     assert followup.return_rested(live.store, back_at + 1) == []  # both wait for their read
     seen = []
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.append((instructions, text))
         return {"stale": len(seen) == 1, "why": "both days have passed"}, 7
 
@@ -2052,7 +2052,7 @@ def test_a_found_card_read_before_it_comes_back_isnt_read_again_in_that_run_or_t
     found_card(live, chat_id=CHAT, news="Look at the flaky deploy", came=back_at - followup.FOUND_EVERY_S - 60)
     asked = []
 
-    def memory_llm(instructions, text, purpose="pulse memory", route=None):
+    def memory_llm(instructions, text, purpose="pulse memory", route=None, schema=None):
         asked.append(text)
         return {"stale": False, "why": "still open"}, 42
 
@@ -2307,7 +2307,7 @@ def test_a_card_about_something_open_has_its_chat_read_before_it_comes_back(live
     assert control.dismiss(live.store, card_id, True, now=back_at + 2, until="later_today") is True
     back_at = live.store.card(card_id)["rest_until"]
 
-    def failing(instructions, text):
+    def failing(instructions, text, schema=None):
         raise RuntimeError("no model")
 
     done = {}
@@ -2354,7 +2354,7 @@ def test_a_held_card_put_off_to_tomorrow_comes_back_for_that_brief(live, monkeyp
     assert live.store.card(held["id"])["dismissed_at"] is not None and live.sent() == []
     asked = []
 
-    def memory_llm(instructions, text, purpose="pulse memory", route=None):
+    def memory_llm(instructions, text, purpose="pulse memory", route=None, schema=None):
         asked.append(purpose)
         return {"stale": False, "why": "still open"}, 42
 
@@ -2448,7 +2448,7 @@ def test_a_rested_card_done_during_its_read_comes_back_as_the_user_left_it(live)
     back_at = live.store.card(card_id)["rest_until"]
     calls = []
 
-    def llm(instructions, text):  # the user marks the card done while the model reads its chat
+    def llm(instructions, text, schema=None):  # the user marks the card done while the model reads its chat
         calls.append(text)
         assert control.done(live.store, card_id) is True
         return {"stale": False, "why": "still open"}, 42

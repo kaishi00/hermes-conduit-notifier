@@ -36,6 +36,7 @@ turn of its own as the user gets there or leaves, which pushes too.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -1142,8 +1143,8 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
             # The report is made from this list only (no free text to read back):
             # a list that fails is asked for once more.
             try:
-                rows, tokens = candidates.ask(lambda instructions, text: _memory_llm(
-                    instructions, text, purpose="pulse report", max_tokens=candidates.REPLY_TOKENS, route=route),
+                rows, tokens = candidates.ask(functools.partial(
+                    _memory_llm, purpose="pulse report", max_tokens=candidates.REPLY_TOKENS, route=route),
                     gathered, nudge=learning.nudge(pulse_store), note=report.note(pulse_store), lessons=lessons,
                     drawn=drawn)
                 break
@@ -1358,8 +1359,9 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         sources = memory_sources(pulse_store, home, home_chat_id, profiles)
         route = lent_route(home, home_chat_id)
 
-        def ask(instructions: str, text: str, purpose: str = "pulse memory") -> tuple[Any, int]:
-            return _memory_llm(instructions, text, purpose=purpose, route=route)
+        def ask(instructions: str, text: str, purpose: str = "pulse memory",
+                schema: Optional[dict] = None) -> tuple[Any, int]:
+            return _memory_llm(instructions, text, purpose=purpose, route=route, schema=schema)
 
         done: dict[str, int] = {}
         checked: dict[str, int] = {}
@@ -1370,8 +1372,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
         try:
             if moments:
                 try:
-                    followup.run(pulse_store, home, lambda instructions, text: ask(
-                                     instructions, text, purpose="pulse follow-up"), zone=zone,
+                    followup.run(pulse_store, home, functools.partial(ask, purpose="pulse follow-up"), zone=zone,
                                  now=max(now, time.time()),
                                  still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
                                  budget=float("inf"), done=placed, only=moments)
@@ -1400,8 +1401,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                     logger.warning("conduit_push: Pulse memory couldn't read the inbox", exc_info=True)
             if acts:
                 try:
-                    followup.check_acts(pulse_store, home, lambda instructions, text: ask(
-                                            instructions, text, purpose="pulse follow-up"), zone=zone,
+                    followup.check_acts(pulse_store, home, functools.partial(ask, purpose="pulse follow-up"), zone=zone,
                                         now=max(now, time.time()),
                                         still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
                                         budget=float("inf"), done=acted)
@@ -1411,8 +1411,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                 # Before the held checks: its cards count as just read, and
                 # the checks after it spend what it leaves of the budget.
                 try:
-                    ahead.run(pulse_store, home, lambda instructions, text: ask(
-                                  instructions, text, purpose="pulse look ahead"), zone=zone,
+                    ahead.run(pulse_store, home, functools.partial(ask, purpose="pulse look ahead"), zone=zone,
                               now=max(now, time.time()),
                               still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
                               budget=follow_cap - follow_used, done=looked)
@@ -1424,14 +1423,12 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
             if holds or rests:
                 try:
                     if holds:
-                        followup.check_held(pulse_store, home, lambda instructions, text: ask(
-                                                instructions, text, purpose="pulse follow-up"), zone=zone,
+                        followup.check_held(pulse_store, home, functools.partial(ask, purpose="pulse follow-up"), zone=zone,
                                             now=max(now, time.time()),
                                             still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
                                             budget=follow_cap - follow_used, done=checked)
                     if rests:
-                        followup.check_rested(pulse_store, home, lambda instructions, text: ask(
-                                                  instructions, text, purpose="pulse follow-up"), zone=zone,
+                        followup.check_rested(pulse_store, home, functools.partial(ask, purpose="pulse follow-up"), zone=zone,
                                               now=max(now, time.time()),
                                               still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
                                               budget=follow_cap - follow_used, done=checked)
@@ -1450,8 +1447,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                 followup.check_all_now(pulse_store, now)
                 followup.check_watches_now(pulse_store, now)
                 try:
-                    followup.run(pulse_store, home, lambda instructions, text: ask(
-                                     instructions, text, purpose="pulse follow-up"), zone=zone, now=now,
+                    followup.run(pulse_store, home, functools.partial(ask, purpose="pulse follow-up"), zone=zone, now=now,
                                  still_leader=lambda: (not stopped.is_set() and _leads(pulse_store)
                                                        and bool(pulse_store.get("followups"))),
                                  budget=follow_cap - follow_used, done=checked)
@@ -1459,8 +1455,7 @@ def _memory_run(home: Path, home_chat_id: str, now: float, stopped: threading.Ev
                     _count_checks(pulse_store, checked)
             if founds:
                 try:
-                    followup.check_found(pulse_store, home, lambda instructions, text: ask(
-                                             instructions, text, purpose="pulse follow-up"), zone=zone,
+                    followup.check_found(pulse_store, home, functools.partial(ask, purpose="pulse follow-up"), zone=zone,
                                          now=max(now, time.time()),
                                          still_leader=lambda: not stopped.is_set() and _leads(pulse_store),
                                          budget=follow_cap - follow_used - checked.get("tokens", 0), done=found)
@@ -1516,20 +1511,32 @@ def _leads(pulse_store: store.PulseStore) -> bool:
 
 
 def _memory_llm(instructions: str, text: str, purpose: str = "pulse memory",
-                max_tokens: int = memory.MAX_TOKENS, route: Optional[dict[str, str]] = None) -> tuple[Any, int]:
+                max_tokens: int = memory.MAX_TOKENS, route: Optional[dict[str, str]] = None,
+                schema: Optional[dict] = None) -> tuple[Any, int]:
     """One Pulse model call, on Hermes's "Pulse memory" slot. ``route`` is
     the Pulse chat's model (``lent_route``), which that slot left on "auto"
-    then means, as Settings > Pulse's "Default" (and the model it names) says."""
+    then means, as Settings > Pulse's "Default" (and the model it names) says.
+    ``schema``: the reply's JSON schema, sent as its shape (structured_args)."""
     llm = getattr(_ctx, "llm", None)
     if llm is None:
         raise RuntimeError("this Hermes gives plugins no model access")
     with _own_profile_scope(), _on_route(route):
         result = llm.complete_structured(
-            instructions=instructions, input=[{"type": "text", "text": text}], json_mode=True,
+            instructions=instructions, input=[{"type": "text", "text": text}], **structured_args(schema),
             task=memory.TASK if _memory_task else None, purpose=purpose, timeout=memory.CALL_TIMEOUT_S,
             max_tokens=max_tokens)
     usage = getattr(result, "usage", None)
     return getattr(result, "parsed", None), int(getattr(usage, "total_tokens", 0) or 0)
+
+
+def structured_args(schema: Optional[dict]) -> dict[str, Any]:
+    """``complete_structured``'s reply format: the reply's JSON schema, or a
+    bare object when a call names none. Never ``json_mode``: Hermes sends that
+    as ``json_object``, which the Claude subscription provider refuses before
+    calling Claude (only a schema goes), so every read failed on a Claude route
+    (notifier issue 848). Hermes sends a schema with ``strict`` off and checks
+    the reply against it; Pulse's and the watch's are loose for that."""
+    return {"json_schema": schema if schema is not None else {"type": "object"}}
 
 
 def _on_route(route: Optional[dict[str, str]]) -> Any:

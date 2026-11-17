@@ -253,7 +253,7 @@ def test_a_held_pick_is_read_again_and_one_done_goes_where_it_was_made(holding):
     _, card = held(holding)
     asked, stale = [], [False]
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         asked.append((instructions, text))
         return {"stale": stale[0], "why": "the chat says the gift is bought"}, 40
 
