@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.27 (2026-11-17)
+
+### Fixes
+
+- When one of your bots asks another for work, the bot asked starts on it instead of waiting for you to okay it again in its own Bot Chat. Your message goes along with the ask, and on into the workstream that bot hands it to, so a go-ahead you gave once reaches whoever does the work. Steps that can't be undone still need your own words or Hermes' approval.
+
 ## 0.177.26 (2026-11-16)
 
 ### Fixes
