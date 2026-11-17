@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.31 (2026-11-17)
+
+### Fixes
+
+- With notification encryption on, answering a question on the card Conduit shows in the open chat no longer sends your answer unencrypted (with the matching Conduit update), and an answer the plugin refuses no longer leaves Hermes waiting 10 minutes with the alert calls still ringing: Hermes hears at once that nothing was answered, and keeps the answers already given.
+
 ## 0.177.30 (2026-11-17)
 
 ### Fixes

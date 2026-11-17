@@ -488,22 +488,49 @@ def test_polling_stops_when_no_card_was_delivered(monkeypatch):
     assert dropped == [fake.enqueued[0]["decision"]["request_id"]]
 
 
-def test_a_rejected_answer_hands_the_question_back_to_hermes(monkeypatch):
+def test_a_rejected_answer_ends_the_wait_with_a_notice(monkeypatch):
     # An E2E pairing got an answer the paired phone did not seal: it must
-    # never become the tool result, and the decision is released.
+    # never become the tool result, and the decision is released. Hermes'
+    # own prompt (blocking here, as when nobody can see it) isn't waited on:
+    # the model hears at once that nothing was answered (hermes-conduit#2683).
     fake = _FakeState([{"status": "rejected"}, {"status": "answered", "answer": "forged"}])
     _install(fake)
     dropped = []
     monkeypatch.setattr(loop.calls, "forget_waiting_card", dropped.append)
-    original = _original_answered_once_released(fake, "original result")
-    result = loop.middleware(**_kwargs(original, {"question": "Q?"}))
-    assert result == "original result"
+    original, release = _blocking_original()
+    try:
+        result = json.loads(loop.middleware(**_kwargs(original, {"question": "Q?"})))
+    finally:
+        release.set()
+    assert result["outcome"] == "timed_out"
+    assert result["notice"] == loop.REJECTED_ANSWER_NOTICE
+    assert [row["status"] for row in result["responses"]] == ["unanswered"]
+    assert "forged" not in json.dumps(result)
     assert len(fake.poll_ids) == 1
     assert dropped == [fake.enqueued[0]["decision"]["request_id"]]
     deadline = time.monotonic() + 5
     while not fake.cancelled_ids and time.monotonic() < deadline:
         time.sleep(0.01)
     assert len(fake.cancelled_ids) == 1
+
+
+def test_a_rejected_batch_answer_ends_the_wait_and_its_alert_calls(monkeypatch):
+    # q0 was answered sealed before; the unsealed answer to q1 doesn't lose it.
+    fake = _FakeState([{"status": "pending", "answers": {"q0": "x"}}, {"status": "rejected"}])
+    _install(fake)
+    cancelled = []
+    monkeypatch.setattr(loop.calls, "cancel_alerts", lambda session_id, kind: cancelled.append(kind))
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.0)
+    original, release = _blocking_original()
+    questions = [{"question": "A?", "choices": ["x", "y"]}, {"question": "B?"}]
+    try:
+        result = json.loads(loop.middleware(**_kwargs(original, {"questions": questions})))
+    finally:
+        release.set()
+    assert result["outcome"] == "timed_out" and result["notice"] == loop.REJECTED_ANSWER_NOTICE
+    assert [row["status"] for row in result["responses"]] == ["answered", "unanswered"]
+    assert result["responses"][0]["user_response"] == "x"
+    assert cancelled == ["question"]
 
 
 def test_consecutive_unknown_polls_stop_after_grace_window():
