@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.30 (2026-11-17)
+
+### Fixes
+
+- A notification Hermes writes that runs past 60 characters of title or 300 of text is shortened with "…" instead of refused, so a scheduled job's notification is no longer lost.
+
 ## 0.177.29 (2026-11-17)
 
 ### Fixes
