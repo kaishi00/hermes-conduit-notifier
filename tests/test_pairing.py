@@ -108,6 +108,22 @@ def test_an_unnamed_pairing_takes_the_bots_name(tmp_path, monkeypatch):
     assert sent[-1]["gateway_name"] == "Studio"
 
 
+def test_an_unnamed_profile_comes_from_the_dashboards_home(tmp_path, monkeypatch):
+    # A dashboard scoped to a named profile names the gateway as the CLI does.
+    client = api.self_update._plugin_client()
+    titles = sys.modules[f"{client.__package__}.session_titles"]
+    monkeypatch.setattr(titles, "bot_name", lambda: "")
+    monkeypatch.setattr(titles, "_home", lambda: tmp_path / "profiles" / "work")
+    calls = []
+    for profile in (None, "", "current"):
+        api.pairing.pair_profile({"pairing_code": CODE}, profile=profile, path=tmp_path / "s.json",
+                                 claim=_recording_claim(calls))
+        assert calls[-1][2] == "box Hermes (work)", profile
+        assert client.default_gateway_name(profile) == "box Hermes (work)", profile
+    monkeypatch.setattr(titles, "_home", lambda: None)
+    assert client.default_gateway_name() == "box Hermes"
+
+
 def test_a_plugin_that_wont_load_still_pairs_by_the_host_name(tmp_path, monkeypatch):
     def broken():
         raise ImportError("half-updated install")
