@@ -59,11 +59,14 @@ SCHEMA: dict[str, Any] = {
     "parameters": {
         "type": "object",
         "properties": {
-            "title": {"type": "string", "maxLength": MAX_TITLE_CHARS,
+            # No maxLength: Hermes rejects a call over it before the tool
+            # runs, and a scheduled job's notification was lost (notifier
+            # issue 849). The tool shortens a longer one instead.
+            "title": {"type": "string",
                       "description": f"What happened, in a few words (up to {MAX_TITLE_CHARS} characters)."},
-            "body": {"type": "string", "maxLength": MAX_BODY_CHARS,
+            "body": {"type": "string",
                      "description": f"The result in a sentence or two (up to {MAX_BODY_CHARS} characters)."},
-            "key": {"type": "string", "maxLength": MAX_KEY_CHARS,
+            "key": {"type": "string",
                     "description": ("Optional. A short name for what this is about (\"report\", \"backup\"). A later "
                                     "notification with the same key replaces this one on the phone. Leave it out "
                                     "for a new notification.")},
@@ -132,8 +135,8 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
 
 def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict[str, Any]:
     args = args if isinstance(args, dict) else {}
-    title = _line(args.get("title"), MAX_TITLE_CHARS)
-    body = _line(args.get("body"), MAX_BODY_CHARS)
+    title, title_cut = _line(args.get("title"), MAX_TITLE_CHARS)
+    body, body_cut = _line(args.get("body"), MAX_BODY_CHARS)
     if not title or not body:
         return {"ok": False, "error": "missing_text", "note": "Give both a title and a body."}
     session = session_id.strip() if isinstance(session_id, str) else ""
@@ -157,6 +160,9 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
     if key:
         note += (f" It replaces this profile's earlier notification with the key \"{key}\", if it's still showing. A turn "
                  "that sends no notification (a [SILENT] reply, or the user is watching the chat) leaves the earlier one.")
+    if title_cut or body_cut:
+        note += (f" It was too long, so the phone shows it shortened, ending in \u2026 (a title fits {MAX_TITLE_CHARS} "
+                 f"characters, a body {MAX_BODY_CHARS}). Call conduit_notify again with a shorter one to replace it.")
     return {"ok": True, "note": note, **({"key": key} if key else {})}
 
 
@@ -211,7 +217,12 @@ def drop(session_id: str) -> str:
     return taken[1].key if taken is not None else ""
 
 
-def _line(value: Any, limit: int) -> str:
+def _line(value: Any, limit: int) -> tuple[str, bool]:
+    """The text on one line, and whether it was cut to fit: a cut one ends
+    in an ellipsis, inside the limit."""
     if not isinstance(value, str):
-        return ""
-    return " ".join(value.split())[:limit].strip()
+        return "", False
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text, False
+    return text[:limit - 1].rstrip() + "\u2026", True

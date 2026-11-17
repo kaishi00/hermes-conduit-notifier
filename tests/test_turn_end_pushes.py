@@ -1,5 +1,6 @@
 """One notice per turn: a failed turn's error text isn't a reply, and a
 subagent that ends inside its parent's turn is part of that reply."""
+import json
 import os
 import importlib.util
 import pathlib
@@ -704,6 +705,25 @@ def test_a_silent_reply_drops_the_written_notification(pushed, paired):
     plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
     assert pushed == []
     assert notify_tool.take("s") is None, "it doesn't wait for a later turn"
+
+
+def test_a_long_notification_is_shortened_not_refused(pushed, paired):
+    """Notifier issue 849: Hermes refused a body over the schema's maxLength
+    before the tool ran, and a scheduled job's notification was lost."""
+    for field in ("title", "body", "key"):
+        assert "maxLength" not in notify_tool.SCHEMA["parameters"]["properties"][field]
+    body = "Fleet healthy; fixed career-job-scan. " * 20
+    answer = json.loads(notify_tool.handle({"title": "Nightly fleet check " * 5, "body": body}, session_id="s"))
+    assert answer["ok"] is True and "shortened" in answer["note"]
+    plugin._post_llm_call(session_id="s", turn_id="t", assistant_response="Full report.")
+    plugin._on_session_end(session_id="s", turn_id="t", completed=True, failed=False, interrupted=False)
+    [event] = pushed
+    assert len(event["headline"]) <= notify_tool.MAX_TITLE_CHARS and event["headline"].endswith("\u2026")
+    assert len(event["body"]) <= notify_tool.MAX_BODY_CHARS and event["body"].endswith("\u2026")
+    assert event["body"].startswith("Fleet healthy; fixed career-job-scan.")
+    fits = json.loads(notify_tool.handle({"title": "t" * 60, "body": "b" * 300}, session_id="s2"))
+    assert "shortened" not in fits["note"]
+    assert notify_tool.take("s2") == notify_tool.Headline("t" * 60, "b" * 300)
 
 
 def test_conduit_notify_refuses_what_cant_notify(paired, monkeypatch):
