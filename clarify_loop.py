@@ -373,9 +373,16 @@ def _first_answer_wins(
         elif state == "rejected":
             # An answer for an end-to-end encrypted pairing that the paired
             # phone did not seal (client.opened_answers). It never answers
-            # the tool call: release the decision and let Hermes' own clarify
-            # path take the question.
-            break
+            # the tool call, and the relay keeps it locked, so the card can't
+            # be answered again either. Waiting on Hermes' own prompt would
+            # hold the turn to the clarify timeout, often with nobody able
+            # to see that prompt (a gateway turn while Conduit is attached to
+            # `hermes serve`), and the unanswered-question calls ringing all
+            # along (hermes-conduit#2683). End the wait now and tell the
+            # model why, so it can ask again.
+            calls.forget_waiting_card(request_id)
+            _release_decision(request_id, relay_won)
+            return _format_batch_result(batch, {}, outcome="timed_out", notice=REJECTED_ANSWER_NOTICE)
         elif state == "unknown" and saw_pending:
             # unknown-after-pending: the relay expired the decision (2h TTL,
             # far under an unlimited clarify timeout).
@@ -426,6 +433,14 @@ def _first_answer_wins(
     if "original_error" in outcome:
         raise outcome["original_error"]
     return outcome["original"]
+
+
+# The tool result's notice when an answer reached the relay that the paired
+# phone did not seal (hermes-conduit#2683). Nothing was answered.
+REJECTED_ANSWER_NOTICE = (
+    "[an answer reached Conduit that was not sealed by the paired phone, so it was refused and nothing "
+    "was answered; ask the question again if you still need it]"
+)
 
 
 # How often a parked question looks for a call's answers between relay polls.

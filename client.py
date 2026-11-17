@@ -561,8 +561,9 @@ def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: st
     A pairing that provisioned a key only accepts answers sealed with it and
     bound to this request (and question). Plaintext or anything that fails to
     verify came from somewhere other than the paired phone, so the poll
-    reports ``rejected`` and the clarify loop hands the question back to
-    Hermes' own clarify path instead of answering with it.
+    reports ``rejected`` and the clarify loop ends the question, telling the
+    model nothing was answered, instead of answering with it
+    (hermes-conduit#2683).
     """
     if state.get("e2e") is None or not isinstance(status, dict):
         return status
