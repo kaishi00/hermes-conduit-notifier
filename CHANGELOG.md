@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.29 (2026-11-17)
+
+### Fixes
+
+- Live > Local with a fast model on your own computer no longer makes it re-read the call's whole setup before it answers each call, so the first words come several seconds sooner.
+
 ## 0.177.28 (2026-11-17)
 
 ### Fixes

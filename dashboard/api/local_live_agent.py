@@ -163,9 +163,22 @@ def local_live_front_model_status() -> Dict[str, Any]:
             "reason": None}
 
 
+def _local_live_sorted_keys(value: Any) -> Any:
+    """``value`` with every object's keys in sorted order, lists as they were."""
+    if isinstance(value, dict):
+        return {key: _local_live_sorted_keys(value[key]) for key in sorted(value, key=str)}
+    if isinstance(value, list):
+        return [_local_live_sorted_keys(item) for item in value]
+    return value
+
+
 def _local_live_agent_tool(raw: Any) -> Optional[Dict[str, Any]]:
     """A tool as chat completions takes it, from either the Realtime shape
-    ({type, name, description, parameters}) or the chat one ({type, function})."""
+    ({type, name, description, parameters}) or the chat one ({type, function}).
+    Its keys go out in one fixed order whatever order the phone sent them in:
+    a local server reuses its cached prompt only when the tools read the same
+    on every call (Conduit builds before #2669 sent them in a new order each
+    call)."""
     if not isinstance(raw, dict):
         return None
     function = raw.get("function") if isinstance(raw.get("function"), dict) else raw
@@ -178,7 +191,7 @@ def _local_live_agent_tool(raw: Any) -> Optional[Dict[str, Any]]:
                                                                                            "properties": {}}}
     if isinstance(function.get("description"), str):
         tool["description"] = function["description"]
-    return {"type": "function", "function": tool}
+    return _local_live_sorted_keys({"type": "function", "function": tool})
 
 
 class _LocalLiveAgent:

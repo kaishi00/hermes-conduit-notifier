@@ -1534,6 +1534,33 @@ def test_agent_mode_answers_with_the_fast_model_not_a_hermes_turn(client, hermes
     assert server.upstream.sent == ["finish"]
 
 
+def test_the_fast_model_gets_the_calls_tools_in_one_order_whatever_order_the_phone_sent(client, hermes, server, front):
+    # A local server reuses its cached prompt only when the tools read the same on every call (#2669).
+    def reversed_keys(value):
+        if isinstance(value, dict):
+            return {key: reversed_keys(value[key]) for key in reversed(list(value))}
+        return [reversed_keys(item) for item in value] if isinstance(value, list) else value
+
+    tools = [{"type": "function", "name": "start_job", "description": "Start a Hermes job.",
+              "parameters": {"type": "object", "required": ["instructions"],
+                             "properties": {"instructions": {"type": "string", "description": "What to do."},
+                                            "chat": {"type": "string", "enum": ["this", "new"]}}}}]
+    front.answers = [[{"content": "Hi."}], [{"content": "Hi again."}]]
+    headers = {"Authorization": f"Bearer {_key(hermes)}"}
+    sent = []
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        # A reconnect sends the call's setup again, built anew on the phone.
+        for each in (tools, reversed_keys(tools)):
+            ws.send_text(json.dumps({"type": "conduit.agent", "instructions": "Be brief.", "tools": each}))
+            assert json.loads(ws.receive_text())["type"] == "conduit.agent.ready"
+            client.post(f"{BASE}/local-live/v1/chat/completions", json=_completion("Hi", stream=True), headers=headers)
+            sent.append(json.dumps(front.requests[-1]["body"]["tools"]))
+        ws.send_text("finish")
+    first, second = sent
+    assert first == second
+    assert '"enum": ["this", "new"]' in first, "lists keep their order"
+
+
 def test_a_fast_model_that_never_stops_is_cut_off(client, hermes, front, monkeypatch):
     monkeypatch.setattr(api.local_live, "LOCAL_LIVE_MAX_REPLY_CHARS", 10)
     front.answers = [[{"content": "abcdef"}, {"content": "ghijkl"}, {"content": "mnop"}]]
