@@ -382,9 +382,13 @@ def _first_answer_wins(
             # model why, so it can ask again.
             calls.forget_waiting_card(request_id)
             _release_decision(request_id, relay_won)
-            # A batch's answers the paired phone sealed before still count.
-            return _format_batch_result(batch, locked_answers if batch_protocol else {},
-                                        outcome="timed_out", notice=REJECTED_ANSWER_NOTICE)
+            # A batch's answers the paired phone sealed still count: those
+            # locked before, and any that opened in this very poll.
+            kept: dict[str, Any] = {}
+            if batch_protocol:
+                kept = {**locked_answers, **(status.get("answers") if isinstance(status.get("answers"), dict) else {})}
+            return _format_batch_result(batch, kept, outcome="timed_out",
+                                        notice=REJECTED_SOME_ANSWERED_NOTICE if kept else REJECTED_ANSWER_NOTICE)
         elif state == "unknown" and saw_pending:
             # unknown-after-pending: the relay expired the decision (2h TTL,
             # far under an unlimited clarify timeout).
@@ -442,6 +446,11 @@ def _first_answer_wins(
 REJECTED_ANSWER_NOTICE = (
     "[an answer reached Conduit that was not sealed by the paired phone, so it was refused and nothing "
     "was answered; ask the question again if you still need it]"
+)
+# The same, when a batch's other answers were sealed by the phone and stand.
+REJECTED_SOME_ANSWERED_NOTICE = (
+    "[an answer reached Conduit that was not sealed by the paired phone, so it was refused; the answers "
+    "shown stand, and only the unanswered questions need asking again]"
 )
 
 

@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.32 (2026-11-17)
+
+### Fixes
+
+- When an answer that wasn't encrypted by your phone is refused, the answers you gave to the form's other questions, even in the same moment, still count, and Hermes is told only the unanswered questions need asking again.
+
 ## 0.177.31 (2026-11-17)
 
 ### Fixes

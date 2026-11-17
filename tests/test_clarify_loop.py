@@ -527,10 +527,25 @@ def test_a_rejected_batch_answer_ends_the_wait_and_its_alert_calls(monkeypatch):
         result = json.loads(loop.middleware(**_kwargs(original, {"questions": questions})))
     finally:
         release.set()
-    assert result["outcome"] == "timed_out" and result["notice"] == loop.REJECTED_ANSWER_NOTICE
+    assert result["outcome"] == "timed_out" and result["notice"] == loop.REJECTED_SOME_ANSWERED_NOTICE
     assert [row["status"] for row in result["responses"]] == ["answered", "unanswered"]
     assert result["responses"][0]["user_response"] == "x"
     assert cancelled == ["question"]
+
+
+def test_a_rejected_poll_keeps_the_answers_that_opened_in_it(monkeypatch):
+    # A sealed q0 and an unsealed q1 landed between two polls: the poll that
+    # comes back rejected still carries q0, which stands.
+    fake = _FakeState([{"status": "rejected", "answers": {"q0": "y"}}])
+    _install(fake)
+    original, release = _blocking_original()
+    questions = [{"question": "A?", "choices": ["x", "y"]}, {"question": "B?"}]
+    try:
+        result = json.loads(loop.middleware(**_kwargs(original, {"questions": questions})))
+    finally:
+        release.set()
+    assert result["notice"] == loop.REJECTED_SOME_ANSWERED_NOTICE
+    assert [(row["status"], row["user_response"]) for row in result["responses"]] == [("answered", "y"), ("unanswered", None)]
 
 
 def test_consecutive_unknown_polls_stop_after_grace_window():
