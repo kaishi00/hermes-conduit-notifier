@@ -904,6 +904,16 @@ def test_a_managed_install_blocks_before_any_write(hermes):
     assert hermes.config_writes == [] and hermes.env_writes == []
 
 
+def test_a_managed_install_with_nothing_to_write_doesnt_block(hermes):
+    """Notifier issue 875: a package manager that declares everything the
+    setup would write is ready; one write left blocks again."""
+    _apply(hermes)
+    hermes.managed_install = "This Hermes installation is managed by nixos."
+    assert _state(hermes)["blockers"] == []
+    _write(hermes.root / "config.yaml", {**_yaml(hermes.root / "config.yaml"), "approvals": {"mode": "off"}})
+    assert [blocker["code"] for blocker in _state(hermes)["blockers"]] == ["managed"]
+
+
 @pytest.mark.parametrize("pinned", ["platform_toolsets.api_server", "known_plugin_toolsets.api_server",
                                     "approvals.mode"])
 def test_a_pinned_setting_blocks_before_any_write(hermes, pinned):

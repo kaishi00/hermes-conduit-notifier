@@ -1551,7 +1551,9 @@ def _ask_words(home: Path, store: work_store.Store, args: dict, bot: str,
     ref = args.get("ask")
     if ref:
         ask = store.get(ref)
-        if ask is None or ask.kind != "ask_in" or ask.closed_at:
+        # An answered or failed ask keeps closed_at unset: its status says
+        # it's no longer open (notifier issue 860).
+        if ask is None or ask.kind != "ask_in" or ask.closed_at or ask.status not in work_store.ACTIVE:
             return "", {"ok": False, "error": "ask",
                         "note": "ask names an open ask another bot sent you (A2), the one this work is for. Leave "
                                 "it out for work of your own. Nothing was done."}

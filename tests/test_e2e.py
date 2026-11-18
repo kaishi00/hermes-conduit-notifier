@@ -428,6 +428,13 @@ def test_a_rejected_batch_poll_keeps_the_answers_the_phone_sealed():
         "status": "rejected", "answers": {"q0": "Red"}}
 
 
+def test_a_batch_answer_moved_to_another_question_is_refused_on_the_retry():
+    # hermes-conduit#2692: the per-question retry binds each answer to its
+    # own question too, so q1's answer under q0 stays out.
+    status = {"status": "pending", "answers": {"q0": _answer("Blue", "q1"), "q1": "Red"}, "remaining": []}
+    assert client.opened_answers(status, _state(), "conduit-push-abc123def456") == {"status": "rejected"}
+
+
 # A sealed answer is random each time it's made, so the ids are fixed:
 # pytest-xdist's workers must collect the same test ids.
 @pytest.mark.parametrize("answer", [

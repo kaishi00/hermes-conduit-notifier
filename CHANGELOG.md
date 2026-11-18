@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.40 (2026-11-18)
+
+### Fixes
+
+- Linked Rooms setup no longer stops a package-managed Hermes (like NixOS) that already declares everything the setup needs.
+- A bot handing work to a workstream can no longer name an ask that was already answered, which quoted the user's old words again.
+
 ## 0.177.38 (2026-11-18)
 
 ### Fixes
