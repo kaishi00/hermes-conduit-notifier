@@ -126,8 +126,30 @@ def test_a_row_that_never_ran_says_nothing_about_cost(db):
     assert body["input_tokens"] == 0 and body["cost_usd"] is None and body["cost_status"] == "unknown"
 
 
+def test_a_subagent_that_compressed_is_one_run(db):
+    _add(db, "chat", started=1, input_tokens=100)
+    _add(db, "sub", parent="chat", started=2, ended=4, end_reason="compression", input_tokens=40)
+    _add(db, "sub-tail", parent="sub", started=5, input_tokens=10)
+    db.commit()
+    body = _get("?session_id=chat").json()
+    assert body["input_tokens"] == 150
+    assert body["subagent_runs"] == 1 and body["compressions"] == 0
+
+
+def test_a_hermes_without_the_cost_columns_says_so(db):
+    db.execute("ALTER TABLE sessions DROP COLUMN cost_status")
+    _add_old = "INSERT INTO sessions (id, source, started_at) VALUES ('old', 'cli', 1)"
+    db.execute(_add_old)
+    db.commit()
+    response = _get("?session_id=old")
+    assert response.status_code == 501
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_refusals(db):
-    assert _get("?session_id=nope").status_code == 404
+    missing = _get("?session_id=nope")
+    assert missing.status_code == 404
+    assert missing.headers["cache-control"] == "no-store"
     response = _get("")
     assert response.status_code == 400
     assert response.headers["cache-control"] == "no-store"

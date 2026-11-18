@@ -93,11 +93,13 @@ def _chain(conn: sqlite3.Connection, start: Dict[str, Any]) -> List[Dict[str, An
     return chain
 
 
-def _subagents(conn: sqlite3.Connection, chain: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """The subagent runs under the chat's rows, and theirs: every child that is
-    neither a branch nor the chain's own continuation."""
+def _subagents(conn: sqlite3.Connection, chain: List[Dict[str, Any]]) -> tuple:
+    """The subagent rows under the chat's rows, and theirs: every child that is
+    neither a branch nor the chain's own continuation. Returns (rows, runs):
+    a subagent's own compression continuations are its rows but not new runs."""
     in_chain = {row["id"] for row in chain}
     found: List[Dict[str, Any]] = []
+    runs = 0
     seen = set(in_chain)
     queue = list(chain)
     while queue and len(seen) < USAGE_MAX_ROWS:
@@ -107,8 +109,10 @@ def _subagents(conn: sqlite3.Connection, chain: List[Dict[str, Any]]) -> List[Di
                 continue
             seen.add(child["id"])
             found.append(child)
+            if not (parent["id"] not in in_chain and _continues(child, parent)):
+                runs += 1
             queue.append(child)
-    return found
+    return found, runs
 
 
 def _ran(row: Dict[str, Any]) -> bool:
@@ -136,7 +140,7 @@ def chat_usage(conn: sqlite3.Connection, session_id: str) -> Optional[Dict[str, 
     if start is None:
         return None
     chain = _chain(conn, start)
-    subagents = _subagents(conn, chain)
+    subagents, runs = _subagents(conn, chain)
     rows = chain + subagents
     totals = {key: sum(int(row.get(key) or 0) for row in rows)
               for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
@@ -165,7 +169,7 @@ def chat_usage(conn: sqlite3.Connection, session_id: str) -> Optional[Dict[str, 
         "model": newest.get("model") or "",
         "started_at": chain[0].get("started_at"),
         "compressions": len(chain) - 1,
-        "subagent_runs": len(subagents),
+        "subagent_runs": runs,
         **totals,
         "cost_usd": cost_usd,
         "cost_status": cost_status,

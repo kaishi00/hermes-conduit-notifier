@@ -72,8 +72,9 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 notes:
   chat usage: >-
     dashboard/api/session_usage.py reads the sessions table's token and cost columns
-    (input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, api_call_count,
-    estimated_cost_usd, actual_cost_usd, cost_status, parent_session_id, end_reason) read-only, for
+    (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+    api_call_count, tool_call_count, estimated_cost_usd, actual_cost_usd, cost_status, model,
+    parent_session_id, started_at, ended_at, end_reason, model_config) read-only, for
     Conduit's Context sheet and Usage Details (feature map: "Chat usage"). Compression continuations
     and subagent runs are told apart from branches as hermes_state's _BRANCH_CHILD_SQL and
     _COMPRESSION_CHILD_SQL do. Without the columns the route answers 501.
