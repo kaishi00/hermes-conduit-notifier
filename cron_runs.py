@@ -47,7 +47,7 @@ def is_silent(response: Any) -> bool:
     """Hermes' cron silence rule, from Hermes itself when it has one."""
     try:
         from gateway.response_filters import is_autonomous_silence_response
-    except ImportError:  # an older Hermes: the same rule, kept here
+    except Exception:  # noqa: BLE001 — an older Hermes (the same rule, kept here), or a broken one
         return _fallback_silent(response)
     try:
         return bool(is_autonomous_silence_response(response))

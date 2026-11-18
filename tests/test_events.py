@@ -69,6 +69,26 @@ def test_silent_response_follows_hermes_rule_when_it_has_one(monkeypatch):
     assert not is_silent_response("NO_REPLY")
 
 
+def test_a_hermes_module_that_fails_to_import_costs_no_push(monkeypatch):
+    """Not only a missing module: one that raises as it loads falls back too."""
+    import importlib.abc
+
+    import events
+
+    class Broken(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == "gateway.response_filters" or name == "gateway":
+                raise RuntimeError("broken Hermes install")
+            return None
+
+    monkeypatch.delitem(sys.modules, "gateway", raising=False)
+    monkeypatch.delitem(sys.modules, "gateway.response_filters", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [Broken(), *sys.meta_path])
+    assert is_silent_response("[SILENT]")
+    assert not is_silent_response("NO_REPLY")
+    assert events.without_closing_silence_marker("Done.\n\n[SILENT]") == "Done.\n\n[SILENT]"
+
+
 def test_push_event_attaches_sanitized_approval_decision():
     event = push_event(
         "approval.needed",
