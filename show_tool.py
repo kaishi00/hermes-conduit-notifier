@@ -359,6 +359,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     templates = card_templates.TemplateStore(get_hermes_home())
     if args.get("save_templates") is not None:
         saved = templates.save(args["save_templates"], problems)
+    if args.get("cards") is not None:
+        args = {**args, "cards": _cards_unwrapped(args["cards"])}
     given = _filled_templates(args.get("cards"), templates, problems)
     given = _reviews_kept(given, session, problems, reviews, is_room)
     # Every round kept above, however the card spelled its type.
@@ -683,6 +685,24 @@ def _review_decision(raw: Any, where: str, problems: list[str]) -> tuple[dict[st
         decision["layout"] = raw["layout"]
     decision["options"] = options
     return decision, option_pages
+
+
+def _cards_unwrapped(given: Any) -> Any:
+    """The cards as the list the schema asks for, however a model wrapped
+    them: a list sent as a JSON string, one card on its own, or the list
+    inside another list (``[[{...}]]``). A smaller model that got those
+    wrong kept showing the board again for half an hour (MiniMax M3.1,
+    2026-11-18)."""
+    if isinstance(given, str) and given.strip()[:1] in ("[", "{"):
+        try:
+            given = json.loads(given)
+        except ValueError:
+            return given
+    if isinstance(given, dict):
+        return given["cards"] if "type" not in given and isinstance(given.get("cards"), list) else [given]
+    while isinstance(given, list) and any(isinstance(item, list) for item in given):
+        given = [card for item in given for card in (item if isinstance(item, list) else [item])]
+    return given
 
 
 def _filled_templates(given: Any, templates: card_templates.TemplateStore, problems: list[str]) -> Any:
