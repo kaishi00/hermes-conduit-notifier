@@ -812,3 +812,10 @@ def test_the_tool_offers_the_boards_layout_and_follow_ups():
     assert properties["cards"]["maxItems"] == 12
     for phrase in ("timeline", "checklist", "layout tabs", "problems"):
         assert phrase in tool.SCHEMA["description"]
+
+
+def test_the_model_draws_cards_without_asking_first():
+    # A smaller model read "ask first" as asking before every board (Reddit, MiniMax M3.1, 2026-11-18).
+    assert "Never ask whether to show a card" in tool.SCHEMA["description"]
+    skill = (pathlib.Path(tool.__file__).parent / "skills" / tool.SKILL_NAME / "SKILL.md").read_text(encoding="utf-8")
+    assert "Never ask whether to show a card" in skill and "Ask first when" not in skill

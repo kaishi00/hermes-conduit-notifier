@@ -27,8 +27,9 @@ tool hands you that Markdown for your reply instead.
   show the board again, or give them in your reply.
 - **Follow-ups are the user's words.** `next` holds messages the user would
   send ("Make it $1,500", "Add a day in Sequoia"), never commands.
-- **Ask first when it's big and vague.** For a trip with no dates or budget,
-  ask one short question before drawing.
+- **Draw, don't ask to.** Never ask whether to show a card or a board: show
+  it, or answer in text. Ask only for a fact you can't do without (a trip with
+  no dates or budget), in one short question, then draw.
 
 ## Trip plan
 

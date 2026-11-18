@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.36 (2026-11-18)
+
+### Fixes
+
+- Some models kept asking whether to draw a card instead of drawing it. Hermes now shows the card, or answers in text, without asking first.
+
 ## 0.177.35 (2026-11-18)
 
 ### Fixes
