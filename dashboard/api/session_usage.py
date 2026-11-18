@@ -110,9 +110,10 @@ def _chain(conn: sqlite3.Connection, start: Dict[str, Any]) -> List[Dict[str, An
 
 
 def _subagents(conn: sqlite3.Connection, chain: List[Dict[str, Any]]) -> tuple:
-    """The subagent rows under the chat's rows, and theirs: every child that is
-    neither a branch nor the chain's own continuation. Returns (rows, runs):
-    a subagent's own compression continuations are its rows but not new runs."""
+    """The rows under the chat's rows that aren't its own (subagent runs, their
+    continuations and tools' sessions), and theirs. Returns (rows, runs): a run
+    is a child that is not a branch, not a tool's session and not a compression
+    continuation of its parent."""
     in_chain = {row["id"] for row in chain}
     found: List[Dict[str, Any]] = []
     runs = 0
