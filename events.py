@@ -720,11 +720,9 @@ def is_silent_response(value: Any) -> bool:
         return False
     try:
         from gateway.response_filters import is_intentional_silence_response
-    except ImportError:  # an older Hermes: its exact sentinel
-        return " ".join(value.split()).casefold() == "[silent]"
-    try:
+
         return bool(is_intentional_silence_response(value))
-    except Exception:  # noqa: BLE001 — a Hermes change must not cost the push
+    except Exception:  # noqa: BLE001 — an older Hermes (its exact sentinel), or a Hermes change that must not cost the push
         return " ".join(value.split()).casefold() == "[silent]"
 
 
@@ -736,11 +734,9 @@ def without_closing_silence_marker(value: Any) -> Any:
         return value
     try:
         from gateway.response_filters import strip_trailing_silence_marker
-    except ImportError:
-        return value
-    try:
+
         stripped = strip_trailing_silence_marker(value)
-    except Exception:  # noqa: BLE001 — a Hermes change must not cost the push
+    except Exception:  # noqa: BLE001 — an older Hermes, or a Hermes change that must not cost the push
         return value
     return stripped if isinstance(stripped, str) else value
 

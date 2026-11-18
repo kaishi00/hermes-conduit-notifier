@@ -11,7 +11,9 @@ A run stays quiet when:
 - its output is Hermes' silence marker by the cron rule: ``[SILENT]`` (or
   SILENT / NO_REPLY) as the whole reply, on its own first or last line, or
   opening the reply (``[SILENT] No changes``). Hermes doesn't deliver such a
-  run anywhere else either. Chats keep the exact rule (events).
+  run anywhere else either. Chats keep Hermes' interactive rule, the marker
+  as the whole reply (events.is_silent_response, the exact ``[SILENT]`` on
+  a Hermes without it).
 """
 
 from __future__ import annotations
