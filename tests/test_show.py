@@ -299,10 +299,12 @@ STATS = {"type": "stats", "stats": [{"label": "Steps", "value": "8,412"}], "sour
 def test_cards_wrapped_another_way_are_still_drawn(tool_home):
     # MiniMax M3.1 sent [[{...}]] and kept showing the board again (2026-11-18).
     _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
-    for given in ([[STATS]], [[[STATS]]], STATS, {"cards": [STATS]}, json.dumps([STATS]), json.dumps([[STATS]])):
+    for given in ([[STATS]], [[[STATS]]], STATS, {"cards": [STATS]}, json.dumps([STATS]), json.dumps([[STATS]]),
+                  {"cards": [[STATS]]}, json.dumps({"cards": [[STATS]]})):
         answer = _call({"title": "Today", "cards": given})
         assert answer["ok"] is True and answer["cards"] == [STATS], given
     assert _call({"title": "Today", "cards": "[not json"})["error"] == "invalid_cards"
+    assert _call({"title": "Today", "cards": "[" * 100_000})["error"] == "invalid_cards", "too deep to parse"
     answer = _call({"title": "Today", "cards": [[STATS], "x"]})
     assert answer["cards"] == [STATS] and "cards[1]: dropped" in answer["problems"], "a list among cards opens"
 
