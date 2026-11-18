@@ -764,18 +764,53 @@ def poll_decision(request_id: str) -> dict[str, Any]:
         found.append(opened)
     if not found:
         raise error or RuntimeError("No pairing answered.")
-    return next((status for status in found if isinstance(status, dict) and status.get("status") == "pending"),
-                found[0])
+    pending = [status for status in found if isinstance(status, dict) and status.get("status") == "pending"]
+    if not pending:
+        return found[0]
+    combined = _combined_pending(pending)
+    if combined.get("status") == "answered" and len(devices) > 1:
+        _release_elsewhere(request_id, devices)
+    return combined
 
 
-def _decision_devices() -> list[tuple[str | None, dict[str, Any]]]:
+def _combined_pending(pending: list[dict[str, Any]]) -> dict[str, Any]:
+    """One wait from every device that has the question pending
+    (hermes-conduit#2758): a device whose card can be answered speaks for
+    them over one whose can't, and a batch answered partly on one device and
+    partly on another keeps every answer, completing once together they
+    cover every question."""
+    if len(pending) == 1:
+        return pending[0]
+    base = next((status for status in pending if status.get("deliverable") is not False), pending[0])
+    combined = dict(base)
+    answers: dict[str, Any] = {}
+    remaining: list[Any] | None = None
+    for status in pending:
+        if isinstance(status.get("answers"), dict):
+            answers.update(status["answers"])
+        if isinstance(status.get("remaining"), list):
+            remaining = [qid for qid in (remaining if remaining is not None else status["remaining"])
+                         if qid in status["remaining"]]
+    if answers:
+        combined["answers"] = {**answers, **(base.get("answers") if isinstance(base.get("answers"), dict) else {})}
+    if remaining is not None:
+        remaining = [qid for qid in remaining if qid not in combined.get("answers", {})]
+        combined["remaining"] = remaining
+        if not remaining and answers:
+            return {"status": "answered", "answers": combined["answers"], "remaining": []}
+    return combined
+
+
+def _decision_devices(include_paused: bool = False) -> list[tuple[str | None, dict[str, Any]]]:
     """The pairings a decision may wait on: inside one device's pairing only
-    that one, else every one not in a refusal pause."""
+    that one, else every one not in a refusal pause (every one at all when
+    releasing it)."""
     if _device.get() is not None:
         state = load_state()
         return [(_device.get(), state)] if state else []
     now = time.monotonic()
-    return [(device, state) for device, state in paired_devices() if _paused_until(state) <= now]
+    return [(device, state) for device, state in paired_devices()
+            if include_paused or _paused_until(state) <= now]
 
 
 def _release_elsewhere(request_id: str, devices: list[tuple[str | None, dict[str, Any]]]) -> None:
@@ -919,7 +954,8 @@ def cancel_decision(request_id: str) -> bool:
     the endpoint (or a transport blip) must never break the answering path.
     """
     try:
-        devices = _decision_devices()
+        # A paused pairing's parked decision is released too, as before.
+        devices = _decision_devices(include_paused=True)
     except Exception as error:
         logger.warning("Conduit decision cancel failed for %s: %s", request_id, error)
         return False

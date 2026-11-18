@@ -395,3 +395,49 @@ def test_polling_with_every_pairing_paused_says_so(home):
             client.poll_decision("clarify:4")
     finally:
         client._clear_refusal()
+
+
+def test_a_device_that_can_answer_speaks_for_a_question_over_one_that_cannot(home, monkeypatch):
+    _write_pairings(home)
+
+    def relay(url, *, method, payload=None, credential="", timeout=15.0):
+        if credential.startswith(PHONE):
+            return {"status": "pending", "deliverable": False}
+        return {"status": "pending", "deliverable": True}
+
+    monkeypatch.setattr(client, "request_json", relay)
+    assert client.poll_decision("clarify:5")["deliverable"] is True
+
+
+def test_a_batch_answered_partly_on_each_device_keeps_every_answer(home, monkeypatch):
+    _write_pairings(home)
+    calls = []
+    answered = {PHONE: {"q1": "Red"}, IPAD: {}}
+
+    def relay(url, *, method, payload=None, credential="", timeout=15.0):
+        calls.append((method, credential))
+        if method == "DELETE":
+            return {}
+        mine = answered[PHONE if credential.startswith(PHONE) else IPAD]
+        return {"status": "pending", "answers": dict(mine), "remaining": [q for q in ("q1", "q2") if q not in mine]}
+
+    monkeypatch.setattr(client, "request_json", relay)
+    monkeypatch.setattr(client.threading, "Thread", lambda target, **kwargs: types.SimpleNamespace(start=target))
+    assert client.poll_decision("clarify:6") == {"status": "pending", "answers": {"q1": "Red"}, "remaining": ["q2"]}
+    answered[IPAD] = {"q2": "Small"}
+    assert client.poll_decision("clarify:6") == {"status": "answered", "answers": {"q1": "Red", "q2": "Small"},
+                                                 "remaining": []}
+    assert ("DELETE", f"{PHONE}.gw-1.secret") in calls and ("DELETE", f"{IPAD}.gw-2.secret") in calls
+
+
+def test_releasing_a_question_reaches_a_paused_pairing_too(home, monkeypatch):
+    _write_pairings(home)
+    calls = []
+    monkeypatch.setattr(client, "request_json",
+                        lambda url, *, method, payload=None, credential="", timeout=15.0: calls.append((method, credential)) or {})
+    client._refusals[f"{PHONE}.gw-1.secret"] = {"paused_for": 60, "until": 1e18}
+    try:
+        assert client.cancel_decision("clarify:7") is True
+    finally:
+        client._clear_refusal()
+    assert ("DELETE", f"{PHONE}.gw-1.secret") in calls

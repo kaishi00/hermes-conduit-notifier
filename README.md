@@ -5406,8 +5406,9 @@ A profile can notify every device you use Conduit on: an iPhone, an iPad and
 a Mac at once. With `"also": true` (and the device's name as `device_name`),
 the claim pairs the asking device besides the ones paired already, instead of
 moving the pairing to it. Each device keeps its own credential, gateway and
-encryption key, in `conduit-push-devices/<installation id>.json` beside
-`conduit-push.json`, and is removed on its own. Every notification goes to
+encryption key. The main device's pairing is `conduit-push.json`, as before,
+and each other device's is `conduit-push-devices/<installation id>.json`. Each
+is removed on its own. Every notification goes to
 each device; a question resolves on the first device that answers, and the
 others are released, so a late answer there is refused. Calls, Lock Screen
 progress and the phone's tools (calendar, reminders, location) stay with the
