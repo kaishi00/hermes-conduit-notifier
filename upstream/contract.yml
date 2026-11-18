@@ -70,6 +70,13 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  chat usage: >-
+    dashboard/api/session_usage.py reads the sessions table's token and cost columns
+    (input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, api_call_count,
+    estimated_cost_usd, actual_cost_usd, cost_status, parent_session_id, end_reason) read-only, for
+    Conduit's Context sheet and Usage Details (feature map: "Chat usage"). Compression continuations
+    and subagent runs are told apart from branches as hermes_state's _BRANCH_CHILD_SQL and
+    _COMPRESSION_CHILD_SQL do. Without the columns the route answers 501.
   chat close hooks: >-
     tui_gateway's _finalize_session says a chat closed with on_session_end (no turn_id) and then
     on_session_finalize. The plugin's _on_session_finalize ends a turn still running there as
@@ -706,6 +713,7 @@ routes:
   - GET /sessions/desktop-views
   - POST /sessions/history-page
   - POST /sessions/takeover
+  - GET /sessions/usage
   - POST /side-question
   - GET /speech-server/presets
   - WS /speech-server/socket

@@ -28,6 +28,7 @@ MODULES = (
     "voice_calls",
     "chats",
     "history",
+    "session_usage",
     "pairing",
     "notifications",
     "hermes_calls",
