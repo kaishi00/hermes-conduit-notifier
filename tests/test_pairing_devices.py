@@ -373,3 +373,25 @@ def test_a_device_file_can_only_hold_its_own_installation(home):
     assert [installation for installation, _state in client.other_devices()] == [IPAD]
     with pytest.raises(ValueError):
         client.device_state_path("../conduit-push")
+
+
+def test_pairing_by_hand_from_the_host_undoes_a_removal(home, revoked, monkeypatch):
+    _pair(home, PHONE, "gw-1")
+    _pair(home, IPAD, "gw-2", also=True)
+    api.pairing.remove_paired_device({"installation_id": IPAD})
+    assert IPAD in api.pairing._removed_devices(home / "conduit-push.json")
+    monkeypatch.setattr(client, "_request", lambda url, *, method, payload=None, credential="", timeout=15.0:
+                        _pairing(IPAD, "gw-3") if method == "POST" else {})
+    client.claim_pairing(CODE, RELAY, "box")
+    assert api.pairing._removed_devices(home / "conduit-push.json") == []
+
+
+def test_polling_with_every_pairing_paused_says_so(home):
+    _write_pairings(home)
+    client._refusals[f"{PHONE}.gw-1.secret"] = {"paused_for": 60, "until": 1e18}
+    client._refusals[f"{IPAD}.gw-2.secret"] = {"paused_for": 60, "until": 1e18}
+    try:
+        with pytest.raises(RuntimeError, match="paused"):
+            client.poll_decision("clarify:4")
+    finally:
+        client._clear_refusal()

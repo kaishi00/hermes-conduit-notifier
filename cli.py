@@ -34,7 +34,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Send an encrypted test push with a broken ciphertext; the phone must show only generic text",
     )
-    commands.add_parser("unpair", help="Revoke this profile's relay credential")
+    commands.add_parser("unpair", help="Revoke this profile's relay credentials, on every device it notifies")
     redact = commands.add_parser(
         "redact",
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
@@ -404,7 +404,7 @@ def dispatch(args: argparse.Namespace) -> int:
         except _RELAY_ERRORS as error:
             print(f"Unpairing failed: {error}")
             return 1
-        print("Conduit pairing revoked." if revoked else "This Hermes profile was not paired.")
+        print("Conduit pairing revoked on every device." if revoked else "This Hermes profile was not paired.")
         return 0
     if action == "pulse":
         return _pulse(args)

@@ -388,7 +388,34 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
     _revoke_replaced(previous, state["credential"], state)
     # This device was one of the others: it's the main one now, once.
     _drop_device(state.get("installation_id"), replaced_by=state)
+    # Paired by hand: a removal from Conduit is undone, as POST /pair does.
+    _forget_removed_device(state.get("installation_id"))
     return state
+
+
+# Devices removed from this profile's notifications in Conduit (the
+# dashboard's POST /pair/remove keeps the list, dashboard/api/pairing.py).
+REMOVED_DEVICES_NAME = "conduit-push-removed.json"
+
+
+def _forget_removed_device(installation_id: Any) -> None:
+    key = installation_key(installation_id)
+    if key is None:
+        return
+    path = get_hermes_home() / REMOVED_DEVICES_NAME
+    with state_file_lock(path):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError, OSError, RecursionError):
+            return
+        listed = value.get("removed") if isinstance(value, dict) else None
+        if not isinstance(listed, list) or key not in listed:
+            return
+        kept = [item for item in listed if item != key]
+        if kept:
+            _write_state({"removed": kept}, path)
+        else:
+            path.unlink(missing_ok=True)
 
 
 def _drop_device(installation_id: Any, *, replaced_by: dict[str, Any] | None = None) -> bool:
@@ -711,7 +738,8 @@ def poll_decision(request_id: str) -> dict[str, Any]:
     """
     devices = _decision_devices()
     if not devices:
-        raise RuntimeError("This Hermes profile is not paired with Conduit.")
+        raise RuntimeError("Notifications are paused for this profile's pairings." if paired_devices()
+                           else "This Hermes profile is not paired with Conduit.")
     # Each device the question went to parked it at the relay under its own
     # pairing (hermes-conduit#2758). The first that answers resolves it, and
     # the others are released so a late answer there is refused (409); a
