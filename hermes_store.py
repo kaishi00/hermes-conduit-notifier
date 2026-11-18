@@ -147,7 +147,7 @@ def _media_root() -> str:
 
 class _Store:
     """The ``SessionDB`` methods the plugin calls, on Hermes' storage interface.
-    The handle opens nothing until its first use and is released by
+    The handle is opened (and the store created) here and released by
     ``close``."""
 
     def __init__(self, home: Path, *, read_only: bool = False) -> None:
