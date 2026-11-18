@@ -1023,8 +1023,12 @@ It can run on another machine (an LXC, a GPU box, a Mac on your network).
 
 Conduit never connects to it directly. This plugin relays Conduit's realtime
 events to the server and back, adding only `Authorization: Bearer <api_key>`
-when a key is set. The phone and Watch keep talking to Hermes alone, so the
-speech server never needs to be exposed outside your network.
+when a key is set. A server that sends each reply frame under both of OpenAI
+Realtime's names for it (the beta's `response.audio.delta` and the GA's
+`response.output_audio.delta`) has the copies under the name it used second
+left out, so nothing is said twice (plugin 0.178.1). The phone and Watch keep
+talking to Hermes alone, so the speech server never needs to be exposed
+outside your network.
 
 Set it per profile in `config.yaml` (Conduit's Voice settings write the same keys):
 

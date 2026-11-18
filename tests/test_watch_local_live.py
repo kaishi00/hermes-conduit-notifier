@@ -296,9 +296,19 @@ def test_the_watch_runs_its_local_live_session_through_the_bridge(call):
 
         # The server's events reach the Watch, its audio as audio.
         upstream.push({"type": "session.updated"})
-        upstream.push({"type": "response.output_audio.delta", "delta": base64.b64encode(b"\x10\x27" * 240).decode()})
-        await _until(lambda: watch.events(socket, "session.updated") and any(k == 1 for k, _ in watch.received(socket)))
+        # A server that sends each frame under both its names is heard once
+        # (issue 2783).
+        audio = base64.b64encode(b"\x10\x27" * 240).decode()
+        upstream.push({"type": "response.output_audio.delta", "delta": audio})
+        upstream.push({"type": "response.audio.delta", "delta": audio})
+        upstream.push({"type": "response.output_audio_transcript.delta", "delta": "Hi"})
+        upstream.push({"type": "response.audio_transcript.delta", "delta": "Hi"})
+        upstream.push({"type": "response.done"})
+        await _until(lambda: watch.events(socket, "response.done") and any(k == 1 for k, _ in watch.received(socket)))
+        await asyncio.sleep(0.2)
         assert b"".join(v for k, v in watch.received(socket) if k == 1) == b"\x10\x27" * 240
+        assert [event["delta"] for event in watch.events(socket, "response.output_audio_transcript.delta")] == ["Hi"]
+        assert watch.events(socket, "response.audio_transcript.delta") == []
 
         # The call answers the model address.
         assert api.local_live._local_live_active_call("") is bridge.session.call

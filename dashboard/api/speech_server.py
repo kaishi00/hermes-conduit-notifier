@@ -719,6 +719,52 @@ async def _speech_server_socket(ws: WebSocket, relay: Callable[..., Any]) -> Non
         _speech_server_give_open(open_key)
 
 
+# A reply's frames under OpenAI Realtime's two names for them: the beta's
+# (response.audio.delta) and the GA's (response.output_audio.delta). Conduit
+# and the relay take either, but some servers send each frame under both, to
+# please clients of either dialect (issue 2783), and then every word would be
+# played and captioned twice. The first name a connection uses for a frame is
+# the one it keeps: the same frame under its other name goes no further.
+_SPEECH_SERVER_DIALECT_PAIRS = (
+    ("response.audio.delta", "response.output_audio.delta"),
+    ("response.audio.done", "response.output_audio.done"),
+    ("response.audio_transcript.delta", "response.output_audio_transcript.delta"),
+    ("response.audio_transcript.done", "response.output_audio_transcript.done"),
+    ("response.text.delta", "response.output_text.delta"),
+    ("response.text.done", "response.output_text.done"),
+)
+_SPEECH_SERVER_DIALECT_OTHER = {name: other for pair in _SPEECH_SERVER_DIALECT_PAIRS
+                                for name, other in (pair, pair[::-1])}
+_SPEECH_SERVER_DIALECT_HINTS = ('"response.audio', '"response.output_audio', '"response.text', '"response.output_text')
+
+
+class _SpeechServerDialect:
+    """One connection's names for a reply's frames (see above)."""
+
+    def __init__(self) -> None:
+        self.dropped: "set[str]" = set()
+
+    def keeps(self, text: str) -> bool:
+        """False for a frame the server already sent under its other name."""
+        if not any(hint in text for hint in _SPEECH_SERVER_DIALECT_HINTS):
+            return True
+        try:
+            event = json.loads(text)
+        except ValueError:
+            return True
+        kind = event.get("type") if isinstance(event, dict) else None
+        other = _SPEECH_SERVER_DIALECT_OTHER.get(kind) if isinstance(kind, str) else None
+        if other is None:
+            return True
+        if kind in self.dropped:
+            return False
+        if other not in self.dropped:
+            self.dropped.add(other)
+            if len(self.dropped) == 1:
+                logger.info("Speech server relay: the server names reply frames like %s", kind)
+        return True
+
+
 async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any], url: str, key: str,
                                intercept: Optional[Callable[[str], Any]] = None,
                                send_lock: Optional[asyncio.Lock] = None,
@@ -772,8 +818,12 @@ async def _speech_server_relay(ws: WebSocket, refuse: Callable[[int, str], Any],
             elif data is not None:
                 await upstream.send(data)
 
+    dialect = _SpeechServerDialect()
+
     async def server_to_client() -> None:
         async for frame in upstream:
+            if isinstance(frame, str) and not dialect.keeps(frame):
+                continue
             if read_back is not None and isinstance(frame, str):
                 frame = await read_back.from_server(frame)
                 if frame is None:

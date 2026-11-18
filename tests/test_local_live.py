@@ -2504,6 +2504,29 @@ def test_an_agent_call_is_answered_by_the_servers_own_model_with_the_calls_instr
     assert status["answers_alone"] is False and status["speech_server"]["own_model"] is True
 
 
+def test_an_own_model_server_that_names_each_reply_frame_twice_is_heard_and_captioned_once(client, hermes, server):
+    # Issue 2783: the server sends each frame under OpenAI's beta name and the
+    # GA's; the call plays and captions what reaches it, so only one goes on.
+    _own_model(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=False)
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _own_ready(ws, upstream)
+        upstream.push({"type": "response.created", "response": {"id": "talk"}})
+        for kind, payload in (("audio_transcript.delta", {"delta": "Hello"}), ("audio.delta", {"delta": PCM}),
+                              ("audio_transcript.done", {"transcript": "Hello"}), ("audio.done", {})):
+            upstream.push({"type": f"response.{kind}", "response_id": "talk", **payload})
+            upstream.push({"type": f"response.output_{kind}", "response_id": "talk", **payload})
+        upstream.push({"type": "response.done", "response": {"id": "talk", "status": "completed", "output": []}})
+        while True:
+            done, seen = _next(ws, "response.done")
+            if done["response"]["id"] == "talk":
+                break
+        _finish(ws)
+    kinds = [frame["type"] for frame in seen if frame["type"] != "response.created"]
+    assert kinds == ["response.audio_transcript.delta", "response.audio.delta",
+                     "response.audio_transcript.done", "response.audio.done", "response.done"]
+
+
 def test_a_tools_answer_waits_for_the_servers_response_to_end(client, hermes, server):
     _own_model(hermes)
     server.upstream = upstream = ReadBackUpstream(refuses=False)

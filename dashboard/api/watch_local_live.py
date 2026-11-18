@@ -1197,10 +1197,11 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
             raise watch_audio.WatchAudioFailure("unreachable", "Could not reach the speech server from the Hermes host")
 
     async def _read(self, upstream: Any, pacer: watch_audio._WatchAudioPacer) -> None:
+        dialect = speech_server._SpeechServerDialect()
         with contextlib.suppress(Exception):
             async for message in upstream:
                 self.answered()
-                if not isinstance(message, str):
+                if not isinstance(message, str) or not dialect.keeps(message):
                     continue
                 if self.read_back is not None:
                     message = await self.read_back.from_server(message)
