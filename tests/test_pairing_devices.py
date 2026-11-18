@@ -459,3 +459,9 @@ def test_an_answer_releases_a_paused_pairings_parked_question_too(home, monkeypa
     finally:
         client._clear_refusal()
     assert ("DELETE", f"{PHONE}.gw-1.secret") in calls
+
+
+def test_the_plugin_and_the_dashboard_name_the_device_files_alike():
+    assert client.DEVICES_DIRECTORY == api.core.PAIRING_DEVICES_DIRECTORY
+    assert client._INSTALLATION_ID.pattern == api.core._INSTALLATION_ID.pattern
+    assert client.REMOVED_DEVICES_NAME == api.pairing.REMOVED_DEVICES_NAME

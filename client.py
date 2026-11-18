@@ -389,7 +389,10 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
     # This device was one of the others: it's the main one now, once.
     _drop_device(state.get("installation_id"), replaced_by=state)
     # Paired by hand: a removal from Conduit is undone, as POST /pair does.
-    _forget_removed_device(state.get("installation_id"))
+    try:
+        _forget_removed_device(state.get("installation_id"))
+    except OSError as error:  # the pairing is saved: clearing the mark is best effort
+        logger.warning("Conduit could not clear a removed device's mark: %s", error)
     return state
 
 
