@@ -91,7 +91,7 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     tool_name = str(kwargs.get("tool_name") or "")
     if tool_name != "clarify":
         return kwargs["next_call"](kwargs.get("args") or {})
-    if not client.load_state():
+    if not client.has_pairings():
         # Unpaired profile: no push is possible, keep the original path only.
         return kwargs["next_call"](kwargs.get("args") or {})
     session_id = _text(kwargs.get("session_id"))
@@ -325,9 +325,13 @@ def _first_answer_wins(
                 # Complete batch: the relay only reports answered once every
                 # qid is locked, so first-answer-wins held per question.
                 relay_won = True
+                calls.forget_waiting_card(request_id)
+                _release_decision(request_id, relay_won)
                 return _format_batch_result(batch, status.get("answers") or {})
             if not batch_protocol:
                 relay_won = True
+                calls.forget_waiting_card(request_id)
+                _release_decision(request_id, relay_won)
                 offered = list(batch[0]["choices"])
                 return _format_result(
                     question=batch[0]["question"],
@@ -341,6 +345,8 @@ def _first_answer_wins(
             # come back unanswered with a null response, the upstream absence
             # semantics — instead of pretending the whole batch was answered.
             relay_won = True
+            calls.forget_waiting_card(request_id)
+            _release_decision(request_id, relay_won)
             return _format_batch_result(
                 batch,
                 {batch[0]["qid"]: str(status.get("answer") or "")},
@@ -557,7 +563,7 @@ def _release_decision(request_id: str, relay_won: bool) -> None:
     the relay rejects answers to a released decision regardless of whether
     the release has landed yet.
     """
-    if relay_won:
+    if relay_won and not client.multi_device_enabled():
         return
 
     def _cancel() -> None:

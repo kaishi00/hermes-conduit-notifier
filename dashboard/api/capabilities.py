@@ -33,6 +33,7 @@ ROUTE_CAPABILITIES = (
     "voice-chat-calls",
     "session-takeover",
     "e2e-notifications",
+    "multi-device-notifications",
     # POST /e2e/rotate: keys rotate inline through a key exchange.
     "e2e-inline-rotation",
     "watch-tools",

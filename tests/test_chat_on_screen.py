@@ -249,3 +249,20 @@ def test_a_bad_body_is_a_400(client):
                           headers={"Content-Type": "application/json"})
     assert response.status_code == 400
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_two_macs_have_independent_installation_holds(tmp_path):
+    on_screen.hold(tmp_path, "mac", ["s-1"], 30, now=1000, installation_id="device-a")
+    on_screen.hold(tmp_path, "mac", ["s-2"], 30, now=1000, installation_id="device-b")
+    assert on_screen.on_screen(tmp_path, "s-1", now=1001, installation_id="device-a")
+    assert not on_screen.on_screen(tmp_path, "s-1", now=1001, installation_id="device-b")
+    on_screen.hold(tmp_path, "mac", [], 0, installation_id="device-a")
+    assert on_screen.on_screen(tmp_path, "s-2", now=1001, installation_id="device-b")
+    assert on_screen.on_screen(tmp_path, "s-2", now=1001)
+
+
+def test_a_mirrored_reply_is_not_suppressed_for_every_device(turn, monkeypatch):
+    monkeypatch.setattr(plugin.client, "multi_device_enabled", lambda: True)
+    monkeypatch.setattr(plugin, "_desktop_watched", lambda *args: True)
+    on_screen.hold(turn.home, "mac", ["s-1"], 90, installation_id="device-a")
+    assert turn() == ["response.ready"]

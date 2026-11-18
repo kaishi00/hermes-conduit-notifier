@@ -101,6 +101,38 @@ With plugin 0.24+ Conduit pairs the active dashboard's profile by itself: it
 creates the code and hands it to `POST /api/plugins/conduit_push/pair?profile=`
 over your signed-in dashboard connection (see [Pairing from Conduit](#pairing-from-conduit-plugin-024)).
 
+## Notifications on multiple devices (proposed)
+
+With a Conduit build that supports `multi-device-notifications`, enable
+**Notifications from all bots on this device** in Settings > Notifications on
+each Mac, iPhone or iPad you want to notify. The choice belongs to that device.
+Conduit associates the device with the profiles on the connected dashboard,
+including newly discovered profiles, without replacing another device.
+Older hosts keep their existing pairing behavior until upgraded.
+
+Each profile keeps its primary pairing in `conduit-push.json` and additional
+pairings in `conduit-push-devices/`. Each installation has its own relay
+credential and encryption key; content stays generic until its key handover
+completes. A profile can pair up to 16 devices. Reply, failure, background-task,
+question and approval notifications go to every paired device independently;
+an offline device does not hold up the others. Watching a chat suppresses its
+completion notification only on the installation watching it. Each device's
+notification categories, mute and Focus settings still apply.
+
+Questions and approvals still produce one result for Hermes. Answers to
+separate questions in a form can arrive from different devices. Once the
+request completes, the remaining copies are released. Calls, Watch grants and
+Live Activities keep the primary pairing rather than ringing every device.
+
+A dashboard client can revoke one installation with authenticated
+`DELETE /api/plugins/conduit_push/pair?installation_id=...&profile=...`.
+It revokes that relay gateway and removes only that device's local pairing;
+other devices and keys remain. Failed revocation preserves the local pairing
+so it can be retried. Removing a gateway from Conduit's existing relay settings
+also revokes its credential. An opt-in device remembers attempted associations
+so it does not silently re-add itself after revocation; toggle the all-bots
+setting off and on to request automatic association again.
+
 ## Manage the pairing
 
 ```bash
@@ -191,7 +223,7 @@ The iOS app controls which categories are enabled, how much a notification shows
 - The credential is stored in the profile-aware Hermes home as `conduit-push.json` with mode `0600` on supported systems.
 - Authorization credentials are never written to logs or printed by `status`.
 - Hook callbacks enqueue bounded events; HTTPS delivery runs on a background worker and does not block the agent loop. Two waits are bounded instead (plugin 0.81.2+), for a process that exits right after its turn, such as a restart-safe cron job's worker: a turn end that sends a call request waits up to 3 seconds for it to reach the relay, and the process's exit waits up to 3 seconds for queued notifications and up to 10 for call requests still retrying (call requests first, so a fallback push they queue is among those notifications).
-- A delivery that fails on the way (no connection, a timeout, `408`, `429` or a `5xx` from the relay) is sent again with the same event ID after 1, 2 and 4 seconds, for at most about 30 seconds per event; the relay drops the repeats it already accepted. One thread delivers the queue (up to 128 events), approvals and questions ahead of everything else, so they don't wait behind retries of finished-turn notices (plugin 0.177.15+). A queued event goes out only under the pairing that accepted it: pairing again drops what was queued before, and a key rotation doesn't. A sealed push the relay refuses as `e2e_clock_ahead` (this host's clock more than an hour ahead of the relay's) is sealed again once by the relay's clock, which that refusal's `Date` gives it. Other refusals are not retried. A `401` means the relay no longer knows this gateway (Conduit removed it, or the relay lost its data): the pairing is kept, and `status` says to pair again from Conduit until a delivery is accepted again. A `401` or `403` also parks notifications for that pairing (plugin 0.55.1+): events are dropped for 1 minute, doubling with each refusal in a row up to 30 minutes, then the next event goes out as the probe and an accepted one (or an accepted `test`) ends the pause; a clarify question asked meanwhile uses the native prompt at once (Live Activity reports pause 30 minutes on their own). A `403` with no JSON body comes from something in front of the relay (a firewall or rate limiter) blocking this host's address: `status` says so instead of telling you to pair again, since a pairing claim meets the same block, and Conduit's pairing status reports it as `relay_blocked`.
+- A delivery that fails on the way (no connection, a timeout, `408`, `429` or a `5xx` from the relay) is sent again with the same event ID after 1, 2 and 4 seconds, for at most about 30 seconds per event; the relay drops the repeats it already accepted. Each installation has a delivery queue (up to 128 events), approvals and questions ahead of everything else, so they don't wait behind retries of finished-turn notices (plugin 0.177.15+). A queued event goes out only under the pairing that accepted it: pairing again drops what was queued before, and a key rotation doesn't. A sealed push the relay refuses as `e2e_clock_ahead` (this host's clock more than an hour ahead of the relay's) is sealed again once by the relay's clock, which that refusal's `Date` gives it. Other refusals are not retried. A `401` means the relay no longer knows this gateway (Conduit removed it, or the relay lost its data): the pairing is kept, and `status` says to pair again from Conduit until a delivery is accepted again. A `401` or `403` also parks notifications for that pairing (plugin 0.55.1+): events are dropped for 1 minute, doubling with each refusal in a row up to 30 minutes, then the next event goes out as the probe and an accepted one (or an accepted `test`) ends the pause; a clarify question asked meanwhile uses the native prompt at once (Live Activity reports pause 30 minutes on their own). A `403` with no JSON body comes from something in front of the relay (a firewall or rate limiter) blocking this host's address: `status` says so instead of telling you to pair again, since a pairing claim meets the same block, and Conduit's pairing status reports it as `relay_blocked`.
 - Disabling or reloading the plugin (on a Hermes with plugin unload callbacks) stops its background work: notifications still queued and replies waiting for their turn's end are dropped, the delivery and Lock Screen threads end, and a call held until your call ends is kept for the next load instead of going out.
 - The health, location, maps, calendar, phone, contacts, calls, display and inbox (`conduit_inbox`) tools refuse delegated subagents, including one whose session id a compaction replaced (`compression.in_place: false`): the plugin asks Hermes' delegation flag (Hermes 0.22+) and follows the compaction links in Hermes' session store back to the subagent it was (plugin 0.51.6+).
 - Event titles and bodies are length-limited before delivery.

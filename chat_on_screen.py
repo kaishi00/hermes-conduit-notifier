@@ -22,12 +22,11 @@ iPad that never locks is likely being left, and its reply should push, as
 with Desktop's 2-minute rule. Nothing is sent while no turn runs, so an idle
 chat left open costs no requests.
 
-One small file per device kind (iPhone, iPad, Mac…) in
+One small file per installation (or device kind for older clients) in
 ``conduit-on-screen/`` under the profile's home, each written whole through a
 private temp file: two devices never write the same file, so no lock is
-needed, and one leaving doesn't end another's hold. Two devices of the same
-kind (two iPhones) share a file, so the later one's report replaces the
-other's; that can only let a push through. The dashboard writes; the
+needed, and one leaving doesn't end another's hold. Older clients of the same
+kind share a file. Installation-scoped reports never quiet another device. The dashboard writes; the
 turn's hooks (agent process) only read. A file that can't be read, has the
 wrong shape or claims a hold longer than MAX_HOLD_S from now counts as
 nothing on screen, so a fault here can only let a push through.
@@ -45,6 +44,7 @@ its file, the plugin imports it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -89,13 +89,14 @@ def parse(body: Any) -> tuple[str, list[str], float]:
     return device, ids, float(hold)
 
 
-def hold(home: Any, device: str, session_ids: Iterable[str], hold_s: float, *, now: float | None = None) -> bool:
+def hold(home: Any, device: str, session_ids: Iterable[str], hold_s: float, *, now: float | None = None,
+         installation_id: str | None = None) -> bool:
     """Records that ``device`` has the chat ``session_ids`` names on screen
     for ``hold_s`` more seconds, or no chat (0, which removes its file).
     True while something is held."""
     if device not in DEVICES:
         raise ValueError(f"device must be one of {', '.join(DEVICES)}")
-    path = Path(home) / DIRECTORY / f"{device}.json"
+    path = Path(home) / DIRECTORY / _filename(device, installation_id)
     ids = _ids(session_ids)
     # Anything but a positive hold (0, a negative, nan) releases.
     if not ids or not isinstance(hold_s, (int, float)) or isinstance(hold_s, bool) or not hold_s > 0:
@@ -135,21 +136,31 @@ def attended(started_at: Any, *, now: float | None = None) -> bool:
     return 0 <= now - started_at <= MAX_TURN_S
 
 
-def on_screen(home: Any, session_id: Any, *, now: float | None = None) -> bool:
+def on_screen(home: Any, session_id: Any, *, now: float | None = None, installation_id: str | None = None) -> bool:
     """True while a Conduit device holds the chat ``session_id`` names on screen."""
     if not isinstance(session_id, str) or not session_id.strip():
         return False
     wanted = session_id.strip()
     now = time.time() if now is None else now
     directory = Path(home) / DIRECTORY
-    for device in DEVICES:
+    paths = ([directory / _filename("", installation_id)] if installation_id is not None else
+             [*(directory / f"{device}.json" for device in DEVICES), *directory.glob("installation-*.json")])
+    for path in paths:
         try:
-            raw = json.loads((directory / f"{device}.json").read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, RecursionError):
             continue
         if _holds(raw, wanted, now):
             return True
     return False
+
+
+def _filename(device: str, installation_id: str | None) -> str:
+    if installation_id is None:
+        return f"{device}.json"
+    if not isinstance(installation_id, str) or not installation_id.strip() or len(installation_id) > 256 or not installation_id.isprintable():
+        raise ValueError("installation_id must be a nonempty printable string of at most 256 characters")
+    return f"installation-{hashlib.sha256(installation_id.encode()).hexdigest()}.json"
 
 
 def _holds(raw: Any, session_id: str, now: float) -> bool:

@@ -218,9 +218,11 @@ def set_chat_on_screen(body: Any) -> Dict[str, Any]:
     module = _chat_on_screen()
     try:
         device, session_ids, hold_s = module.parse(body)
+        installation = body.get("installation_id")
+        result = module.hold(_cron_home(), device, session_ids, hold_s, installation_id=installation)
     except ValueError as exc:
         raise core.TokenError(400, str(exc))
-    return {"on_screen": module.hold(_cron_home(), device, session_ids, hold_s)}
+    return {"on_screen": result}
 
 
 @router.put("/notifications/on-screen")

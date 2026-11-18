@@ -1536,3 +1536,18 @@ def test_a_last_look_that_finds_no_card_still_ends_as_timed_out(monkeypatch):
     parsed = json.loads(loop.middleware(**_kwargs(_undelivered_original(returned), _batch_args())))
     assert parsed["outcome"] == "timed_out"
     assert [row["user_response"] for row in parsed["responses"]] == ["staging", None]
+
+
+def test_relay_answer_releases_other_device_copies(monkeypatch):
+    fake = _FakeState([{"status": "answered", "answer": "Red"}])
+    _install(fake)
+    monkeypatch.setattr(loop.client, "multi_device_enabled", lambda: True)
+    release = threading.Event()
+    try:
+        loop.middleware(**_kwargs(lambda args: release.wait(2) or "unused", {"question": "Which color?", "choices": ["Red", "Blue"]}))
+        deadline = time.monotonic() + 1
+        while not fake.cancelled_ids and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert fake.cancelled_ids == [fake.enqueued[0]["decision"]["request_id"]]
+    finally:
+        release.set()

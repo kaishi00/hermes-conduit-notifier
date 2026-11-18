@@ -660,7 +660,10 @@ def _post_llm_call(**kwargs: Any) -> None:
     # on screen, on any device (chat_on_screen.py). A reply to a message sent
     # from a source the user turned off (Desktop, a messaging app…) arrives
     # there (#115).
-    send = (ready is not None and not _desktop_watched(session_id, started) and not _conduit_watched(session_id, started)
+    mirrored = client.multi_device_enabled()
+    if ready is not None and mirrored:
+        ready["_notification_started"] = started
+    send = (ready is not None and (mirrored or (not _desktop_watched(session_id, started) and not _conduit_watched(session_id, started)))
             and _source_notifies(kwargs.get("platform"), session_id))
     # Hermes also runs this hook for a turn that failed with text (its error
     # explanation): on_session_end, right after, says which it was, so the

@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.41 (2026-11-18)
+
+### New and improved
+
+- A compatible Conduit build can receive notifications from every bot on several devices at once, with a separate encryption key for each device. Pairing another device no longer replaces the existing one.
+- Watching a chat quiets its reply notification only on that device. Questions and approvals are shared across devices and close after an answer is accepted.
+- The dashboard pairing API can revoke one device without disconnecting the others. Calls keep their primary destination.
+
 ## 0.177.40 (2026-11-18)
 
 ### Fixes

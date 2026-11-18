@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -35,7 +36,7 @@ except ImportError:  # everything but Windows
 
 from hermes_constants import get_hermes_home
 
-from . import e2e, link_status
+from . import device_pairings, e2e, link_status
 from .events import PLUGIN_VERSION, redact_event
 from . import push_proxy
 from .keep_alive import KeepAliveHTTPSHandler
@@ -65,14 +66,50 @@ _worker_lock = threading.Lock()
 # belongs to an older generation.
 _stopped = threading.Event()
 _generation = 0
+_recipient_path: contextvars.ContextVar[Path | None] = contextvars.ContextVar("conduit_push_recipient", default=None)
+_device_lanes: dict[tuple[str, str], tuple[queue.PriorityQueue, threading.Thread]] = {}
+_DEVICE_IDLE_S = 60.0
+_FANOUT = frozenset({"approval.needed", "input.needed", "response.ready", "turn.failed", "background_task.finished"})
+_decision_lock = threading.Lock()
+_decision_answers: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_closed_decisions: dict[tuple[str, str], float] = {}
+
 
 
 def state_path() -> Path:
     return get_hermes_home() / "conduit-push.json"
 
 
+def _selected_state_path() -> Path:
+    return _recipient_path.get() or state_path()
+
+
+def recipient_states() -> list[tuple[Path, dict[str, Any]]]:
+    primary = state_path()
+    state = load_state()
+    result = [(primary, state)] if state else []
+    seen = {str(state.get("installation_id"))} if state else set()
+    for path in device_pairings.paths(primary):
+        if path == primary:
+            continue
+        extra = device_pairings.load(path)
+        if extra and str(extra.get("installation_id")) not in seen:
+            result.append((path, extra))
+            seen.add(str(extra.get("installation_id")))
+    return result[:16]
+
+
+def has_pairings() -> bool:
+    return bool(recipient_states())
+
+
+def multi_device_enabled() -> bool:
+    states = recipient_states()
+    return len(states) > 1 or any(state.get("require_e2e") for _, state in states)
+
+
 def load_state() -> dict[str, Any] | None:
-    path = state_path()
+    path = _selected_state_path()
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
@@ -131,7 +168,7 @@ def _exclusive(handle: Any) -> Iterator[None]:
 
 
 def save_state(value: dict[str, Any]) -> None:
-    path = state_path()
+    path = _selected_state_path()
     with state_file_lock(path):
         _write_state(value, path)
 
@@ -141,7 +178,7 @@ def update_state(change: Callable[[dict[str, Any]], bool | None]) -> bool:
     under the state lock, so a pairing another process replaced or removed
     meanwhile is never written over. False when the profile isn't paired or
     ``change`` returned False (nothing written)."""
-    path = state_path()
+    path = _selected_state_path()
     with state_file_lock(path):
         state = load_state()
         if not state or change(state) is False:
@@ -209,7 +246,7 @@ def remove_state(credential: str | None = None, *, unpaired: bool = False) -> No
     """Remove the saved pairing; with ``credential``, only while the saved
     pairing still carries it, and with ``unpaired`` only while none is saved
     (a leftover file), so a pairing claimed meanwhile stays."""
-    path = state_path()
+    path = _selected_state_path()
     with state_file_lock(path):
         if (credential is not None or unpaired) and (load_state() or {}).get("credential") not in (None, credential):
             return
@@ -272,7 +309,7 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
     }
     # Re-pairing over an existing pairing must not silently drop the
     # profile's privacy choice, even one switched on meanwhile.
-    path = state_path()
+    path = _selected_state_path()
     with state_file_lock(path):
         previous = load_state() or {}
         if previous.get("redact_content"):
@@ -338,30 +375,45 @@ def enqueue(event: dict[str, Any]) -> bool:
     on this event, so a drop has to fall back to the native clarify path
     instead of polling an answer that can never arrive.
     """
-    state = load_state()
-    if _stopped.is_set() or not state:
+    states = recipient_states() if event.get("type") in _FANOUT else []
+    if event.get("type") not in _FANOUT:
+        state = load_state()
+        states = [(state_path(), state)] if state else []
+    if _stopped.is_set() or not states:
         return False
-    if _paused_until(state) > time.monotonic():
-        logger.info("Conduit notification dropped for %s: %s", event.get("type", "event"), _pause_reason(state))
-        return False
-    # Hermes can serve several profiles in one process, each through a
-    # context variable for its home that a new thread doesn't inherit.
-    # The event goes out under the profile that accepted it here: its
-    # pairing, credential and encryption key, not the launch profile's.
-    context = contextvars.copy_context()
+    separate = event.get("type") in _FANOUT and (len(states) > 1 or any(state.get("require_e2e") for _, state in states))
     rank = 0 if event.get("type") in _URGENT else 1
-    # With stop(), so an event is never accepted by a plugin that stopped
-    # meanwhile and left queued with no worker.
+    accepted = False
     with _worker_lock:
         if _stopped.is_set():
             return False
-        try:
-            _events.put_nowait((rank, next(_order), context, event, _pairing_of(state), _generation))
-        except queue.Full:
-            logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
-            return False
-        _start_worker_locked()
-    return True
+        for path, state in states:
+            if _paused_until(state) > time.monotonic():
+                continue
+            context = contextvars.copy_context()
+            if _stopped.is_set():
+                return accepted
+            events = _events
+            if separate:
+                context.run(_recipient_path.set, path)
+                lane_key = (str(state_path()), str(state.get("installation_id")))
+                lane = _device_lanes.get(lane_key)
+                if lane is None:
+                    events = queue.PriorityQueue(maxsize=128)
+                    thread = threading.Thread(target=_delivery_worker, args=(_generation, events, lane_key),
+                                              name="conduit-push-device", daemon=True)
+                    _device_lanes[lane_key] = (events, thread)
+                    thread.start()
+                else:
+                    events = lane[0]
+            try:
+                events.put_nowait((rank, next(_order), context, event, _pairing_of(state), _generation))
+                accepted = True
+            except queue.Full:
+                logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
+            if not separate:
+                _start_worker_locked()
+    return accepted
 
 
 def _pairing_of(state: dict[str, Any]) -> tuple[str, str, str]:
@@ -430,7 +482,7 @@ def build_outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, An
     """The event exactly as it is sent to the relay for this pairing."""
     # Redaction (the user's explicit choice) applies first, then a pairing
     # that provisioned end-to-end encryption seals whatever content is left.
-    return _sealed(_redacted(event, state), state)
+    return _sealed(_redacted({key: value for key, value in event.items() if key != "_notification_started"}, state), state)
 
 
 def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -442,6 +494,8 @@ def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     # the relay dedupes across gateways.
     # Presence, not truthiness: an empty or malformed record is a broken key
     # and fails closed like any other.
+    if state.get("require_e2e") and state.get("e2e") is None and event.get("type") != "plugin.hello":
+        return e2e.content_free(_rekeyed(event, _redact_key(state)))
     if state.get("e2e") is None or event.get("type") == "plugin.hello":
         # Whether a Pulse push is private is for the phone, sealed: in
         # plaintext its body is already the private copy (pulse_push).
@@ -547,15 +601,72 @@ def poll_decision(request_id: str) -> dict[str, Any]:
     ``opened_answers``). Raises on transport errors so the caller can decide
     to keep waiting.
     """
-    state = load_state()
-    if not state:
+    states = recipient_states()
+    if not states:
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
-    status = request_json(
-        f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
-        method="GET",
-        credential=state["credential"],
-    )
-    return opened_answers(status, state, request_id)
+
+    def poll(item: tuple[Path, dict[str, Any]]) -> dict[str, Any]:
+        _, state = item
+        return opened_answers(request_json(
+            f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
+            method="GET", credential=state["credential"], timeout=2.0,
+        ), state, request_id)
+
+    key = _decision_key(request_id)
+    with _decision_lock:
+        _expire_decisions()
+        has_cached_answers = key in _decision_answers
+    if len(states) == 1 and not has_cached_answers:
+        return poll(states[0])
+    with ThreadPoolExecutor(max_workers=len(states), thread_name_prefix="conduit-decision") as pool:
+        futures = [pool.submit(poll, item) for item in states]
+        statuses, errors = [], []
+        for future in futures:
+            try:
+                statuses.append(future.result())
+            except Exception as error:
+                errors.append(error)
+    if not statuses:
+        raise errors[0]
+    for status in statuses:
+        if status.get("status") == "answered" and "answer" in status:
+            return status
+    with _decision_lock:
+        _expire_decisions()
+        merged = _decision_answers.setdefault(key, (time.monotonic(), {}))[1]
+        questions = set()
+        for status in statuses:
+            for qid, answer in (status.get("answers") or {}).items():
+                merged.setdefault(qid, answer)
+            questions.update(status.get("remaining") or [])
+            questions.update(status.get("answers") or {})
+        if any(status.get("status") == "rejected" for status in statuses):
+            return {"status": "rejected", **({"answers": dict(merged)} if merged else {})}
+        if questions:
+            remaining = sorted(questions - merged.keys())
+            return {"status": "pending" if remaining else "answered", "answers": dict(merged), "remaining": remaining}
+    return next((status for status in statuses if status.get("status") == "pending"), statuses[0])
+
+
+def _decision_key(request_id: str) -> tuple[str, str]:
+    return str(state_path()), request_id
+
+
+def _expire_decisions() -> None:
+    cutoff = time.monotonic() - 7200
+    for key, (created, _) in list(_decision_answers.items()):
+        if created < cutoff:
+            del _decision_answers[key]
+    for key, created in list(_closed_decisions.items()):
+        if created < cutoff:
+            del _closed_decisions[key]
+
+
+def _decision_closed(event: dict[str, Any]) -> bool:
+    request_id = (event.get("decision") or {}).get("request_id")
+    with _decision_lock:
+        _expire_decisions()
+        return bool(request_id) and _decision_key(str(request_id)) in _closed_decisions
 
 
 def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: str) -> dict[str, Any]:
@@ -568,6 +679,8 @@ def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: st
     the clarify loop ends the question, telling the model the refused answer
     didn't count, instead of answering with it (hermes-conduit#2683).
     """
+    if state.get("require_e2e") and state.get("e2e") is None and isinstance(status, dict) and ("answer" in status or status.get("answers")):
+        return {"status": "rejected"}
     if state.get("e2e") is None or not isinstance(status, dict):
         return status
     has_answer = "answer" in status
@@ -671,19 +784,24 @@ def cancel_decision(request_id: str) -> bool:
     answer Hermes never received. Best effort by contract: a relay without
     the endpoint (or a transport blip) must never break the answering path.
     """
-    try:
-        state = load_state()
-        if not state:
-            return False
-        request_json(
-            f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
-            method="DELETE",
-            credential=state["credential"],
-        )
-        return True
-    except Exception as error:
-        logger.warning("Conduit decision cancel failed for %s: %s", request_id, error)
-        return False
+    with _decision_lock:
+        _expire_decisions()
+        key = _decision_key(request_id)
+        _closed_decisions[key] = time.monotonic()
+        _decision_answers.pop(key, None)
+    accepted = False
+    for _, state in recipient_states():
+        try:
+            _cancel_for_state(request_id, state)
+            accepted = True
+        except Exception as error:
+            logger.warning("Conduit decision cancel failed for %s: %s", request_id, error)
+    return accepted
+
+
+def _cancel_for_state(request_id: str, state: dict[str, Any]) -> None:
+    request_json(f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
+                 method="DELETE", credential=state["credential"], timeout=2.0)
 
 
 def looks_like_json_object(raw: bytes) -> bool:
@@ -921,6 +1039,16 @@ def stop(timeout: float = 1.0) -> None:
         _clear_refusal()
         _keep_alive.close_idle()
         running, _worker, _worker_started = _worker, None, False
+        lanes = list(_device_lanes.values())
+        _device_lanes.clear()
+        for events, thread in lanes:
+            while True:
+                try:
+                    events.get_nowait()
+                except queue.Empty:
+                    break
+                events.task_done()
+            events.put_nowait(_WAKE)
         dropped = 0
         while True:
             try:
@@ -931,10 +1059,13 @@ def stop(timeout: float = 1.0) -> None:
             dropped += 1
         if running is not None:
             _events.put_nowait(_WAKE)  # wakes the worker; the queue was just emptied
+    deadline = time.monotonic() + timeout
+    for _, thread in lanes:
+        thread.join(max(0, deadline - time.monotonic()))
     if dropped:
         logger.info("Conduit dropped %d queued notification(s): the plugin was unloaded", dropped)
     if running is not None:
-        running.join(timeout)
+        running.join(max(0, deadline - time.monotonic()))
         # The send that was in progress may have handed its connection back.
         _keep_alive.close_idle()
 
@@ -973,8 +1104,8 @@ def _paused_until(state: dict[str, Any]) -> float:
 def notifications_paused() -> bool:
     """Whether this profile's pairing is in a refusal pause: its events are
     dropped, and nothing should poll the relay for it meanwhile."""
-    state = load_state()
-    return bool(state) and _paused_until(state) > time.monotonic()
+    states = recipient_states()
+    return bool(states) and all(_paused_until(state) > time.monotonic() for _, state in states)
 
 
 def _pause_reason(state: dict[str, Any]) -> str:
@@ -1034,15 +1165,25 @@ def relay_takes(state: dict[str, Any], capability: str, *, timeout: float = SEND
     return capability in takes
 
 
-def _delivery_worker(generation: int = 0) -> None:
+def _delivery_worker(generation: int = 0, events: queue.PriorityQueue | None = None,
+                     lane_key: tuple[str, str] | None = None) -> None:
+    events = _events if events is None else events
     while generation == _generation:
-        item = _events.get()
+        try:
+            item = events.get(timeout=_DEVICE_IDLE_S if lane_key is not None else None)
+        except queue.Empty:
+            with _worker_lock:
+                lane = _device_lanes.get(lane_key)
+                if lane is not None and lane[0] is events and events.empty():
+                    del _device_lanes[lane_key]
+                    return
+            continue
         try:
             if item is None or len(item) < 6:  # stop()'s wake-up
                 continue
             if generation != _generation:
                 # Queued for the worker started after a stop(): hand it back.
-                _requeue(item)
+                _requeue(item, events)
                 continue
             _, _, context, event, pairing, accepted = item
             context.run(lambda: _deliver(event, pairing=pairing, generation=accepted))
@@ -1050,7 +1191,7 @@ def _delivery_worker(generation: int = 0) -> None:
             logger.warning("Conduit notification delivery failed for %s: %s",
                            item[3].get("type", "event") if item and len(item) >= 6 else "event", error)
         finally:
-            _events.task_done()
+            events.task_done()
 
 
 # How long the process's exit waits for queued notifications to go out. A cron
@@ -1063,16 +1204,18 @@ def _drain_at_exit() -> None:
     """At interpreter exit: waits up to EXIT_DRAIN_S for the queue to empty and
     the send in progress to end. Daemon threads still run while atexit does."""
     with _worker_lock:
-        if _stopped.is_set() or not _worker_started:
+        if _stopped.is_set():
             return
+        queues = [_events, *(events for events, _ in _device_lanes.values())]
     deadline = time.monotonic() + EXIT_DRAIN_S
-    with _events.all_tasks_done:
-        while _events.unfinished_tasks:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                logger.info("Conduit left %d notification(s) unsent at exit", _events.unfinished_tasks)
-                return
-            _events.all_tasks_done.wait(left)
+    for events in queues:
+        with events.all_tasks_done:
+            while events.unfinished_tasks:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    logger.info("Conduit left %d notification(s) unsent at exit", events.unfinished_tasks)
+                    return
+                events.all_tasks_done.wait(left)
 
 
 # At import, so it runs after calls' wait at exit (atexit runs last in, first
@@ -1080,9 +1223,10 @@ def _drain_at_exit() -> None:
 atexit.register(_drain_at_exit)
 
 
-def _requeue(item: Any) -> None:
+def _requeue(item: Any, events: queue.PriorityQueue | None = None) -> None:
+    events = _events if events is None else events
     try:
-        _events.put_nowait(item)
+        events.put_nowait(item)
     except queue.Full:
         logger.warning("Conduit notification queue is full; dropping %s", item[3].get("type", "event"))
 
@@ -1107,6 +1251,8 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
         if _stopped.is_set() or generation != _generation:
             logger.info("Conduit notification dropped for %s: the plugin was unloaded", event.get("type", "event"))
             return False
+        if _decision_closed(event):
+            return False
         state = load_state()
         if not state:
             logger.warning("Conduit notification dropped for %s: this profile is no longer paired", event.get("type", "event"))
@@ -1117,6 +1263,12 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
             logger.info("Conduit notification dropped for %s: this profile was paired again since it was queued",
                         event.get("type", "event"))
             return False
+        if event.get("type") == "response.ready" and "_notification_started" in event:
+            from . import chat_on_screen
+            if chat_on_screen.attended(event["_notification_started"]) and chat_on_screen.on_screen(
+                state_path().parent, event.get("session_id"), installation_id=state.get("installation_id")
+            ):
+                return False
         paused_until, now = _paused_until(state), clock()
         if now < paused_until:
             logger.info("Conduit notification dropped for %s: %s for %d more seconds",
@@ -1140,6 +1292,11 @@ def _deliver(event: dict[str, Any], *, sleep: Callable[[float], None] = _pause,
             if isinstance(error, RelayRejected) and error.status in (401, 403):
                 _refused(state, error, clock(), generation)
             return False
+        if _decision_closed(event):
+            try:
+                _cancel_for_state(str(event["decision"]["request_id"]), state)
+            except Exception as error:
+                logger.warning("Conduit late decision release failed: %s", error)
         record_relay_accepted(state)
         _note_push(True)
         return True

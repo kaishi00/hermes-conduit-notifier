@@ -629,6 +629,7 @@ routes:
   - PUT /notifications/on-screen
   - GET /notifications/reply-sources
   - PUT /notifications/reply-sources
+  - DELETE /pair
   - POST /pair
   - GET /personality
   - POST /phone/exchange

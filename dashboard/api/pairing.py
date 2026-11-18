@@ -63,7 +63,7 @@ def _pairing_state_lock(path: Any):
     # The same lock file client.state_file_lock takes in the agent process,
     # so a hook rewriting the state can't drop a key stored here (or the
     # other way round).
-    with open(_pairing_state_lock_path(path), "a+b") as handle, _locked_handle(handle):
+    with _open_private_lock_file(_pairing_state_lock_path(path)) as handle, _locked_handle(handle):
         yield
 
 
@@ -129,6 +129,50 @@ def _save_pairing_state(path: Any, value: Dict[str, Any]) -> None:
     path.chmod(0o600)
 
 
+_device_pairings_value: Any = None
+
+
+def _device_pairings() -> Any:
+    """Shared storage without importing the plugin's Hermes entry point."""
+    global _device_pairings_value
+    if _device_pairings_value is None:
+        path = os.path.join(core._plugin_root(), "device_pairings.py")
+        spec = importlib.util.spec_from_file_location("conduit_push_dashboard_device_pairings", path)
+        if spec is None or spec.loader is None:
+            raise core.TokenError(501, "This plugin install is missing device_pairings.py; update the plugin")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _device_pairings_value = module
+    return _device_pairings_value
+
+
+def _validate_pairing_ids(installation_id: Any, gateway_id: Any = None) -> None:
+    if not _device_pairings().valid_installation_id(installation_id):
+        raise core.TokenError(400, "installation_id must be a nonempty printable string of at most 256 characters")
+    if gateway_id is not None and not _device_pairings().valid_installation_id(gateway_id):
+        raise core.TokenError(400, "gateway_id must be a nonempty printable string of at most 256 characters")
+
+
+@contextlib.contextmanager
+def _installation_state_lock(primary: Any, installation_id: str):
+    # Serialize path selection with pairing, then use the same per-device
+    # lock as delivery. Unknown installations never create directories.
+    if not _device_pairings().paths(primary):
+        raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
+    with _pairing_state_lock(primary):
+        path = _device_pairings().for_installation(primary, installation_id)
+        state = _device_pairings().load(path)
+        if not state or state.get("installation_id") != installation_id:
+            raise core.TokenError(409, "This Hermes profile isn't paired with this device")
+        with contextlib.ExitStack() as stack:
+            if path != primary:
+                stack.enter_context(_pairing_state_lock(path))
+            state = _device_pairings().load(path)
+            if not state or state.get("installation_id") != installation_id:
+                raise core.TokenError(409, "This Hermes profile isn't paired with this device")
+            yield path
+
+
 def _e2e_crypto_available() -> bool:
     try:
         from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305  # noqa: F401
@@ -162,7 +206,7 @@ def _e2e_prune_previous(path: Any, now: float) -> None:
     status read never fails on it, and an expired key opens nothing anyway."""
     try:
         with _e2e_lock, _pairing_state_lock(path):
-            state = core._load_pairing_state(path)
+            state = _device_pairings().load(path)
             if state and "e2e_previous" in state and _e2e_live_previous(state, now) is None:
                 state.pop("e2e_previous", None)
                 _save_pairing_state(path, state)
@@ -170,7 +214,7 @@ def _e2e_prune_previous(path: Any, now: float) -> None:
         pass
 
 
-def e2e_status(path: Any = None) -> Dict[str, Any]:
+def e2e_status(path: Any = None, installation_id: Optional[str] = None) -> Dict[str, Any]:
     """This profile's pairing and key state. Never includes the secret.
 
     ``rotate`` asks the phone for a new key: requested from the host
@@ -180,7 +224,12 @@ def e2e_status(path: Any = None) -> Dict[str, Any]:
     ``rotate_without_overlap`` says the host asked to drop it (a key that may
     have leaked)."""
     path = path if path is not None else core._pairing_state_path()
-    state = core._load_pairing_state(path)
+    if installation_id is not None:
+        _validate_pairing_ids(installation_id)
+        path = _device_pairings().for_installation(path, installation_id)
+    state = _device_pairings().load(path)
+    if state and installation_id is not None and state.get("installation_id") != installation_id:
+        state = None
     crypto = _e2e_crypto_available()
     if not state:
         return {"paired": False, "crypto": crypto}
@@ -241,8 +290,9 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     gateway_id = body.get("gateway_id")
     kid = body.get("kid")
     secret = body.get("secret")
-    if not isinstance(installation_id, str) or not installation_id or not isinstance(gateway_id, str) or not gateway_id:
+    if gateway_id is None:
         raise core.TokenError(400, "installation_id and gateway_id are required")
+    _validate_pairing_ids(installation_id, gateway_id)
     if not isinstance(kid, str) or not _E2E_KID.match(kid):
         raise core.TokenError(400, "kid must be 32 lowercase hex characters")
     if not isinstance(secret, str) or not _E2E_B64URL.match(secret):
@@ -250,8 +300,8 @@ def provision_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     if not _e2e_crypto_available():
         raise core.TokenError(501, "Encrypted notifications need the cryptography package on this host")
     path = path if path is not None else core._pairing_state_path()
-    with _e2e_lock, _pairing_state_lock(path):
-        state = core._load_pairing_state(path)
+    with _e2e_lock, _installation_state_lock(path, installation_id) as path:
+        state = _device_pairings().load(path)
         if not state:
             raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
         if not state.get("gateway_id"):
@@ -358,14 +408,15 @@ def rotate_e2e(body: Any, path: Any = None) -> Dict[str, Any]:
     if not isinstance(body, dict):
         raise core.TokenError(400, "Expected a JSON object")
     installation_id, gateway_id = body.get("installation_id"), body.get("gateway_id")
-    if not isinstance(installation_id, str) or not installation_id or not isinstance(gateway_id, str) or not gateway_id:
+    if gateway_id is None:
         raise core.TokenError(400, "installation_id and gateway_id are required")
+    _validate_pairing_ids(installation_id, gateway_id)
     if body.get("suite") not in _e2e_rotate_suites():
         raise core.TokenError(400, "This host can't run that rotation suite")
     module = _e2e_module()
     path = path if path is not None else core._pairing_state_path()
-    with _e2e_lock, _pairing_state_lock(path):
-        state = core._load_pairing_state(path)
+    with _e2e_lock, _installation_state_lock(path, installation_id) as path:
+        state = _device_pairings().load(path)
         if not state:
             raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
         if state.get("installation_id") != installation_id or state.get("gateway_id") != gateway_id:
@@ -445,10 +496,10 @@ async def post_e2e_rotate(request: Request, response: Response, profile: Optiona
 
 
 @router.get("/e2e")
-async def get_e2e(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+async def get_e2e(response: Response, profile: Optional[str] = None, installation_id: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await core._run_scoped(profile, e2e_status))}
+        return {"ok": True, **(await core._run_scoped(profile, lambda: e2e_status(installation_id=installation_id)))}
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -665,8 +716,19 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
     code = code.strip().upper() if isinstance(code, str) else ""
     if not _PAIRING_CODE.match(code):
         raise core.TokenError(400, "pairing_code must look like ABCDE-FGHJK")
+    multi_device = body.get("multi_device", False)
+    if not isinstance(multi_device, bool):
+        raise core.TokenError(400, "multi_device must be a boolean")
+    installation_id = body.get("installation_id")
+    if "installation_id" in body:
+        _validate_pairing_ids(installation_id)
     path = path if path is not None else core._pairing_state_path()
-    relay_url = _pair_relay_url(body.get("relay_url"), core._load_pairing_state(path))
+    if multi_device and len(_device_pairings().paths(path)) >= _device_pairings().MAX_DEVICES:
+        selected = _device_pairings().for_installation(path, installation_id) if installation_id else None
+        existing = _device_pairings().load(selected) if selected is not None else None
+        if not existing or existing.get("installation_id") != installation_id:
+            raise core.TokenError(409, "This profile already has 16 notification devices; remove a device before pairing another")
+    relay_url = _pair_relay_url(body.get("relay_url"), _device_pairings().load(path))
     relay_urls = _relay_urls()
     try:
         # Plain http:// only to a LAN or Tailscale address, before the code is spent.
@@ -677,6 +739,9 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
     if limit is not None:
         limit()
     claimed = (claim or _claim_pairing)(relay_url, code, gateway_name)
+    if not isinstance(claimed, dict) or not isinstance(claimed.get("credential"), str) or not claimed["credential"] \
+            or not _device_pairings().valid_installation_id(claimed.get("installation_id")):
+        raise core.TokenError(502, "The push relay sent an unexpected pairing answer")
     state: Dict[str, Any] = {
         "credential": claimed["credential"],
         "gateway_id": claimed.get("gateway_id"),
@@ -690,28 +755,101 @@ def pair_profile(body: Any, profile: Optional[str] = None, path: Any = None,
         state["relay_url"] = relay_urls.paired_relay_url(claimed.get("relay_url"), relay_url)
     except relay_urls.RelayURLError as exc:
         raise core.TokenError(502, str(exc))
+    if installation_id is not None and installation_id != state["installation_id"]:
+        _revoke_replaced_pairing(state["relay_url"], state["credential"])
+        raise core.TokenError(409, "The pairing code belongs to another installation")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with _e2e_lock, _pairing_state_lock(path):
-        # Same carry-over as client.claim_pairing: the privacy choice stays.
-        previous = core._load_pairing_state(path) or {}
-        if previous.get("redact_content"):
-            state["redact_content"] = True
-        if previous.get("redact_key"):
-            state["redact_key"] = previous["redact_key"]
-        # Re-pairing the same phone and gateway keeps its encryption key.
-        if previous.get("e2e") is not None and previous.get("installation_id") == state["installation_id"] \
-                and previous.get("gateway_id") == state["gateway_id"]:
-            state["e2e"] = previous["e2e"]
-            for field in ("e2e_previous", "rotate_requested_at", "rotate_without_overlap"):
-                if field in previous:
-                    state[field] = previous[field]
-        _save_pairing_state(path, state)
+        primary = _device_pairings().load(path) or {}
+        destination = path
+        selected = _device_pairings().for_installation(path, state["installation_id"])
+        existing = _device_pairings().load(selected)
+        if existing and existing.get("installation_id") == state["installation_id"]:
+            destination = selected
+        if multi_device:
+            # A refresh reuses its sidecar even if the primary was removed.
+            if primary or _device_pairings().load(selected) or _device_pairings().paths(path):
+                destination = selected
+            if (not existing or existing.get("installation_id") != state["installation_id"]) \
+                    and len(_device_pairings().paths(path)) >= _device_pairings().MAX_DEVICES:
+                _revoke_replaced_pairing(state["relay_url"], state["credential"])
+                raise core.TokenError(409, "This profile already has 16 notification devices; remove a device before pairing another")
+            state["require_e2e"] = True
+        if destination != path:
+            if destination.parent.is_symlink():
+                raise core.TokenError(409, "The device pairing directory must not be a symlink")
+            destination.parent.mkdir(mode=0o700, exist_ok=True)
+            destination.parent.chmod(0o700)
+        with contextlib.ExitStack() as stack:
+            if destination != path:
+                stack.enter_context(_pairing_state_lock(destination))
+            previous = _device_pairings().load(destination) or {}
+            # Profile privacy carries across devices, pairing keys never do.
+            privacy = previous or primary
+            if not privacy:
+                existing = _device_pairings().paths(path)
+                privacy = _device_pairings().load(existing[0]) if existing else {}
+            if privacy.get("redact_content"):
+                state["redact_content"] = True
+            if privacy.get("redact_key"):
+                state["redact_key"] = privacy["redact_key"]
+            if previous.get("require_e2e"):
+                state["require_e2e"] = True
+            if previous.get("e2e") is not None and previous.get("installation_id") == state["installation_id"] \
+                    and previous.get("gateway_id") == state["gateway_id"]:
+                state["e2e"] = previous["e2e"]
+                for field in ("e2e_previous", "rotate_requested_at", "rotate_without_overlap"):
+                    if field in previous:
+                        state[field] = previous[field]
+            _save_pairing_state(destination, state)
     old_credential, old_relay = previous.get("credential"), previous.get("relay_url")
     if isinstance(old_credential, str) and old_credential and old_credential != state["credential"] \
             and isinstance(old_relay, str) and old_relay:
         _revoke_replaced_pairing(old_relay, old_credential, _relay_urls().replaced_pairing_query(previous, state))
     return {"paired": True, "installation_id": state["installation_id"], "gateway_id": state["gateway_id"],
             "gateway_name": gateway_name, "relay_url": state["relay_url"]}
+
+
+def unpair_installation(installation_id: Any, path: Any = None) -> Dict[str, Any]:
+    """Revoke one device before removing its local credential."""
+    _validate_pairing_ids(installation_id)
+    primary = path if path is not None else core._pairing_state_path()
+    with _e2e_lock, _installation_state_lock(primary, installation_id) as selected:
+        previous = _device_pairings().load(selected)
+        if not previous:
+            raise core.TokenError(409, "This Hermes profile isn't paired with this device")
+    try:
+        relay_url = previous.get("relay_url")
+        if not isinstance(relay_url, str):
+            raise ValueError("Missing relay URL")
+        url = _relay_urls().check_request_url(f"{relay_url.rstrip('/')}/v1/gateways/current")
+        status, _ = watch_tools._relay_request(url, "DELETE", previous["credential"], None, PAIR_TIMEOUT_S)
+    except (ValueError, urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+        raise core.TokenError(502, f"Couldn't revoke this device at the push relay ({type(exc).__name__}); try again")
+    if not 200 <= status < 300 and status != 401:
+        raise core.TokenError(502, "The push relay refused to revoke this device; try again")
+    with _e2e_lock, _installation_state_lock(primary, installation_id) as selected:
+        current = _device_pairings().load(selected)
+        if not current or current.get("credential") != previous["credential"] \
+                or current.get("gateway_id") != previous.get("gateway_id"):
+            raise core.TokenError(409, "This device's pairing changed during revocation; try again")
+        selected.unlink()
+    return {"paired": False, "installation_id": installation_id}
+
+
+@router.delete("/pair")
+async def delete_pair(response: Response, installation_id: Optional[str] = None,
+                      profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return {"ok": True, **(await core._run_scoped(profile, lambda: unpair_installation(installation_id),
+                                                     _pair_executor))}
+    except core.TokenError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise core._unexpected("unpairing", exc, feature="Pairing")
 
 
 @router.post("/pair")

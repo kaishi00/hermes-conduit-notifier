@@ -119,7 +119,7 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool]) -> None:
 def available() -> bool:
     """Shown to the model only while this profile is paired with Conduit."""
     try:
-        return client.load_state() is not None
+        return client.has_pairings()
     except Exception:  # noqa: BLE001
         return False
 
@@ -146,7 +146,7 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool]) -> dict
                 "note": "Only the main conversation's reply notifies. Report back; the main agent can write it."}
     if not session:
         return {"ok": False, "error": "no_session", "note": "This conversation doesn't send notifications."}
-    if client.load_state() is None:
+    if not client.has_pairings():
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so nothing reaches the phone."}
     key = slot_key(args.get("key"))
