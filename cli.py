@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import e2e, push_proxy, session_titles
-from .client import DEFAULT_RELAY_URL, RelayRejected, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, post_event, record_relay_accepted, record_relay_refusal, request_key_rotation, send_now, set_redact_content, state_path, unpair
+from .client import DEFAULT_RELAY_URL, RelayRejected, UnpairedLocally, build_outgoing, claim_pairing, e2e_status, load_state, other_devices, post_event, record_relay_accepted, record_relay_refusal, request_key_rotation, send_now, set_redact_content, state_path, unpair
 from .relay_urls import check_request_url
 from .events import event_id, plugin_hello, push_event
 
@@ -287,6 +287,13 @@ def dispatch(args: argparse.Namespace) -> int:
                   f"with an empty 403 since {_printable(state['relay_blocked_at'])}, so notifications, calls and "
                   "Lock Screen progress aren't arriving. Pairing again won't help: it meets the same block. "
                   f"To get it lifted, {_block_operator(relay_url)}.")
+        others = other_devices(state)
+        if others:
+            # hermes-conduit#2758: every device gets the notifications; calls
+            # ring the main one.
+            names = ", ".join(_printable(str(other.get("device_name") or installation[:8]))
+                              for installation, other in others)
+            print(f"Also notifying: {names} (calls ring the device paired first, or the one picked in Conduit)")
         print(f"Redact content: {'on' if state.get('redact_content') else 'off'}")
         encryption = e2e_status(state)
         if encryption["enabled"]:

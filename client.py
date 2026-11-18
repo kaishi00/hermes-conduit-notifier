@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import queue
+import re
 import secrets
 import socket
 import ssl
@@ -53,7 +54,7 @@ logger = logging.getLogger("hermes.plugins.conduit_push")
 # approval or a question never waits behind a queue of finished-turn notices
 # (notifier issue 834). ``pairing`` and ``generation`` are the pairing and the
 # plugin load that accepted the event: it goes out only under both.
-_events: queue.PriorityQueue[tuple[Any, ...]] = queue.PriorityQueue(maxsize=128)
+_events: queue.PriorityQueue[tuple[Any, ...]] = queue.PriorityQueue(maxsize=256)
 _URGENT = frozenset({"approval.needed", "input.needed"})
 _WAKE = (-1, 0)  # stop()'s wake-up, ahead of everything
 _order = itertools.count(1)
@@ -67,19 +68,123 @@ _stopped = threading.Event()
 _generation = 0
 
 
+# A profile's pairings, one per device (hermes-conduit#2758). The device it
+# paired first, or the one picked since, keeps conduit-push.json: it's the
+# main pairing, the one calls ring, the phone's tools reach and every older
+# plugin and dashboard read. Every other device's pairing is a file of the
+# same shape in DEVICES_DIRECTORY, named by its relay installation id. Each
+# has its own credential, gateway, encryption key and refusal pause, and is
+# removed on its own. Notifications go to every one of them (enqueue); what
+# reaches the phone's data (MAIN_ONLY, send_now, calls) goes to the main one.
+# There are others only while the main pairing is there: removing it hands
+# the main file to the device paired first after it.
+MAIN_STATE_NAME = "conduit-push.json"
+DEVICES_DIRECTORY = "conduit-push-devices"
+_INSTALLATION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# The device whose pairing state_path() and everything reading it use: None
+# for the main pairing. Set around one device's send (enqueue) or read.
+_device: contextvars.ContextVar[str | None] = contextvars.ContextVar("conduit_push_device", default=None)
+# Events that stay with the main pairing: they ask the main device for its own
+# data (phone.changes: calendar, reminders, a present prompt).
+MAIN_ONLY = frozenset({"phone.changes"})
+
+
+def main_state_path() -> Path:
+    return get_hermes_home() / MAIN_STATE_NAME
+
+
+def installation_key(installation_id: Any) -> str | None:
+    """The relay installation id as a device file is named, or None for
+    anything that isn't one (never a path)."""
+    if not isinstance(installation_id, str):
+        return None
+    key = installation_id.strip().lower()
+    return key if _INSTALLATION_ID.fullmatch(key) else None
+
+
+def device_state_path(installation_id: str) -> Path:
+    key = installation_key(installation_id)
+    if key is None:
+        raise ValueError("not a relay installation id")
+    return get_hermes_home() / DEVICES_DIRECTORY / f"{key}.json"
+
+
 def state_path() -> Path:
-    return get_hermes_home() / "conduit-push.json"
+    device = _device.get()
+    return main_state_path() if device is None else device_state_path(device)
 
 
-def load_state() -> dict[str, Any] | None:
-    path = state_path()
+@contextmanager
+def for_device(installation_id: str | None) -> Iterator[None]:
+    """Reads and writes in the block go to ``installation_id``'s pairing
+    (None: the main one)."""
+    key = None if installation_id is None else installation_key(installation_id)
+    if installation_id is not None and key is None:
+        raise ValueError("not a relay installation id")
+    token = _device.set(key)
+    try:
+        yield
+    finally:
+        _device.reset(token)
+
+
+def _read_pairing(path: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError, RecursionError):
         return None
     if not isinstance(value, dict) or not value.get("credential"):
         return None
     return value
+
+
+def _main_pairing() -> dict[str, Any] | None:
+    token = _device.set(None)
+    try:
+        return load_state()
+    finally:
+        _device.reset(token)
+
+
+def other_devices(main: dict[str, Any] | None = None) -> list[tuple[str, dict[str, Any]]]:
+    """The profile's pairings with other devices than the main one, the
+    first paired first: (installation id, state). None without a main one,
+    and none for the main device's own installation."""
+    main = main if main is not None else _main_pairing()
+    if not main:
+        return []
+    found: list[tuple[str, dict[str, Any]]] = []
+    try:
+        entries = list((get_hermes_home() / DEVICES_DIRECTORY).iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        key = installation_key(entry.name[:-5]) if entry.name.endswith(".json") else None
+        if key is None or key == installation_key(main.get("installation_id")):
+            continue
+        state = _read_pairing(entry)
+        # A file is that installation's only: one holding another's is skipped.
+        if state and installation_key(state.get("installation_id")) == key:
+            found.append((key, state))
+    found.sort(key=lambda item: (str(item[1].get("paired_at") or ""), item[0]))
+    return found
+
+
+def paired_devices() -> list[tuple[str | None, dict[str, Any]]]:
+    """Every pairing of this profile, the main one first (its id None)."""
+    main = _main_pairing()
+    if not main:
+        return []
+    return [(None, main), *other_devices(main)]
+
+
+def load_state() -> dict[str, Any] | None:
+    """The pairing state_path() names: the main one unless a device's is
+    set (for_device)."""
+    if _device.get() is not None and not _read_pairing(main_state_path()):
+        # Another device's pairing lasts only while the main one does.
+        return None
+    return _read_pairing(state_path())
 
 
 def state_lock_path(path: Path) -> Path:
@@ -281,7 +386,28 @@ def claim_pairing(code: str, relay_url: str = DEFAULT_RELAY_URL, gateway_name: s
             state["redact_key"] = previous["redact_key"]
         _write_state(state, path)
     _revoke_replaced(previous, state["credential"], state)
+    # This device was one of the others: it's the main one now, once.
+    _drop_device(state.get("installation_id"), replaced_by=state)
     return state
+
+
+def _drop_device(installation_id: Any, *, replaced_by: dict[str, Any] | None = None) -> bool:
+    """Removes ``installation_id``'s pairing among the others and revokes its
+    credential at its relay, best effort. False when there was none."""
+    key = installation_key(installation_id)
+    if key is None:
+        return False
+    path = get_hermes_home() / DEVICES_DIRECTORY / f"{key}.json"
+    with state_file_lock(path):
+        previous = _read_pairing(path)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    if not previous:
+        return False
+    _revoke_replaced(previous, "", replaced_by or {})
+    return True
 
 
 def _revoke_replaced(previous: dict[str, Any], credential: str, current: dict[str, Any]) -> None:
@@ -309,6 +435,15 @@ class UnpairedLocally(RuntimeError):
 
 
 def unpair() -> bool:
+    """Unpairs this profile from every device: the others first, then the
+    main one (`hermes conduit-push unpair`)."""
+    main = _read_pairing(main_state_path())
+    for installation_id, _state in (other_devices(main) if main else []):
+        _drop_device(installation_id)
+    return _unpair_main()
+
+
+def _unpair_main() -> bool:
     state = load_state()
     if not state:
         remove_state(unpaired=True)
@@ -338,30 +473,43 @@ def enqueue(event: dict[str, Any]) -> bool:
     on this event, so a drop has to fall back to the native clarify path
     instead of polling an answer that can never arrive.
     """
-    state = load_state()
-    if _stopped.is_set() or not state:
+    if _stopped.is_set():
         return False
-    if _paused_until(state) > time.monotonic():
-        logger.info("Conduit notification dropped for %s: %s", event.get("type", "event"), _pause_reason(state))
+    # Every device the profile is paired with gets it (hermes-conduit#2758),
+    # each through its own pairing; MAIN_ONLY events only the main one. A
+    # caller already inside one device's pairing (for_device) sends to it.
+    if _device.get() is not None or event.get("type") in MAIN_ONLY:
+        state = load_state()
+        targets = [(_device.get(), state)] if state else []
+    else:
+        targets = paired_devices()
+    if not targets:
         return False
-    # Hermes can serve several profiles in one process, each through a
-    # context variable for its home that a new thread doesn't inherit.
-    # The event goes out under the profile that accepted it here: its
-    # pairing, credential and encryption key, not the launch profile's.
-    context = contextvars.copy_context()
     rank = 0 if event.get("type") in _URGENT else 1
-    # With stop(), so an event is never accepted by a plugin that stopped
-    # meanwhile and left queued with no worker.
-    with _worker_lock:
-        if _stopped.is_set():
-            return False
-        try:
-            _events.put_nowait((rank, next(_order), context, event, _pairing_of(state), _generation))
-        except queue.Full:
-            logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
-            return False
-        _start_worker_locked()
-    return True
+    accepted = False
+    for device, state in targets:
+        if _paused_until(state) > time.monotonic():
+            logger.info("Conduit notification dropped for %s: %s", event.get("type", "event"), _pause_reason(state))
+            continue
+        # Hermes can serve several profiles in one process, each through a
+        # context variable for its home that a new thread doesn't inherit.
+        # The event goes out under the profile that accepted it here: its
+        # pairing, credential and encryption key, not the launch profile's.
+        context = contextvars.copy_context()
+        context.run(_device.set, device)
+        # With stop(), so an event is never accepted by a plugin that stopped
+        # meanwhile and left queued with no worker.
+        with _worker_lock:
+            if _stopped.is_set():
+                return False
+            try:
+                _events.put_nowait((rank, next(_order), context, event, _pairing_of(state), _generation))
+            except queue.Full:
+                logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
+                continue
+            _start_worker_locked()
+        accepted = True
+    return accepted
 
 
 def _pairing_of(state: dict[str, Any]) -> tuple[str, str, str]:
@@ -430,7 +578,21 @@ def build_outgoing(event: dict[str, Any], state: dict[str, Any]) -> dict[str, An
     """The event exactly as it is sent to the relay for this pairing."""
     # Redaction (the user's explicit choice) applies first, then a pairing
     # that provisioned end-to-end encryption seals whatever content is left.
-    return _sealed(_redacted(event, state), state)
+    return _sealed(_redacted(event, _with_profile_privacy(state)), state)
+
+
+def _with_profile_privacy(state: dict[str, Any]) -> dict[str, Any]:
+    """Redacting content is the profile's choice, kept with the main pairing:
+    another device's pairing sends under the main one's switch and key."""
+    if _device.get() is None:
+        return state
+    main = _read_pairing(main_state_path()) or {}
+    merged = {key: value for key, value in state.items() if key != "redact_content"}
+    if main.get("redact_content"):
+        merged["redact_content"] = True
+    if main.get("redact_key"):
+        merged["redact_key"] = main["redact_key"]
+    return merged
 
 
 def _sealed(event: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -547,15 +709,67 @@ def poll_decision(request_id: str) -> dict[str, Any]:
     ``opened_answers``). Raises on transport errors so the caller can decide
     to keep waiting.
     """
-    state = load_state()
-    if not state:
+    devices = _decision_devices()
+    if not devices:
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
-    status = request_json(
-        f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
-        method="GET",
-        credential=state["credential"],
-    )
-    return opened_answers(status, state, request_id)
+    # Each device the question went to parked it at the relay under its own
+    # pairing (hermes-conduit#2758). The first that answers resolves it, and
+    # the others are released so a late answer there is refused (409); a
+    # pending one keeps the wait going over one that never parked it.
+    found: list[dict[str, Any]] = []
+    error: Exception | None = None
+    for device, state in devices:
+        try:
+            status = request_json(
+                f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
+                method="GET",
+                credential=state["credential"],
+            )
+            opened = opened_answers(status, state, request_id)
+        except Exception as failure:  # noqa: BLE001 - another device may still answer
+            error = error or failure
+            continue
+        if isinstance(opened, dict) and opened.get("status") in ("answered", "rejected"):
+            if opened.get("status") == "answered" and len(devices) > 1:
+                _release_elsewhere(request_id, [other for other in devices if other[0] != device])
+            return opened
+        found.append(opened)
+    if not found:
+        raise error or RuntimeError("No pairing answered.")
+    return next((status for status in found if isinstance(status, dict) and status.get("status") == "pending"),
+                found[0])
+
+
+def _decision_devices() -> list[tuple[str | None, dict[str, Any]]]:
+    """The pairings a decision may wait on: inside one device's pairing only
+    that one, else every one not in a refusal pause."""
+    if _device.get() is not None:
+        state = load_state()
+        return [(_device.get(), state)] if state else []
+    now = time.monotonic()
+    return [(device, state) for device, state in paired_devices() if _paused_until(state) <= now]
+
+
+def _release_elsewhere(request_id: str, devices: list[tuple[str | None, dict[str, Any]]]) -> None:
+    """Releases a decision another device answered, off the answer's path."""
+    def release() -> None:
+        for _device_id, state in devices:
+            _cancel_with(state, request_id)
+
+    threading.Thread(target=release, name="conduit-push-release-elsewhere", daemon=True).start()
+
+
+def _cancel_with(state: dict[str, Any], request_id: str) -> bool:
+    try:
+        request_json(
+            f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
+            method="DELETE",
+            credential=state["credential"],
+        )
+        return True
+    except Exception as error:
+        logger.warning("Conduit decision cancel failed for %s: %s", request_id, error)
+        return False
 
 
 def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: str) -> dict[str, Any]:
@@ -649,7 +863,12 @@ def request_key_rotation(*, without_overlap: bool = False) -> bool:
             state.pop("rotate_without_overlap", None)
         return True
 
-    return update_state(change)
+    # Every device's key: each pairing has its own (hermes-conduit#2758).
+    requested = update_state(change)
+    for installation_id, _state in other_devices():
+        with for_device(installation_id):
+            requested = update_state(change) or requested
+    return requested
 
 
 def post_event(build: Callable[[dict[str, Any]], dict[str, Any]], timeout: float = 15.0) -> dict[str, Any]:
@@ -672,18 +891,13 @@ def cancel_decision(request_id: str) -> bool:
     the endpoint (or a transport blip) must never break the answering path.
     """
     try:
-        state = load_state()
-        if not state:
-            return False
-        request_json(
-            f"{state['relay_url'].rstrip('/')}/v1/decisions/{request_id}",
-            method="DELETE",
-            credential=state["credential"],
-        )
-        return True
+        devices = _decision_devices()
     except Exception as error:
         logger.warning("Conduit decision cancel failed for %s: %s", request_id, error)
         return False
+    # Every device it was parked on (hermes-conduit#2758).
+    released = [_cancel_with(state, request_id) for _device_id, state in devices]
+    return bool(released) and all(released)
 
 
 def looks_like_json_object(raw: bytes) -> bool:
@@ -973,8 +1187,11 @@ def _paused_until(state: dict[str, Any]) -> float:
 def notifications_paused() -> bool:
     """Whether this profile's pairing is in a refusal pause: its events are
     dropped, and nothing should poll the relay for it meanwhile."""
-    state = load_state()
-    return bool(state) and _paused_until(state) > time.monotonic()
+    devices = [(_device.get(), load_state())] if _device.get() is not None else paired_devices()
+    now = time.monotonic()
+    # Paused only when every device's pairing is: one still taking pushes
+    # carries the question (hermes-conduit#2758).
+    return bool(devices) and all(state and _paused_until(state) > now for _device_id, state in devices)
 
 
 def _pause_reason(state: dict[str, Any]) -> str:

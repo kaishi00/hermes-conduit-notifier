@@ -181,6 +181,10 @@ ROUTE_CAPABILITIES = (
     # /inbox: events the user's Shortcuts automations log (Log to Hermes).
     "shortcut-inbox",
     "pairing",
+    # POST /pair with "also", /pair/remove, /pair/main and GET /e2e's
+    # "devices": a profile paired with several devices, each notified
+    # (hermes-conduit#2758).
+    "pairing-devices",
     "self-restart",
     # POST /self/update runs the whole update on the host and notifies.
     "self-update",

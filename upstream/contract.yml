@@ -630,6 +630,8 @@ routes:
   - GET /notifications/reply-sources
   - PUT /notifications/reply-sources
   - POST /pair
+  - POST /pair/main
+  - POST /pair/remove
   - GET /personality
   - POST /phone/exchange
   - POST /phone/ingest

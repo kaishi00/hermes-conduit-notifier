@@ -113,7 +113,7 @@ hermes conduit-push test
 # Redact chat text from pushes (see Privacy and security)
 hermes conduit-push redact on
 
-# Revoke this profile's credential
+# Revoke this profile's credentials, on every device it notifies
 hermes conduit-push unpair
 ```
 
@@ -191,7 +191,7 @@ The iOS app controls which categories are enabled, how much a notification shows
 - The credential is stored in the profile-aware Hermes home as `conduit-push.json` with mode `0600` on supported systems.
 - Authorization credentials are never written to logs or printed by `status`.
 - Hook callbacks enqueue bounded events; HTTPS delivery runs on a background worker and does not block the agent loop. Two waits are bounded instead (plugin 0.81.2+), for a process that exits right after its turn, such as a restart-safe cron job's worker: a turn end that sends a call request waits up to 3 seconds for it to reach the relay, and the process's exit waits up to 3 seconds for queued notifications and up to 10 for call requests still retrying (call requests first, so a fallback push they queue is among those notifications).
-- A delivery that fails on the way (no connection, a timeout, `408`, `429` or a `5xx` from the relay) is sent again with the same event ID after 1, 2 and 4 seconds, for at most about 30 seconds per event; the relay drops the repeats it already accepted. One thread delivers the queue (up to 128 events), approvals and questions ahead of everything else, so they don't wait behind retries of finished-turn notices (plugin 0.177.15+). A queued event goes out only under the pairing that accepted it: pairing again drops what was queued before, and a key rotation doesn't. A sealed push the relay refuses as `e2e_clock_ahead` (this host's clock more than an hour ahead of the relay's) is sealed again once by the relay's clock, which that refusal's `Date` gives it. Other refusals are not retried. A `401` means the relay no longer knows this gateway (Conduit removed it, or the relay lost its data): the pairing is kept, and `status` says to pair again from Conduit until a delivery is accepted again. A `401` or `403` also parks notifications for that pairing (plugin 0.55.1+): events are dropped for 1 minute, doubling with each refusal in a row up to 30 minutes, then the next event goes out as the probe and an accepted one (or an accepted `test`) ends the pause; a clarify question asked meanwhile uses the native prompt at once (Live Activity reports pause 30 minutes on their own). A `403` with no JSON body comes from something in front of the relay (a firewall or rate limiter) blocking this host's address: `status` says so instead of telling you to pair again, since a pairing claim meets the same block, and Conduit's pairing status reports it as `relay_blocked`.
+- A delivery that fails on the way (no connection, a timeout, `408`, `429` or a `5xx` from the relay) is sent again with the same event ID after 1, 2 and 4 seconds, for at most about 30 seconds per event; the relay drops the repeats it already accepted. One thread delivers the queue (up to 256 events, one per device a profile notifies), approvals and questions ahead of everything else, so they don't wait behind retries of finished-turn notices (plugin 0.177.15+). A queued event goes out only under the pairing that accepted it: pairing again drops what was queued before, and a key rotation doesn't. A sealed push the relay refuses as `e2e_clock_ahead` (this host's clock more than an hour ahead of the relay's) is sealed again once by the relay's clock, which that refusal's `Date` gives it. Other refusals are not retried. A `401` means the relay no longer knows this gateway (Conduit removed it, or the relay lost its data): the pairing is kept, and `status` says to pair again from Conduit until a delivery is accepted again. A `401` or `403` also parks notifications for that pairing (plugin 0.55.1+): events are dropped for 1 minute, doubling with each refusal in a row up to 30 minutes, then the next event goes out as the probe and an accepted one (or an accepted `test`) ends the pause; a clarify question asked meanwhile uses the native prompt at once (Live Activity reports pause 30 minutes on their own). A `403` with no JSON body comes from something in front of the relay (a firewall or rate limiter) blocking this host's address: `status` says so instead of telling you to pair again, since a pairing claim meets the same block, and Conduit's pairing status reports it as `relay_blocked`.
 - Disabling or reloading the plugin (on a Hermes with plugin unload callbacks) stops its background work: notifications still queued and replies waiting for their turn's end are dropped, the delivery and Lock Screen threads end, and a call held until your call ends is kept for the next load instead of going out.
 - The health, location, maps, calendar, phone, contacts, calls, display and inbox (`conduit_inbox`) tools refuse delegated subagents, including one whose session id a compaction replaced (`compression.in_place: false`): the plugin asks Hermes' delegation flag (Hermes 0.22+) and follows the compaction links in Hermes' session store back to the subagent it was (plugin 0.51.6+).
 - Event titles and bodies are length-limited before delivery.
@@ -5399,6 +5399,37 @@ the same phone and gateway pair again, and otherwise drops it (Conduit
 provisions a new one). 400 for a malformed code or URL, 410 when the
 code expired or was used, 429 past 10 requests a minute, 502 when the relay
 can't be reached.
+
+### Several devices (plugin 0.178+)
+
+A profile can notify every device you use Conduit on: an iPhone, an iPad and
+a Mac at once. With `"also": true` (and the device's name as `device_name`),
+the claim pairs the asking device besides the ones paired already, instead of
+moving the pairing to it. Each device keeps its own credential, gateway and
+encryption key, in `conduit-push-devices/<installation id>.json` beside
+`conduit-push.json`, and is removed on its own. Every notification goes to
+each device; a question resolves on the first device that answers, and the
+others are released, so a late answer there is refused. Calls, Lock Screen
+progress and the phone's tools (calendar, reminders, location) stay with the
+main device: the one paired first, or the one picked since. Without `also`
+(an older Conduit, `hermes conduit-push pair`) the claim moves the main
+pairing as before, and the other devices keep theirs.
+
+- `GET /e2e?installation_id=` answers for that device's pairing, with `main`
+  and `devices` (each device's `installation_id`, `gateway_id`,
+  `device_name`, `paired_at`, `main` and `relay_rejected`, the main one
+  first). `POST /e2e` and `POST /e2e/rotate` store the key of the device the
+  body names.
+- `POST /pair/remove` with `{"installation_id": …}` unpairs that device and
+  revokes its credential. Removing the main device makes the device paired
+  first after it the main one. A removed device stays removed: Conduit's own
+  pairing on connect (`"auto": true`) is refused for it (409) until someone
+  pairs it by hand.
+- `POST /pair/main` with `{"installation_id": …}` makes that device the main
+  one, without pairing again.
+- `GET /waiting` names each device's gateway under `gateways`, so a question
+  answered from Conduit's Needs you list is sealed for that device's key.
+- `hermes conduit-push unpair` unpairs every device; `status` lists them.
 
 ## Updating from Conduit (plugin 0.24+)
 

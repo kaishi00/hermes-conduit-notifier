@@ -70,9 +70,20 @@ def waiting_list() -> Dict[str, Any]:
     # from its row answers through the relay, sealed for this gateway's key
     # on an end-to-end encrypted pairing, and the card came from no push
     # that would have named it (hermes-conduit#2683).
-    gateway_id = (core._load_pairing_state(core._pairing_state_path()) or {}).get("gateway_id")
+    main = core._load_pairing_state(core._pairing_state_path()) or {}
+    gateway_id = main.get("gateway_id")
     if isinstance(gateway_id, str) and gateway_id.strip():
         listed["gateway_id"] = gateway_id.strip()
+        # Each device the profile is paired with answers through its own
+        # pairing's gateway (hermes-conduit#2758): the main one's above, every
+        # device's here by installation id.
+        gateways = {}
+        for state in (main, *(other for _key, other in core._device_pairings(main))):
+            key, gateway = core._installation_key(state.get("installation_id")), state.get("gateway_id")
+            if key and isinstance(gateway, str) and gateway.strip():
+                gateways[key] = gateway.strip()
+        if gateways:
+            listed["gateways"] = gateways
     return listed
 
 
