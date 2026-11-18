@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.178.2 (2026-11-18)
+
+### Fixes
+
+- A malformed reply from a speech server no longer ends a call: the relay passes it on as before 0.178.1.
+
 ## 0.178.1 (2026-11-18)
 
 ### Fixes

@@ -303,6 +303,8 @@ def test_the_watch_runs_its_local_live_session_through_the_bridge(call):
         upstream.push({"type": "response.audio.delta", "delta": audio})
         upstream.push({"type": "response.output_audio_transcript.delta", "delta": "Hi"})
         upstream.push({"type": "response.audio_transcript.delta", "delta": "Hi"})
+        # A frame too deep to parse doesn't end the Watch's reading (#902).
+        upstream.incoming.put_nowait('{"type":"response.audio_transcript.delta","x":' + "[" * 100000 + "]" * 100000 + "}")
         upstream.push({"type": "response.done"})
         await _until(lambda: watch.events(socket, "response.done") and any(k == 1 for k, _ in watch.received(socket)))
         await asyncio.sleep(0.2)

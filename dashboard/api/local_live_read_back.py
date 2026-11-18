@@ -438,7 +438,7 @@ class _LocalLiveReadBack:
             return False
         try:
             frame = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             return False
         kind = frame.get("type") if isinstance(frame, dict) else None
         if kind == "session.update":
@@ -500,7 +500,7 @@ class _LocalLiveReadBack:
             return text
         try:
             event = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             return text
         kind = event.get("type") if isinstance(event, dict) else None
         if self.update is not None:
