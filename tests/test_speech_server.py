@@ -439,6 +439,31 @@ def test_socket_relays_both_ways(client, server):
     assert server.connects == [("ws://127.0.0.1:8765/v1/realtime", {})]
 
 
+@pytest.mark.parametrize("first,second", [("output_", ""), ("", "output_")])
+def test_a_server_that_names_each_reply_frame_twice_is_passed_on_once(client, server, first, second):
+    # Some servers send each frame under the beta's name and the GA's, for
+    # clients of either; the call would play and caption every word twice
+    # (issue 2783). The name the server used first is the one kept.
+    frames = []
+    for kind in ("audio.delta", "audio_transcript.delta", "audio_transcript.done", "audio.done", "text.delta"):
+        payload = {"delta": "AAAA"} if kind.endswith("delta") else {}
+        frames.append(json.dumps({"type": f"response.{first}{kind}", **payload}))
+        frames.append(json.dumps({"type": f"response.{second}{kind}", **payload}))
+    # Words that quote an event's name are words, and a frame both dialects
+    # name alike goes through.
+    frames.append(json.dumps({"type": f"response.{first}audio_transcript.delta",
+                              "delta": 'She said "response.audio.delta"'}))
+    frames.append('{"type":"response.done"}')
+    server.upstream = FakeUpstream(frames=frames)
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        got = [json.loads(ws.receive_text())["type"] for _ in range(7)]
+        ws.send_text("finish")
+        _wait_close(ws)
+    assert got == [f"response.{first}audio.delta", f"response.{first}audio_transcript.delta",
+                   f"response.{first}audio_transcript.done", f"response.{first}audio.done",
+                   f"response.{first}text.delta", f"response.{first}audio_transcript.delta", "response.done"]
+
+
 def test_socket_tells_a_driven_server_to_read_aloud(client, hermes, server):
     _settings(hermes, url="ws://127.0.0.1:8765", drive_turns=True, transcription_model="gpt-4o-mini-transcribe")
     server.upstream = FakeUpstream(frames=['{"type":"session.created"}'])

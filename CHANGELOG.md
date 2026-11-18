@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.178.1 (2026-11-18)
+
+### Fixes
+
+- On a speech server that sends each reply under both OpenAI Realtime event names, Local Live, Classic voice and Watch calls no longer say and caption every word twice.
+
 ## 0.178.0 (2026-11-18)
 
 ### New and improved
