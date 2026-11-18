@@ -465,3 +465,37 @@ def test_the_plugin_and_the_dashboard_name_the_device_files_alike():
     assert client.DEVICES_DIRECTORY == api.core.PAIRING_DEVICES_DIRECTORY
     assert client._INSTALLATION_ID.pattern == api.core._INSTALLATION_ID.pattern
     assert client.REMOVED_DEVICES_NAME == api.pairing.REMOVED_DEVICES_NAME
+
+
+def test_a_batch_completed_across_devices_releases_a_paused_pairing_too(home, monkeypatch):
+    _write_pairings(home, others=(IPAD, MAC))
+    calls = []
+
+    def relay(url, *, method, payload=None, credential="", timeout=15.0):
+        calls.append((method, credential))
+        if method == "DELETE":
+            return {}
+        if credential.startswith(IPAD):
+            return {"status": "pending", "answers": {"q1": "Red"}, "remaining": ["q2"]}
+        return {"status": "pending", "answers": {"q2": "Small"}, "remaining": ["q1"]}
+
+    monkeypatch.setattr(client, "request_json", relay)
+    monkeypatch.setattr(client.threading, "Thread", lambda target, **kwargs: types.SimpleNamespace(start=target))
+    client._refusals[f"{PHONE}.gw-1.secret"] = {"paused_for": 60, "until": 1e18}
+    try:
+        assert client.poll_decision("clarify:9")["status"] == "answered"
+    finally:
+        client._clear_refusal()
+    assert ("GET", f"{PHONE}.gw-1.secret") not in calls
+    assert ("DELETE", f"{PHONE}.gw-1.secret") in calls
+
+
+def test_a_hand_pairing_stands_when_its_removed_mark_cannot_be_cleared(home, monkeypatch):
+    def fail(_installation):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(client, "_forget_removed_device", fail)
+    monkeypatch.setattr(client, "_request", lambda url, *, method, payload=None, credential="", timeout=15.0:
+                        _pairing(IPAD, "gw-3") if method == "POST" else {})
+    state = client.claim_pairing(CODE, RELAY, "box")
+    assert state["installation_id"] == IPAD and _read(home / "conduit-push.json")["installation_id"] == IPAD
