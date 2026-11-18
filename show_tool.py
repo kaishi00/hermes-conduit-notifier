@@ -63,7 +63,8 @@ SCHEMA: dict[str, Any] = {
     "description": (
         "Show something on the user's phone screen in Conduit. On a voice call, use it for anything better seen "
         "than heard: tables, charts, forecasts, recipes and other step-by-step instructions, lists, comparisons, "
-        "code, images and links, and whenever the user asks to see or show something. Prefer cards, which Conduit "
+        "code, images and links, and whenever the user asks to see or show something. Never ask whether to show a "
+        "card: show it, or answer in text. Prefer cards, which Conduit "
         "draws natively, on a call or in a typed chat: a map with pins and a route, one place in detail, several "
         "places to swipe through, big numbers (stats), a line, bar or pie chart, a weather forecast, a comparison "
         "of two to four options, steps the user can tick off (with timers), photos, videos or audio to play, people "
