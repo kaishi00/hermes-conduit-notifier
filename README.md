@@ -2044,6 +2044,26 @@ or changed rows cross the link.
   Hermes takes over 30 seconds, 429 past 120 reads a minute per profile.
   Every answer is `Cache-Control: no-store`.
 
+## Chat usage (plugin 0.177.34+)
+
+Conduit's Context sheet and its chat lists' Usage Details show one chat's
+tokens and cost. Hermes keeps them on each session's row in `state.db` but
+only sums them over days and models, so this route reads one chat's: its row,
+the rows its compressions continued it into, and the subagent runs it
+started. A branch is a chat of its own and isn't counted.
+
+| Method | Route | Returns |
+| --- | --- | --- |
+| GET | `/api/plugins/conduit_push/sessions/usage?session_id=&profile=` | `{session_id, newest_session_id, model, started_at, compressions, subagent_runs, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, api_call_count, tool_call_count, cost_usd, cost_status}` |
+
+- `cost_status` follows Hermes' own per row: `actual` (billed), `estimated`
+  (Hermes' pricing table), `included` (a plan that doesn't bill per token),
+  `partial` (some calls priced, so `cost_usd` is a floor) or `unknown` (no
+  call priced: `cost_usd` is null, never 0, though Hermes stores 0).
+- 404 when Hermes has no row for the chat, 501 when its sessions table
+  predates the cost columns, 504 past 10 seconds, 429 past 120 reads a minute
+  per profile. Every answer is `Cache-Control: no-store`.
+
 ## Chats opened on Desktop (plugin 0.12+)
 
 Conduit's Unread filter can count a chat as read when you have it open in

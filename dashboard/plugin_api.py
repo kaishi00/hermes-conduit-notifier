@@ -28,6 +28,7 @@ they run:
                           and predictions
     history               Chat history pages without the rows Conduit already
                           has
+    session_usage         Chat usage: one chat's tokens and cost
     pairing               End-to-end encrypted notifications and pairing from
                           Conduit
     notifications         Cron and reply notifications, the chat Conduit has on

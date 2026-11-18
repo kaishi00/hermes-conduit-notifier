@@ -51,6 +51,9 @@ ROUTE_CAPABILITIES = (
     # POST /sessions/history-page: Hermes' page of a chat's rows, the ones
     # Conduit holds sent as their fingerprints.
     "history-page",
+    # GET /sessions/usage: one chat's tokens and cost, its compressions and
+    # subagent runs included (hermes-conduit#2699).
+    "session-usage",
     "hermes-calls",
     "hermes-call-presence",
     "hermes-call-outcomes",

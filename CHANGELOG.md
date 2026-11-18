@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.34 (2026-11-18)
+
+### New and improved
+
+- Conduit can show what one chat has used: its input and output tokens and its cost, counting the chat's compressions and the subagents it started. Hermes' own price is shown as it is: billed, estimated, included in your plan, or not reported.
+
 ## 0.177.33 (2026-11-17)
 
 ### Fixes

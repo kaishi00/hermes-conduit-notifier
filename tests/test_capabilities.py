@@ -66,6 +66,7 @@ def test_every_capability_names_a_served_route_family():
         "turn-surface": "/turn-surface",
         "turn-surface-discard": "/turn-surface/discard",
         "history-page": "/sessions/history-page",
+        "session-usage": "/sessions/usage",
         "hermes-calls": "/calls",
         "hermes-call-presence": "/calls/presence",
         "hermes-call-outcomes": "/calls/outcomes",
