@@ -21,6 +21,12 @@ checks it). The format is fixed, because Conduit reads it:
 - A bot handing work to a workstream can no longer name an ask that was already answered, which quoted the user's old words again.
 - A question answered from Conduit on a pairing whose stored encryption key can't be read now ends at once, instead of leaving Hermes waiting out the whole time.
 
+## 0.177.39 (2026-11-18)
+
+### Fixes
+
+- Cards a model put inside a "cards" field inside a list, or a "cards" field inside another one, are now drawn instead of refused.
+
 ## 0.177.38 (2026-11-18)
 
 ### Fixes

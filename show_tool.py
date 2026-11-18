@@ -687,24 +687,43 @@ def _review_decision(raw: Any, where: str, problems: list[str]) -> tuple[dict[st
     return decision, option_pages
 
 
-def _cards_unwrapped(given: Any) -> Any:
+def _cards_unwrapped(given: Any, depth: int = 0) -> Any:
     """The cards as the list the schema asks for, however a model wrapped
-    them: a list sent as a JSON string, one card on its own, or the list
-    inside another list (``[[{...}]]``). A smaller model that got those
-    wrong kept showing the board again for half an hour (MiniMax M3.1,
-    2026-11-18)."""
+    them: a list sent as a JSON string, one card on its own, a
+    ``{"cards": ...}`` wrapper, or the list inside another list
+    (``[[{...}]]``), each of these inside the others too. A smaller model
+    that got those wrong kept showing the board again for half an hour
+    (MiniMax M3.1, 2026-11-18)."""
+    if depth > _MAX_CARD_WRAPS:
+        return given
     if isinstance(given, str) and given.strip()[:1] in ("[", "{"):
         try:
             given = json.loads(given)
         except (ValueError, RecursionError):
             return given
     if isinstance(given, dict):
-        if "type" not in given and isinstance(given.get("cards"), (list, str)):
-            return _cards_unwrapped(given["cards"])
-        given = [given]
-    while isinstance(given, list) and any(isinstance(item, list) for item in given):
-        given = [card for item in given for card in (item if isinstance(item, list) else [item])]
-    return given
+        if _is_cards_wrapper(given):
+            return _cards_unwrapped(given["cards"], depth + 1)
+        return [given]
+    if not isinstance(given, list):
+        return given
+    cards: list[Any] = []
+    for item in given:
+        if isinstance(item, list) or (isinstance(item, dict) and _is_cards_wrapper(item)):
+            opened = _cards_unwrapped(item, depth + 1)
+            cards.extend(opened if isinstance(opened, list) else [opened])
+        else:
+            cards.append(item)
+    return cards
+
+
+# How deep _cards_unwrapped opens wrappers: past this the cards are refused.
+_MAX_CARD_WRAPS = 8
+
+
+def _is_cards_wrapper(value: dict[str, Any]) -> bool:
+    """A ``{"cards": ...}`` around cards, not a card of its own."""
+    return "type" not in value and isinstance(value.get("cards"), (list, str, dict))
 
 
 def _filled_templates(given: Any, templates: card_templates.TemplateStore, problems: list[str]) -> Any:
