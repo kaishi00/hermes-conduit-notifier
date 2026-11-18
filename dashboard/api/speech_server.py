@@ -750,7 +750,9 @@ class _SpeechServerDialect:
             return True
         try:
             event = json.loads(text)
-        except ValueError:
+        except Exception:
+            # Unreadable (or nested past the parser's depth): kept, as the
+            # relay passed every frame on before.
             return True
         kind = event.get("type") if isinstance(event, dict) else None
         other = _SPEECH_SERVER_DIALECT_OTHER.get(kind) if isinstance(kind, str) else None

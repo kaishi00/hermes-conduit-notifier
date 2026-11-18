@@ -454,9 +454,13 @@ def test_a_server_that_names_each_reply_frame_twice_is_passed_on_once(client, se
     frames.append(json.dumps({"type": f"response.{first}audio_transcript.delta",
                               "delta": 'She said "response.audio.delta"'}))
     frames.append('{"type":"response.done"}')
+    # A frame nested past the parser's depth is passed on, not the call's end.
+    deep = '{"type":"response.audio.delta","x":' + "[" * 100000 + "]" * 100000 + "}"
+    frames.append(deep)
     server.upstream = FakeUpstream(frames=frames)
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
         got = [json.loads(ws.receive_text())["type"] for _ in range(7)]
+        assert ws.receive_text() == deep
         ws.send_text("finish")
         _wait_close(ws)
     assert got == [f"response.{first}audio.delta", f"response.{first}audio_transcript.delta",
