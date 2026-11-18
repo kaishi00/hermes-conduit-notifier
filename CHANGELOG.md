@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### Fixes
 
-- A reply that was only a silence marker written another way, like `*[SILENT]*` or `NO_REPLY`, could still send a notification, and a reply that ended with `[SILENT]` on its own line showed it in the notification.
+- On a recent Hermes, a reply that was only a silence marker written another way, like `*[SILENT]*` or `NO_REPLY`, could still send a notification, and a reply that ended with `[SILENT]` on its own line showed it in the notification.
 
 ## 0.177.34 (2026-11-18)
 
