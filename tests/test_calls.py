@@ -1240,6 +1240,22 @@ def test_a_reply_push_follows_hermes_silence_rule(cron_home, fake, monkeypatch):
     assert event["type"] == "response.ready" and event["body"] == "W2 is done."
 
 
+def test_a_broken_hermes_module_keeps_the_cron_rule(monkeypatch):
+    import importlib.abc
+
+    class Broken(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name in ("gateway", "gateway.response_filters"):
+                raise RuntimeError("broken Hermes install")
+            return None
+
+    monkeypatch.delitem(sys.modules, "gateway", raising=False)
+    monkeypatch.delitem(sys.modules, "gateway.response_filters", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [Broken(), *sys.meta_path])
+    assert cron_runs.is_silent("[SILENT] No changes")
+    assert not cron_runs.is_silent("Three new emails.")
+
+
 def test_the_fallback_silence_rule_matches_hermes(monkeypatch):
     assert cron_runs._fallback_silent("[SILENT] No changes")
     assert cron_runs._fallback_silent("Report\n\nsilent")
