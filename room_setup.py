@@ -14,7 +14,7 @@ profile's for the ceiling (notifier #500): then it lists them in place of
 stays out, and their tools run only where a room's Custom choice names them.
 
 It writes only what changes something, and what it can't fix (YOLO mode, a
-managed install, a setting an administrator pinned, a profile the host
+managed install with something left to write, a setting an administrator pinned, a profile the host
 gateway doesn't serve) is reported before anything is written. Whether the
 API server runs is read from the gateway's own record of it
 (``gateway_state.json``), so the key never leaves the files Hermes keeps it
@@ -564,9 +564,6 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
         blockers.append({"code": "yolo", "message": (
             f"{YOLO_ENV} is on for this Hermes, which turns approvals off for every turn, and rooms refuse that. Take "
             f"{YOLO_ENV} out of {root / '.env'} and the environment Hermes runs in, then restart the gateway.")})
-    managed = hermes.managed()
-    if managed:
-        blockers.append({"code": "managed", "message": str(managed)})
 
     # The API server: a key where none is, a disable turned on, a port.
     root_writes: dict = {}
@@ -668,7 +665,12 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
 
     # An administrator's pins (managed_scope's config and .env, in
     # HERMES_MANAGED_DIR or /etc/hermes) and a managed install are the
-    # installation's, whichever profile asks.
+    # installation's, whichever profile asks. A managed install blocks only
+    # a setup that has something to write: one whose package manager
+    # declares it all is ready (notifier issue 875).
+    managed = hermes.managed()
+    if managed and (profile_writes or root_writes or new_key or new_profile_key or new_port is not None):
+        blockers.append({"code": "managed", "message": str(managed)})
     for dotted in [*profile_writes, *root_writes]:
         if hermes.key_managed(dotted):
             blockers.append({"code": "managed", "message": (

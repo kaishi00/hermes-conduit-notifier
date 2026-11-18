@@ -518,6 +518,11 @@ def test_a_workstream_started_for_an_ask_gets_the_users_words(bots, hermes, monk
     assert "«Yes, have Nahida fix both bugs»" in brief
     refused = call("work_start", {"title": "Other", "instructions": "Other.", "ask": "A9"}, session_id=NAHIDA_CHAT)
     assert refused["error"] == "ask"
+    # Notifier issue 860: an answered ask keeps closed_at unset, and still
+    # isn't one to quote.
+    store_mod.Store(bots["nahida"]).update("A1", status="done")
+    answered = call("work_start", {"title": "Again", "instructions": "Again.", "ask": "A1"}, session_id=NAHIDA_CHAT)
+    assert answered["error"] == "ask"
 
 
 def test_the_one_ask_a_turn_was_woken_with_needs_no_ref(bots, hermes, monkeypatch):

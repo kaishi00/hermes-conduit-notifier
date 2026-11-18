@@ -541,8 +541,11 @@ def poll_decision(request_id: str) -> dict[str, Any]:
     Returns {"status": "answered", "answer": str} once the device responded
     to a single-question decision, {"status": "answered", "answers": {...},
     "remaining": []} for a completed batch, and {"status": "pending",
-    "remaining": [...]} while questions are still open. Raises on transport
-    errors so the caller can decide to keep waiting.
+    "remaining": [...]} while questions are still open. On an E2E pairing,
+    an answer not sealed by the paired phone gives {"status": "rejected"},
+    with "answers" holding any of a batch's that did open (see
+    ``opened_answers``). Raises on transport errors so the caller can decide
+    to keep waiting.
     """
     state = load_state()
     if not state:
@@ -576,6 +579,9 @@ def opened_answers(status: dict[str, Any], state: dict[str, Any], request_id: st
         "gateway_id": str(state.get("gateway_id") or ""),
         "request_id": request_id,
     }
+    # Bound before the try, so a failure reading the keys fails closed on
+    # purpose rather than by a NameError below (hermes-conduit#2692).
+    keys: list = []
     try:
         # The key a rotation just replaced still opens answers the phone
         # sealed before it learned of the new one.
