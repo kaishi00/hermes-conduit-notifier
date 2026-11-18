@@ -170,9 +170,10 @@ def test_a_chat_row_continued_twice_counts_no_run(db):
     _add(db, "first", parent="chat", started=6, input_tokens=10)
     _add(db, "second", parent="chat", started=7, input_tokens=20)
     db.commit()
-    body = _get("?session_id=chat").json()
-    assert body["newest_session_id"] == "second" and body["compressions"] == 1
-    assert body["input_tokens"] == 130 and body["subagent_runs"] == 0
+    for sid in ("chat", "first", "second"):
+        body = _get(f"?session_id={sid}").json()
+        assert body["newest_session_id"] == "second" and body["compressions"] == 1
+        assert body["input_tokens"] == 130 and body["subagent_runs"] == 0
 
 
 def test_a_hermes_without_the_cost_columns_says_so(db):
