@@ -14,7 +14,7 @@ profile's for the ceiling (notifier #500): then it lists them in place of
 stays out, and their tools run only where a room's Custom choice names them.
 
 It writes only what changes something, and what it can't fix (YOLO mode, a
-managed install, a setting an administrator pinned, a profile the host
+managed install with something left to write, a setting an administrator pinned, a profile the host
 gateway doesn't serve) is reported before anything is written. Whether the
 API server runs is read from the gateway's own record of it
 (``gateway_state.json``), so the key never leaves the files Hermes keeps it

@@ -19,6 +19,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Linked Rooms setup no longer stops a package-managed Hermes (like NixOS) that already declares everything the setup needs.
 - A bot handing work to a workstream can no longer name an ask that was already answered, which quoted the user's old words again.
+- A question answered from Conduit on a pairing whose stored encryption key can't be read now ends at once, instead of leaving Hermes waiting out the whole time.
 
 ## 0.177.38 (2026-11-18)
 

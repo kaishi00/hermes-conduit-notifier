@@ -428,6 +428,17 @@ def test_a_rejected_batch_poll_keeps_the_answers_the_phone_sealed():
         "status": "rejected", "answers": {"q0": "Red"}}
 
 
+@pytest.mark.parametrize("status", [
+    {"status": "answered", "answer": "sealed?"},
+    {"status": "pending", "answers": {"q0": "sealed?"}, "remaining": []},
+], ids=["single", "batch"])
+def test_an_unreadable_key_refuses_the_answer(status):
+    # hermes-conduit#2692: a key read that raises fails closed, a refused
+    # poll, rather than an error the clarify loop would keep polling past.
+    broken = _state(e2e={"kid": KID, "secret": "!!!"})
+    assert client.opened_answers(status, broken, "conduit-push-abc123def456") == {"status": "rejected"}
+
+
 def test_a_batch_answer_moved_to_another_question_is_refused_on_the_retry():
     # hermes-conduit#2692: the per-question retry binds each answer to its
     # own question too, so q1's answer under q0 stays out.
