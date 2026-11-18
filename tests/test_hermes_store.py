@@ -417,6 +417,15 @@ def test_copies_read_a_rooms_log_from_its_services_store(interface, monkeypatch,
     own = types.SimpleNamespace(scope=types.SimpleNamespace(profile_dir=tmp_path))
     hermes.read_events(types.SimpleNamespace(store=own, placement="profile"), room_id="r1", since_seq=0)
     assert seen == [(own, "profile", "r1")]
+    # GLM's review of #904: room_reading reads a log by its database's path.
+    hermes.read_events(tmp_path / "shared-state.db", room_id="r2", since_seq=0)
+    assert seen[1][1:] == ("shared", "r2") and all(store.closed for store in interface.opened)
+    old = []
+    monkeypatch.setattr(hermes, "_calls", {"read_events": lambda db_path, **fields: old.append(db_path) or {},
+                                            "ingest_page": None, "ReplicaError": None})
+    hermes.read_events(tmp_path / "shared-state.db", room_id="r3")
+    hermes.read_events(types.SimpleNamespace(store=own, placement="shared", db_path=tmp_path / "x.db"), room_id="r4")
+    assert old == [tmp_path / "shared-state.db", tmp_path / "x.db"]
 
 
 def test_a_store_and_placement_name_the_room_database_hermes_keeps_them_in(store_module, interface, tmp_path):

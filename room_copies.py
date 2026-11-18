@@ -104,9 +104,10 @@ class Hermes:
     def keeps_copies(self) -> bool:
         return self._load()["ingest_page"] is not None and self._load()["ReplicaError"] is not None
 
-    def read_events(self, service: Any, **fields: Any) -> dict[str, Any]:
-        """The room log of ``service`` (the home's room service), read from its own store."""
-        return hermes_store.service_call(self._load()["read_events"], service, **fields)
+    def read_events(self, target: Any, **fields: Any) -> dict[str, Any]:
+        """A room's log: ``target`` is the home's room service, read from its own store, or the room
+        database's path (room_reading)."""
+        return hermes_store.service_call(self._load()["read_events"], target, **fields)
 
     def ingest_page(self, db_path: Any, **fields: Any) -> dict[str, Any]:
         return hermes_store.room_call(self._load()["ingest_page"], db_path, **fields)

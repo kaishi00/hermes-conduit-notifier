@@ -140,14 +140,16 @@ def room_call(call: Callable[..., Any], db_path: Any, **fields: Any) -> Any:
         return call(store, placement=placement, **fields)
 
 
-def service_call(call: Callable[..., Any], service: Any, **fields: Any) -> Any:
-    """Hermes' room call on a room service's own store: its store handle and
-    placement where both it and this Hermes take one, else its database
-    file."""
-    store, placement = getattr(service, "store", None), getattr(service, "placement", None)
+def service_call(call: Callable[..., Any], target: Any, **fields: Any) -> Any:
+    """Hermes' room call on ``target``: a room service, on its own store
+    handle and placement where both it and this Hermes take one, else on its
+    database file; or a room database path, as ``room_call`` takes it."""
+    if isinstance(target, (str, Path)):
+        return room_call(call, target, **fields)
+    store, placement = getattr(target, "store", None), getattr(target, "placement", None)
     if store is not None and placement is not None and takes_store(call):
         return call(store, placement=placement, **fields)
-    return room_call(call, service.db_path, **fields)
+    return room_call(call, target.db_path, **fields)
 
 
 def _media_root() -> str:
