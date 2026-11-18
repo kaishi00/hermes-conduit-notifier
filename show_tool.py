@@ -696,10 +696,12 @@ def _cards_unwrapped(given: Any) -> Any:
     if isinstance(given, str) and given.strip()[:1] in ("[", "{"):
         try:
             given = json.loads(given)
-        except ValueError:
+        except (ValueError, RecursionError):
             return given
     if isinstance(given, dict):
-        return given["cards"] if "type" not in given and isinstance(given.get("cards"), list) else [given]
+        if "type" not in given and isinstance(given.get("cards"), (list, str)):
+            return _cards_unwrapped(given["cards"])
+        given = [given]
     while isinstance(given, list) and any(isinstance(item, list) for item in given):
         given = [card for item in given for card in (item if isinstance(item, list) else [item])]
     return given
