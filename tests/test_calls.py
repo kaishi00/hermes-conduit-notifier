@@ -1213,9 +1213,33 @@ def test_a_cron_run_that_mentions_silent_mid_sentence_still_notifies(cron_home, 
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
 
 
-def test_chats_keep_the_exact_silence_rule(cron_home, fake):
+def test_chats_keep_the_interactive_silence_rule(cron_home, fake):
+    # Prose after the marker is a reply in a chat, by Hermes' interactive
+    # rule and by the exact sentinel alike; only cron runs take the loose one.
     _reply(session_id="rt-1", turn_id="t1", assistant_response="[SILENT] No changes")
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_a_reply_push_follows_hermes_silence_rule(cron_home, fake, monkeypatch):
+    """Issue 2700: a marker written another way sends nothing, and one that
+    closes a reply on its own line leaves the push's body."""
+    import types
+
+    filters = types.ModuleType("gateway.response_filters")
+    filters.is_intentional_silence_response = lambda text: text.strip().strip("*").upper() in {"[SILENT]", "NO_REPLY"}
+    filters.strip_trailing_silence_marker = (
+        lambda text: text.rstrip().rpartition("\n")[0].rstrip()
+        if filters.is_intentional_silence_response(text.rstrip().rpartition("\n")[2]) else text)
+    gateway = types.ModuleType("gateway")
+    gateway.response_filters = filters
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.response_filters", filters)
+
+    _reply(session_id="rt-1", turn_id="t1", assistant_response="*[silent]*")
+    assert fake.enqueued == []
+    _reply(session_id="rt-1", turn_id="t2", assistant_response="W2 is done.\n\nNO_REPLY")
+    [event] = fake.enqueued
+    assert event["type"] == "response.ready" and event["body"] == "W2 is done."
 
 
 def test_the_fallback_silence_rule_matches_hermes(monkeypatch):
