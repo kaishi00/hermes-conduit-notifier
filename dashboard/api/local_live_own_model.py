@@ -160,7 +160,7 @@ class _LocalLiveOwnModel:
             return text
         try:
             event = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             return text
         kind = event.get("type") if isinstance(event, dict) else None
         if kind == "response.created":
@@ -318,7 +318,7 @@ class _LocalLiveOwnModel:
     def _frame(text: str, kind: str) -> Optional[Dict[str, Any]]:
         try:
             frame = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
         return frame if isinstance(frame, dict) and frame.get("type") == kind else None
 

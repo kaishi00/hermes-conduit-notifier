@@ -1209,7 +1209,7 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
                         continue
                 try:
                     event = json.loads(message)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 kind = event.get("type") if isinstance(event, dict) else None
                 if kind in watch_audio._GROK_AUDIO_DELTAS:
@@ -1423,7 +1423,7 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
             # Watch's answers to the turns it was sent, and its keepalive.
             try:
                 frame = json.loads(text)
-            except ValueError:
+            except (ValueError, RecursionError):
                 return
             kind = frame.get("type") if isinstance(frame, dict) else None
             if isinstance(kind, str) and kind.startswith("conduit."):

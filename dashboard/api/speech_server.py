@@ -198,7 +198,7 @@ class SpeechServerSetup:
             return text
         try:
             frame = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             return text
         kind = frame.get("type") if isinstance(frame, dict) else None
         if kind == "session.update":
@@ -750,9 +750,10 @@ class _SpeechServerDialect:
             return True
         try:
             event = json.loads(text)
-        except Exception:
+        except (ValueError, RecursionError):
             # Unreadable (or nested past the parser's depth): kept, as the
-            # relay passed every frame on before.
+            # relay passed every frame on before. Whatever reads it next
+            # (the read-back, the own model, the Watch) passes it on too.
             return True
         kind = event.get("type") if isinstance(event, dict) else None
         other = _SPEECH_SERVER_DIALECT_OTHER.get(kind) if isinstance(kind, str) else None

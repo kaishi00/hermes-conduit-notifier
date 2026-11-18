@@ -2527,6 +2527,28 @@ def test_an_own_model_server_that_names_each_reply_frame_twice_is_heard_and_capt
                      "response.audio_transcript.done", "response.audio.done", "response.done"]
 
 
+@pytest.mark.parametrize("own_model", [False, True])
+def test_a_server_frame_nested_past_the_parsers_depth_is_passed_on_not_the_calls_end(client, hermes, server, own_model):
+    # The read-back and the own model read the frames they care about; one
+    # too deep to parse goes on as it came, and the call carries on (#902).
+    if own_model:
+        _own_model(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=not own_model)
+    deep = '{"type":"response.done","x":' + "[" * 100000 + "]" * 100000 + "}"
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _own_ready(ws, upstream) if own_model else _ready(ws, upstream)
+        upstream.events.put(deep)
+        upstream.push({"type": "conversation.item.created", "item": {"id": "after"}})
+        frames = []
+        while True:
+            text = ws.receive_text()
+            frames.append(text)
+            if '"after"' in text:
+                break
+        _finish(ws)
+    assert deep in frames
+
+
 def test_a_tools_answer_waits_for_the_servers_response_to_end(client, hermes, server):
     _own_model(hermes)
     server.upstream = upstream = ReadBackUpstream(refuses=False)
