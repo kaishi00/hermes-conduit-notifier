@@ -188,11 +188,11 @@ def _read(home: Any, key: str) -> str:
 def read_or_raise(home: Any, key: str) -> str:
     """The session's title ("" when it has none), raising when the session
     store can't be read, for a caller that must tell the two apart."""
-    from hermes_state import SessionDB
+    from . import hermes_store
 
-    # Pin the path: hooks can run off the turn thread, where the ambient home
-    # lookup could fall back to the launch profile.
-    db = SessionDB(db_path=home / "state.db")
+    # Pinned to the profile: hooks can run off the turn thread, where the
+    # ambient home lookup could fall back to the launch profile.
+    db = hermes_store.open_store(home)
     try:
         # Older Hermes may lack the id lookup; the key lookup can still work.
         getter = getattr(db, "get_session_title", None)

@@ -22,7 +22,7 @@ from pathlib import Path
 from conftest import ROOT
 
 CHILD = r"""
-import importlib.util, json, sys, types
+import importlib, importlib.util, json, sys, types
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -35,6 +35,9 @@ for name in ("room_choices", "room_rules"):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 room_rules = sys.modules["conduit_push.room_rules"]
+# Hermes' room calls take the room database's path, or a store and a
+# placement from its 2026-11-18 canary on: the plugin's room_call makes either.
+room_call = importlib.import_module("conduit_push.hermes_store").room_call
 
 from gateway import hosted_room_context as context
 from gateway import hosted_room_discussion as discussion
@@ -47,17 +50,20 @@ gateway = hosted_rooms.local_authority_gateway_id()
 
 
 def first_turn(room_id, text, **settings):
-    hosted_rooms.create_room(db, room_id=room_id, name="Zoo trip", members=members, authority_gateway_id=gateway, now=1)
+    room_call(hosted_rooms.create_room, db, room_id=room_id, name="Zoo trip", members=members,
+              authority_gateway_id=gateway, now=1)
     if settings:
-        context.set_room_context(db, room_id=room_id, event_id="ctx", purpose="", notes="", **settings)
-    seq = hosted_rooms.append_event(
-        db, room_id=room_id, event_id="u1", kind="message.user", actor={"kind": "user", "id": "desktop"},
+        room_call(context.set_room_context, db, room_id=room_id, event_id="ctx", purpose="", notes="", **settings)
+    seq = room_call(
+        hosted_rooms.append_event, db, room_id=room_id, event_id="u1", kind="message.user",
+        actor={"kind": "user", "id": "desktop"},
         payload={"text": text, "thread_id": "t1"}, authority_gateway_id=gateway, authority_epoch=1)["seq"]
-    room = hosted_rooms.room_state(db, room_id=room_id)
+    room = room_call(hosted_rooms.room_state, db, room_id=room_id)
     room["members"] = members
-    events = hosted_rooms.read_events(db, room_id=room_id, limit=hosted_rooms.MAX_LOG_LIMIT)["events"]
+    events = room_call(hosted_rooms.read_events, db, room_id=room_id, limit=hosted_rooms.MAX_LOG_LIMIT)["events"]
     decision = discussion.plan_next_task(room, events, local_profiles=("default", "linus"),
-                                         room_context=context.room_context(db, room_id=room_id, before_seq=seq))
+                                         room_context=room_call(context.room_context, db, room_id=room_id,
+                                                                before_seq=seq))
     return decision.reason, decision.task.payload.get("prompt") if decision.task else None
 
 

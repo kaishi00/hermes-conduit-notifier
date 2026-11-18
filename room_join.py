@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import room_bridge, room_bridge_member
+from . import hermes_store, room_bridge, room_bridge_member
 
 logger = logging.getLogger(__name__)
 
@@ -233,11 +233,11 @@ class Hermes:
 
     def reserve(self, claims: Mapping[str, Any], expires_at: float) -> None:
         reserve, db_path = self._need("gateway.hosted_rooms", "reserve_peer_room", "default_db_path")
-        reserve(db_path(), claims=claims, expires_at=expires_at)
+        hermes_store.room_call(reserve, db_path(), claims=claims, expires_at=expires_at)
 
     def revoke(self, claims: Mapping[str, Any], expires_at: float) -> None:
         revoke, db_path = self._need("gateway.hosted_rooms", "revoke_room_grant_scope", "default_db_path")
-        revoke(db_path(), claims=claims, expires_at=expires_at)
+        hermes_store.room_call(revoke, db_path(), claims=claims, expires_at=expires_at)
 
     def capabilities(self, profile: str, grant: str) -> tuple[Optional[int], dict]:
         """What this Hermes' API server answers its room capabilities route with for the grant: its status and

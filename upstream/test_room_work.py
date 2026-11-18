@@ -19,7 +19,7 @@ from pathlib import Path
 from conftest import ROOT
 
 CHILD = r"""
-import importlib.util, json, sys, types
+import importlib, importlib.util, json, sys, types
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -32,6 +32,9 @@ for name in ("room_choices", "room_rules", "room_work"):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 room_work = sys.modules["conduit_push.room_work"]
+# Hermes' room calls take the room database's path, or a store and a
+# placement from its 2026-11-18 canary on: the plugin's room_call makes either.
+room_call = importlib.import_module("conduit_push.hermes_store").room_call
 
 from gateway import hosted_rooms
 from gateway import hosted_room_discussion as discussion
@@ -39,15 +42,15 @@ from gateway import hosted_room_discussion as discussion
 members = [{"member_id": "m-furina", "profile": "default", "handle": "Furina"},
            {"member_id": "m-nahida", "profile": "nahida", "handle": "Nahida"}]
 db = hosted_rooms.default_db_path()
-hosted_rooms.create_room(db, room_id="room-work", name="Stage", members=members,
-                         authority_gateway_id=hosted_rooms.local_authority_gateway_id(), now=1)
+room_call(hosted_rooms.create_room, db, room_id="room-work", name="Stage", members=members,
+          authority_gateway_id=hosted_rooms.local_authority_gateway_id(), now=1)
 reply_to = {"to": "room", "room": "room-work", "handle": "Furina", "session": "s"}
 lines = ["- W1 “Wallpaper” finished. In short: WALLPAPER-READY"]
 first = room_work.post(reply_to, bot="Furina", key="default-W1-abc", lines=lines, profiles=["default"])
 again = room_work.post(reply_to, bot="Furina", key="default-W1-abc", lines=lines, profiles=["default"])
-events = hosted_rooms.read_events(db, room_id="room-work", limit=hosted_rooms.MAX_LOG_LIMIT)["events"]
+events = room_call(hosted_rooms.read_events, db, room_id="room-work", limit=hosted_rooms.MAX_LOG_LIMIT)["events"]
 posts = [e for e in events if e["kind"] == "message.user"]
-room = hosted_rooms.room_state(db, room_id="room-work")
+room = room_call(hosted_rooms.room_state, db, room_id="room-work")
 room["members"] = members
 decision = discussion.plan_next_task(room, events, local_profiles=("default", "nahida"))
 task = decision.task

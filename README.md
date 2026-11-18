@@ -5118,7 +5118,11 @@ The room's home sends each of them its log a page at a time over their Link,
 with what the room is doing (whether it ended, who's answering, how each
 linked agent's route is; never the home's own approvals or its own agents'
 turn errors), and their Hermes keeps it with Hermes' replica store in
-`conduit-rooms/copies.db` (owner only), apart from Hermes' own rooms. Pages
+`conduit-rooms/copies.db` (owner only), apart from Hermes' own rooms; a Hermes
+with the storage interface (its 2026-11-18 canary and later) keeps a replica
+only in a store's `shared-state.db`, so there it's
+`conduit-rooms/copies/shared-state.db`, and an older `copies.db` moves there
+the first time. Pages
 stop when you leave or your agents are taken out, and you keep what you had;
 a disbanded room's go on until every copy has its end. A Hermes without
 Hermes' replica store (`gateway/hosted_room_replicas.py`) keeps no copies,

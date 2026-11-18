@@ -20,7 +20,7 @@ from pathlib import Path
 from conftest import ROOT
 
 CHILD = r"""
-import importlib.util, json, sqlite3, sys, types
+import importlib, importlib.util, json, sqlite3, sys, types
 from pathlib import Path
 
 root, home = Path(sys.argv[1]), Path(sys.argv[2])
@@ -34,6 +34,9 @@ for name in ("room_identity", "room_envelope", "room_mailbox", "room_links", "ro
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
 room_start = sys.modules["conduit_push.room_start"]
+# Hermes' room calls take the room database's path, or a store and a
+# placement from its 2026-11-18 canary on: the plugin's room_call makes either.
+room_call = importlib.import_module("conduit_push.hermes_store").room_call
 
 from gateway import hosted_rooms
 from gateway.hosted_rooms_gateway_import import import_standalone_rooms
@@ -42,17 +45,17 @@ members = [{"member_id": "m-furina", "profile": "default", "handle": "Furina"},
            {"member_id": "m-nahida", "profile": "nahida", "handle": "Nahida"}]
 source, target = home / "shared-state.db", home / "state.db"
 local = hosted_rooms.local_authority_gateway_id()
-hosted_rooms.create_room(source, room_id="room-linked", name="Zoo trip", members=members,
-                         authority_gateway_id=local, now=1)
-before = hosted_rooms.read_events(source, room_id="room-linked", limit=100)
+room_call(hosted_rooms.create_room, source, room_id="room-linked", name="Zoo trip", members=members,
+          authority_gateway_id=local, now=1)
+before = room_call(hosted_rooms.read_events, source, room_id="room-linked", limit=100)
 starter = room_start.Starter(home)
 not_yet = starter.moved("room-linked")
 with sqlite3.connect(target) as conn:  # the gateway's store, as its runtime makes it
     conn.execute("CREATE TABLE IF NOT EXISTS state_meta (key TEXT PRIMARY KEY, value TEXT)")
 copied = import_standalone_rooms(target)
 moved = starter.moved("room-linked")
-after = hosted_rooms.read_events(target, room_id="room-linked", limit=100)
-frozen = hosted_rooms.read_events(source, room_id="room-linked", limit=100)
+after = room_call(hosted_rooms.read_events, target, room_id="room-linked", limit=100)
+frozen = room_call(hosted_rooms.read_events, source, room_id="room-linked", limit=100)
 print(json.dumps({"local": local, "not_yet": not_yet, "copied": copied, "moved": moved,
                   "before": before["authority"], "after": after["authority"], "frozen": frozen["authority"],
                   "before_seqs": [e["seq"] for e in before["events"]],

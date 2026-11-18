@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
 
-from . import room_identity, room_reading, room_rules
+from . import room_copies, room_identity, room_reading, room_rules
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -79,7 +79,7 @@ def available() -> bool:
     try:
         root = room_identity.root_home(get_hermes_home())
         return (root / room_identity.DIRECTORY / "rooms.json").exists() or \
-            (root / room_identity.DIRECTORY / "copies.db").exists()
+            room_copies.path(root).exists()
     except Exception:  # noqa: BLE001
         return False
 

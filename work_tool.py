@@ -65,7 +65,8 @@ from typing import Any, Callable, Optional
 import uuid
 from urllib.parse import quote, unquote
 
-from . import degraded, room_rules, room_work, screen_lock, work_broker, work_coord, work_store, work_trees, work_watch
+from . import (degraded, hermes_store, room_rules, room_work, screen_lock, work_broker, work_coord, work_store,
+               work_trees, work_watch)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -2666,9 +2667,7 @@ def _read(home: Path, work: work_store.Work, transcript: bool) -> dict:
 
 def _messages(home: Path, session_id: str) -> list[dict]:
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=home / "state.db")
+        db = hermes_store.open_store(home)
     except Exception:  # noqa: BLE001 — no session store here
         return []
     try:
@@ -2815,9 +2814,7 @@ def _show_in_desktop(store: work_store.Store, *works: work_store.Work) -> Option
         return 0
     unhidden = 0
     try:
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=store.home / "state.db")
+        db = hermes_store.open_store(store.home)
         try:
             setter = getattr(db, "set_session_hidden", None)
             if not callable(setter):

@@ -443,8 +443,7 @@ def _session_row(home: Optional[Path], key: str) -> Dict[str, Any]:
     if home is None:
         return {}
     try:
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=home / "state.db")
+        db = core._hermes_store().open_store(home)
     except Exception:  # noqa: BLE001 — a name is never worth failing the answer
         logger.debug("Conduit plugin: couldn't open a profile's sessions", exc_info=True)
         return {}

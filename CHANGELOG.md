@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.178.3 (2026-11-18)
+
+### Fixes
+
+- Works with the next Hermes, which moves its chats and group rooms to new storage: Bot Chats keep their step budget, work board and coordination, cron reports still show in the Bot Chat, voice calls are still saved, and group rooms still clean up, link people and keep copies.
+
 ## 0.178.2 (2026-11-18)
 
 ### Fixes

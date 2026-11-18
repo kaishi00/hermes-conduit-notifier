@@ -21,7 +21,14 @@ watch_paths:
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
   - hermes_cli/config*.py
-  - hermes_state_schema.py
+  # hermes_store.py: a profile's session store through Hermes' storage interface (its
+  # 2026-11-18 canary on, loaded with importlib), or SessionDB on a release before it.
+  - persistence/
+  - persistence_assembly.py
+  - session_retention.py
+  - gateway/session_ingress_media.py
+  - session_rules/session_ids.py
+  - hermes_state.py
   - gateway/hosted_room*.py
   # room_work posts a room workstream's report with deliver_to_room (loaded with importlib).
   - cron/scheduler_delivery_room.py
@@ -45,7 +52,6 @@ watch_paths:
   - gateway/session_controls.py
   - gateway/session_contract.py
   - gateway/session_mutations.py
-  - hermes_state_mutations.py
   - tui_gateway/ws.py
   - tui_gateway/contracts/
   # gateway_chats.py reads all_authorities, owner_scope and each authority's sessions
@@ -78,6 +84,15 @@ notes:
     Conduit's Context sheet and Usage Details (feature map: "Chat usage"). Compression continuations
     and subagent runs are told apart from branches as hermes_state's _BRANCH_CHILD_SQL and
     _COMPRESSION_CHILD_SQL do. Without the columns the route answers 501.
+  session store: >-
+    hermes_store.py opens a profile's sessions through Hermes' storage interface
+    (persistence_assembly.open_persistence / open_persistence_reader, the sessions, messages,
+    maintenance and state_meta repositories, session_retention.after_sessions_removed, and
+    gateway.session_ingress_media.native_inputs_root for a delete's media root) since Hermes'
+    2026-11-18 canary removed SessionDB (issues 883-897), and SessionDB on a release before it. It
+    feeds the session titles that tell a Bot Chat (its step budget, board and coordination), cron
+    reports shown in a Bot Chat, voice calls' rows and tags, room chat cleanup and workstream
+    transcripts. A missing repository verb turns its feature off or fails its route.
   chat close hooks: >-
     tui_gateway's _finalize_session says a chat closed with on_session_end (no turn_id) and then
     on_session_finalize. The plugin's _on_session_finalize ends a turn still running there as
@@ -209,8 +224,9 @@ notes:
     Bot Chat with tools.bot_live_delivery._bot_chat_tip and goes in through
     gateway.session_cron.deliver_to_local_chat (owner_for_home first), as Hermes writes a cron
     result into a local chat: a note, no turn. Where the owner refuses (a desktop-made Bot Chat its
-    door hasn't adopted) or runs in another process, hermes_state's SessionDB.append_completion_note
-    writes it, once per run. gateway.session_cron is newer than v0.22.5, so it's reached by name
+    door hasn't adopted) or runs in another process, the session store's append_completion_note
+    (hermes_store.py: the storage interface's messages repository, or SessionDB on a release
+    before it) writes it, once per run. gateway.session_cron is newer than v0.22.5, so it's reached by name
     and checked first, and without it every job keeps Hermes' turn (the route's shows_reports is
     false). upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
     report on the user's next turn.
@@ -221,7 +237,7 @@ notes:
     that is draining. Without them it restarts at once and gives up after 180 s, so an update
     during a turn reports a failure while the gateway refuses new work (notifier #546).
     GET /self/gateway-work names that work for Conduit (each chat's session row by its key in
-    hermes_state, a cron job's name by hermes_cli.update_cmd_drain_report._cron_job_name) with the
+    the session store, a cron job's name by hermes_cli.update_cmd_drain_report._cron_job_name) with the
     gateway's own cap (gateway.restart's parse of agent.restart_after_turn_timeout), so the update
     says what it waits on and Restart now can stop it; without them it names only the kind. When
     it restarts anyway starts from hermes_cli.web_server's _LAST_GATEWAY_RESTART (the restart this
@@ -314,6 +330,9 @@ known_failures:
     issue: kaishi00/hermes-conduit-notifier (session_route, 2026-11-14)
     upstream: tui_gateway/agent_factory.py _runtime_model_config leaves model_config.gateway_runtime, which session_gateway_runtime reads first
     since: v0.22.5
+    # Hermes a04a835be9 ("a later Desktop/TUI pick replaces an older saved CLI route on reopen", canary
+    # 20261118); the workaround stays until a release carries it, then this entry and it get another look.
+    fixed_in: a04a835be9
     workaround: dashboard/api/session_route.py writes the TUI's live route into gateway_runtime too
   - test: test_hermes_counts_a_hidden_ask_after_a_handoff
     signature: hidden ask skipped
@@ -435,10 +454,6 @@ imports:
   hermes_constants:
     required: ["*", "get_hermes_home"]
     optional: ["get_default_hermes_root"]
-  hermes_state:
-    required: ["SessionDB"]
-  hermes_state_ids:
-    optional: ["new_session_id"]
   hermes_time:
     optional: ["now"]
   hermes_yaml:
@@ -531,8 +546,6 @@ module_paths:
   - hermes_cli/web_server_files
   - hermes_cli/web_server_profiles
   - hermes_constants
-  - hermes_state
-  - hermes_state_ids
   - hermes_time
   - hermes_yaml
   - plugins/memory

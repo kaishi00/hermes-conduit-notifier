@@ -423,6 +423,31 @@ def _plugin_package_module(name: str) -> Any:
         raise TokenError(501, f"This plugin install is missing {name}.py; update the plugin") from None
 
 
+# --- Hermes' stores (hermes_store.py) -----------------------------------------
+
+_hermes_store_module: Any = None
+_hermes_store_lock = threading.Lock()
+
+
+def _hermes_store() -> Any:
+    """hermes_store.py in the plugin's folder, loaded once by path: a profile's
+    session store through whichever door this Hermes has (its storage
+    interface, or the SessionDB of a release before it)."""
+    global _hermes_store_module
+    with _hermes_store_lock:
+        if _hermes_store_module is None:
+            import importlib.util
+
+            path = os.path.join(_plugin_root(), "hermes_store.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_hermes_store", path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"no loader for {path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _hermes_store_module = module
+        return _hermes_store_module
+
+
 # --- CONDUIT_PUSH_PROXY (push_proxy.py) ------------------------------------------
 
 _push_proxy_module: Any = None
