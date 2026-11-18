@@ -25,7 +25,8 @@ from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, c
 from .session_titles import bot_name as _bot_name, title as _session_title, titled as _titled
 from .client import enqueue
 from .present_store import PresentStore
-from .events import approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event
+from .events import (approval_decision, clarification_text, event_id, is_silent_response, plain_text, push_event,
+                     without_closing_silence_marker)
 
 
 logger = logging.getLogger(__name__)
@@ -636,7 +637,7 @@ def _post_llm_call(**kwargs: Any) -> None:
         copy = {"title": headline.title, "title_label": "response.ready", "body": headline.body,
                 "headline": headline.title, **({"level": "passive"} if headline.quiet else {})}
     else:
-        copy = {"title": chat_title, "title_label": "response.ready", "body": response}
+        copy = {"title": chat_title, "title_label": "response.ready", "body": without_closing_silence_marker(response)}
     ready = None if quiet else push_event(
         "response.ready",
         identifier=event_id("response", kwargs.get("turn_id"), session_id),
