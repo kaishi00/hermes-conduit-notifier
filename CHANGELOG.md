@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.177.35 (2026-11-18)
+
+### Fixes
+
+- A reply that was only a silence marker written another way, like `*[SILENT]*` or `NO_REPLY`, could still send a notification, and a reply that ended with `[SILENT]` on its own line showed it in the notification.
+
 ## 0.177.34 (2026-11-18)
 
 ### New and improved
