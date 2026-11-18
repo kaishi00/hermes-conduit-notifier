@@ -360,7 +360,10 @@ def _first_answer_wins(
                 # A write that failed is tried again on the next poll.
                 saw_card = calls.keep_waiting_card(request_id, card) is not False
             if batch_protocol and isinstance(status.get("answers"), dict):
-                locked_answers = dict(status["answers"])
+                # Merged, not replaced: a device that answered part of a
+                # batch can drop out of a poll (an error, a pause) while
+                # another reports none yet (hermes-conduit#2758).
+                locked_answers = {**locked_answers, **status["answers"]}
             remaining = status.get("remaining")
             if isinstance(remaining, list):
                 # Batch progress (a shrinking remaining set means another qid

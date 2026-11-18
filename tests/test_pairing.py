@@ -65,7 +65,7 @@ def test_pairing_claims_the_code_and_saves_the_credential(tmp_path):
     assert state["relay_url"] == "https://relay.example"
     assert "credential" not in result
     assert result == {"paired": True, "installation_id": "inst-1", "gateway_id": "gw-1",
-                      "gateway_name": calls[0][2], "relay_url": "https://relay.example"}
+                      "gateway_name": calls[0][2], "relay_url": "https://relay.example", "main": True}
     assert oct(path.stat().st_mode & 0o777) == "0o600"
 
 

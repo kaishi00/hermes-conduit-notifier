@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.178.0 (2026-11-18)
+
+### New and improved
+
+- A profile can notify several devices at once, such as your iPhone, iPad and Mac, each with its own pairing and encryption key that you can remove on its own. A question resolves on whichever device answers first. Calls still ring one device. Needs a Conduit update that offers it.
+
 ## 0.177.40 (2026-11-18)
 
 ### Fixes

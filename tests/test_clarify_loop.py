@@ -1464,6 +1464,19 @@ def test_a_half_answered_card_that_times_out_keeps_the_locked_answers(monkeypatc
         ("answered", "staging"), ("unanswered", None)]
 
 
+def test_an_answer_locked_on_a_device_that_leaves_the_poll_still_counts(monkeypatch):
+    # hermes-conduit#2758: the device that answered q0 errors or pauses on a
+    # later poll, and the other device reports no answers yet.
+    fake = _FakeState([{"status": "pending", "remaining": ["q1"], "answers": {"q0": "staging"}}]
+                      + [{"status": "pending", "remaining": ["q0", "q1"], "answers": {}}] * 1000)
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 0.3)
+    parsed = json.loads(loop.middleware(**_kwargs(_undelivered_original(), _batch_args())))
+    assert parsed["outcome"] == "timed_out"
+    assert [(row["status"], row["user_response"]) for row in parsed["responses"]] == [
+        ("answered", "staging"), ("unanswered", None)]
+
+
 def test_an_answer_locked_during_the_last_sleep_of_the_unattended_wait_still_counts(monkeypatch):
     # The card is pending at every poll the deadline allows, then the answer
     # arrives in the last backoff sleep: the one more poll at the deadline

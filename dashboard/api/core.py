@@ -9,6 +9,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -317,11 +318,75 @@ def _pairing_state_path() -> Any:
 def _load_pairing_state(path: Any) -> Optional[Dict[str, Any]]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError, OSError):
+    except (FileNotFoundError, ValueError, OSError, RecursionError):
         return None
     if not isinstance(value, dict) or not value.get("credential"):
         return None
     return value
+
+
+# A profile's pairings with its other devices (hermes-conduit#2758): files of
+# conduit-push.json's shape, named by relay installation id, as client.py
+# (DEVICES_DIRECTORY, other_devices) keeps them. The main pairing stays in
+# conduit-push.json.
+PAIRING_DEVICES_DIRECTORY = "conduit-push-devices"
+_INSTALLATION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _installation_key(installation_id: Any) -> Optional[str]:
+    if not isinstance(installation_id, str):
+        return None
+    key = installation_id.strip().lower()
+    return key if _INSTALLATION_ID.fullmatch(key) else None
+
+
+def _device_pairing_path(installation_id: Any, main_path: Any = None) -> Any:
+    """Where ``installation_id``'s pairing among the others is kept, beside
+    ``main_path`` (this profile's main pairing by default); None for anything
+    that isn't an installation id."""
+    key = _installation_key(installation_id)
+    if key is None:
+        return None
+    main_path = main_path if main_path is not None else _pairing_state_path()
+    return main_path.parent / PAIRING_DEVICES_DIRECTORY / f"{key}.json"
+
+
+def _device_pairings(main: Optional[Dict[str, Any]] = None, main_path: Any = None) -> list:
+    """The other devices' pairings, the first paired first: (installation id,
+    state). None while the main pairing is missing, and never the main
+    device's own installation (client.other_devices). ``main_path``: the main
+    pairing's file, beside which they're kept (this profile's by default)."""
+    main_path = main_path if main_path is not None else _pairing_state_path()
+    main = main if main is not None else _load_pairing_state(main_path)
+    if not main:
+        return []
+    directory = main_path.parent / PAIRING_DEVICES_DIRECTORY
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return []
+    found = []
+    for entry in entries:
+        key = _installation_key(entry.name[:-5]) if entry.name.endswith(".json") else None
+        if key is None or key == _installation_key(main.get("installation_id")):
+            continue
+        state = _load_pairing_state(entry)
+        if state and _installation_key(state.get("installation_id")) == key:
+            found.append((key, state))
+    found.sort(key=lambda item: (str(item[1].get("paired_at") or ""), item[0]))
+    return found
+
+
+def _pairing_path_for(installation_id: Any) -> Any:
+    """The file holding ``installation_id``'s pairing: the main one when it's
+    that device's (or there's no other), else that device's own."""
+    main_path = _pairing_state_path()
+    main = _load_pairing_state(main_path)
+    key = _installation_key(installation_id)
+    if not main or key is None or _installation_key(main.get("installation_id")) == key:
+        return main_path
+    path = _device_pairing_path(key)
+    return path if _load_pairing_state(path) is not None else main_path
 
 
 # --- The calls store's home ---------------------------------------------------

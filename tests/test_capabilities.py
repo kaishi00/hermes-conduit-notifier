@@ -130,6 +130,7 @@ def test_every_capability_names_a_served_route_family():
         # sharing.turn_status, read from the phone store each turn.
         "phone-turn-status": "/phone/",
         "pairing": "/pair",
+        "pairing-devices": "/pair/remove",
         "self-restart": "/self/restart",
         "self-update": "/self/update",
         "gateway-work": "/self/gateway-work",
