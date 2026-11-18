@@ -29,16 +29,20 @@ BOT_CHAT = "bot-chat-784"
 STEPS = 6
 
 PROBE = r"""
-import json, sys
+import importlib.util, json, sys
 from pathlib import Path
 from hermes_cli.plugins import discover_plugins
 discover_plugins(force=True)
-from hermes_state import SessionDB
 from model_tools import handle_function_call
 
 home = Path(sys.argv[1])
-db = SessionDB(db_path=home / "state.db")
-db.create_session(sys.argv[2], "cli")
+# The plugin's own door to the session store (its storage interface, or
+# SessionDB on a release before it).
+spec = importlib.util.spec_from_file_location("probe_hermes_store", sys.argv[4])
+hermes_store = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hermes_store)
+db = hermes_store.open_store(home)
+db.ensure_session(sys.argv[2], "cli")
 db.set_session_title(sys.argv[2], "Bot Chat")
 db.close()
 code = (
@@ -73,7 +77,8 @@ def _run(tmp_path: Path) -> dict:
     # Quick Things Here, saved, as Edit Bot > Work saves it.
     _work_store().Store(home).set_policy("lookups")
     env = {"HERMES_HOME": str(home), "PATH": "/usr/bin:/bin", "NO_COLOR": "1"}
-    out = subprocess.run([sys.executable, "-c", PROBE, str(home), BOT_CHAT, str(STEPS)], env=env,
+    out = subprocess.run([sys.executable, "-c", PROBE, str(home), BOT_CHAT, str(STEPS),
+                          str(home / "plugins" / PLUGIN / "hermes_store.py")], env=env,
                          capture_output=True, text=True, timeout=180, cwd=tmp_path)
     assert out.returncode == 0, out.stderr[-4000:]
     return json.loads(out.stdout.strip().splitlines()[-1])

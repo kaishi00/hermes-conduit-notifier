@@ -118,14 +118,18 @@ def _open_voice_db(needs=_VOICE_READ, appends: bool = False):
     or, with *appends*, without either message writer."""
     try:
         from hermes_constants import get_hermes_home
-        from hermes_state import SessionDB
     except ImportError as exc:
-        if exc.name not in ("hermes_state", "hermes_constants"):
+        if exc.name != "hermes_constants":
             raise
         raise core.TokenError(501, _VOICE_UNSUPPORTED)
-    # Pin the path: this runs on a worker thread, where Hermes' ambient home
-    # lookup could fall back to the launch profile.
-    db = SessionDB(db_path=get_hermes_home() / "state.db")
+    # Pinned to the profile: this runs on a worker thread, where Hermes'
+    # ambient home lookup could fall back to the launch profile.
+    try:
+        db = core._hermes_store().open_store(get_hermes_home())
+    except ImportError as exc:
+        if exc.name != "hermes_state":
+            raise
+        raise core.TokenError(501, _VOICE_UNSUPPORTED)
     can_append = hasattr(db, "append_messages_batch") or hasattr(db, "append_message")
     if (appends and not can_append) or not all(hasattr(db, name) for name in needs):
         db.close()
@@ -252,12 +256,10 @@ def _row_message(turn: Dict[str, Any], call_id: str) -> Dict[str, Any]:
 
 
 def _new_voice_session_id() -> str:
-    try:
-        from hermes_state_ids import new_session_id
-        return new_session_id()
-    except ImportError:
-        import uuid
-        return f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}"
+    import uuid
+
+    made = core._hermes_store().new_session_id()
+    return made or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}"
 
 
 def _set_voice_title(db, session_id: str, title: str) -> None:

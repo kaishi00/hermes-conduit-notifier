@@ -4,7 +4,8 @@
 Hermes' TUI persists a chat's live route at the top of its ``model_config``
 (tui_gateway/agent_factory.py ``_runtime_model_config``) and leaves a nested
 ``gateway_runtime`` an earlier gateway turn wrote, which the reader every
-rebuild and resume uses takes first (``SessionDB.session_gateway_runtime``).
+rebuild and resume uses takes first (``persistence.gateway.routing.gateway_runtime``,
+``SessionDB.session_gateway_runtime`` on a release before Hermes' storage interface).
 A pick saved that way rebuilds on the old provider: Furina's Bot Chat paired
 every pick with zai, zai refused it, and the fallback put the chat back on
 glm-5.3-flash (2026-11-14).
@@ -29,7 +30,6 @@ from conftest import ROOT
 PROBE = r"""
 import importlib.util, json, sys, types
 from tui_gateway import server
-from hermes_state import SessionDB
 
 if sys.argv[1] == "plugin":
     spec = importlib.util.spec_from_file_location("conduit_plugin_api_route", sys.argv[3])
@@ -48,7 +48,14 @@ agent = types.SimpleNamespace(model="deepseek-v4.1-flash", provider="opencode-go
 # The persist calls it through the server's globals, where the wrapper sits.
 persist_sees = server._persist_live_session_runtime.__globals__.get("_runtime_model_config")
 config = persist_sees(agent, stored)
-route = SessionDB.session_gateway_runtime({"model_config": json.dumps(config)})
+try:
+    from persistence.gateway.routing import gateway_runtime
+except ImportError:  # a release before Hermes' storage interface
+    from hermes_state import SessionDB
+    route = SessionDB.session_gateway_runtime({"model_config": json.dumps(config)})
+else:
+    found = gateway_runtime(config)
+    route = {"provider": found.provider, "base_url": found.base_url}
 open(sys.argv[2], "w").write(json.dumps({"installed": installed, "provider": route.get("provider"),
                                          "base_url": route.get("base_url")}))
 """

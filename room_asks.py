@@ -26,7 +26,7 @@ from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
 
-from . import client, room_identity, room_rules, session_titles
+from . import client, room_copies, room_identity, room_rules, session_titles
 from .events import push_event
 from .present_store import MAX_TITLE_CHARS, PresentError, PresentStore, first_line
 from .present_store import _line as clean_line
@@ -112,7 +112,7 @@ def available() -> bool:
     try:
         root = room_identity.root_home(get_hermes_home())
         return (root / room_identity.DIRECTORY / "rooms.json").exists() or \
-            (root / room_identity.DIRECTORY / "copies.db").exists()
+            room_copies.path(root).exists()
     except Exception:  # noqa: BLE001
         return False
 

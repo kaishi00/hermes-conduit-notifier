@@ -9,7 +9,8 @@ top-level ``provider``/``base_url``/``api_mode`` the TUI gateway writes
 gateway writes after its turns (gateway/run_turn_prepare.py
 ``_sync_session_model_from_agent``) and the CLI's ``/model`` writes with the
 top-level keys. The reader every rebuild and resume goes through
-(hermes_state_gateway.py ``session_gateway_runtime``) takes the nested copy
+(persistence/gateway/routing.py ``gateway_runtime``; hermes_state_gateway.py
+``session_gateway_runtime`` before Hermes' storage interface) takes the nested copy
 first. The TUI's persist never touches it, so once a chat has one, a model
 picked in Conduit (``config.set model``) is saved with its new provider at
 the top and the old provider below, and the next rebuild pairs the new model
@@ -43,7 +44,7 @@ from . import core
 SERVER = "tui_gateway.server"
 METHOD = "_runtime_model_config"
 NESTED = "gateway_runtime"
-# The route keys both copies hold (what session_gateway_runtime reads).
+# The route keys both copies hold (what gateway_runtime reads).
 ROUTE_KEYS = ("provider", "base_url", "api_mode")
 _GUARD_FLAG = "__conduit_session_route__"
 

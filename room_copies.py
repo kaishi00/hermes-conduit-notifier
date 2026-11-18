@@ -13,7 +13,10 @@ only for its own agents (an older plugin drops it, and shows everyone as in, as 
 The person's Hermes takes a page only over the Link that invited it to the room, once it started, from the room's
 own authority, and keeps it with Hermes' replica store (gateway/hosted_room_replicas.ingest_page), which refuses a
 page with a gap or from an older epoch. It keeps it in ``conduit-rooms/copies.db``, owner only, never in Hermes'
-own room database, with who it's from and the room's state in a table of the plugin's beside Hermes'.
+own room database, with who it's from and the room's state in a table of the plugin's beside Hermes'. Hermes'
+storage interface (its 2026-11-18 canary on) keeps a replica only in a store's ``shared-state.db``, so there the file
+is ``conduit-rooms/copies/shared-state.db``, a store of its own, and a ``copies.db`` an older Hermes kept moves
+there on first use (``path``).
 
 Hermes' calls come in through ``Hermes``. Nothing here imports Hermes at module level, so the tests give it a
 fake, and a Hermes without the log reader or the replica store sends or keeps no copies, with one log line.
@@ -34,7 +37,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import room_identity, room_links, room_posts
+from . import hermes_store, room_identity, room_links, room_posts
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,8 @@ OUT_AGAIN_S = 6 * 24 * 3600
 # forgotten.
 OUT_MARK = "out"
 FILE_NAME = "copies.db"
+# The folder whose store keeps the copies under Hermes' storage interface (hermes_store.SHARED_STATE_DB in it).
+STORE_DIRECTORY = "copies"
 # A page: Hermes' read_events limit, and a JSON body that fits an envelope sealed (room_envelope.MAX_BYTES, 256 KB).
 PAGE_EVENTS = 500
 PAGE_BYTES = 160_000
@@ -71,6 +76,7 @@ _TABLE = """CREATE TABLE IF NOT EXISTS conduit_room_copies (
 _POSTS_TABLE = """CREATE TABLE IF NOT EXISTS conduit_room_copy_posts (
     room_id TEXT NOT NULL, event_id TEXT NOT NULL, by_name TEXT, PRIMARY KEY (room_id, event_id))"""
 _db_lock = threading.Lock()
+_move_lock = threading.Lock()
 
 
 # On each member a copy keeps: its profile when it's one of this installation's agents, as its invite had them (the
@@ -99,10 +105,10 @@ class Hermes:
         return self._load()["ingest_page"] is not None and self._load()["ReplicaError"] is not None
 
     def read_events(self, db_path: Any, **fields: Any) -> dict[str, Any]:
-        return self._load()["read_events"](db_path, **fields)
+        return hermes_store.room_call(self._load()["read_events"], db_path, **fields)
 
     def ingest_page(self, db_path: Any, **fields: Any) -> dict[str, Any]:
-        return self._load()["ingest_page"](db_path, **fields)
+        return hermes_store.room_call(self._load()["ingest_page"], db_path, **fields)
 
     @property
     def replica_error(self) -> type:
@@ -466,7 +472,26 @@ class Copies:
 
 
 def path(root: Any) -> Path:
-    return Path(root) / room_identity.DIRECTORY / FILE_NAME
+    """The copies' file: ``copies.db``, or on Hermes' storage interface its store's ``shared-state.db``, where the
+    ``copies.db`` an older Hermes kept is moved (with its journal files) the first time."""
+    folder = Path(root) / room_identity.DIRECTORY
+    if not hermes_store.has_storage_interface():
+        return folder / FILE_NAME
+    file = folder / STORE_DIRECTORY / hermes_store.SHARED_STATE_DB
+    old = folder / FILE_NAME
+    if old.exists() and not file.exists():
+        with _move_lock:
+            if old.exists() and not file.exists():
+                try:
+                    file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    for suffix in ("-wal", "-shm", ""):
+                        moving = old.with_name(old.name + suffix)
+                        if moving.exists():
+                            os.replace(moving, file.with_name(file.name + suffix))
+                except OSError:
+                    logger.warning("Linked Rooms couldn't move its copies of other people's rooms to %s", file,
+                                   exc_info=True)
+    return file
 
 
 def copies(root: Any) -> list[dict[str, Any]]:

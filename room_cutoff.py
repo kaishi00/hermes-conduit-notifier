@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import inspect
 import logging
 import threading
 from collections.abc import Mapping
@@ -60,11 +61,21 @@ def _log_unreadable() -> None:
                    "accepts the room is retried as Hermes retries it (logged once)", exc_info=True)
 
 
-def cut_off(db_path: Any, room_id: Any, member_id: str) -> bool:
+def _links(runtime: Any) -> Any:
+    """The room routes Hermes stored where the runtime keeps its rooms: its
+    store and placement (Hermes' 2026-11-18 canary on), or its database."""
+    load = importlib.import_module(LINKS).load_room_links_tolerant
+    store = getattr(runtime, "store", None)
+    if store is not None and next(iter(inspect.signature(load).parameters), None) == "store":
+        return load(store, placement=getattr(runtime, "placement", None))
+    return load(getattr(runtime, "db_path", None))
+
+
+def cut_off(runtime: Any, room_id: Any, member_id: str) -> bool:
     """Whether the room's stored route to this member says its host no
     longer accepts the room. False when the routes can't be read."""
     try:
-        links, _malformed = importlib.import_module(LINKS).load_room_links_tolerant(db_path)
+        links, _malformed = _links(runtime)
     except Exception:  # noqa: BLE001 - Hermes' behaviour stands
         _log_unreadable()
         return False
@@ -84,7 +95,7 @@ def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
         # host). The home's own agents have no stored route.
         if isinstance(task, Mapping) and task.get("status") == "queued":
             member = _member_id(task)
-            if member and cut_off(getattr(self, "db_path", None), getattr(binding, "room_id", None), member):
+            if member and cut_off(self, getattr(binding, "room_id", None), member):
                 raise MemberCutOff(f"cut off: {member}'s Hermes no longer accepts this room")
         return original(self, binding, task, *args, **kwargs)
 

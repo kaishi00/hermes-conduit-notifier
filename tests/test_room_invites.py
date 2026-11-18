@@ -243,6 +243,18 @@ class CanonicalService(Service):
         self.owners.setdefault(room_id, actor_subject)
 
 
+class OwnedCanonicalService(Service):
+    """CanonicalHostedRoomService from Hermes' 2026-11-18 canary on: create_room takes the owner, whose claim
+    runs in the same write, and there's no admit."""
+
+    kind = "canonical"
+
+    def create_room(self, *, room_id, name, members, owner=None):
+        assert owner is not None
+        self.owners.setdefault(room_id, owner)
+        return super().create_room(room_id=room_id, name=name, members=members)
+
+
 class Client:
     """Hermes' PeerRunsHTTPClient as the start and a removal use it: its probe of a member's capabilities and
     its revoke of a member's grant, through the bridge, which the test answers."""
@@ -352,8 +364,8 @@ class HomeHermes:
         assert value.startswith("http://127.0.0.1:")
         return value
 
-    def client(self, base_url, db_path):
-        return Client(self, base_url, db_path)
+    def client(self, base_url, service):
+        return Client(self, base_url, service.db_path)
 
     def route(self, **fields):
         return Route(**fields)
@@ -993,12 +1005,13 @@ def test_the_room_starts_once_everyone_has_answered(rooms):
     assert len(rooms.wire.bodies("room.start")) == 2 and len(rooms.home.probed) == 2
 
 
-@pytest.mark.parametrize("kind", ["legacy", "canonical"])
+@pytest.mark.parametrize("kind", ["legacy", "canonical", "owned"])
 def test_routes_go_live_in_the_running_service_with_no_restart(rooms, kind):
     _listening(rooms)
     service, where = rooms.home.legacy, LEGACY
-    if kind == "canonical":
-        service = rooms.home.canonical = CanonicalService(rooms.tmp_path / "furina" / "state.db")
+    if kind != "legacy":
+        made = OwnedCanonicalService if kind == "owned" else CanonicalService
+        service = rooms.home.canonical = made(rooms.tmp_path / "furina" / "state.db")
         where = {"kind": "canonical", "home": str(rooms.tmp_path / "furina"), "subject": "eric"}
     room_id = draft(rooms, where=where)["room_id"]
     _everyone_joins(rooms, room_id)
@@ -1019,7 +1032,7 @@ def test_routes_go_live_in_the_running_service_with_no_restart(rooms, kind):
     assert route.cancellation_scope_id == f"cancel-{room_id}" and route.trace_id.startswith("trace-")
     assert rooms.member["laifu"].decode(route.grant, "dispatch")["member_id"] == slot("link1", 1)
     assert service.running
-    if kind == "canonical":
+    if kind != "legacy":
         assert service.owners == {room_id: "eric"} and rooms.home.legacy.rooms == {}
 
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import inspect
 import logging
 import os
 import sqlite3
@@ -36,7 +37,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import room_bridge, room_cutoff, room_identity, room_links
+from . import hermes_store, room_bridge, room_cutoff, room_identity, room_links
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ class Starter:
         groups.peer.register checks a route's probe, for the scope the room will give it (authority epoch 1,
         this installation's authority): OK, REFUSED or UNANSWERED. BridgeError before the bridge listens."""
         client = self.hermes.client(self.hermes.link_url(room_bridge.url(self.root, link_id, agent["profile"])),
-                                    found.service.db_path)
+                                    found.service)
         try:
             answer = client.probe(grant=agent["grant"])
         except self.hermes.error as exc:
@@ -158,14 +159,19 @@ class Starter:
 
     def create(self, found: Found, *, room_id: str, name: str, members: list[dict[str, Any]]) -> None:
         """The room, with every member, in the service: a canonical room is the subject's, claimed in the same
-        transaction (session_hosted_service's authorize_room)."""
-        admit = None
-        if found.kind == "canonical":
-            service, subject = found.service, found.subject
+        transaction (session_hosted_service's authorize_room, or its create_room's owner from Hermes' 2026-11-18
+        canary on)."""
+        if found.kind != "canonical":
+            found.service.create_room(room_id=room_id, name=name, members=members)
+            return
+        service, subject = found.service, found.subject
+        if "owner" in inspect.signature(service.create_room).parameters:
+            service.create_room(room_id=room_id, name=name, members=members, owner=subject)
+            return
 
-            def admit(conn: Any) -> Any:
-                return service.authorize_room(subject, room_id, create=True, conn=conn)
-        found.service.create_room(room_id=room_id, name=name, members=members, admit=admit)
+        def admit(conn: Any) -> Any:
+            return service.authorize_room(subject, room_id, create=True, conn=conn)
+        service.create_room(room_id=room_id, name=name, members=members, admit=admit)
 
     def register(self, found: Found, *, room_id: str, home_install_id: str, link_id: str,
                  agent: Mapping[str, Any]) -> None:
@@ -181,7 +187,7 @@ class Starter:
             cancellation_scope_id=f"cancel-{room_id}", trace_id=f"trace-{os.urandom(16).hex()}",
             grant=agent["grant"])
         found.service.register_peer_route(room_id=room_id, member_id=agent["member_id"], route=route,
-                                          client=self.hermes.client(target_url, found.service.db_path),
+                                          client=self.hermes.client(target_url, found.service),
                                           target_url=target_url, catalog=catalog)
 
     def swap(self, found: Found, *, room_id: str, home_install_id: str, link_id: str,
@@ -207,7 +213,7 @@ class Starter:
             return False
         target_url = self.hermes.link_url(room_bridge.url(self.root, link_id, agent["profile"]))
         client = getattr(found.service, "peer_clients", {}).get(key) \
-            or self.hermes.client(target_url, found.service.db_path)
+            or self.hermes.client(target_url, found.service)
         found.service.register_peer_route(room_id=room_id, member_id=agent["member_id"],
                                           route=dataclasses.replace(route, grant=agent["grant"]), client=client,
                                           target_url=target_url, catalog=self.hermes.catalog(agent["catalog"]))
@@ -253,7 +259,16 @@ def where_from(request: Any, profile: Optional[str]) -> dict[str, Any]:
         raise StartError("unsupported", "This Hermes can't host rooms with linked people; update Hermes", 501) \
             from None
     authority, principal = context(request, profile)
-    return {"kind": "canonical", "home": str(Path(authority.db.db_path).parent), "subject": str(principal.subject)}
+    return {"kind": "canonical", "home": str(_authority_home(authority)), "subject": str(principal.subject)}
+
+
+def _authority_home(authority: Any) -> Path:
+    """The profile home a session authority serves: its storage handle's (Hermes' 2026-11-18 canary on), or its
+    SessionDB's folder."""
+    persistence = getattr(authority, "persistence", None)
+    if persistence is not None:
+        return Path(persistence.scope.profile_dir)
+    return Path(authority.db.db_path).parent
 
 
 class Hermes:
@@ -356,16 +371,22 @@ class Hermes:
     def link_url(self, value: str) -> str:
         return self._call("validate_room_link_url")(value)[0]
 
-    def client(self, base_url: str, receipt_db_path: Any) -> Any:
-        return self._call("PeerRunsHTTPClient")(base_url=base_url, api_key="", receipt_db_path=receipt_db_path)
+    def client(self, base_url: str, service: Any) -> Any:
+        """A peer runs client keeping its receipts where ``service`` keeps its rooms: its store and placement
+        (Hermes' 2026-11-18 canary on), or its database path."""
+        make = self._call("PeerRunsHTTPClient")
+        if "receipt_store" in inspect.signature(make).parameters:
+            return make(base_url=base_url, api_key="", receipt_store=service.store,
+                        receipt_placement=service.placement)
+        return make(base_url=base_url, api_key="", receipt_db_path=service.db_path)
 
     def route(self, **fields: Any) -> Any:
         return self._call("PeerMemberRoute")(**fields)
 
     def mark(self, db_path: Any, *, room_id: str, member_id: str, status: str) -> None:
         """A stored route's status, for a service that doesn't keep its routes' itself."""
-        importlib.import_module("gateway.hosted_room_links").mark_room_link_status(
-            db_path, room_id=room_id, member_id=member_id, status=status)
+        hermes_store.room_call(importlib.import_module("gateway.hosted_room_links").mark_room_link_status,
+                               db_path, room_id=room_id, member_id=member_id, status=status)
 
     @property
     def error(self) -> type:

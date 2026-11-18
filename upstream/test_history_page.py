@@ -9,19 +9,28 @@ import json
 import urllib.parse
 import urllib.request
 
-from conftest import TOKEN
+from conftest import ROOT, TOKEN
 
 PAGE = {"limit": 120, "offset": 0, "order": "latest", "include_compacted": True, "inline_images": False}
 
 
-def _seed(home, session_id, words):
-    from hermes_state import SessionDB
+def _hermes_store():
+    """The plugin's own door to the session store (Hermes' storage interface,
+    or SessionDB on a release before it)."""
+    import importlib.util
 
-    db = SessionDB(db_path=home / "state.db")
+    spec = importlib.util.spec_from_file_location("upstream_hermes_store", ROOT / "hermes_store.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _seed(home, session_id, words):
+    db = _hermes_store().open_store(home)
     try:
-        db.create_session(session_id, "cli")
-        for index, word in enumerate(words):
-            db.append_message(session_id, "user" if index % 2 == 0 else "assistant", word)
+        db.ensure_session(session_id, "cli")
+        db.append_messages_batch(session_id, [{"role": "user" if index % 2 == 0 else "assistant", "content": word}
+                                              for index, word in enumerate(words)])
     finally:
         db.close()
 

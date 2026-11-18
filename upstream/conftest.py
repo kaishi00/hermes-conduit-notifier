@@ -293,6 +293,14 @@ def dashboard(tmp_path_factory: pytest.TempPathFactory):
             print(log_path.read_text()[-8000:])
 
 
+def _hermes_has(ref: str) -> bool:
+    """Whether the Hermes under test (install-hermes.sh's checkout, HERMES_BIN's) holds ``ref``."""
+    checkout = Path(_hermes_bin()).parents[2]
+    found = subprocess.run(["git", "-C", str(checkout), "merge-base", "--is-ancestor", ref, "HEAD"],
+                           capture_output=True, timeout=60)
+    return found.returncode == 0
+
+
 def _known_failures() -> List[Dict[str, Any]]:
     data = yaml.safe_load(CONTRACT.read_text()) or {}
     return list(data.get("known_failures") or [])
@@ -304,14 +312,16 @@ def known_failure(request: pytest.FixtureRequest):
 
     A test listed in contract.yml's known_failures is xfailed while it fails
     with the listed signature; it fails if it passes (upstream fixed it: the
-    workaround and the entry can go) or fails differently (a new break).
+    workaround and the entry can go) or fails differently (a new break). An
+    entry with ``fixed_in`` (the Hermes commit that fixed it, not yet released)
+    holds only on a Hermes without that commit: with it the test must pass.
     """
     name = request.node.originalname or request.node.name
     entry = next((e for e in _known_failures() if e.get("test") == name), None)
     raw = os.environ.get("UPSTREAM_CONTRACT_RAW") == "1"
 
     def check(passed: bool, signature: str, detail: str = "") -> None:
-        if entry is None or raw:
+        if entry is None or raw or (entry.get("fixed_in") and _hermes_has(str(entry["fixed_in"]))):
             assert passed, f"{signature}: {detail}"
             return
         if passed:

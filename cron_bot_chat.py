@@ -197,7 +197,7 @@ def _note_from_elsewhere(home: Path, chat: str, text: str, key: str, for_failure
     """The note written straight into the profile's history when its owner
     runs in another process: once per run (keyed by it), and never while
     a turn holds the chat, so it waits for that turn."""
-    from hermes_state import SessionDB
+    from . import hermes_store
 
     metadata = {"completion_note": [key], "conduit_cron_report": True}
     if for_failure:
@@ -207,7 +207,7 @@ def _note_from_elsewhere(home: Path, chat: str, text: str, key: str, for_failure
     while True:
         db = None
         try:
-            db = SessionDB(db_path=home / "state.db")
+            db = hermes_store.open_store(home)
             db.append_completion_note(chat, key, text, "internal_notification", metadata)
             return None
         except Exception as exc:  # noqa: BLE001 - a running turn refuses it, a locked database too; anything else once the wait is up
@@ -307,14 +307,15 @@ def _replacement(original: Callable[..., Any]) -> Callable[..., Any]:
 
 def supported() -> bool:
     """Whether this Hermes can write a cron result into a chat as a note."""
+    from . import hermes_store
+
     try:
         cron = importlib.import_module(LOCAL_NOTE)
-        state = importlib.import_module("hermes_state")
     except Exception:  # noqa: BLE001
         return False
     return (callable(getattr(cron, "deliver_to_local_chat", None))
             and callable(getattr(cron, "owner_for_home", None))
-            and callable(getattr(getattr(state, "SessionDB", None), "append_completion_note", None)))
+            and hermes_store.can("append_completion_note"))
 
 
 def install() -> bool:

@@ -61,10 +61,28 @@ def _archived_voice_chat(path: Path, session_id: str) -> bool:
     return isinstance(tag, dict) and tag.get("kind") in ARCHIVED_KINDS
 
 
-def _open_session_db(path: Path):
-    from hermes_state import SessionDB
+_hermes_store_module = None
 
-    return SessionDB(db_path=path)
+
+def _hermes_store():
+    """hermes_store.py beside this file, loaded by path: the dashboard loads
+    this module by path too, outside the plugin's package."""
+    global _hermes_store_module
+    if _hermes_store_module is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("conduit_push_voice_archive_hermes_store",
+                                                      Path(__file__).with_name("hermes_store.py"))
+        if spec is None or spec.loader is None:
+            raise ImportError("no hermes_store.py beside voice_archive.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _hermes_store_module = module
+    return _hermes_store_module
+
+
+def _open_session_db(path: Path):
+    return _hermes_store().open_store(path.parent)
 
 
 def bring_back(home: Path, session_id: str, open_db: Callable[[Path], object] = _open_session_db) -> bool:
@@ -81,6 +99,10 @@ def bring_back(home: Path, session_id: str, open_db: Callable[[Path], object] = 
         logger.debug("conduit_push: couldn't check whether voice chat %s was archived", session_id, exc_info=True)
         return False
     try:
+        own: Optional[Callable] = getattr(db, "unarchive_auto_archived", None)
+        if own is not None:  # Hermes' storage interface (hermes_store)
+            own(session_id)
+            return True
         write: Optional[Callable] = getattr(db, "_execute_write", None)
         unarchive: Optional[Callable] = getattr(db, "_unarchive_auto_archived_lineage", None)
         if write is None or unarchive is None:
