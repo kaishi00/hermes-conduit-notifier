@@ -39,7 +39,7 @@ _usage_limiter = core._MintLimiter(120, 60.0, message="Too many chat usage reads
 
 _COLUMNS = (
     "id", "source", "parent_session_id", "started_at", "ended_at", "end_reason", "model", "model_config",
-    "message_count", "tool_call_count", "api_call_count", "input_tokens", "output_tokens",
+    "tool_call_count", "api_call_count", "input_tokens", "output_tokens",
     "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "estimated_cost_usd",
     "actual_cost_usd", "cost_status",
 )
@@ -125,10 +125,10 @@ def _subagents(conn: sqlite3.Connection, chain: List[Dict[str, Any]]) -> tuple:
                 continue
             seen.add(child["id"])
             found.append(child)
-            # A subagent's own compression continues its run, and a tool's
+            # A compression's continuation (a subagent's own, or a chat row
+            # Hermes ever continued twice) continues its run, and a tool's
             # session is the tool's: their tokens count, but not as runs.
-            if (child.get("source") or "") != "tool" \
-                    and not (parent["id"] not in in_chain and _continues(child, parent)):
+            if (child.get("source") or "") != "tool" and not _continues(child, parent):
                 runs += 1
             queue.append(child)
     return found, runs
