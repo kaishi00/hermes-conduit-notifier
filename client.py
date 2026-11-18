@@ -758,8 +758,9 @@ def poll_decision(request_id: str) -> dict[str, Any]:
             error = error or failure
             continue
         if isinstance(opened, dict) and opened.get("status") in ("answered", "rejected"):
-            if opened.get("status") == "answered" and len(devices) > 1:
-                _release_elsewhere(request_id, [other for other in devices if other[0] != device])
+            if opened.get("status") == "answered":
+                _release_elsewhere(request_id, [other for other in _decision_devices(include_paused=True)
+                                                if other[0] != device])
             return opened
         found.append(opened)
     if not found:
@@ -768,8 +769,8 @@ def poll_decision(request_id: str) -> dict[str, Any]:
     if not pending:
         return found[0]
     combined = _combined_pending(pending)
-    if combined.get("status") == "answered" and len(devices) > 1:
-        _release_elsewhere(request_id, devices)
+    if combined.get("status") == "answered":
+        _release_elsewhere(request_id, _decision_devices(include_paused=True))
     return combined
 
 
@@ -814,7 +815,10 @@ def _decision_devices(include_paused: bool = False) -> list[tuple[str | None, di
 
 
 def _release_elsewhere(request_id: str, devices: list[tuple[str | None, dict[str, Any]]]) -> None:
-    """Releases a decision another device answered, off the answer's path."""
+    """Releases a decision another device answered, off the answer's path
+    (paused pairings included: one may have parked it before its pause)."""
+    if not devices:
+        return
     def release() -> None:
         for _device_id, state in devices:
             _cancel_with(state, request_id)

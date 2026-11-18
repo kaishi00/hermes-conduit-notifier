@@ -441,3 +441,21 @@ def test_releasing_a_question_reaches_a_paused_pairing_too(home, monkeypatch):
     finally:
         client._clear_refusal()
     assert ("DELETE", f"{PHONE}.gw-1.secret") in calls
+
+
+def test_an_answer_releases_a_paused_pairings_parked_question_too(home, monkeypatch):
+    _write_pairings(home)
+    calls = []
+
+    def relay(url, *, method, payload=None, credential="", timeout=15.0):
+        calls.append((method, credential))
+        return {} if method == "DELETE" else {"status": "answered", "answer": "Yes"}
+
+    monkeypatch.setattr(client, "request_json", relay)
+    monkeypatch.setattr(client.threading, "Thread", lambda target, **kwargs: types.SimpleNamespace(start=target))
+    client._refusals[f"{PHONE}.gw-1.secret"] = {"paused_for": 60, "until": 1e18}
+    try:
+        assert client.poll_decision("clarify:8") == {"status": "answered", "answer": "Yes"}
+    finally:
+        client._clear_refusal()
+    assert ("DELETE", f"{PHONE}.gw-1.secret") in calls
