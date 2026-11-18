@@ -1213,7 +1213,7 @@ def test_a_cron_run_that_mentions_silent_mid_sentence_still_notifies(cron_home, 
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
 
 
-def test_chats_keep_the_interactive_silence_rule(cron_home, fake):
+def test_chats_keep_the_interactive_silence_rule(home, fake):
     # Prose after the marker is a reply in a chat, by Hermes' interactive
     # rule and by the exact sentinel alike; only cron runs take the loose one.
     _reply(session_id="rt-1", turn_id="t1", assistant_response="[SILENT] No changes")
@@ -1223,8 +1223,6 @@ def test_chats_keep_the_interactive_silence_rule(cron_home, fake):
 def test_a_reply_push_follows_hermes_silence_rule(cron_home, fake, monkeypatch):
     """Issue 2700: a marker written another way sends nothing, and one that
     closes a reply on its own line leaves the push's body."""
-    import types
-
     filters = types.ModuleType("gateway.response_filters")
     filters.is_intentional_silence_response = lambda text: text.strip().strip("*").upper() in {"[SILENT]", "NO_REPLY"}
     filters.strip_trailing_silence_marker = (
