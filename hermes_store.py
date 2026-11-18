@@ -140,6 +140,16 @@ def room_call(call: Callable[..., Any], db_path: Any, **fields: Any) -> Any:
         return call(store, placement=placement, **fields)
 
 
+def service_call(call: Callable[..., Any], service: Any, **fields: Any) -> Any:
+    """Hermes' room call on a room service's own store: its store handle and
+    placement where both it and this Hermes take one, else its database
+    file."""
+    store, placement = getattr(service, "store", None), getattr(service, "placement", None)
+    if store is not None and placement is not None and takes_store(call):
+        return call(store, placement=placement, **fields)
+    return room_call(call, service.db_path, **fields)
+
+
 def _media_root() -> str:
     """The profile's retained media root, as Hermes' own delete resolves it."""
     return str(_hermes("gateway.session_ingress_media").native_inputs_root())

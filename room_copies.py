@@ -104,8 +104,9 @@ class Hermes:
     def keeps_copies(self) -> bool:
         return self._load()["ingest_page"] is not None and self._load()["ReplicaError"] is not None
 
-    def read_events(self, db_path: Any, **fields: Any) -> dict[str, Any]:
-        return hermes_store.room_call(self._load()["read_events"], db_path, **fields)
+    def read_events(self, service: Any, **fields: Any) -> dict[str, Any]:
+        """The room log of ``service`` (the home's room service), read from its own store."""
+        return hermes_store.service_call(self._load()["read_events"], service, **fields)
 
     def ingest_page(self, db_path: Any, **fields: Any) -> dict[str, Any]:
         return hermes_store.room_call(self._load()["ingest_page"], db_path, **fields)
@@ -219,7 +220,7 @@ class Copies:
         if sent is not None and now - sent["at"] < WAIT_S:
             return
         try:
-            page = self.hermes.read_events(found.service.db_path, room_id=room_id, since_seq=copy["acked"],
+            page = self.hermes.read_events(found.service, room_id=room_id, since_seq=copy["acked"],
                                            limit=PAGE_EVENTS, include_disbanded=True)
         except Exception as exc:  # noqa: BLE001 - the next pass tries again
             self._tell_once(f"read:{room_id}", "Linked Rooms couldn't read room %s's log for its copies (%s)",

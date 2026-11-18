@@ -380,6 +380,45 @@ def test_a_room_call_takes_a_store_and_placement_where_hermes_does(store_module,
     assert all(store.closed for store in interface.opened)
 
 
+def test_a_room_service_is_called_on_its_own_store_where_it_has_one(store_module, interface, tmp_path):
+    # DeepSeek's review of #904: a room service's log is read from the store
+    # it holds, not from a handle opened again on its file.
+    seen = []
+
+    def read_events(store, *, placement, room_id):
+        seen.append((store, placement, room_id))
+        return {"events": []}
+
+    def old_read_events(db_path, *, room_id):
+        seen.append((db_path, room_id))
+        return {"events": []}
+
+    own = types.SimpleNamespace(scope=types.SimpleNamespace(profile_dir=tmp_path))
+    service = types.SimpleNamespace(store=own, placement="shared", db_path=None)
+    store_module.service_call(read_events, service, room_id="r1")
+    old = types.SimpleNamespace(db_path=tmp_path / "shared-state.db")
+    store_module.service_call(old_read_events, old, room_id="r2")
+    store_module.service_call(read_events, old, room_id="r3")  # a path only: opened on it
+    assert seen[:2] == [(own, "shared", "r1"), (tmp_path / "shared-state.db", "r2")]
+    assert seen[2][1:] == ("shared", "r3") and seen[2][0] is not own
+    assert not interface.opened[:-1] and all(store.closed for store in interface.opened)
+
+
+def test_copies_read_a_rooms_log_from_its_services_store(interface, monkeypatch, tmp_path):
+    copies = _plugin("room_copies")
+    seen = []
+
+    def read_events(store, *, placement, **fields):
+        seen.append((store, placement, fields["room_id"]))
+        return {"events": []}
+
+    hermes = copies.Hermes()
+    monkeypatch.setattr(hermes, "_calls", {"read_events": read_events, "ingest_page": None, "ReplicaError": None})
+    own = types.SimpleNamespace(scope=types.SimpleNamespace(profile_dir=tmp_path))
+    hermes.read_events(types.SimpleNamespace(store=own, placement="profile"), room_id="r1", since_seq=0)
+    assert seen == [(own, "profile", "r1")]
+
+
 def test_a_store_and_placement_name_the_room_database_hermes_keeps_them_in(store_module, interface, tmp_path):
     work = tmp_path / "profiles" / "work"
     store = types.SimpleNamespace(scope=types.SimpleNamespace(profile_dir=work))
