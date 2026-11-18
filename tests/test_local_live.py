@@ -2129,7 +2129,7 @@ def test_in_a_plugin_host_local_live_says_so(hermes, monkeypatch):
 @pytest.mark.parametrize("method,route", [
     ("get", "/local-live/status"), ("post", "/local-live/key"), ("post", "/watch-tools/grant"),
     ("post", "/watch-tools/revoke"), ("get", "/watch-audio/status"), ("post", "/sessions/takeover"),
-    ("get", "/sessions/desktop-views"), ("get", "/predict"), ("post", "/predict"),
+    ("get", "/sessions/desktop-views"), ("get", "/sessions/usage"), ("get", "/predict"), ("post", "/predict"),
     ("post", "/rooms/drafts"), ("get", "/rooms/setup"), ("post", "/rooms/setup"),
 ])
 def test_every_dashboard_route_takes_conduit_profile(client, hermes, method, route):

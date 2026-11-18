@@ -33,15 +33,15 @@ def _load_plugin_api():
 api = _load_plugin_api()
 
 
-def _add(conn, sid, *, parent=None, started=1.0, ended=None, end_reason=None, model="m", model_config=None,
+def _add(conn, sid, *, source="conduit", parent=None, started=1.0, ended=None, end_reason=None, model="m", model_config=None,
          calls=1, input_tokens=100, output_tokens=10, cache_read=0, reasoning=0, tools=0,
          estimated=None, actual=None, status=None):
     conn.execute(
         "INSERT INTO sessions (id, source, parent_session_id, started_at, ended_at, end_reason, model, "
         "model_config, api_call_count, input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, "
         "tool_call_count, estimated_cost_usd, actual_cost_usd, cost_status) "
-        "VALUES (?, 'conduit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (sid, parent, started, ended, end_reason, model, model_config, calls, input_tokens, output_tokens,
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (sid, source, parent, started, ended, end_reason, model, model_config, calls, input_tokens, output_tokens,
          cache_read, reasoning, tools, estimated, actual, status))
 
 
@@ -134,6 +134,35 @@ def test_a_subagent_that_compressed_is_one_run(db):
     body = _get("?session_id=chat").json()
     assert body["input_tokens"] == 150
     assert body["subagent_runs"] == 1 and body["compressions"] == 0
+
+
+def test_a_branch_that_compressed_keeps_its_continuation(db):
+    # The continuation inherits the branch's model_config, marker and all.
+    marker = '{"_branched_from": "root"}'
+    _add(db, "root", started=1, input_tokens=1000)
+    _add(db, "branch", parent="root", started=2, ended=5, end_reason="compression", model_config=marker,
+         input_tokens=100)
+    _add(db, "branch-tail", parent="branch", started=6, model_config=marker, model="newest", input_tokens=10)
+    db.commit()
+    for sid in ("branch", "branch-tail"):
+        body = _get(f"?session_id={sid}").json()
+        assert body["input_tokens"] == 110 and body["compressions"] == 1
+        assert body["newest_session_id"] == "branch-tail" and body["model"] == "newest"
+    # The root doesn't count its branch.
+    assert _get("?session_id=root").json()["input_tokens"] == 1000
+
+
+def test_a_reset_and_a_tools_session_are_told_apart(db):
+    _add(db, "chat", started=1, ended=5, end_reason="compression", input_tokens=100)
+    _add(db, "reset", parent="chat", started=6, model_config='{"_reset_from": "chat"}', input_tokens=7777)
+    _add(db, "tool", source="tool", parent="chat", started=2, input_tokens=5)
+    _add(db, "delegate", parent="chat", started=7, model_config='{"_delegate_from": "chat"}', input_tokens=20)
+    db.commit()
+    body = _get("?session_id=chat").json()
+    # The delegate started after the compression but is a run, not the continuation.
+    assert body["compressions"] == 0
+    assert body["input_tokens"] == 125
+    assert body["subagent_runs"] == 1
 
 
 def test_a_hermes_without_the_cost_columns_says_so(db):

@@ -4,6 +4,7 @@ chat list's Usage Details (hermes-conduit#2699)."""
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from typing import Any, Dict, List, Optional
 
@@ -37,7 +38,7 @@ NO_STORE = {"Cache-Control": "no-store"}
 _usage_limiter = core._MintLimiter(120, 60.0, message="Too many chat usage reads; try again shortly")
 
 _COLUMNS = (
-    "id", "parent_session_id", "started_at", "ended_at", "end_reason", "model", "model_config",
+    "id", "source", "parent_session_id", "started_at", "ended_at", "end_reason", "model", "model_config",
     "message_count", "tool_call_count", "api_call_count", "input_tokens", "output_tokens",
     "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "estimated_cost_usd",
     "actual_cost_usd", "cost_status",
@@ -55,16 +56,31 @@ def _children(conn: sqlite3.Connection, parent_id: str) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def _marker(child: Dict[str, Any], name: str) -> str:
+    """A ``model_config`` marker (``_branched_from``, ``_delegate_from``,
+    ``_reset_from``). Continuations inherit model_config, so a marker only
+    counts when it names the child's own parent (hermes_state_common.py)."""
+    try:
+        config = json.loads(child.get("model_config") or "{}")
+    except ValueError:
+        return ""
+    value = config.get(name) if isinstance(config, dict) else None
+    return value if isinstance(value, str) else ""
+
+
 def _is_branch(child: Dict[str, Any], parent: Dict[str, Any]) -> bool:
-    """Hermes' own test for a branch (hermes_state._BRANCH_CHILD_SQL)."""
-    if '"_branched_from"' in (child.get("model_config") or ""):
+    """A branch is a chat of its own (hermes_state's _BRANCH_CHILD_SQL), as is
+    a reset's new session."""
+    if parent["id"] in (_marker(child, "_branched_from"), _marker(child, "_reset_from")):
         return True
     return parent.get("end_reason") == "branched" and (child.get("started_at") or 0) >= (parent.get("ended_at") or 0)
 
 
 def _continues(child: Dict[str, Any], parent: Dict[str, Any]) -> bool:
-    """A compression's continuation of ``parent`` (hermes_state._COMPRESSION_CHILD_SQL)."""
+    """A compression's continuation of ``parent`` (hermes_state._COMPRESSION_CHILD_SQL):
+    not a branch, a subagent's run or a tool's session."""
     return parent.get("end_reason") == "compression" and not _is_branch(child, parent) \
+        and _marker(child, "_delegate_from") != parent["id"] and (child.get("source") or "") != "tool" \
         and (child.get("started_at") or 0) >= (parent.get("ended_at") or 0)
 
 
@@ -109,7 +125,10 @@ def _subagents(conn: sqlite3.Connection, chain: List[Dict[str, Any]]) -> tuple:
                 continue
             seen.add(child["id"])
             found.append(child)
-            if not (parent["id"] not in in_chain and _continues(child, parent)):
+            # A subagent's own compression continues its run, and a tool's
+            # session is the tool's: their tokens count, but not as runs.
+            if (child.get("source") or "") != "tool" \
+                    and not (parent["id"] not in in_chain and _continues(child, parent)):
                 runs += 1
             queue.append(child)
     return found, runs
