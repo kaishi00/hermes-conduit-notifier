@@ -49,6 +49,7 @@ opens no ask (issue 2395).
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import contextlib
 import hashlib
 import json
@@ -5119,9 +5120,119 @@ def needs_you(session_id: Any, description: Any = None, *, question: bool = Fals
         # listed, can open it and answer there (Eric 2026-11-03).
         link = _link(work.ref, work.session_id, (work.executor or {}).get("bot")) if work.session_id else ""
         who = (ROOM_WAITS_ON_QUESTION if _in_room(work) else WAITS_ON_QUESTION) if question else WAITS_ON_APPROVAL
-        _report(home, work, f"- {work.ref} “{work.title}” is waiting on the user ({what}). {who}"
-                            + (f" {link} {LINK_RULE}" if link else ""),
-                kind="call" if _call_of(work) else "work")
+        line = (f"- {work.ref} “{work.title}” is waiting on the user ({what}). {who}"
+                + (f" {link} {LINK_RULE}" if link else ""))
+        # The plugin's own push tells the user (notifier issue 908): once it
+        # is queued (wait_pushed), a work update of nothing else sends none
+        # from the Bot Chat's answer.
+        _note_wait_line(session_id, line)
+        _report(home, work, line, kind="call" if _call_of(work) else "work")
+
+
+# A workstream's wait reaches the user as one push, the plugin's own: its
+# answerable approval or question, sent from the workstream's hooks and named
+# by its ref (``wait_title``), so no model decides whether they hear of it
+# (notifier issue 908, Eric 2026-11-19). The Bot Chat still hears of it in a
+# work update, but its answer to an update that carries nothing else sends no
+# second push, whatever it says, [SILENT] included.
+MAX_WAIT_LINES = 256
+# The line needs_you wrote for each chat's wait, until its push is queued.
+_wait_unpushed: "OrderedDict[str, str]" = OrderedDict()
+_wait_lines: "OrderedDict[str, None]" = OrderedDict()  # the lines of waits whose push was queued
+_wait_wakes: "OrderedDict[tuple[str, str], int]" = OrderedDict()  # (Bot Chat, text) -> sendings
+_wait_turns: "OrderedDict[str, None]" = OrderedDict()  # Hermes' turn ids that answer one
+_wait_lock = threading.Lock()
+
+
+def _note_wait_line(session_id: Any, line: str) -> None:
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _wait_lock:
+        _wait_unpushed.pop(session_id, None)
+        _wait_unpushed[session_id] = line
+        while len(_wait_unpushed) > MAX_WAIT_LINES:
+            _wait_unpushed.popitem(last=False)
+
+
+def wait_pushed(session_id: Any) -> None:
+    """The wait needs_you noted for ``session_id`` has its push queued: only
+    then may the Bot Chat's answer to it go without one. A push that was
+    dropped (a full queue, a lost pairing) leaves the Bot Chat's answer as
+    the user's notice, as before."""
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _wait_lock:
+        line = _wait_unpushed.pop(session_id, None)
+        if line is None:
+            return
+        _wait_lines.pop(line, None)
+        _wait_lines[line] = None
+        while len(_wait_lines) > MAX_WAIT_LINES:
+            _wait_lines.popitem(last=False)
+
+
+def _note_wait_wake(coordinator: str, lines: list[str], text: str) -> None:
+    """A work update about to go to ``coordinator``: one whose every line is
+    a wait (needs_you) is kept by its text, for its turn to find. Each wait's
+    line goes with its update, so a later wait in the same words counts only
+    once its own push is queued (DeepSeek on notifier #911: an answered
+    question left its line, and the next one's dropped push went unheard)."""
+    if not lines or not text.strip():
+        return
+    with _wait_lock:
+        waits = [_wait_lines.pop(line, _MISSING_TURN) is not _MISSING_TURN for line in lines]
+        if not all(waits):
+            return
+        key = (coordinator, text.strip())
+        _wait_wakes[key] = _wait_wakes.pop(key, 0) + 1
+        while len(_wait_wakes) > MAX_WAIT_LINES:
+            _wait_wakes.popitem(last=False)
+
+
+def note_wait_wake(session_id: Any, turn_id: Any, user_message: Any) -> None:
+    """A Bot Chat turn starts (pre_llm_call): one whose message is a work
+    update of waits only is noted by its turn id. A turn whose message isn't
+    that text word for word (Hermes joined it with another) pushes as before."""
+    if not isinstance(turn_id, str) or not turn_id or not isinstance(user_message, str):
+        return
+    key = (str(session_id or ""), user_message.strip())
+    with _wait_lock:
+        left = _wait_wakes.pop(key, 0)
+        if not left:
+            return
+        if left > 1:
+            _wait_wakes[key] = left - 1
+        _wait_turns.pop(turn_id, None)
+        _wait_turns[turn_id] = None
+        while len(_wait_turns) > MAX_WAIT_LINES:
+            _wait_turns.popitem(last=False)
+
+
+def waits_only_turn(turn_id: Any, *, end: bool = False) -> bool:
+    """Whether this turn answers a work update of waits only (note_wait_wake),
+    which sends no push; its end forgets it."""
+    if not isinstance(turn_id, str) or not turn_id:
+        return False
+    with _wait_lock:
+        if end:
+            return _wait_turns.pop(turn_id, _MISSING_TURN) is not _MISSING_TURN
+        return turn_id in _wait_turns
+
+
+_MISSING_TURN = object()
+
+
+def wait_title(session_id: Any) -> str:
+    """A coordinated workstream's name on its approval or question push:
+    its ref and title ("W3 · Fix the export"), so the push reads as the Bot
+    Chat's work (the subtitle names the bot); "" for any other chat."""
+    try:
+        _, work = _workstream(session_id)
+        if work is None or not work.coordinator or _in_room(work):
+            return ""
+        return f"{work.ref} · {work.title}" if work.title else work.ref
+    except Exception:  # noqa: BLE001 — a push never fails on its title: the chat's own then
+        return ""
 
 
 def answered(session_id: Any) -> None:
@@ -6447,6 +6558,11 @@ def _send_wake(home: Path, coordinator: str) -> None:
     rest = [line for line in lines if line not in answers]
     text = "" if not rest else (_wake_text(rest, asks, tail, tells) if asks or tells
                                 else WAKE_HEAD.format(lines="\n".join(rest)) + tail)
+    if not (asks or tells or answers):
+        # Before the send: a submit that timed out may still queue the turn,
+        # and its answer should be quiet then too. A refused one leaves a
+        # count only a word-for-word copy of this update could ever use.
+        _note_wait_wake(coordinator, rest, text)
     if answers:
         # The user's tapped yes leads, then whatever else came in with it.
         said = work_coord.ANSWER_HEAD.format(lines="\n".join(line for line in lines if line in answers))
@@ -6630,6 +6746,11 @@ def stop() -> None:
     """The plugin unloads: batched wakes are dropped with their timers
     rather than sent through a plugin on its way out. The Bot Chat's next
     turn still hears of the work, from the digest."""
+    with _wait_lock:
+        _wait_unpushed.clear()
+        _wait_lines.clear()
+        _wait_wakes.clear()
+        _wait_turns.clear()
     with _wake_lock:
         pending = list(_wakes.values())
         _wakes.clear()

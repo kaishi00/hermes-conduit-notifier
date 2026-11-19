@@ -133,15 +133,19 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         else None
     )
 
+    # A coordinated workstream's question is named by its ref (notifier issue 908).
+    from . import work_tool
+
+    wait = work_tool.wait_title(session_id)
     push = push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
         session_id=session_id,
         profile=profile,
         profile_name=bot_name(),
-        title=titled("Input needed", session_id),
+        title=f"Input needed · {wait}" if wait else titled("Input needed", session_id),
         title_label="input.needed",
-        session_title=chat_title(session_id),
+        session_title=wait or chat_title(session_id),
         body=question,
         decision=clarify_decision(
             request_id=request_id,
@@ -169,6 +173,8 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         # unknown grace can only burn minutes before the inevitable native
         # fallback. Use the native path immediately.
         return kwargs["next_call"](args)
+    # Its push went: the Bot Chat's answer to a workstream's wait needs none (notifier issue 908).
+    work_tool.wait_pushed(session_id)
 
     # With alert calls on, a question left unanswered for a minute calls
     # the user (#449); any answer, from anywhere, stops it.

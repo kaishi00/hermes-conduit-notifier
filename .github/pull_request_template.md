@@ -10,4 +10,13 @@
      descriptions and results included) has none and needs no new entry; if
      it moves a file the map lists, update that path in hermes-conduit. -->
 
+## Desktop
+<!-- Does Conduit for desktop (hermes-conduit-desktop) need this change? CI
+     fails the PR until this says one of:
+     Done: desktop#58 (the desktop PR).
+     Not needed: why (the desktop doesn't draw it, a relay or mailbox change,
+     CI or docs only).
+     Follow-up: the desktop issue or PR, or the feature map entry whose
+     Desktop app line records the gap. -->
+
 ## Testing

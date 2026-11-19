@@ -19,6 +19,18 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Calls from Hermes ring Conduit on your computer too, beside your iPhone: answer there and the call opens in its chat. Answered on one, the other stops ringing; declined on your computer, Hermes hears so, as from your iPhone.
 
+## 0.179.2 (2026-11-19)
+
+### Fixes
+
+- When a workstream asked you the same thing twice and the second notification couldn't be sent, the Bot Chat's message about it was kept quiet too. Now it tells you.
+
+## 0.179.1 (2026-11-19)
+
+### Fixes
+
+- When a bot's workstream needs your approval or an answer, you get one notification, named after the workstream (W3 · its title), instead of a second one from the Bot Chat. The Bot Chat no longer decides whether you hear about it.
+
 ## 0.179.0 (2026-11-19)
 
 ### New and improved
