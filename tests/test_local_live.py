@@ -2695,3 +2695,17 @@ def test_a_call_with_no_agent_keeps_hermes_turns_on_a_server_with_its_own_model(
     assert session["audio"]["input"]["turn_detection"]["create_response"] is False
     assert isinstance(api.speech_server.speech_server_drive({"own_model": "yes"}), api.speech_server.SpeechServerOwnModel)
     assert api.speech_server.speech_server_own_model({"own_model": 1}) is False
+
+
+def test_a_speak_sockets_item_too_deep_to_parse_notes_no_words_and_goes_on():
+    # notifier 910 (#907 leftovers): on a speak socket, a conversation.item.create
+    # nested past the parser's depth skips the words note (notifier 903)
+    # instead of ending the relay; the next item is noted as before.
+    call = api.local_live._LocalLiveCall(None, "default", speaks=True)
+    deep = '{"type":"conversation.item.create","item":' + "[" * 100000 + "]" * 100000 + "}"
+    assert asyncio.run(call.intercept(deep)) is False
+    assert list(call.to_read) == []
+    item = {"type": "conversation.item.create",
+            "item": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Read  this"}]}}
+    assert asyncio.run(call.intercept(json.dumps(item))) is False
+    assert list(call.to_read) == ["Read this"]

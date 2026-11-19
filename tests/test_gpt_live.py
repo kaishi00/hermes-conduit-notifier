@@ -1153,3 +1153,26 @@ def test_a_refusal_naming_the_ga_path_past_the_read_cap_stays_a_502(client, monk
     monkeypatch.setattr(api.gpt_live, "_post_sdp", REAL_POST_SDP)
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 502
     assert opener.urls == [api.gpt_live.GPT_LIVE_URL]
+
+
+def test_read_only_goes_only_to_a_resolver_that_names_it():
+    # notifier 910 (#907 leftovers): a Hermes resolver taking only **kwargs
+    # may pass them on somewhere strict, so it gets no read_only.
+    takes = api.gpt_live._takes_read_only
+
+    def named(*, refresh_if_expiring=True, read_only=False):
+        return None
+
+    def named_with_rest(*, read_only=False, **kwargs):
+        return None
+
+    def rest_only(**kwargs):
+        return None
+
+    def older(*, refresh_if_expiring=True):
+        return None
+
+    assert takes(named) and takes(named_with_rest)
+    assert not takes(rest_only)
+    assert not takes(older)
+    assert not takes(object()), "no signature to read"

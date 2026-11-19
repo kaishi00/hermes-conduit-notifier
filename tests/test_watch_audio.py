@@ -1321,3 +1321,50 @@ def test_a_gpt_live_call_that_never_connects_names_the_chosen_voice():
     for request in ({}, {"voice": None}, {"voice": ""}, {"voice": "not a voice!"}):
         session.request = request
         assert str(session._unreachable()) == "GPT-Live's audio connection didn't come up from the Hermes host"
+
+
+def test_a_provider_or_helper_frame_too_deep_to_parse_is_dropped_and_the_session_goes_on():
+    # notifier 910 (#907 leftovers): the Grok session's provider reader and
+    # the GPT-Live helper's exit frame drop a frame nested past the parser's
+    # depth (notifier 903) instead of ending the relay on it.
+    deep = '{"type":"session.updated","x":' + "[" * 100000 + "]" * 100000 + "}"
+
+    class Pacer:
+        def __init__(self):
+            self.pcm, self.events = [], []
+
+        def audio(self, pcm):
+            self.pcm.append(pcm)
+
+        def event(self, message):
+            self.events.append(message)
+
+        def interrupt(self):
+            pass
+
+    async def provider():
+        for message in [deep, json.dumps({"type": "response.audio.delta", "delta": "AQA="})]:
+            yield message
+
+    grok = object.__new__(api.watch_audio._GrokWatchSession)
+    grok.owed_since = 1.0
+    pacer = Pacer()
+    asyncio.run(grok._read(provider(), pacer))
+    assert pacer.pcm == [b"\1\0"], "the frame after the deep one still plays"
+    assert pacer.events == []
+
+    async def helper_exit():
+        stdout = asyncio.StreamReader()
+        payload = ('{"reason":' + "[" * 100000 + "]" * 100000 + "}").encode()
+        stdout.feed_data(b"X" + len(payload).to_bytes(4, "big") + payload)
+        stdout.feed_eof()
+        helper = object.__new__(api.watch_audio._GptLiveHelper)
+        helper.process = types.SimpleNamespace(stdout=stdout)
+        helper.reason = None
+        helper.ended = asyncio.Event()
+        helper.offer = asyncio.get_running_loop().create_future()
+        await helper._read()
+        return helper
+
+    helper = asyncio.run(helper_exit())
+    assert helper.ended.is_set() and helper.reason == "GPT-Live ended the call"
