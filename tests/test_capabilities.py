@@ -65,6 +65,7 @@ def test_every_capability_names_a_served_route_family():
         "desktop-views": "/sessions/desktop-views",
         "turn-surface": "/turn-surface",
         "turn-surface-discard": "/turn-surface/discard",
+        "turn-surface-windows": "/turn-surface",
         "history-page": "/sessions/history-page",
         "session-usage": "/sessions/usage",
         "bot-plugin": "/profiles/plugin",

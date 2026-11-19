@@ -79,6 +79,8 @@ SURFACES = {
     "iphone": "the user's iPhone",
     "ipad": "the user's iPad",
     "mac": "the user's Mac",
+    # Conduit for desktop on Windows (hermes-conduit-desktop); on a Mac it says `mac`.
+    "windows": "the user's Windows PC",
     "vision": "the user's Apple Vision Pro",
     "watch": "the user's Apple Watch",
     "carplay": "CarPlay in the user's car",
@@ -99,7 +101,7 @@ HINTS = {
 # questions shows as a form (hermes-conduit's ClarifyActivity.isForm). Only
 # when Conduit says it was typed: spoken, a form is read out one question at
 # a time, and Conduit reports how every message it sends was entered.
-SCREENS = ("iphone", "ipad", "mac", "vision")
+SCREENS = ("iphone", "ipad", "mac", "windows", "vision")
 FORM_HINT = ("When you need several details only the user can give (like dates or a budget), ask them in one "
              "clarify call with open questions: Conduit shows it as a form, and they may leave some blank.")
 # Said for a spoken message, a voice call's or a voice job's: the answer is
