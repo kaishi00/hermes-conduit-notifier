@@ -168,7 +168,8 @@ def hermes(home, monkeypatch):
     work._wakes.clear()
     work._wake_asks.clear()
     work._wait_unpushed.clear()
-    work._wait_lines.clear()
+    work._wait_tokens.clear()
+    work._wait_pushed.clear()
     work._wait_wakes.clear()
     work._wait_turns.clear()
     work._wake_held.clear()
@@ -1718,11 +1719,86 @@ def test_a_dropped_approval_push_leaves_the_bot_chat_to_tell_the_user(on, hermes
     monkeypatch.setattr(plugin, "_home_room", lambda session_id: None)
     plugin._pre_approval_request(session_key="20261031_work_1", session_id="20261031_work_1",
                                  description="rm -rf build", turn_id="t")
-    assert work._wait_lines == OrderedDict() and "20261031_work_1" in work._wait_unpushed
+    assert work._wait_pushed == OrderedDict() and "20261031_work_1" in work._wait_unpushed
     monkeypatch.setattr(plugin, "enqueue", lambda event: True)
     plugin._pre_approval_request(session_key="20261031_work_1", session_id="20261031_work_1",
                                  description="rm -rf build", turn_id="t2")
     assert work._wait_unpushed == OrderedDict(), "a queued push lets the Bot Chat's answer go without one"
+
+
+def test_a_wake_hermes_refused_leaves_no_count_for_a_later_wait(on, hermes, monkeypatch):
+    # Notifier issue 917: a refused update's count would quiet the answer to
+    # a later wait in the same words whose own push was dropped.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    monkeypatch.setattr(work, "_coordinator_busy", lambda home, chat: False)
+    start()
+    work.needs_you("20261031_work_1", "a question", question=True)
+    work.wait_pushed("20261031_work_1")
+    monkeypatch.setattr(hermes, "prompt_submit", lambda params: {"status": "rejected"}, raising=False)
+    work.flush_wakes()
+    assert work._wait_wakes == OrderedDict(), "a refused update gives its count back"
+    hermes.refuse["prompt.submit"] = {"code": 4130, "message": "Session has 23000 messages"}
+    work.answered("20261031_work_1")
+    work.needs_you("20261031_work_1", "a question", question=True)
+    work.wait_pushed("20261031_work_1")
+    work.flush_wakes()
+    assert work._wait_wakes == OrderedDict(), "so does one Hermes refused with an error"
+
+
+def test_a_wait_sent_with_an_ask_leaves_nothing_for_a_later_update(on, hermes, monkeypatch):
+    # Notifier issue 917: a wait batched with an ask (or a tell, or a tapped
+    # answer) takes its token with it, so a later wait in the same words
+    # whose push was dropped still has the Bot Chat tell the user.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    monkeypatch.setattr(work, "_coordinator_busy", lambda home, chat: False)
+    start()
+    work.needs_you("20261031_work_1", "a question", question=True)
+    work.wait_pushed("20261031_work_1")
+    work._queue_wake(on.home, BOT_CHAT, "- Nahida asks: which branch?", kind="ask")
+    work.flush_wakes()
+    assert work._wait_tokens == OrderedDict() and work._wait_wakes == OrderedDict()
+    work.answered("20261031_work_1")
+    work.needs_you("20261031_work_1", "a question", question=True)  # its push is dropped
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")[-1:]
+    assert _bot_chat_answer_push(monkeypatch, params["text"], turn_id="t-later") is not None
+
+
+def test_an_owner_busy_retry_counts_the_update_it_sends(on, hermes, monkeypatch):
+    # Notifier issue 917: the held try gave no count back, and a wait that
+    # joined the retry went uncounted (an extra banner) beside a stale count.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    monkeypatch.setattr(work, "_coordinator_busy", lambda home, chat: False)
+    start()
+    start(title="Docs", instructions="Update the docs.")
+    timers = []
+    real = work.threading
+
+    class OnlyTimersHeld:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        @staticmethod
+        def Timer(delay, fn, args=()):
+            timers.append(delay)
+            return types.SimpleNamespace(daemon=True, start=lambda: None, cancel=lambda: None)
+
+    monkeypatch.setattr(work, "threading", OnlyTimersHeld())
+    work.needs_you("20261031_work_1", "rm -rf build")
+    work.wait_pushed("20261031_work_1")
+    hermes.refuse["prompt.submit"] = {"code": 4090, "message": "The gateway is running a turn in this chat.",
+                                      "data": {"reason": "SESSION_OWNER_BUSY"}}
+    work.flush_wakes()
+    assert timers[-1] == work.WAKE_OWNER_BUSY_RETRY_S
+    assert work._wait_wakes == OrderedDict(), "the held try gives its count back"
+    hermes.refuse.clear()
+    work.needs_you("20261031_work_2", "rm -rf docs")  # joins the retry, its push queued too
+    work.wait_pushed("20261031_work_2")
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")[-1:]
+    assert "W1" in params["text"] and "W2" in params["text"]
+    assert list(work._wait_wakes.values()) == [1], "the update that went is the one counted"
+    assert _bot_chat_answer_push(monkeypatch, params["text"]) is None
 
 
 def test_a_work_update_with_a_wait_and_news_still_pushes(on, hermes, monkeypatch):
