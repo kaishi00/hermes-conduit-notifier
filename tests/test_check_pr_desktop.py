@@ -76,6 +76,9 @@ def test_list_fences_info_strings_and_digits_as_github_draws_them():
     assert "inside a code fence" in check.problem(one)
     three_in = "## Summary\n1. ```bash\n   npm test\n      ```\n\n## Desktop\nNot needed: docs.\n"
     assert check.problem(three_in) is None
+    # The line that ends the item is kept as it is: a heading shows.
+    ended = "## Summary\n- ```bash\n  npm test\n## Desktop\nNot needed: docs only.\n"
+    assert check.problem(ended) is None
     # A backtick fence whose info string has a backtick is a paragraph.
     ticked = "## Summary\n``` js `x`\n\n## Desktop\nNot needed: docs.\n"
     assert check.problem(ticked) is None

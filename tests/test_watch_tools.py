@@ -138,6 +138,8 @@ def test_a_sealed_payload_too_deep_to_parse_is_refused_as_not_json():
     fits = ("[" * 2000 + "]" * 2000).encode()
     assert len(fits) <= api.watch_tools.WATCH_MAX_CALL_BYTES
     ct = ChaCha20Poly1305(keys["call"]).encrypt(nonce, fits, api.watch_tools.watch_tool_aad("call", GRANT_ID, rid))
+    # This Python parses that depth (a list, so no object); a parser with a
+    # lower limit refuses it as not JSON. Either way it's refused, not raised.
     with pytest.raises(api.watch_tools.WatchToolError, match="not JSON|not an object"):
         api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, rid, {"n": b64u(nonce), "ct": b64u(ct)})
 
