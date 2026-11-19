@@ -35,7 +35,7 @@ COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 # line, inside the item. One never closed runs to the end, as GitHub draws it.
 CLOSE = r"(?:(?<=`)`*|(?<=~)~*)[ \t]*$|\Z)"
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1" + CLOSE + "|"
-                   r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+(`{3,}|~{3,}).*?(?:^[ \t]+\2" + CLOSE,
+                   r"^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+(`{3,}|~{3,}).*?(?:^[ \t]+\2" + CLOSE,
                    re.DOTALL | re.MULTILINE)
 # A Follow-up that names nothing yet.
 PLACEHOLDER = re.compile(r"^(later|tbd|todo|none|n/?a|soon|maybe)\W*$", re.IGNORECASE)

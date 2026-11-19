@@ -60,6 +60,9 @@ def test_fences_end_as_github_draws_them():
     deep = "## Summary\n```\nsample:\n    ```\n\n## Desktop\nNot needed: docs.\n"
     assert "inside a code fence" in check.problem(deep)
     assert "inside a code fence" in check.problem(listed.replace("  ```", "```"))
+    # A list marker four spaces in is indented code, not a list.
+    coded = "## Summary\n    - ```bash\n    npm test\n\n## Desktop\nNot needed: docs.\n"
+    assert check.problem(coded) is None
 
 
 def test_done_names_a_pr_not_an_issue():
