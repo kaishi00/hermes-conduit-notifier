@@ -18,7 +18,7 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 
 - Conduit for desktop tells your agent when a message came from your Windows PC, as the iPhone app does for an iPhone or a Mac, so it can answer for a big screen.
-- A Windows PC can hold a chat as on screen, as the phone and a Mac do, so a reply you're watching arrive there doesn't also push to your phone.
+- The plugin is ready for a Windows PC to hold a chat as on screen, as the phone and a Mac do, once Conduit for desktop sends it, so a reply you're watching arrive there won't also push to your phone.
 
 ## 0.181.0 (2026-11-19)
 

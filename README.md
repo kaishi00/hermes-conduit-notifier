@@ -2180,8 +2180,8 @@ questions, failed turns and calls. There is nothing to set up.
 - After the turn ends the last hold runs out on its own, so the reply's own
   hooks still see it. Leaving the chat or the app sends `"hold_s": 0`, and
   the next reply there pushes as before.
-- Each device kind (`iphone`, `ipad`, `mac`, `vision`, `watch`) keeps its own
-  file in `<hermes home>/conduit-on-screen/` (private to the user), so one
+- Each device kind (`iphone`, `ipad`, `mac`, `vision`, `watch`, `windows`)
+  keeps its own file in `<hermes home>/conduit-on-screen/` (private to the user), so one
   device leaving never ends another's hold (two devices of the same kind
   share a file, and the later report wins). A turn longer than 30 minutes
   pushes whatever Conduit says. A hold longer than 10 minutes, a
@@ -2222,7 +2222,7 @@ or said it to CarPlay while driving. Just before Conduit sends a message it
 tells the plugin the surface and how the message was entered, and that
 message's turn gets one line of context, for example
 `[Conduit: this message came from CarPlay in the user's car, spoken. They are likely driving: …]`.
-A message typed on an iPhone, iPad, Mac or Vision Pro adds that several
+A message typed on an iPhone, iPad, Mac, Vision Pro or Windows PC adds that several
 details only the user can give go in one clarify call with open questions,
 which Conduit shows as a form they may leave partly blank (0.82+). A spoken
 message adds that the answer is heard: Hermes says it in words, not with
