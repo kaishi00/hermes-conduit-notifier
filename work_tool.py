@@ -5125,8 +5125,10 @@ def needs_you(session_id: Any, description: Any = None, *, question: bool = Fals
                 + (f" {link} {LINK_RULE}" if link else ""))
         # The plugin's own push tells the user (notifier issue 908): once it
         # is queued (wait_pushed), a work update of nothing else sends none
-        # from the Bot Chat's answer.
-        _note_wait_line(session_id, line)
+        # from the Bot Chat's answer. A room's line reaches the Bot Chat only
+        # with more after it, never as a waits-only update (#919 review).
+        if not _in_room(work):
+            _note_wait_line(session_id, line)
         _report(home, work, line, kind="call" if _call_of(work) else "work")
 
 
@@ -5213,10 +5215,14 @@ def _note_wait_wake(coordinator: str, tokens: list[Optional[int]], text: str) ->
     find. Returns its key, to forget again if it never goes."""
     if not tokens or not text.strip():
         return None
+    key = (coordinator, text.strip())
     with _wait_lock:
         if not all(token is not None and token in _wait_pushed for token in tokens):
+            # A count an earlier send of these words left (one that timed
+            # out may never become a turn) mustn't quiet this one's answer
+            # (#919 review): an extra banner over a missing one.
+            _wait_wakes.pop(key, None)
             return None
-        key = (coordinator, text.strip())
         _wait_wakes[key] = _wait_wakes.pop(key, 0) + 1
         _bounded(_wait_wakes)
         return key
@@ -5252,6 +5258,9 @@ def note_wait_wake(session_id: Any, turn_id: Any, user_message: Any) -> None:
             _wait_turns.popitem(last=False)
 
 
+_MISSING_TURN = object()
+
+
 def waits_only_turn(turn_id: Any, *, end: bool = False) -> bool:
     """Whether this turn answers a work update of waits only (note_wait_wake),
     which sends no push; its end forgets it."""
@@ -5262,8 +5271,6 @@ def waits_only_turn(turn_id: Any, *, end: bool = False) -> bool:
             return _wait_turns.pop(turn_id, _MISSING_TURN) is not _MISSING_TURN
         return turn_id in _wait_turns
 
-
-_MISSING_TURN = object()
 
 
 def wait_title(session_id: Any) -> str:

@@ -1801,6 +1801,44 @@ def test_an_owner_busy_retry_counts_the_update_it_sends(on, hermes, monkeypatch)
     assert _bot_chat_answer_push(monkeypatch, params["text"]) is None
 
 
+def test_a_timed_out_wakes_count_doesnt_quiet_a_later_unpushed_wait(on, hermes, monkeypatch):
+    # #919 review: a submit that timed out keeps its count, since its turn
+    # may still come; a later wait in the same words whose push was dropped
+    # takes that count away, so its answer still tells the user.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    monkeypatch.setattr(work, "_coordinator_busy", lambda home, chat: False)
+    start()
+    broker = sys.modules["conduit_push.work_broker"]
+    real = broker.Broker.wake
+
+    def late(self, *args, **kwargs):
+        raise broker.BrokerError("prompt.submit timed out; it may still have started", timed_out=True)
+
+    work.needs_you("20261031_work_1", "a question", question=True)
+    work.wait_pushed("20261031_work_1")
+    monkeypatch.setattr(broker.Broker, "wake", late)
+    work.flush_wakes()
+    assert list(work._wait_wakes.values()) == [1], "its turn may still come"
+    monkeypatch.setattr(broker.Broker, "wake", real)
+    work.answered("20261031_work_1")
+    work.needs_you("20261031_work_1", "a question", question=True)  # its push is dropped
+    work.flush_wakes()
+    assert work._wait_wakes == OrderedDict()
+    (_, params, _), = hermes.named("prompt.submit")[-1:]
+    assert _bot_chat_answer_push(monkeypatch, params["text"], turn_id="t-later") is not None
+
+
+def test_a_room_workstreams_wait_keeps_no_token(on, hermes, monkeypatch):
+    # #919 review: a room's line reaches the Bot Chat only with more after
+    # it, so a token noted for it could never be taken.
+    start()
+    monkeypatch.setattr(work, "_in_room", lambda w: True)
+    monkeypatch.setattr(work, "_report", lambda *args, **kwargs: None)
+    work.needs_you("20261031_work_1", "rm -rf build")
+    work.wait_pushed("20261031_work_1")
+    assert work._wait_tokens == OrderedDict() and work._wait_pushed == OrderedDict()
+
+
 def test_a_work_update_with_a_wait_and_news_still_pushes(on, hermes, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
     start()
