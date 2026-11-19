@@ -141,6 +141,12 @@ notes:
     Rooms"). The plugin's draft follows the room there (handed_room_ids), the gateway's process takes
     the Links' mailbox, and guests mint grants for the new epoch. A rename there leaves a moved room's
     guests without its new messages and its turns.
+  turning the plugin on for a bot: >-
+    POST /profiles/plugin (feature map: "Conduit plugin update", hermes-conduit#2803) links a fresh
+    profile's plugins/conduit_push to the main install, then runs `python -m hermes_cli.main -p
+    <name> plugins enable conduit_push` with HERMES_HOME at the root: Hermes' own enable writes the
+    profile's plugins.enabled and nudges a running gateway. upstream/test_bot_plugin.py checks the
+    profile's plugin requests are served afterwards with no restart.
   plugin host flag: >-
     HERMES_PLUGIN_HOST_PROCESS=1 marks a plugin host. The self-update refuses there, and the
     Linked Rooms setup saves without restarting the gateway: a restart from a plugin host brings

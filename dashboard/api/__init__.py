@@ -51,6 +51,7 @@ MODULES = (
     "boards",
     "capabilities",
     "self_update",
+    "bot_plugin",
 )
 
 

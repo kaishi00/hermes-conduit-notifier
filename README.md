@@ -44,6 +44,13 @@ out of `plugins.disabled` if it is there), then
 restart as above. Until then Hermes answers that profile's plugin requests
 with "Plugin not found", and Conduit says so on the screen that asked.
 
+Conduit can do this for you (plugin 0.180.0+): a bot made with Conduit's New
+Bot gets the plugin turned on, and Edit Bot shows Turn On for a bot that has
+it off. The dashboard links the profile to the main install and runs `hermes
+-p <name> plugins enable conduit_push` for it (`POST
+/api/plugins/conduit_push/profiles/plugin`). Hermes' enable has the running
+gateway load the plugin, so no restart is needed.
+
 A profile's chats load plugins from that profile's own `plugins/` folder
 only, so with plugin 0.122.2+ the dashboard links every profile that turns
 the plugin on to the main install (`~/.hermes/plugins/conduit_push`) when it

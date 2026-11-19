@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.180.0 (2026-11-19)
+
+### New and improved
+
+- A bot you make in Conduit can use Conduit's features (notifications, rooms, the Folder, cards) right away, even when it starts from a fresh profile: Conduit turns the plugin on for it. A bot that has it off gets a Turn On button in Edit Bot.
+
 ## 0.179.2 (2026-11-19)
 
 ### Fixes

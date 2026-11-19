@@ -69,6 +69,8 @@ they run:
     capabilities          Capabilities: the features this plugin serves, as
                           Conduit reads them
     self_update           Self restart and self update
+    bot_plugin            A bot's Conduit plugin: whether a profile has it on,
+                          and turning it on there
 
 A module takes what it uses from another by module (``core.TokenError``), never
 by name, so a test that replaces ``plugin_api.core._calls_home`` replaces it
