@@ -48,6 +48,8 @@ ROUTE_CAPABILITIES = (
     "turn-surface",
     # POST /turn-surface/discard: forgets a report whose send failed.
     "turn-surface-discard",
+    # POST /turn-surface takes `windows`: Conduit for desktop on a Windows PC.
+    "turn-surface-windows",
     # POST /sessions/history-page: Hermes' page of a chat's rows, the ones
     # Conduit holds sent as their fingerprints.
     "history-page",
