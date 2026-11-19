@@ -956,15 +956,17 @@ class CallStore:
                 # and a decline or miss another device reported (or reports
                 # later) for one of them isn't heard, since the user took it.
                 now = self.clock()
-                recent = [ring for ring in state["rings"]
-                          if ring["state"] != "answered" and now - ring["at"] < RING_ANSWER_WINDOW_S]
+                recent = [ring for ring in state["rings"] if now - ring["at"] < RING_ANSWER_WINDOW_S]
                 # The rings still ringing, and the newest one even if a device
                 # declined it (the iPhone answered what the computer declined);
                 # an older declined one stays declined: the user turned that
                 # call down and took a later one.
+                # Newest of them all, answered ones included: a renewal once
+                # the newer ring was answered leaves the older decline alone.
                 answered = {ring["id"] for ring in recent if ring["state"] == "ringing"}
-                if recent:
-                    answered.add(max(recent, key=lambda ring: ring["at"])["id"])
+                newest = max(recent, key=lambda ring: ring["at"]) if recent else None
+                if newest is not None and newest["state"] != "answered":
+                    answered.add(newest["id"])
                 for ring in state["rings"]:
                     if ring["id"] in answered:
                         ring["state"], ring["changed"] = "answered", now

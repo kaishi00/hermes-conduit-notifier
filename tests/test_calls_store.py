@@ -877,4 +877,8 @@ def test_a_call_declined_before_another_was_answered_stays_declined(tmp_path):
     store.set_presence(90)
     assert {ring["id"]: ring["state"] for ring in store.rings()["rings"]} == {
         "watch_aaaaaaaa": "declined", "watch_bbbbbbbb": "answered"}
+    # The call's presence renewed (or another device's): the older decline still stands.
+    clock.now += 5
+    store.set_presence(90)
+    assert {ring["id"]: ring["state"] for ring in store.rings()["rings"]}["watch_aaaaaaaa"] == "declined"
     assert [entry["outcome"] for entry in store.take_outcomes("s1")] == ["declined"]
