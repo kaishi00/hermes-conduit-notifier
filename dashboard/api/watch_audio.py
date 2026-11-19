@@ -273,7 +273,7 @@ def _watch_audio_event_text(text: str) -> bytes:
         return data
     try:
         kind = json.loads(text).get("type")
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, RecursionError):
         kind = None
     return json.dumps({"type": kind if isinstance(kind, str) else "unknown", "conduit_truncated": True}).encode("utf-8")
 
@@ -551,7 +551,7 @@ class _WatchAudioSession:
             self.owed_since = self.bridge.clock()
             try:
                 kind = json.loads(text).get("type")
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError, RecursionError):
                 kind = None
             self.owed_event = kind if isinstance(kind, str) and _WATCH_AUDIO_EVENT_TYPE.fullmatch(kind) else "?"
 
@@ -680,7 +680,7 @@ class _GptLiveHelper:
                 else:
                     try:
                         reason = json.loads(payload or b"{}").get("reason")
-                    except (ValueError, AttributeError):
+                    except (ValueError, AttributeError, RecursionError):
                         reason = None
                     self._end(str(reason or "GPT-Live ended the call")[:200])
                     return
@@ -1003,7 +1003,7 @@ class _GrokWatchSession(_WatchAudioSession):
                     continue
                 try:
                     event = json.loads(message)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 kind = event.get("type") if isinstance(event, dict) else None
                 if kind in _GROK_AUDIO_DELTAS:
@@ -1370,7 +1370,7 @@ class _WatchAudioBridge:
     async def _control(self, stream: _WatchAudioStream, plain: bytes) -> None:
         try:
             request = json.loads(plain)
-        except ValueError:
+        except (ValueError, RecursionError):
             return
         if not isinstance(request, dict):
             return

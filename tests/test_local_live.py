@@ -749,7 +749,12 @@ class ReadBackUpstream:
         if frame == "finish":
             self.events.put(None)
             return
-        event = json.loads(frame)
+        try:
+            event = json.loads(frame)
+        except RecursionError:
+            # A frame too deep to parse, kept as it came (notifier 903).
+            self.sent.append(frame)
+            return
         self.sent.append(event)
         kind = event.get("type")
         if kind == "session.update":
@@ -2547,6 +2552,25 @@ def test_a_server_frame_nested_past_the_parsers_depth_is_passed_on_not_the_calls
                 break
         _finish(ws)
     assert deep in frames
+
+
+@pytest.mark.parametrize("own_model", [False, True])
+def test_a_client_frame_nested_past_the_parsers_depth_reaches_the_server_as_it_came(client, hermes, server, own_model):
+    # The read-back's from_client and the own model's frame reader take a
+    # client frame too deep to parse as unreadable: it goes on, the call
+    # carries on (notifier 903).
+    if own_model:
+        _own_model(hermes)
+    server.upstream = upstream = ReadBackUpstream(refuses=not own_model)
+    deep = '{"type":"session.update","session":' + "[" * 100000 + "]" * 100000 + "}"
+    with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
+        _own_ready(ws, upstream) if own_model else _ready(ws, upstream)
+        ws.send_text(deep)
+        ws.send_text(json.dumps({"type": "input_audio_buffer.commit"}))
+        _wait_for(lambda: {"type": "input_audio_buffer.commit"} in upstream.sent)
+        _finish(ws)
+    assert deep in upstream.sent
+    assert upstream.sent.index(deep) < upstream.sent.index({"type": "input_audio_buffer.commit"})
 
 
 def test_a_tools_answer_waits_for_the_servers_response_to_end(client, hermes, server):

@@ -301,12 +301,17 @@ def test_cards_wrapped_another_way_are_still_drawn(tool_home):
     _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
     for given in ([[STATS]], [[[STATS]]], STATS, {"cards": [STATS]}, json.dumps([STATS]), json.dumps([[STATS]]),
                   {"cards": [[STATS]]}, json.dumps({"cards": [[STATS]]}), {"cards": json.dumps([STATS])},
-                  [{"cards": [STATS]}], [[{"cards": [STATS]}]], {"cards": {"cards": [STATS]}}):
+                  [{"cards": [STATS]}], [[{"cards": [STATS]}]], {"cards": {"cards": [STATS]}},
+                  [json.dumps([STATS])], [json.dumps(STATS)], {"cards": [json.dumps([STATS])]}):
         answer = _call({"title": "Today", "cards": given})
         assert answer["ok"] is True and answer["cards"] == [STATS], given
     assert _call({"title": "Today", "cards": "[not json"})["error"] == "invalid_cards"
     assert _call({"title": "Today", "cards": "[" * 100_000})["error"] == "invalid_cards", "too deep to parse"
-    assert _call({"title": "Today", "cards": [[[[[[[[[[[STATS]]]]]]]]]]]})["error"] == "invalid_cards", "too deep to open"
+    deep = _call({"title": "Today", "cards": [[[[[[[[[[[STATS]]]]]]]]]]]})
+    assert deep["error"] == "invalid_cards", "too deep to open"
+    assert any("wrapped more than 8 deep" in problem for problem in deep["problems"]), "and Hermes hears why (879)"
+    answer = _call({"title": "Today", "cards": [[[[[[[[[{"cards": [STATS]}, MAP]]]]]]]]]})
+    assert any("wrapped more than 8 deep" in problem for problem in answer["problems"]), answer
     answer = _call({"title": "Today", "cards": [[STATS], "x"]})
     assert answer["cards"] == [STATS] and "cards[1]: dropped" in answer["problems"], "a list among cards opens"
 

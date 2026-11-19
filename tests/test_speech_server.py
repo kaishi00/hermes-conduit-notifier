@@ -481,6 +481,23 @@ def test_socket_tells_a_driven_server_to_read_aloud(client, hermes, server):
     assert session["audio"]["input"]["transcription"] == {"model": "gpt-4o-mini-transcribe"}
 
 
+@pytest.mark.parametrize("drive_turns", [False, True])
+def test_a_client_frame_nested_past_the_parsers_depth_goes_on_as_it_came(client, hermes, server, drive_turns):
+    # #902 made every frame read on this path take RecursionError as an
+    # unreadable frame; the client's direction too (notifier 903).
+    _settings(hermes, url="ws://127.0.0.1:8765", drive_turns=drive_turns)
+    server.upstream = FakeUpstream(frames=['{"type":"session.created"}'])
+    deep = '{"type":"session.update","session":' + "[" * 100000 + "]" * 100000 + "}"
+    after = json.dumps({"type": "input_audio_buffer.commit"})
+    with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:
+        ws.receive_text()
+        ws.send_text(deep)
+        ws.send_text(after)
+        ws.send_text("finish")
+        _wait_close(ws)
+    assert server.upstream.sent[:2] == [deep, after]
+
+
 def test_socket_without_a_server_closes_with_the_reason(client, hermes, server):
     hermes.config = {}
     with client.websocket_connect(f"{BASE}/speech-server/socket") as ws:

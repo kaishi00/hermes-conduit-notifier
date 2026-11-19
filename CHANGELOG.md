@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.178.4 (2026-11-19)
+
+### Fixes
+
+- Checking whether GPT-Live is ready no longer touches the Codex sign-in on the host: it only reads it.
+- Cards a model sends as text inside a list are drawn, and cards wrapped too deeply say why they weren't.
+- A Watch call no longer ends on a message too deeply nested to read.
+
 ## 0.178.3 (2026-11-18)
 
 ### Fixes

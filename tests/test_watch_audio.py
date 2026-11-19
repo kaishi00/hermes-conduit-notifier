@@ -129,6 +129,18 @@ def test_an_event_too_large_to_seal_goes_as_its_type():
     assert api.watch_audio._watch_audio_event_text('{"type":"a"}') == b'{"type":"a"}'
 
 
+def test_a_frame_too_deep_to_parse_is_unreadable_not_the_bridges_end():
+    # #902's rule on the Watch bridge too (notifier 903): RecursionError is
+    # an unreadable frame wherever the bridge reads one.
+    deep = '{"type":"session.update","x":' + "[" * 100000 + "]" * 100000 + "}"
+    assert json.loads(api.watch_audio._watch_audio_event_text(deep)) == {"type": "unknown", "conduit_truncated": True}
+    session = object.__new__(api.watch_audio._WatchAudioSession)
+    session.owed_since = None
+    session.bridge = types.SimpleNamespace(clock=lambda: 1.0)
+    session.asked(deep)
+    assert session.owed_event == "?" and session.owed_since == 1.0
+
+
 # --- Pacing -------------------------------------------------------------------
 
 
