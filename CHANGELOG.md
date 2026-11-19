@@ -17,7 +17,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 ### New and improved
 
-- Calls from Hermes ring Conduit on your computer too, beside your iPhone: answer there and the call opens in its chat.
+- Calls from Hermes ring Conduit on your computer too, beside your iPhone: answer there and the call opens in its chat. Answered on one, the other stops ringing; declined on your computer, Hermes hears so, as from your iPhone.
 
 ## 0.179.0 (2026-11-19)
 

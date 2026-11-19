@@ -829,3 +829,52 @@ def test_a_ring_without_sessions_or_a_bad_id_is_handled(tmp_path):
     store.add_ring("not a call")
     rings = store.rings()["rings"]
     assert [(ring["id"], ring["kind"], ring["session_ids"]) for ring in rings] == [("watch_abcdefgh", None, [])]
+
+
+def test_a_ring_settles_wherever_the_user_acted_on_it(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    store.add_ring({"id": "watch_aaaaaaaa", "kind": "done", "session_ids": ["s1"]})
+    first = store.rings()
+    assert first["rings"][0]["state"] == "ringing"
+    # Declined on one device: a computer asking since its last answer hears so.
+    clock.now += 2
+    store.record_outcome("watch_aaaaaaaa", ["s1"], "declined")
+    settled = store.rings(first["now"])["rings"]
+    assert [(ring["id"], ring["state"]) for ring in settled] == [("watch_aaaaaaaa", "declined")]
+    assert [entry["outcome"] for entry in store.take_outcomes("s1")] == ["declined"]
+
+
+def test_a_call_started_anywhere_answers_the_ring_and_takes_back_its_decline(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    store.add_ring({"id": "watch_aaaaaaaa", "kind": "done", "session_ids": ["s1"]})
+    # Declined on the computer, then answered on the iPhone: Hermes hears no decline.
+    store.record_outcome("watch_aaaaaaaa", ["s1"], "declined")
+    before = store.rings()["now"]
+    clock.now += 3
+    store.set_presence(90)
+    assert [(ring["id"], ring["state"]) for ring in store.rings(before)["rings"]] == [("watch_aaaaaaaa", "answered")]
+    assert store.take_outcomes("s1") == []
+    # A miss the other device reports later isn't heard either.
+    store.record_outcome("watch_aaaaaaaa", ["s1"], "missed")
+    assert store.take_outcomes("s1") == []
+    # A ring older than the window isn't answered by a later call.
+    store.set_presence(0)
+    store.add_ring({"id": "watch_bbbbbbbb", "kind": "done", "session_ids": ["s2"]})
+    clock.now += calls_store.RING_ANSWER_WINDOW_S + 1
+    store.set_presence(90)
+    assert {ring["id"]: ring["state"] for ring in store.rings()["rings"]}["watch_bbbbbbbb"] == "ringing"
+
+
+def test_a_call_declined_before_another_was_answered_stays_declined(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    store.add_ring({"id": "watch_aaaaaaaa", "kind": "done", "session_ids": ["s1"]})
+    store.record_outcome("watch_aaaaaaaa", ["s1"], "declined")
+    clock.now += 5
+    store.add_ring({"id": "watch_bbbbbbbb", "kind": "done", "session_ids": ["s2"]})
+    store.set_presence(90)
+    assert {ring["id"]: ring["state"] for ring in store.rings()["rings"]} == {
+        "watch_aaaaaaaa": "declined", "watch_bbbbbbbb": "answered"}
+    assert [entry["outcome"] for entry in store.take_outcomes("s1")] == ["declined"]

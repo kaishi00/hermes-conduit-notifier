@@ -305,7 +305,8 @@ async def get_call_rings(response: Response, after: Optional[float] = None,
                          profile: Optional[str] = None) -> Dict[str, Any]:
     """The calls that just went out, for Conduit on a computer to ring too:
     those after ``after`` (the ``now`` of its last answer), kept for
-    calls_store.RING_TTL_S seconds."""
+    calls_store.RING_TTL_S seconds, and those settled since (answered on
+    any device, declined or missed), so a computer still ringing stops."""
     return await _calls_route(profile, response, lambda: call_rings(after), "rings")
 
 

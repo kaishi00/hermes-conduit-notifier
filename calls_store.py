@@ -187,6 +187,14 @@ MAX_DELIVERED = 32
 RING_TTL_S = 2 * 60
 MAX_RINGS = 16
 RING_KINDS = ("done", "failed", "stopped", "approval", "question")
+# Where a ring stands: still ringing, or settled by the device that acted on
+# it (a call started on any device answers it; a decline or a missed call
+# reported from any device settles it so). A computer stops ringing for one
+# settled anywhere.
+RING_STATES = ("ringing", "answered", "declined", "missed")
+# A call started this soon after a ring answers it, whichever device still
+# rang or declined: longer than the iPhone and a computer ring.
+RING_ANSWER_WINDOW_S = 60
 # How long a call waits to hear how its approval answer fared: longer than
 # the agent's process takes to pass it on (calls.APPROVAL_ANSWER_POLL_S and
 # APPROVAL_MATCH_TRIES), well within the Watch relay's wait.
@@ -942,6 +950,26 @@ class CallStore:
             return {"status": "away"}
         with self._locked() as state:
             state["presence_until"] = self.clock() + hold if hold else 0.0
+            if hold:
+                # A call starting on any device answers the rings of the last
+                # RING_ANSWER_WINDOW_S (below): a computer still ringing stops,
+                # and a decline or miss another device reported (or reports
+                # later) for one of them isn't heard, since the user took it.
+                now = self.clock()
+                recent = [ring for ring in state["rings"]
+                          if ring["state"] != "answered" and now - ring["at"] < RING_ANSWER_WINDOW_S]
+                # The rings still ringing, and the newest one even if a device
+                # declined it (the iPhone answered what the computer declined);
+                # an older declined one stays declined: the user turned that
+                # call down and took a later one.
+                answered = {ring["id"] for ring in recent if ring["state"] == "ringing"}
+                if recent:
+                    answered.add(max(recent, key=lambda ring: ring["at"])["id"])
+                for ring in state["rings"]:
+                    if ring["id"] in answered:
+                        ring["state"], ring["changed"] = "answered", now
+                if answered:
+                    state["outcomes"] = [entry for entry in state["outcomes"] if entry["id"] not in answered]
             return {"status": "present" if hold else "away"}
 
     def in_call(self) -> bool:
@@ -1005,6 +1033,12 @@ class CallStore:
         # Below the TTL: one exactly a day old would be dropped unheard.
         age = _seconds(age_s, "age_s", OUTCOME_TTL_S - 1)
         with self._locked() as state:
+            # Answered on another device (a computer, or the iPhone after the
+            # computer declined): the user took the call, so Hermes hears no
+            # decline or miss for it.
+            if any(ring["id"] == call_id and ring["state"] == "answered" for ring in state["rings"]):
+                return {"status": "recorded"}
+            self._settle_rings(state, outcome, call_id)
             known = {entry["id"] for entry in state["outcomes"]} | {entry["id"] for entry in state["told"]}
             if call_id not in known:
                 state["outcomes"] = [*state["outcomes"], {
@@ -1119,17 +1153,28 @@ class CallStore:
             "body": _clip(body, 500),
         }
         with self._locked() as state:
-            entry["at"] = self.clock()
+            entry["at"] = entry["changed"] = self.clock()
+            entry["state"] = "ringing"
             state["rings"] = [ring for ring in state["rings"] if ring["id"] != entry["id"]] + [entry]
             state["rings"] = state["rings"][-MAX_RINGS:]
 
     def rings(self, after: Any = None) -> dict[str, Any]:
-        """The calls of the last RING_TTL_S seconds that went out after
-        ``after`` (the ``now`` an earlier answer gave), oldest first."""
+        """The calls of the last RING_TTL_S seconds that went out or settled
+        after ``after`` (the ``now`` an earlier answer gave), oldest first:
+        each with its ``state`` (RING_STATES), so a computer still ringing
+        for one answered on the iPhone stops."""
         since = float(after) if isinstance(after, (int, float)) and not isinstance(after, bool) else None
         now = self.clock()
-        rings = [dict(ring) for ring in self._load()["rings"] if since is None or ring["at"] > since]
+        rings = [dict(ring) for ring in self._load()["rings"] if since is None or ring["changed"] > since]
         return {"rings": rings, "now": now}
+
+    def _settle_rings(self, state: dict[str, Any], outcome: str, call_id: str | None = None) -> None:
+        """Settles the rings still ringing (only ``call_id``'s, when named)."""
+        now = self.clock()
+        for ring in state["rings"]:
+            if ring["state"] == "ringing" and (call_id is None or ring["id"] == call_id):
+                ring["state"] = outcome
+                ring["changed"] = now
 
     def next_due(self) -> float | None:
         """When the earliest hold over an ended job runs out, if any."""
@@ -1369,6 +1414,7 @@ def _ring_entry(entry: dict[str, Any], now: float) -> dict[str, Any] | None:
             or not isinstance(entry.get("id"), str) or not _WATCH_ID.match(entry["id"])):
         return None
     session_ids = _ring_sessions(entry.get("session_ids"))
+    changed = entry.get("changed")
     return {
         "id": entry["id"],
         "kind": entry.get("kind") if entry.get("kind") in RING_KINDS else None,
@@ -1379,6 +1425,8 @@ def _ring_entry(entry: dict[str, Any], now: float) -> dict[str, Any] | None:
         "heading": _clip(entry.get("heading"), 120),
         "body": _clip(entry.get("body"), 500),
         "at": float(at),
+        "state": entry.get("state") if entry.get("state") in RING_STATES else "ringing",
+        "changed": float(changed) if isinstance(changed, (int, float)) and not isinstance(changed, bool) and changed >= at else float(at),
     }
 
 
