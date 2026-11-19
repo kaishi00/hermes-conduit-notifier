@@ -30,6 +30,14 @@ entry current.
   entry.
 - Text that describes a behavior is one of its siblings: tool descriptions and
   results the models read, README.md, and the app's briefings and Settings text.
+- Conduit for desktop
+  ([hermes-conduit-desktop](https://github.com/kaishi00/hermes-conduit-desktop))
+  reads the same routes and tools the phone does. Each map entry's Desktop app
+  line says whether it has the feature, and the PR's Desktop section says Done
+  (the desktop PR), Not needed (why) or Follow-up (the desktop issue or PR, or
+  the entry whose Desktop app line records the gap); CI fails a PR without
+  one (`.github/workflows/pr-desktop.yml`). Keep the desktop compatible where
+  it's cheap, but never hold or narrow a Conduit feature for it.
 
 ## Dashboard routes
 

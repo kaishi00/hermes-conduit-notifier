@@ -612,6 +612,7 @@ routes:
   - PUT /calls
   - POST /calls/outcomes
   - PUT /calls/presence
+  - GET /calls/rings
   - GET /calls/waiting
   - POST /calls/waiting/answer
   - POST /calls/watches

@@ -319,6 +319,9 @@ ROUTE_CAPABILITIES = (
     # POST /workstreams/adopt: a voice call's job kept in its bot's registry,
     # in the Work panel marked as a call's (Bot workstreams M5).
     "work-adopt",
+    # GET /calls/rings: the calls that just went out, so Conduit on a
+    # computer rings for them beside the iPhone (Calls from Hermes).
+    "call-rings",
     # POST /workstreams/call-ended: a call kept with the Bot Chat ended in
     # any voice mode, so the updates its workstreams held go out.
     "work-call-ended",

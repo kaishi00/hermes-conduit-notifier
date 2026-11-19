@@ -36,6 +36,10 @@ CALLS_WINDOW_S = 60.0
 CALLS_MAX_BODY_BYTES = 4096
 _CALL_WATCH_ID = re.compile(r"^[0-9a-f]{24}\Z")
 _calls_limiter = core._MintLimiter(CALLS_LIMIT, CALLS_WINDOW_S, message="Too many call requests; try again shortly")
+# Conduit on a computer asks for rings every few seconds per profile: a bucket
+# of its own, so its polling never leaves a watch, presence or outcome a 429.
+RINGS_LIMIT = 60
+_rings_limiter = core._MintLimiter(RINGS_LIMIT, CALLS_WINDOW_S, message="Too many ring requests; try again shortly")
 _calls_store_module: Any = None
 
 
@@ -65,6 +69,10 @@ def calls_status() -> Dict[str, Any]:
         "rules_max": module.MAX_RULES_CHARS,
         "watches": store.watch_count(),
     }
+
+
+def call_rings(after: Optional[float]) -> Dict[str, Any]:
+    return _calls_store().CallStore(core._calls_home()).rings(after)
 
 
 def update_call_settings(body: Any) -> Dict[str, Any]:
@@ -248,10 +256,10 @@ def _approval_outcome(result: Dict[str, Any], fared: str) -> Dict[str, Any]:
 
 
 async def _calls_route(profile: Optional[str], response: Response, fn: Callable[[], Dict[str, Any]],
-                       route: str) -> Dict[str, Any]:
+                       route: str, limiter: Any = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await core._run_scoped(profile, core._limited(_calls_limiter, profile, fn)))}
+        return {"ok": True, **(await core._run_scoped(profile, core._limited(limiter or _calls_limiter, profile, fn)))}
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:
@@ -294,6 +302,16 @@ async def delete_call_watch(watch_id: str, response: Response, profile: Optional
 async def put_call_presence(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     body = await core._read_json_body(request, CALLS_MAX_BODY_BYTES)
     return await _calls_route(profile, response, lambda: set_call_presence(body), "presence")
+
+
+@router.get("/calls/rings")
+async def get_call_rings(response: Response, after: Optional[float] = None,
+                         profile: Optional[str] = None) -> Dict[str, Any]:
+    """The calls that just went out, for Conduit on a computer to ring too:
+    those after ``after`` (the ``now`` of its last answer), kept for
+    calls_store.RING_TTL_S seconds, and those settled since (answered on
+    any device, declined or missed), so a computer still ringing stops."""
+    return await _calls_route(profile, response, lambda: call_rings(after), "rings", _rings_limiter)
 
 
 @router.get("/calls/waiting")

@@ -30,6 +30,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     api.hermes_calls._calls_limiter._mints.clear()
     api.waiting._waiting_limiter._mints.clear()
+    api.hermes_calls._rings_limiter._mints.clear()
     return tmp_path
 
 
@@ -373,4 +374,24 @@ def test_the_waiting_list_reads_from_a_bucket_of_its_own(paired):
     for _ in range(api.hermes_calls.CALLS_LIMIT + 5):
         assert http.get(f"{BASE}/waiting").status_code == 200
     # A call's renewals still go through.
+    assert http.get(f"{BASE}/calls").status_code == 200
+
+
+def test_rings_list_the_calls_that_just_went_out(home):
+    store = api.hermes_calls._calls_store().CallStore(home)
+    store.add_ring({"id": "watch_abcdefgh", "kind": "done", "title": "Deploy", "session_ids": ["s1"]}, name="Atlas")
+    response = _http().get(f"{BASE}/calls/rings")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["ok"] is True and [ring["id"] for ring in body["rings"]] == ["watch_abcdefgh"]
+    assert _http().get(f"{BASE}/calls/rings", params={"after": body["now"]}).json()["rings"] == []
+
+
+def test_rings_are_read_from_a_bucket_of_their_own(paired):
+    http = _http()
+    for _ in range(api.hermes_calls.CALLS_LIMIT + 5):
+        assert http.get(f"{BASE}/calls/rings").status_code == 200
+    # A computer's polling leaves presence and watches working.
+    assert http.put(f"{BASE}/calls/presence", json={"hold_s": 0}).status_code == 200
     assert http.get(f"{BASE}/calls").status_code == 200
