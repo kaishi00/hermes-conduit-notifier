@@ -141,6 +141,8 @@ def test_the_line_names_the_surface_and_how_it_was_entered():
         "give (like dates or a budget), ask them in one clarify call with open questions: Conduit shows it as a "
         "form, and they may leave some blank.]")
     assert surfaces.line("siri") == "[Conduit: this message came from Siri or a Shortcut.]"
+    # Conduit for desktop: a Mac says `mac`, a Windows PC `windows`.
+    assert surfaces.line("windows", "typed").startswith("[Conduit: this message came from the user's Windows PC, typed. ")
     assert "likely driving" in surfaces.line("carplay", "spoken")
     # The Pulse widget's Do it: a tap, never typed or spoken, in Conduit's words.
     assert surfaces.line("widget") == (
@@ -149,7 +151,7 @@ def test_the_line_names_the_surface_and_how_it_was_entered():
 
 
 def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
-    for surface in ("iphone", "ipad", "mac", "vision"):
+    for surface in ("iphone", "ipad", "mac", "windows", "vision"):
         assert surfaces.FORM_HINT in surfaces.line(surface, "typed")
         # Spoken, it's read out one question at a time; and only a message
         # Conduit says was typed hears it.

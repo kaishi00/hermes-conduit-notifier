@@ -13,6 +13,13 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.182.0 (2026-11-19)
+
+### New and improved
+
+- Conduit for desktop tells your agent when a message came from your Windows PC, as the iPhone app does for an iPhone or a Mac, so it can answer for a big screen.
+- A Windows PC can hold a chat as on screen, as the phone and a Mac do, so a reply you're watching arrive there doesn't also push to your phone.
+
 ## 0.181.0 (2026-11-19)
 
 ### New and improved

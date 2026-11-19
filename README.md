@@ -2235,7 +2235,8 @@ about sound files, since the answer is heard as well as read (0.156.0+).
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
   answers `{"ok": true, "recorded": true}`. `text_sha256` is the SHA-256 of
   the UTF-8 text Conduit sends in `prompt.submit`. Surfaces: `iphone`,
-  `ipad`, `mac`, `vision`, `watch`, `carplay`, `siri`, and `widget` for a
+  `ipad`, `mac`, `windows` (Conduit for desktop on a Windows PC, 0.182.0+;
+  capability `turn-surface-windows`; on a Mac it says `mac`), `vision`, `watch`, `carplay`, `siri`, and `widget` for a
   widget's button such as the Pulse widget's Do it (0.164.12+; an older
   plugin refuses it, and that turn has no line); `input` is `typed` or
   `spoken`, or left out when unknown (a Shortcut, a widget). `"heard": true` on a
