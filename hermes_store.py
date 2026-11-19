@@ -198,11 +198,11 @@ class _Store:
         return None if source is None else str(getattr(source, "value", source))
 
     def list_sessions_rich(self, *, session_key: Optional[str] = None, limit: Optional[int] = 20,
-                           order_by_last_active: bool = False) -> list:
+                           order_by_last_active: bool = False, include_hidden: bool = False) -> list:
         """The rows of a session key (the only listing the plugin asks for)."""
         sessions = _hermes("persistence.conversation.sessions")
         order = sessions.SessionOrder.LAST_ACTIVE if order_by_last_active else sessions.SessionOrder.STARTED_AT
-        query = sessions.SessionQuery(session_key=session_key, order=order)
+        query = sessions.SessionQuery(session_key=session_key, order=order, include_hidden=include_hidden)
         return [entry.as_list_row()
                 for entry in self._handle.sessions.list_sessions(query, sessions.SessionWindow(limit=limit))]
 
