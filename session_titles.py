@@ -199,14 +199,7 @@ def read_or_raise(home: Any, key: str) -> str:
         value = getter(key) if getter else None
         if not value and hasattr(db, "list_sessions_rich"):
             # Approval hooks carry the gateway session key, not the session id.
-            # The listing leaves hidden rows out unless asked, and a Bot Chat
-            # is one (notifier#881); a Hermes from before that filter has no
-            # hidden rows to leave out.
-            try:
-                rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True, include_hidden=True)
-            except TypeError:
-                rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True)
-            value = rows[0].get("title") if rows else None
+            value = hermes_store.latest_row_of_key(db, key).get("title")
         return value.strip() if isinstance(value, str) else ""
     finally:
         try:

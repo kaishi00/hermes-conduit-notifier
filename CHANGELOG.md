@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.178.5 (2026-11-19)
+
+### Fixes
+
+- When an update waits on a Bot Chat that's still working, Conduit names that chat and can stop it again.
+
 ## 0.178.4 (2026-11-19)
 
 ### Fixes
