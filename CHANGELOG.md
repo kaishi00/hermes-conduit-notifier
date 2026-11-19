@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.178.4 (2026-11-19)
+
+### Fixes
+
+- Approval pushes from a Bot Chat show the chat's title again (Bot Chats are hidden from Hermes' chat list, and the lookup skipped them).
+
 ## 0.178.3 (2026-11-18)
 
 ### Fixes
