@@ -139,6 +139,9 @@ def test_a_frame_too_deep_to_parse_is_unreadable_not_the_bridges_end():
     session.bridge = types.SimpleNamespace(clock=lambda: 1.0)
     session.asked(deep)
     assert session.owed_event == "?" and session.owed_since == 1.0
+    # A Watch control message too deep to parse is ignored, not raised.
+    bridge = object.__new__(api.watch_audio._WatchAudioBridge)
+    assert asyncio.run(bridge._control(None, deep.encode())) is None
 
 
 # --- Pacing -------------------------------------------------------------------

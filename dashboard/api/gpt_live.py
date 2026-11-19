@@ -209,7 +209,8 @@ def _takes_read_only(call: Callable[..., Any]) -> bool:
         params = inspect.signature(call).parameters.values()
     except (TypeError, ValueError):
         return False
-    return any(p.name == "read_only" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+    # Named only: a Hermes taking **kwargs may pass them on somewhere strict.
+    return any(p.name == "read_only" and p.kind is not inspect.Parameter.VAR_KEYWORD for p in params)
 
 
 def _codex_credentials(refresh_if_expiring: bool = True, read_only: bool = False) -> tuple:

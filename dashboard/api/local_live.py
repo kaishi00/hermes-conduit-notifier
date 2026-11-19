@@ -522,7 +522,8 @@ class _LocalLiveCall:
             return False
         try:
             frame = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # Too deep to parse is unreadable, passed on as it is (notifier 903).
             return False
         kind = frame.get("type") if isinstance(frame, dict) else None
         if not isinstance(kind, str) or not kind.startswith("conduit."):
@@ -547,7 +548,7 @@ class _LocalLiveCall:
     def _note_words(self, text: str) -> None:
         try:
             frame = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             return
         item = frame.get("item") if isinstance(frame, dict) and frame.get("type") == "conversation.item.create" else None
         content = item.get("content") if isinstance(item, dict) else None

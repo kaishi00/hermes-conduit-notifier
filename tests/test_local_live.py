@@ -2554,15 +2554,16 @@ def test_a_server_frame_nested_past_the_parsers_depth_is_passed_on_not_the_calls
     assert deep in frames
 
 
+@pytest.mark.parametrize("kind", ["session.update", "conduit.turn.delta"])
 @pytest.mark.parametrize("own_model", [False, True])
-def test_a_client_frame_nested_past_the_parsers_depth_reaches_the_server_as_it_came(client, hermes, server, own_model):
-    # The read-back's from_client and the own model's frame reader take a
-    # client frame too deep to parse as unreadable: it goes on, the call
-    # carries on (notifier 903).
+def test_a_client_frame_nested_past_the_parsers_depth_reaches_the_server_as_it_came(client, hermes, server, own_model, kind):
+    # The read-back's from_client, the own model's frame reader and its turn
+    # frames' intercept take a client frame too deep to parse as unreadable:
+    # it goes on, the call carries on (notifier 903).
     if own_model:
         _own_model(hermes)
     server.upstream = upstream = ReadBackUpstream(refuses=not own_model)
-    deep = '{"type":"session.update","session":' + "[" * 100000 + "]" * 100000 + "}"
+    deep = '{"type":"' + kind + '","session":' + "[" * 100000 + "]" * 100000 + "}"
     with client.websocket_connect(f"{BASE}/local-live/socket") as ws:
         _own_ready(ws, upstream) if own_model else _ready(ws, upstream)
         ws.send_text(deep)

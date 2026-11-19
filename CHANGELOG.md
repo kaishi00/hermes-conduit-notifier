@@ -19,7 +19,7 @@ checks it). The format is fixed, because Conduit reads it:
 
 - Checking whether GPT-Live is ready no longer touches the Codex sign-in on the host: it only reads it.
 - Cards a model sends as text inside a list are drawn, and cards wrapped too deeply say why they weren't.
-- A Watch call no longer ends on a message too deeply nested to read.
+- A Watch call or a Local Live call no longer ends on a message too deeply nested to read.
 
 ## 0.178.3 (2026-11-18)
 
