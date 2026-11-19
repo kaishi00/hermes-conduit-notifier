@@ -335,3 +335,13 @@ def test_link_profile_keeps_what_isnt_ours_and_refuses_a_profiles_own_install(ho
 
     elsewhere = _plugin(tmp_path / "copy" / "conduit_push", "0.123.0")
     assert profile_copies.link_profile(root, elsewhere, other) is None
+
+
+def test_holds_plugin_counts_a_copy_under_another_folder_name(host):
+    root, shared = host
+    home = _profile(root, "nilou", None)
+    _plugin(home / "plugins" / "conduit-push", "0.1.0")
+    assert profile_copies.holds_plugin(home, shared)
+    other = _profile(root, "dehya", None)
+    _plugin(other / "plugins" / "hindsight", "1.0.0", name="hindsight")
+    assert not profile_copies.holds_plugin(other, shared)

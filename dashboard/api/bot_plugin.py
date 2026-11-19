@@ -34,7 +34,6 @@ router = core.router
 # New Bot calls it for every bot it makes, Edit Bot's Turn On for one that has
 # it off. GET says which.
 
-BOT_PLUGIN_PATH = "/profiles/plugin"
 BOT_PLUGIN_ENABLE_TIMEOUT_S = 90.0
 # Hermes' profile ids (hermes_constants.PROFILE_ID_RE): checked here too, so a
 # name never reaches the command line as anything but a profile id.
@@ -83,15 +82,16 @@ def _main_install() -> Optional[Path]:
 async def bot_plugin_state(name: str, home: Path) -> Dict[str, Any]:
     """``on``: Hermes serves the plugin's routes for the profile (its own
     consent check) and its chats have a copy to load. ``can_turn_on``: this
-    dashboard can turn it on there."""
-    shared = _main_install()
-    copies = self_update.profile_copies_module() if shared is not None else None
-    holds = bool(copies and copies.holds_plugin(home, shared))
+    dashboard can turn it on there (it runs the main install)."""
+    root = _hermes_root()
+    copies = self_update.profile_copies_module()
+    # The profile's copy is counted against the main install wherever this dashboard runs from.
+    holds = bool(copies and root is not None and copies.holds_plugin(home, root / "plugins" / core.PLUGIN_NAME))
     # Hermes failing to check (503) or not knowing the profile (404) is said
     # as such, never read as the plugin being off.
     allowed = not await core._plugin_refused_on(name)
     return {"profile": name, "on": allowed and holds, "allowed": allowed, "linked": holds,
-            "can_turn_on": copies is not None}
+            "can_turn_on": copies is not None and _main_install() is not None}
 
 
 def _enable_command(name: str) -> list:
@@ -134,7 +134,7 @@ def turn_on(name: str, home: Path) -> None:
     logger.info("Conduit plugin: turned on for profile %s", name)
 
 
-@router.get(BOT_PLUGIN_PATH)
+@router.get("/profiles/plugin")
 async def get_bot_plugin(request: Request, response: Response, name: str = "") -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     _refuse_other_ticket(request, name.strip())
@@ -142,7 +142,7 @@ async def get_bot_plugin(request: Request, response: Response, name: str = "") -
     return await bot_plugin_state(name.strip(), home)
 
 
-@router.post(BOT_PLUGIN_PATH)
+@router.post("/profiles/plugin")
 async def post_bot_plugin(request: Request, response: Response) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     body = await core._read_json_body(request)

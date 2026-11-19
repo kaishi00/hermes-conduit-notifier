@@ -115,7 +115,11 @@ def test_a_profiles_own_copy_of_the_plugin_cant_share_itself(host, monkeypatch, 
     (own / "profile_copies.py").write_text((ROOT / "profile_copies.py").read_text())
     monkeypatch.setattr(api.core, "_plugin_root", lambda: str(own))
     client = _client()
-    assert client.get(f"{BASE}/profiles/plugin", params={"name": "furina"}).json()["can_turn_on"] is False
+    # The bot's own link to the main install still counts as its copy.
+    (host.fresh / "plugins").mkdir()
+    (host.fresh / "plugins" / "conduit_push").symlink_to(host.shared, target_is_directory=True)
+    state = client.get(f"{BASE}/profiles/plugin", params={"name": "furina"}).json()
+    assert state["can_turn_on"] is False and state["linked"] is True
     assert client.post(f"{BASE}/profiles/plugin", json={"name": "furina"}).status_code == 501
     assert host.runs == []
 

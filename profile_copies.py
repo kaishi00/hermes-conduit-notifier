@@ -191,15 +191,23 @@ def link_profile(root: Path, shared: Path, home: Path, *,
 
 
 def holds_plugin(home: Path, shared: Path) -> bool:
-    """Whether the profile at ``home`` has a copy of the plugin its chats load:
-    a link to ``shared`` or a folder of this plugin in its own ``plugins/``."""
-    target = Path(home) / "plugins" / Path(shared).name
+    """Whether the profile at ``home`` has a copy of the plugin its chats load,
+    as ``_point_profile`` counts one: a link to ``shared``, or a folder in its
+    own ``plugins/`` (any name) whose manifest names this plugin."""
+    plugins = Path(home) / "plugins"
     try:
-        if (Path(home) / "plugins").resolve() == Path(shared).parent.resolve():
+        if plugins.resolve() == Path(shared).parent.resolve():
             return True
-        return _links_to(target, Path(shared)) or (target.is_dir() and _manifest(target).get("name") == PLUGIN_NAME)
+        children = list(plugins.iterdir()) if plugins.is_dir() else []
     except OSError:
         return False
+    for child in children:
+        try:
+            if _links_to(child, Path(shared)) or (child.is_dir() and _manifest(child).get("name") == PLUGIN_NAME):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path, Path], None],

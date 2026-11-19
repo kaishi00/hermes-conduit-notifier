@@ -680,6 +680,8 @@ routes:
   - GET /predict
   - POST /predict
   - POST /present/exchange
+  - GET /profiles/plugin
+  - POST /profiles/plugin
   - GET /pulse
   - PUT /pulse
   - POST /pulse/acted
