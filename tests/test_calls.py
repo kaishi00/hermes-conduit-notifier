@@ -128,6 +128,7 @@ def test_a_watched_job_that_finishes_sends_a_call_request_instead(home, fake):
 
 def test_a_call_that_goes_out_rings_conduit_on_a_computer_too(home, fake):
     watch_id = _watch(home, "rt-1", "st-1")
+    fake.answers = [{"accepted": True, "delivered": True, "rang": True}]
     assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
     [ring] = CallStore(home).rings()["rings"]
     assert ring["id"] == watch_id
@@ -137,8 +138,28 @@ def test_a_call_that_goes_out_rings_conduit_on_a_computer_too(home, fake):
     assert ring["body"] == "“Check the server” finished."
 
 
+@pytest.mark.parametrize("answer", [
+    {"accepted": True, "delivered": True, "rang": False},
+    {"accepted": True, "delivered": False},
+    {"accepted": True, "duplicate": True},
+])
+def test_a_call_the_iphone_didnt_ring_rings_no_computer(home, fake, answer):
+    _watch(home, "st-1")
+    fake.answers = [answer]
+    assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
+    assert CallStore(home).rings()["rings"] == []
+
+
+def test_a_call_that_fell_back_to_a_push_rings_no_computer(home, fake):
+    fake.failures = [_Rejected(400, "invalid_event_type")]
+    _watch(home, "st-1")
+    calls.turn_ended("st-1", "done", profile="default", fallback=READY)
+    assert fake.enqueued and CallStore(home).rings()["rings"] == []
+
+
 def test_a_ring_that_cant_be_kept_never_stops_the_call(home, fake, monkeypatch):
     _watch(home, "st-1")
+    fake.answers = [{"accepted": True, "delivered": True, "rang": True}]
     monkeypatch.setattr(CallStore, "add_ring", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
     assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
     assert len(fake.sent) == 1

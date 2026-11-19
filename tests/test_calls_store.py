@@ -813,11 +813,11 @@ def test_a_call_that_went_out_rings_computers_for_two_minutes(tmp_path):
     assert ring["name"] == "Atlas" and ring["heading"] == "Atlas wants to talk" and ring["session_ids"] == ["s1"]
     # Asked again after that answer: nothing new.
     assert store.rings(answer["now"])["rings"] == []
-    # A resend of the same call is one ring, newer.
+    # A resend of the same call (a replayed failure hook) keeps the first: no second ring.
     clock.now += 5
     store.add_ring(call, name="Atlas")
     assert len(store.rings()["rings"]) == 1
-    assert len(store.rings(answer["now"])["rings"]) == 1
+    assert store.rings(answer["now"])["rings"] == []
     clock.now += calls_store.RING_TTL_S + 1
     assert store.rings()["rings"] == []
 

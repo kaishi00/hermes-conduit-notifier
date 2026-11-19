@@ -30,6 +30,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     api.hermes_calls._calls_limiter._mints.clear()
     api.waiting._waiting_limiter._mints.clear()
+    api.hermes_calls._rings_limiter._mints.clear()
     return tmp_path
 
 
@@ -385,3 +386,12 @@ def test_rings_list_the_calls_that_just_went_out(home):
     body = response.json()
     assert body["ok"] is True and [ring["id"] for ring in body["rings"]] == ["watch_abcdefgh"]
     assert _http().get(f"{BASE}/calls/rings", params={"after": body["now"]}).json()["rings"] == []
+
+
+def test_rings_are_read_from_a_bucket_of_their_own(paired):
+    http = _http()
+    for _ in range(api.hermes_calls.CALLS_LIMIT + 5):
+        assert http.get(f"{BASE}/calls/rings").status_code == 200
+    # A computer's polling leaves presence and watches working.
+    assert http.put(f"{BASE}/calls/presence", json={"hold_s": 0}).status_code == 200
+    assert http.get(f"{BASE}/calls").status_code == 200

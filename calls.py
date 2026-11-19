@@ -96,7 +96,9 @@ _in_flight_lock = threading.Lock()
 
 def _note_ring(event: dict[str, Any]) -> None:
     """Keeps the call for Conduit on a computer (GET /calls/rings), which rings
-    for it beside the iPhone. Never stops the call itself."""
+    for it beside the iPhone: only once the relay says the iPhone rang, so a
+    call that fell back to a push, or rang nowhere ("Ring like a phone call"
+    off), never rings a computer. Never stops the call itself."""
     try:
         _store(get_hermes_home()).add_ring(
             event.get("call"), name=event.get("profile_name", ""), title=event.get("title", ""), body=event.get("body", ""))
@@ -114,7 +116,6 @@ def _deliver_waited(event: dict[str, Any], fallback: dict[str, Any] | None, dead
     on past it, and the process's exit waits for them (_wait_at_exit)."""
     if _stopped.is_set():
         return
-    _note_ring(event)
     done = threading.Event()
 
     def work() -> None:
@@ -864,6 +865,8 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
         # notice: one too many beats none.
         if not (relay_failed and isinstance(answer, dict) and answer.get("duplicate")):
             logger.info("Conduit call request: %s", call_delivery(answer))
+            if isinstance(answer, dict) and answer.get("rang") is True and answer.get("duplicate") is not True:
+                _note_ring(event)
             return
         logger.warning("Conduit call request was taken but never sent")
         break

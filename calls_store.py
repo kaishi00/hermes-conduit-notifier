@@ -1139,7 +1139,7 @@ class CallStore:
 
     def add_ring(self, call: Any, *, name: Any = "", title: Any = "", body: Any = "") -> None:
         """Keeps a call that just went out, so Conduit on a computer rings for
-        it too. A resend of the same call keeps one entry."""
+        it too. A resend of the same call keeps the first entry."""
         if not isinstance(call, dict) or not _WATCH_ID.match(str(call.get("id") or "")):
             return
         entry = {
@@ -1153,9 +1153,13 @@ class CallStore:
             "body": _clip(body, 500),
         }
         with self._locked() as state:
+            # A replay of the same call (a failure hook seeded to its id) keeps
+            # the first: a computer asking since then doesn't ring again.
+            if any(ring["id"] == entry["id"] for ring in state["rings"]):
+                return
             entry["at"] = entry["changed"] = self.clock()
             entry["state"] = "ringing"
-            state["rings"] = [ring for ring in state["rings"] if ring["id"] != entry["id"]] + [entry]
+            state["rings"] = [*state["rings"], entry]
             state["rings"] = state["rings"][-MAX_RINGS:]
 
     def rings(self, after: Any = None) -> dict[str, Any]:
@@ -1164,8 +1168,11 @@ class CallStore:
         each with its ``state`` (RING_STATES), so a computer still ringing
         for one answered on the iPhone stops."""
         since = float(after) if isinstance(after, (int, float)) and not isinstance(after, bool) else None
+        # Read before the clock: a ring kept in between is in this answer,
+        # or newer than its ``now`` and in the next one.
+        kept = self._load()["rings"]
         now = self.clock()
-        rings = [dict(ring) for ring in self._load()["rings"] if since is None or ring["changed"] > since]
+        rings = [dict(ring) for ring in kept if since is None or ring["changed"] > since]
         return {"rings": rings, "now": now}
 
     def _settle_rings(self, state: dict[str, Any], outcome: str, call_id: str | None = None) -> None:
