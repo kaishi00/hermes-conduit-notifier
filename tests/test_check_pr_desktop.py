@@ -26,7 +26,8 @@ def test_answers_that_say_too_little_fail():
     assert "says why" in check.problem(body("Not needed."))
     assert "starts with" in check.problem(body("Later."))
     assert "no \"## Desktop\" section" in check.problem("## Summary\n")
-    assert "Follow-up" in check.problem(body("Follow-up: TBD"))
+    for placeholder in ("later", "TBD", "none", "N/A"):
+        assert "Follow-up" in check.problem(body(f"Follow-up: {placeholder}")), placeholder
     assert "names the desktop PR" in check.problem(body("Done.\nTracked as desktop#58."))
 
 
@@ -36,6 +37,7 @@ def test_a_fenced_heading_isnt_the_section():
     assert check.problem(quoted + "## Desktop\nNot needed: template only.\n") is None
     nested = "## Summary\n````\n```\n## Desktop\nDone: desktop#58.\n```\n````\n"
     assert "no \"## Desktop\" section" in check.problem(nested)
+    assert "no \"## Desktop\" section" in check.problem("## Summary\n```\n## Desktop\nDone: desktop#58.\n")
 
 
 def test_the_pr_template_asks_for_it():
