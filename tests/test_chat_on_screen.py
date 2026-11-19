@@ -74,6 +74,14 @@ def test_a_hold_of_zero_ends_only_that_devices_hold(tmp_path):
     assert list((tmp_path / on_screen.DIRECTORY).iterdir()) == []
 
 
+def test_a_windows_pc_holds_a_chat_beside_the_phone(tmp_path):
+    # Conduit for desktop on Windows names itself as its turn surface does.
+    assert on_screen.hold(tmp_path, "windows", ["s-1"], 90, now=1000.0) is True
+    on_screen.hold(tmp_path, "iphone", ["s-1"], 90, now=1000.0)
+    on_screen.hold(tmp_path, "iphone", [], 0, now=1001.0)
+    assert on_screen.on_screen(tmp_path, "s-1", now=1001.0), "the PC still has it on screen"
+
+
 def test_a_new_hold_replaces_the_devices_last_chat(tmp_path):
     on_screen.hold(tmp_path, "ipad", ["s-1"], 90, now=1000.0)
     on_screen.hold(tmp_path, "ipad", ["s-2"], 90, now=1005.0)
