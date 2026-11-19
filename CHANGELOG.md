@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.180.1 (2026-11-19)
+
+### Fixes
+
+- When a workstream asked you the same thing again and that notification couldn't be sent, the Bot Chat could still stay quiet about it in a few rare cases (its earlier message was refused, sent with another bot's question, or held while the Bot Chat was busy). Now each question counts on its own notification.
+
 ## 0.180.0 (2026-11-19)
 
 ### New and improved
