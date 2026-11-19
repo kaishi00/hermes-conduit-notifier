@@ -34,6 +34,8 @@ def test_a_fenced_heading_isnt_the_section():
     quoted = "## Summary\n```\n## Desktop\nDone: desktop#58.\n```\n\n"
     assert "no \"## Desktop\" section" in check.problem(quoted)
     assert check.problem(quoted + "## Desktop\nNot needed: template only.\n") is None
+    nested = "## Summary\n````\n```\n## Desktop\nDone: desktop#58.\n```\n````\n"
+    assert "no \"## Desktop\" section" in check.problem(nested)
 
 
 def test_the_pr_template_asks_for_it():
