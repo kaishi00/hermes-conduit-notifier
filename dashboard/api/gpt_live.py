@@ -204,15 +204,30 @@ def _gpt_live_instructions(live: Dict[str, Any]) -> str:
     return f"{persona}\n\n{extra}" if extra else persona
 
 
-def _codex_credentials(refresh_if_expiring: bool = True) -> tuple:
-    """(bearer, ChatGPT account id) from Hermes' Codex sign-in; TokenError(503) when unusable."""
+def _takes_read_only(call: Callable[..., Any]) -> bool:
+    try:
+        params = inspect.signature(call).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    # Named only: a Hermes taking **kwargs may pass them on somewhere strict.
+    return any(p.name == "read_only" and p.kind is not inspect.Parameter.VAR_KEYWORD for p in params)
+
+
+def _codex_credentials(refresh_if_expiring: bool = True, read_only: bool = False) -> tuple:
+    """(bearer, ChatGPT account id) from Hermes' Codex sign-in; TokenError(503) when unusable.
+
+    ``read_only`` (the status read): Hermes reports the stored sign-in as it
+    is, taking no auth.lock and importing nothing from the Codex CLI
+    (notifier 900). A Hermes before ``read_only`` reads without it, as
+    ``refresh_if_expiring=False`` already refreshed nothing there."""
     try:
         from hermes_cli.auth_codex import resolve_codex_runtime_credentials
         from hermes_cli.auth_constants import AuthError, _decode_jwt_claims
     except ImportError:
         raise core.TokenError(503, "This Hermes version has no Codex sign-in. " + GPT_LIVE_NO_FALLBACK)
     try:
-        credentials = resolve_codex_runtime_credentials(refresh_if_expiring=refresh_if_expiring)
+        extra = {"read_only": True} if read_only and _takes_read_only(resolve_codex_runtime_credentials) else {}
+        credentials = resolve_codex_runtime_credentials(refresh_if_expiring=refresh_if_expiring, **extra)
     except AuthError:
         raise core.TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
                               "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
@@ -244,7 +259,7 @@ def gpt_live_status() -> Dict[str, Any]:
     # fields stay the subscription's, which is all an older Conduit reads.
     status["api"] = gpt_live_api_status(live)
     try:
-        _codex_credentials(refresh_if_expiring=False)
+        _codex_credentials(refresh_if_expiring=False, read_only=True)
     except core.TokenError as exc:
         # A readiness reason, not a call failure: without the "no fallback" sentence.
         return {**status, "available": False, "reason": str(exc).replace(" " + GPT_LIVE_NO_FALLBACK, "")}

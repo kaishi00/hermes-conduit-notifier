@@ -491,7 +491,10 @@ def test_a_batch_completed_across_devices_releases_a_paused_pairing_too(home, mo
 
 
 def test_a_hand_pairing_stands_when_its_removed_mark_cannot_be_cleared(home, monkeypatch):
-    def fail(_installation):
+    tried = []
+
+    def fail(installation):
+        tried.append(installation)
         raise OSError("read-only")
 
     monkeypatch.setattr(client, "_forget_removed_device", fail)
@@ -499,3 +502,4 @@ def test_a_hand_pairing_stands_when_its_removed_mark_cannot_be_cleared(home, mon
                         _pairing(IPAD, "gw-3") if method == "POST" else {})
     state = client.claim_pairing(CODE, RELAY, "box")
     assert state["installation_id"] == IPAD and _read(home / "conduit-push.json")["installation_id"] == IPAD
+    assert tried == [IPAD], "the clear is tried, for the device paired (hermes-conduit 2778)"

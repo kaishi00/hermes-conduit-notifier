@@ -360,7 +360,7 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     if args.get("save_templates") is not None:
         saved = templates.save(args["save_templates"], problems)
     if args.get("cards") is not None:
-        args = {**args, "cards": _cards_unwrapped(args["cards"])}
+        args = {**args, "cards": _cards_unwrapped(args["cards"], problems)}
     given = _filled_templates(args.get("cards"), templates, problems)
     given = _reviews_kept(given, session, problems, reviews, is_room)
     # Every round kept above, however the card spelled its type.
@@ -687,42 +687,61 @@ def _review_decision(raw: Any, where: str, problems: list[str]) -> tuple[dict[st
     return decision, option_pages
 
 
-def _cards_unwrapped(given: Any, depth: int = 0) -> Any:
+# How deep _cards_unwrapped opens wrappers: past this the cards are refused.
+_MAX_CARD_WRAPS = 8
+
+CARD_WRAPS_NOTE = ("cards: wrapped more than {depth} deep (lists, JSON strings or {{\"cards\": ...}} "
+                   "inside each other), the cards inside left out; send them as one list")
+
+
+def _cards_unwrapped(given: Any, problems: list[str] | None = None, depth: int = 0) -> Any:
     """The cards as the list the schema asks for, however a model wrapped
     them: a list sent as a JSON string, one card on its own, a
     ``{"cards": ...}`` wrapper, or the list inside another list
-    (``[[{...}]]``), each of these inside the others too. A smaller model
-    that got those wrong kept showing the board again for half an hour
-    (MiniMax M3.1, 2026-11-18)."""
+    (``[[{...}]]``), each of these inside the others too, a JSON string
+    sitting in the list included. A smaller model that got those wrong kept
+    showing the board again for half an hour (MiniMax M3.1, 2026-11-18).
+    Past ``_MAX_CARD_WRAPS`` a wrapper stays unopened, and ``problems`` says
+    it was too deep (notifier 879)."""
     if depth > _MAX_CARD_WRAPS:
+        if problems is not None and CARD_WRAPS_NOTE.format(depth=_MAX_CARD_WRAPS) not in problems:
+            problems.append(CARD_WRAPS_NOTE.format(depth=_MAX_CARD_WRAPS))
         return given
-    if isinstance(given, str) and given.strip()[:1] in ("[", "{"):
+    if _is_card_json(given):
         try:
             given = json.loads(given)
         except (ValueError, RecursionError):
             return given
     if isinstance(given, dict):
         if _is_cards_wrapper(given):
-            return _cards_unwrapped(given["cards"], depth + 1)
+            return _cards_unwrapped(given["cards"], problems, depth + 1)
         return [given]
     if not isinstance(given, list):
         return given
     cards: list[Any] = []
     for item in given:
-        if isinstance(item, list) or (isinstance(item, dict) and _is_cards_wrapper(item)):
-            opened = _cards_unwrapped(item, depth + 1)
+        if isinstance(item, list) or _is_card_json(item) or (isinstance(item, dict) and _is_cards_wrapper(item)):
+            if depth + 1 > _MAX_CARD_WRAPS:
+                # Left as it is, never spliced in: what the note says was
+                # left out isn't drawn.
+                _cards_unwrapped(item, problems, depth + 1)
+                cards.append(item)
+                continue
+            opened = _cards_unwrapped(item, problems, depth + 1)
             cards.extend(opened if isinstance(opened, list) else [opened])
         else:
             cards.append(item)
     return cards
 
 
-# How deep _cards_unwrapped opens wrappers: past this the cards are refused.
-_MAX_CARD_WRAPS = 8
+def _is_card_json(value: Any) -> bool:
+    """A string that may be cards sent as JSON: a list or an object."""
+    return isinstance(value, str) and value.strip()[:1] in ("[", "{")
 
 
 def _is_cards_wrapper(value: dict[str, Any]) -> bool:
-    """A ``{"cards": ...}`` around cards, not a card of its own."""
+    """A ``{"cards": ...}`` around cards, not a card of its own. Its value
+    is a list of cards, a JSON string of them, or one card on its own."""
     return "type" not in value and isinstance(value.get("cards"), (list, str, dict))
 
 
