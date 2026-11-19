@@ -183,7 +183,7 @@ def open_watch_tool(key: bytes, direction: str, grant_id: str, rid: str, sealed:
         raise WatchToolError("the envelope did not verify") from error
     try:
         value = json.loads(plain.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
         raise WatchToolError("the payload is not JSON") from error
     if not isinstance(value, dict):
         raise WatchToolError("the payload is not an object")

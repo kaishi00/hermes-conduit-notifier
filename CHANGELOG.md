@@ -19,6 +19,14 @@ checks it). The format is fixed, because Conduit reads it:
 
 - When your words ask for it (what you say, a bot's SOUL.md), a bot can start one workstream on another model, checked first that your Hermes can run it. The Workstream Model in Edit Bot > Work stays the default, and the workstream's card shows the model it runs on.
 
+## 0.178.6 (2026-11-19)
+
+### Fixes
+
+- Checking whether GPT-Live is ready no longer touches the Codex sign-in on the host: it only reads it.
+- Cards a model sends as text inside a list are drawn, and cards wrapped too deeply say why they weren't.
+- A Watch call or a Local Live call no longer ends on a message too deeply nested to read.
+
 ## 0.178.5 (2026-11-19)
 
 ### Fixes
