@@ -619,6 +619,8 @@ routes:
   - DELETE /calls/watches/{watch_id}
   - PUT /calls/watches/{watch_id}
   - GET /capabilities
+  - GET /chats/done
+  - POST /chats/done
   - GET /conduit-prefs
   - PUT /conduit-prefs
   - GET /conduit-prefs/export

@@ -2096,6 +2096,29 @@ started. A branch is a chat of its own and isn't counted.
   predates the cost columns, 504 past 10 seconds, 429 past 120 reads a minute
   per profile. Every answer is `Cache-Control: no-store`.
 
+## Done chats (plugin 0.183+)
+
+Conduit's Sessions list dims a chat marked done and lists it under the Status
+filter's Done, on every iPhone, iPad, Mac and desktop signed in to the
+profile. The user marks a chat from its row's menu or swipe; Hermes marks its
+own chat with the `conduit_chat_done` tool (`done: false` opens it again) when
+the user asks, or when their own instructions or a skill say to mark finished
+work done. A mark stays until someone opens the chat again; a new turn
+doesn't open it.
+
+A mark keeps every id of the chat it was given (its lineage root, its session
+and the sessions it continued through compactions), and any of them finds it.
+Marks live in the profile's `conduit-chat-marks.json`, the newest 5,000.
+
+| Method | Route | Body | Returns |
+| --- | --- | --- | --- |
+| GET | `/api/plugins/conduit_push/chats/done?profile=` | | `{done: [{ids, at, by}]}`, newest first; `by` is `user` or `agent` |
+| POST | `/api/plugins/conduit_push/chats/done?profile=` | `{ids: [...], done: true\|false}` | `{mark}`, null once open |
+
+- 400 for a body without the chat's ids or with `done` not a boolean, 429
+  past 240 requests a minute per profile. Every answer is
+  `Cache-Control: no-store`.
+
 ## Chats opened on Desktop (plugin 0.12+)
 
 Conduit's Unread filter can count a chat as read when you have it open in

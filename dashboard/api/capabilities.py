@@ -56,6 +56,9 @@ ROUTE_CAPABILITIES = (
     # GET /sessions/usage: one chat's tokens and cost, its compressions and
     # subagent runs included (hermes-conduit#2699).
     "session-usage",
+    # GET/POST /chats/done: the chats the user or their agent marked done
+    # (chat_marks_store), and the conduit_chat_done tool.
+    "chat-done",
     # GET/POST /profiles/plugin: whether a bot's profile has this plugin on,
     # and turning it on there (New Bot and Edit Bot, hermes-conduit#2803).
     "bot-plugin",

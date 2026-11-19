@@ -15,7 +15,7 @@ from typing import Any
 
 from hermes_constants import get_hermes_home
 
-from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
+from . import (bot_chat_adopt, call_tool, call_watches, calls, chat_done_tool, chat_on_screen, clarify_loop, client, compaction_skip, conduit_first, cron_bot_chat, cron_runs,
                desktop_selected, forks, health_tool, inbox_tool, leaked_calls, link_ask_tool, link_asks, live_activity,
                location_tool, maps_tool, memory_scan, notify_tool, phone_tool, present_tool, profile_copies, pulse,
                reply_sources, review_notices,
@@ -179,6 +179,9 @@ def register(ctx: Any) -> None:
     # What the user's Shortcuts automations logged through Conduit's Log to
     # Hermes action (notifications, messages, emails, payments...), read-only.
     inbox_tool.register(ctx, is_child=_is_child)
+    # The agent marks its chat done in Conduit's Sessions list, when the user
+    # or their own instructions ask (hermes-conduit: Done chats).
+    chat_done_tool.register(ctx, is_child=_is_child)
     # Where the user is, as Conduit shares it, with place rules and its skill.
     location_tool.register(ctx, is_child=_is_child, profile=lambda: _profile,
                            skill_path=Path(__file__).resolve().parent / "skills" / location_tool.SKILL_NAME / "SKILL.md")
