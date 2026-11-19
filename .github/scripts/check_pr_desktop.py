@@ -53,7 +53,7 @@ def problem(body):
     fenced, body = body, FENCE.sub("", body)
     found = SECTION.search(body)
     if not found and SECTION.search(fenced):
-        return ("The Desktop section is inside a ``` fence, which shows it as code: close "
+        return ("The Desktop section is inside a code fence, which shows it as code: close "
                 "the fence above it.")
     if not found:
         return f"The PR description has no \"## Desktop\" section. {HOW}"

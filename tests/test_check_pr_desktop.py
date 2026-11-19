@@ -33,11 +33,11 @@ def test_answers_that_say_too_little_fail():
 
 def test_a_fenced_heading_isnt_the_section():
     quoted = "## Summary\n```\n## Desktop\nDone: desktop#58.\n```\n\n"
-    assert "inside a ``` fence" in check.problem(quoted)
+    assert "inside a code fence" in check.problem(quoted)
     assert check.problem(quoted + "## Desktop\nNot needed: template only.\n") is None
     nested = "## Summary\n````\n```\n## Desktop\nDone: desktop#58.\n```\n````\n"
-    assert "inside a ``` fence" in check.problem(nested)
-    assert "inside a ``` fence" in check.problem("## Summary\n```\n## Desktop\nDone: desktop#58.\n")
+    assert "inside a code fence" in check.problem(nested)
+    assert "inside a code fence" in check.problem("## Summary\n```\n## Desktop\nDone: desktop#58.\n")
 
 
 def test_fences_end_as_github_draws_them():
@@ -46,7 +46,10 @@ def test_fences_end_as_github_draws_them():
     assert check.problem(indented) is None
     # A closing line of the other character doesn't end the block.
     mixed = "## Summary\n```\n```~\n## Desktop\nDone: desktop#58.\n```\n"
-    assert "inside a ``` fence" in check.problem(mixed)
+    assert "inside a code fence" in check.problem(mixed)
+    # A longer run of the same character closes it.
+    longer = "## Summary\n```\n## Desktop\nDone: desktop#58.\n`````\n\n## Desktop\nNot needed: docs.\n"
+    assert check.problem(longer) is None
 
 
 def test_done_names_a_pr_not_an_issue():
