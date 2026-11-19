@@ -35,19 +35,28 @@ router = core.router
 # and after an update pulls a new version, before the gateway restarts.
 
 
+def profile_copies_module() -> Optional[Any]:
+    """profile_copies.py from this install's folder, freshly loaded (an update
+    may have replaced it); None when the install has none."""
+    path = os.path.join(core._plugin_root(), "profile_copies.py")
+    spec = importlib.util.spec_from_file_location("conduit_push_dashboard_profile_copies", path)
+    if spec is None or spec.loader is None or not os.path.isfile(path):
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _point_profiles() -> List[str]:
     """profile_copies.sweep over this host's profiles; [] when it can't run."""
-    path = os.path.join(core._plugin_root(), "profile_copies.py")
     try:
         from hermes_constants import get_default_hermes_root
     except (ImportError, AttributeError):  # an older Hermes: one home, no profiles to point
         return []
     try:
-        spec = importlib.util.spec_from_file_location("conduit_push_dashboard_profile_copies", path)
-        if spec is None or spec.loader is None or not os.path.isfile(path):
+        module = profile_copies_module()
+        if module is None:
             return []
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         return module.sweep_quietly(Path(get_default_hermes_root()), Path(core._plugin_root()))
     except Exception:  # noqa: BLE001 — a fault here mustn't stop the dashboard
         logger.warning("Conduit plugin: couldn't point profiles at the main install", exc_info=True)

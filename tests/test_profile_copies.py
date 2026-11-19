@@ -303,3 +303,45 @@ def test_a_profile_whose_plugins_folder_is_the_main_one_is_left_alone(host):
     assert profile_copies.sweep(root, shared) == ["profile inner: linked to the main install (0.123.0)"]
     assert (shared / "plugin.yaml").exists() and not shared.is_symlink()
     assert not (home / "plugins-backup").exists()
+
+
+def test_link_profile_links_a_fresh_profile_whatever_its_config_says(host):
+    # Conduit's Turn On links first, then runs `hermes -p <name> plugins enable`,
+    # which finds only a plugin in the profile's own folder (hermes-conduit#2803).
+    root, shared = host
+    fresh = _profile(root, "furina", "plugins:\n  enabled: []\n")
+    assert not profile_copies.holds_plugin(fresh, shared)
+
+    assert profile_copies.link_profile(root, shared, fresh) == ["profile furina: linked to the main install (0.123.0)"]
+
+    assert (fresh / "plugins" / "conduit_push").resolve() == shared.resolve()
+    assert profile_copies.holds_plugin(fresh, shared)
+    assert profile_copies.link_profile(root, shared, fresh) == []
+    # The config is Hermes' enable's to write, not this.
+    assert (fresh / "config.yaml").read_text() == "plugins:\n  enabled: []\n"
+
+
+def test_link_profile_keeps_what_isnt_ours_and_refuses_a_profiles_own_install(host, tmp_path):
+    root, shared = host
+    other = _profile(root, "kaveh", None)
+    _plugin(other / "plugins" / "conduit_push", "1.0.0", name="something-else")
+    assert profile_copies.link_profile(root, shared, other) == []
+    assert not profile_copies.holds_plugin(other, shared)
+
+    newer = _profile(root, "alhaitham", None)
+    _plugin(newer / "plugins" / "conduit_push", "9.0.0")
+    assert profile_copies.link_profile(root, shared, newer) == []
+    assert profile_copies.holds_plugin(newer, shared)
+
+    elsewhere = _plugin(tmp_path / "copy" / "conduit_push", "0.123.0")
+    assert profile_copies.link_profile(root, elsewhere, other) is None
+
+
+def test_holds_plugin_counts_a_copy_under_another_folder_name(host):
+    root, shared = host
+    home = _profile(root, "nilou", None)
+    _plugin(home / "plugins" / "conduit-push", "0.1.0")
+    assert profile_copies.holds_plugin(home, shared)
+    other = _profile(root, "dehya", None)
+    _plugin(other / "plugins" / "hindsight", "1.0.0", name="hindsight")
+    assert not profile_copies.holds_plugin(other, shared)
