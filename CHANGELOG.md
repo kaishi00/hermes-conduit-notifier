@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.182.0 (2026-11-19)
+
+### New and improved
+
+- Mark a chat Done in Conduit, or have Hermes mark it when its work is finished: every one of your Conduits shows it, so finished chats stand apart from the ones still going.
+
 ## 0.181.0 (2026-11-19)
 
 ### New and improved

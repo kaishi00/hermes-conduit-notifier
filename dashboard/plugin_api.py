@@ -29,6 +29,8 @@ they run:
     history               Chat history pages without the rows Conduit already
                           has
     session_usage         Chat usage: one chat's tokens and cost
+    chat_marks            Done chats: the chats the user or their agent marked
+                          done
     pairing               End-to-end encrypted notifications and pairing from
                           Conduit
     notifications         Cron and reply notifications, the chat Conduit has on
