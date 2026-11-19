@@ -19,6 +19,12 @@ hermes plugins install kaishi00/hermes-conduit-notifier --enable
 hermes gateway restart
 ```
 
+The plugin follows the current Hermes release, and every change is checked
+against Hermes' own install scan. A Hermes from before v0.21.6 (the
+date-numbered releases, v2026.9.24 and older) has an older scan that reads
+the plugin's test fixtures as live code, and it refuses the install as
+dangerous or asks you to confirm it. Run `hermes update` first, then install.
+
 In Hermes Conduit, open **Settings > Notifications**, enable notifications, and create a pairing code. Claim it from the matching Hermes profile:
 
 ```bash
