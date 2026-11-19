@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.179.0 (2026-11-19)
+
+### New and improved
+
+- When your words ask for it (what you say, a bot's SOUL.md), a bot can start one workstream on another model, checked first that your Hermes can run it. The Workstream Model in Edit Bot > Work stays the default, and the workstream's card shows the model it runs on.
+
 ## 0.178.6 (2026-11-19)
 
 ### Fixes
