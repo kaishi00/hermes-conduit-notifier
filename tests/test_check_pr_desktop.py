@@ -65,6 +65,26 @@ def test_fences_end_as_github_draws_them():
     assert check.problem(coded) is None
 
 
+def test_list_fences_info_strings_and_digits_as_github_draws_them():
+    # notifier 924: a list item's fence closes only within three spaces of
+    # the item's content indent, so six spaces in is code and the closer
+    # after it ends the block; one space in ends the item, its line then
+    # opening a fence of its own that hides what follows.
+    six = "## Summary\n- ```bash\n  npm test\n      ```\n   ```\n\n## Desktop\nNot needed: docs.\n"
+    assert check.problem(six) is None
+    one = "## Summary\n- ```bash\n  npm test\n ```\n## Desktop\nDone: desktop#58.\n"
+    assert "inside a code fence" in check.problem(one)
+    three_in = "## Summary\n1. ```bash\n   npm test\n      ```\n\n## Desktop\nNot needed: docs.\n"
+    assert check.problem(three_in) is None
+    # A backtick fence whose info string has a backtick is a paragraph.
+    ticked = "## Summary\n``` js `x`\n\n## Desktop\nNot needed: docs.\n"
+    assert check.problem(ticked) is None
+    assert check.problem(ticked.replace("```", "~~~")) is not None, "a tilde fence may hold one"
+    # Only ASCII digits make a list marker.
+    arabic = "## Summary\n\u0661. ```\n## Desktop\nNot needed: docs.\n"
+    assert check.problem(arabic) is None
+
+
 def test_done_names_a_pr_not_an_issue():
     issue = "Done: https://github.com/kaishi00/hermes-conduit-desktop/issues/59"
     assert "An issue goes under Follow-up" in check.problem(body(issue))
