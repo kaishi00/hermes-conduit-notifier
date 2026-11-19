@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.179.2 (2026-11-19)
+
+### Fixes
+
+- When a workstream asked you the same thing twice and the second notification couldn't be sent, the Bot Chat's message about it was kept quiet too. Now it tells you.
+
 ## 0.179.1 (2026-11-19)
 
 ### Fixes
