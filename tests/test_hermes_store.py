@@ -105,7 +105,8 @@ class Store:
             def list_sessions(self, query, window):
                 store.calls.append(("list_sessions", query, window))
                 return tuple(Entry(row) for row in store.sessions_rows.values()
-                             if row.get("session_key") == query.session_key)[:window.limit]
+                             if row.get("session_key") == query.session_key
+                             and (query.include_hidden or not row.get("hidden")))[:window.limit]
 
             def create(self, spec):
                 store.sessions_rows.setdefault(spec.session_id, {"id": spec.session_id, "source": spec.source})
@@ -183,6 +184,7 @@ class TitleConflict(ValueError):
 class SessionQuery:
     session_key: Optional[str] = None
     order: object = None
+    include_hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,6 +297,31 @@ def test_a_session_key_lists_its_rows_newest_activity_first(store_module, interf
     assert [row["title"] for row in rows] == ["Trip"]
     _, query, window = next(call for call in interface.opened[-1].calls if call[0] == "list_sessions")
     assert (query.session_key, query.order, window.limit) == ("agent:main:x", "last_active", 1)
+
+
+def test_a_hidden_bot_chat_reads_its_title_by_id_and_by_gateway_key(interface, tmp_path):
+    """notifier#881: a Bot Chat's row is hidden and its id isn't its gateway
+    key. Its title reads either way (the Work tools' Bot Chat check passes the
+    id, approval hooks the key); an unknown id or key reads none."""
+    titles = _plugin("session_titles")
+    with _plugin("hermes_store").open_store(tmp_path) as db:
+        db.ensure_session("20261118_090000_aaaaaa", "api_server")
+        db.ensure_session("20261118_090500_bbbbbb", "api_server")
+    rows = interface.stores[tmp_path].sessions_rows
+    rows["20261118_090000_aaaaaa"].update(session_key="agent:main:api_server:dm:bot", title="Bot Chat", hidden=True)
+    rows["20261118_090500_bbbbbb"].update(session_key="agent:main:api_server:dm:trip", title="Trip")
+    assert titles.read_or_raise(tmp_path, "20261118_090000_aaaaaa") == "Bot Chat"
+    assert titles.read_or_raise(tmp_path, "agent:main:api_server:dm:bot") == "Bot Chat"
+    assert titles.read_or_raise(tmp_path, "20261118_090500_bbbbbb") == "Trip"
+    assert titles.read_or_raise(tmp_path, "nope") == ""
+
+
+def test_a_session_key_listing_leaves_hidden_rows_out_unless_asked(store_module, interface, tmp_path):
+    with store_module.open_store(tmp_path) as db:
+        db.ensure_session("s1", "api_server")
+        interface.stores[tmp_path].sessions_rows["s1"].update(session_key="k", title="Bot Chat", hidden=True)
+        assert db.list_sessions_rich(session_key="k") == []
+        assert [r["title"] for r in db.list_sessions_rich(session_key="k", include_hidden=True)] == ["Bot Chat"]
 
 
 def test_deleting_runs_what_hermes_own_delete_runs_after_it(store_module, interface, tmp_path):
