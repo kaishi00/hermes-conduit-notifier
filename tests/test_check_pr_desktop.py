@@ -56,6 +56,10 @@ def test_fences_end_as_github_draws_them():
     # A fence in a list item closes at the item's indent.
     listed = "## Summary\n- ```bash\n  npm test\n  ```\n\n## Desktop\nNot needed: docs only.\n"
     assert check.problem(listed) is None
+    # A line GitHub keeps as code doesn't close the block.
+    deep = "## Summary\n```\nsample:\n    ```\n\n## Desktop\nNot needed: docs.\n"
+    assert "inside a code fence" in check.problem(deep)
+    assert "inside a code fence" in check.problem(listed.replace("  ```", "```"))
 
 
 def test_done_names_a_pr_not_an_issue():

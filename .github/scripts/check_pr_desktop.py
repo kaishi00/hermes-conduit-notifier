@@ -28,13 +28,14 @@ NEXT_SECTION = re.compile(r"^##\s", re.MULTILINE)
 COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 # A fenced block, such as the template quoted in a PR that changes it.
 # It opens with up to three spaces of indent (four is an indented code
-# block, which GitHub draws without treating the ticks as a fence) or after
-# a list marker, and its closing line, at any indent so a list item's closes
-# too, repeats the opening run or a longer run of the same character, so a
-# ```` block that quotes a ``` block goes as a whole. One never closed runs
-# to the end, as GitHub draws it.
-FENCE = re.compile(r"^(?: {0,3}|[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)(`{3,}|~{3,}).*?"
-                   r"(?:^[ \t]*\1(?:(?<=`)`*|(?<=~)~*)[ \t]*$|\Z)",
+# block, which GitHub draws without treating the ticks as a fence), and its
+# closing line, also within three spaces, repeats the opening run or a
+# longer run of the same character, so a ```` block that quotes a ``` block
+# goes as a whole. One opened after a list marker closes on an indented
+# line, inside the item. One never closed runs to the end, as GitHub draws it.
+CLOSE = r"(?:(?<=`)`*|(?<=~)~*)[ \t]*$|\Z)"
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?(?:^ {0,3}\1" + CLOSE + "|"
+                   r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+(`{3,}|~{3,}).*?(?:^[ \t]+\2" + CLOSE,
                    re.DOTALL | re.MULTILINE)
 # A Follow-up that names nothing yet.
 PLACEHOLDER = re.compile(r"^(later|tbd|todo|none|n/?a|soon|maybe)\W*$", re.IGNORECASE)
