@@ -141,3 +141,13 @@ def test_hermes_failing_to_check_the_profile_is_an_error_not_off(host, monkeypat
     monkeypatch.setattr(api.core, "_plugin_refused_on", unavailable)
     response = _client().get(f"{BASE}/profiles/plugin", params={"name": "furina"})
     assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_an_install_whose_manifest_names_another_plugin_isnt_linked(host):
+    (host.shared / "plugin.yaml").write_text("name: someone_else\nversion: 1.0.0\n")
+    response = _client().post(f"{BASE}/profiles/plugin", json={"name": "furina"})
+    assert response.status_code == 500
+    assert "doesn't name conduit_push" in response.json()["detail"]
+    assert response.headers["cache-control"] == "no-store"
+    assert host.runs == []

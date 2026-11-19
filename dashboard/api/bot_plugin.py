@@ -89,7 +89,12 @@ async def bot_plugin_state(name: str, home: Path) -> Dict[str, Any]:
     holds = bool(copies and root is not None and copies.holds_plugin(home, root / "plugins" / core.PLUGIN_NAME))
     # Hermes failing to check (503) or not knowing the profile (404) is said
     # as such, never read as the plugin being off.
-    allowed = not await core._plugin_refused_on(name)
+    try:
+        allowed = not await core._plugin_refused_on(name)
+    except HTTPException as exc:
+        # Like every other answer here, never cached: Hermes may recover.
+        exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+        raise
     return {"profile": name, "on": allowed and holds, "allowed": allowed, "linked": holds,
             "can_turn_on": copies is not None and _main_install() is not None}
 
