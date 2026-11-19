@@ -181,6 +181,12 @@ APPROVAL_CHOICES = ("once", "deny")
 DELIVERY_STATES = ("sent", "claimed", "resolved", "missed", "withdrawn")
 DELIVERY_TTL_S = 10 * 60
 MAX_DELIVERED = 32
+# Calls kept for Conduit on a computer, which hears of them by asking
+# (GET /calls/rings), not from the relay: long enough for a few missed polls,
+# short enough that a computer waking up never rings for an old call.
+RING_TTL_S = 2 * 60
+MAX_RINGS = 16
+RING_KINDS = ("done", "failed", "stopped", "approval", "question")
 # How long a call waits to hear how its approval answer fared: longer than
 # the agent's process takes to pass it on (calls.APPROVAL_ANSWER_POLL_S and
 # APPROVAL_MATCH_TRIES), well within the Watch relay's wait.
@@ -1097,6 +1103,34 @@ class CallStore:
             return [{**_decide(state, watch, watch["pending"]["outcome"], now, self.place_blocked),
                      "session_id": watch["pending"]["session_id"]} for watch in due]
 
+    def add_ring(self, call: Any, *, name: Any = "", title: Any = "", body: Any = "") -> None:
+        """Keeps a call that just went out, so Conduit on a computer rings for
+        it too. A resend of the same call keeps one entry."""
+        if not isinstance(call, dict) or not _WATCH_ID.match(str(call.get("id") or "")):
+            return
+        entry = {
+            "id": str(call["id"]),
+            "kind": call.get("kind") if call.get("kind") in RING_KINDS else None,
+            "title": _title(call.get("title")),
+            "reason": _reason(call.get("reason")),
+            "session_ids": _ring_sessions(call.get("session_ids")),
+            "name": _clip(name, 64),
+            "heading": _clip(title, 120),
+            "body": _clip(body, 500),
+        }
+        with self._locked() as state:
+            entry["at"] = self.clock()
+            state["rings"] = [ring for ring in state["rings"] if ring["id"] != entry["id"]] + [entry]
+            state["rings"] = state["rings"][-MAX_RINGS:]
+
+    def rings(self, after: Any = None) -> dict[str, Any]:
+        """The calls of the last RING_TTL_S seconds that went out after
+        ``after`` (the ``now`` an earlier answer gave), oldest first."""
+        since = float(after) if isinstance(after, (int, float)) and not isinstance(after, bool) else None
+        now = self.clock()
+        rings = [dict(ring) for ring in self._load()["rings"] if since is None or ring["at"] > since]
+        return {"rings": rings, "now": now}
+
     def next_due(self) -> float | None:
         """When the earliest hold over an ended job runs out, if any."""
         holds = [watch["hold_until"] for watch in self._load()["watches"] if watch["pending"] is not None]
@@ -1306,10 +1340,46 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
                 and entry.get("state") in DELIVERY_STATES and isinstance(entry.get("at"), (int, float))
                 and not isinstance(entry.get("at"), bool) and now - entry["at"] < DELIVERY_TTL_S):
             delivered.append({"id": entry["id"], "state": entry["state"], "at": float(entry["at"])})
+    rings = []
+    for entry in raw.get("rings") if isinstance(raw.get("rings"), list) else []:
+        kept = _ring_entry(entry, now) if isinstance(entry, dict) else None
+        if kept is not None:
+            rings.append(kept)
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
             "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until,
             "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": _capped_waiting(waiting),
-            "delivered": delivered[-MAX_DELIVERED:]}
+            "delivered": delivered[-MAX_DELIVERED:], "rings": rings[-MAX_RINGS:]}
+
+
+def _clip(value: Any, limit: int) -> str:
+    return " ".join(value.split())[:limit] if isinstance(value, str) else ""
+
+
+def _ring_sessions(value: Any) -> list[str]:
+    """A ring's sessions; none when the call lost them (it still rings)."""
+    try:
+        return _session_ids(value)
+    except (TypeError, ValueError):
+        return []
+
+
+def _ring_entry(entry: dict[str, Any], now: float) -> dict[str, Any] | None:
+    at = entry.get("at")
+    if (not isinstance(at, (int, float)) or isinstance(at, bool) or not 0 <= now - at < RING_TTL_S
+            or not isinstance(entry.get("id"), str) or not _WATCH_ID.match(entry["id"])):
+        return None
+    session_ids = _ring_sessions(entry.get("session_ids"))
+    return {
+        "id": entry["id"],
+        "kind": entry.get("kind") if entry.get("kind") in RING_KINDS else None,
+        "title": _title(entry.get("title")),
+        "reason": _reason(entry.get("reason")),
+        "session_ids": session_ids,
+        "name": _clip(entry.get("name"), 64),
+        "heading": _clip(entry.get("heading"), 120),
+        "body": _clip(entry.get("body"), 500),
+        "at": float(at),
+    }
 
 
 def _calls_wait(item: dict[str, Any], now: float) -> bool:

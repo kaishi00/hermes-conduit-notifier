@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.180.0 (2026-11-19)
+
+### New and improved
+
+- Calls from Hermes ring Conduit on your computer too, beside your iPhone: answer there and the call opens in its chat.
+
 ## 0.179.0 (2026-11-19)
 
 ### New and improved

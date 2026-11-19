@@ -67,6 +67,10 @@ def calls_status() -> Dict[str, Any]:
     }
 
 
+def call_rings(after: Optional[float]) -> Dict[str, Any]:
+    return _calls_store().CallStore(core._calls_home()).rings(after)
+
+
 def update_call_settings(body: Any) -> Dict[str, Any]:
     if not isinstance(body, dict) or not isinstance(body.get("settings"), dict):
         raise core.TokenError(400, "Expected a JSON object with settings")
@@ -294,6 +298,15 @@ async def delete_call_watch(watch_id: str, response: Response, profile: Optional
 async def put_call_presence(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     body = await core._read_json_body(request, CALLS_MAX_BODY_BYTES)
     return await _calls_route(profile, response, lambda: set_call_presence(body), "presence")
+
+
+@router.get("/calls/rings")
+async def get_call_rings(response: Response, after: Optional[float] = None,
+                         profile: Optional[str] = None) -> Dict[str, Any]:
+    """The calls that just went out, for Conduit on a computer to ring too:
+    those after ``after`` (the ``now`` of its last answer), kept for
+    calls_store.RING_TTL_S seconds."""
+    return await _calls_route(profile, response, lambda: call_rings(after), "rings")
 
 
 @router.get("/calls/waiting")

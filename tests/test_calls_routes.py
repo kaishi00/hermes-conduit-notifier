@@ -374,3 +374,14 @@ def test_the_waiting_list_reads_from_a_bucket_of_its_own(paired):
         assert http.get(f"{BASE}/waiting").status_code == 200
     # A call's renewals still go through.
     assert http.get(f"{BASE}/calls").status_code == 200
+
+
+def test_rings_list_the_calls_that_just_went_out(home):
+    store = api.hermes_calls._calls_store().CallStore(home)
+    store.add_ring({"id": "watch_abcdefgh", "kind": "done", "title": "Deploy", "session_ids": ["s1"]}, name="Atlas")
+    response = _http().get(f"{BASE}/calls/rings")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["ok"] is True and [ring["id"] for ring in body["rings"]] == ["watch_abcdefgh"]
+    assert _http().get(f"{BASE}/calls/rings", params={"after": body["now"]}).json()["rings"] == []

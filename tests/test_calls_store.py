@@ -800,3 +800,32 @@ def test_a_written_answer_leaves_a_question_older_than_the_approval_waited_on(tm
     store.note_waiting("s1", "approval", description="Delete the backups", command="rm -rf /backups")
     assert not store.answer_in_writing("s1", "yes")
     assert store.take_answers("conduit-push-old") is None
+
+
+def test_a_call_that_went_out_rings_computers_for_two_minutes(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    call = {"id": "watch_abcdefgh", "kind": "done", "title": "Deploy", "session_ids": ["s1"], "reason": "It shipped."}
+    store.add_ring(call, name="Atlas", title="Atlas wants to talk", body="It shipped.")
+    answer = store.rings()
+    assert [ring["id"] for ring in answer["rings"]] == ["watch_abcdefgh"]
+    ring = answer["rings"][0]
+    assert ring["name"] == "Atlas" and ring["heading"] == "Atlas wants to talk" and ring["session_ids"] == ["s1"]
+    # Asked again after that answer: nothing new.
+    assert store.rings(answer["now"])["rings"] == []
+    # A resend of the same call is one ring, newer.
+    clock.now += 5
+    store.add_ring(call, name="Atlas")
+    assert len(store.rings()["rings"]) == 1
+    assert len(store.rings(answer["now"])["rings"]) == 1
+    clock.now += calls_store.RING_TTL_S + 1
+    assert store.rings()["rings"] == []
+
+
+def test_a_ring_without_sessions_or_a_bad_id_is_handled(tmp_path):
+    store = _store(tmp_path)
+    store.add_ring({"id": "watch_abcdefgh", "kind": "nonsense", "session_ids": []})
+    store.add_ring({"id": "../bad"})
+    store.add_ring("not a call")
+    rings = store.rings()["rings"]
+    assert [(ring["id"], ring["kind"], ring["session_ids"]) for ring in rings] == [("watch_abcdefgh", None, [])]

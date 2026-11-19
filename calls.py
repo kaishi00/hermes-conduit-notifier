@@ -94,6 +94,16 @@ _in_flight: set[threading.Event] = set()
 _in_flight_lock = threading.Lock()
 
 
+def _note_ring(event: dict[str, Any]) -> None:
+    """Keeps the call for Conduit on a computer (GET /calls/rings), which rings
+    for it beside the iPhone. Never stops the call itself."""
+    try:
+        _store(get_hermes_home()).add_ring(
+            event.get("call"), name=event.get("profile_name", ""), title=event.get("title", ""), body=event.get("body", ""))
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not keep a call for its computers", exc_info=True)
+
+
 def _deadline() -> float:
     return time.monotonic() + DELIVERY_WAIT_S
 
@@ -104,6 +114,7 @@ def _deliver_waited(event: dict[str, Any], fallback: dict[str, Any] | None, dead
     on past it, and the process's exit waits for them (_wait_at_exit)."""
     if _stopped.is_set():
         return
+    _note_ring(event)
     done = threading.Event()
 
     def work() -> None:

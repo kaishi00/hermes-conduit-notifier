@@ -126,6 +126,24 @@ def test_a_watched_job_that_finishes_sends_a_call_request_instead(home, fake):
     assert event["call"] == {"id": watch_id, "kind": "done", "title": "Check the server", "session_ids": ["rt-1", "st-1"]}
 
 
+def test_a_call_that_goes_out_rings_conduit_on_a_computer_too(home, fake):
+    watch_id = _watch(home, "rt-1", "st-1")
+    assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
+    [ring] = CallStore(home).rings()["rings"]
+    assert ring["id"] == watch_id
+    assert ring["kind"] == "done"
+    assert ring["session_ids"] == ["rt-1", "st-1"]
+    assert ring["heading"] == "Hermes wants to talk"
+    assert ring["body"] == "“Check the server” finished."
+
+
+def test_a_ring_that_cant_be_kept_never_stops_the_call(home, fake, monkeypatch):
+    _watch(home, "st-1")
+    monkeypatch.setattr(CallStore, "add_ring", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+    assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
+    assert len(fake.sent) == 1
+
+
 def test_failed_and_stopped_jobs_say_so(home, fake):
     _watch(home, "a", title="")
     _watch(home, "b", min_gap_s=30)
