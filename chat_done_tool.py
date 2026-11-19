@@ -25,7 +25,7 @@ TOOL_NAME = "conduit_chat_done"
 TOOLSET = "conduit"
 
 DESCRIPTION = (
-    "Mark this chat done in the user's Conduit Sessions list, or open it again (done: false). Conduit dims a "
+    "Mark this chat done in Conduit's Sessions list. done: false opens it again. Conduit dims a "
     "done chat on every device until someone opens it again. Use it when the user asks, or when their own "
     "instructions or a skill say to mark finished work done (a wrap-up, say); don't mark a chat done on your "
     "own judgment otherwise."
