@@ -33,11 +33,42 @@ def test_answers_that_say_too_little_fail():
 
 def test_a_fenced_heading_isnt_the_section():
     quoted = "## Summary\n```\n## Desktop\nDone: desktop#58.\n```\n\n"
-    assert "no \"## Desktop\" section" in check.problem(quoted)
+    assert "inside a code fence" in check.problem(quoted)
     assert check.problem(quoted + "## Desktop\nNot needed: template only.\n") is None
     nested = "## Summary\n````\n```\n## Desktop\nDone: desktop#58.\n```\n````\n"
-    assert "no \"## Desktop\" section" in check.problem(nested)
-    assert "no \"## Desktop\" section" in check.problem("## Summary\n```\n## Desktop\nDone: desktop#58.\n")
+    assert "inside a code fence" in check.problem(nested)
+    assert "inside a code fence" in check.problem("## Summary\n```\n## Desktop\nDone: desktop#58.\n")
+
+
+def test_fences_end_as_github_draws_them():
+    # Four spaces of indent is an indented code block, not a fence.
+    indented = "## Summary\nRun:\n\n    ```\n    npm test\n\n## Desktop\nNot needed: docs only.\n"
+    assert check.problem(indented) is None
+    # A closing line of the other character doesn't end the block.
+    mixed = "## Summary\n```\n```~\n## Desktop\nDone: desktop#58.\n```\n"
+    assert "inside a code fence" in check.problem(mixed)
+    # A longer run of the same character closes it.
+    longer = "## Summary\n```\n## Desktop\nDone: desktop#58.\n`````\n\n## Desktop\nNot needed: docs.\n"
+    assert check.problem(longer) is None
+    assert check.problem(longer.replace("```", "~~~").replace("``", "~~")) is None
+    tildes = "## Summary\n~~~\n~~~`\n## Desktop\nDone: desktop#58.\n~~~~\n"
+    assert "inside a code fence" in check.problem(tildes)
+    # A fence in a list item closes at the item's indent.
+    listed = "## Summary\n- ```bash\n  npm test\n  ```\n\n## Desktop\nNot needed: docs only.\n"
+    assert check.problem(listed) is None
+    # A line GitHub keeps as code doesn't close the block.
+    deep = "## Summary\n```\nsample:\n    ```\n\n## Desktop\nNot needed: docs.\n"
+    assert "inside a code fence" in check.problem(deep)
+    assert "inside a code fence" in check.problem(listed.replace("  ```", "```"))
+    # A list marker four spaces in is indented code, not a list.
+    coded = "## Summary\n    - ```bash\n    npm test\n\n## Desktop\nNot needed: docs.\n"
+    assert check.problem(coded) is None
+
+
+def test_done_names_a_pr_not_an_issue():
+    issue = "Done: https://github.com/kaishi00/hermes-conduit-desktop/issues/59"
+    assert "An issue goes under Follow-up" in check.problem(body(issue))
+    assert check.problem(body(issue.replace("Done", "Follow-up"))) is None
 
 
 def test_the_pr_template_asks_for_it():
