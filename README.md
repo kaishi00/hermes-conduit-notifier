@@ -1612,6 +1612,15 @@ question or a small task doesn't start a workstream. Change it in Conduit
   can't be posted goes to the Bot Chat. Asks between bots, answers and notes
   stay the Bot Chat's, and a room with other people's agents in it starts no
   work.
+- New workstreams run on the Workstream Model (Edit Bot > Work, or `work on
+  --model`). When your own words name another model for a task (what you
+  said, the bot's SOUL.md, its notes), `work_start` takes `model` (as
+  Hermes' `/model` takes it: `claude-opus-5-5`, `anthropic:claude-opus-5-5`)
+  and `reasoning_effort` for that one workstream; the Workstream Model stays
+  the default for the rest. The name is checked with Hermes' own `/model`
+  in the bot's profile first: one it can't run starts nothing, and Hermes'
+  reason, with the names it found, goes back to the bot. Conduit's Work
+  panel shows the model on that workstream's card (plugin 0.179.0+).
 - `work_start` with a `cwd` that isn't a folder on the host is refused
   (`no_such_folder`) instead of running in Hermes' own folder, where Hermes'
   terminal runs on the host itself (plugin 0.168.1+). Hermes' review after a

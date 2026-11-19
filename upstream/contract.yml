@@ -295,6 +295,14 @@ notes:
     memory_scan.py answers False for the plugin's own folders and leaves every other to Hermes.
     upstream/test_memory_scan.py checks Hermes alone (a known failure while it parses the
     plugin) and with the plugin loaded (none of its modules parsed).
+  a workstream's own model: >-
+    work_models.py checks the model work_start names for one workstream (app issue 2788) with
+    Hermes' /model pipeline in the bot's profile: hermes_cli.inventory.load_picker_context for its
+    providers, hermes_cli.providers.resolve_provider_full to take a leading provider name apart,
+    hermes_cli.model_switch.switch_model (nothing saved) and
+    models_validate.static_model_provider_conflict, session.create's own gate, said before a row is
+    kept. Without them the name goes to session.create as given. upstream/test_bot_work.py's
+    test_a_model_the_bot_names_is_checked_as_hermes_model_command_checks_it holds it.
   a chat's model pick: >-
     dashboard/api/session_route.py wraps tui_gateway.server._runtime_model_config, reached by name
     through sys.modules (the split modules' functions are published onto the server and called
@@ -429,12 +437,20 @@ imports:
     optional: ["_candidate_homes", "live_work"]
   hermes_cli.gateway_runtime_start:
     optional: ["start_detached_replacement"]
+  hermes_cli.inventory:
+    optional: ["load_picker_context"]
+  hermes_cli.model_switch:
+    optional: ["switch_model"]
+  hermes_cli.models_validate:
+    optional: ["static_model_provider_conflict"]
   hermes_cli.plugins:
     required: ["invoke_hook"]
     optional: ["clear_thread_tool_whitelist", "set_thread_tool_whitelist"]
   hermes_cli.profiles:
     required: ["get_profile_dir"]
     optional: ["get_active_profile_name", "list_profile_names"]
+  hermes_cli.providers:
+    optional: ["resolve_provider_full"]
   hermes_cli.tools_config:
     optional: ["_get_platform_tools", "_get_plugin_toolset_keys"]
   hermes_cli.update_cmd_drain_report:
@@ -535,8 +551,12 @@ module_paths:
   - hermes_cli/gateway
   - hermes_cli/gateway_lifecycle_guards
   - hermes_cli/gateway_runtime_start
+  - hermes_cli/inventory
+  - hermes_cli/model_switch
+  - hermes_cli/models_validate
   - hermes_cli/plugins
   - hermes_cli/profiles
+  - hermes_cli/providers
   - hermes_cli/tools_config
   - hermes_cli/update_cmd_drain_report
   - hermes_cli/web_routers

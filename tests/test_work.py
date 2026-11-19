@@ -1103,6 +1103,71 @@ def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes, 
     assert refused["ok"] is False and "claude-sonet-5-5" in refused["note"] and "Edit Bot > Work" in refused["note"]
 
 
+def test_a_workstream_runs_on_the_model_the_users_words_named(on, home, hermes, monkeypatch):
+    # Issue 2788: the bot names a model for one workstream, checked as Hermes' /model checks it; the
+    # Workstream Model stays the default for every other.
+    from conduit_push import work_models
+
+    work.app_set_settings(home, {"workstream_model": {"model": "claude-sonnet-5-5", "provider": "anthropic"}})
+    checked = []
+
+    def switch(here, profile, model, provider):
+        checked.append((profile, model, provider))
+        return {"model": "claude-opus-5-5", "provider": "anthropic"}
+
+    monkeypatch.setattr(work_models, "_switch", switch)
+    answer = start(model="opus", reasoning_effort="xhigh")
+    assert answer["ok"] and checked == [("default", "opus", "")]
+    assert answer["model"] == "claude-opus-5-5 (xhigh reasoning)" and "claude-opus-5-5" in answer["note"]
+    (_, params, _), = hermes.named("session.create")
+    assert (params["model"], params["provider"], params["reasoning_effort"]) == ("claude-opus-5-5", "anthropic",
+                                                                                 "xhigh")
+    assert on.get("W1").executor["model"] == {"model": "claude-opus-5-5", "provider": "anthropic",
+                                              "reasoning_effort": "xhigh"}
+    assert call("work_list")["work"][0]["model"] == "claude-opus-5-5 (xhigh reasoning)"
+    assert "on claude-opus-5-5 (xhigh reasoning), the model you named for it" in work.digest(BOT_CHAT)
+    shown, = work.app_list(home)["work"]
+    assert shown["model"] == {"model": "claude-opus-5-5", "provider": "anthropic", "reasoning_effort": "xhigh"}
+    # The default is untouched, and a start that names none runs on it.
+    assert work.app_settings(home)["workstream_model"] == {"model": "claude-sonnet-5-5", "provider": "anthropic"}
+    assert start("Invoices", "Count the invoices sent in March.")["ok"]
+    params = hermes.named("session.create")[-1][1]
+    assert params["model"] == "claude-sonnet-5-5" and "reasoning_effort" not in params
+    assert "model" not in call("work_list")["work"][0] and work.app_list(home)["work"][0]["model"] is None
+    # The object shape a model guesses, with its provider.
+    assert start("Logs", "Read the logs.", model={"model": "gpt-5.5", "provider": "openai-codex"})["ok"]
+    assert checked[-1] == ("default", "gpt-5.5", "openai-codex")
+
+
+def test_a_model_hermes_cant_run_starts_nothing(on, home, hermes, monkeypatch):
+    from conduit_push import work_models
+
+    hermes_check = work_models._switch
+
+    def switch(here, profile, model, provider):
+        raise work_models.Refused(f"Hermes can't run {model} here: Similar models: `claude-opus-5-5`.")
+
+    monkeypatch.setattr(work_models, "_switch", switch)
+    refused = start(model="claude-opus-5.5")
+    assert refused["ok"] is False and refused["error"] == "model" and "claude-opus-5-5" in refused["note"]
+    assert on.get("W1") is None and hermes.named("session.create") == []
+    refused = start(model="opus", reasoning_effort="hgih")
+    assert refused["error"] == "model" and "xhigh" in refused["note"] and on.get("W1") is None
+    # A Hermes that can't check (too old: no hermes_cli here) passes it on as given; its own
+    # session.create still refuses a pair it knows is wrong.
+    assert hermes_check(home, "default", "opus", "") == {}
+    monkeypatch.setattr(work_models, "_switch", hermes_check)
+    # Hermes refusing at the start names the model the bot named, not Edit Bot > Work.
+
+    def refuse(self, **kwargs):
+        raise broker_mod.BrokerError("unknown model opus")
+
+    monkeypatch.setattr(broker_mod.Broker, "start", refuse)
+    failed = start(model="opus")
+    assert failed["ok"] is False and "the model you named for it" in failed["note"]
+    assert "Edit Bot > Work" not in failed["note"]
+
+
 def test_a_secondary_bot_starts_on_its_own_profile(tmp_path, monkeypatch, hermes):
     home = tmp_path / "root" / "profiles" / "nahida"
     home.mkdir(parents=True)

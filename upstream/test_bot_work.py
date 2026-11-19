@@ -697,3 +697,52 @@ def test_a_workstreams_worktree_is_hermes_own(tmp_path: Path) -> None:
     assert json.loads(out.read_text()) == {
         "repo": True, "made": [True, True, True], "clean": True, "back": True, "kept": [False, True, True],
         "outside": True}
+
+
+MODEL_PROBE = r"""
+import importlib.util, json, sys
+from pathlib import Path
+
+root, home, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location("conduit_push", root / "__init__.py",
+                                              submodule_search_locations=[str(root)])
+package = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push"] = package
+spec.loader.exec_module(package)
+from conduit_push import work_models
+
+seen = {}
+for name, asked in (("declared", {"model": "fake-big", "reasoning_effort": "high"}),
+                    ("prefixed", {"model": "custom:fake:fake-big"}),
+                    ("unknown_provider", {"model": "fake-big", "provider": "no-such-provider"})):
+    try:
+        seen[name] = work_models.check(home, "default", asked)
+    except work_models.Refused as error:
+        seen[name] = "refused: " + str(error)
+out.write_text(json.dumps(seen))
+"""
+
+
+def test_a_model_the_bot_names_is_checked_as_hermes_model_command_checks_it(tmp_path: Path) -> None:
+    """Issue 2788: work_start's model goes through Hermes' own /model resolver
+    (hermes_cli.model_switch.switch_model) in the bot's profile: a model its
+    provider declares comes back with that provider, a leading provider name is
+    taken apart as /model's --provider, and a provider Hermes doesn't have
+    refuses the start with Hermes' reason. Nothing reaches a network."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "model:\n  default: fake-default\n  provider: custom:fake\n"
+        "custom_providers:\n  - name: fake\n    base_url: http://127.0.0.1:9/v1\n    api_key: x\n"
+        "    models:\n      fake-default: {}\n      fake-big: {}\n")
+    python = Path(_hermes_bin()).with_name("python")
+    out = tmp_path / "seen.json"
+    done = subprocess.run([str(python), "-c", MODEL_PROBE, str(ROOT), str(home), str(out)], capture_output=True,
+                          text=True, timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
+    assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
+    seen = json.loads(out.read_text())
+    assert seen["declared"] == {"model": "fake-big", "provider": "custom:fake", "reasoning_effort": "high"}
+    assert seen["prefixed"] == {"model": "fake-big", "provider": "custom:fake"}
+    assert seen["unknown_provider"].startswith("refused: Hermes can't run fake-big here: ")
+    assert "no-such-provider" in seen["unknown_provider"]
+

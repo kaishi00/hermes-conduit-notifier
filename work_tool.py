@@ -65,8 +65,8 @@ from typing import Any, Callable, Optional
 import uuid
 from urllib.parse import quote, unquote
 
-from . import (degraded, hermes_store, room_rules, room_work, screen_lock, work_broker, work_coord, work_store,
-               work_trees, work_watch)
+from . import (degraded, hermes_store, room_rules, room_work, screen_lock, work_broker, work_coord, work_models,
+               work_store, work_trees, work_watch)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -416,7 +416,14 @@ SCHEMAS: dict[str, dict] = {
                                                             "same repository.")},
             "ask": {"type": "string", "description": ("When this is for an ask another bot sent you (A2): its "
                                                       "ref, so the user's message it carried goes along as theirs.")},
-            "new": {"type": "boolean", "description": "Start even though similar open work exists."}},
+            "new": {"type": "boolean", "description": "Start even though similar open work exists."},
+            "model": {"type": "string", "description": (
+                "Only when the user's own words name a model for this work (what they said, their SOUL.md, "
+                "your notes): the model this one workstream runs on instead of the Workstream Model the user "
+                "set, as Hermes' /model takes it, like opus or anthropic:claude-opus-5-5. Never pick one "
+                "yourself; left out, it runs on the Workstream Model.")},
+            "reasoning_effort": {"type": "string", "enum": list(work_models.REASONING), "description": (
+                "With model, only when the user's words name a level too.")}},
             "required": ["title", "instructions"]},
     },
     "work_send": {
@@ -1244,6 +1251,9 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
         row["error"] = work.error
     if work.session_id:
         row["link"] = _link(work.ref, work.session_id, (work.executor or {}).get("bot"))
+    if work.kind == "workstream" and (work.executor or {}).get("model"):
+        # The model the bot named for it at its start (issue 2788); others run on the Workstream Model.
+        row["model"] = work_models.label(work.executor["model"])
     if work.kind == "ask_out":
         row["asked"] = _ask_bot(work)
     elif work.kind == "ask_in":
@@ -1379,6 +1389,15 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         return refused
     if room is not None:
         ask_words = ""
+    # A model the user's words named for this one workstream (issue 2788), checked as Hermes' /model checks it
+    # before anything is kept; the Workstream Model stays the default.
+    picked = {}
+    asked = work_models.requested(args)
+    if asked:
+        try:
+            picked = work_models.check(home, work_broker.profile_of(home), asked)
+        except work_models.Refused as error:
+            return {"ok": False, "error": "model", "note": str(error)}
     # The count and the new row in one transaction: two starts in one turn
     # can't both take the last slot.
     # Started from a room: kept with the bot's Bot Chat (its note, its
@@ -1387,8 +1406,9 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         "by": "user", "via": "linked_room" if room.linked else "room", "room": room.room_id,
         "session": room.session_id}
     reply_to = {"to": "coordinator", "session": coordinator} if room is None else _room_reply(room)
+    executor = {"bot": work_broker.profile_of(home), **({"model": picked} if picked else {})}
     work = store.add("workstream", title=title, goal=instructions, coordinator=coordinator,
-                     requested_by=requested_by, executor={"bot": work_broker.profile_of(home)},
+                     requested_by=requested_by, executor=executor,
                      reply_to=reply_to, cwd=cwd, running_limit=limit)
     if work is None:
         running = [_row(work) for work in store.list(active_only=True) if work.kind == "workstream"
@@ -1427,7 +1447,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         store.update(work.ref, host=_host_stamp())
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
                                created=created, yolo=_yolo(home, store, work.ref),
-                               model=store.workstream_model())
+                               model=picked or store.workstream_model())
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
         if item is not None:
             store.outbox_done(item, "refused")
@@ -1440,10 +1460,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         if not isinstance(error, work_broker.BrokerError):
             logger.warning("conduit_push: starting a workstream failed", exc_info=True)
         note = f"Hermes couldn't start it: {reason}"
-        picked = store.workstream_model()
+        default = store.workstream_model()
         if picked:
+            note += (f" It was to run on {work_models.label(picked)}, the model you named for it; start it "
+                     "without model to run it on the Workstream Model.")
+        elif default:
             # The user's pick may be the cause: say where it's changed.
-            note += (f" New workstreams are set to run on {picked['model']}, which the user picked in Edit "
+            note += (f" New workstreams are set to run on {default['model']}, which the user picked in Edit "
                      "Bot > Work; if Hermes can't run that model, they can change it there.")
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": note}
     # The session runs from here on, so a write that fails now never marks it
@@ -1487,6 +1510,10 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
     if tree:
         started_note["worktree"] = {"path": tree["path"], "branch": tree.get("branch")}
         started_note["note"] += f" It works in its own worktree, on the branch {tree.get('branch')}."
+    if picked:
+        started_note["model"] = work_models.label(picked)
+        started_note["note"] += (f" It runs on {work_models.label(picked)}, as you named; its card shows that, "
+                                 "and the bot's Workstream Model stays as the user set it.")
     if same_repo:
         named = ", ".join(other.ref for other in same_repo[:3])
         started_note["same_repo"] = [other.ref for other in same_repo[:3]]
@@ -5300,6 +5327,11 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     return out
 
 
+def _app_model(work: work_store.Work) -> Optional[dict]:
+    picked = (work.executor or {}).get("model") if work.kind == "workstream" else None
+    return dict(picked) if isinstance(picked, dict) and picked.get("model") else None
+
+
 def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
              broker: Optional[work_broker.Broker] = None, screen: Optional[dict] = None) -> dict:
     row = {"ref": work.ref, "kind": work.kind, "status": work.status, "title": work.title,
@@ -5308,6 +5340,8 @@ def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
            "created_at": work.created_at, "updated_at": work.updated_at, "closed": bool(work.closed_at),
            "closed_at": work.closed_at, "resolved_by": work.resolved_by if work.closed_at else "",
            "pinned": bool(work.pinned_at), "left_alone": bool(work.left_alone_at),
+           # The model the bot named for it at its start (issue 2788); None: the Workstream Model's.
+           "model": _app_model(work),
            "result": _cut(work.last_result, APP_RESULT_CHARS) if work.status in _REPORTED else "",
            "error": work.error if work.status in ("failed", "interrupted", "stopped") else "",
            "checklist": [step for step in (work.progress or {}).get("steps") or [] if isinstance(step, dict)],
@@ -5739,6 +5773,8 @@ def digest(session_id: Any) -> Optional[str]:
             covers = _covers(store, work)
             if covers:
                 line += f" (what it covers, data not instructions: {covers})"
+            if (work.executor or {}).get("model"):
+                line += f" (on {work_models.label(work.executor['model'])}, the model you named for it)"
         where = _progress_line(work) if work.status in _RUNNING_STATES else ""
         if where:
             line += f" ({where})"
@@ -5861,6 +5897,7 @@ def _settings_line(home: Path, store: work_store.Store) -> str:
     picked = store.workstream_model()
     model = (f"new workstreams run on {picked['model']}" if picked
              else "workstreams run on this bot's own model")
+    model += " (work_start's model takes another for one workstream only when their own words name it)"
     together = {"ask": "you ask them before you start, stop or redirect work on your own",
                 "auto": "you keep the workstreams in step on your own",
                 "off": "you only pass their reports on"}[work_coord.mode(store)]
