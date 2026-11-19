@@ -1688,6 +1688,27 @@ def test_a_wait_whose_push_was_dropped_still_pushes_the_bot_chats_answer(on, her
     assert _bot_chat_answer_push(monkeypatch, params["text"]) is not None
 
 
+def test_a_later_wait_in_the_same_words_needs_its_own_push_queued(on, hermes, monkeypatch):
+    # DeepSeek on notifier #911: the first question's queued push mustn't
+    # quiet the Bot Chat's answer to a second, identical one whose push was dropped.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    monkeypatch.setattr(work, "_coordinator_busy", lambda home, chat: False)  # its first answer has ended
+    start()
+    work.needs_you("20261031_work_1", "a question", question=True)
+    work.wait_pushed("20261031_work_1")
+    work.flush_wakes()
+    (_, first, _), = hermes.named("prompt.submit")[-1:]
+    assert _bot_chat_answer_push(monkeypatch, first["text"]) is None
+    work.answered("20261031_work_1")
+    work.needs_you("20261031_work_1", "a question", question=True)  # its push is dropped this time
+    sent = len(hermes.named("prompt.submit"))
+    work.flush_wakes()
+    assert len(hermes.named("prompt.submit")) == sent + 1, "the second wait's update went"
+    (_, second, _), = hermes.named("prompt.submit")[-1:]
+    assert second["text"] == first["text"]
+    assert _bot_chat_answer_push(monkeypatch, second["text"], turn_id="t-second") is not None
+
+
 def test_a_dropped_approval_push_leaves_the_bot_chat_to_tell_the_user(on, hermes, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
     start()

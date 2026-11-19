@@ -5173,11 +5173,15 @@ def wait_pushed(session_id: Any) -> None:
 
 def _note_wait_wake(coordinator: str, lines: list[str], text: str) -> None:
     """A work update about to go to ``coordinator``: one whose every line is
-    a wait (needs_you) is kept by its text, for its turn to find."""
+    a wait (needs_you) is kept by its text, for its turn to find. Each wait's
+    line goes with its update, so a later wait in the same words counts only
+    once its own push is queued (DeepSeek on notifier #911: an answered
+    question left its line, and the next one's dropped push went unheard)."""
     if not lines or not text.strip():
         return
     with _wait_lock:
-        if not all(line in _wait_lines for line in lines):
+        waits = [_wait_lines.pop(line, _MISSING_TURN) is not _MISSING_TURN for line in lines]
+        if not all(waits):
             return
         key = (coordinator, text.strip())
         _wait_wakes[key] = _wait_wakes.pop(key, 0) + 1
