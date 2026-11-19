@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
-from .chat_marks_store import ChatMarksError, ChatMarksStore
+from .chat_marks_store import MAX_IDS, ChatMarksError, ChatMarksStore
 from .link_ask_tool import lineage
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
@@ -82,8 +82,8 @@ def handle(args: Any, *, session_id: Any = None, is_child: Callable[[Any], bool]
         # Its session, then the ones it continued through compactions, the
         # lineage root last: Conduit finds the mark by any of them.
         ids = list(dict.fromkeys([session, *chain(session)]))
-        if len(ids) > 8:
-            ids = ids[:7] + ids[-1:]
+        if len(ids) > MAX_IDS:
+            ids = ids[:MAX_IDS - 1] + ids[-1:]
         (store or ChatMarksStore(get_hermes_home())).mark(ids, done, by="agent")
         if done:
             return _answer(ok=True, done=True, note="Marked done in Conduit. Tell the user only if they asked.")
