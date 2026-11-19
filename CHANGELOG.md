@@ -19,6 +19,12 @@ checks it). The format is fixed, because Conduit reads it:
 
 - When your words ask for it (what you say, a bot's SOUL.md), a bot can start one workstream on another model, checked first that your Hermes can run it. The Workstream Model in Edit Bot > Work stays the default, and the workstream's card shows the model it runs on.
 
+## 0.178.5 (2026-11-19)
+
+### Fixes
+
+- When an update waits on a Bot Chat that's still working, Conduit names that chat and can stop it again.
+
 ## 0.178.4 (2026-11-19)
 
 ### Fixes
