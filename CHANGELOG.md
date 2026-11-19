@@ -19,6 +19,12 @@ checks it). The format is fixed, because Conduit reads it:
 
 - A bot you make in Conduit can use Conduit's features (notifications, rooms, the Folder, cards) right away, even when it starts from a fresh profile: Conduit turns the plugin on for it. A bot that has it off gets a Turn On button in Edit Bot.
 
+## 0.180.1 (2026-11-19)
+
+### Fixes
+
+- When a workstream asked you the same thing again and that notification couldn't be sent, the Bot Chat could still stay quiet about it in a few rare cases (its earlier message was refused, sent with another bot's question, or held while the Bot Chat was busy). Now each question counts on its own notification.
+
 ## 0.180.0 (2026-11-19)
 
 ### New and improved
