@@ -103,6 +103,29 @@ def test_a_hand_edited_file_is_read_safely(store):
 # --- The tool ------------------------------------------------------------------------
 
 
+def test_an_unreadable_store_is_not_overwritten(store, monkeypatch):
+    store.mark(["chat-a"], True)
+    saved = store.path.read_text(encoding="utf-8")
+    real = type(store.path).read_text
+
+    def unreadable(path, *args, **kwargs):
+        if path == store.path:
+            raise PermissionError("busy")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(store.path), "read_text", unreadable)
+    assert store.done() == []
+    with pytest.raises(OSError):
+        store.mark(["chat-b"], True)
+    monkeypatch.undo()
+    assert store.path.read_text(encoding="utf-8") == saved
+
+
+def test_a_deeply_nested_file_reads_as_no_marks(store):
+    store.path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+    assert store.done() == []
+
+
 def test_the_tool_marks_the_chat_under_its_compaction_chain(tmp_path):
     store = marks.ChatMarksStore(tmp_path)
     answer = json.loads(tool.handle({}, session_id="tip", store=store, chain=lambda s: [s, "middle", "root"]))

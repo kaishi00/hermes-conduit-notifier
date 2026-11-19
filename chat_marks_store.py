@@ -86,10 +86,17 @@ class ChatMarksStore:
 
     # --- reading and writing the file ---------------------------------------
 
-    def _load(self) -> dict[str, Any]:
+    def _load(self, for_write: bool = False) -> dict[str, Any]:
+        """The file's marks; a missing or garbled file reads as none. A file
+        that's there but can't be read raises when it's read for a write,
+        so a mark never replaces every other one."""
         try:
             state = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError, OSError):
+        except (FileNotFoundError, ValueError, RecursionError):
+            return {"done": []}
+        except OSError:
+            if for_write:
+                raise
             return {"done": []}
         if not isinstance(state, dict) or not isinstance(state.get("done"), list):
             return {"done": []}
@@ -107,7 +114,7 @@ class ChatMarksStore:
                 os.chmod(lock_path, 0o600)
             except OSError:
                 pass
-            state = self._load()
+            state = self._load(for_write=True)
             before = json.dumps(state, sort_keys=True)
             yield state
             if json.dumps(state, sort_keys=True) != before:
