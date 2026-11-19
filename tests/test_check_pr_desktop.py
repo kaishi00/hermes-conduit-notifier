@@ -50,6 +50,12 @@ def test_fences_end_as_github_draws_them():
     # A longer run of the same character closes it.
     longer = "## Summary\n```\n## Desktop\nDone: desktop#58.\n`````\n\n## Desktop\nNot needed: docs.\n"
     assert check.problem(longer) is None
+    assert check.problem(longer.replace("```", "~~~").replace("``", "~~")) is None
+    tildes = "## Summary\n~~~\n~~~`\n## Desktop\nDone: desktop#58.\n~~~~\n"
+    assert "inside a code fence" in check.problem(tildes)
+    # A fence in a list item closes at the item's indent.
+    listed = "## Summary\n- ```bash\n  npm test\n  ```\n\n## Desktop\nNot needed: docs only.\n"
+    assert check.problem(listed) is None
 
 
 def test_done_names_a_pr_not_an_issue():
