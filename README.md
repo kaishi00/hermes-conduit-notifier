@@ -356,6 +356,7 @@ gateway-bound inactive records still require separately reviewed maintenance.
 | POST | `/v1/installations` | Register a device; `token_proof` carries the pushed nonce (see "Registration proof") |
 | PUT | `/v1/installations/:id` | Update device token (a new one needs `token_proof`), PushKit token (`voip_token`, `null` clears it), the paired Apple Watch's PushKit token (`watch_voip_token`, 0.10+), location push token (`location_token`, 0.12+) / preferences |
 | DELETE | `/v1/installations/:id` | Deactivate a device |
+| DELETE | `/v1/installations/:id/gateways/:gateway_id` | The device drops one of its pairings; Conduit does when a dashboard is removed, so its host is refused (401) whether or not it can be reached; 204 also for one already gone (0.28+, capability `device-gateway-removal`) |
 | POST | `/v1/installations/:id/pairings` | Create a pairing code |
 | POST | `/v1/pairings/claim` | Claim a pairing code (gateway side) |
 | POST | `/v1/events` | Deliver a notification event; a reply's `level` (`passive`, `active` or `time-sensitive`) sets its interruption level (0.20+, capability `push-levels`) |

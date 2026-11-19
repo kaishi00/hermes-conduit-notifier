@@ -18,7 +18,7 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
-const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip', 'push-levels', 'room-invites'];
+const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip', 'push-levels', 'room-invites', 'device-gateway-removal'];
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -487,6 +487,24 @@ async function route(request, response) {
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRevocationBudget();
     deactivateInstallation(installation.id);
+    response.writeHead(204).end();
+    return;
+  }
+
+  // The phone drops one of its pairings itself (0.28+): a dashboard removed from Conduit stops pushing to it even when its host
+  // can't be reached to unpair, or never will be (signed out by then). The
+  // host's next push is refused 401, which its plugin already reads as the
+  // phone having removed the pairing. Answers 204 for a gateway already
+  // gone, so a retry after a lost answer is done too.
+  const gatewayMatch = url.pathname.match(/^\/v1\/installations\/([0-9a-f-]+)\/gateways\/([0-9a-f-]+)$/i);
+  if (gatewayMatch && request.method === 'DELETE') {
+    const installation = authorize(request, gatewayMatch[1], 'device');
+    if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRateLimit(`gateway-removal:${installation.id}`, 30, 60_000);
+    enforceRevocationBudget();
+    const gatewayId = gatewayMatch[2].toLowerCase();
+    // The Watch's PushKit token stays, as an unpair from the host keeps it.
+    if (store.removeGateway(installation.id, gatewayId)) watchGrants.closeOwned(installation.id, gatewayId, 'revoked');
     response.writeHead(204).end();
     return;
   }
