@@ -310,6 +310,16 @@ def test_cards_wrapped_another_way_are_still_drawn(tool_home):
     deep = _call({"title": "Today", "cards": [[[[[[[[[[[STATS]]]]]]]]]]]})
     assert deep["error"] == "invalid_cards", "too deep to open"
     assert any("wrapped more than 8 deep" in problem for problem in deep["problems"]), "and Hermes hears why (879)"
+    def lists(count):
+        given = [STATS]
+        for _ in range(count - 1):
+            given = [given]
+        return _call({"title": "Today", "cards": given})
+    nine = lists(9)
+    assert nine["cards"] == [STATS] and not any("deep" in problem for problem in nine.get("problems", [])), nine
+    ten = lists(10)
+    assert ten.get("error") == "invalid_cards", "a card the note leaves out isn't drawn"
+    assert any("wrapped more than 8 deep" in problem for problem in ten["problems"]), ten
     answer = _call({"title": "Today", "cards": [[[[[[[[[{"cards": [STATS]}, MAP]]]]]]]]]})
     assert any("wrapped more than 8 deep" in problem for problem in answer["problems"]), answer
     answer = _call({"title": "Today", "cards": [[STATS], "x"]})

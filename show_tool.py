@@ -721,6 +721,12 @@ def _cards_unwrapped(given: Any, problems: list[str] | None = None, depth: int =
     cards: list[Any] = []
     for item in given:
         if isinstance(item, list) or _is_card_json(item) or (isinstance(item, dict) and _is_cards_wrapper(item)):
+            if depth + 1 > _MAX_CARD_WRAPS:
+                # Left as it is, never spliced in: what the note says was
+                # left out isn't drawn.
+                _cards_unwrapped(item, problems, depth + 1)
+                cards.append(item)
+                continue
             opened = _cards_unwrapped(item, problems, depth + 1)
             cards.extend(opened if isinstance(opened, list) else [opened])
         else:
