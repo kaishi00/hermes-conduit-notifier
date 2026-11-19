@@ -329,15 +329,17 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         # The middleware wraps the execution and pushes a richer, answerable
         # input.needed event itself; pushing here too would double-notify.
         return
+    # A coordinated workstream's question is named by its ref (notifier issue 908).
+    wait = _wait_title(_text(kwargs.get("session_id")))
     enqueue(push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id")),
         session_id=_text(kwargs.get("session_id")),
         profile=_profile,
         profile_name=_bot_name(),
-        title=_titled("Input needed", kwargs.get("session_id")),
+        title=f"Input needed · {wait}" if wait else _titled("Input needed", kwargs.get("session_id")),
         title_label="input.needed",
-        session_title=_session_title(kwargs.get("session_id")),
+        session_title=wait or _session_title(kwargs.get("session_id")),
         body=clarification_text(kwargs.get("args")),
     ))
 
@@ -622,6 +624,7 @@ def _post_llm_call(**kwargs: Any) -> None:
              or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
              or _member_room_turn(session_id) or _lead_routing(kwargs.get("turn_id"))
+             or _waits_only_turn(kwargs.get("turn_id"))
              or (automation and not headline))
     # A turn in a room this Hermes hosts opens the room, under its name.
     room = None if quiet or pulse_turn else _home_room(session_id)
@@ -968,6 +971,7 @@ def _on_session_end(**kwargs: Any) -> None:
     _end_parent_turn(session_id)
     _drop_unnamed_end(session_id)
     routing = _lead_routing(kwargs.get("turn_id"), end=True)
+    _waits_only_turn(kwargs.get("turn_id"), end=True)
     # A workstream's turn is settled with its reply, or as failed, and its
     # coordinator told (work_tool); a failed one sends no push of its own.
     workstream = _work_turn_finished(session_id, kwargs)
@@ -1110,15 +1114,19 @@ def _pre_approval_request(**kwargs: Any) -> None:
     # One in a room this Hermes hosts opens the room, whose card answers it.
     room = _home_room(_text(kwargs.get("session_id")) or session_id)
     room_title = room[1] if room else ""
+    # A coordinated workstream's is named by its ref, as the Bot Chat's work
+    # (notifier issue 908): this push is how the user hears of it.
+    wait = "" if room_title else _wait_title(_text(kwargs.get("session_id")) or session_id)
+    named = room_title or wait
     enqueue(push_event(
         "approval.needed",
         identifier=event_id("approval", session_id, turn_id, kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
         profile=_profile,
         profile_name=_bot_name(),
-        title=f"Approval needed · {room_title}" if room_title else _titled("Approval needed", session_id),
+        title=f"Approval needed · {named}" if named else _titled("Approval needed", session_id),
         title_label="approval.needed",
-        session_title=room_title or _session_title(session_id),
+        session_title=named or _session_title(session_id),
         room={"id": room[0]} if room else None,
         # No description: the phone writes the generic line in its language.
         body=description,
@@ -1356,6 +1364,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _note_lead_routing(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
         # The ask a Bot Chat's quick steps hand on to a workstream (work_tool).
         _quietly(work_tool.note_turn_ask, session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
+        # A work update of waits only, whose answer sends no push (notifier issue 908).
+        _quietly(work_tool.note_wait_wake, session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))
         _drop_unnamed_end(session_id)
         # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
@@ -1827,6 +1837,25 @@ def _note_lead_routing(session_id: str, turn_id: Any, user_message: Any) -> None
         _routing_turns[turn_id] = None
         while len(_routing_turns) > MAX_TURN_STARTS:
             _routing_turns.pop(next(iter(_routing_turns)))
+
+
+def _waits_only_turn(turn_id: Any, *, end: bool = False) -> bool:
+    """Whether this Bot Chat turn answers a work update that only says a
+    workstream waits on the user (work_tool.note_wait_wake): the
+    workstream's own approval or question push told them, so this answer
+    sends none (notifier issue 908)."""
+    try:
+        return work_tool.waits_only_turn(turn_id, end=end)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        return False
+
+
+def _wait_title(session_id: str) -> str:
+    """work_tool.wait_title, "" when it can't be read."""
+    try:
+        return work_tool.wait_title(session_id)
+    except Exception:  # noqa: BLE001 — a push must never fail on its title
+        return ""
 
 
 def _lead_routing(turn_id: Any, *, end: bool = False) -> bool:

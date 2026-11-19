@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.178.7 (2026-11-19)
+
+### Fixes
+
+- When a bot's workstream needs your approval or an answer, you get one notification, named after the workstream (W3 · its title), instead of a second one from the Bot Chat. The Bot Chat no longer decides whether you hear about it.
+
 ## 0.178.6 (2026-11-19)
 
 ### Fixes

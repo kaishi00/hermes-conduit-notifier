@@ -3,6 +3,7 @@ designs/bot-mode-coordinator): a bot's Bot Chat coordinates work sessions
 of its own, names them by ref only, and keeps to its policy."""
 import contextvars
 import threading
+from collections import OrderedDict
 import json
 import re
 import pathlib
@@ -1568,6 +1569,77 @@ def test_a_question_tells_the_bot_it_may_pass_the_users_answer_on(on, hermes, mo
     assert on.get("W1").status == "needs_you"
     line, = [line for line in batched() if "is waiting on the user" in line]
     assert "(a question)" in line and "pass their answer on with work_send" in line and "you can't" not in line
+
+
+def _bot_chat_answer_push(monkeypatch, text, turn_id="t-wait"):
+    """What the Bot Chat's answer to the work update ``text`` pushes (None: nothing)."""
+    sent = []
+    monkeypatch.setattr(plugin, "_finish_ready", lambda session_id, ready, send: sent.append(ready))
+    monkeypatch.setattr(plugin, "_later", lambda delay, work: None)
+    monkeypatch.setattr(plugin, "_session_title", lambda session_id: "Furina")
+    monkeypatch.setattr(plugin.calls, "failed_turn", lambda *args, **kwargs: False, raising=False)
+    plugin._pre_llm_call(session_id=BOT_CHAT, turn_id=turn_id, user_message=text, platform="tui")
+    plugin._post_llm_call(session_id=BOT_CHAT, turn_id=turn_id, assistant_response="W1 is waiting on you.",
+                          platform="tui")
+    plugin._on_session_end(session_id=BOT_CHAT, turn_id=turn_id, completed=True, failed=False, interrupted=False,
+                           platform="tui")
+    assert len(sent) == 1
+    return sent[0]
+
+
+def test_a_wait_is_one_push_the_plugins_not_the_bot_chats_answer(on, hermes, monkeypatch):
+    # Notifier issue 908 (Eric 2026-11-19): the workstream's answerable push
+    # tells the user, so no model's [SILENT] can swallow it, and the Bot
+    # Chat's answer to an update of only that sends no second banner.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    work.needs_you("20261031_work_1", "rm -rf build")
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")[-1:]
+    assert "is waiting on the user" in params["text"]
+    assert _bot_chat_answer_push(monkeypatch, params["text"]) is None
+    assert work._wait_turns == OrderedDict(), "its end forgets it"
+    # The same words again are a turn of the user's own, which pushes.
+    assert _bot_chat_answer_push(monkeypatch, params["text"], turn_id="t-again") is not None
+
+
+def test_a_work_update_with_a_wait_and_news_still_pushes(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    start(title="Docs", instructions="Update the docs.")
+    work.needs_you("20261031_work_1", "rm -rf build")
+    work._queue_wake(on.home, BOT_CHAT, "- W2 “Docs” finished: the docs are updated.")
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")[-1:]
+    assert "is waiting on the user" in params["text"] and "W2 “Docs” finished" in params["text"]
+    assert _bot_chat_answer_push(monkeypatch, params["text"]) is not None
+
+
+def test_a_workstreams_approval_push_names_it_by_its_ref(on, hermes, monkeypatch):
+    start()
+    pushed = []
+    monkeypatch.setattr(plugin, "enqueue", pushed.append)
+    monkeypatch.setattr(plugin, "_session_title", lambda session_id: "Login bug")
+    monkeypatch.setattr(plugin.calls, "alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugin.calls, "note_waiting", lambda *args, **kwargs: False)
+    monkeypatch.setattr(plugin, "_home_room", lambda session_id: None)
+    plugin._pre_approval_request(session_key="20261031_work_1", session_id="20261031_work_1",
+                                 description="rm -rf build", turn_id="t")
+    approval, = [event for event in pushed if event["type"] == "approval.needed"]
+    assert (approval["title"], approval["session_title"]) == ("Approval needed · W1 · Login bug", "W1 · Login bug")
+    assert approval["session_id"] == "20261031_work_1", "it opens the workstream, whose card answers it"
+    # Its question too, on the hook's path (the clarify middleware's in test_clarify_loop).
+    pushed.clear()
+    monkeypatch.setattr(plugin, "_clarify_loop_active", False)
+    plugin._pre_tool_call(session_id="20261031_work_1", turn_id="t3", tool_call_id="c1", tool_name="clarify",
+                          args={"question": "Which branch?"})
+    question, = [event for event in pushed if event["type"] == "input.needed"]
+    assert (question["title"], question["session_title"]) == ("Input needed · W1 · Login bug", "W1 · Login bug")
+    # Any other chat keeps its own title.
+    pushed.clear()
+    plugin._pre_approval_request(session_key=OTHER_CHAT, session_id=OTHER_CHAT, description="ls", turn_id="t2")
+    approval, = [event for event in pushed if event["type"] == "approval.needed"]
+    assert approval["session_title"] == "Login bug"
 
 
 def _waits_on_a_question(home, session_id="20261031_work_1", request_id="conduit-push-q1"):

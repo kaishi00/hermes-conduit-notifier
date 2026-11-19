@@ -133,15 +133,17 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         else None
     )
 
+    # A coordinated workstream's question is named by its ref (notifier issue 908).
+    wait = _wait_title(session_id)
     push = push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
         session_id=session_id,
         profile=profile,
         profile_name=bot_name(),
-        title=titled("Input needed", session_id),
+        title=f"Input needed · {wait}" if wait else titled("Input needed", session_id),
         title_label="input.needed",
-        session_title=chat_title(session_id),
+        session_title=wait or chat_title(session_id),
         body=question,
         decision=clarify_decision(
             request_id=request_id,
@@ -750,3 +752,13 @@ def _parse_multi_select(raw: str) -> list[str]:
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _wait_title(session_id: Any) -> str:
+    """work_tool.wait_title, "" when it can't be read: the chat's own title then."""
+    try:
+        from . import work_tool
+
+        return work_tool.wait_title(session_id)
+    except Exception:  # noqa: BLE001 — a push must never fail on its title
+        return ""

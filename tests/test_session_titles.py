@@ -121,6 +121,21 @@ def test_a_clarify_question_is_titled_on_the_middleware_path(sent, monkeypatch):
     assert queued[0]["title"] == "Input needed · Infra"
 
 
+def test_a_coordinated_workstreams_question_is_named_by_its_ref_on_the_middleware_path(sent, monkeypatch):
+    # Notifier issue 908: this push is how the user hears of the wait, named as the Bot Chat's work.
+    queued = []
+    work_tool = sys.modules["conduit_push.work_tool"]
+    monkeypatch.setattr(work_tool, "wait_title", lambda session_id: "W3 · Login bug" if session_id == "s1" else "")
+    monkeypatch.setattr(loop.client, "load_state", lambda: {"credential": "x"})
+    monkeypatch.setattr(loop.client, "enqueue", lambda event: queued.append(event) or True)
+    monkeypatch.setattr(loop.client, "poll_decision", lambda request_id: {"status": "answered", "answer": "Red"})
+    monkeypatch.setattr(loop.client, "cancel_decision", lambda request_id: True)
+    monkeypatch.setattr(loop, "POLL_INTERVAL_SECONDS", 0.01)
+    loop.middleware(tool_name="clarify", args={"question": "Which color?", "choices": ["Red", "Blue"]},
+                    next_call=lambda args: time.sleep(5), session_id="s1")
+    assert (queued[0]["title"], queued[0]["session_title"]) == ("Input needed · W3 · Login bug", "W3 · Login bug")
+
+
 def test_events_in_one_turn_share_one_session_store_read(sent):
     _reply(session_id="s1", turn_id="t5", assistant_response="Deployed.")
     _reply(session_id="s1", turn_id="t6", assistant_response="Again.")

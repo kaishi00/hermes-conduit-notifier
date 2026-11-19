@@ -1860,7 +1860,10 @@ question or a small task doesn't start a workstream. Change it in Conduit
   `screen` and ends its turn: its card in Conduit shows what to do, with the
   screen one tap away.
 - A workstream's turn sends no push of its own: the Bot Chat's reply about it
-  is the one push. Its approvals and questions still come from the workstream.
+  is the one push. Its approvals and questions still come from the workstream,
+  as the one push for each, titled with its ref ("Approval needed · W3 ·
+  Login bug"), whatever the Bot Chat answers: the Bot Chat hears of the wait
+  too, but its answer to an update that only says so sends no second push.
   You answer an approval in the workstream's chat or on its card. A question
   you can also answer from the reply field on its card, or in the Bot Chat:
   the bot passes your answer on with `work_send`, and that answers the
