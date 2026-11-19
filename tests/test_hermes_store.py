@@ -324,6 +324,15 @@ def test_a_session_key_listing_leaves_hidden_rows_out_unless_asked(store_module,
         assert [r["title"] for r in db.list_sessions_rich(session_key="k", include_hidden=True)] == ["Bot Chat"]
 
 
+def test_a_hermes_without_the_hidden_filter_lists_a_key_without_it(store_module):
+    class OldDB:
+        def list_sessions_rich(self, session_key=None, limit=20, order_by_last_active=False):
+            return [{"title": "Infra"}] if session_key == "k" else []
+
+    assert store_module.latest_row_of_key(OldDB(), "k") == {"title": "Infra"}
+    assert store_module.latest_row_of_key(OldDB(), "other") == {}
+
+
 def test_deleting_runs_what_hermes_own_delete_runs_after_it(store_module, interface, tmp_path):
     with store_module.open_store(tmp_path) as db:
         for sid in ("a", "b", "c"):

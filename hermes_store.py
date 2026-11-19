@@ -81,6 +81,19 @@ def can(method: str) -> bool:
         return False
 
 
+def latest_row_of_key(db: Any, key: str) -> dict:
+    """The latest session row of a gateway session key in an open store ({}
+    when there's none), hidden rows included: a Bot Chat is one, and a key
+    listing leaves them out unless asked (notifier#881). A Hermes from before
+    that filter has no hidden rows to leave out."""
+    try:
+        rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True, include_hidden=True)
+    except TypeError:
+        logger.debug("This Hermes lists no hidden rows by key; listing without them", exc_info=True)
+        rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True)
+    return rows[0] if rows and isinstance(rows[0], dict) else {}
+
+
 def new_session_id() -> Optional[str]:
     """A session id the way Hermes makes one; None when this Hermes can't say."""
     for module, name in (("session_rules.session_ids", "new_session_id"), ("hermes_state_ids", "new_session_id")):

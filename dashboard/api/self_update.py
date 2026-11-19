@@ -443,13 +443,14 @@ def _session_row(home: Optional[Path], key: str) -> Dict[str, Any]:
     if home is None:
         return {}
     try:
-        db = core._hermes_store().open_store(home)
+        store = core._hermes_store()
+        db = store.open_store(home)
     except Exception:  # noqa: BLE001 — a name is never worth failing the answer
         logger.debug("Conduit plugin: couldn't open a profile's sessions", exc_info=True)
         return {}
     try:
-        rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True)
-        return rows[0] if rows and isinstance(rows[0], dict) else {}
+        # A Bot Chat's row is hidden (notifier#881).
+        return store.latest_row_of_key(db, key)
     except Exception:  # noqa: BLE001
         logger.debug("Conduit plugin: couldn't read a chat's session", exc_info=True)
         return {}
