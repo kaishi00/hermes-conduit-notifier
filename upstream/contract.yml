@@ -145,7 +145,7 @@ notes:
     POST /profiles/plugin (feature map: "Conduit plugin update", hermes-conduit#2803) links a fresh
     profile's plugins/conduit_push to the main install, then runs `python -m hermes_cli.main -p
     <name> plugins enable conduit_push` with HERMES_HOME at the root: Hermes' own enable writes the
-    profile's plugins.enabled and nudges a running gateway. upstream/test_bot_plugin.py checks the
+    profile's plugins.enabled and nudges a running gateway. upstream/test_profile_plugin_turn_on.py checks the
     profile's plugin requests are served afterwards with no restart.
   plugin host flag: >-
     HERMES_PLUGIN_HOST_PROCESS=1 marks a plugin host. The self-update refuses there, and the

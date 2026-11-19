@@ -122,6 +122,18 @@ def test_a_profiles_own_copy_of_the_plugin_cant_share_itself(host, monkeypatch, 
 
 def test_a_desktop_ticket_turns_it_on_for_its_own_profile_only(host, monkeypatch):
     monkeypatch.setattr(api.core, "_native_ticket_home", lambda request: str(host.root / "profiles" / "nahida"))
-    response = _client().post(f"{BASE}/profiles/plugin", json={"name": "furina"})
-    assert response.status_code == 403
+    client = _client()
+    assert client.post(f"{BASE}/profiles/plugin", json={"name": "furina"}).status_code == 403
+    assert client.get(f"{BASE}/profiles/plugin", params={"name": "furina"}).status_code == 403
+    # Checked before the profile is looked up, so it tells nothing about other profiles.
+    assert client.get(f"{BASE}/profiles/plugin", params={"name": "nobody"}).status_code == 403
     assert host.runs == []
+
+
+def test_hermes_failing_to_check_the_profile_is_an_error_not_off(host, monkeypatch):
+    async def unavailable(profile):
+        raise api.bot_plugin.HTTPException(status_code=503, detail="Hermes couldn't check this profile's plugins")
+
+    monkeypatch.setattr(api.core, "_plugin_refused_on", unavailable)
+    response = _client().get(f"{BASE}/profiles/plugin", params={"name": "furina"})
+    assert response.status_code == 503

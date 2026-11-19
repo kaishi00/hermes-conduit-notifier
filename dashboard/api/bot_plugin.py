@@ -87,10 +87,9 @@ async def bot_plugin_state(name: str, home: Path) -> Dict[str, Any]:
     shared = _main_install()
     copies = self_update.profile_copies_module() if shared is not None else None
     holds = bool(copies and copies.holds_plugin(home, shared))
-    try:
-        allowed = not await core._plugin_refused_on(name)
-    except HTTPException:
-        allowed = False
+    # Hermes failing to check (503) or not knowing the profile (404) is said
+    # as such, never read as the plugin being off.
+    allowed = not await core._plugin_refused_on(name)
     return {"profile": name, "on": allowed and holds, "allowed": allowed, "linked": holds,
             "can_turn_on": copies is not None}
 
@@ -112,7 +111,9 @@ def turn_on(name: str, home: Path) -> None:
     except OSError as exc:
         logger.warning("Conduit plugin: couldn't link profile %s to the main install", name, exc_info=True)
         raise core.TokenError(500, f"Couldn't give the profile the plugin ({type(exc).__name__})")
-    if changes is None or not copies.holds_plugin(home, shared):
+    if changes is None:
+        raise core.TokenError(500, f"This install's plugin.yaml doesn't name {core.PLUGIN_NAME}")
+    if not copies.holds_plugin(home, shared):
         raise core.TokenError(409, f"Profile {name} holds something else under plugins/{shared.name}")
     # -p names the profile under the root; a HERMES_HOME naming a profile's home must not outrank it.
     env = {**os.environ, "HERMES_HOME": str(root)}
@@ -136,8 +137,8 @@ def turn_on(name: str, home: Path) -> None:
 @router.get(BOT_PLUGIN_PATH)
 async def get_bot_plugin(request: Request, response: Response, name: str = "") -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    home = _profile_home(name)
     _refuse_other_ticket(request, name.strip())
+    home = _profile_home(name)
     return await bot_plugin_state(name.strip(), home)
 
 
@@ -146,8 +147,8 @@ async def post_bot_plugin(request: Request, response: Response) -> Dict[str, Any
     response.headers["Cache-Control"] = "no-store"
     body = await core._read_json_body(request)
     name = str((body or {}).get("name") or "").strip() if isinstance(body, dict) else ""
-    home = _profile_home(name)
     _refuse_other_ticket(request, name)
+    home = _profile_home(name)
     try:
         await asyncio.get_running_loop().run_in_executor(None, turn_on, name, home)
     except core.TokenError as exc:
