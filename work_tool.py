@@ -1392,12 +1392,12 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
     # A model the user's words named for this one workstream (issue 2788), checked as Hermes' /model checks it
     # before anything is kept; the Workstream Model stays the default.
     picked = {}
-    asked = work_models.requested(args)
-    if asked:
-        try:
+    try:
+        asked = work_models.requested(args)
+        if asked:
             picked = work_models.check(home, work_broker.profile_of(home), asked)
-        except work_models.Refused as error:
-            return {"ok": False, "error": "model", "note": str(error)}
+    except work_models.Refused as error:
+        return {"ok": False, "error": "model", "note": str(error)}
     # The count and the new row in one transaction: two starts in one turn
     # can't both take the last slot.
     # Started from a room: kept with the bot's Bot Chat (its note, its

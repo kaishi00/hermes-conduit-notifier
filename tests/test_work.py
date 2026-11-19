@@ -1153,6 +1153,10 @@ def test_a_model_hermes_cant_run_starts_nothing(on, home, hermes, monkeypatch):
     assert on.get("W1") is None and hermes.named("session.create") == []
     refused = start(model="opus", reasoning_effort="hgih")
     assert refused["error"] == "model" and "xhigh" in refused["note"] and on.get("W1") is None
+    # A level with no model would start on the Workstream Model while the bot says otherwise.
+    refused = start(reasoning_effort="high")
+    assert refused["error"] == "model" and "needs the model" in refused["note"] and on.get("W1") is None
+    assert "provider name is too long" in start(model={"model": "m", "provider": "p" * 201})["note"]
     # A Hermes that can't check (too old: no hermes_cli here) passes it on as given; its own
     # session.create still refuses a pair it knows is wrong.
     assert hermes_check(home, "default", "opus", "") == {}

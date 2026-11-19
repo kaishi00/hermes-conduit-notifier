@@ -32,12 +32,16 @@ def _line(value: Any) -> str:
 
 def requested(args: dict) -> dict:
     """The bot's ``model``, ``provider`` and ``reasoning_effort`` from work_start's
-    arguments, as given ({} when it named no model). ``model`` may also be an
-    object carrying the three."""
+    arguments, as given ({} when it named none of them). ``model`` may also be an
+    object carrying the three. A provider or level with no model raises Refused:
+    started anyway, the bot would tell the user it runs on what it doesn't."""
     raw = args.get("model")
     given = raw if isinstance(raw, dict) else {"model": raw}
     picked = {key: _line(given.get(key) if key in given else args.get(key))
               for key in ("model", "provider", "reasoning_effort")}
+    if not picked["model"] and (picked["provider"] or picked["reasoning_effort"]):
+        raise Refused("A provider or reasoning level needs the model too. Name the model the user's words named, "
+                      "or leave all three out to run it on the Workstream Model.")
     return {key: value for key, value in picked.items() if value} if picked["model"] else {}
 
 
@@ -47,8 +51,9 @@ def check(home: Path, profile: str, asked: dict) -> dict:
     can't run it or the level isn't one of Hermes'."""
     model, provider = asked.get("model", ""), asked.get("provider", "")
     effort = asked.get("reasoning_effort", "").lower()
-    if any(len(value) > MAX_CHARS for value in (model, provider)):
-        raise Refused("That model name is too long to be one. Name a model from the bot's providers.")
+    for what, value in (("model", model), ("provider", provider)):
+        if len(value) > MAX_CHARS:
+            raise Refused(f"That {what} name is too long to be one. Name a model from the bot's providers.")
     if effort and effort not in REASONING:
         raise Refused(f"Reasoning {effort} isn't a level Hermes has. Use one of: {', '.join(REASONING)}, "
                       "or leave it out for the model's own.")
@@ -71,7 +76,7 @@ def _switch(home: Path, profile: str, model: str, provider: str) -> dict:
         from hermes_cli.model_switch import switch_model
         from hermes_cli.models_validate import static_model_provider_conflict
         from hermes_cli.providers import resolve_provider_full
-    except ImportError:
+    except (ImportError, AttributeError):  # too old, or a name it no longer has
         return {}
     from . import room_setup
 
