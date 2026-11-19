@@ -46,6 +46,15 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 RPC_TIMEOUT_S = 30.0
+
+# What a workstream session gets, overriding the profile's chat-only ``cli``
+# platform list. Kept explicit so a profile edit can't silently strip a workstream
+# of the tools it exists to use.
+WORKSTREAM_TOOLSETS = (
+    "clarify", "cronjob", "delegation", "kanban", "memory", "session_search",
+    "skills", "todo", "web", "terminal", "file", "code_execution",
+)
+
 CALL_TIMEOUT_S = 45.0
 # Hermes answers a submit another surface refused with this code, and says
 # why in data.reason: SESSION_NOT_OWNED (another window holds the chat),
@@ -380,8 +389,12 @@ class Broker:
         registry."""
         # On the authority, _dispatch names the profile and gateway_chats puts the
         # TUI gateway's shape (cols, source desktop, idempotency_key) in its own.
+        # ``toolsets`` overrides config platform_toolsets for this session
+        # (session_policy._resolve_toolsets): the profile's ``cli`` list carries no
+        # terminal/file/code_execution, so a workstream would get a chat-only toolset.
         params: dict[str, Any] = {"cols": 96, "source": "desktop", "title": title, "hidden": True,
-                                  "idempotency_key": idempotency_key, **self._profile_params()}
+                                  "idempotency_key": idempotency_key,
+                                  "toolsets": list(WORKSTREAM_TOOLSETS), **self._profile_params()}
         if cwd:
             params["cwd"] = cwd
         if model and model.get("model"):
