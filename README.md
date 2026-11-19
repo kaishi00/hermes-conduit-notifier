@@ -181,7 +181,7 @@ Beside notifications, the plugin keeps a Live Activity up to date while a turn y
 
 Each notification is titled with the session's title when it has one (for example a Telegram topic name), so you can tell which chat it came from: a reply shows the session title, and the others prefix it (`Approval needed · Infra`). A Conduit Bot Chat, whose title is always `Bot Chat`, is titled with its bot's name instead, as Conduit's Bots list shows it (its Bot Mode title, else its display name, else its profile id capitalized, and Hermes for the main bot), so you can tell which bot replied. Conduit shows a name you gave the main bot on the phone instead. Every push also carries that name, so a call from the bot names it too. Untitled sessions keep the generic copy. How much shows is Conduit's Settings > Notifications > Show in notifications: Generic shows neither the title nor the text, Chat names shows the session's title and the profile without Hermes' words, and Full previews shows both, with the profile as the subtitle. `redact on` or end-to-end encryption keeps the title from reaching the relay.
 
-Hermes can write a reply's notification itself with the `conduit_notify` tool (plugin 0.112+), when you asked to be told something is done or a scheduled job reports: a title of a few words and a sentence or two, sent instead of the reply's opening when the turn ends (plugin 0.177.30+ shortens a title past 60 characters or text past 300 with "…" rather than refusing it). It sends no push of its own, so the turn still sends one, under the same settings, and a reply that sends none (`[SILENT]`, a muted job) sends none with it. The title rides as `headline`, sealed with the rest, and Conduit shows it only with Full previews; Chat names and Generic never show it. To update a notification instead of adding another ("Report in progress", later "Report ready"), Hermes gives both the same `key` (plugin 0.123+): the profile's chats and scheduled jobs share it, and `quiet` sends the update without a sound or banner (relay 0.26+). Each scheduled job also keeps one notification of its own, so a new run replaces the last one.
+Hermes can write a reply's notification itself with the `conduit_notify` tool (plugin 0.112+), when you asked to be told something is done or a scheduled job reports: a title of a few words and a sentence or two, sent instead of the reply's opening when the turn ends (plugin 0.177.30+ shortens a title past 60 characters or text past 300 with "…" rather than refusing it). It sends no push of its own, so the turn still sends one, under the same settings, and a reply that sends none (`[SILENT]`, a muted job, a Bot Chat's answer to a work update that only says a workstream waits on you) sends none with it. The title rides as `headline`, sealed with the rest, and Conduit shows it only with Full previews; Chat names and Generic never show it. To update a notification instead of adding another ("Report in progress", later "Report ready"), Hermes gives both the same `key` (plugin 0.123+): the profile's chats and scheduled jobs share it, and `quiet` sends the update without a sound or banner (relay 0.26+). Each scheduled job also keeps one notification of its own, so a new run replaces the last one.
 
 The iOS app controls which categories are enabled, how much a notification shows, whether completion sounds play, and whether approval and input-needed notifications play a sound (on by default).
 
@@ -1612,6 +1612,15 @@ question or a small task doesn't start a workstream. Change it in Conduit
   can't be posted goes to the Bot Chat. Asks between bots, answers and notes
   stay the Bot Chat's, and a room with other people's agents in it starts no
   work.
+- New workstreams run on the Workstream Model (Edit Bot > Work, or `work on
+  --model`). When your own words name another model for a task (what you
+  said, the bot's SOUL.md, its notes), `work_start` takes `model` (as
+  Hermes' `/model` takes it: `claude-opus-5-5`, `anthropic:claude-opus-5-5`)
+  and `reasoning_effort` for that one workstream; the Workstream Model stays
+  the default for the rest. The name is checked with Hermes' own `/model`
+  in the bot's profile first: one it can't run starts nothing, and Hermes'
+  reason, with the names it found, goes back to the bot. Conduit's Work
+  panel shows the model on that workstream's card (plugin 0.179.0+).
 - `work_start` with a `cwd` that isn't a folder on the host is refused
   (`no_such_folder`) instead of running in Hermes' own folder, where Hermes'
   terminal runs on the host itself (plugin 0.168.1+). Hermes' review after a
@@ -1862,8 +1871,10 @@ question or a small task doesn't start a workstream. Change it in Conduit
 - A workstream's turn sends no push of its own: the Bot Chat's reply about it
   is the one push. Its approvals and questions still come from the workstream,
   as the one push for each, titled with its ref ("Approval needed · W3 ·
-  Login bug"), whatever the Bot Chat answers: the Bot Chat hears of the wait
-  too, but its answer to an update that only says so sends no second push.
+  Login bug" with Chat names or Full previews), whatever the Bot Chat
+  answers: the Bot Chat hears of the wait too, but its answer to an update
+  that only says so sends no second push. A wait whose push was dropped (a
+  full queue, a lost pairing) leaves the Bot Chat's answer to tell you.
   You answer an approval in the workstream's chat or on its card. A question
   you can also answer from the reply field on its card, or in the Bot Chat:
   the bot passes your answer on with `work_send`, and that answers the

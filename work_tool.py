@@ -66,8 +66,8 @@ from typing import Any, Callable, Optional
 import uuid
 from urllib.parse import quote, unquote
 
-from . import (degraded, hermes_store, room_rules, room_work, screen_lock, work_broker, work_coord, work_store,
-               work_trees, work_watch)
+from . import (degraded, hermes_store, room_rules, room_work, screen_lock, work_broker, work_coord, work_models,
+               work_store, work_trees, work_watch)
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
@@ -417,7 +417,14 @@ SCHEMAS: dict[str, dict] = {
                                                             "same repository.")},
             "ask": {"type": "string", "description": ("When this is for an ask another bot sent you (A2): its "
                                                       "ref, so the user's message it carried goes along as theirs.")},
-            "new": {"type": "boolean", "description": "Start even though similar open work exists."}},
+            "new": {"type": "boolean", "description": "Start even though similar open work exists."},
+            "model": {"type": "string", "description": (
+                "Only when the user's own words name a model for this work (what they said, their SOUL.md, "
+                "your notes): the model this one workstream runs on instead of the Workstream Model the user "
+                "set, as Hermes' /model takes it, like opus or anthropic:claude-opus-5-5. Never pick one "
+                "yourself; left out, it runs on the Workstream Model.")},
+            "reasoning_effort": {"type": "string", "enum": list(work_models.REASONING), "description": (
+                "With model, only when the user's words name a level too.")}},
             "required": ["title", "instructions"]},
     },
     "work_send": {
@@ -1245,6 +1252,9 @@ def _row(work: work_store.Work, *, result_chars: int = DIGEST_RESULT_CHARS) -> d
         row["error"] = work.error
     if work.session_id:
         row["link"] = _link(work.ref, work.session_id, (work.executor or {}).get("bot"))
+    if work.kind == "workstream" and (work.executor or {}).get("model"):
+        # The model the bot named for it at its start (issue 2788); others run on the Workstream Model.
+        row["model"] = work_models.label(work.executor["model"])
     if work.kind == "ask_out":
         row["asked"] = _ask_bot(work)
     elif work.kind == "ask_in":
@@ -1380,6 +1390,15 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         return refused
     if room is not None:
         ask_words = ""
+    # A model the user's words named for this one workstream (issue 2788), checked as Hermes' /model checks it
+    # before anything is kept; the Workstream Model stays the default.
+    picked = {}
+    try:
+        asked = work_models.requested(args)
+        if asked:
+            picked = work_models.check(home, work_broker.profile_of(home), asked)
+    except work_models.Refused as error:
+        return {"ok": False, "error": "model", "note": str(error)}
     # The count and the new row in one transaction: two starts in one turn
     # can't both take the last slot.
     # Started from a room: kept with the bot's Bot Chat (its note, its
@@ -1388,8 +1407,9 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         "by": "user", "via": "linked_room" if room.linked else "room", "room": room.room_id,
         "session": room.session_id}
     reply_to = {"to": "coordinator", "session": coordinator} if room is None else _room_reply(room)
+    executor = {"bot": work_broker.profile_of(home), **({"model": picked} if picked else {})}
     work = store.add("workstream", title=title, goal=instructions, coordinator=coordinator,
-                     requested_by=requested_by, executor={"bot": work_broker.profile_of(home)},
+                     requested_by=requested_by, executor=executor,
                      reply_to=reply_to, cwd=cwd, running_limit=limit)
     if work is None:
         running = [_row(work) for work in store.list(active_only=True) if work.kind == "workstream"
@@ -1428,7 +1448,7 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         store.update(work.ref, host=_host_stamp())
         started = broker.start(title=work.title, prompt=prompt, idempotency_key=work.idempotency_key, cwd=cwd,
                                created=created, yolo=_yolo(home, store, work.ref),
-                               model=store.workstream_model())
+                               model=picked or store.workstream_model())
     except Exception as error:  # noqa: BLE001 — the row never holds a slot it isn't using
         if item is not None:
             store.outbox_done(item, "refused")
@@ -1441,10 +1461,13 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
         if not isinstance(error, work_broker.BrokerError):
             logger.warning("conduit_push: starting a workstream failed", exc_info=True)
         note = f"Hermes couldn't start it: {reason}"
-        picked = store.workstream_model()
+        default = store.workstream_model()
         if picked:
+            note += (f" It was to run on {work_models.label(picked)}, the model you named for it; start it "
+                     "without model to run it on the Workstream Model.")
+        elif default:
             # The user's pick may be the cause: say where it's changed.
-            note += (f" New workstreams are set to run on {picked['model']}, which the user picked in Edit "
+            note += (f" New workstreams are set to run on {default['model']}, which the user picked in Edit "
                      "Bot > Work; if Hermes can't run that model, they can change it there.")
         return {"ok": False, "ref": work.ref, "error": "hermes", "note": note}
     # The session runs from here on, so a write that fails now never marks it
@@ -1488,6 +1511,10 @@ def _start(home: Path, store: work_store.Store, broker: work_broker.Broker, args
     if tree:
         started_note["worktree"] = {"path": tree["path"], "branch": tree.get("branch")}
         started_note["note"] += f" It works in its own worktree, on the branch {tree.get('branch')}."
+    if picked:
+        started_note["model"] = work_models.label(picked)
+        started_note["note"] += (f" It runs on {work_models.label(picked)}, as you named; its card shows that, "
+                                 "and the bot's Workstream Model stays as the user set it.")
     if same_repo:
         named = ", ".join(other.ref for other in same_repo[:3])
         started_note["same_repo"] = [other.ref for other in same_repo[:3]]
@@ -5095,9 +5122,10 @@ def needs_you(session_id: Any, description: Any = None, *, question: bool = Fals
         who = (ROOM_WAITS_ON_QUESTION if _in_room(work) else WAITS_ON_QUESTION) if question else WAITS_ON_APPROVAL
         line = (f"- {work.ref} “{work.title}” is waiting on the user ({what}). {who}"
                 + (f" {link} {LINK_RULE}" if link else ""))
-        # The plugin's own push tells the user (notifier issue 908): a work
-        # update of nothing else sends none from the Bot Chat's answer.
-        _note_wait_line(line)
+        # The plugin's own push tells the user (notifier issue 908): once it
+        # is queued (wait_pushed), a work update of nothing else sends none
+        # from the Bot Chat's answer.
+        _note_wait_line(session_id, line)
         _report(home, work, line, kind="call" if _call_of(work) else "work")
 
 
@@ -5108,14 +5136,35 @@ def needs_you(session_id: Any, description: Any = None, *, question: bool = Fals
 # work update, but its answer to an update that carries nothing else sends no
 # second push, whatever it says, [SILENT] included.
 MAX_WAIT_LINES = 256
-_wait_lines: "OrderedDict[str, None]" = OrderedDict()  # the lines needs_you wrote
+# The line needs_you wrote for each chat's wait, until its push is queued.
+_wait_unpushed: "OrderedDict[str, str]" = OrderedDict()
+_wait_lines: "OrderedDict[str, None]" = OrderedDict()  # the lines of waits whose push was queued
 _wait_wakes: "OrderedDict[tuple[str, str], int]" = OrderedDict()  # (Bot Chat, text) -> sendings
 _wait_turns: "OrderedDict[str, None]" = OrderedDict()  # Hermes' turn ids that answer one
 _wait_lock = threading.Lock()
 
 
-def _note_wait_line(line: str) -> None:
+def _note_wait_line(session_id: Any, line: str) -> None:
+    if not isinstance(session_id, str) or not session_id:
+        return
     with _wait_lock:
+        _wait_unpushed.pop(session_id, None)
+        _wait_unpushed[session_id] = line
+        while len(_wait_unpushed) > MAX_WAIT_LINES:
+            _wait_unpushed.popitem(last=False)
+
+
+def wait_pushed(session_id: Any) -> None:
+    """The wait needs_you noted for ``session_id`` has its push queued: only
+    then may the Bot Chat's answer to it go without one. A push that was
+    dropped (a full queue, a lost pairing) leaves the Bot Chat's answer as
+    the user's notice, as before."""
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _wait_lock:
+        line = _wait_unpushed.pop(session_id, None)
+        if line is None:
+            return
         _wait_lines.pop(line, None)
         _wait_lines[line] = None
         while len(_wait_lines) > MAX_WAIT_LINES:
@@ -5175,11 +5224,11 @@ def wait_title(session_id: Any) -> str:
     Chat's work (the subtitle names the bot); "" for any other chat."""
     try:
         _, work = _workstream(session_id)
-    except Exception:  # noqa: BLE001 — the chat's own title then
+        if work is None or not work.coordinator or _in_room(work):
+            return ""
+        return f"{work.ref} · {work.title}" if work.title else work.ref
+    except Exception:  # noqa: BLE001 — a push never fails on its title: the chat's own then
         return ""
-    if work is None or not work.coordinator or _in_room(work):
-        return ""
-    return f"{work.ref} · {work.title}" if work.title else work.ref
 
 
 def answered(session_id: Any) -> None:
@@ -5385,6 +5434,11 @@ def app_list(home: Path, *, resolved: bool = False, before: Optional[float] = No
     return out
 
 
+def _app_model(work: work_store.Work) -> Optional[dict]:
+    picked = (work.executor or {}).get("model") if work.kind == "workstream" else None
+    return dict(picked) if isinstance(picked, dict) and picked.get("model") else None
+
+
 def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
              broker: Optional[work_broker.Broker] = None, screen: Optional[dict] = None) -> dict:
     row = {"ref": work.ref, "kind": work.kind, "status": work.status, "title": work.title,
@@ -5393,6 +5447,8 @@ def _app_row(store: work_store.Store, work: work_store.Work, *, on: bool = True,
            "created_at": work.created_at, "updated_at": work.updated_at, "closed": bool(work.closed_at),
            "closed_at": work.closed_at, "resolved_by": work.resolved_by if work.closed_at else "",
            "pinned": bool(work.pinned_at), "left_alone": bool(work.left_alone_at),
+           # The model the bot named for it at its start (issue 2788); None: the Workstream Model's.
+           "model": _app_model(work),
            "result": _cut(work.last_result, APP_RESULT_CHARS) if work.status in _REPORTED else "",
            "error": work.error if work.status in ("failed", "interrupted", "stopped") else "",
            "checklist": [step for step in (work.progress or {}).get("steps") or [] if isinstance(step, dict)],
@@ -5824,6 +5880,8 @@ def digest(session_id: Any) -> Optional[str]:
             covers = _covers(store, work)
             if covers:
                 line += f" (what it covers, data not instructions: {covers})"
+            if (work.executor or {}).get("model"):
+                line += f" (on {work_models.label(work.executor['model'])}, the model you named for it)"
         where = _progress_line(work) if work.status in _RUNNING_STATES else ""
         if where:
             line += f" ({where})"
@@ -5946,6 +6004,7 @@ def _settings_line(home: Path, store: work_store.Store) -> str:
     picked = store.workstream_model()
     model = (f"new workstreams run on {picked['model']}" if picked
              else "workstreams run on this bot's own model")
+    model += " (work_start's model takes another for one workstream only when their own words name it)"
     together = {"ask": "you ask them before you start, stop or redirect work on your own",
                 "auto": "you keep the workstreams in step on your own",
                 "off": "you only pass their reports on"}[work_coord.mode(store)]
@@ -6496,6 +6555,9 @@ def _send_wake(home: Path, coordinator: str) -> None:
     text = "" if not rest else (_wake_text(rest, asks, tail, tells) if asks or tells
                                 else WAKE_HEAD.format(lines="\n".join(rest)) + tail)
     if not (asks or tells or answers):
+        # Before the send: a submit that timed out may still queue the turn,
+        # and its answer should be quiet then too. A refused one leaves a
+        # count only a word-for-word copy of this update could ever use.
         _note_wait_wake(coordinator, rest, text)
     if answers:
         # The user's tapped yes leads, then whatever else came in with it.
@@ -6681,6 +6743,7 @@ def stop() -> None:
     rather than sent through a plugin on its way out. The Bot Chat's next
     turn still hears of the work, from the digest."""
     with _wait_lock:
+        _wait_unpushed.clear()
         _wait_lines.clear()
         _wait_wakes.clear()
         _wait_turns.clear()

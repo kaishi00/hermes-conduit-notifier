@@ -134,7 +134,9 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
     )
 
     # A coordinated workstream's question is named by its ref (notifier issue 908).
-    wait = _wait_title(session_id)
+    from . import work_tool
+
+    wait = work_tool.wait_title(session_id)
     push = push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id"), request_id),
@@ -171,6 +173,8 @@ def middleware(is_child_session: Callable[[str], bool] | None = None, **kwargs: 
         # unknown grace can only burn minutes before the inevitable native
         # fallback. Use the native path immediately.
         return kwargs["next_call"](args)
+    # Its push went: the Bot Chat's answer to a workstream's wait needs none (notifier issue 908).
+    work_tool.wait_pushed(session_id)
 
     # With alert calls on, a question left unanswered for a minute calls
     # the user (#449); any answer, from anywhere, stops it.
@@ -752,13 +756,3 @@ def _parse_multi_select(raw: str) -> list[str]:
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
-
-
-def _wait_title(session_id: Any) -> str:
-    """work_tool.wait_title, "" when it can't be read: the chat's own title then."""
-    try:
-        from . import work_tool
-
-        return work_tool.wait_title(session_id)
-    except Exception:  # noqa: BLE001 — a push must never fail on its title
-        return ""

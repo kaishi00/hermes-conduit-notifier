@@ -167,6 +167,10 @@ def hermes(home, monkeypatch):
     monkeypatch.setattr(work, "_handed", {})
     work._wakes.clear()
     work._wake_asks.clear()
+    work._wait_unpushed.clear()
+    work._wait_lines.clear()
+    work._wait_wakes.clear()
+    work._wait_turns.clear()
     work._wake_held.clear()
     work._finished.clear()
     work._unjournaled.clear()
@@ -1104,6 +1108,75 @@ def test_new_workstreams_start_on_the_workstream_model_picked(on, home, hermes, 
     assert refused["ok"] is False and "claude-sonet-5-5" in refused["note"] and "Edit Bot > Work" in refused["note"]
 
 
+def test_a_workstream_runs_on_the_model_the_users_words_named(on, home, hermes, monkeypatch):
+    # Issue 2788: the bot names a model for one workstream, checked as Hermes' /model checks it; the
+    # Workstream Model stays the default for every other.
+    from conduit_push import work_models
+
+    work.app_set_settings(home, {"workstream_model": {"model": "claude-sonnet-5-5", "provider": "anthropic"}})
+    checked = []
+
+    def switch(here, profile, model, provider):
+        checked.append((profile, model, provider))
+        return {"model": "claude-opus-5-5", "provider": "anthropic"}
+
+    monkeypatch.setattr(work_models, "_switch", switch)
+    answer = start(model="opus", reasoning_effort="xhigh")
+    assert answer["ok"] and checked == [("default", "opus", "")]
+    assert answer["model"] == "claude-opus-5-5 (xhigh reasoning)" and "claude-opus-5-5" in answer["note"]
+    (_, params, _), = hermes.named("session.create")
+    assert (params["model"], params["provider"], params["reasoning_effort"]) == ("claude-opus-5-5", "anthropic",
+                                                                                 "xhigh")
+    assert on.get("W1").executor["model"] == {"model": "claude-opus-5-5", "provider": "anthropic",
+                                              "reasoning_effort": "xhigh"}
+    assert call("work_list")["work"][0]["model"] == "claude-opus-5-5 (xhigh reasoning)"
+    assert "on claude-opus-5-5 (xhigh reasoning), the model you named for it" in work.digest(BOT_CHAT)
+    shown, = work.app_list(home)["work"]
+    assert shown["model"] == {"model": "claude-opus-5-5", "provider": "anthropic", "reasoning_effort": "xhigh"}
+    # The default is untouched, and a start that names none runs on it.
+    assert work.app_settings(home)["workstream_model"] == {"model": "claude-sonnet-5-5", "provider": "anthropic"}
+    assert start("Invoices", "Count the invoices sent in March.")["ok"]
+    params = hermes.named("session.create")[-1][1]
+    assert params["model"] == "claude-sonnet-5-5" and "reasoning_effort" not in params
+    assert "model" not in call("work_list")["work"][0] and work.app_list(home)["work"][0]["model"] is None
+    # The object shape a model guesses, with its provider.
+    assert start("Logs", "Read the logs.", model={"model": "gpt-5.5", "provider": "openai-codex"})["ok"]
+    assert checked[-1] == ("default", "gpt-5.5", "openai-codex")
+
+
+def test_a_model_hermes_cant_run_starts_nothing(on, home, hermes, monkeypatch):
+    from conduit_push import work_models
+
+    hermes_check = work_models._switch
+
+    def switch(here, profile, model, provider):
+        raise work_models.Refused(f"Hermes can't run {model} here: Similar models: `claude-opus-5-5`.")
+
+    monkeypatch.setattr(work_models, "_switch", switch)
+    refused = start(model="claude-opus-5.5")
+    assert refused["ok"] is False and refused["error"] == "model" and "claude-opus-5-5" in refused["note"]
+    assert on.get("W1") is None and hermes.named("session.create") == []
+    refused = start(model="opus", reasoning_effort="hgih")
+    assert refused["error"] == "model" and "xhigh" in refused["note"] and on.get("W1") is None
+    # A level with no model would start on the Workstream Model while the bot says otherwise.
+    refused = start(reasoning_effort="high")
+    assert refused["error"] == "model" and "needs the model" in refused["note"] and on.get("W1") is None
+    assert "provider name is too long" in start(model={"model": "m", "provider": "p" * 201})["note"]
+    # A Hermes that can't check (too old: no hermes_cli here) passes it on as given; its own
+    # session.create still refuses a pair it knows is wrong.
+    assert hermes_check(home, "default", "opus", "") == {}
+    monkeypatch.setattr(work_models, "_switch", hermes_check)
+    # Hermes refusing at the start names the model the bot named, not Edit Bot > Work.
+
+    def refuse(self, **kwargs):
+        raise broker_mod.BrokerError("unknown model opus")
+
+    monkeypatch.setattr(broker_mod.Broker, "start", refuse)
+    failed = start(model="opus")
+    assert failed["ok"] is False and "the model you named for it" in failed["note"]
+    assert "Edit Bot > Work" not in failed["note"]
+
+
 def test_a_secondary_bot_starts_on_its_own_profile(tmp_path, monkeypatch, hermes):
     home = tmp_path / "root" / "profiles" / "nahida"
     home.mkdir(parents=True)
@@ -1594,6 +1667,7 @@ def test_a_wait_is_one_push_the_plugins_not_the_bot_chats_answer(on, hermes, mon
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
     start()
     work.needs_you("20261031_work_1", "rm -rf build")
+    work.wait_pushed("20261031_work_1")  # its answerable push was queued
     work.flush_wakes()
     (_, params, _), = hermes.named("prompt.submit")[-1:]
     assert "is waiting on the user" in params["text"]
@@ -1603,11 +1677,39 @@ def test_a_wait_is_one_push_the_plugins_not_the_bot_chats_answer(on, hermes, mon
     assert _bot_chat_answer_push(monkeypatch, params["text"], turn_id="t-again") is not None
 
 
+def test_a_wait_whose_push_was_dropped_still_pushes_the_bot_chats_answer(on, hermes, monkeypatch):
+    # DeepSeek on notifier #911: a full queue or a lost pairing drops the
+    # workstream's push, so the Bot Chat's answer stays the user's notice.
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    work.needs_you("20261031_work_1", "rm -rf build")
+    work.flush_wakes()
+    (_, params, _), = hermes.named("prompt.submit")[-1:]
+    assert _bot_chat_answer_push(monkeypatch, params["text"]) is not None
+
+
+def test_a_dropped_approval_push_leaves_the_bot_chat_to_tell_the_user(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
+    start()
+    monkeypatch.setattr(plugin, "enqueue", lambda event: False)
+    monkeypatch.setattr(plugin.calls, "alert", lambda *args, **kwargs: None)
+    monkeypatch.setattr(plugin.calls, "note_waiting", lambda *args, **kwargs: False)
+    monkeypatch.setattr(plugin, "_home_room", lambda session_id: None)
+    plugin._pre_approval_request(session_key="20261031_work_1", session_id="20261031_work_1",
+                                 description="rm -rf build", turn_id="t")
+    assert work._wait_lines == OrderedDict() and "20261031_work_1" in work._wait_unpushed
+    monkeypatch.setattr(plugin, "enqueue", lambda event: True)
+    plugin._pre_approval_request(session_key="20261031_work_1", session_id="20261031_work_1",
+                                 description="rm -rf build", turn_id="t2")
+    assert work._wait_unpushed == OrderedDict(), "a queued push lets the Bot Chat's answer go without one"
+
+
 def test_a_work_update_with_a_wait_and_news_still_pushes(on, hermes, monkeypatch):
     monkeypatch.setattr(work, "WAKE_BATCH_S", 60)
     start()
     start(title="Docs", instructions="Update the docs.")
     work.needs_you("20261031_work_1", "rm -rf build")
+    work.wait_pushed("20261031_work_1")
     work._queue_wake(on.home, BOT_CHAT, "- W2 “Docs” finished: the docs are updated.")
     work.flush_wakes()
     (_, params, _), = hermes.named("prompt.submit")[-1:]

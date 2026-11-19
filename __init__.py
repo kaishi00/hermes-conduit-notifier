@@ -330,8 +330,8 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         # input.needed event itself; pushing here too would double-notify.
         return
     # A coordinated workstream's question is named by its ref (notifier issue 908).
-    wait = _wait_title(_text(kwargs.get("session_id")))
-    enqueue(push_event(
+    wait = work_tool.wait_title(_text(kwargs.get("session_id")))
+    queued = enqueue(push_event(
         "input.needed",
         identifier=event_id("input", kwargs.get("turn_id"), kwargs.get("tool_call_id")),
         session_id=_text(kwargs.get("session_id")),
@@ -342,6 +342,9 @@ def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
         session_title=wait or _session_title(kwargs.get("session_id")),
         body=clarification_text(kwargs.get("args")),
     ))
+    if queued:
+        # Its push went: the Bot Chat's answer to the wait needs none (notifier issue 908).
+        _quietly(work_tool.wait_pushed, _text(kwargs.get("session_id")))
 
 
 def _room_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
@@ -1101,7 +1104,8 @@ def _pre_approval_request(**kwargs: Any) -> None:
     description = _text(kwargs.get("description"))
     _quietly(live_activity.reporter.waiting,
              _text(kwargs.get("session_id")) or session_id, "approval")
-    _quietly(work_tool.needs_you, _text(kwargs.get("session_id")) or session_id, description)
+    wait_session = _text(kwargs.get("session_id")) or session_id
+    _quietly(work_tool.needs_you, wait_session, description)
     # The event id deliberately excludes `id(kwargs)`: CPython recycles ids, so
     # a later, distinct approval with the same session/pattern/command could
     # collide and be silently deduped by the relay for 24h. `turn_id` (forwarded
@@ -1116,9 +1120,9 @@ def _pre_approval_request(**kwargs: Any) -> None:
     room_title = room[1] if room else ""
     # A coordinated workstream's is named by its ref, as the Bot Chat's work
     # (notifier issue 908): this push is how the user hears of it.
-    wait = "" if room_title else _wait_title(_text(kwargs.get("session_id")) or session_id)
+    wait = "" if room_title else work_tool.wait_title(wait_session)
     named = room_title or wait
-    enqueue(push_event(
+    queued = enqueue(push_event(
         "approval.needed",
         identifier=event_id("approval", session_id, turn_id, kwargs.get("pattern_key"), kwargs.get("command")),
         session_id=session_id,
@@ -1143,6 +1147,9 @@ def _pre_approval_request(**kwargs: Any) -> None:
             else None
         ),
     ))
+    if queued:
+        # Its push went: the Bot Chat's answer to the wait needs none (notifier issue 908).
+        _quietly(work_tool.wait_pushed, wait_session)
     # With alert calls on, an approval left unanswered for a minute calls the
     # user too (#449), beside the answerable notification.
     calls.alert(session_id, "approval", description, profile=_profile,
@@ -1848,14 +1855,6 @@ def _waits_only_turn(turn_id: Any, *, end: bool = False) -> bool:
         return work_tool.waits_only_turn(turn_id, end=end)
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         return False
-
-
-def _wait_title(session_id: str) -> str:
-    """work_tool.wait_title, "" when it can't be read."""
-    try:
-        return work_tool.wait_title(session_id)
-    except Exception:  # noqa: BLE001 — a push must never fail on its title
-        return ""
 
 
 def _lead_routing(turn_id: Any, *, end: bool = False) -> bool:
