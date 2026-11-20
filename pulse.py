@@ -1155,6 +1155,8 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
                 if isinstance(error, candidates.CutOff):
                     # Asked the same, it overruns the same (notifier issue 947): less, with more room.
                     room, found = candidates.RETRY_REPLY_TOKENS, candidates.RETRY_FOUND
+                else:
+                    room = candidates.FALLBACK_REPLY_TOKENS  # a provider that refused 8,000 took 6,000
                 logger.info("conduit_push: Pulse: the report's candidate list failed; asking once more",
                             exc_info=True)
         candidates.decide(pulse_store, rows, now=now, zone=zone)
@@ -1547,12 +1549,13 @@ def _log_unread(result: Any, purpose: str, max_tokens: int) -> bool:
     tells why from the log alone: the model, the reply's tokens against its
     limit and its length (Hermes gives plugins no finish reason). True when
     it ran out of room (notifier issue 947)."""
-    output = int(getattr(getattr(result, "usage", None), "output_tokens", 0) or 0)
+    reported = getattr(getattr(result, "usage", None), "output_tokens", None)
+    output = int(reported or 0)
     cut = max_tokens > 0 and output >= max_tokens * CUT_OFF_SHARE
     text = getattr(result, "text", None)
     logger.warning("conduit_push: Pulse: the %s reply wasn't the JSON asked for%s (model %s, %s of %d reply tokens, "
                    "%s characters)", purpose, ", cut off at its limit" if cut else "",
-                   getattr(result, "model", None) or "unknown", output or "unknown", max_tokens,
+                   getattr(result, "model", None) or "unknown", "unknown" if reported is None else output, max_tokens,
                    len(text) if isinstance(text, str) else "unknown")
     return cut
 
