@@ -146,3 +146,16 @@ on the PR when you've answered it, and a workflow swaps the label for
 `waiting on Eric`, so the maintainer knows it's his turn again. Putting
 `waiting on contributor` back on takes `waiting on Eric` off. A reply inside a
 review thread doesn't count, so also comment on the PR itself or push.
+
+## PR preflight
+
+Before opening or updating a PR, fetch the target main branch and validate the
+exact prepared description against it:
+
+    git fetch https://github.com/kaishi00/hermes-conduit-notifier.git main:refs/remotes/upstream/main
+    python .github/scripts/pr_preflight.py --body-file /tmp/pr-body.md --base upstream/main
+
+The check requires the template sections (including Desktop), a version newer
+than the fetched base, matching manifests and preservation of published upstream
+changelog history. It does not replace tests or the upstream CI checks. Pass the
+same description file to `gh pr create/edit --body-file`.
