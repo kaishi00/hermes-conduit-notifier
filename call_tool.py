@@ -176,7 +176,7 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
             return {"ok": False, "error": "too_many", "note": "Too many calls are already waiting. Put the news in your reply."}
         return {"ok": False, "error": "invalid", "note": "The call couldn't be set up. Put the news in your reply."}
     return {"ok": True, "status": "call_at_turn_end",
-            "note": ("The user's phone rings when this turn ends, unless their call limits hold it back (they get "
+            "note": ("The user's iPhone, or Conduit on their computer, rings when this turn ends, unless their call limits hold it back (they get "
                      "the usual notification then) or they're already in a voice call with you. Finish the work "
                      "and end the turn with the result: the call opens with your reason and that reply. Don't "
                      "say the phone is ringing yet.")}

@@ -2666,14 +2666,14 @@ and the dashboard routes under one file lock, so they survive restarts:
 
 | Method | Route | Body | Returns |
 | --- | --- | --- | --- |
-| GET | `/api/plugins/conduit_push/calls?profile=` | | `{ok, paired, settings, bounds, rules_max, watches}` |
+| GET | `/api/plugins/conduit_push/calls?profile=` | | `{ok, paired, can_ring, settings, bounds, rules_max, watches}`: `can_ring` (0.186+) is true when an iPhone is paired or Conduit on a computer asked for rings in the last 30 days |
 | PUT | `/api/plugins/conduit_push/calls?profile=` | `{settings: {...}}` (any subset) | `{ok, settings}` |
 | POST | `/api/plugins/conduit_push/calls/watches?profile=` | `{session_ids: [...], title, hold_s?, ended_within_s?}` | `{ok, status: "watching", id}` or `{ok, status: "ended", outcome}` |
 | PUT | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | `{hold_s}` (0 releases) | `{ok, status: "watching"}`, `{ok, status: "ended", outcome}` or `{ok, status: "gone"}` |
 | DELETE | `/api/plugins/conduit_push/calls/watches/{id}?profile=` | | `{ok, removed}` |
 | PUT | `/api/plugins/conduit_push/calls/presence?profile=` (0.14+) | `{hold_s}` (0 releases) | `{ok, status: "present"}` or `{ok, status: "away"}` |
 | POST | `/api/plugins/conduit_push/calls/outcomes?profile=` (0.15+) | `{call_id, session_ids: [...], outcome: "declined" or "missed", kind?, title?, reason?, age_s?}` | `{ok, status: "recorded"}` |
-| GET | `/api/plugins/conduit_push/calls/rings?after=&profile=` (0.180+) | | `{ok, rings: [{id, kind, title, reason, session_ids, name, heading, body, at, state, changed}], now}`: the calls the iPhone rang in the last two minutes, for Conduit on a computer to ring too, and those settled since `after` (the `now` of its last answer): `state` is `ringing`, `answered` (a call started on any device), `declined` or `missed`. Polled, so it has a bucket of its own |
+| GET | `/api/plugins/conduit_push/calls/rings?after=&profile=` (0.180+) | | `{ok, rings: [{id, kind, title, reason, session_ids, name, heading, body, at, state, changed}], now, paired}`: the calls the iPhone rang in the last two minutes, for Conduit on a computer to ring too (with no iPhone paired, 0.186+, the calls that ring the computer alone, while it keeps asking; `paired` false then tells it to report a miss itself), and those settled since `after` (the `now` of its last answer): `state` is `ringing`, `answered` (a call started on any device), `declined` or `missed`. Polled, so it has a bucket of its own |
 | GET | `/api/plugins/conduit_push/calls/waiting?session_id=&profile=` (0.70+) | | `{ok, waiting}`: null, `{kind: "question", questions: [{number, question, choices, multi_select, answered, may_leave_blank}]}` (`may_leave_blank` 0.82+) or `{kind: "approval", description, command, command_cut, answered}` |
 | POST | `/api/plugins/conduit_push/calls/waiting/answer?profile=` (0.70+) | `{session_id, answer?, question?, choice?, reason?}` | `{ok, status: "answered", ...}`, `{ok, status: "not_waiting"}`, `{ok, status: "refused", message}`, or for an approval Hermes didn't take (0.70.1+) `{ok, status: "too_late" or "failed" or "unconfirmed", message}` |
 | GET | `/api/plugins/conduit_push/waiting?profile=` (0.131+) | | `{ok, waiting: [{id, kind: "approval" or "question", session_ids, title, summary, questions, at, room?, decision?}], gateway_id?}`, newest first (`room` 0.150.1+, `decision` 0.177.17+); `gateway_id` (0.177.31+) is the relay gateway the profile pairs through, for sealing a `decision` card's answer |
@@ -2732,7 +2732,7 @@ and the dashboard routes under one file lock, so they survive restarts:
   phone's clock, so an earlier turn of the same chat doesn't count; the plugin
   remembers turn ends for 30 minutes while calls are on); Conduit then tells
   you itself.
-- 409 when the profile isn't paired with Conduit, or calls (or "call when I
+- 409 when the profile isn't paired with Conduit and no computer asked for rings in the last 30 days, or calls (or "call when I
   ask") are off. 400 for an unknown setting or a value outside its range.
   429 past 30 requests a minute per profile.
 - A call held back by your limits, or calls turned off after the watch was
@@ -2763,7 +2763,7 @@ and the dashboard routes under one file lock, so they survive restarts:
   placed 12 minutes ago", and takes it, so Hermes hears it once, even if a
   late retry of the report arrives after. Nothing rings again. A retried
   report keeps the first; a profile keeps at most 20 waiting, each for a
-  day. 409 when the profile isn't paired, 400 for anything malformed.
+  day. 409 when the profile isn't paired and no computer asked for rings in the last 30 days, 400 for anything malformed.
 - **Conduit first (0.36+):** every turn of a main conversation also gets one
   line naming what the phone shares with this profile (calendar and
   reminders, health, location, phone status, contacts) and saying to use

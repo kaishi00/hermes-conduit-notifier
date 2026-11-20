@@ -862,7 +862,7 @@ def _place_call(store: "WatchStore", job_id: str, session_id: Any, saw: str, *, 
         return {"ok": True, "status": "not_called", "note": (
             "It's time to call, but the call couldn't be set up. End with what you found in a few short lines.")}
     return {"ok": True, "status": "calling", "note": (
-        "The user's phone rings when this run ends, unless their call limits hold it back. End with what you "
+        "The user's iPhone, or Conduit on their computer, rings when this run ends, unless their call limits hold it back. End with what you "
         "found in a few short lines: the call opens on it. Don't say the phone is ringing.")}
 
 

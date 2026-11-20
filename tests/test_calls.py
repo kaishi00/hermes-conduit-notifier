@@ -163,7 +163,8 @@ def test_with_no_iphone_and_no_computer_asking_nothing_rings(home, fake, clock):
     clock[0] += 5 * 60
     assert calls.can_ring() is True
     calls.turn_ended("st-1", "done", profile="default", fallback=READY)
-    assert fake.sent == [] and CallStore(home).rings()["rings"] == []
+    # The patched clock on both sides: a ring kept at its time would show.
+    assert fake.sent == [] and calls._store(home).rings()["rings"] == []
 
 
 def test_with_no_iphone_and_no_computer_ever_calls_cant_ring(home, fake):
