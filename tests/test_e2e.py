@@ -420,6 +420,32 @@ def test_sealed_batch_answers_open_per_question():
     assert opened["answers"] == {"q0": "Red", "q1": "Blue"}
 
 
+def test_a_rejected_batch_poll_keeps_the_answers_the_phone_sealed():
+    # hermes-conduit#2683: one unsealed answer refuses the poll, not the
+    # batch's sealed ones, which the clarify loop hands to Hermes.
+    status = {"status": "pending", "answers": {"q0": _answer("Red", "q0"), "q1": "Blue"}, "remaining": ["q2"]}
+    assert client.opened_answers(status, _state(), "conduit-push-abc123def456") == {
+        "status": "rejected", "answers": {"q0": "Red"}}
+
+
+@pytest.mark.parametrize("status", [
+    {"status": "answered", "answer": "sealed?"},
+    {"status": "pending", "answers": {"q0": "sealed?"}, "remaining": []},
+], ids=["single", "batch"])
+def test_an_unreadable_key_refuses_the_answer(status):
+    # hermes-conduit#2692: a key read that raises fails closed, a refused
+    # poll, rather than an error the clarify loop would keep polling past.
+    broken = _state(e2e={"kid": KID, "secret": "!!!"})
+    assert client.opened_answers(status, broken, "conduit-push-abc123def456") == {"status": "rejected"}
+
+
+def test_a_batch_answer_moved_to_another_question_is_refused_on_the_retry():
+    # hermes-conduit#2692: the per-question retry binds each answer to its
+    # own question too, so q1's answer under q0 stays out.
+    status = {"status": "pending", "answers": {"q0": _answer("Blue", "q1"), "q1": "Red"}, "remaining": []}
+    assert client.opened_answers(status, _state(), "conduit-push-abc123def456") == {"status": "rejected"}
+
+
 # A sealed answer is random each time it's made, so the ids are fixed:
 # pytest-xdist's workers must collect the same test ids.
 @pytest.mark.parametrize("answer", [
@@ -474,7 +500,7 @@ def test_status_reports_the_pairing_without_a_key(state_file):
     response = _http().get(f"{BASE}/e2e")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "previous_kid": None, "rotate": False, "rotate_without_overlap": False, "rotate_suites": [], "crypto": True, "relay_rejected": False, "relay_blocked": False}
+    assert response.json() == {"ok": True, "paired": True, "installation_id": INSTALLATION, "gateway_id": GATEWAY, "e2e": None, "previous_kid": None, "rotate": False, "rotate_without_overlap": False, "rotate_suites": [], "crypto": True, "relay_rejected": False, "relay_blocked": False, "main": True, "devices": [{"installation_id": INSTALLATION, "gateway_id": GATEWAY, "device_name": None, "paired_at": None, "main": True, "relay_rejected": False}]}
 
 
 def test_provisioning_stores_the_key_owner_only_and_never_returns_it(state_file):

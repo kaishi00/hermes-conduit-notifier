@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, Request, Response, WebSocket
 
-from . import core, local_live_agent, local_live_read_back, pairing, speech_server
+from . import core, local_live_agent, local_live_own_model, local_live_read_back, pairing, speech_server
 
 logger = core.logger
 router = core.router
@@ -482,6 +482,10 @@ class _LocalLiveCall:
         # answers the call and hands the work to Hermes through the call's
         # tools. None keeps one Hermes turn per utterance.
         self.agent: Optional[local_live_agent._LocalLiveAgent] = None
+        # The relay's local_live_own_model._LocalLiveOwnModel, when the
+        # profile's speech server answers agent calls with its own model:
+        # it is told of the agent's setup and notes.
+        self.own_model: Any = None
 
     async def send(self, payload: Dict[str, Any]) -> bool:
         if self.closed:
@@ -518,7 +522,8 @@ class _LocalLiveCall:
             return False
         try:
             frame = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # Too deep to parse is unreadable, passed on as it is (notifier 903).
             return False
         kind = frame.get("type") if isinstance(frame, dict) else None
         if not isinstance(kind, str) or not kind.startswith("conduit."):
@@ -543,7 +548,7 @@ class _LocalLiveCall:
     def _note_words(self, text: str) -> None:
         try:
             frame = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):
             return
         item = frame.get("item") if isinstance(frame, dict) and frame.get("type") == "conversation.item.create" else None
         content = item.get("content") if isinstance(item, dict) else None
@@ -573,10 +578,14 @@ class _LocalLiveCall:
             agent = local_live_agent._LocalLiveAgent.configured(frame, previous=self.agent)
             self.agent = agent
             await self.send({"type": "conduit.agent.ready", "tools": len(agent.tools)})
+            if self.own_model is not None:
+                await self.own_model.agent_changed()
         elif self.agent is None:
             return
         elif kind == "conduit.agent.note":
             self.agent.note(frame.get("text"))
+            if self.own_model is not None:
+                await self.own_model.note(frame.get("text"))
         elif kind == "conduit.tool.result":
             call_id = str(frame.get("call_id") or "")
             output = frame.get("output")
@@ -635,6 +644,11 @@ _local_live_limiter = core._MintLimiter(LOCAL_LIVE_REQUEST_LIMIT, 60.0,
 # When each profile's voice server last asked for a turn: Conduit's setup
 # shows whether the server is pointed at this plugin.
 _local_live_last_request: Dict[str, float] = {}
+# When a profile's speech server last answered a call by itself: a response
+# ended with the model address not asked since the call began. A server with
+# a model of its own does that; the plugin never gets a turn on it unless
+# the profile has it run them (voice.speech_server.drive_turns).
+_local_live_answered_alone: Dict[str, float] = {}
 
 
 _local_live_tasks: set = set()
@@ -704,6 +718,7 @@ def _local_live_profile_can_carry_key(profile: Optional[str]) -> bool:
 
 def local_live_status(
     profile: Optional[str], in_call: Optional[bool] = None, last_request_at: Optional[float] = None,
+    answered_alone_at: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Inside the profile's scope: what Conduit shows in Local Live's settings.
 
@@ -729,6 +744,9 @@ def local_live_status(
         "in_call": (_local_live_active_call(profile or "") is not None) if in_call is None else in_call,
         "last_request_at": (_local_live_last_request.get(_local_live_profile_key(profile))
                             if last_request_at is None else last_request_at),
+        # The server answered a call with a model of its own, and still
+        # would: Hermes gets no turn on it until the plugin runs them.
+        "answers_alone": bool(answered_alone_at) and not server.get("drive_turns") and not server.get("own_model"),
     }
 
 
@@ -739,9 +757,11 @@ async def get_local_live_status(request: Request, response: Response, profile: O
     _local_live_start_auth()
     in_call = _local_live_active_call(profile or "") is not None
     last_request_at = _local_live_last_request.get(_local_live_profile_key(profile))
+    answered_alone_at = _local_live_answered_alone.get(_local_live_profile_key(profile))
     try:
         return {"ok": True, **(await asyncio.wait_for(
-            core._run_scoped(profile, lambda: local_live_status(profile, in_call, last_request_at), speech_server._speech_server_executor),
+            core._run_scoped(profile, lambda: local_live_status(profile, in_call, last_request_at, answered_alone_at),
+                             speech_server._speech_server_executor),
             timeout=speech_server.SPEECH_SERVER_SETUP_TIMEOUT_S))}
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Local Live status timed out", headers={"Cache-Control": "no-store"})
@@ -789,7 +809,8 @@ async def post_local_live_key(request: Request, response: Response, profile: Opt
 async def local_live_socket(ws: WebSocket) -> None:
     """A Local Live call: relayed to the speech server like Classic voice, plus its turns."""
 
-    async def relay(refuse: Callable[[int, str], Any], url: str, key: str, profile: Optional[str]) -> None:
+    async def relay(refuse: Callable[[int, str], Any], url: str, key: str, profile: Optional[str],
+                    drive: Optional[speech_server.SpeechServerSetup] = None) -> None:
         call = _LocalLiveCall(ws, _local_live_profile_key(profile), speaks=ws.query_params.get("mode") == "speak")
 
         async def to_phone(text: str) -> None:
@@ -799,15 +820,20 @@ async def local_live_socket(ws: WebSocket) -> None:
         async def fail(reason: str) -> None:
             await refuse(speech_server.SPEECH_SERVER_CLOSE_REFUSED, reason)
 
-        # A live call's turns, should its server only read text back.
-        read_back = None if call.speaks else local_live_read_back._LocalLiveReadBack(call, to_phone, fail)
+        # A live call's turns, should its server only read text back, or
+        # from the start when the profile has the plugin run them.
+        read_back = None if call.speaks else local_live_read_back._LocalLiveReadBack(call, to_phone, fail, drive=drive)
+        if read_back is not None and getattr(drive, "answers", False):
+            # The server's own model answers a call in agent mode; the
+            # read-back stays for one that isn't.
+            read_back = local_live_own_model._LocalLiveOwnModel(call, to_phone, read_back, drive)
         if not _local_live_register(call):
             call.close()
             await fail("A Local Live call is already running on this Hermes profile")
             return
         try:
             await speech_server._speech_server_relay(ws, refuse, url, key, intercept=call.intercept, send_lock=call.send_lock,
-                                       read_back=read_back)
+                                       read_back=read_back, drive=drive)
         finally:
             call.close()
             _local_live_unregister(call)

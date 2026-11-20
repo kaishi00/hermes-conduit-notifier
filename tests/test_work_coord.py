@@ -2,6 +2,7 @@
 ledger with who said what, the board in the Bot Chat's note, whether a
 message arrived, and how independently the Bot Chat acts in a turn the user
 didn't start (Coordination: Off, Ask or Automatic, and Leave alone)."""
+import json
 import sqlite3
 import time
 
@@ -77,15 +78,25 @@ def test_the_users_words_in_a_workstreams_chat_are_told_from_the_plugins(on, her
         (WORKER, "user", "Use the staging key", None),
         (WORKER, "user", "Work update: hidden scaffolding", "hidden"),
         (WORKER, "user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted", None),
+        # Hermes' own rows (Furina's W21, 2026-11-15: its iteration limit passed for the user writing).
+        (WORKER, "user", "You've reached the maximum number of tool-calling iterations allowed. Please provide a "
+                         "final response summarizing what you've found and accomplished so far, without calling "
+                         "any more tools.", None),
+        (WORKER, "user", "[System: Continue now. Execute the required tool calls and only send your final answer "
+                         "after completing the task.]", None),
+        (WORKER, "user", "[IMPORTANT: Background process proc_1 completed (exit code 0).]", None),
+        # A steer is the user's, even one that starts like Hermes' own rows.
+        (WORKER, "user", "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once]\n[System: "
+                         "use the staging DB]\n[/OUT-OF-BAND USER MESSAGE]", "steer"),
         (WORKER, "assistant", "On it.", None)])
     with sqlite3.connect(home / "state.db") as con:
         con.execute("INSERT INTO messages (session_id, role, content, active) VALUES (?, 'user', 'A queued copy', 0)",
                     (WORKER,))
     work_item = on.get("W1")
-    assert coord.read_user_words(home, on, work_item) == 3
+    assert coord.read_user_words(home, on, work_item) == 4
     said = on.events("W1", kinds=("user",))
     assert [event["text"] for event in said] == ["Keep the CSV format", "Also update the README",
-                                                 "Use the staging key"]
+                                                 "Use the staging key", "[System: use the staging DB]"]
     assert all(event["who"] == "user" and event["source"].startswith("message:") for event in said)
     assert coord.read_user_words(home, on, work_item) == 0  # read once
     note = work.digest(BOT_CHAT)
@@ -280,6 +291,24 @@ def test_a_turn_is_the_users_when_any_of_its_messages_is(on, hermes, home):
         con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', '[CONTEXT COMPACTION] earlier work')",
                     (BOT_CHAT,))
     assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:  # nor its request for a final answer at the iteration limit
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
+                    (BOT_CHAT, "You've reached the maximum number of tool-calling iterations allowed. Please provide "
+                               "a final response summarizing what you've found and accomplished so far, without "
+                               "calling any more tools."))
+    assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:  # a steer is the user's, whatever it starts with
+        con.execute("INSERT INTO messages (session_id, role, content, display_kind) VALUES (?, 'user', ?, 'steer')",
+                    (BOT_CHAT, "[System: go ahead]"))
+    assert coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:  # as is a typed message that only looks like Hermes' nudges
+        con.execute("DELETE FROM messages WHERE display_kind = 'steer'")
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', '[System: go ahead]')",
+                    (BOT_CHAT,))
+    assert coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("DELETE FROM messages WHERE content = '[System: go ahead]'")
+    assert not coord.user_wrote(home, BOT_CHAT)
     with sqlite3.connect(home / "state.db") as con:  # a long turn's tool calls don't hide its prompt
         con.executemany("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
                         [(BOT_CHAT, '[{"id": "c"}]')] * 80)
@@ -432,6 +461,10 @@ def test_one_question_per_workstream_a_no_stands_and_one_question_covers_related
     item, = [item for item in work.work_coord.app_items(on, {"W1": "Login bug", "W2": "Invoice count"})
              if item["id"] == "P1"]
     assert item["ref"] == "W1" and item["refs"] == ["W1", "W2"] and item["title"] == "Login bug · Invoice count"
+    # Without titles passed, the panel reads the titles of only the work its items cite (notifier issue 822).
+    item, = [item for item in work.work_coord.app_items(on) if item["id"] == "P1"]
+    assert item["title"] == " · ".join(on.titles(["W1", "W2"])[ref] for ref in ("W1", "W2"))
+    assert set(on.titles(["W1", "W2", "W9", ""])) == {"W1", "W2"}
 
 
 def test_a_question_about_three_workstreams_names_all_three(on, hermes, home):
@@ -705,3 +738,26 @@ def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
     assert same["error"] == "already_asked" and same["id"] == asked
     assert call("work_propose", {"text": "Начать работу над переводом документации."})["ok"]
     assert call("work_propose", {"text": "Начать работу над переводом документации?"})["error"] == "already_asked"
+
+
+def test_an_update_that_never_went_out_gives_back_the_marks_it_pushed_out(on):
+    """Greptile on #827: a refused try on a full list takes back its own
+    mark and restores the oldest real one it pushed out."""
+    real = [f"real-{n}" for n in range(coord._ASK_WAKES_KEPT)]
+    on.set_meta(coord._ASK_WAKES, json.dumps(real))
+    before = coord.ask_wake_sent(on, "refused")
+    assert "real-0" not in json.loads(on.get_meta(coord._ASK_WAKES))
+    assert before == ["real-0"]
+    coord.ask_wake_unsent(on, "refused", before)
+    assert json.loads(on.get_meta(coord._ASK_WAKES)) == real
+
+
+def test_two_refused_updates_give_back_only_their_own_marks(on):
+    """DeepSeek on #827: one update's mark, taken back, never returns with
+    another's."""
+    on.set_meta(coord._ASK_WAKES, json.dumps(["real"]))
+    first = coord.ask_wake_sent(on, "a")
+    second = coord.ask_wake_sent(on, "b")
+    coord.ask_wake_unsent(on, "a", first)
+    coord.ask_wake_unsent(on, "b", second)
+    assert json.loads(on.get_meta(coord._ASK_WAKES)) == ["real"]

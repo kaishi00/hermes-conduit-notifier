@@ -188,17 +188,17 @@ test('validateEvent passes a bounded decision through', () => {
 test('a push names the bot by its name, not its profile id', () => {
   const event = validateEvent({ type: 'response.ready', event_id: 'ready:12345678', session_id: 'sess-1', profile: 'default', profile_name: ' Nova ' });
   const { payload } = notificationFor(event, { show_previews: false, completion_sound: false });
-  assert.equal(payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Nova · Session: sess-1');
+  assert.equal(payload.aps.alert.body, 'Nova has finished responding.\nSession: sess-1', 'the copy names the bot, so the profile line goes (issue 2540)');
   assert.equal(payload.conduit.profile, 'default', 'routing keeps the profile id');
   assert.equal(payload.conduit.profile_name, 'Nova');
   assert.equal(payload.body.conduit.profile_name, 'Nova');
   const unnamed = notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:12345679', session_id: 'sess-1', profile: 'default' }),
     { show_previews: false, completion_sound: false });
-  assert.equal(unnamed.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Hermes · Session: sess-1', 'the main bot as Conduit names it');
+  assert.equal(unnamed.payload.aps.alert.body, 'Hermes has finished responding.\nSession: sess-1', 'the main bot as Conduit names it');
   const scout = notificationFor(validateEvent({ type: 'response.ready', event_id: 'ready:12345680', session_id: 'sess-1', profile: 'scout', title: 'Scout', session_title: 'Scout' }),
     { show_previews: false, show_chat_names: true, completion_sound: false });
   assert.equal(scout.payload.aps.alert.title, 'Scout');
-  assert.equal(scout.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Scout · Session: sess-1', 'the title and the profile line agree');
+  assert.equal(scout.payload.aps.alert.body, 'Scout has finished responding.\nSession: sess-1', 'the title and the body agree');
   assert.equal('profile_name' in unnamed.payload.conduit, false);
 });
 
@@ -207,7 +207,7 @@ test('Chat names titles a push with its chat, never with Hermes\' words (#1415)'
   const names = { show_previews: false, show_chat_names: true, completion_sound: false };
   const ready = notificationFor(validateEvent({ ...base, type: 'response.ready', title: 'Pesquisa de Skills', body: 'Found five repos.' }), names);
   assert.equal(ready.payload.aps.alert.title, 'Pesquisa de Skills');
-  assert.equal(ready.payload.aps.alert.body, 'Hermes has finished responding.\nProfile: Segundo Cérebro · Session: sess-1');
+  assert.equal(ready.payload.aps.alert.body, 'Segundo Cérebro has finished responding.\nSession: sess-1');
   assert.equal('subtitle' in ready.payload.aps.alert, false, 'the body names the profile already');
   const approval = notificationFor(validateEvent({ ...base, type: 'approval.needed', title: 'Approval needed · Pesquisa de Skills' }), names);
   assert.equal(approval.payload.aps.alert.title, 'Approval needed · Pesquisa de Skills');
@@ -752,6 +752,24 @@ test('a call request rings with the call category, its job and the generic copy 
   assert.equal(silenced.payload.aps.sound, undefined);
 });
 
+test('a call names the bot that calls, with previews off too (issue 2540)', () => {
+  const named = validateEvent({ ...callBody, profile_name: 'Cortana', title: 'Cortana wants to talk' });
+  const { payload } = notificationFor(named, { show_previews: false }, { id: 'gw-1' });
+  assert.equal(payload.aps.alert.title, 'Cortana wants to talk');
+  assert.match(payload.aps.alert.body, /^Tap to talk to Cortana\.\nSession: /, 'the profile line would only say it again');
+  const scout = notificationFor(validateEvent({ ...callBody, profile: 'scout' }), { show_previews: false }, { id: 'gw-1' }).payload;
+  assert.equal(scout.aps.alert.title, 'Scout wants to talk', 'a bot with no name by its profile, as Conduit shows it');
+  const full = notificationFor(named, { show_previews: true }, { id: 'gw-1' }).payload;
+  assert.deepEqual(full.aps.alert, { title: 'Cortana wants to talk', body: '“Check the server” finished.' }, 'no subtitle saying it again');
+  const older = notificationFor(validateEvent({ ...callBody, profile_name: 'Cortana' }), { show_previews: true }, { id: 'gw-1' }).payload;
+  assert.equal(older.aps.alert.subtitle, 'Cortana', "an older plugin's Hermes title keeps the subtitle");
+  const change = notificationFor(validateEvent({ ...phoneBody, profile_name: 'Cortana' }), {}, { id: 'gw-1' }).payload;
+  assert.equal(change.aps.alert.title, 'Cortana has a change for you');
+  assert.doesNotMatch(change.aps.alert.body, /Profile:/, 'a title that names the bot drops the profile line too');
+  const done = notificationFor(validateEvent({ ...callBody, type: 'background_task.finished', profile_name: 'Cortana' }), { show_previews: false }, { id: 'gw-1' }).payload;
+  assert.match(done.aps.alert.body, /Profile: Cortana/, 'copy that names no bot keeps the profile line');
+});
+
 test('a call request with previews on shows the plugin copy; other pushes get no call category', () => {
   const { payload } = notificationFor(validateEvent(callBody), { show_previews: true }, { id: 'gw-1' });
   assert.deepEqual(payload.aps.alert, { title: 'Hermes wants to talk', body: '“Check the server” finished.' });
@@ -865,7 +883,7 @@ test('a phone change is an alert unless it says background; any other mode is re
 test('a phone change that asks is a notification in its category, generic until previews are on', () => {
   const { payload } = notificationFor(validateEvent(phoneBody), {}, { id: 'gw-1' });
   assert.equal(payload.aps.category, 'PHONE_CHANGE');
-  assert.equal(payload.aps.alert.title, 'Hermes has a change for you');
+  assert.equal(payload.aps.alert.title, 'Work has a change for you', 'from its bot (issue 2540)');
   assert.match(payload.aps.alert.body, /^Tap to review it in Conduit\./);
   assert.equal(payload.aps.sound, 'default', 'it waits on the user, so it chimes');
   assert.ok(!JSON.stringify(payload).includes('Dentist'));

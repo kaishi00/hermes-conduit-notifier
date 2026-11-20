@@ -347,3 +347,26 @@ test('unpairing keeps the Watch, so pairing the same phone again rings it', asyn
   await pair(own);
   assert.equal((await current(own)).watch_voip, true);
 });
+
+test('a phone drops one of its own pairings: the host is refused, the others still push, the Watch stays', async () => {
+  const own = await phone('9b'.repeat(32), { watch_voip_token: '9a'.repeat(32) });
+  const removed = await pair(own);
+  const kept = await pair(own);
+  const gatewayId = removed.split('.')[1];
+  const other = await phone('9c'.repeat(32));
+  const drop = (installation, id = gatewayId) => api(`/v1/installations/${installation.id}/gateways/${id}`, { method: 'DELETE', credential: installation.credential });
+
+  // Only the phone that holds the pairing can drop it.
+  assert.equal((await drop(other)).status, 204, 'another phone drops nothing of its own');
+  assert.equal((await api(`/v1/installations/${own.id}/gateways/${gatewayId}`, { method: 'DELETE', credential: other.credential })).status, 401);
+  assert.equal((await api('/v1/meta', { credential: removed })).status, 200, 'still paired');
+
+  assert.equal((await drop(own)).status, 204);
+  assert.equal((await api('/v1/meta', { credential: removed })).status, 401, 'the host is refused from now on');
+  assert.equal((await api('/v1/meta', { credential: kept })).status, 200, 'its other pairing still works');
+  const meta = await api('/v1/meta', { credential: own.credential });
+  assert.ok(meta.json.capabilities.includes('device-gateway-removal'));
+  assert.deepEqual(meta.json.gateways.map((gateway) => gateway.id), [kept.split('.')[1]]);
+  assert.equal((await drop(own)).status, 204, 'a retry after a lost answer is done too');
+  assert.equal((await current(own)).watch_voip, true, 'the Watch still rings, as after an unpair');
+});

@@ -21,12 +21,16 @@ they run:
     local_live_read_back  Local Live on a read-back speech server
     local_live_agent      Local Live agent mode: a fast front model in front of
                           Hermes
+    local_live_own_model  Local Live on a speech server whose own model answers
     voice_calls           Voice transcripts and call end: a live call's turns
                           saved into its chat
     chats                 Chat takeover, where in Conduit a message was sent,
                           and predictions
     history               Chat history pages without the rows Conduit already
                           has
+    session_usage         Chat usage: one chat's tokens and cost
+    chat_marks            Done chats: the chats the user or their agent marked
+                          done
     pairing               End-to-end encrypted notifications and pairing from
                           Conduit
     notifications         Cron and reply notifications, the chat Conduit has on
@@ -51,6 +55,8 @@ they run:
     link_status           Link status: the dashboard's Conduit card
     desktop_views         Desktop views: the chats Hermes Desktop or the web
                           dashboard has open
+    session_route         Session route: a chat's model pick keeps the route
+                          Hermes rebuilds it on (gateway_runtime)
     rooms                 Room files, room pictures and the room planner
     workspace             Artifacts and workspace files
     workstreams           Bot workstreams: the Work panel, and Reply, Stop,
@@ -65,6 +71,8 @@ they run:
     capabilities          Capabilities: the features this plugin serves, as
                           Conduit reads them
     self_update           Self restart and self update
+    bot_plugin            A bot's Conduit plugin: whether a profile has it on,
+                          and turning it on there
 
 A module takes what it uses from another by module (``core.TokenError``), never
 by name, so a test that replaces ``plugin_api.core._calls_home`` replaces it

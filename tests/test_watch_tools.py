@@ -116,6 +116,34 @@ def test_a_sealed_call_opens_only_for_its_grant_call_id_and_direction():
         api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, rid, tampered)
 
 
+def test_a_sealed_payload_too_deep_to_parse_is_refused_as_not_json():
+    # A payload nested past the parser's depth is an unreadable call, refused
+    # like any other that isn't JSON (notifier 903).
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+
+    keys = api.watch_tools.watch_tool_keys(bytes(range(32)))
+    rid = "R" * 22
+    nonce = bytes(12)
+    deep = ("[" * 20000 + "]" * 20000).encode()
+    ct = ChaCha20Poly1305(keys["call"]).encrypt(nonce, deep, api.watch_tools.watch_tool_aad("call", GRANT_ID, rid))
+    sealed = {"n": b64u(nonce), "ct": b64u(ct)}
+    with pytest.raises(api.watch_tools.WatchToolError, match="not JSON"):
+        api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, rid, sealed, max_bytes=64 * 1024)
+    # Under the production cap (notifier 910): the 4 KB gate refuses the
+    # deep payload as too big before any parse, and what fits in 4 KB
+    # (about 2,000 levels) is refused as no object, whichever the parser's
+    # depth is, never raised.
+    with pytest.raises(api.watch_tools.WatchToolError, match="malformed"):
+        api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, rid, sealed)
+    fits = ("[" * 2000 + "]" * 2000).encode()
+    assert len(fits) <= api.watch_tools.WATCH_MAX_CALL_BYTES
+    ct = ChaCha20Poly1305(keys["call"]).encrypt(nonce, fits, api.watch_tools.watch_tool_aad("call", GRANT_ID, rid))
+    # This Python parses that depth (a list, so no object); a parser with a
+    # lower limit refuses it as not JSON. Either way it's refused, not raised.
+    with pytest.raises(api.watch_tools.WatchToolError, match="not JSON|not an object"):
+        api.watch_tools.open_watch_tool(keys["call"], "call", GRANT_ID, rid, {"n": b64u(nonce), "ct": b64u(ct)})
+
+
 def test_the_directions_use_separate_keys_derived_from_the_root():
     keys = api.watch_tools.watch_tool_keys(bytes(range(32)))
     assert keys["call"] != keys["result"]

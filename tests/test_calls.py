@@ -126,6 +126,45 @@ def test_a_watched_job_that_finishes_sends_a_call_request_instead(home, fake):
     assert event["call"] == {"id": watch_id, "kind": "done", "title": "Check the server", "session_ids": ["rt-1", "st-1"]}
 
 
+def test_a_call_that_goes_out_rings_conduit_on_a_computer_too(home, fake):
+    watch_id = _watch(home, "rt-1", "st-1")
+    fake.answers = [{"accepted": True, "delivered": True, "rang": True}]
+    assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
+    [ring] = CallStore(home).rings()["rings"]
+    assert ring["id"] == watch_id
+    assert ring["kind"] == "done"
+    assert ring["session_ids"] == ["rt-1", "st-1"]
+    assert ring["heading"] == "Hermes wants to talk"
+    assert ring["body"] == "“Check the server” finished."
+
+
+@pytest.mark.parametrize("answer", [
+    {"accepted": True, "delivered": True, "rang": False},
+    {"accepted": True, "delivered": False},
+    {"accepted": True, "duplicate": True},
+])
+def test_a_call_the_iphone_didnt_ring_rings_no_computer(home, fake, answer):
+    _watch(home, "st-1")
+    fake.answers = [answer]
+    assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
+    assert CallStore(home).rings()["rings"] == []
+
+
+def test_a_call_that_fell_back_to_a_push_rings_no_computer(home, fake):
+    fake.failures = [_Rejected(400, "invalid_event_type")]
+    _watch(home, "st-1")
+    calls.turn_ended("st-1", "done", profile="default", fallback=READY)
+    assert fake.enqueued and CallStore(home).rings()["rings"] == []
+
+
+def test_a_ring_that_cant_be_kept_never_stops_the_call(home, fake, monkeypatch):
+    _watch(home, "st-1")
+    fake.answers = [{"accepted": True, "delivered": True, "rang": True}]
+    monkeypatch.setattr(CallStore, "add_ring", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+    assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
+    assert len(fake.sent) == 1
+
+
 def test_failed_and_stopped_jobs_say_so(home, fake):
     _watch(home, "a", title="")
     _watch(home, "b", min_gap_s=30)
@@ -756,11 +795,11 @@ def test_register_adds_the_tool_and_its_skill():
     plugin.register(ctx)
     assert [tool["name"] for tool in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report",
                                                   "conduit_settings", "conduit_present", "conduit_show", "conduit_notify", "conduit_health",
-                                                  "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar",
+                                                  "conduit_inbox", "conduit_chat_done", "conduit_location", "conduit_maps", "conduit_calendar",
                                                   "conduit_phone", "conduit_contacts", "conduit_photos", "conduit_room",
                                                   "conduit_ask_owner", "conduit_free_busy", "conduit_ask_linked",
                                                       "work_list", "work_start", "work_send", "work_stop", "work_read",
-                                                      "work_close", "work_ask", "work_reply", "work_note", "work_propose", "work_progress",
+                                                      "work_close", "work_ask", "work_reply", "work_tell", "work_note", "work_propose", "work_progress",
                                                       "conduit_room_work"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
@@ -796,11 +835,11 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
                                 register_cli_command=lambda **kwargs: None, register_tool=register_tool)
     plugin.register(ctx)
     assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report", "conduit_settings",
-                                           "conduit_present", "conduit_show", "conduit_notify", "conduit_health", "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar", "conduit_phone",
+                                           "conduit_present", "conduit_show", "conduit_notify", "conduit_health", "conduit_inbox", "conduit_chat_done", "conduit_location", "conduit_maps", "conduit_calendar", "conduit_phone",
                                            "conduit_contacts", "conduit_photos", "conduit_room", "conduit_ask_owner",
                                            "conduit_free_busy", "conduit_ask_linked", "work_list", "work_start",
                                            "work_send", "work_stop", "work_read", "work_close", "work_ask",
-                                           "work_reply", "work_note", "work_propose", "work_progress", "conduit_room_work"]
+                                           "work_reply", "work_tell", "work_note", "work_propose", "work_progress", "conduit_room_work"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.
@@ -1213,9 +1252,47 @@ def test_a_cron_run_that_mentions_silent_mid_sentence_still_notifies(cron_home, 
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
 
 
-def test_chats_keep_the_exact_silence_rule(cron_home, fake):
+def test_chats_keep_the_interactive_silence_rule(home, fake):
+    # Prose after the marker is a reply in a chat, by Hermes' interactive
+    # rule and by the exact sentinel alike; only cron runs take the loose one.
     _reply(session_id="rt-1", turn_id="t1", assistant_response="[SILENT] No changes")
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_a_reply_push_follows_hermes_silence_rule(cron_home, fake, monkeypatch):
+    """Issue 2700: a marker written another way sends nothing, and one that
+    closes a reply on its own line leaves the push's body."""
+    filters = types.ModuleType("gateway.response_filters")
+    filters.is_intentional_silence_response = lambda text: text.strip().strip("*").upper() in {"[SILENT]", "NO_REPLY"}
+    filters.strip_trailing_silence_marker = (
+        lambda text: text.rstrip().rpartition("\n")[0].rstrip()
+        if filters.is_intentional_silence_response(text.rstrip().rpartition("\n")[2]) else text)
+    gateway = types.ModuleType("gateway")
+    gateway.response_filters = filters
+    monkeypatch.setitem(sys.modules, "gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.response_filters", filters)
+
+    _reply(session_id="rt-1", turn_id="t1", assistant_response="*[silent]*")
+    assert fake.enqueued == []
+    _reply(session_id="rt-1", turn_id="t2", assistant_response="W2 is done.\n\nNO_REPLY")
+    [event] = fake.enqueued
+    assert event["type"] == "response.ready" and event["body"] == "W2 is done."
+
+
+def test_a_broken_hermes_module_keeps_the_cron_rule(monkeypatch):
+    import importlib.abc
+
+    class Broken(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name in ("gateway", "gateway.response_filters"):
+                raise RuntimeError("broken Hermes install")
+            return None
+
+    monkeypatch.delitem(sys.modules, "gateway", raising=False)
+    monkeypatch.delitem(sys.modules, "gateway.response_filters", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [Broken(), *sys.meta_path])
+    assert cron_runs.is_silent("[SILENT] No changes")
+    assert not cron_runs.is_silent("Three new emails.")
 
 
 def test_the_fallback_silence_rule_matches_hermes(monkeypatch):
@@ -1563,3 +1640,58 @@ def test_the_plugins_own_work_update_isnt_at_a_screen_because_desktop_has_it_ope
         assert calls._at_screen(home, ["st-1"]) is False
     finally:
         calls.turn_surface.start_turn("st-1")
+
+
+# A chat's close (notifier issue 820): Hermes says on_session_end with no turn
+# named, and skips it while another chat's close holds its gate.
+@pytest.fixture
+def turns_marked(monkeypatch):
+    monkeypatch.setattr(sys.modules["conduit_push.pulse"], "turns_marked", True)
+
+
+def test_a_chat_closed_after_its_turn_ended_stops_nothing(home, fake, turns_marked):
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", turn_id="t1", completed=True, failed=False, interrupted=False)
+    _watch(home, "rt-1")
+    # Hermes' finalize, then on_session_finalize: the turn's own end settled
+    # it, so the close is no stopped turn of its own.
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    plugin._on_session_finalize(session_id="rt-1")
+    assert fake.sent == []
+    assert fake.enqueued == []
+
+
+def test_a_chat_closed_mid_turn_ends_it_stopped_once(home, fake, turns_marked):
+    _watch(home, "rt-1")
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    plugin._on_session_finalize(session_id="rt-1")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_chat_closed_mid_turn_ends_it_when_hermes_skipped_on_session_end(home, fake, turns_marked):
+    _watch(home, "rt-1")
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    # The gate skipped this chat's on_session_end: only the finalize arrives.
+    plugin._on_session_finalize(session_id="rt-1", platform="tui")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+    plugin._on_session_finalize(session_id="rt-1", platform="tui")
+    assert len(fake.sent) == 1
+
+
+def test_a_hermes_that_marks_no_turns_still_stops_on_a_close(home, fake, monkeypatch):
+    monkeypatch.setattr(sys.modules["conduit_push.pulse"], "turns_marked", False)
+    _watch(home, "rt-1")
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_turn_whose_start_was_forgotten_still_ends_on_its_close(home, fake, turns_marked):
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", turn_id="t1", completed=True, failed=False, interrupted=False)
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t2", conversation_history=[])
+    # Hours in, or past the cap: its start is gone, but its end never came.
+    plugin._end_parent_turn("rt-1")
+    _watch(home, "rt-1")
+    plugin._on_session_finalize(session_id="rt-1")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]

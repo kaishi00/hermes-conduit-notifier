@@ -42,6 +42,14 @@ class Client:
         self.base_url, self.api_key, self.receipt_db_path = base_url, api_key, receipt_db_path
 
 
+class StoreClient:
+    """PeerRunsHTTPClient from Hermes' 2026-11-18 canary on: its receipts go where a store and placement say."""
+
+    def __init__(self, *, base_url, api_key, receipt_store=None, receipt_placement="shared"):
+        self.base_url, self.api_key = base_url, api_key
+        self.receipt_store, self.receipt_placement = receipt_store, receipt_placement
+
+
 class PeerError(RuntimeError):
     pass
 
@@ -239,11 +247,20 @@ def test_roomlinks_catalog_client_and_route_are_hermes_own(hermes, root):
     assert calls.installation() == "install:furina"
     assert calls.catalog({"installation_id": "install:laifu"}).value == {"installation_id": "install:laifu"}
     assert calls.link_url("http://127.0.0.1:4242/l/link1/p/default/") == "http://127.0.0.1:4242/l/link1/p/default"
-    client = calls.client("http://127.0.0.1:4242/l/link1/p/default", Path("/db"))
+    service = types.SimpleNamespace(db_path=Path("/db"), store="the store", placement="profile")
+    client = calls.client("http://127.0.0.1:4242/l/link1/p/default", service)
     assert (client.base_url, client.api_key, client.receipt_db_path) == (
         "http://127.0.0.1:4242/l/link1/p/default", "", Path("/db"))
     assert calls.route(member_id="l1-1", grant="g").fields == {"member_id": "l1-1", "grant": "g"}
     assert calls.error is PeerError and calls.protocol_version == 2
+
+
+def test_a_peer_client_keeps_its_receipts_in_the_services_store_where_hermes_takes_one(hermes, root):
+    hermes.module("tui_gateway.hosted_room_peer_http", PeerRunsHTTPClient=StoreClient, PeerRunsHTTPError=PeerError)
+    service = types.SimpleNamespace(db_path=Path("/db"), store="the store", placement="profile")
+    client = start_module.Hermes(root).client("http://127.0.0.1:4242/l/link1/p/default", service)
+    assert (client.base_url, client.receipt_store, client.receipt_placement) == (
+        "http://127.0.0.1:4242/l/link1/p/default", "the store", "profile")
 
 
 def test_a_starter_without_hermes_calls_given_uses_this_hermes(hermes, root):
@@ -270,6 +287,17 @@ def test_a_dashboard_draft_starts_where_the_dashboard_runs_and_is_the_requests_s
     hermes.module("hermes_cli.web_server_sessions", _session_mutation_context=context)
     where = start_module.where_from(Request(authority=hermes.authorities[root]), "work")
     assert where == {"kind": "canonical", "home": str(work), "subject": "owner"} and asked == ["work"]
+
+
+def test_a_canonical_draft_starts_in_the_home_of_its_authoritys_store_handle(hermes, root):
+    # Hermes' 2026-11-18 canary on: a session authority holds a storage handle, not a SessionDB.
+    work = root / "profiles" / "work"
+    hermes.gateway(root, work)
+    authority = types.SimpleNamespace(persistence=types.SimpleNamespace(scope=types.SimpleNamespace(profile_dir=work)))
+    hermes.module("hermes_cli.web_server_sessions", _session_mutation_context=lambda request, profile: (
+        authority, types.SimpleNamespace(subject="owner", profile_id=str(work))))
+    where = start_module.where_from(Request(authority=hermes.authorities[root]), "work")
+    assert where == {"kind": "canonical", "home": str(work), "subject": "owner"}
 
 
 def test_a_dashboard_in_a_gateway_without_its_request_context_cant_make_drafts(hermes, root):

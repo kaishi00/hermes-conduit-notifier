@@ -69,10 +69,9 @@ def _cron_shows_reports() -> bool:
             import importlib
 
             cron = importlib.import_module("gateway.session_cron")
-            state = importlib.import_module("hermes_state")
             _shows_reports = (callable(getattr(cron, "deliver_to_local_chat", None))
                               and callable(getattr(cron, "owner_for_home", None))
-                              and callable(getattr(getattr(state, "SessionDB", None), "append_completion_note", None)))
+                              and core._hermes_store().can("append_completion_note"))
         except Exception:  # noqa: BLE001 - an older Hermes, or none here (tests)
             _shows_reports = False
     return _shows_reports

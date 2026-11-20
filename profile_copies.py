@@ -172,7 +172,46 @@ def sweep(root: Path, shared: Path, *, link: Callable[[Path, Path], None] = _lin
     return changes
 
 
-def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path, Path], None]) -> List[str]:
+def link_profile(root: Path, shared: Path, home: Path, *,
+                 link: Callable[[Path, Path], None] = _link_dir) -> Optional[List[str]]:
+    """Points the one profile at ``home`` at ``shared`` whatever its config says,
+    for a caller about to turn the plugin on there (Conduit's Turn On,
+    hermes-conduit#2803): ``hermes -p <name> plugins enable`` finds only a
+    plugin in the profile's own folder. The same rules as ``sweep`` otherwise:
+    a newer copy of its own is kept, and anything else holding the name is left.
+    None when ``shared`` isn't the main install under ``root``. Raises what
+    the move raised, after putting back what it moved."""
+    shared, root, home = Path(os.path.abspath(shared)), Path(os.path.abspath(root)), Path(os.path.abspath(home))
+    if shared.parent != root / "plugins" or _manifest(shared).get("name") != PLUGIN_NAME:
+        return None
+    changes = _point_profile(home, shared, _manifest(shared).get("version", ""), link, force=True)
+    for line in changes:
+        logger.info("Conduit plugin: %s", line)
+    return changes
+
+
+def holds_plugin(home: Path, shared: Path) -> bool:
+    """Whether the profile at ``home`` has a copy of the plugin its chats load,
+    as ``_point_profile`` counts one: a link to ``shared``, or a folder in its
+    own ``plugins/`` (any name) whose manifest names this plugin."""
+    plugins = Path(home) / "plugins"
+    try:
+        if plugins.resolve() == Path(shared).parent.resolve():
+            return True
+        children = list(plugins.iterdir()) if plugins.is_dir() else []
+    except OSError:
+        return False
+    for child in children:
+        try:
+            if _links_to(child, Path(shared)) or (child.is_dir() and _manifest(child).get("name") == PLUGIN_NAME):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path, Path], None],
+                   force: bool = False) -> List[str]:
     changes: List[str] = []
     plugins = home / "plugins"
     target = plugins / shared.name
@@ -194,12 +233,13 @@ def _point_profile(home: Path, shared: Path, version: str, link: Callable[[Path,
             ours = child
         elif child.is_dir() and not child.is_symlink() and _manifest(child).get("name") == PLUGIN_NAME:
             copies.append(child)
-    config = _config(home)
-    if config is None:
-        logger.info("Conduit plugin: couldn't read %s; leaving its plugins alone", home / "config.yaml")
-        return changes
-    if not _turns_on(config, bool(ours or copies)):
-        return changes
+    if not force:
+        config = _config(home)
+        if config is None:
+            logger.info("Conduit plugin: couldn't read %s; leaving its plugins alone", home / "config.yaml")
+            return changes
+        if not _turns_on(config, bool(ours or copies)):
+            return changes
     own = [copy for copy in copies if not (copy / COPY_MARKER).exists()]
     for copy in own:
         if _newer(_manifest(copy).get("version", ""), version):

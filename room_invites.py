@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from . import (client, room_bridge, room_choices, room_copies, room_files_link, room_identity, room_join, room_links,
-               room_looks, room_posts, room_start, room_work_news, session_titles)
+               room_looks, room_own_bots, room_posts, room_start, room_work_news, session_titles)
 from .events import event_id, push_event
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ GRANT, LEAVE, ENDED = "room.grant", "room.leave", "room.ended"
 # reason} says it ended for them. Only sent to a home whose link.hello names it: an older one drops it.
 PERSON = "room.person"
 KINDS = (INVITE, ANSWER, START, GRANT, LEAVE, ENDED, PERSON, *room_copies.KINDS, *room_posts.KINDS, *room_looks.KINDS,
-         *room_files_link.KINDS, *room_work_news.KINDS)
+         *room_files_link.KINDS, *room_work_news.KINDS, *room_own_bots.KINDS)
 DIRECTORY = room_identity.DIRECTORY
 FILE_NAME = "rooms.json"
 
@@ -156,27 +156,33 @@ class Rooms:
         self.looks = room_looks.Looks(self)
         self.files = room_files_link.Files(self)
         self.news = room_work_news.News(self, clock=clock)
+        self.own_bots = room_own_bots.OwnBots(self, clock=clock)
         self._notes: Any = None
 
     # --- The home's drafts ---------------------------------------------------------
 
-    def draft(self, name: Any, agents: Any, links: Any, *, where: Any) -> dict[str, Any]:
+    def draft(self, name: Any, agents: Any, links: Any, *, where: Any, bring: Any = None) -> dict[str, Any]:
         """A new room with the people of ``links``, waiting for their answers: ``agents`` are this
         installation's own, each ``{profile, handle, display_name}`` with its ``choices`` for the room if they
         aren't the last room's with the same people, and ``where`` the room service it starts in
-        (room_start.where_from)."""
+        (room_start.where_from). ``bring`` names, by Link, the profiles of an own Link's Hermes that join by
+        themselves (room_own_bots), each Link one of ``links``."""
         name = _room_name(name)
         where = _where(where)
         if not isinstance(links, list) or not 1 <= len(links) <= MAX_LINKS \
                 or len(set(map(str, links))) != len(links):
             raise RoomsError("bad_links", f"Invite 1 to {MAX_LINKS} people, each once")
         own = self._agents(agents, minimum=1)
+        bring = self._bring(bring, links)
         try:
             for agent in own:
                 self.joiner.check(agent["profile"], joining=False)
         except room_join.JoinError as exc:
             raise RoomsError(exc.code, str(exc), exc.status) from None
         each = (MAX_AGENTS - len(own)) // len(links)
+        if any(len(profiles) > each for profiles in bring.values()):
+            raise RoomsError("too_many", f"A room has up to {MAX_AGENTS} agents: bring at most {each} of each "
+                                         "Hermes' bots", 409)
         if each < 1:
             raise RoomsError("too_many", f"A room has up to {MAX_AGENTS} agents: with {len(own)} of yours, invite "
                                          f"at most {MAX_AGENTS - len(own)} people", 409)
@@ -214,8 +220,30 @@ class Rooms:
                                    for agent in own],
                         "slots": slots(link_id, each), "expires_at": now + LASTS_S}
                 _queue(state, link_id, INVITE, room_id, body, now)
+                if bring.get(link_id):
+                    _queue(state, link_id, room_own_bots.BRING, room_id,
+                           {"v": room_own_bots.VERSION, "room_id": room_id, "profiles": bring[link_id]}, now)
         self.flush()
         return self._shown_draft(room_id, self.store.read()["drafts"][room_id])
+
+    def _bring(self, bring: Any, links: Any) -> dict[str, list[str]]:
+        """A draft's ``bring``: by Link, the other Hermes' profiles to join by themselves, each Link an own
+        one whose other side takes room.bring."""
+        if bring is None:
+            return {}
+        if not isinstance(bring, dict) or not isinstance(links, list) or not set(bring) <= set(map(str, links)):
+            raise RoomsError("bad_bring", "bring names the bots to bring, by Link, each one of the links")
+        kept: dict[str, list[str]] = {}
+        for link_id, profiles in bring.items():
+            if not isinstance(profiles, list) or not 1 <= len(profiles) <= MAX_AGENTS - 1 \
+                    or not all(isinstance(profile, str) and room_bridge.PROFILE.match(profile) for profile in profiles) \
+                    or len(set(profiles)) != len(profiles):
+                raise RoomsError("bad_bring", "bring names each Link's bots by profile, each once")
+            if not self.own_bots.brings(link_id):
+                raise RoomsError("not_own", "Only bots of your own other Hermes can be brought, over a Link both "
+                                            "sides marked as yours, with a plugin that takes it", 409)
+            kept[link_id] = list(profiles)
+        return kept
 
     def drafts(self) -> dict[str, Any]:
         """The drafts, newest first, with no grant, and whether this Hermes can start them: ``starts`` says
@@ -394,6 +422,29 @@ class Rooms:
         self.flush()
         return self._shown_invite(self.store.read()["invites"][key])
 
+    def remove_invite(self, link_id: Any, room_id: Any) -> dict[str, Any]:
+        """Takes the invite to ``room_id`` over the Link ``link_id`` off Group Chats on every phone of this
+        installation: one that started, ran out, or was cancelled or ended. It stays kept (a started room's copy and
+        its agents' grants are as they were) and shows with ``removed`` true until it's forgotten. One still waiting
+        on an answer or on its room stays (``not_finished``). Returns the invite as the join card shows it."""
+        key = f"{link_id}/{room_id}"
+        with self._answering():
+            invite = self.store.read()["invites"].get(key) if isinstance(link_id, str) and isinstance(
+                room_id, str) else None
+            if invite is None:
+                raise RoomsError("no_invite", "This Hermes wasn't invited to that room over that Link", 404)
+            if _invite_status(invite, int(self.clock())) in ("waiting", "joined"):
+                raise RoomsError("not_finished", "An invite waiting on an answer or on its room can't be removed", 409)
+            if not invite.get("removed"):
+                with self.store.update() as state:
+                    invite = state["invites"].get(key)
+                    if invite is not None:
+                        invite["removed"] = True
+            invite = self.store.read()["invites"].get(key)
+            if invite is None:
+                raise RoomsError("no_invite", "This Hermes wasn't invited to that room over that Link", 404)
+            return self._shown_invite(invite)
+
     def leave(self, link_id: Any, room_id: Any, profiles: Any = None) -> dict[str, Any]:
         """Takes this installation's agents out of the started room ``room_id`` the Link ``link_id`` invited it to
         (R6): those of ``profiles``, or every one still in (None). Each is undone here (unbound, its grant's scope
@@ -456,7 +507,9 @@ class Rooms:
                    room_posts.POSTED: self.posts.on_posted, room_looks.LOOKS: self.looks.on_looks,
                    room_files_link.CHUNK: self.files.on_chunk,
                    room_files_link.GOT: self.files.on_got,
-                   room_work_news.NEWS: self.news.on_news}.get(received.kind)
+                   room_work_news.NEWS: self.news.on_news,
+                   room_own_bots.BOTS: self.own_bots.on_bots,
+                   room_own_bots.BRING: self.own_bots.on_bring}.get(received.kind)
         if handler is not None:
             handler(received)
 
@@ -485,7 +538,18 @@ class Rooms:
                 "reason": None,
             }
             told = dict(invite)
-        self.notify(told)
+        # Bots of this Hermes the home asks for over an own Link join by themselves (room_own_bots): such an
+        # invite's push waits for the room.bring, and goes only when they can't join.
+        try:
+            held = self.own_bots.holds(received.link_id, told)
+            if held:
+                self.own_bots.hold(key)
+        except Exception:  # noqa: BLE001 - a retry stops at the stored invite: push it now rather than never
+            logger.warning("Linked Rooms couldn't hold room %s's invite push for its bots; pushing it", body["room_id"],
+                           exc_info=True)
+            held = False
+        if not held:
+            self.notify(told)
 
     def on_answer(self, received: room_links.Received) -> None:
         """A person's answer to a draft: taken only from the Link invited, for its own places, while the draft
@@ -1080,6 +1144,8 @@ class Rooms:
         loop holds the drafts from the CLI from its first pass (room_start's claim)."""
         if self.starter is not None:
             self.starter.claim()
+        # This Hermes' bots, to the other side of each own Link (room_own_bots): before any room is made.
+        self.own_bots.pass_once()
         if not self.store.path.exists():
             return
         self.flush()
@@ -1217,6 +1283,8 @@ class Rooms:
                           "choices": self._filled(profile, invite["room_id"], people).as_dict()}
                          for profile in self._profiles()],
             "reason": invite["reason"],
+            # Taken off Group Chats on every phone (remove_invite).
+            "removed": bool(invite.get("removed")),
             # Joined with no agents, and whether the home's plugin takes that (PERSON).
             "just_me": bool(invite.get("just_me")),
             "just_me_offered": PERSON in ((self.link(invite["link"]) or {}).get("kinds") or ())
@@ -1298,7 +1366,10 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
             # Who's who still shows; whose each post was waits for posts.db.
             logger.warning("Linked Rooms couldn't read who posted in room %s (%s)", room_id, type(exc).__name__)
             latest = []
+        seated = {member["link"] for member in draft["members"] or () if member["link"] is not None}
+        own = room_links.own_links(root)
         return {"room_id": room_id, "home": None, "members": _members(draft),
+                "own_hermes": bool(own) and (seated | set(room_copies.just_me(draft))) <= own,
                 "just_me": [draft["links"][link_id]["name"] for link_id in room_copies.just_me(draft)], "posts": [
             {"event_id": each["event_id"], "seq": each["seq"], "by": names.get(each["link"], room_posts.GUEST)}
             for each in latest]}
@@ -1315,7 +1386,9 @@ def people(root: Any, room_id: Any, strict: bool = False) -> Optional[dict[str, 
                     if member["member_id"] in mine), None)
         if you is None and invite.get("you"):
             you = room_posts.poster(invite["you"])  # Just me: the name the home gave at the start
-        return {"room_id": room_id, "home": invite["from"], "you": you, "members": [
+        from . import room_rules  # room_rules reads rooms.json through this module
+        return {"room_id": room_id, "home": invite["from"], "you": you,
+                "own_hermes": room_rules.own_guest_room(root, room_id), "members": [
             {"member_id": member["member_id"], "handle": member["handle"],
              "display_name": member["display_name"],
              "owner": None if member["member_id"] in mine else member["owner"] or invite["from"],

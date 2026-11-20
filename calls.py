@@ -45,7 +45,10 @@ from .events import push_event
 
 logger = logging.getLogger("hermes.plugins.conduit_push")
 
-CALL_TITLE = "Hermes wants to talk"
+# A call's title names the bot that calls, as the ring does (issue 2540):
+# "Cortana wants to talk", and "Hermes wants to talk" for a main bot nobody
+# named. Conduit writes its own from the push's `profile_name`.
+CALL_TITLE = "{name} wants to talk"
 # Seconds to wait before each delivery attempt.
 DELIVERY_DELAYS_S = (0.0, 2.0, 4.0)
 # How long a turn's end waits for its call requests to reach the relay. A cron
@@ -89,6 +92,18 @@ def _spawn(work: Callable[[], None]) -> bool:
 # wait at exit.
 _in_flight: set[threading.Event] = set()
 _in_flight_lock = threading.Lock()
+
+
+def _note_ring(event: dict[str, Any]) -> None:
+    """Keeps the call for Conduit on a computer (GET /calls/rings), which rings
+    for it beside the iPhone: only once the relay says the iPhone rang, so a
+    call that fell back to a push, or rang nowhere ("Ring like a phone call"
+    off), never rings a computer. Never stops the call itself."""
+    try:
+        _store(get_hermes_home()).add_ring(
+            event.get("call"), name=event.get("profile_name", ""), title=event.get("title", ""), body=event.get("body", ""))
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not keep a call for its computers", exc_info=True)
 
 
 def _deadline() -> float:
@@ -386,6 +401,28 @@ def cancel_alerts(session_id: str, kind: str | None = None) -> None:
         store.forget_waiting(session_id, kind)
     except Exception:  # noqa: BLE001
         logger.warning("Conduit could not cancel an alert call", exc_info=True)
+
+
+def keep_waiting_card(request_id: str, decision: Any) -> bool:
+    """The relay holds a question and takes answers for it
+    (``CallStore.keep_waiting_card``): the Needs you list hands Conduit its
+    card from now on. Never raises: False when the store couldn't be
+    written, so the caller tries again."""
+    try:
+        _store(get_hermes_home()).keep_waiting_card(request_id, decision)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not keep a question's card on the waiting list", exc_info=True)
+        return False
+
+
+def forget_waiting_card(request_id: str) -> None:
+    """A question's card can no longer be answered (``CallStore.forget_waiting_card``):
+    the Needs you list stops handing it to Conduit. Never raises."""
+    try:
+        _store(get_hermes_home()).forget_waiting_card(request_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not take a question's card off the waiting list", exc_info=True)
 
 
 def note_waiting(session_id: str, kind: str, *, turn_session_id: str = "", **detail: Any) -> bool:
@@ -740,11 +777,13 @@ def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile:
     title = str(watch.get("title") or "")
     reason = str(watch.get("reason") or "")
     subject = f"“{title}”" if title else "Your job"
+    given = session_titles.bot_name()
+    name = session_titles.shown_name(given, profile)
     if outcome in ("approval", "question"):
-        lead = "Hermes needs your OK" if outcome == "approval" else "Hermes has a question for you"
+        lead = f"{name} needs your OK" if outcome == "approval" else f"{name} has a question for you"
         body = f"{lead}: {reason}" if reason else f"{lead}."
     elif watch.get("origin") == "alert":
-        body = "Hermes ran into a problem with your request."
+        body = f"{name} ran into a problem with your request."
     else:
         # What Hermes said it calls about, else how the job ended.
         body = reason or {
@@ -763,8 +802,8 @@ def call_event(watch: dict[str, Any], outcome: str, *, session_id: str, profile:
         identifier=f"call:{watch['id']}",
         session_id=session_id,
         profile=profile,
-        profile_name=session_titles.bot_name(),
-        title=CALL_TITLE,
+        profile_name=given,
+        title=CALL_TITLE.format(name=name),
         title_label="call.requested",
         body=body,
         call=call,
@@ -809,17 +848,25 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
                 relay_failed = True
                 continue
             # The relay refused it, the profile lost its pairing, or the
-            # relay took it and Apple didn't: sending the same event again
-            # won't change that (a retry only answers "duplicate").
+            # relay took it and Apple didn't. The relay gives the id back
+            # after an Apple failure, so a retry would be sent again, but
+            # Apple just refused or couldn't be reached: the usual push
+            # goes instead, at once, rather than a ring that comes late.
             logger.warning("Conduit call request refused: %s", error)
             break
         except Exception as error:  # noqa: BLE001 — transport: try again
             logger.warning("Conduit call request delivery failed: %s", error)
             continue
-        # A relay that failed after taking the event answers the retry as a
-        # duplicate without sending it again.
+        # After a failure, a duplicate doesn't say the call went: an older
+        # relay kept the id of an event it failed to send, and
+        # answers the retry as a duplicate without sending it. Today's
+        # relay gives a failed send's id back, so there a duplicate means an
+        # earlier try did go, and the usual push below comes as a second
+        # notice: one too many beats none.
         if not (relay_failed and isinstance(answer, dict) and answer.get("duplicate")):
             logger.info("Conduit call request: %s", call_delivery(answer))
+            if isinstance(answer, dict) and answer.get("rang") is True and answer.get("duplicate") is not True:
+                _note_ring(event)
             return
         logger.warning("Conduit call request was taken but never sent")
         break

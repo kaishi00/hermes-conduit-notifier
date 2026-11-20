@@ -1,4 +1,6 @@
 import importlib.util
+import sys
+import types
 import json
 import re
 from pathlib import Path
@@ -63,11 +65,16 @@ def test_every_capability_names_a_served_route_family():
         "desktop-views": "/sessions/desktop-views",
         "turn-surface": "/turn-surface",
         "turn-surface-discard": "/turn-surface/discard",
+        "turn-surface-windows": "/turn-surface",
         "history-page": "/sessions/history-page",
+        "session-usage": "/sessions/usage",
+        "chat-done": "/chats/done",
+        "bot-plugin": "/profiles/plugin",
         "hermes-calls": "/calls",
         "hermes-call-presence": "/calls/presence",
         "hermes-call-outcomes": "/calls/outcomes",
         "hermes-call-answers": "/calls/waiting",
+        "call-rings": "/calls/rings",
         "conduit-settings": "/conduit-settings",
         "conduit-prefs": "/conduit-prefs",
         "pulse": "/pulse",
@@ -127,6 +134,7 @@ def test_every_capability_names_a_served_route_family():
         # sharing.turn_status, read from the phone store each turn.
         "phone-turn-status": "/phone/",
         "pairing": "/pair",
+        "pairing-devices": "/pair/remove",
         "self-restart": "/self/restart",
         "self-update": "/self/update",
         "gateway-work": "/self/gateway-work",
@@ -146,14 +154,18 @@ def test_every_capability_names_a_served_route_family():
         # Agent mode: the call's tools for an engine with its own front model.
         "local-live-agent": "/local-live/v1/tools",
         "artifacts": "/artifacts",
+        "artifact-pins": "/artifacts/pins",
         "workspace-files": "/workspace/",
         "workspace-resolve": "/workspace/resolve",
         "workspace-copy": "/workspace/",
         "room-rules": "/rooms/",
         "room-forget": "/rooms/sessions",
         "room-links": "/rooms/links",
+        "room-own-links": "/rooms/links/own",
+        "room-own-bots": "/rooms/own-bots",
         "room-setup": "/rooms/setup",
         "room-invites": "/rooms/drafts",
+        "room-invites-remove": "/rooms/invites/remove",
         # ?conduit_profile= on the voice and Watch routes, Local Live's first.
         "dashboard-profiles": "/local-live/",
         "room-leave": "/rooms/leave",
@@ -237,3 +249,21 @@ def test_a_host_that_keeps_disbanded_rooms_chats_says_so(monkeypatch):
 
     monkeypatch.setattr(settings, "cleanup_disbanded", broken)
     assert "room_chats_kept" not in _client().get(f"{BASE}/capabilities").json()
+
+
+def test_what_the_plugin_cant_do_on_this_hermes_is_listed_until_it_can(monkeypatch):
+    # Notifier issue 834: a state the host's log alone used to say.
+    degraded = api.core._plugin_package_module("degraded")
+    monkeypatch.setitem(sys.modules, degraded._HOLDER, types.ModuleType(degraded._HOLDER))
+    assert "degraded" not in _client().get(f"{BASE}/capabilities").json()
+    degraded.note(degraded.WORKSTREAM_RECOVERY)
+    degraded.note(degraded.WORKSPACE_FILES)
+    assert _client().get(f"{BASE}/capabilities").json()["degraded"] == ["workspace-files", "workstream-recovery"]
+    degraded.clear(degraded.WORKSPACE_FILES)
+    assert _client().get(f"{BASE}/capabilities").json()["degraded"] == ["workstream-recovery"]
+
+    def broken():
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(degraded, "current", broken)
+    assert "degraded" not in _client().get(f"{BASE}/capabilities").json()

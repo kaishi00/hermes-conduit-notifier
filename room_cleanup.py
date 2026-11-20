@@ -32,7 +32,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from . import room_rules, room_settings
+from . import hermes_store, room_rules, room_settings
 
 logger = logging.getLogger(__name__)
 
@@ -155,23 +155,31 @@ def cleans(room_id: Any, home: Any) -> bool:
 
 
 def _guard(original: Callable[..., Any]) -> Callable[..., Any]:
-    def disband_room(db_path: Any, *args: Any, **kwargs: Any) -> Any:
+    def disband_room(store: Any, *args: Any, **kwargs: Any) -> Any:
         room_id = kwargs.get("room_id")
+        # Hermes names the room database by its path, or (its 2026-11-18
+        # canary on) by a store handle and a placement.
+        try:
+            db_path = hermes_store.room_db_path(store, kwargs.get("placement"))
+        except Exception:  # noqa: BLE001 - the disband is Hermes' either way
+            logger.warning("conduit_push: couldn't tell which room database disbands room %s; its hidden chats "
+                           "stay until the plugin next loads", room_id, exc_info=True)
+            return original(store, *args, **kwargs)
         # Read first: Hermes can prune the room's row in the disband's own
         # transaction. A room whose chats stay has nothing to read.
         try:
-            wanted = cleans(room_id, Path(db_path).parent)
+            wanted = cleans(room_id, db_path.parent)
         except Exception:  # noqa: BLE001 - the disband is Hermes' either way
             logger.warning("conduit_push: couldn't read the room settings; deleting room %s's hidden chats as by "
                            "default", room_id, exc_info=True)
             wanted = True
         profiles = _before(db_path, room_id) if wanted else ()
-        result = original(db_path, *args, **kwargs)
+        result = original(store, *args, **kwargs)
         if profiles is None:
             logger.warning("conduit_push: couldn't read room %s's members before it was disbanded; looking for its "
                            "hidden chats in every agent's home on this host", room_id)
         try:
-            _in_background(functools.partial(_after, room_id, profiles, Path(db_path)), "conduit-room-cleanup")
+            _in_background(functools.partial(_after, room_id, profiles, db_path), "conduit-room-cleanup")
         except Exception:  # noqa: BLE001 - the room is disbanded either way
             logger.warning("conduit_push: couldn't start deleting the hidden chats of room %s; the plugin "
                            "deletes them when it next loads", room_id, exc_info=True)
@@ -262,8 +270,11 @@ def _delete(home: Path, session_ids: list[str]) -> tuple[int, int, int]:
     itself."""
     if not session_ids:
         return 0, 0, 0
-    registry = importlib.import_module("hermes_state_registry")
-    db = registry.acquire(home / STATE_DB)
+    shared = not hermes_store.has_storage_interface()
+    # An older Hermes shares its stores through its registry; the storage
+    # interface shares them itself.
+    registry = importlib.import_module("hermes_state_registry") if shared else None
+    db = registry.acquire(home / STATE_DB) if registry is not None else hermes_store.open_store(home)
     deleted = kept = failed = 0
     try:
         for session_id in session_ids:
@@ -282,7 +293,10 @@ def _delete(home: Path, session_ids: list[str]) -> tuple[int, int, int]:
                 continue
             kept += len(skipped)
     finally:
-        registry.release_or_close(db)
+        if registry is not None:
+            registry.release_or_close(db)
+        else:
+            db.close()
     return deleted, kept, failed
 
 
@@ -424,7 +438,10 @@ def _configured_homes(home: Path) -> dict[str, Path]:
 
 def _can_delete() -> bool:
     """Whether this Hermes deletes a session with its compression chain,
-    skipping a turn's (SessionDB.delete_sessions), through its shared stores."""
+    skipping a turn's (SessionDB.delete_sessions), through its shared stores.
+    The storage interface (Hermes' 2026-11-18 canary on) always does."""
+    if hermes_store.has_storage_interface():
+        return True
     try:
         delete = importlib.import_module("hermes_state").SessionDB.delete_sessions
         registry = importlib.import_module("hermes_state_registry")

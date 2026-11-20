@@ -328,9 +328,9 @@ def _reader(home: Any) -> room_reading.Reader:
 def _chat_exists(home: Any, chat_id: str) -> bool:
     """Whether the profile at ``home`` still has the chat; True when its sessions can't be read."""
     try:
-        from hermes_state import SessionDB
+        from . import hermes_store
 
-        db = SessionDB(db_path=Path(home) / "state.db")
+        db = hermes_store.open_store(home)
     except Exception:  # noqa: BLE001 - no session store here (tests, older Hermes)
         return True
     try:

@@ -296,6 +296,36 @@ def test_cards_that_are_all_invalid_are_refused(tool_home):
 STATS = {"type": "stats", "stats": [{"label": "Steps", "value": "8,412"}], "source": {"name": "Health"}}
 
 
+def test_cards_wrapped_another_way_are_still_drawn(tool_home):
+    # MiniMax M3.1 sent [[{...}]] and kept showing the board again (2026-11-18).
+    _exchange(PresentStore(tool_home), features=("chat-cards", "info-cards"))
+    for given in ([[STATS]], [[[STATS]]], STATS, {"cards": [STATS]}, json.dumps([STATS]), json.dumps([[STATS]]),
+                  {"cards": [[STATS]]}, json.dumps({"cards": [[STATS]]}), {"cards": json.dumps([STATS])},
+                  [{"cards": [STATS]}], [[{"cards": [STATS]}]], {"cards": {"cards": [STATS]}},
+                  [json.dumps([STATS])], [json.dumps(STATS)], {"cards": [json.dumps([STATS])]}):
+        answer = _call({"title": "Today", "cards": given})
+        assert answer["ok"] is True and answer["cards"] == [STATS], given
+    assert _call({"title": "Today", "cards": "[not json"})["error"] == "invalid_cards"
+    assert _call({"title": "Today", "cards": "[" * 100_000})["error"] == "invalid_cards", "too deep to parse"
+    deep = _call({"title": "Today", "cards": [[[[[[[[[[[STATS]]]]]]]]]]]})
+    assert deep["error"] == "invalid_cards", "too deep to open"
+    assert any("wrapped more than 8 deep" in problem for problem in deep["problems"]), "and Hermes hears why (879)"
+    def lists(count):
+        given = [STATS]
+        for _ in range(count - 1):
+            given = [given]
+        return _call({"title": "Today", "cards": given})
+    nine = lists(9)
+    assert nine["cards"] == [STATS] and not any("deep" in problem for problem in nine.get("problems", [])), nine
+    ten = lists(10)
+    assert ten.get("error") == "invalid_cards", "a card the note leaves out isn't drawn"
+    assert any("wrapped more than 8 deep" in problem for problem in ten["problems"]), ten
+    answer = _call({"title": "Today", "cards": [[[[[[[[[{"cards": [STATS]}, MAP]]]]]]]]]})
+    assert any("wrapped more than 8 deep" in problem for problem in answer["problems"]), answer
+    answer = _call({"title": "Today", "cards": [[STATS], "x"]})
+    assert answer["cards"] == [STATS] and "cards[1]: dropped" in answer["problems"], "a list among cards opens"
+
+
 def test_information_cards_go_only_to_a_conduit_that_draws_them(tool_home):
     _exchange(PresentStore(tool_home), features=("chat-cards",))
     answer = _call({"title": "Today", "cards": [STATS]})
@@ -601,6 +631,27 @@ def test_a_text_message_goes_only_to_a_conduit_that_offers_send_text(tool_home):
                       "markdown": "**Mei** · Wife  \n+86 139 6261 8677  \nText to send: Landed safe, see you soon"}
 
 
+EMAIL_TEXT = {"type": "contact", "people": [
+    {"name": "Mei", "phone": "+86 139 6261 8677", "message": "Landed safe"},
+    {"name": "Bo", "email": "bo@example.com", "message": "Running late"}]}
+
+
+def test_a_text_to_an_email_goes_only_to_a_conduit_that_sends_one(tool_home):
+    # hermes-conduit#2465: Messages takes an email as an iMessage recipient.
+    _exchange(PresentStore(tool_home), features=("chat-cards", "media-cards", tool.TEXT_DRAFTS_FEATURE))
+    answer = _call({"title": "Texts", "cards": [EMAIL_TEXT]})
+    mei, bo = answer["cards"][0]["people"]
+    assert mei["message"] == "Landed safe", "a text to a phone still goes"
+    assert "message" not in bo and bo["email"] == "bo@example.com", "an older Conduit keeps a text only with a phone"
+    assert tool.NO_EMAIL_TEXTS_NOTE in answer["note"] and tool.NO_TEXT_DRAFTS_NOTE not in answer["note"]
+    assert "Running late" not in answer["markdown"]
+    _exchange(PresentStore(tool_home), features=("chat-cards", "media-cards", tool.TEXT_DRAFTS_FEATURE,
+                                                 tool.EMAIL_TEXTS_FEATURE))
+    answer = _call({"title": "Texts", "cards": [EMAIL_TEXT]})
+    assert answer["cards"] == [EMAIL_TEXT] and answer["note"] == tool.IN_CHAT_NOTE
+    assert "Text to send: Running late" in answer["markdown"]
+
+
 def test_the_tool_says_a_text_is_sent_only_by_the_users_tap():
     description = tool.SCHEMA["description"]
     assert "Send text" in description and "never that it was sent" in description
@@ -791,3 +842,10 @@ def test_the_tool_offers_the_boards_layout_and_follow_ups():
     assert properties["cards"]["maxItems"] == 12
     for phrase in ("timeline", "checklist", "layout tabs", "problems"):
         assert phrase in tool.SCHEMA["description"]
+
+
+def test_the_model_draws_cards_without_asking_first():
+    # A smaller model read "ask first" as asking before every board (Reddit, MiniMax M3.1, 2026-11-18).
+    assert "Never ask whether to show a card" in tool.SCHEMA["description"]
+    skill = (pathlib.Path(tool.__file__).parent / "skills" / tool.SKILL_NAME / "SKILL.md").read_text(encoding="utf-8")
+    assert "Never ask whether to show a card" in skill and "Ask first when" not in skill

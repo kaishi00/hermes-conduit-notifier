@@ -74,6 +74,12 @@ class FakeHermes:
         if action == "remove":
             del self.jobs[job_id]
             return json.dumps({"success": True})
+        if action == "resume":
+            self.jobs[job_id]["state"] = "scheduled"
+            return json.dumps({"success": True, "job": {"job_id": job_id, "state": "scheduled"}})
+        if action == "pause":
+            self.jobs[job_id]["state"] = "paused"
+            return json.dumps({"success": True, "job": {"job_id": job_id, "state": "paused"}})
         raise AssertionError(f"unexpected action {action}")
 
     def older(self, name, prompt="Check the homelab and call me", skills=("conduit_push:calling-the-user",), **extra):
@@ -453,8 +459,29 @@ def test_report_outside_a_watch_run(home, hermes, clock):
     older = hermes.older("Call watch: site down")
     answer = _report(older, True)
     assert answer["ok"] is False and answer["error"] == "older_watch"
-    no_saw = json.loads(watches.report({"happening": True}, session_id=RUN.format(_homelab(hermes))))
-    assert no_saw["ok"] is False and "saw" in no_saw["note"]
+
+
+def test_a_report_without_saw_still_counts(home, hermes, clock):
+    """Hermes refuses a call missing a required argument before the plugin
+    sees it, so only happening is required; a missing saw never drops the
+    call a run owes, and the watch's name is said instead."""
+    assert watches.REPORT_SCHEMA["parameters"]["required"] == ["happening"]
+    prompt = watches.run_prompt({"what": "site down", "how": "curl it", "unless": ""})
+    assert "every time" in prompt
+    # The call shown whole, with both arguments, for a run where it's behind Tool Search
+    # (Furina's W21, 2026-11-15: a weak model called it by name, or skipped to [SILENT]).
+    assert watches.REPORT_EXAMPLE in prompt and watches.REPORT_EXAMPLE in watches.RUN_NOTE
+    assert "argument is missing" in prompt and "argument is missing" in watches.RUN_NOTE
+    example = json.loads(watches.REPORT_EXAMPLE.removeprefix("tool_call "))
+    assert example["calls"][0]["name"] == watches.REPORT_TOOL
+    assert set(example["calls"][0]["arguments"]) == {"happening", "saw"}
+    assert prompt.index("Report before you reply") < prompt.index("reply [SILENT]")
+    job_id = _homelab(hermes, for_minutes=0)
+    quiet = json.loads(watches.report({"happening": False}, session_id=RUN.format(job_id)))
+    assert quiet["ok"] is True and quiet["status"] == "quiet"
+    calling = json.loads(watches.report({"happening": True, "saw": "  "}, session_id=RUN.format(job_id)))
+    assert calling["ok"] is True and calling["status"] == "calling", calling
+    assert _rang(home)[0]["reason"] == "Your call watch went off: homelab down.", _rang(home)
 
 
 def test_conduit_call_user_sends_a_watch_run_to_its_report(home, hermes, clock, monkeypatch):
@@ -542,6 +569,158 @@ def test_a_full_call_queue_tries_again_on_the_next_run(home, hermes, clock, monk
     assert _report(job_id, True)["status"] == "calling"
 
 
+REMINDER = {"what": "reminder at 12:46", "how": "the local time is 12:46 or later", "for_minutes": 0, "once": True}
+
+
+def _reminder(hermes, **changes):
+    _setup({"action": "set", "watch": {**REMINDER, **changes}})
+    [job_id] = [key for key, job in hermes.jobs.items() if job["name"] == "Call watch: reminder at 12:46"]
+    return job_id
+
+
+def test_a_one_time_watch_rings_once_and_stops_even_when_a_run_reads_it_differently(home, hermes, clock):
+    # notifier #775: a time stays passed, and one run said "the reminder was
+    # already sent" (happening false), so the next opened a new incident and
+    # rang again: three calls, hours apart, for one reminder.
+    job_id = _reminder(hermes)
+    first = _report(job_id, True)
+    assert first["status"] == "calling" and "it has stopped" in first["note"]
+    assert hermes.jobs[job_id]["state"] == "paused", "it checks no more"
+    assert len(_rang(home)) == 1
+    clock.now[0] += 4 * 3600
+    for happening in (False, True, True):
+        later = _report(job_id, happening)
+        assert later["status"] == "done" and later["reply"] == "[SILENT]"
+    assert len(_rang(home)) == 1, "never a second call"
+    [listed] = _setup({"action": "list"})["watches"]
+    assert listed["finished"] is True and listed["state"] == "paused"
+
+
+def test_a_one_time_watch_set_again_after_its_call_starts_over(home, hermes, clock):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    again = _setup({"action": "set", "watch": {**REMINDER, "once": "true"}})
+    assert again["result"] == "changed" and again["watch"]["stops_after_its_call"] is True
+    assert list(hermes.jobs) == [job_id] and hermes.jobs[job_id]["state"] == "scheduled", "resumed"
+    assert _report(job_id, True)["status"] == "calling"
+
+
+def test_a_sync_of_a_note_that_still_describes_a_finished_one_time_watch_leaves_it_finished(home, hermes, clock):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    synced = _setup({"action": "sync", "watches": [REMINDER]})
+    assert [view["what"] for view in synced["unchanged"]] == [REMINDER["what"]]
+    assert synced["unchanged"][0]["finished"] is True
+    assert hermes.jobs[job_id]["state"] == "paused"
+    assert _report(job_id, True)["status"] == "done", "never rings twice for the same event"
+    changed = _setup({"action": "sync", "watches": [{**REMINDER, "how": "the local time is 13:00 or later"}]})
+    assert changed["changed"] and hermes.jobs[job_id]["state"] == "scheduled", "a changed watch starts over"
+    assert _report(job_id, True)["status"] == "calling"
+
+
+def test_a_sync_that_only_changes_how_often_or_drops_once_leaves_a_finished_watch_finished(home, hermes, clock):
+    job_id = _reminder(hermes, every_minutes=240)
+    assert _report(job_id, True)["status"] == "calling"
+    no_cadence = {key: value for key, value in REMINDER.items() if key != "once"}
+    synced = _setup({"action": "sync", "watches": [no_cadence]})
+    assert synced["unchanged"] and synced["unchanged"][0]["finished"] is True
+    assert hermes.jobs[job_id]["state"] == "paused"
+    assert _report(job_id, True)["status"] == "done"
+
+
+def test_a_finished_watch_set_again_counts_toward_the_cap(home, hermes, clock):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    for index in range(watches.MAX_WATCHES):
+        assert _setup({"action": "set", "watch": {**HOMELAB, "what": f"host {index} down"}})["ok"]
+    again = _setup({"action": "set", "watch": REMINDER})
+    assert again["ok"] is False and "Ask the user which one to stop" in again["note"]
+    assert hermes.jobs[job_id]["state"] == "paused"
+
+
+def test_a_finished_watch_that_cant_be_resumed_stays_finished(home, hermes, clock, monkeypatch):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    real = hermes.__call__
+
+    def no_resume(action, *args, **kwargs):
+        if action == "resume":
+            return json.dumps({"success": False, "error": "locked"})
+        return real(action, *args, **kwargs)
+    monkeypatch.setattr(watches, "_cronjob", lambda: no_resume)
+    changed = {**REMINDER, "how": "the local time is 13:00 or later"}
+    assert _setup({"action": "set", "watch": changed})["ok"] is False
+    [listed] = _setup({"action": "list"})["watches"]
+    assert listed["finished"] is True and listed["how"] == changed["how"]
+    assert _report(job_id, True)["status"] == "done"
+
+
+def test_the_list_never_asks_to_set_a_finished_watch_again_to_fix_its_tools(home, hermes, clock, monkeypatch):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    monkeypatch.setattr(watches, "_toolsets_with_conduit", lambda job: ["web"] if job else None)
+    assert "can't report" not in _setup({"action": "list"})["note"]
+
+
+def test_a_finished_one_time_watch_can_be_removed_by_id_and_leaves_room_under_the_cap(home, hermes, clock):
+    job_id = _reminder(hermes)
+    assert _report(job_id, True)["status"] == "calling"
+    for index in range(watches.MAX_WATCHES - 1):
+        assert _setup({"action": "set", "watch": {**HOMELAB, "what": f"host {index} down"}})["ok"]
+    assert _setup({"action": "set", "watch": {**HOMELAB, "what": "one more"}})["ok"], "finished ones don't count"
+    assert _setup({"action": "remove", "id": job_id})["ok"] and job_id not in hermes.jobs
+
+
+def test_a_one_time_watch_whose_call_waits_for_a_full_queue_keeps_checking(home, hermes, clock, monkeypatch):
+    job_id = _reminder(hermes)
+    real = calls.tool_watch
+
+    def full(*args, **kwargs):
+        raise ValueError("too_many")
+    monkeypatch.setattr(calls, "tool_watch", full)
+    assert _report(job_id, True)["status"] == "busy"
+    assert hermes.jobs[job_id].get("state", "scheduled") == "scheduled", "not paused"
+    monkeypatch.setattr(calls, "tool_watch", real)
+    assert _report(job_id, True)["status"] == "calling"
+    assert hermes.jobs[job_id]["state"] == "paused"
+
+
+def test_a_one_time_watch_with_calls_off_tells_the_user_once_and_stops(home, hermes, clock):
+    CallStore(home).update_settings({"enabled": False})
+    job_id = _reminder(hermes)
+    off = _report(job_id, True)
+    assert off["status"] == "calls_off" and "set this watch up again" in off["note"]
+    assert "for this watch to ring" not in off["note"]
+    assert hermes.jobs[job_id]["state"] == "paused"
+    assert _report(job_id, False)["status"] == "done"
+
+
+def test_a_watch_changed_to_once_after_its_call_stops(home, hermes, clock):
+    job_id = _reminder(hermes, once=False)
+    assert _report(job_id, True)["status"] == "calling"
+    assert _setup({"action": "set", "watch": REMINDER})["result"] == "changed"
+    for happening in (False, True):
+        assert _report(job_id, happening)["status"] == "done"
+    assert hermes.jobs[job_id]["state"] == "paused" and len(_rang(home)) == 1
+
+
+def test_a_list_while_a_one_time_call_is_being_queued_keeps_the_watch(home, hermes, clock, monkeypatch):
+    job_id = _reminder(hermes)
+
+    def full_after_a_list(*args, **kwargs):
+        assert _setup({"action": "list"})["watches"], "still listed while its call is queued"
+        raise ValueError("too_many")
+    monkeypatch.setattr(calls, "tool_watch", full_after_a_list)
+    assert _report(job_id, True)["status"] == "busy"
+    assert job_id in hermes.jobs and job_id in watches._store().configs()
+
+
+def test_once_is_true_or_false(home, hermes):
+    answer = _setup({"action": "set", "watch": {**REMINDER, "once": "soon"}})
+    assert answer["ok"] is False and "once" in answer["note"]
+    assert _setup({"action": "set", "watch": HOMELAB})["watch"].get("stops_after_its_call") is None
+
+
 def test_a_removed_watch_never_rings_from_a_run_already_going(home, hermes, clock):
     job_id = _homelab(hermes, for_minutes=0)
     _setup({"action": "remove", "id": job_id})
@@ -593,3 +772,41 @@ def test_an_unreadable_store_is_not_overwritten(home, hermes, clock, monkeypatch
         store.put("another-job", {"what": "Is the NAS up?"})
     monkeypatch.undo()
     assert store.path.read_text(encoding="utf-8") == saved
+
+
+def test_a_watch_on_an_older_prompt_gets_the_current_one_on_its_next_run(home, hermes, clock):
+    """Plugin tools are deferred behind tool_search in cron runs, and the
+    first prompt said to reply [SILENT] when the report wasn't listed, so
+    runs went quiet without reporting. The next run puts the current prompt
+    on the job and is told itself how to reach the report."""
+    job_id = _homelab(hermes)
+    assert watches.run_note(RUN.format(job_id)) is None, "a job set up now already has it"
+    state = json.loads((home / watches.FILE_NAME).read_text())
+    del state["watches"][job_id]["prompt"]  # as 0.169.0 and earlier kept it
+    (home / watches.FILE_NAME).write_text(json.dumps(state))
+    hermes.jobs[job_id]["prompt"] = "old prompt"
+    note = watches.run_note(None, task_id=f"cron:{job_id}:1")
+    assert note == watches.RUN_NOTE and "tool_call" in note
+    assert hermes.jobs[job_id]["prompt"] == watches.run_prompt(watches._store().configs()[job_id])
+    assert "through tool_call" in hermes.jobs[job_id]["prompt"]
+    assert watches.run_note(RUN.format(job_id)) is None, "once"
+    assert watches.run_note("chat-1") is None and watches.run_note(RUN.format("abcdef123456")) is None
+
+
+def test_a_quoted_happening_is_read(home, hermes, clock):
+    job_id = _homelab(hermes, for_minutes=0)
+    assert json.loads(watches.report({"happening": "False", "saw": "Fine."},
+                                     session_id=RUN.format(job_id)))["status"] == "quiet"
+    assert json.loads(watches.report({"happening": " true ", "saw": "Down."},
+                                     session_id=RUN.format(job_id)))["status"] == "calling"
+    assert json.loads(watches.report({"happening": "maybe"}, session_id=RUN.format(job_id)))["error"] == "invalid"
+
+
+def test_a_run_whose_watch_was_refreshed_meanwhile_still_hears_how_to_report(home, hermes, clock, monkeypatch):
+    job_id = _homelab(hermes)
+    store = watches._store()
+    # The first read finds it stale; by the read under the lock another run refreshed it.
+    reads = iter([{job_id: store.configs()[job_id]}, {}])
+    monkeypatch.setattr(type(store), "stale_prompts", lambda self: next(reads))
+    monkeypatch.setattr(watches, "_store", lambda: store)
+    assert watches.run_note(RUN.format(job_id)) == watches.RUN_NOTE

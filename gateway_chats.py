@@ -47,6 +47,37 @@ def _sibling(name: str) -> Any:
     return importlib.import_module(f"{package}.{name}" if package else name)
 
 
+# Hermes' longest session title (SessionDB.MAX_TITLE_LENGTH); a longer one refuses the create.
+AUTHORITY_TITLE_CHARS = 100
+# A title's tag: 12 hex characters, so even every Watch call's "Watch call" never meets
+# an earlier one's tag (six gave a 3% chance of a repeat within 1,000 calls).
+TITLE_TAG_CHARS = 12
+
+
+def own_title(title: str, request_id: Any = None) -> str:
+    """The title a plugin create asks the authority for. Its titled create is
+    resolve-or-create (Hermes' session_controls._create): a title another chat
+    holds, or that chat's latest "<title> #N", opens that chat instead of
+    making one, so a workstream, Watch job or Watch call titled like an
+    earlier one went into it (issue 2521). Every create the plugin sends
+    means a new chat, so its title ends in its request's tag (the end of its
+    request id), which no other chat holds; an exact retry (the same request id) asks for the same title
+    and resolves to its own chat. "Bot Chat" is tagged too: no plugin create
+    means the bot's one chat (the app makes that one itself), and a Watch job
+    titled so would have run in it. A title too long for the tag is cut at
+    its last whole word."""
+    text = " ".join(title.split())
+    if not text:
+        return title
+    key = request_id if isinstance(request_id, str) and request_id else uuid.uuid4().hex
+    tag = f" · {key[-TITLE_TAG_CHARS:]}"
+    room = AUTHORITY_TITLE_CHARS - len(tag)
+    if len(text) > room:
+        cut = text[:room + 1].rsplit(" ", 1)[0] if " " in text[:room + 1] else ""
+        text = cut if cut else text[:room]
+    return text.rstrip() + tag
+
+
 AUTHORITY_RPC_TIMEOUT_S = 60.0
 # How long a link remembers that a prompt stopped waiting: longer than any
 # read that could have been in flight then (a call's budget, plus its thread's).
@@ -361,10 +392,12 @@ class _AuthorityLink:
             self._drop_surface(method, params)
             return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": f"{method} gave no answer"}}
         result = response.get("result") if isinstance(response.get("result"), dict) else {}
-        if method == "prompt.submit" and (response.get("error") or str(result.get("status") or "").lower() == "terminal"):
+        if method == "prompt.submit" and _reason(response) != "SESSION_OWNER_UNCONFIRMED" \
+                and (response.get("error") or str(result.get("status") or "").lower() == "terminal"):
             # No turn of that text is coming (refused, or settled without one): its
             # surface line would wait for the next one. "queued", "started" and
-            # "unknown" each have the turn still to run.
+            # "unknown" each have the turn still to run, as may a send the
+            # chat's owner couldn't confirm (issue 2522).
             self._drop_surface(method, params)
         return self._answer(method, params, shaped, response, asked_at)
 
@@ -528,9 +561,8 @@ class _AuthorityLink:
                 heard = self.prompt_texts.get(prompt_id, (None, None, None, 0.0))[3]
                 if heard < asked_at:
                     self._forget_prompt(prompt_id)
+            self._sweep_settled()
             now = time.monotonic()
-            for prompt_id in [key for key, at in self.settled.items() if now - at > SETTLED_KEPT_S]:
-                del self.settled[prompt_id]
             for prompt in result.get("prompts") or ():
                 # An approval still waiting when the chat was read: answerable by its id,
                 # though this link never saw it asked. One it heard settle after the
@@ -559,6 +591,15 @@ class _AuthorityLink:
         self.prompt_texts.pop(prompt_id, None)
         if isinstance(prompt_id, str) and prompt_id:
             self.settled[prompt_id] = time.monotonic()
+        # Swept where it grows too, so a link that hears settles and never
+        # reads the chat again keeps no entry past SETTLED_KEPT_S (notifier 773).
+        self._sweep_settled()
+
+    def _sweep_settled(self) -> None:
+        # Called with the lock held.
+        now = time.monotonic()
+        for prompt_id in [key for key, at in self.settled.items() if now - at > SETTLED_KEPT_S]:
+            del self.settled[prompt_id]
 
     def seen_approvals(self, sid: str, viewing: Any) -> Optional[list]:
         """The approvals ``sid`` waits on, oldest first, as this link's view of
@@ -612,6 +653,8 @@ class _AuthorityLink:
             if "idempotency_key" in params:
                 # The authority keeps a retried create to one chat by its request id.
                 params.setdefault("request_id", params.pop("idempotency_key"))
+            if isinstance(params.get("title"), str):
+                params["title"] = own_title(params["title"], params.get("request_id"))
             return method, params
         if method == "prompt.submit":
             self._settle_lost(sid, left)

@@ -243,6 +243,18 @@ class CanonicalService(Service):
         self.owners.setdefault(room_id, actor_subject)
 
 
+class OwnedCanonicalService(Service):
+    """CanonicalHostedRoomService from Hermes' 2026-11-18 canary on: create_room takes the owner, whose claim
+    runs in the same write, and there's no admit."""
+
+    kind = "canonical"
+
+    def create_room(self, *, room_id, name, members, owner=None):
+        assert owner is not None
+        self.owners.setdefault(room_id, owner)
+        return super().create_room(room_id=room_id, name=name, members=members)
+
+
 class Client:
     """Hermes' PeerRunsHTTPClient as the start and a removal use it: its probe of a member's capabilities and
     its revoke of a member's grant, through the bridge, which the test answers."""
@@ -352,8 +364,8 @@ class HomeHermes:
         assert value.startswith("http://127.0.0.1:")
         return value
 
-    def client(self, base_url, db_path):
-        return Client(self, base_url, db_path)
+    def client(self, base_url, service):
+        return Client(self, base_url, service.db_path)
 
     def route(self, **fields):
         return Route(**fields)
@@ -993,12 +1005,13 @@ def test_the_room_starts_once_everyone_has_answered(rooms):
     assert len(rooms.wire.bodies("room.start")) == 2 and len(rooms.home.probed) == 2
 
 
-@pytest.mark.parametrize("kind", ["legacy", "canonical"])
+@pytest.mark.parametrize("kind", ["legacy", "canonical", "owned"])
 def test_routes_go_live_in_the_running_service_with_no_restart(rooms, kind):
     _listening(rooms)
     service, where = rooms.home.legacy, LEGACY
-    if kind == "canonical":
-        service = rooms.home.canonical = CanonicalService(rooms.tmp_path / "furina" / "state.db")
+    if kind != "legacy":
+        made = OwnedCanonicalService if kind == "owned" else CanonicalService
+        service = rooms.home.canonical = made(rooms.tmp_path / "furina" / "state.db")
         where = {"kind": "canonical", "home": str(rooms.tmp_path / "furina"), "subject": "eric"}
     room_id = draft(rooms, where=where)["room_id"]
     _everyone_joins(rooms, room_id)
@@ -1019,7 +1032,7 @@ def test_routes_go_live_in_the_running_service_with_no_restart(rooms, kind):
     assert route.cancellation_scope_id == f"cancel-{room_id}" and route.trace_id.startswith("trace-")
     assert rooms.member["laifu"].decode(route.grant, "dispatch")["member_id"] == slot("link1", 1)
     assert service.running
-    if kind == "canonical":
+    if kind != "legacy":
         assert service.owners == {room_id: "eric"} and rooms.home.legacy.rooms == {}
 
 
@@ -1249,6 +1262,30 @@ def test_a_withdrawn_draft_tells_everyone_who_hasnt_declined_and_their_joins_are
     with pytest.raises(invites_module.RoomsError) as refused:
         rooms.furina.withdraw(room_id)
     assert refused.value.code == "not_waiting"
+
+
+def test_a_finished_invite_removed_is_kept_and_shows_removed_on_every_phone(rooms):
+    room_id = draft(rooms)["room_id"]
+
+    def refused(link_id):
+        with pytest.raises(invites_module.RoomsError) as refusal:
+            rooms.laifu.remove_invite(link_id, room_id)
+        return refusal.value.code, refusal.value.status
+
+    # Waiting on an answer, then on its room: it stays.
+    assert refused("link1") == ("not_finished", 409)
+    answer(rooms, "laifu", room_id, "link1", LAIFUS)
+    assert refused("link1") == ("not_finished", 409)
+    assert refused("link9") == ("no_invite", 404)
+    assert invite_of(rooms, "laifu", room_id)["removed"] is False
+    rooms.furina.withdraw(room_id)
+
+    shown = rooms.laifu.remove_invite("link1", room_id)
+
+    assert (shown["status"], shown["reason"], shown["removed"]) == ("cancelled", "withdrawn", True)
+    assert invite_of(rooms, "laifu", room_id)["removed"] is True
+    # Again is the same.
+    assert rooms.laifu.remove_invite("link1", room_id)["removed"] is True
 
 
 def test_a_draft_that_lapsed_tells_who_hasnt_declined_and_their_joins_are_undone(rooms):
@@ -1891,12 +1928,29 @@ def test_people_says_whos_who_in_a_room_on_each_side(rooms):
     mona = {"member_id": slot("link2", 1), "handle": "mona", "display_name": "Mona", "status": "in"}
 
     assert invites_module.people(rooms.tmp_path / "furina", room_id) == {"room_id": room_id, "home": None, "members": [
-        {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}], "just_me": [], "posts": []}
+        {**furina, "owner": None}, {**laifu, "owner": "Laifu"}, {**mona, "owner": "Mona"}], "just_me": [], "posts": [],
+        "own_hermes": False}
     assert invites_module.people(rooms.tmp_path / "laifu", room_id) == {"room_id": room_id, "home": "Furina",
-                                                                        "you": "Laifu", "members": [
+                                                                        "you": "Laifu", "own_hermes": False, "members": [
         {**furina, "owner": "Furina"}, {**laifu, "owner": None}, {**mona, "owner": "Mona"}]}
     assert invites_module.people(rooms.tmp_path / "furina", "conduit-other") is None
     assert invites_module.people(rooms.tmp_path / "nobody", room_id) is None
+
+
+def test_people_says_when_a_room_is_only_the_owners_own_hermes(rooms, monkeypatch):
+    # Multi-instance plan, Rooms 1: a room whose other installations all came over own Links.
+    _listening(rooms)
+    room_id = draft(rooms)["room_id"]
+    _everyone_joins(rooms, room_id)
+    rooms.furina.pass_once()
+    from conduit_push import room_links
+
+    monkeypatch.setattr(room_links, "own_links", lambda root: frozenset({"link1"}))
+    assert invites_module.people(rooms.tmp_path / "furina", room_id)["own_hermes"] is False  # Mona's too
+    # Laifu's Hermes knows another person was invited.
+    assert invites_module.people(rooms.tmp_path / "laifu", room_id)["own_hermes"] is False
+    monkeypatch.setattr(room_links, "own_links", lambda root: frozenset({"link1", "link2"}))
+    assert invites_module.people(rooms.tmp_path / "furina", room_id)["own_hermes"] is True
 
 
 def test_people_has_no_room_that_hasnt_started(rooms):
@@ -2167,6 +2221,8 @@ def test_routes_start_now_and_take_a_draft_back(routes):
      "no_invite"),
     ("furina", "POST", "/rooms/drafts/remove", {"room_id": "conduit-nope", "member": "laifu"}, None, 404,
      "no_draft"),
+    ("laifu", "POST", "/rooms/invites/remove", {"link": "link1", "room_id": "conduit-nope"}, None, 404,
+     "no_invite"),
 ])
 def test_routes_refuse_with_the_reasons_code(routes, name, method, path, body, params, status, code):
     refused = routes.call(name, method, path, json=body, params=params)
@@ -2176,7 +2232,7 @@ def test_routes_refuse_with_the_reasons_code(routes, name, method, path, body, p
 
 
 @pytest.mark.parametrize("path", ["/rooms/drafts", "/rooms/drafts/start", "/rooms/invites/answer", "/rooms/leave",
-                                  "/rooms/drafts/remove"])
+                                  "/rooms/drafts/remove", "/rooms/invites/remove"])
 def test_routes_refuse_a_body_that_isnt_an_object(routes, path):
     refused = routes.call("furina", "POST", path, json=["Zoo trip"])
     assert refused.status_code == 400 and refused.headers["cache-control"] == "no-store"
@@ -2980,3 +3036,223 @@ def test_the_cli_joins_just_me_and_leaves(commands, capsys):
     commands.furina.pass_once()
     assert commands.run("furina", "drafts") == 0
     assert "  Mona: joined without agents (Just me), then left" in _said(commands, capsys)
+
+
+# --- Your own other Hermes' bots (room_own_bots, multi-instance Rooms 1) ------------------
+
+
+own_bots_module = sys.modules["conduit_push.room_own_bots"]
+
+
+def _own(rooms, monkeypatch, own=("link1",), kinds=("room.bots", "room.bring")):
+    """link1 both sides' own Link, each side's plugin taking ``kinds``."""
+    monkeypatch.setattr(links_module, "own_links", lambda root: frozenset(own))
+    for name in ("furina", "laifu"):
+        rooms.links[name]["link1"].update(kinds=list(kinds), plugin="0.171.0")
+
+
+def test_each_side_tells_the_other_its_bots_over_an_own_link(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    rooms.member["laifu"].not_ready.add("work")
+    rooms.laifu.own_bots.pass_once(force=True)
+    [shown] = rooms.furina.own_bots.theirs()["links"].values()
+    assert shown == {"name": "Laifu", "brings": True, "bots": [
+        {"profile": "default", "handle": "hermes", "display_name": "Hermes", "ready": True},
+        {"profile": "work", "handle": "work", "display_name": "work", "ready": False}]}
+    # Said again only when it changed.
+    before = len(rooms.wire.sent)
+    rooms.laifu.own_bots.pass_once(force=True)
+    assert len(rooms.wire.sent) == before
+    rooms.member["laifu"].not_ready.clear()
+    rooms.laifu.own_bots.pass_once(force=True)
+    assert rooms.wire.kinds("laifu")[-1] == ("link1", "room.bots")
+    # And once a day unchanged, in case the other side missed it past the mailbox's hold.
+    before = len(rooms.wire.sent)
+    rooms.clock.now += own_bots_module.RESEND_S - 1
+    rooms.laifu.own_bots.pass_once(force=True)
+    assert len(rooms.wire.sent) == before
+    rooms.clock.now += 1
+    rooms.laifu.own_bots.pass_once(force=True)
+    assert len(rooms.wire.sent) == before + 1
+    # A Link that isn't an own one hears nothing and shows nothing.
+    monkeypatch.setattr(links_module, "own_links", lambda root: frozenset())
+    assert rooms.furina.own_bots.theirs() == {"links": {}}
+    rooms.wire.sent.clear()
+    rooms.member["laifu"].not_ready.add("default")
+    rooms.laifu.own_bots.pass_once(force=True)
+    assert rooms.wire.sent == []
+
+
+def test_bots_from_a_link_that_isnt_your_own_are_dropped(rooms, monkeypatch):
+    _own(rooms, monkeypatch, own=())
+    bots = {"v": 1, "bots": [{"profile": "default", "handle": "hermes", "display_name": "Hermes", "ready": True}]}
+    rooms.furina.handle(_received(rooms, "laifu", "link1", "room.bots", bots))
+    assert own_bots_module.Store(rooms.tmp_path / "furina").read()["theirs"] == {}
+
+
+def test_a_draft_brings_bots_of_your_own_other_hermes_with_no_join_card(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    made = rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY, bring={"link1": ["work"]})
+    room_id = made["room_id"]
+    # The invite, then what to bring; Laifu's Hermes joins its work bot by itself.
+    assert [kind for _, kind in rooms.wire.kinds("furina")][:2] == ["room.invite", "room.bring"]
+    shown = invite_of(rooms, "laifu", room_id)
+    assert shown["status"] == "joined"
+    assert shown["joined"] == [{"profile": "work", "handle": "work", "display_name": "work"}]
+    [laifu] = draft_of(rooms, room_id)["people"]
+    assert laifu["status"] == "joined"
+
+
+def test_a_bring_that_comes_before_its_invite_waits_for_it(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    rooms.wire.holding = True
+    room_id = rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY,
+                                 bring={"link1": ["default"]})["room_id"]
+    held = rooms.wire.held
+    rooms.wire.held = [held[1], held[0]]  # the bring first
+    rooms.wire.release()
+    assert invite_of(rooms, "laifu", room_id)["status"] == "joined"
+
+
+def test_a_bring_that_cant_join_leaves_the_join_card(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    rooms.member["laifu"].not_ready.add("work")
+    room_id = rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY,
+                                 bring={"link1": ["work"]})["room_id"]
+    assert invite_of(rooms, "laifu", room_id)["status"] == "waiting"
+    # Its push goes, since the owner has to answer it.
+    assert [told["room_id"] for told in rooms.notified["laifu"]] == [room_id]
+
+
+def test_bots_that_join_by_themselves_send_no_invite_push(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    room_id = rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY,
+                                 bring={"link1": ["work"]})["room_id"]
+    assert invite_of(rooms, "laifu", room_id)["status"] == "joined"
+    assert rooms.notified["laifu"] == []
+    # Nor when the bring came first.
+    rooms.wire.holding = True
+    second = rooms.furina.draft("Picnic", [dict(FURINAS)], ["link1"], where=LEGACY,
+                                bring={"link1": ["default"]})["room_id"]
+    rooms.wire.held = rooms.wire.held[::-1]
+    rooms.wire.release()
+    assert invite_of(rooms, "laifu", second)["status"] == "joined"
+    assert rooms.notified["laifu"] == []
+
+
+def test_an_own_links_invite_with_no_bring_pushes_once_its_wait_ends(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    room_id = draft(rooms, links=("link1",))["room_id"]
+    assert rooms.notified["laifu"] == []
+    rooms.laifu.own_bots.pass_once()
+    assert rooms.notified["laifu"] == []
+    rooms.clock.now += own_bots_module.HOLD_S
+    rooms.laifu.own_bots.pass_once()
+    assert [told["room_id"] for told in rooms.notified["laifu"]] == [room_id]
+    assert own_bots_module.Store(rooms.tmp_path / "laifu").read()["held"] == {}
+    # A bring after the wait joins its bots without a second push.
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.bring",
+                                 {"v": 1, "room_id": room_id, "profiles": ["default"]}))
+    assert invite_of(rooms, "laifu", room_id)["status"] == "joined"
+    assert len(rooms.notified["laifu"]) == 1
+
+
+def test_a_bring_whose_invite_never_comes_is_forgotten(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.bring",
+                                 {"v": 1, "room_id": "conduit-gone", "profiles": ["default"]}))
+    store = own_bots_module.Store(rooms.tmp_path / "laifu")
+    assert list(store.read()["pending"]) == ["link1/conduit-gone"]
+    rooms.clock.now += own_bots_module.PENDING_S
+    rooms.laifu.own_bots.pass_once()
+    assert store.read()["pending"] == {}
+
+
+def test_an_update_never_writes_over_a_file_it_failed_to_read(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    store = own_bots_module.Store(rooms.tmp_path / "laifu")
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.bring",
+                                 {"v": 1, "room_id": "conduit-x", "profiles": ["default"]}))
+    before = store.path.read_bytes()
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(PermissionError("EACCES"))
+                        if self == store.path else real(self))
+    with pytest.raises(PermissionError):
+        with store.update() as state:
+            state["pending"].clear()
+    monkeypatch.setattr(Path, "read_bytes", real)
+    assert store.path.read_bytes() == before
+
+
+def test_an_invite_whose_hold_cant_be_kept_pushes_at_once(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+
+    def broken(key):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rooms.laifu.own_bots, "hold", broken)
+    room_id = draft(rooms, links=("link1",))["room_id"]
+    assert [told["room_id"] for told in rooms.notified["laifu"]] == [room_id]
+
+
+def test_a_held_invite_that_ran_out_doesnt_push(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    room_id = draft(rooms, links=("link1",))["room_id"]
+    expires = rooms.laifu.store.read()["invites"][f"link1/{room_id}"]["expires_at"]
+    rooms.clock.now = expires
+    rooms.laifu.own_bots.pass_once()
+    assert rooms.notified["laifu"] == []
+    assert own_bots_module.Store(rooms.tmp_path / "laifu").read()["held"] == {}
+
+
+def test_a_bot_the_other_side_wouldnt_take_is_left_out_alone(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    (rooms.tmp_path / "laifu" / "profiles" / "everyone").mkdir()
+    (rooms.tmp_path / "laifu" / "profiles" / "everyone" / "config.yaml").write_text("model: {}\n")
+    rooms.laifu.own_bots.pass_once(force=True)
+    [shown] = rooms.furina.own_bots.theirs()["links"].values()
+    assert [bot["profile"] for bot in shown["bots"]] == ["default", "work"]
+
+
+def test_a_bring_over_a_link_that_isnt_your_own_is_refused_or_dropped(rooms, monkeypatch):
+    _own(rooms, monkeypatch, own=())
+    with pytest.raises(invites_module.RoomsError) as refused:
+        rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY, bring={"link1": ["work"]})
+    assert refused.value.code == "not_own"
+    with pytest.raises(invites_module.RoomsError) as refused:
+        rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1"], where=LEGACY, bring={"link2": ["work"]})
+    assert refused.value.code == "bad_bring"
+    # A bring that comes over a Link that isn't own, even for a real invite, joins nothing.
+    room_id = draft(rooms, links=("link1",))["room_id"]
+    rooms.laifu.handle(_received(rooms, "furina", "link1", "room.bring",
+                                 {"v": 1, "room_id": room_id, "profiles": ["default"]}))
+    assert invite_of(rooms, "laifu", room_id)["status"] == "waiting"
+
+
+def test_a_bring_into_a_room_with_other_people_leaves_the_join_card(rooms, monkeypatch):
+    _own(rooms, monkeypatch)
+    rooms.links["furina"]["link2"].update(kinds=["room.bring"])
+    room_id = rooms.furina.draft("Zoo trip", [dict(FURINAS)], ["link1", "link2"], where=LEGACY,
+                                 bring={"link1": ["default"]})["room_id"]
+    # Mona is invited too: Laifu's Hermes waits on its join card.
+    assert invite_of(rooms, "laifu", room_id)["status"] == "waiting"
+
+
+def test_routes_list_your_other_hermes_bots_and_bring_them(routes, monkeypatch):
+    _listening(routes)
+    monkeypatch.setattr(api.core._plugin_package_module("room_links"), "own_links", lambda root: frozenset({"link1"}))
+    for name in ("furina", "laifu"):
+        routes.links[name]["link1"].update(kinds=["room.bots", "room.bring"], plugin="0.171.0")
+    routes.laifu.own_bots.pass_once(force=True)
+    listed = routes.call("furina", "GET", "/rooms/own-bots")
+    assert listed.status_code == 200 and listed.headers["cache-control"] == "no-store"
+    [link] = listed.json()["links"].values()
+    assert [bot["profile"] for bot in link["bots"]] == ["default", "work"] and link["brings"]
+    made = routes.call("furina", "POST", "/rooms/drafts", json={
+        "name": "Zoo trip", "agents": [FURINAS], "links": ["link1"], "bring": {"link1": ["work"]}}).json()
+    assert made["ok"]
+    [invite] = routes.call("laifu", "GET", "/rooms/invites").json()["invites"]
+    assert invite["status"] == "joined" and [agent["profile"] for agent in invite["joined"]] == ["work"]
+    refused = routes.call("furina", "POST", "/rooms/drafts", json={
+        "name": "Zoo trip", "agents": [FURINAS], "links": ["link2"], "bring": {"link2": ["work"]}})
+    assert (refused.status_code, refused.json()["code"]) == (409, "not_own")

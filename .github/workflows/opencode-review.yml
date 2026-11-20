@@ -737,6 +737,10 @@ jobs:
               needs neither an entry nor a hermes-conduit PR, unless it moves a
               file the map lists, and then it names the hermes-conduit PR that
               updates that path.
+              The PR's Desktop section says whether Conduit for desktop
+              (hermes-conduit-desktop) needs the change; CI checks that it
+              answers. A Not needed whose reason doesn't hold, for a tool,
+              route or push the desktop app reads too, is a minor finding.
 
             If you find no issues, say so explicitly. Don't summarize what you did
             or describe your process. Output only the review.

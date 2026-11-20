@@ -135,6 +135,15 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirect)
 
 
+def _proxied_opener(proxy: urllib.request.ProxyHandler) -> Any:
+    return urllib.request.build_opener(_NoRedirect, proxy)
+
+
+def _provider_opener() -> Any:
+    """The opener for a voice provider's HTTPS API: _opener, or through CONDUIT_PUSH_PROXY when it's set."""
+    return core._proxy_opener(_opener, _proxied_opener)
+
+
 def _post_json(url: str, api_key: str, body: Dict[str, Any]) -> Dict[str, Any]:
     request = urllib.request.Request(
         url,
@@ -143,7 +152,7 @@ def _post_json(url: str, api_key: str, body: Dict[str, Any]) -> Dict[str, Any]:
         method="POST",
     )
     try:
-        with _opener.open(request, timeout=REQUEST_TIMEOUT_S) as response:
+        with _provider_opener().open(request, timeout=REQUEST_TIMEOUT_S) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         # Google's error body names the problem (bad key, quota) without echoing the key.
@@ -227,7 +236,7 @@ def mint_qwen_live_token(get_env: Optional[Callable[[str], Optional[str]]] = Non
         if post is not None:
             result = post(request)
         else:
-            with _opener.open(request, timeout=REQUEST_TIMEOUT_S) as response:
+            with _provider_opener().open(request, timeout=REQUEST_TIMEOUT_S) as response:
                 result = json.loads(response.read(64 * 1024))
     except urllib.error.HTTPError as exc:
         raise core.TokenError(502, f"Alibaba Cloud rejected the temporary token request (HTTP {exc.code})") from None

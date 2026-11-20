@@ -712,8 +712,33 @@ def clarification_text(args: Any) -> str:
 
 
 def is_silent_response(value: Any) -> bool:
-    """Return true only for Hermes' exact no-notification response sentinel."""
-    return isinstance(value, str) and " ".join(value.split()).casefold() == "[silent]"
+    """Whether a reply is only one of Hermes' silence markers ([SILENT],
+    NO_REPLY, ...), by Hermes' own rule when it has one: case, inner spaces
+    and stray edge punctuation ("*[SILENT]*") don't matter, and prose that
+    mentions a marker is a reply (issue 2700)."""
+    if not isinstance(value, str):
+        return False
+    try:
+        from gateway.response_filters import is_intentional_silence_response
+
+        return bool(is_intentional_silence_response(value))
+    except Exception:  # noqa: BLE001 — an older Hermes (its exact sentinel), or a Hermes change that must not cost the push
+        return " ".join(value.split()).casefold() == "[silent]"
+
+
+def without_closing_silence_marker(value: Any) -> Any:
+    """A reply without a silence marker that closes it on its own line
+    ("Done.\n\n[SILENT]" is "Done."), as Hermes delivers it, so a push never
+    shows the marker. Unchanged on a Hermes without the rule."""
+    if not isinstance(value, str):
+        return value
+    try:
+        from gateway.response_filters import strip_trailing_silence_marker
+
+        stripped = strip_trailing_silence_marker(value)
+    except Exception:  # noqa: BLE001 — an older Hermes, or a Hermes change that must not cost the push
+        return value
+    return stripped if isinstance(stripped, str) else value
 
 
 _FENCE = re.compile(r"^\s{0,3}(```|~~~)")

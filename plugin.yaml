@@ -13,6 +13,7 @@ provides_hooks:
   - post_tool_call
   - post_llm_call
   - on_session_end
+  - on_session_finalize
   - pre_approval_request
   - subagent_start
   - subagent_stop
@@ -30,6 +31,7 @@ provides_tools:
   - conduit_present
   - conduit_show
   - conduit_notify
+  - conduit_chat_done
   - conduit_health
   - conduit_inbox
   - conduit_location
@@ -50,6 +52,7 @@ provides_tools:
   - work_close
   - work_ask
   - work_reply
+  - work_tell
   - work_note
   - work_propose
   - work_progress

@@ -841,6 +841,24 @@ def test_a_pulse_turn_gets_its_note_and_no_tools(live, db):
     assert plugin._pre_tool_call(session_id=SID, turn_id="t2", tool_name="read_file", args={}) is None
 
 
+def test_another_chats_script_isnt_held_while_a_pulse_turn_runs(live, db):
+    # DeepSeek on notifier#795: a tool an execute_code script calls comes
+    # with no session id, which Pulse holds while any attempt is in flight;
+    # its task names the chat it's from, which isn't Pulse's.
+    db.session()
+    live.store.set("enabled", True)
+    pulse.tick()
+    plugin._pre_llm_call(session_id=SID, turn_id="t1", user_message=live.sent()[0], conversation_history=[])
+    assert plugin._pre_tool_call(session_id="", tool_name="read_file", args={}) == {
+        "action": "block", "message": pulse.HELD_MESSAGE}
+    assert plugin._pre_tool_call(session_id="elsewhere", turn_id="e1", task_id="task-e", tool_name="execute_code",
+                                 args={}) is None
+    assert plugin._pre_tool_call(session_id="", task_id="task-e", tool_name="read_file", args={}) is None
+    plugin._post_tool_call(session_id="elsewhere", task_id="task-e", tool_name="execute_code", args={}, result="{}")
+    assert plugin._pre_tool_call(session_id="", task_id="task-e", tool_name="read_file", args={}) == {
+        "action": "block", "message": pulse.HELD_MESSAGE}
+
+
 def test_a_lookalike_tag_is_not_a_pulse_turn(live, db):
     db.session()
     live.store.set("enabled", True)
@@ -2090,7 +2108,7 @@ class FakeModel:
         self.replies = list(replies)
         self.shown = []
 
-    def __call__(self, instructions, text):
+    def __call__(self, instructions, text, schema=None):
         self.shown.append(text)
         reply = self.replies.pop(0) if self.replies else {"items": []}
         if isinstance(reply, Exception):
@@ -2760,7 +2778,7 @@ def test_a_chunk_two_processes_read_is_kept_once(remembering, db):
     reply = {"items": [{"kind": "commitment", "text": "x", "evidence": "renew my passport", "line": 1}]}
 
     class Racing(FakeModel):
-        def __call__(self, instructions, text):
+        def __call__(self, instructions, text, schema=None):
             if not self.shown:  # the other process finishes the same chunk during this call
                 _remember(remembering, FakeModel(reply), DAY + 70 + memory.IDLE_S)
             return super().__call__(instructions, text)
@@ -3024,6 +3042,54 @@ def test_model_calls_run_in_this_profiles_secret_scope(remembering, monkeypatch)
     assert scope == [None, "left"]
 
 
+
+def test_pulse_calls_send_their_replys_shape_never_json_mode(remembering):
+    # Hermes sends json_mode as json_object, which the Claude subscription
+    # provider refuses before calling Claude; a schema goes (issue 848).
+    calls = []
+
+    class Llm:
+        def complete_structured(self, **kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(parsed={"items": []}, usage=types.SimpleNamespace(total_tokens=5))
+
+    remembering.ctx.llm = Llm()
+    pulse._memory_llm("instructions", "text", schema=memory.INBOX_SCHEMA)
+    pulse._memory_llm("instructions", "text")
+    assert [call["json_schema"] for call in calls] == [memory.INBOX_SCHEMA, {"type": "object"}]
+    assert not any("json_mode" in call for call in calls)
+
+
+def test_pulse_reply_schemas_take_the_replies_the_parsers_take():
+    # Hermes checks a reply against its schema (with jsonschema installed): a
+    # schema tighter than the parser would fail a reply Pulse used to take.
+    import jsonschema  # tests/requirements.txt: Hermes checks replies with it
+    followup = sys.modules["conduit_push.pulse_followup"]
+    ahead = sys.modules["conduit_push.pulse_ahead"]
+    taken = [
+        (memory.SCHEMA, {"items": [{"kind": "commitment", "text": "x"}], "closed": [], "claims": []}),
+        (memory.SCHEMA, {"items": []}),
+        (memory.INBOX_SCHEMA, {"deadlines": [], "closed": []}),
+        (candidates.SCHEMA, {"remembered": [{"ref": 12, "bring_up": False}], "found": []}),
+        (candidates.SCHEMA, {"found": [{"kind": "date", "due": None}]}),
+        (candidates.SCHEMA, {"remembered": None, "found": []}),
+        (ahead.SCHEMA, {"dates": [], "ahead": None}),
+        (candidates.SCHEMA, {"remembered": "none", "found": []}),
+        (ahead.SCHEMA, {"dates": "none", "ahead": []}),
+        (memory.SCHEMA, {"items": [], "closed": None, "claims": "none"}),
+        (ahead.SCHEMA, {"dates": [{"ref": "D1", "bring_up": True}], "ahead": []}),
+        (followup.CHECK_SCHEMA, {"decision": "tell", "news": "x", "why": "y", "check_again_hours": None,
+                                 "when": None, "urgent": False, "pick": None}),
+        (followup.CHECK_SCHEMA, {"decision": "wait", "check_again_hours": "24"}),
+        (followup.ACT_SCHEMA, {"done": True, "why": "sent"}),
+        (followup.ACT_SCHEMA, {"done": None}),
+        (followup.STALE_SCHEMA, {"stale": False, "why": None}),
+        (followup.STALE_SCHEMA, {}),
+    ]
+    for schema, reply in taken:
+        jsonschema.validate(reply, schema)
+
+
 def test_the_chats_model_is_read_where_hermes_reads_it(db, tmp_path):
     db.session()
     assert hermes.chat_model_row(tmp_path, SID) is None  # on Hermes's main model
@@ -3103,7 +3169,7 @@ def test_memory_and_follow_ups_run_on_the_pulse_chats_model(remembering, monkeyp
     monkeypatch.setattr(pulse, "chat_route", lambda home, chat_id: VOLCENGINE if chat_id == SID else None)
     asked = []
 
-    def memory_llm(instructions, text, purpose="pulse memory", route=None):
+    def memory_llm(instructions, text, purpose="pulse memory", route=None, schema=None):
         asked.append((purpose, route))
         return {"items": []}, 1
 
@@ -3182,7 +3248,7 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     assert pulse._memory_thread.ident and calls == []  # not due again yet
     stopping = threading.Event()
     assert memory.run(remembering.store, [("", remembering.store.path.parent, SID)],
-                      lambda *_: (stopping.set(), ({"items": []}, 1))[1], zone=UTC, now=start + 4000,
+                      lambda *_, **__: (stopping.set(), ({"items": []}, 1))[1], zone=UTC, now=start + 4000,
                       still_leader=lambda: not stopping.is_set())["chunks"] == 0  # stopped during the call
     assert remembering.store.watermark("", "work") is None
     pulse._memory_thread.join(5)
@@ -3190,7 +3256,8 @@ def test_the_loop_runs_memory_on_its_own_thread(remembering, db, monkeypatch):
     remembering.store.set("memory_requested", True)
     pulse.tick(start + 120)
     pulse._memory_thread.join(5)
-    assert [(c["task"], c["json_mode"]) for c in calls] == [(memory.TASK, True)]
+    assert [(c["task"], c["json_schema"]) for c in calls] == [(memory.TASK, memory.SCHEMA)]
+    assert not any("json_mode" in c for c in calls)  # issue 848
     assert remembering.store.get("memory_usage") == {"chunks": 1, "tokens": 7, "failed": 0, "skipped": 0}
     pulse._stop.set()  # an unloaded plugin's run makes no more calls
     db.message("user", "more", sid="work", at=start + 130)
@@ -3291,7 +3358,7 @@ def test_a_backfill_stopped_mid_run_is_left_alone(remembering, db):
     store_.set("memory_backfill", {"from": DAY - 30 * 86400, "to": DAY, "active": True, "done": False})
     shown = []
 
-    def model(instructions, text):
+    def model(instructions, text, schema=None):
         shown.append(text)
         store_.set("memory_backfill", {**store_.get("memory_backfill"), "active": False})  # `backfill stop`
         return {"items": []}, 100

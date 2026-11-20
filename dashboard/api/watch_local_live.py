@@ -1047,14 +1047,14 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
         profile = self.profile
         loop = self.loop = asyncio.get_running_loop()
 
-        def setup() -> Tuple[str, str]:
+        def setup() -> Tuple[str, str, Optional[speech_server.SpeechServerSetup]]:
             status = local_live_watch_status(profile)
             if status["runtime"] != "ready" and status["reason"] != LOCAL_LIVE_WATCH_NO_SESSIONS:
                 raise core.TokenError(503, str(status["reason"]))
-            return speech_server._speech_server_setup(profile)
+            return speech_server._speech_server_call_setup(profile)
 
         try:
-            url, key = await asyncio.wait_for(core._run_scoped(profile, setup, speech_server._speech_server_executor),
+            url, key, drive = await asyncio.wait_for(core._run_scoped(profile, setup, speech_server._speech_server_executor),
                                               timeout=speech_server.SPEECH_SERVER_SETUP_TIMEOUT_S)
             # Outside any profile's scope: importing it reads Hermes' home.
             server = await asyncio.wait_for(loop.run_in_executor(_local_live_watch_executor, _watch_chat_session_api),
@@ -1102,7 +1102,8 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
             if not local_live._local_live_register(call, self._rejoins):
                 raise watch_audio.WatchAudioFailure("busy", "A Local Live call is already running on this Hermes profile")
             pacer = self.pacer = watch_audio._WatchAudioPacer(self.send, LOCAL_LIVE_WATCH_RATE)
-            read_back = self.read_back = local_live_read_back._LocalLiveReadBack(call, self._to_watch_event, self._fail)
+            read_back = self.read_back = local_live_read_back._LocalLiveReadBack(call, self._to_watch_event, self._fail,
+                                                                                    drive=drive)
             read_back.attach(upstream.send)
             # Set first: the Watch answers "started" with its session.update.
             self.upstream = upstream
@@ -1196,10 +1197,11 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
             raise watch_audio.WatchAudioFailure("unreachable", "Could not reach the speech server from the Hermes host")
 
     async def _read(self, upstream: Any, pacer: watch_audio._WatchAudioPacer) -> None:
+        dialect = speech_server._SpeechServerDialect()
         with contextlib.suppress(Exception):
             async for message in upstream:
                 self.answered()
-                if not isinstance(message, str):
+                if not isinstance(message, str) or not dialect.keeps(message):
                     continue
                 if self.read_back is not None:
                     message = await self.read_back.from_server(message)
@@ -1207,7 +1209,7 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
                         continue
                 try:
                     event = json.loads(message)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 kind = event.get("type") if isinstance(event, dict) else None
                 if kind in watch_audio._GROK_AUDIO_DELTAS:
@@ -1421,7 +1423,7 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
             # Watch's answers to the turns it was sent, and its keepalive.
             try:
                 frame = json.loads(text)
-            except ValueError:
+            except (ValueError, RecursionError):
                 return
             kind = frame.get("type") if isinstance(frame, dict) else None
             if isinstance(kind, str) and kind.startswith("conduit."):
@@ -1430,8 +1432,10 @@ class _LocalLiveWatchSession(watch_audio._WatchAudioSession):
                 elif kind == "conduit.approval.answer" and self.cards and not self.finished:
                     local_live._local_live_spawn(self._answer_approval(frame))
                 return
-        if self.read_back is not None and await self.read_back.from_client(text):
-            return
+        if self.read_back is not None:
+            if await self.read_back.from_client(text):
+                return
+            text = self.read_back.passed_on(text)
         await self.send_asking(upstream, text)
 
 

@@ -1794,6 +1794,28 @@ def test_routes_link_two_installations(routes, monkeypatch, mailbox_url):
 
 
 @needs_node
+def test_routes_mark_a_link_as_your_own_hermes(routes, monkeypatch, mailbox_url):
+    monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", mailbox_url)
+    eric, mona = routes("eric"), routes("mona")
+    url = eric.call("POST", "/rooms/links/invites", json={"name": "Eric"}).json()["url"]
+    link_id = mona.call("POST", "/rooms/links", json={"url": url, "name": "Mona"}).json()["link"]["id"]
+    for side in (eric, mona, eric, mona):
+        side.poll()
+
+    marked = eric.call("PUT", "/rooms/links/own", json={"link_id": link_id, "own": True})
+    assert marked.status_code == 200 and marked.headers["cache-control"] == "no-store"
+    assert (marked.json()["link"]["own"], marked.json()["link"]["own_link"]) == (True, False)
+    mona.call("PUT", "/rooms/links/own", json={"link_id": link_id, "own": True})
+    for side in (eric, mona, eric, mona):
+        side.poll()
+    assert [link["own_link"] for link in eric.call("GET", "/rooms/links").json()["links"]] == [True]
+
+    assert eric.call("PUT", "/rooms/links/own", json={"link_id": "nope", "own": True}).status_code == 404
+    assert eric.call("PUT", "/rooms/links/own", json={"link_id": link_id, "own": "yes"}).status_code == 400
+    assert eric.call("PUT", "/rooms/links/own", json={"link_id": 123, "own": True}).status_code == 400
+
+
+@needs_node
 def test_routes_cancel_an_invite(routes, monkeypatch, mailbox_url):
     monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", mailbox_url)
     eric = routes("eric")
@@ -2118,6 +2140,24 @@ def test_cli_says_what_it_couldnt_do(cli, capsys):
     assert "No Link" in capsys.readouterr().out
 
 
+@needs_node
+def test_cli_marks_a_link_as_your_own_hermes(cli, monkeypatch, mailbox_url, tmp_path, capsys):
+    monkeypatch.setenv("CONDUIT_ROOMS_MAILBOX_URL", mailbox_url)
+    eric, mona = links_module.Links(tmp_path / "eric"), links_module.Links(tmp_path / "mona")
+    link_id = mona.accept(eric.invite("Eric")["url"], "Mona")["link"]["id"]
+    _run(eric, mona)
+
+    assert cli("eric", "own", link_id, value="on") == 0
+    assert "waiting for the other Hermes" in capsys.readouterr().out
+    _run(eric, mona)
+    assert cli("mona", "list") == 0
+    assert "mark it here too" in capsys.readouterr().out
+    assert cli("mona", "own", link_id, value="on") == 0
+    assert "your own Hermes on both sides" in capsys.readouterr().out
+    assert cli("mona", "own", link_id, value="maybe") == 2
+    assert cli("mona", "own", "nope", value="off") == 1
+
+
 def test_the_links_command_parses(tmp_path):
     module = _load("conduit_push.cli", ROOT / "cli.py")
     parser = argparse.ArgumentParser()
@@ -2127,6 +2167,7 @@ def test_the_links_command_parses(tmp_path):
     assert (args.conduit_push_action, args.links_action, args.target, args.name) == (
         "links", "accept", "conduit://link/abc", "Mona")
     assert parser.parse_args(["links", "remove", "abc", "--yes"]).yes is True
+    assert parser.parse_args(["links", "own", "abc", "on"]).value == "on"
 
 
 # --- Plugin versions ----------------------------------------------------------
@@ -2219,7 +2260,7 @@ def test_a_hello_goes_again_when_the_kinds_change_and_after_six_days(home, monke
     _kinds(monkeypatch, "test.echo", "test.newer")
     clock.now += 5
     _run(eric, mona)
-    assert mona._store.read()["links"][link_id]["peer"]["kinds"] == ["test.echo", "test.newer"]
+    assert mona._store.read()["links"][link_id]["peer"]["kinds"] == [links_module.OWN, "test.echo", "test.newer"]
 
     clock.now += links_module.HELLO_AGAIN_S
     _run(eric, mona)
@@ -2241,3 +2282,156 @@ def test_a_hello_that_isnt_one_is_dropped(body):
 def test_a_hello_reads_its_version_and_kinds():
     assert links_module._peer_from({"v": 1, "plugin": "0.167.4", "kinds": ["room.out", "room.out", "room.page"]}) \
         == {"plugin": "0.167.4", "kinds": ["room.out", "room.page"]}
+
+
+# --- This is my own Hermes (multi-instance plan, Rooms 1) -----------------------
+
+
+@needs_node
+def test_a_link_is_an_own_link_only_once_both_sides_mark_it(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+
+    shown = eric.set_own(link_id, True)
+    assert shown["own"] is True and shown["their_own"] is False and shown["own_link"] is False
+    assert links_module.own_links(eric.root) == frozenset()
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is True and mona.get(link_id)["own_link"] is False
+    assert links_module.own_links(mona.root) == frozenset()
+
+    clock.now += 1
+    mona.set_own(link_id, True)
+    _run(mona, eric)
+    assert links_module.own_links(eric.root) == {link_id}
+    assert links_module.own_links(mona.root) == {link_id}
+    assert eric.get(link_id)["own_link"] is True
+
+    # Either side unmarking it ends it on both.
+    clock.now += 1
+    mona.set_own(link_id, False)
+    assert links_module.own_links(mona.root) == frozenset()
+    _run(mona, eric)
+    assert links_module.own_links(eric.root) == frozenset()
+    assert eric.get(link_id)["their_own"] is False
+
+
+@needs_node
+def test_an_older_link_own_never_undoes_a_later_one(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)
+    _run(eric, mona)
+    with mona._store.update() as state:
+        state["links"][link_id]["peer_own"]["seq"] = 10 ** 12  # a later change already arrived
+
+    clock.now += 1
+    eric.set_own(link_id, False)  # older than what mona has
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is True
+
+
+@needs_node
+def test_link_own_goes_again_with_the_hello(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)
+    _run(eric, mona)
+    with mona._store.update() as state:
+        state["links"][link_id].pop("peer_own")  # an older links.json restored
+
+    clock.now += links_module.HELLO_AGAIN_S
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is True
+
+
+@needs_node
+def test_link_own_heals_after_an_older_links_json_comes_back(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)  # seqs are past the clock's second
+    _run(eric, mona)
+    with eric._store.update() as state:
+        backup = dict(state["links"][link_id])
+    clock.now += 1
+    eric.set_own(link_id, False)  # a later seq
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is False
+    with eric._store.update() as state:  # the backup from between the two
+        state["links"][link_id].update(own=backup["own"], own_seq=backup["own_seq"])
+
+    assert eric.set_own(link_id, True)["own"] is True  # already marked: nothing new to say
+    clock.now += links_module.HELLO_AGAIN_S
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is True
+
+
+@needs_node
+def test_a_hand_edited_own_seq_still_lets_the_hello_go(home, monkeypatch):
+    # Hermes-conduit issue 2405: a links.json whose own_seq isn't a number
+    # still flushes the hello's mark, and the other side takes it.
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)
+    _run(eric, mona)
+    with mona._store.update() as state:
+        state["links"][link_id].pop("peer_own")
+    with eric._store.update() as state:
+        state["links"][link_id]["own_seq"] = "x"
+    clock.now += links_module.HELLO_AGAIN_S
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is True
+    assert type(eric._store.read()["links"][link_id]["own_seq"]) is int
+
+
+@needs_node
+def test_an_unmark_with_the_seq_already_held_still_ends_the_own_link(home, monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    eric, mona, link_id, clock = _clocked_link(home)
+    eric.set_own(link_id, True)
+    _run(eric, mona)
+    held = mona._store.read()["links"][link_id]["peer_own"]["seq"]
+    with eric._store.update() as state:  # a backup from before the mark, restored the same second
+        state["links"][link_id].update(own=True, own_seq=held - 1)
+    eric.set_own(link_id, False)  # sends the seq mona already holds
+    assert eric._store.read()["links"][link_id]["own_seq"] == held
+    _run(eric, mona)
+    assert mona.get(link_id)["their_own"] is False
+
+
+def test_the_next_own_seq_is_past_the_last_and_the_clock():
+    assert links_module._next_own_seq({}, 100) == 101
+    assert links_module._next_own_seq({"own_seq": 100}, 100) == 101  # one the other side took this second
+    assert links_module._next_own_seq({"own_seq": 500}, 100) == 501
+    assert links_module._next_own_seq({"own_seq": "x"}, 100) == 101  # a hand-edited file doesn't stop the hello
+    assert links_module._next_own_seq({"own_seq": True}, 100) == 101
+    # With the clock at 0 the clock can't hide what a bad seq counts as.
+    assert links_module._next_own_seq({"own_seq": True}, 0) == 1
+    assert links_module._next_own_seq({"own_seq": 0}, 0) == 1
+    assert links_module._next_own_seq({"own_seq": -5}, 0) == 1
+    assert links_module._next_own_seq({"own_seq": 7}, 0) == 8
+
+
+def test_set_own_needs_a_linked_link(home):
+    eric = home("eric")
+    assert eric.set_own("nope", True) is None
+    assert eric.set_own(123, True) is None
+
+
+@pytest.mark.parametrize("body", [
+    None, {"v": 1, "own": True}, {"v": 1, "own": 1, "seq": 1}, {"v": 1, "own": True, "seq": 0},
+    {"v": 1, "own": True, "seq": True}, {"v": 1, "own": True, "seq": 1, "extra": 1},
+])
+def test_a_link_own_that_isnt_one_is_dropped(body):
+    assert links_module._own_from(body) is None
+
+
+def test_the_hello_names_link_own_so_an_older_plugin_reads_as_behind(monkeypatch):
+    _kinds(monkeypatch, "test.echo")
+    assert links_module.OWN in links_module._hello_body()["kinds"]
+
+
+def test_own_links_reads_none_from_a_store_it_cant_read(tmp_path):
+    directory = tmp_path / links_module.DIRECTORY
+    directory.mkdir()
+    (directory / links_module.FILE_NAME).write_text("{not json")
+    assert links_module.own_links(tmp_path) == frozenset()

@@ -133,7 +133,7 @@ class FakeHermes:
     def policy(self, profile, home):
         # execution_policy_mapping, from the profile's own config.yaml.
         if self.policy_fails:
-            raise RuntimeError("gateway config is invalid")
+            raise getattr(self, "policy_error", RuntimeError)("gateway config is invalid")
         config = _yaml(home / "config.yaml")
         saved = (config.get("platform_toolsets") or {}).get("api_server")
         named = [name for name in saved if name != "no_mcp"] if isinstance(saved, list) else ["hermes-api-server"]
@@ -193,6 +193,7 @@ def hermes(tmp_path, monkeypatch):
     fake = FakeHermes(root)
     fake.ports = Ports()
     monkeypatch.setattr(setup, "_answers", fake.ports.answers)
+    monkeypatch.setattr(setup, "_policy_failures", set())
     monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
     return fake
 
@@ -903,6 +904,16 @@ def test_a_managed_install_blocks_before_any_write(hermes):
     assert hermes.config_writes == [] and hermes.env_writes == []
 
 
+def test_a_managed_install_with_nothing_to_write_doesnt_block(hermes):
+    """Notifier issue 875: a package manager that declares everything the
+    setup would write is ready; one write left blocks again."""
+    _apply(hermes)
+    hermes.managed_install = "This Hermes installation is managed by nixos."
+    assert _state(hermes)["blockers"] == []
+    _write(hermes.root / "config.yaml", {**_yaml(hermes.root / "config.yaml"), "approvals": {"mode": "off"}})
+    assert [blocker["code"] for blocker in _state(hermes)["blockers"]] == ["managed"]
+
+
 @pytest.mark.parametrize("pinned", ["platform_toolsets.api_server", "known_plugin_toolsets.api_server",
                                     "approvals.mode"])
 def test_a_pinned_setting_blocks_before_any_write(hermes, pinned):
@@ -1095,6 +1106,28 @@ def test_the_policy_is_null_when_hermes_cant_read_it(hermes, caplog):
     with caplog.at_level(logging.WARNING):
         assert _state(hermes)["policy"] is None
     assert "RuntimeError" in caplog.text
+
+
+def test_a_policy_that_keeps_failing_is_logged_once_until_it_reads_again(hermes, caplog):
+    # The own-bots check reads each profile's state every minute: .52 logged one failure 1,300 times
+    # (2026-11-15).
+    hermes.policy_fails = True
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert _state(hermes)["policy"] is None
+        hermes.policy_error = ConnectionError  # failing another way still counts as the same failure
+        assert _state(hermes)["policy"] is None
+        hermes.policy_error = RuntimeError
+        assert _state(hermes, "laifu")["policy"] is None
+    told = [record for record in caplog.records if "room policy" in record.getMessage()]
+    assert [record.getMessage().split("profile ")[1].split("'")[0] for record in told] == ["default", "laifu"]
+    caplog.clear()
+    hermes.policy_fails = False
+    with caplog.at_level(logging.WARNING):
+        assert _state(hermes)["policy"] is not None
+        hermes.policy_fails = True
+        assert _state(hermes)["policy"] is None
+    assert caplog.text.count("room policy") == 1
 
 
 # --- Hermes without these calls ---------------------------------------------------------

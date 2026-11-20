@@ -18,7 +18,7 @@ import { WATCH_TOOLS_CAPABILITY, WatchToolGrants, watchToolRoutes } from './watc
 
 // Self-reported relay version/capabilities, surfaced via GET /v1/meta so the
 // app can show compatibility state (keep the version in sync with package.json).
-const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip', 'push-levels', 'room-invites'];
+const RELAY_CAPABILITIES = ['decisions', 'decision-cards', 'meta', 'e2e-v1', WATCH_TOOLS_CAPABILITY, WATCH_AUDIO_CAPABILITY, 'calls', 'voip-calls', 'watch-calls', 'ring-sessions', 'ring-controls', 'location-push', 'phone-changes', MAPS_TOKENS_CAPABILITY, LIVE_ACTIVITIES_CAPABILITY, TOKEN_PROOF_CAPABILITY, 'clarify-skip', 'push-levels', 'room-invites', 'device-gateway-removal'];
 const RELAY_INFO = (() => {
   try {
     const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -487,6 +487,24 @@ async function route(request, response) {
     if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
     enforceRevocationBudget();
     deactivateInstallation(installation.id);
+    response.writeHead(204).end();
+    return;
+  }
+
+  // The phone drops one of its pairings itself (0.28+): a dashboard removed from Conduit stops pushing to it even when its host
+  // can't be reached to unpair, or never will be (signed out by then). The
+  // host's next push is refused 401, which its plugin already reads as the
+  // phone having removed the pairing. Answers 204 for a gateway already
+  // gone, so a retry after a lost answer is done too.
+  const gatewayMatch = url.pathname.match(/^\/v1\/installations\/([0-9a-f-]+)\/gateways\/([0-9a-f-]+)$/i);
+  if (gatewayMatch && request.method === 'DELETE') {
+    const installation = authorize(request, gatewayMatch[1], 'device');
+    if (!installation) return sendJson(response, 401, { error: 'unauthorized' });
+    enforceRateLimit(`gateway-removal:${installation.id}`, 30, 60_000);
+    enforceRevocationBudget();
+    const gatewayId = gatewayMatch[2].toLowerCase();
+    // The Watch's PushKit token stays, as an unpair from the host keeps it.
+    if (store.removeGateway(installation.id, gatewayId)) watchGrants.closeOwned(installation.id, gatewayId, 'revoked');
     response.writeHead(204).end();
     return;
   }
@@ -1121,7 +1139,7 @@ function notificationFor(event, preferences, gateway = undefined) {
   const scopeToken = (seed) =>
     gatewayId ? createHash('sha256').update(`${gatewayId}:${seed}`).digest('hex').slice(0, 16) : undefined;
   if (event.e2e) return encryptedNotificationFor(event, preferences, { gatewayId, dashboardId, scopeToken });
-  const generic = genericCopy(event.type);
+  const generic = genericCopy(event.type, profileName(event));
   // What threads and replaces this push on the phone: its slot, else its chat.
   const threadSeed = event.slot ? `slot:${event.slot}` : event.sessionId;
   // Chat names (#1415) joins the chat's title to the generic one, as
@@ -1133,10 +1151,13 @@ function notificationFor(event, preferences, gateway = undefined) {
       : generic.title;
   // Keep previews private by default, while still making notifications from
   // different profiles and sessions distinguishable in Notification Center.
-  const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event);
+  const body = preferences.show_previews && event.body ? event.body : notificationContext(generic.body, event, namesBot(event.type));
   // With the reply as the body, the profile moves to the subtitle, as
   // Conduit's own copy shows it.
-  const subtitle = preferences.show_previews && event.body ? profileLine(event, title) : '';
+  // A call's title names its bot ("Cortana wants to talk", issue 2540); an
+  // older plugin's "Hermes wants to talk" keeps the subtitle.
+  const callNamesBot = event.type === 'call.requested' && String(title).startsWith(`${profileName(event)} `);
+  const subtitle = preferences.show_previews && event.body && !callNamesBot ? profileLine(event, title) : '';
   const completion = event.type === 'response.ready' || event.type === 'background_task.finished';
   // Approval, clarify and call pushes wait on the user, so they chime by
   // default: `!== false` keeps installations whose stored preferences predate
@@ -1511,8 +1532,10 @@ function levelAps(event) {
   return event.level ? { 'interruption-level': event.level, 'relevance-score': PUSH_LEVELS.get(event.level) } : {};
 }
 
-function notificationContext(message, event) {
-  const profile = profileName(event);
+// `named`: the copy already names the bot ("Tap to talk to Cortana."), so
+// the profile isn't said again.
+function notificationContext(message, event, named = false) {
+  const profile = named ? '' : profileName(event);
   const sessionId = String(event.sessionId ?? '').trim();
   const details = [profile && `Profile: ${profile}`, sessionId && `Session: ${shortSessionId(sessionId)}`].filter(Boolean);
   return details.length ? `${message}\n${details.join(' · ')}` : message;
@@ -1557,15 +1580,25 @@ function waitsOnUser(type) {
     || type === 'room.invite';
 }
 
-function genericCopy(type) {
-  if (type === 'call.requested') return { title: 'Hermes wants to talk', body: 'Tap to talk to Hermes.' };
-  if (type === 'phone.changes') return { title: 'Hermes has a change for you', body: 'Tap to review it in Conduit.' };
+// `name`: the bot the push is from (profileName), so a call says "Cortana
+// wants to talk" (issue 2540). A sealed push's is Hermes: the relay can't
+// read it, and Conduit writes the copy over it on the phone.
+function genericCopy(type, name = 'Hermes') {
+  if (type === 'call.requested') return { title: `${name} wants to talk`, body: `Tap to talk to ${name}.` };
+  if (type === 'phone.changes') return { title: `${name} has a change for you`, body: 'Tap to review it in Conduit.' };
   if (type === 'room.invite') return { title: 'Room invite', body: "Someone you've linked with invited you to a room." };
-  if (type === 'approval.needed') return { title: 'Approval needed', body: 'Hermes is waiting for your approval.' };
-  if (type === 'input.needed') return { title: 'Input needed', body: 'Hermes needs your response before it can continue.' };
+  if (type === 'approval.needed') return { title: 'Approval needed', body: `${name} is waiting for your approval.` };
+  if (type === 'input.needed') return { title: 'Input needed', body: `${name} needs your response before it can continue.` };
   if (type === 'turn.failed') return { title: 'Turn failed', body: 'A Hermes turn could not be completed.' };
   if (type === 'background_task.finished') return { title: 'Background task finished', body: 'A delegated task has finished.' };
-  return { title: 'Response ready', body: 'Hermes has finished responding.' };
+  return { title: 'Response ready', body: `${name} has finished responding.` };
+}
+
+// Whether a type's generic copy names the bot, in its title or its body.
+function namesBot(type) {
+  const a = genericCopy(type, 'A');
+  const b = genericCopy(type, 'B');
+  return a.title !== b.title || a.body !== b.body;
 }
 
 // A kind the phone's preferences don't name yet (stored before it existed)

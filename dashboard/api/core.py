@@ -9,6 +9,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -22,7 +23,7 @@ from typing import Any, Callable, Dict, Optional, TypeVar
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.requests import HTTPConnection
 
-from . import link_status
+from . import link_status, session_route
 
 # The plugin's logger, under the name it always had (the module Hermes loads,
 # plugin_api.py): every module logs through it.
@@ -46,6 +47,8 @@ async def _note_conduit_request(connection: HTTPConnection) -> None:
     being seen, for the dashboard's Conduit card (see "Link status" in
     api/link_status.py). Defined before the router, which takes it."""
     link_status._note_app_request(connection)
+    # Before the app can pick a model, its pick sticks (api/session_route.py).
+    session_route.ensure_installed()
 
 
 router = APIRouter(dependencies=[Depends(_note_conduit_request)])
@@ -315,11 +318,75 @@ def _pairing_state_path() -> Any:
 def _load_pairing_state(path: Any) -> Optional[Dict[str, Any]]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError, OSError):
+    except (FileNotFoundError, ValueError, OSError, RecursionError):
         return None
     if not isinstance(value, dict) or not value.get("credential"):
         return None
     return value
+
+
+# A profile's pairings with its other devices (hermes-conduit#2758): files of
+# conduit-push.json's shape, named by relay installation id, as client.py
+# (DEVICES_DIRECTORY, other_devices) keeps them. The main pairing stays in
+# conduit-push.json.
+PAIRING_DEVICES_DIRECTORY = "conduit-push-devices"
+_INSTALLATION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _installation_key(installation_id: Any) -> Optional[str]:
+    if not isinstance(installation_id, str):
+        return None
+    key = installation_id.strip().lower()
+    return key if _INSTALLATION_ID.fullmatch(key) else None
+
+
+def _device_pairing_path(installation_id: Any, main_path: Any = None) -> Any:
+    """Where ``installation_id``'s pairing among the others is kept, beside
+    ``main_path`` (this profile's main pairing by default); None for anything
+    that isn't an installation id."""
+    key = _installation_key(installation_id)
+    if key is None:
+        return None
+    main_path = main_path if main_path is not None else _pairing_state_path()
+    return main_path.parent / PAIRING_DEVICES_DIRECTORY / f"{key}.json"
+
+
+def _device_pairings(main: Optional[Dict[str, Any]] = None, main_path: Any = None) -> list:
+    """The other devices' pairings, the first paired first: (installation id,
+    state). None while the main pairing is missing, and never the main
+    device's own installation (client.other_devices). ``main_path``: the main
+    pairing's file, beside which they're kept (this profile's by default)."""
+    main_path = main_path if main_path is not None else _pairing_state_path()
+    main = main if main is not None else _load_pairing_state(main_path)
+    if not main:
+        return []
+    directory = main_path.parent / PAIRING_DEVICES_DIRECTORY
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return []
+    found = []
+    for entry in entries:
+        key = _installation_key(entry.name[:-5]) if entry.name.endswith(".json") else None
+        if key is None or key == _installation_key(main.get("installation_id")):
+            continue
+        state = _load_pairing_state(entry)
+        if state and _installation_key(state.get("installation_id")) == key:
+            found.append((key, state))
+    found.sort(key=lambda item: (str(item[1].get("paired_at") or ""), item[0]))
+    return found
+
+
+def _pairing_path_for(installation_id: Any) -> Any:
+    """The file holding ``installation_id``'s pairing: the main one when it's
+    that device's (or there's no other), else that device's own."""
+    main_path = _pairing_state_path()
+    main = _load_pairing_state(main_path)
+    key = _installation_key(installation_id)
+    if not main or key is None or _installation_key(main.get("installation_id")) == key:
+        return main_path
+    path = _device_pairing_path(key)
+    return path if _load_pairing_state(path) is not None else main_path
 
 
 # --- The calls store's home ---------------------------------------------------
@@ -354,6 +421,76 @@ def _plugin_package_module(name: str) -> Any:
         if exc.name != f"{DASHBOARD_PACKAGE}.{name}":
             raise
         raise TokenError(501, f"This plugin install is missing {name}.py; update the plugin") from None
+
+
+# --- Hermes' stores (hermes_store.py) -----------------------------------------
+
+_hermes_store_module: Any = None
+_hermes_store_lock = threading.Lock()
+
+
+def _hermes_store() -> Any:
+    """hermes_store.py in the plugin's folder, loaded once by path: a profile's
+    session store through whichever door this Hermes has (its storage
+    interface, or the SessionDB of a release before it)."""
+    global _hermes_store_module
+    with _hermes_store_lock:
+        if _hermes_store_module is None:
+            import importlib.util
+
+            path = os.path.join(_plugin_root(), "hermes_store.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_hermes_store", path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"no loader for {path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _hermes_store_module = module
+        return _hermes_store_module
+
+
+# --- CONDUIT_PUSH_PROXY (push_proxy.py) ------------------------------------------
+
+_push_proxy_module: Any = None
+_push_proxy_failed = False
+_push_proxy_lock = threading.Lock()
+
+
+def _push_proxy() -> Any:
+    """push_proxy.py in the plugin's folder, loaded once by path (as relay_urls.py
+    is); None when it can't be, which leaves every request as it was. A failed
+    load is tried and logged once, not on every request."""
+    global _push_proxy_module, _push_proxy_failed
+    with _push_proxy_lock:
+        if _push_proxy_module is None and not _push_proxy_failed:
+            try:
+                import importlib.util
+
+                path = os.path.join(_plugin_root(), "push_proxy.py")
+                spec = importlib.util.spec_from_file_location("conduit_push_dashboard_push_proxy", path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"no loader for {path}")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception:  # noqa: BLE001 - a missing or broken file must not stop any request
+                _push_proxy_failed = True
+                logger.warning("Couldn't load push_proxy.py; CONDUIT_PUSH_PROXY is ignored", exc_info=True)
+                return None
+            _push_proxy_module = module
+        return _push_proxy_module
+
+
+def _proxy_opener(default: Any, build: Callable[[Any], Any]) -> Any:
+    """The opener for an HTTPS request: `default`, unless CONDUIT_PUSH_PROXY is set
+    (then one `build` made around its ProxyHandler)."""
+    module = _push_proxy()
+    return default if module is None else module.opener(default, build)
+
+
+def _proxy_websocket_kwargs(url: str, connect: Any) -> Dict[str, Any]:
+    """Extra `websockets` connect arguments for CONDUIT_PUSH_PROXY: {} unless it's
+    set and applies to this wss:// URL."""
+    module = _push_proxy()
+    return {} if module is None else module.websocket_kwargs(url, connect)
 
 
 # --- The profile a request acts for -------------------------------------------

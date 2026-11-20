@@ -44,10 +44,11 @@ class AuthError(RuntimeError):
 @pytest.fixture
 def hermes(monkeypatch):
     """Stub Hermes: config, Codex sign-in, profile scope; no tools.voice_live (pre-#108940)."""
-    state = types.SimpleNamespace(config={}, token=GOOD_TOKEN, auth_error=False, refresh=[], entered=[])
+    state = types.SimpleNamespace(config={}, token=GOOD_TOKEN, auth_error=False, refresh=[], read_only=[], entered=[])
 
-    def resolve(*, refresh_if_expiring=True, **_):
+    def resolve(*, refresh_if_expiring=True, read_only=False, **_):
         state.refresh.append(refresh_if_expiring)
+        state.read_only.append(read_only)
         if state.auth_error:
             raise AuthError("signed out")
         return {"api_key": state.token}
@@ -414,10 +415,29 @@ def test_status_checks_credentials_without_refreshing(client, hermes):
                             "reason": api.gpt_live.GPT_LIVE_API_OFF}}
     assert "conduit_api_billing" in body["api"]["reason"]
     assert hermes.refresh == [False]
+    # A status read writes nothing: no auth.lock, no import from the Codex CLI (notifier 900).
+    assert hermes.read_only == [True]
 
     hermes.auth_error = True
     body = client.get(f"{BASE}/gpt-live/status").json()
     assert body["available"] is False and "hermes auth" in body["reason"]
+
+
+def test_a_call_reads_the_sign_in_it_may_refresh(client, openai, hermes):
+    assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 200
+    assert hermes.read_only == [False] and hermes.refresh == [True]
+
+
+def test_an_older_hermes_without_read_only_still_answers(client, hermes, monkeypatch):
+    calls = []
+
+    def resolve(*, refresh_if_expiring=True):
+        calls.append(refresh_if_expiring)
+        return {"api_key": hermes.token}
+
+    monkeypatch.setattr(sys.modules["hermes_cli.auth_codex"], "resolve_codex_runtime_credentials", resolve)
+    assert client.get(f"{BASE}/gpt-live/status").json()["available"] is True
+    assert calls == [False]
 
 
 def test_session_rate_limit(client, openai):
@@ -1133,3 +1153,26 @@ def test_a_refusal_naming_the_ga_path_past_the_read_cap_stays_a_502(client, monk
     monkeypatch.setattr(api.gpt_live, "_post_sdp", REAL_POST_SDP)
     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 502
     assert opener.urls == [api.gpt_live.GPT_LIVE_URL]
+
+
+def test_read_only_goes_only_to_a_resolver_that_names_it():
+    # notifier 910 (#907 leftovers): a Hermes resolver taking only **kwargs
+    # may pass them on somewhere strict, so it gets no read_only.
+    takes = api.gpt_live._takes_read_only
+
+    def named(*, refresh_if_expiring=True, read_only=False):
+        return None
+
+    def named_with_rest(*, read_only=False, **kwargs):
+        return None
+
+    def rest_only(**kwargs):
+        return None
+
+    def older(*, refresh_if_expiring=True):
+        return None
+
+    assert takes(named) and takes(named_with_rest)
+    assert not takes(rest_only)
+    assert not takes(older)
+    assert not takes(object()), "no signature to read"

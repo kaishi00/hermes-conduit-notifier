@@ -7,6 +7,8 @@ Hermes' grant functions are fakes of c73cbcc4's gateway.hosted_room_peer and gat
 bridge's tests' fake.
 """
 import base64
+import contextlib
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -295,3 +297,45 @@ def test_an_api_server_that_doesnt_answer_leaves_nothing_behind(laifu):
     # Only the look-only grant was minted.
     assert [grant["permissions"] for grant in laifu.grants.issued] == [["status"]]
     assert _bound(laifu) == []
+
+
+def test_off_a_request_each_profile_is_read_in_its_own_hermes_scope(laifu, monkeypatch):
+    """The own-bots check (room_own_bots) and a room.bring's join run in the rooms loop, outside any route's
+    profile scope. Once the dashboard hosts several profiles, a secret read with no scope raises
+    UnscopedSecretError (.52, 2026-11-15: every profile's room policy, every minute), so each read of a
+    profile's config and policy enters that profile's scope, as Conduit's routes do."""
+    scoped = []
+
+    @contextlib.contextmanager
+    def scope(profile):
+        scoped.append(profile)
+        try:
+            yield
+        finally:
+            scoped.pop()
+
+    profiles = types.ModuleType("hermes_cli.web_server_profiles")
+    profiles._config_profile_scope = scope
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server_profiles", profiles)
+
+    def in_scope(read):
+        def checked(profile, *args, **kwargs):
+            if scoped[-1:] != [profile]:
+                raise RuntimeError("UnscopedSecretError")
+            return read(profile, *args, **kwargs)
+        return checked
+
+    adapter = laifu.joiner.hermes._setup
+    laifu.joiner.hermes._setup = dataclasses.replace(adapter, policy=in_scope(adapter.policy))
+    load = sys.modules["hermes_cli.config_effective"].load_user_config_effective
+    sys.modules["hermes_cli.config_effective"].load_user_config_effective = lambda path=None, **kwargs: (
+        in_scope(lambda profile: load(path, **kwargs))("work" if "work" in str(path) else "default"))
+    (laifu.root / "profiles" / "work" / ".env").write_text(f"API_SERVER_KEY={'w' * 64}\n", encoding="utf-8")
+    _apply(laifu.setup, "work")
+
+    for profile in ("default", "work"):
+        laifu.joiner.check(profile)
+        assert laifu.joiner.hermes.ready(profile)
+        assert laifu.joiner.hermes.policy_digest(profile) == _capabilities(laifu, profile)["execution_policy"][
+            "policy_digest"]
+    assert scoped == []

@@ -35,7 +35,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional
 
-from . import room_identity, sealing
+from . import push_proxy, room_identity, sealing
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +312,15 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
 
 
 _opener = urllib.request.build_opener(_NoRedirects)
+
+
+def _proxied_opener(proxy: urllib.request.ProxyHandler) -> Any:
+    return urllib.request.build_opener(_NoRedirects, proxy)
+
+
+def _https_opener() -> Any:
+    # _opener, or through CONDUIT_PUSH_PROXY when it's set (push_proxy.py).
+    return push_proxy.opener(_opener, _proxied_opener)
 _lookup = socket.getaddrinfo
 
 
@@ -338,8 +347,10 @@ def _check_public(url: str, host: str) -> None:
 
 
 def _proxied(scheme: str, host: str) -> bool:
-    # As urllib decides for each request: the proxies it read when this
-    # module loaded, less the hosts no_proxy names.
+    # As urllib decides for each request: CONDUIT_PUSH_PROXY, else the
+    # proxies it read when this module loaded, less the hosts no_proxy names.
+    if push_proxy.proxies(scheme, host):
+        return True
     for handler in _opener.handlers:
         if isinstance(handler, urllib.request.ProxyHandler):
             if scheme not in handler.proxies:
@@ -365,7 +376,8 @@ def _request(url: str, method: str, data: Optional[bytes], headers: dict[str, st
     """The answer's status and JSON object, and its Date (None without one)."""
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with _opener.open(request, timeout=timeout) as answer:
+        opener = _https_opener() if url.startswith("https:") else _opener
+        with opener.open(request, timeout=timeout) as answer:
             status = answer.status
             server_time = _date_of(getattr(answer, "headers", None))
             raw = answer.read(MAX_ANSWER_BYTES + 1)

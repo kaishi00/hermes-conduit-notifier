@@ -361,6 +361,29 @@ async def delete_room_link(response: Response, link_id: Optional[str] = None) ->
     return await _room_links_route(lambda links: links.remove(link_id), "unlink", mailbox=True)
 
 
+@router.put("/rooms/links/own")
+async def put_room_link_own(request: Request, response: Response) -> Any:
+    """Marks a Link as the owner's own Hermes, or not (``link_id``, ``own``),
+    and tells the other side: ``link`` as the list shows it, with ``own``
+    (this side), ``their_own`` and ``own_link`` (both sides, which is what
+    lifts the owner's room rules). 404 for a Link this Hermes doesn't have."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await core._read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"link_id": ..., "own": true|false}')
+    if not isinstance(body.get("link_id"), str) or type(body.get("own")) is not bool:
+        raise HTTPException(status_code=400, detail="Expected link_id and own: true or false",
+                            headers={"Cache-Control": "no-store"})
+
+    def mark(links: Any) -> Dict[str, Any]:
+        shown = links.set_own(body.get("link_id"), body["own"])
+        if shown is None:
+            raise core._plugin_package_module("room_links").LinkError(
+                "not_found", "This Hermes has no such Link", 404)
+        return {"link": shown}
+
+    return await _room_links_route(mark, "own", mailbox=True)
+
+
 @router.delete("/rooms/links/invites")
 async def delete_room_link_invite(response: Response, invite_id: Optional[str] = None) -> Any:
     """Takes an invite back before it's used."""
@@ -470,7 +493,18 @@ async def post_room_draft(request: Request, response: Response, profile: Optiona
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     return await _room_invites_route(profile, lambda rooms: {"draft": rooms.draft(
-        body.get("name"), body.get("agents"), body.get("links"), where=where)}, "draft", mailbox=True)
+        body.get("name"), body.get("agents"), body.get("links"), where=where, bring=body.get("bring"))},
+        "draft", mailbox=True)
+
+
+@router.get("/rooms/own-bots")
+async def get_room_own_bots(response: Response) -> Any:
+    """The bots of your own other Hermes, by Link (room_own_bots): each own
+    Link's name, the bots its Hermes last said it has (each ``{profile,
+    handle, display_name, ready}``) and whether a draft may bring them
+    (``brings``), so New Group Chat lists them beside yours."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_invites_route(None, lambda rooms: rooms.own_bots.theirs(), "own_bots")
 
 
 @router.get("/rooms/drafts")
@@ -522,6 +556,19 @@ async def post_room_invite_answer(request: Request, response: Response) -> Any:
     return await _room_invites_route(None, lambda rooms: {"invite": rooms.answer(
         body.get("link"), body.get("room_id"), body.get("agents"), body.get("just_me", False))}, "answer",
         mailbox=True)
+
+
+@router.post("/rooms/invites/remove")
+async def post_room_invite_remove(request: Request, response: Response) -> Any:
+    """Takes the invite to ``room_id`` over the Link ``link`` off Group
+    Chats on every phone: one that started, ran out, or was cancelled or
+    ended. It's kept, shown with ``removed`` true; one still waiting on an
+    answer or on its room stays."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await core._read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"link": ..., "room_id": ...}')
+    return await _room_invites_route(None, lambda rooms: {"invite": rooms.remove_invite(
+        body.get("link"), body.get("room_id"))}, "remove")
 
 
 @router.post("/rooms/leave")

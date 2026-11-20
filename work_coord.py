@@ -58,7 +58,19 @@ _APP_TAPPED = "The user tapped "
 _WORDS_AT = "words_at:"
 _STEER_OPEN = re.compile(r"\[OUT-OF-BAND USER MESSAGE[^\]\n]*\]")
 _STEER_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
-_SUMMARIES = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:")
+# User rows Hermes writes itself, nobody's message: its summary of the chat
+# so far, the request for a final answer when a turn runs out of
+# iterations, its continue and recovery nudges ("[System: Your previous ..."), and its
+# notes that a background process or subagent finished. A workstream that
+# ran out of iterations once passed for the user writing in its chat, so its
+# Bot Chat answered [SILENT] to the result (2026-11-15, Furina's W21).
+_HERMES_ROWS = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:",
+                "You've reached the maximum number of tool-calling iterations",
+                "Continue from the compressed conversation context above.",
+                "[System: Your previous ", "[System: The previous response ", "[System: Continue now.",
+                "[IMPORTANT: Background process ", "[ASYNC COMPLETE", "[ASYNC DELEGATION", "[ASYNC BATCH",
+                "A background subagent you dispatched earlier has finished.",
+                "A background fan-out of ")
 _WAKE_STARTS = "Work update from "
 # The work updates that carried another bot's ask (their outbox rows):
 # answering it, with a workstream when it takes one, is what that turn is
@@ -134,7 +146,7 @@ def mode(store: work_store.Store) -> str:
         return "off"
 
 
-def ask_wake_sent(store: work_store.Store, item: str) -> None:
+def ask_wake_sent(store: work_store.Store, item: str) -> list[str]:
     """Notes that this work update (its outbox row) carried another bot's
     ask, or the user's yes tapped on a question's card: either makes its
     turn someone's to have acted on, not one the Bot Chat started itself."""
@@ -142,8 +154,24 @@ def ask_wake_sent(store: work_store.Store, item: str) -> None:
         kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
     except ValueError:
         kept = []
-    kept = ([name for name in kept if isinstance(name, str)] + [item])[-_ASK_WAKES_KEPT:]
-    store.set_meta(_ASK_WAKES, json.dumps(kept))
+    before = [name for name in kept if isinstance(name, str)] if isinstance(kept, list) else []
+    marks = before + [item]
+    store.set_meta(_ASK_WAKES, json.dumps(marks[-_ASK_WAKES_KEPT:]))
+    return marks[:-_ASK_WAKES_KEPT]  # what this pushed out
+
+
+def ask_wake_unsent(store: work_store.Store, item: str, before: list[str]) -> None:
+    """Takes back ask_wake_sent for an update that never went out: ``before``
+    (the marks ask_wake_sent pushed out, which it returned) comes back, so a
+    full list loses none of the real updates that one pushed out, and no
+    other update's mark comes back with it."""
+    try:
+        kept = json.loads(store.get_meta(_ASK_WAKES) or "[]")
+    except ValueError:
+        kept = []
+    now = [name for name in kept if isinstance(name, str) and name != item] if isinstance(kept, list) else []
+    restored = [name for name in before if name not in now] + now
+    store.set_meta(_ASK_WAKES, json.dumps(restored[-_ASK_WAKES_KEPT:]))
 
 
 def _carries_ask(store: Optional[work_store.Store], content: str) -> bool:
@@ -193,9 +221,15 @@ def _turn_prompts(home: Path, session_id: Any) -> Optional[list[tuple[str, Any]]
         return None
     finally:
         db.close()
-    # Hermes' own summary of the chat so far is nobody's message.
+    # What Hermes writes itself is nobody's message.
     return [(content, shown) for content, shown in ((text if isinstance(text, str) else "", kind) for text, kind in rows)
-            if not content.lstrip().startswith(_SUMMARIES)]
+            if shown == "steer" or not hermes_own(content)]
+
+
+def hermes_own(content: str) -> bool:
+    """Whether a saved user row is one Hermes wrote itself (_HERMES_ROWS).
+    Hermes saves those with no display kind, so a steer is never one."""
+    return content.lstrip().startswith(_HERMES_ROWS)
 
 
 def _users_own(prompt: tuple[str, Any]) -> bool:
@@ -310,8 +344,8 @@ def read_user_words(home: Path, store: work_store.Store, work: work_store.Work) 
     for row_id, content, display_kind, stamp in rows:
         if not isinstance(content, str) or display_kind not in (None, "steer"):
             continue
-        if content.lstrip().startswith(_SUMMARIES):
-            continue
+        if display_kind != "steer" and hermes_own(content):
+            continue  # a steer is the user's, whatever it starts with
         text = content
         if display_kind == "steer":
             text = _STEER_OPEN.sub("", text).replace(_STEER_CLOSE, "")
@@ -719,7 +753,8 @@ APP_WHY_BEFORE_S = 1800.0
 _FAILED = ("lost", "refused", "expired", "dropped")
 
 
-def app_items(store: work_store.Store, titles: dict[str, str], asked: Optional[list[dict]] = None) -> list[dict]:
+def app_items(store: work_store.Store, titles: Optional[dict[str, str]] = None,
+              asked: Optional[list[dict]] = None) -> list[dict]:
     """What the Bot Chat did to keep the work in step over the last day,
     newest first, for the Work panel: what the watch flagged, what the Bot
     Chat sent from turns it started itself (with how far each got) and what
@@ -727,19 +762,31 @@ def app_items(store: work_store.Store, titles: dict[str, str], asked: Optional[l
     with who said each. A flag's are the lines the watch read; a send's are
     what the board had in the half hour before it, which is what the Bot
     Chat could see, not a record of what it weighed. ``asked`` is
-    ``open_questions(store)`` when the caller has read it already."""
+    ``open_questions(store)`` when the caller has read it already.
+    ``titles`` defaults to the titles of the work the items cite, read
+    for those refs only (notifier issue 822)."""
     now = time.time()
     since = now - BOARD_AGE_S
     known = store.ledger(since=since - APP_WHY_BEFORE_S, kinds=("found", "assumes", "changed", "user", "flag"),
                          limit=400)
     by_id = {event["id"]: event for event in known}
+    listed = store.ledger(since=since, kinds=("flag", "sent"), limit=200)
+    # Every open question is listed, past both limits: each is counted as
+    # needing the user (counts.questions), so each has its card to answer on.
+    if asked is None:
+        asked = open_questions(store)  # one about resolved work is off the list
+    # The answered ones have their own dozen, the latest answered: one asked
+    # long ago and answered just now is among them.
+    answered = store.proposals_answered(since=since, limit=PROPOSALS_SHOWN)
+    if titles is None:
+        titles = store.titles([event["ref"] for event in known + listed]
+                              + [ref for row in asked + answered for ref in work_store.proposal_refs(row)])
 
     def line(event: dict) -> dict:
         return {"ref": event["ref"], "title": titles.get(event["ref"], ""), "kind": event["kind"],
                 "text": event["text"], "at": event["at"]}
 
     items: list[dict] = []
-    listed = store.ledger(since=since, kinds=("flag", "sent"), limit=200)
     states = store.outbox_states_of([event["source"].split(":")[1] for event in listed
                                      if event["kind"] == "sent" and event["source"].count(":") >= 2])
     for event in listed:
@@ -765,13 +812,6 @@ def app_items(store: work_store.Store, titles: dict[str, str], asked: Optional[l
                                    "not_arrived" if state.get("outcome") in _FAILED else "waiting"),
                          "why": [line(known_event) for known_event in before[-APP_WHY_ITEMS:]]})
         items.append(item)
-    # Every open question is listed, past both limits: each is counted as
-    # needing the user (counts.questions), so each has its card to answer on.
-    if asked is None:
-        asked = open_questions(store)  # one about resolved work is off the list
-    # The answered ones have their own dozen, the latest answered: one asked
-    # long ago and answered just now is among them.
-    answered = store.proposals_answered(since=since, limit=PROPOSALS_SHOWN)
     cards = []
     for row in asked + answered:
         refs = work_store.proposal_refs(row)

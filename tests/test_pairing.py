@@ -1,4 +1,5 @@
 import os
+import importlib
 import importlib.util
 import io
 import json
@@ -64,7 +65,7 @@ def test_pairing_claims_the_code_and_saves_the_credential(tmp_path):
     assert state["relay_url"] == "https://relay.example"
     assert "credential" not in result
     assert result == {"paired": True, "installation_id": "inst-1", "gateway_id": "gw-1",
-                      "gateway_name": calls[0][2], "relay_url": "https://relay.example"}
+                      "gateway_name": calls[0][2], "relay_url": "https://relay.example", "main": True}
     assert oct(path.stat().st_mode & 0o777) == "0o600"
 
 
@@ -79,6 +80,58 @@ def test_a_named_profile_is_in_the_gateway_name(tmp_path):
     calls = []
     api.pairing.pair_profile({"pairing_code": CODE}, profile="coder", path=tmp_path / "s.json", claim=_recording_claim(calls))
     assert calls[0][2].endswith("Hermes (coder)")
+
+
+def test_an_unnamed_pairing_takes_the_bots_name(tmp_path, monkeypatch):
+    # Not the container's id a Docker host's name is (issue 2540).
+    client = api.self_update._plugin_client()
+    titles = importlib.import_module(f"{client.__package__}.session_titles")
+    monkeypatch.setattr(titles, "bot_name", lambda: "Cortana")
+    calls = []
+    api.pairing.pair_profile({"pairing_code": CODE}, profile="coder", path=tmp_path / "s.json", claim=_recording_claim(calls))
+    assert calls[0][2] == "Cortana"
+    api.pairing.pair_profile({"pairing_code": CODE, "gateway_name": "Studio"}, path=tmp_path / "s.json",
+                             claim=_recording_claim(calls))
+    assert calls[1][2] == "Studio", "a name the pairing gives wins"
+    monkeypatch.setattr(titles, "bot_name", lambda: "coder")
+    api.pairing.pair_profile({"pairing_code": CODE}, profile="coder", path=tmp_path / "s.json", claim=_recording_claim(calls))
+    assert calls[2][2] == "box Hermes (coder)", "a name that is only the id names it no more than the id"
+    # The CLI's pairing names it the same.
+    assert client.default_gateway_name("coder") == "box Hermes (coder)"
+    monkeypatch.setattr(titles, "bot_name", lambda: "Cortana")
+    assert client.default_gateway_name("coder") == "Cortana"
+    sent = []
+    monkeypatch.setattr(client, "_request", lambda url, **kwargs: sent.append(kwargs["payload"]) or {"credential": "c", "installation_id": "i"})
+    monkeypatch.setattr(client, "state_path", lambda: tmp_path / "cli-pairing.json")
+    client.claim_pairing(CODE, relay_url="https://relay.example")
+    assert sent[-1]["gateway_name"] == "Cortana"
+    client.claim_pairing(CODE, relay_url="https://relay.example", gateway_name="Studio")
+    assert sent[-1]["gateway_name"] == "Studio"
+
+
+def test_an_unnamed_profile_comes_from_the_dashboards_home(tmp_path, monkeypatch):
+    # A dashboard scoped to a named profile names the gateway as the CLI does.
+    client = api.self_update._plugin_client()
+    titles = importlib.import_module(f"{client.__package__}.session_titles")
+    monkeypatch.setattr(titles, "bot_name", lambda: "")
+    monkeypatch.setattr(titles, "_home", lambda: tmp_path / "profiles" / "work")
+    calls = []
+    for profile in (None, "", "current"):
+        api.pairing.pair_profile({"pairing_code": CODE}, profile=profile, path=tmp_path / "s.json",
+                                 claim=_recording_claim(calls))
+        assert calls[-1][2] == "box Hermes (work)", profile
+        assert client.default_gateway_name(profile) == "box Hermes (work)", profile
+    monkeypatch.setattr(titles, "_home", lambda: None)
+    assert client.default_gateway_name() == "box Hermes"
+
+
+def test_a_plugin_that_wont_load_still_pairs_by_the_host_name(tmp_path, monkeypatch):
+    def broken():
+        raise ImportError("half-updated install")
+    monkeypatch.setattr(api.self_update, "_plugin_client", broken)
+    calls = []
+    api.pairing.pair_profile({"pairing_code": CODE}, profile="coder", path=tmp_path / "s.json", claim=_recording_claim(calls))
+    assert calls[0][2] == "box Hermes (coder)"
 
 
 def test_without_a_relay_url_the_current_then_default_relay_is_used(tmp_path):

@@ -11,7 +11,9 @@ A run stays quiet when:
 - its output is Hermes' silence marker by the cron rule: ``[SILENT]`` (or
   SILENT / NO_REPLY) as the whole reply, on its own first or last line, or
   opening the reply (``[SILENT] No changes``). Hermes doesn't deliver such a
-  run anywhere else either. Chats keep the exact rule (events).
+  run anywhere else either. Chats keep Hermes' interactive rule, the marker
+  as the whole reply (events.is_silent_response, the exact ``[SILENT]`` on
+  a Hermes without it).
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ def is_silent(response: Any) -> bool:
     """Hermes' cron silence rule, from Hermes itself when it has one."""
     try:
         from gateway.response_filters import is_autonomous_silence_response
-    except ImportError:  # an older Hermes: the same rule, kept here
+    except Exception:  # noqa: BLE001 — an older Hermes (the same rule, kept here), or a broken one
         return _fallback_silent(response)
     try:
         return bool(is_autonomous_silence_response(response))

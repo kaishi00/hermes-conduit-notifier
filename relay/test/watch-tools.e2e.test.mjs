@@ -324,6 +324,21 @@ test('removing a gateway closes its grants: the Watch is refused and its open po
   assert.equal((await hostPoll(own.kept, kept, 50)).status, 200);
 });
 
+test('a phone dropping one of its gateways closes that gateway\'s grants only', async () => {
+  const { device: ownDevice, installationId, gateways: own } = await registerWithGateways(['dropped', 'kept']);
+  const grant = await openGrant(own.dropped);
+  const kept = await openGrant(own.kept);
+  const polled = hostPoll(own.dropped, grant, 5_000);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const gatewayId = own.dropped.split('.')[1];
+  assert.equal((await api(`/v1/installations/${installationId}/gateways/${gatewayId}`, { method: 'DELETE', credential: ownDevice })).status, 204);
+  const poll = await polled;
+  assert.equal(poll.status, 410);
+  assert.equal(poll.json.reason, 'revoked');
+  assert.equal((await watchCall(grant, { rid: rid(), ...sealed() })).status, 401);
+  assert.equal((await hostPoll(own.kept, kept, 50)).status, 200);
+});
+
 test('deactivating an installation closes the grants of all its gateways', async () => {
   const { device: ownDevice, installationId, gateways: own } = await registerWithGateways(['first', 'second']);
   const first = await openGrant(own.first);

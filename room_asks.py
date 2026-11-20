@@ -26,7 +26,7 @@ from typing import Any, Callable, Optional
 
 from hermes_constants import get_hermes_home
 
-from . import client, room_identity, room_rules, session_titles
+from . import client, room_copies, room_identity, room_rules, session_titles
 from .events import push_event
 from .present_store import MAX_TITLE_CHARS, PresentError, PresentStore, first_line
 from .present_store import _line as clean_line
@@ -45,6 +45,9 @@ POLL_MAX_S = 1.0
 
 _CHECK_LATER = "Tell the room you'll check with your owner, and don't share it until they've said yes."
 # No ask was kept, so no answer will come: never a promise to check.
+# A room of only the owner's own Hermes (room_rules._lifted): nothing to ask, since no room rules apply.
+OWN_ROOM = ("Everyone in this room is your owner's own agents, so there's nothing to ask and no rules to ask "
+            "under: share what helps and use your usual tools right in this turn, as you would at home.")
 UNAVAILABLE = "Your owner can't be asked about this right now. Don't share it: say you can't share that here."
 
 DESCRIPTION = (
@@ -109,7 +112,7 @@ def available() -> bool:
     try:
         root = room_identity.root_home(get_hermes_home())
         return (root / room_identity.DIRECTORY / "rooms.json").exists() or \
-            (root / room_identity.DIRECTORY / "copies.db").exists()
+            room_copies.path(root).exists()
     except Exception:  # noqa: BLE001
         return False
 
@@ -161,6 +164,8 @@ def _handle(args: dict[str, Any], session: str, is_child: Callable[[Any], bool],
     if turn is not None and turn.with_others and not turn.room_id:
         # A member's session Hermes hasn't titled with its room yet: a room all the same.
         return {"ok": False, "error": "unavailable", "note": UNAVAILABLE}
+    if turn is not None and turn.own:
+        return {"ok": False, "error": "own_room", "note": OWN_ROOM}
     if turn is None or not turn.with_others:
         return {"ok": False, "error": "not_room",
                 "note": "This asks your owner from a group room with other people's agents; this isn't one. In "

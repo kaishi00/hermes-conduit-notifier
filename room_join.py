@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from . import room_bridge, room_bridge_member
+from . import hermes_store, room_bridge, room_bridge_member
 
 logger = logging.getLogger(__name__)
 
@@ -202,16 +202,23 @@ class Hermes:
 
     def config(self, profile: str) -> Mapping[str, Any]:
         """The profile's config.yaml as Hermes reads it (its managed settings and env references in)."""
+        from . import room_setup
+
         load = self._need("hermes_cli.config_effective", "load_user_config_effective")
-        return load(self._home(profile) / "config.yaml")
+        with room_setup.profile_scope(profile):
+            return load(self._home(profile) / "config.yaml")
 
     def ready(self, profile: str) -> bool:
         from . import room_setup
 
-        return bool(room_setup.state(self._setup_calls(), self._home(profile), profile)["ready"])
+        with room_setup.profile_scope(profile):
+            return bool(room_setup.state(self._setup_calls(), self._home(profile), profile)["ready"])
 
     def policy_digest(self, profile: str) -> str:
-        return self._setup_calls().policy(profile, self._home(profile))["policy_digest"]
+        from . import room_setup
+
+        with room_setup.profile_scope(profile):
+            return self._setup_calls().policy(profile, self._home(profile))["policy_digest"]
 
     def installation(self) -> str:
         return self._need("gateway.hosted_rooms", "local_authority_gateway_id")()
@@ -226,11 +233,11 @@ class Hermes:
 
     def reserve(self, claims: Mapping[str, Any], expires_at: float) -> None:
         reserve, db_path = self._need("gateway.hosted_rooms", "reserve_peer_room", "default_db_path")
-        reserve(db_path(), claims=claims, expires_at=expires_at)
+        hermes_store.room_call(reserve, db_path(), claims=claims, expires_at=expires_at)
 
     def revoke(self, claims: Mapping[str, Any], expires_at: float) -> None:
         revoke, db_path = self._need("gateway.hosted_rooms", "revoke_room_grant_scope", "default_db_path")
-        revoke(db_path(), claims=claims, expires_at=expires_at)
+        hermes_store.room_call(revoke, db_path(), claims=claims, expires_at=expires_at)
 
     def capabilities(self, profile: str, grant: str) -> tuple[Optional[int], dict]:
         """What this Hermes' API server answers its room capabilities route with for the grant: its status and

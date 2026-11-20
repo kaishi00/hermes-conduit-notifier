@@ -30,6 +30,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(api.core, "_profile_scope", lambda profile: contextlib.nullcontext())
     api.hermes_calls._calls_limiter._mints.clear()
     api.waiting._waiting_limiter._mints.clear()
+    api.hermes_calls._rings_limiter._mints.clear()
     return tmp_path
 
 
@@ -345,9 +346,22 @@ def test_the_waiting_list_names_every_chat_hermes_waits_on_but_workstreams(paire
     assert [(item["title"], item["summary"], item["kind"]) for item in listed] == [
         ("Release prep", "Run the migration?", "approval")]
     assert "command" not in listed[0]
+    # A workstream's question is listed, with its card (hermes-conduit#2556).
+    card = {"kind": "clarify", "request_id": "conduit-push-w", "question": "Which?", "choices": ["a", "b"]}
+    store.note_waiting("w-1", "question", request_id="conduit-push-w", decision=card, questions=[
+        {"qid": "q0", "question": "Which?", "choices": ["a", "b"], "multi_select": False}])
+    listed = http.get(f"{BASE}/waiting").json()["waiting"]
+    assert [(item["kind"], item.get("decision")) for item in listed] == [("question", card), ("approval", None)]
+    store.forget_waiting("w-1", "question")
     # Hermes gave up on it: gone from the list.
     monkeypatch.setattr(api.watch_local_live, "_hermes_approval_timeout", lambda: -1000.0)
-    assert http.get(f"{BASE}/waiting").json() == {"ok": True, "waiting": []}
+    assert http.get(f"{BASE}/waiting").json() == {"ok": True, "waiting": [], "gateway_id": "g"}
+
+
+def test_the_waiting_list_names_no_gateway_for_an_unpaired_profile(home):
+    # The card's answer can't be sealed without it: Conduit then uses the
+    # gateway the host reported for the profile (hermes-conduit#2683).
+    assert _http().get(f"{BASE}/waiting").json() == {"ok": True, "waiting": []}
 
 
 def test_the_waiting_list_reads_an_unreadable_registry_as_no_workstreams(paired, monkeypatch):
@@ -360,4 +374,24 @@ def test_the_waiting_list_reads_from_a_bucket_of_its_own(paired):
     for _ in range(api.hermes_calls.CALLS_LIMIT + 5):
         assert http.get(f"{BASE}/waiting").status_code == 200
     # A call's renewals still go through.
+    assert http.get(f"{BASE}/calls").status_code == 200
+
+
+def test_rings_list_the_calls_that_just_went_out(home):
+    store = api.hermes_calls._calls_store().CallStore(home)
+    store.add_ring({"id": "watch_abcdefgh", "kind": "done", "title": "Deploy", "session_ids": ["s1"]}, name="Atlas")
+    response = _http().get(f"{BASE}/calls/rings")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["ok"] is True and [ring["id"] for ring in body["rings"]] == ["watch_abcdefgh"]
+    assert _http().get(f"{BASE}/calls/rings", params={"after": body["now"]}).json()["rings"] == []
+
+
+def test_rings_are_read_from_a_bucket_of_their_own(paired):
+    http = _http()
+    for _ in range(api.hermes_calls.CALLS_LIMIT + 5):
+        assert http.get(f"{BASE}/calls/rings").status_code == 200
+    # A computer's polling leaves presence and watches working.
+    assert http.put(f"{BASE}/calls/presence", json={"hold_s": 0}).status_code == 200
     assert http.get(f"{BASE}/calls").status_code == 200

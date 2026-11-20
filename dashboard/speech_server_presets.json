@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "id": "speech-to-speech",
+      "name": "Hugging Face speech-to-speech",
+      "url_hint": "ws://192.168.1.20:8765/v1/realtime",
+      "needs_key": false,
+      "drive_turns": false,
+      "docs_url": "https://github.com/huggingface/speech-to-speech"
+    },
+    {
+      "id": "openai-realtime",
+      "name": "OpenAI Realtime",
+      "url": "wss://api.openai.com/v1/realtime",
+      "model": "gpt-realtime",
+      "voice": "marin",
+      "voices": ["alloy", "ash", "ballad", "cedar", "coral", "echo", "marin", "sage", "shimmer", "verse"],
+      "transcription_model": "gpt-4o-mini-transcribe",
+      "needs_key": true,
+      "drive_turns": true,
+      "docs_url": "https://platform.openai.com/docs/guides/realtime"
+    },
+    {
+      "id": "qwen-audio-realtime",
+      "name": "Qwen Audio Realtime (Alibaba Cloud)",
+      "url_hint": "wss://WORKSPACE.ap-southeast-1.maas.aliyuncs.com/api-ws/v1/realtime",
+      "model": "qwen-audio-3.0-realtime-plus",
+      "models": ["qwen-audio-3.1-realtime-plus", "qwen-audio-3.1-realtime-flash", "qwen-audio-3.0-realtime-plus", "qwen-audio-3.0-realtime-flash"],
+      "needs_key": true,
+      "drive_turns": true,
+      "docs_url": "https://help.aliyun.com/en/model-studio/audio-realtime-websocket-access"
+    }
+  ]
+}

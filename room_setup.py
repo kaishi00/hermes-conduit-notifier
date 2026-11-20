@@ -14,7 +14,7 @@ profile's for the ceiling (notifier #500): then it lists them in place of
 stays out, and their tools run only where a room's Custom choice names them.
 
 It writes only what changes something, and what it can't fix (YOLO mode, a
-managed install, a setting an administrator pinned, a profile the host
+managed install with something left to write, a setting an administrator pinned, a profile the host
 gateway doesn't serve) is reported before anything is written. Whether the
 API server runs is read from the gateway's own record of it
 (``gateway_state.json``), so the key never leaves the files Hermes keeps it
@@ -37,7 +37,7 @@ import re
 import secrets
 import socket
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional
@@ -564,9 +564,6 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
         blockers.append({"code": "yolo", "message": (
             f"{YOLO_ENV} is on for this Hermes, which turns approvals off for every turn, and rooms refuse that. Take "
             f"{YOLO_ENV} out of {root / '.env'} and the environment Hermes runs in, then restart the gateway.")})
-    managed = hermes.managed()
-    if managed:
-        blockers.append({"code": "managed", "message": str(managed)})
 
     # The API server: a key where none is, a disable turned on, a port.
     root_writes: dict = {}
@@ -668,7 +665,12 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
 
     # An administrator's pins (managed_scope's config and .env, in
     # HERMES_MANAGED_DIR or /etc/hermes) and a managed install are the
-    # installation's, whichever profile asks.
+    # installation's, whichever profile asks. A managed install blocks only
+    # a setup that has something to write: one whose package manager
+    # declares it all is ready (notifier issue 875).
+    managed = hermes.managed()
+    if managed and (profile_writes or root_writes or new_key or new_profile_key or new_port is not None):
+        blockers.append({"code": "managed", "message": str(managed)})
     for dotted in [*profile_writes, *root_writes]:
         if hermes.key_managed(dotted):
             blockers.append({"code": "managed", "message": (
@@ -701,12 +703,29 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
                  needs=needs, blockers=blockers, changed=changed)
 
 
+# The profiles whose room policy read failed, so one that keeps failing (the own-bots check reads each
+# profile's every minute), however it fails, is logged once, and again only once it read and failed anew.
+_policy_failures: set[str] = set()
+_policy_failures_lock = threading.Lock()
+
+
 def _policy(hermes: Hermes, home: Path, profile: str) -> Optional[dict]:
     try:
-        return dict(hermes.policy(profile, Path(home)))
+        policy = dict(hermes.policy(profile, Path(home)))
     except Exception as exc:  # noqa: BLE001 - the state still answers, without the policy
-        logger.warning("Linked Rooms setup couldn't read profile %s's room policy (%s)", profile, type(exc).__name__)
+        why = type(exc).__name__
+        with _policy_failures_lock:
+            told = profile in _policy_failures
+            _policy_failures.add(profile)
+        if told:
+            logger.debug("Linked Rooms setup still can't read profile %s's room policy (%s)", profile, why)
+        else:
+            logger.warning("Linked Rooms setup couldn't read profile %s's room policy (%s)", profile, why,
+                           exc_info=True)
         return None
+    with _policy_failures_lock:
+        _policy_failures.discard(profile)
+    return policy
 
 
 def _view(hermes: Hermes, home: Path, profile: str, plan: _Plan) -> dict:
@@ -823,6 +842,23 @@ def local_api_url(hermes: Hermes, home: Path, profile: str) -> str:
     root = room_identity.root_home(Path(home))
     server = _server(hermes, root, hermes.read_config(root / "config.yaml"), dict(hermes.read_env(root / ".env")))
     return server.url if profile == "default" else f"{server.url}/p/{quote(profile, safe='')}"
+
+
+def profile_scope(profile: str) -> Any:
+    """Hermes' scope for reading ``profile``'s config and secrets (its home and .env), the one Conduit's
+    routes enter for a ?profile= (dashboard/api/core._profile_scope): for work off any request, such as the
+    own-bots check and a join a room.bring starts in the rooms loop. Once the dashboard has served another
+    profile it hosts several, and a secret read with no scope raises UnscopedSecretError (a profile config's
+    ${VAR} references, its room policy). Inside a route's scope for the same profile it changes nothing; the
+    default profile gets the dashboard's own launch scope. A Hermes without profile hosting has nothing to
+    scope."""
+    try:
+        from hermes_cli.web_server_profiles import _config_profile_scope
+    except ImportError as exc:
+        if exc.name not in ("hermes_cli", "hermes_cli.web_server_profiles"):
+            raise
+        return nullcontext()
+    return _config_profile_scope(profile)
 
 
 def profile_name(home: Path) -> str:

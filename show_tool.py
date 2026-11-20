@@ -51,6 +51,9 @@ SKILL_NAME = "drawing-boards"
 # A Conduit that offers Send text for a contact card's message says this in
 # its exchange (plugin 0.67+).
 TEXT_DRAFTS_FEATURE = "text-drafts"
+# Send text to a person with no phone, to their email over iMessage
+# (hermes-conduit#2465).
+EMAIL_TEXTS_FEATURE = "email-texts"
 # Conduit draws a room's boards under its agents' messages (room_boards).
 ROOM_BOARDS_FEATURE = "room-boards"
 TOOLSET = "conduit"
@@ -60,7 +63,8 @@ SCHEMA: dict[str, Any] = {
     "description": (
         "Show something on the user's phone screen in Conduit. On a voice call, use it for anything better seen "
         "than heard: tables, charts, forecasts, recipes and other step-by-step instructions, lists, comparisons, "
-        "code, images and links, and whenever the user asks to see or show something. Prefer cards, which Conduit "
+        "code, images and links, and whenever the user asks to see or show something. Never ask whether to show a "
+        "card: show it, or answer in text. Prefer cards, which Conduit "
         "draws natively, on a call or in a typed chat: a map with pins and a route, one place in detail, several "
         "places to swipe through, big numbers (stats), a line, bar or pie chart, a weather forecast, a comparison "
         "of two to four options, steps the user can tick off (with timers), photos, videos or audio to play, people "
@@ -81,8 +85,8 @@ SCHEMA: dict[str, Any] = {
         "cards make a board: put a short title on each, use "
         "layout tabs for one card at a time, and give next: the follow-ups the user would likely send, which a tap "
         "sends. "
-        "When the user asks you to text someone, show a contact card for them with their phone and the message "
-        "you wrote: Conduit offers Send text, which opens Messages with it filled in, and the user taps Send there. "
+        "When the user asks you to text someone, show a contact card for them with their phone (or, when they "
+        "have none, the email they use for iMessage) and the message you wrote: Conduit offers Send text, which opens Messages with it filled in, and the user taps Send there. "
         "Say it's ready to send, never that it was sent. "
         "To keep a card up to date, give it a live name and show the whole card again with the same name as "
         "things change: it replaces the earlier one. For places, Conduit adds what Apple "
@@ -133,6 +137,8 @@ LEFT_OUT_NOTE = ("This version of Conduit can't draw {kinds} cards, so they were
                  "your reply.")
 NO_TEXT_DRAFTS_NOTE = ("This version of Conduit can't fill in a text message, so the message was left off the card: "
                        "give the user the text in your reply.")
+NO_EMAIL_TEXTS_NOTE = ("This version of Conduit can fill in a text only to a phone number, so the message to someone "
+                       "with just an email was left off the card: give the user the text in your reply.")
 SHOWN_NOTE = ("On the user's screen. Say in a sentence that it's there and give the gist; don't read it out or "
               "repeat it in your reply.")
 IN_CHAT_NOTE = ("The cards are shown in the chat; Markdown isn't, so put anything else in your reply. Give the "
@@ -353,6 +359,8 @@ def _handle(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], boo
     templates = card_templates.TemplateStore(get_hermes_home())
     if args.get("save_templates") is not None:
         saved = templates.save(args["save_templates"], problems)
+    if args.get("cards") is not None:
+        args = {**args, "cards": _cards_unwrapped(args["cards"], problems)}
     given = _filled_templates(args.get("cards"), templates, problems)
     given = _reviews_kept(given, session, problems, reviews, is_room)
     # Every round kept above, however the card spelled its type.
@@ -679,6 +687,64 @@ def _review_decision(raw: Any, where: str, problems: list[str]) -> tuple[dict[st
     return decision, option_pages
 
 
+# How deep _cards_unwrapped opens wrappers: past this the cards are refused.
+_MAX_CARD_WRAPS = 8
+
+CARD_WRAPS_NOTE = ("cards: wrapped more than {depth} deep (lists, JSON strings or {{\"cards\": ...}} "
+                   "inside each other), the cards inside left out; send them as one list")
+
+
+def _cards_unwrapped(given: Any, problems: list[str] | None = None, depth: int = 0) -> Any:
+    """The cards as the list the schema asks for, however a model wrapped
+    them: a list sent as a JSON string, one card on its own, a
+    ``{"cards": ...}`` wrapper, or the list inside another list
+    (``[[{...}]]``), each of these inside the others too, a JSON string
+    sitting in the list included. A smaller model that got those wrong kept
+    showing the board again for half an hour (MiniMax M3.1, 2026-11-18).
+    Past ``_MAX_CARD_WRAPS`` a wrapper stays unopened, and ``problems`` says
+    it was too deep (notifier 879)."""
+    if depth > _MAX_CARD_WRAPS:
+        if problems is not None and CARD_WRAPS_NOTE.format(depth=_MAX_CARD_WRAPS) not in problems:
+            problems.append(CARD_WRAPS_NOTE.format(depth=_MAX_CARD_WRAPS))
+        return given
+    if _is_card_json(given):
+        try:
+            given = json.loads(given)
+        except (ValueError, RecursionError):
+            return given
+    if isinstance(given, dict):
+        if _is_cards_wrapper(given):
+            return _cards_unwrapped(given["cards"], problems, depth + 1)
+        return [given]
+    if not isinstance(given, list):
+        return given
+    cards: list[Any] = []
+    for item in given:
+        if isinstance(item, list) or _is_card_json(item) or (isinstance(item, dict) and _is_cards_wrapper(item)):
+            if depth + 1 > _MAX_CARD_WRAPS:
+                # Left as it is, never spliced in: what the note says was
+                # left out isn't drawn.
+                _cards_unwrapped(item, problems, depth + 1)
+                cards.append(item)
+                continue
+            opened = _cards_unwrapped(item, problems, depth + 1)
+            cards.extend(opened if isinstance(opened, list) else [opened])
+        else:
+            cards.append(item)
+    return cards
+
+
+def _is_card_json(value: Any) -> bool:
+    """A string that may be cards sent as JSON: a list or an object."""
+    return isinstance(value, str) and value.strip()[:1] in ("[", "{")
+
+
+def _is_cards_wrapper(value: dict[str, Any]) -> bool:
+    """A ``{"cards": ...}`` around cards, not a card of its own. Its value
+    is a list of cards, a JSON string of them, or one card on its own."""
+    return "type" not in value and isinstance(value.get("cards"), (list, str, dict))
+
+
 def _filled_templates(given: Any, templates: card_templates.TemplateStore, problems: list[str]) -> Any:
     """The cards with each of type template filled into its composed card."""
     if not isinstance(given, list):
@@ -819,11 +885,18 @@ def _handle_cards(args: dict[str, Any], session: str, cards: list[dict[str, Any]
         cards = cards[:card_schema.LEGACY_MAX_CARDS]
     elif dropped_extras:
         problems[:0] = dropped_extras
-    no_texts = _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE)
-    if no_texts:
+    # What Hermes hears about a text left off the card, if one was.
+    no_texts = ""
+    if _has_messages(cards) and not store.has_feature_everywhere(TEXT_DRAFTS_FEATURE):
+        no_texts = NO_TEXT_DRAFTS_NOTE
         # An older Conduit would show the person with no Send text, and
         # Hermes would think the message was waiting on the user's phone.
         cards = _without_messages(cards)
+    elif _has_messages(cards, email_only=True) and not store.has_feature_everywhere(EMAIL_TEXTS_FEATURE):
+        no_texts = NO_EMAIL_TEXTS_NOTE
+        # An older Conduit keeps a text only with a phone, and would show the
+        # person with no Send text while Hermes says it's ready.
+        cards = _without_messages(cards, email_only=True)
     fallback = bool(cards) and not given_markdown
     if fallback:
         markdown = _fallback(cards)
@@ -906,18 +979,24 @@ def _diffs_answered(cards: list[dict[str, Any]], keep_diff: Callable[[dict[str, 
     return answered
 
 
-def _with_left_out(note: str, left_out: list[str], no_texts: bool = False) -> str:
+def _with_left_out(note: str, left_out: list[str], no_texts: str = "") -> str:
     if left_out:
         note = f"{note} {LEFT_OUT_NOTE.format(kinds=', '.join(left_out))}"
-    return f"{note} {NO_TEXT_DRAFTS_NOTE}" if no_texts else note
+    return f"{note} {no_texts}" if no_texts else note
 
 
-def _has_messages(cards: list[dict[str, Any]]) -> bool:
-    return any("message" in person for card in cards if card["type"] == "contact" for person in card["people"])
+def _has_messages(cards: list[dict[str, Any]], email_only: bool = False) -> bool:
+    """Whether a contact card carries a text; with email_only, a text to
+    someone with no phone."""
+    return any("message" in person and not (email_only and "phone" in person)
+               for card in cards if card["type"] == "contact" for person in card["people"])
 
 
-def _without_messages(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{**card, "people": [{key: value for key, value in person.items() if key != "message"}
+def _without_messages(cards: list[dict[str, Any]], email_only: bool = False) -> list[dict[str, Any]]:
+    """The cards without their texts; with email_only, only the texts to
+    someone with no phone."""
+    return [{**card, "people": [person if email_only and "phone" in person
+                                else {key: value for key, value in person.items() if key != "message"}
                                 for person in card["people"]]} if card["type"] == "contact" else card
             for card in cards]
 

@@ -181,6 +181,20 @@ APPROVAL_CHOICES = ("once", "deny")
 DELIVERY_STATES = ("sent", "claimed", "resolved", "missed", "withdrawn")
 DELIVERY_TTL_S = 10 * 60
 MAX_DELIVERED = 32
+# Calls kept for Conduit on a computer, which hears of them by asking
+# (GET /calls/rings), not from the relay: long enough for a few missed polls,
+# short enough that a computer waking up never rings for an old call.
+RING_TTL_S = 2 * 60
+MAX_RINGS = 16
+RING_KINDS = ("done", "failed", "stopped", "approval", "question")
+# Where a ring stands: still ringing, or settled by the device that acted on
+# it (a call started on any device answers it; a decline or a missed call
+# reported from any device settles it so). A computer stops ringing for one
+# settled anywhere.
+RING_STATES = ("ringing", "answered", "declined", "missed")
+# A call started this soon after a ring answers it, whichever device still
+# rang or declined: longer than the iPhone and a computer ring.
+RING_ANSWER_WINDOW_S = 60
 # How long a call waits to hear how its approval answer fared: longer than
 # the agent's process takes to pass it on (calls.APPROVAL_ANSWER_POLL_S and
 # APPROVAL_MATCH_TRIES), well within the Watch relay's wait.
@@ -522,13 +536,15 @@ class CallStore:
 
     def note_waiting(self, session_id: str | list[str], kind: str, *, request_id: str = "",
                      questions: Any = None, description: Any = "", command: Any = "",
-                     title: Any = "", room: Any = "") -> bool:
+                     title: Any = "", room: Any = "", decision: Any = None) -> bool:
         """Hermes waits on the user in ``session_id`` (or the ids its session
         goes by, the chat titled ``title``): a question batch (``request_id``,
         the clarify loop's own decision id, and ``questions``) or an approval
         (``description`` and ``command``), in the group room ``room`` this
         Hermes hosts when it's a room member's turn (hermes-conduit#2064:
-        Needs you opens the room). Kept for Conduit's "Needs you"
+        Needs you opens the room). ``decision`` is a question's card as its
+        push carried it, which the list hands Conduit so an open app can draw
+        it (hermes-conduit#2556). Kept for Conduit's "Needs you"
         list always, and so a call about it can read and answer it with no
         chat open while alert calls are on: True only then (the wait is
         ``followed``). A newer wait of the same kind in the session replaces
@@ -545,7 +561,8 @@ class CallStore:
         entry = _waiting_entry({
             "id": secrets.token_hex(12), "session_ids": ids, "kind": kind, "at": self.clock(),
             "followed": followed, "title": title, "room": room,
-            "request_id": request_id, "questions": questions, "description": description,
+            "request_id": request_id, "questions": questions, "decision": decision,
+            "description": description,
             "command": command if isinstance(command, str) else "",
             "command_sha": hashlib.sha256(command.encode("utf-8")).hexdigest() if isinstance(command, str) and command else "",
             "cut": isinstance(command, str) and len(command) > MAX_WAITING_COMMAND_CHARS,
@@ -580,6 +597,45 @@ class CallStore:
             state["waiting"] = kept
             return removed
 
+    def keep_waiting_card(self, request_id: Any, decision: Any) -> bool:
+        """The relay holds the question ``request_id`` and takes answers for
+        it: its wait now carries the card (``decision``, as the push carried
+        it) for the Needs you list to hand Conduit. True when it was kept."""
+        if not isinstance(request_id, str) or not request_id or not self.path.exists():
+            return False
+        card = _waiting_decision(decision, request_id)
+        if card is None:
+            return False
+        with self._locked() as state:
+            kept = False
+            for item in state["waiting"]:
+                if item["kind"] == "question" and item["request_id"] == request_id:
+                    item["decision"] = card
+                    kept = True
+            return kept
+
+    def forget_waiting_card(self, request_id: Any) -> bool:
+        """The question ``request_id`` can no longer be answered on its card
+        (the relay released it, or never showed it), though Hermes may still
+        wait on its own prompt: the wait stays listed, without the card, so
+        Conduit draws none that would refuse the answer. True when one was
+        dropped."""
+        if not isinstance(request_id, str) or not request_id or not self.path.exists():
+            return False
+
+        def carried(item: dict[str, Any]) -> bool:
+            return item["kind"] == "question" and item["request_id"] == request_id and "decision" in item
+
+        if not any(carried(item) for item in self._load()["waiting"]):
+            return False
+        with self._locked() as state:
+            dropped = False
+            for item in state["waiting"]:
+                if carried(item):
+                    del item["decision"]
+                    dropped = True
+            return dropped
+
     def waiting_for(self, session_id: Any) -> dict[str, Any] | None:
         """What Hermes waits on in ``session_id``, as a call reads it: the
         newest wait, with its questions numbered and the ones answered from a
@@ -597,8 +653,10 @@ class CallStore:
         Conduit's "Needs you" list: each wait's kind, the ids its chat goes
         by, the chat's title, a line saying what it waits on and when it
         began. A wait older than ``max_age`` for its kind (Hermes gives up
-        on it then) and a chat in ``leave_out`` (a bot's workstreams, which
-        their Work panel shows) are left out. Never answers anything."""
+        on it then) and an approval in a chat in ``leave_out`` (a bot's
+        workstreams, whose Work panel answers it) are left out; a
+        workstream's question is listed, since only its chat's card answers
+        it (Eric, 2026-11-15, hermes-conduit#2556). Never answers anything."""
         if not self.path.exists():
             return []
         now = self.clock()
@@ -609,7 +667,7 @@ class CallStore:
             limit = ages.get(item["kind"])
             if limit is not None and now - item["at"] >= limit:
                 continue
-            if hidden & set(item["session_ids"]):
+            if item["kind"] == "approval" and hidden & set(item["session_ids"]):
                 continue
             out.append(_listed_waiting(item))
         return sorted(out, key=lambda entry: entry["at"], reverse=True)
@@ -892,6 +950,28 @@ class CallStore:
             return {"status": "away"}
         with self._locked() as state:
             state["presence_until"] = self.clock() + hold if hold else 0.0
+            if hold:
+                # A call starting on any device answers the rings of the last
+                # RING_ANSWER_WINDOW_S (below): a computer still ringing stops,
+                # and a decline or miss another device reported (or reports
+                # later) for one of them isn't heard, since the user took it.
+                now = self.clock()
+                recent = [ring for ring in state["rings"] if now - ring["at"] < RING_ANSWER_WINDOW_S]
+                # The rings still ringing, and the newest one even if a device
+                # declined it (the iPhone answered what the computer declined);
+                # an older declined one stays declined: the user turned that
+                # call down and took a later one.
+                # Newest of them all, answered ones included: a renewal once
+                # the newer ring was answered leaves the older decline alone.
+                answered = {ring["id"] for ring in recent if ring["state"] == "ringing"}
+                newest = max(recent, key=lambda ring: ring["at"]) if recent else None
+                if newest is not None and newest["state"] != "answered":
+                    answered.add(newest["id"])
+                for ring in state["rings"]:
+                    if ring["id"] in answered:
+                        ring["state"], ring["changed"] = "answered", now
+                if answered:
+                    state["outcomes"] = [entry for entry in state["outcomes"] if entry["id"] not in answered]
             return {"status": "present" if hold else "away"}
 
     def in_call(self) -> bool:
@@ -955,6 +1035,12 @@ class CallStore:
         # Below the TTL: one exactly a day old would be dropped unheard.
         age = _seconds(age_s, "age_s", OUTCOME_TTL_S - 1)
         with self._locked() as state:
+            # Answered on another device (a computer, or the iPhone after the
+            # computer declined): the user took the call, so Hermes hears no
+            # decline or miss for it.
+            if any(ring["id"] == call_id and ring["state"] == "answered" for ring in state["rings"]):
+                return {"status": "recorded"}
+            self._settle_rings(state, outcome, call_id)
             known = {entry["id"] for entry in state["outcomes"]} | {entry["id"] for entry in state["told"]}
             if call_id not in known:
                 state["outcomes"] = [*state["outcomes"], {
@@ -1052,6 +1138,52 @@ class CallStore:
             state["watches"] = [watch for watch in state["watches"] if watch["id"] not in due_ids]
             return [{**_decide(state, watch, watch["pending"]["outcome"], now, self.place_blocked),
                      "session_id": watch["pending"]["session_id"]} for watch in due]
+
+    def add_ring(self, call: Any, *, name: Any = "", title: Any = "", body: Any = "") -> None:
+        """Keeps a call that just went out, so Conduit on a computer rings for
+        it too. A resend of the same call keeps the first entry."""
+        if not isinstance(call, dict) or not _WATCH_ID.match(str(call.get("id") or "")):
+            return
+        entry = {
+            "id": str(call["id"]),
+            "kind": call.get("kind") if call.get("kind") in RING_KINDS else None,
+            "title": _title(call.get("title")),
+            "reason": _reason(call.get("reason")),
+            "session_ids": _ring_sessions(call.get("session_ids")),
+            "name": _clip(name, 64),
+            "heading": _clip(title, 120),
+            "body": _clip(body, 500),
+        }
+        with self._locked() as state:
+            # A replay of the same call (a failure hook seeded to its id) keeps
+            # the first: a computer asking since then doesn't ring again.
+            if any(ring["id"] == entry["id"] for ring in state["rings"]):
+                return
+            entry["at"] = entry["changed"] = self.clock()
+            entry["state"] = "ringing"
+            state["rings"] = [*state["rings"], entry]
+            state["rings"] = state["rings"][-MAX_RINGS:]
+
+    def rings(self, after: Any = None) -> dict[str, Any]:
+        """The calls of the last RING_TTL_S seconds that went out or settled
+        after ``after`` (the ``now`` an earlier answer gave), oldest first:
+        each with its ``state`` (RING_STATES), so a computer still ringing
+        for one answered on the iPhone stops."""
+        since = float(after) if isinstance(after, (int, float)) and not isinstance(after, bool) else None
+        # Read before the clock: a ring kept in between is in this answer,
+        # or newer than its ``now`` and in the next one.
+        kept = self._load()["rings"]
+        now = self.clock()
+        rings = [dict(ring) for ring in kept if since is None or ring["changed"] > since]
+        return {"rings": rings, "now": now}
+
+    def _settle_rings(self, state: dict[str, Any], outcome: str, call_id: str | None = None) -> None:
+        """Settles the rings still ringing (only ``call_id``'s, when named)."""
+        now = self.clock()
+        for ring in state["rings"]:
+            if ring["state"] == "ringing" and (call_id is None or ring["id"] == call_id):
+                ring["state"] = outcome
+                ring["changed"] = now
 
     def next_due(self) -> float | None:
         """When the earliest hold over an ended job runs out, if any."""
@@ -1262,10 +1394,49 @@ def _normalized(raw: Any, now: float) -> dict[str, Any]:
                 and entry.get("state") in DELIVERY_STATES and isinstance(entry.get("at"), (int, float))
                 and not isinstance(entry.get("at"), bool) and now - entry["at"] < DELIVERY_TTL_S):
             delivered.append({"id": entry["id"], "state": entry["state"], "at": float(entry["at"])})
+    rings = []
+    for entry in raw.get("rings") if isinstance(raw.get("rings"), list) else []:
+        kept = _ring_entry(entry, now) if isinstance(entry, dict) else None
+        if kept is not None:
+            rings.append(kept)
     return {"v": VERSION, "settings": settings, "watches": watches, "history": history,
             "ends": ends[-MAX_RECENT_ENDS:], "seeded": seeded[-MAX_SEEDED:], "presence_until": presence_until,
             "outcomes": outcomes[-MAX_OUTCOMES:], "told": told[-MAX_TOLD:], "waiting": _capped_waiting(waiting),
-            "delivered": delivered[-MAX_DELIVERED:]}
+            "delivered": delivered[-MAX_DELIVERED:], "rings": rings[-MAX_RINGS:]}
+
+
+def _clip(value: Any, limit: int) -> str:
+    return " ".join(value.split())[:limit] if isinstance(value, str) else ""
+
+
+def _ring_sessions(value: Any) -> list[str]:
+    """A ring's sessions; none when the call lost them (it still rings)."""
+    try:
+        return _session_ids(value)
+    except (TypeError, ValueError):
+        return []
+
+
+def _ring_entry(entry: dict[str, Any], now: float) -> dict[str, Any] | None:
+    at = entry.get("at")
+    if (not isinstance(at, (int, float)) or isinstance(at, bool) or not 0 <= now - at < RING_TTL_S
+            or not isinstance(entry.get("id"), str) or not _WATCH_ID.match(entry["id"])):
+        return None
+    session_ids = _ring_sessions(entry.get("session_ids"))
+    changed = entry.get("changed")
+    return {
+        "id": entry["id"],
+        "kind": entry.get("kind") if entry.get("kind") in RING_KINDS else None,
+        "title": _title(entry.get("title")),
+        "reason": _reason(entry.get("reason")),
+        "session_ids": session_ids,
+        "name": _clip(entry.get("name"), 64),
+        "heading": _clip(entry.get("heading"), 120),
+        "body": _clip(entry.get("body"), 500),
+        "at": float(at),
+        "state": entry.get("state") if entry.get("state") in RING_STATES else "ringing",
+        "changed": float(changed) if isinstance(changed, (int, float)) and not isinstance(changed, bool) and changed >= at else float(at),
+    }
 
 
 def _calls_wait(item: dict[str, Any], now: float) -> bool:
@@ -1352,7 +1523,45 @@ def _waiting_entry(raw: dict[str, Any], now: float) -> dict[str, Any] | None:
     if not questions:
         return None
     entry.update({"request_id": request_id, "questions": questions})
+    decision = _waiting_decision(raw.get("decision"), request_id)
+    if decision:
+        entry["decision"] = decision
     return entry
+
+
+def _waiting_decision(raw: Any, request_id: str) -> dict[str, Any] | None:
+    """A question's card as its push carried it (events.sanitize_decision's
+    shape, kept field by field), or None when it isn't this wait's."""
+    if not isinstance(raw, dict) or raw.get("kind") != "clarify" or raw.get("request_id") != request_id:
+        return None
+    question = raw.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return None
+
+    def labels(value: Any) -> list[str]:
+        return [label[:MAX_WAITING_CHOICE_CHARS] for label in value if isinstance(label, str) and label.strip()
+                ][:MAX_WAITING_CHOICES] if isinstance(value, list) else []
+
+    decision: dict[str, Any] = {"kind": "clarify", "request_id": request_id,
+                                "question": question[:MAX_WAITING_TEXT_CHARS]}
+    if labels(raw.get("choices")):
+        decision["choices"] = labels(raw.get("choices"))
+    questions = []
+    for item in raw.get("questions") if isinstance(raw.get("questions"), list) else []:
+        if not isinstance(item, dict) or len(questions) >= MAX_WAITING_QUESTIONS:
+            continue
+        qid, text = item.get("qid"), item.get("question")
+        if not isinstance(qid, str) or not qid or len(qid) > 128 or not isinstance(text, str) or not text.strip():
+            continue
+        entry: dict[str, Any] = {"qid": qid, "question": text[:MAX_WAITING_TEXT_CHARS]}
+        if labels(item.get("choices")):
+            entry["choices"] = labels(item.get("choices"))
+        if item.get("multi_select") is True:
+            entry["multi_select"] = True
+        questions.append(entry)
+    if questions:
+        decision["questions"] = questions
+    return decision
 
 
 def _complete(item: dict[str, Any], request_id: str) -> bool:
@@ -1375,7 +1584,8 @@ def _public_question(entry: dict[str, Any], index: int, form: bool) -> dict[str,
 
 def _listed_waiting(item: dict[str, Any]) -> dict[str, Any]:
     """A wait as the "Needs you" list shows it: never a command, and only
-    the first question of a batch, with how many there are."""
+    the first question of a batch, with how many there are, then the
+    question's whole card when its push carried one."""
     if item["kind"] == "approval":
         summary, count = item["description"], 1
     else:
@@ -1384,7 +1594,10 @@ def _listed_waiting(item: dict[str, Any]) -> dict[str, Any]:
             "title": item["title"], "summary": " ".join(summary.split())[:MAX_WAITING_SUMMARY_CHARS],
             "questions": count if item["kind"] == "question" else 0, "at": item["at"],
             # A wait in a group room this Hermes hosts opens the room (hermes-conduit#2064).
-            **({"room": item["room"]} if item.get("room") else {})}
+            **({"room": item["room"]} if item.get("room") else {}),
+            # A question's card, for a Conduit on screen to draw in its chat
+            # when Hermes drew none there (hermes-conduit#2556).
+            **({"decision": item["decision"]} if item.get("decision") else {})}
 
 
 def _public_waiting(item: dict[str, Any]) -> dict[str, Any]:

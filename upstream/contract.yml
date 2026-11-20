@@ -12,6 +12,7 @@ watch_paths:
   - hermes_cli/web_server*.py
   - hermes_cli/web_routers/
   - hermes_cli/plugins*.py
+  - hermes_cli/lifecycle*.py
   - tools/plugin_guard*.py
   - tools/plugin_guard/
   - tools/skills_guard.py
@@ -20,13 +21,23 @@ watch_paths:
   - hermes_cli/profiles*.py
   - hermes_cli/dashboard_auth/
   - hermes_cli/config*.py
-  - hermes_state_schema.py
+  # hermes_store.py: a profile's session store through Hermes' storage interface (its
+  # 2026-11-18 canary on, loaded with importlib), or SessionDB on a release before it.
+  - persistence/
+  - persistence_assembly.py
+  - session_retention.py
+  - gateway/session_ingress_media.py
+  - session_rules/session_ids.py
+  - hermes_state.py
   - gateway/hosted_room*.py
   # room_work posts a room workstream's report with deliver_to_room (loaded with importlib).
   - cron/scheduler_delivery_room.py
   - website/docs/user-guide/features/plugins.md
   - website/docs/user-guide/features/extending-the-dashboard.md
+  # session_route.py wraps tui_gateway.server._runtime_model_config through sys.modules,
+  # which the scanner can't see; a rename there brings back picks snapping back to an old provider.
   - tui_gateway/server.py
+  - tui_gateway/agent_factory*.py
   - tui_gateway/transport.py
   - tui_gateway/methods_session*.py
   - tui_gateway/methods_prompt.py
@@ -41,7 +52,6 @@ watch_paths:
   - gateway/session_controls.py
   - gateway/session_contract.py
   - gateway/session_mutations.py
-  - hermes_state_mutations.py
   - tui_gateway/ws.py
   - tui_gateway/contracts/
   # gateway_chats.py reads all_authorities, owner_scope and each authority's sessions
@@ -66,6 +76,29 @@ keywords: [websocket, profile, plugin_api, isolation, consent, refused, ticket, 
 # What each integration point feeds in Conduit, for whoever reads an alert.
 # Feature map entries are in hermes-conduit docs/FEATURE_MAP.md.
 notes:
+  chat usage: >-
+    dashboard/api/session_usage.py reads the sessions table's token and cost columns
+    (id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+    api_call_count, tool_call_count, estimated_cost_usd, actual_cost_usd, cost_status, model, source,
+    parent_session_id, started_at, ended_at, end_reason, model_config) read-only, for
+    Conduit's Context sheet and Usage Details (feature map: "Chat usage"). Compression continuations
+    and subagent runs are told apart from branches as hermes_state's _BRANCH_CHILD_SQL and
+    _COMPRESSION_CHILD_SQL do. Without the columns the route answers 501.
+  session store: >-
+    hermes_store.py opens a profile's sessions through Hermes' storage interface
+    (persistence_assembly.open_persistence / open_persistence_reader, the sessions, messages,
+    maintenance and state_meta repositories, session_retention.after_sessions_removed, and
+    gateway.session_ingress_media.native_inputs_root for a delete's media root) since Hermes'
+    2026-11-18 canary removed SessionDB (issues 883-897), and SessionDB on a release before it. It
+    feeds the session titles that tell a Bot Chat (its step budget, board and coordination), cron
+    reports shown in a Bot Chat, voice calls' rows and tags, room chat cleanup and workstream
+    transcripts. A missing repository verb turns its feature off or fails its route.
+  chat close hooks: >-
+    tui_gateway's _finalize_session says a chat closed with on_session_end (no turn_id) and then
+    on_session_finalize. The plugin's _on_session_finalize ends a turn still running there as
+    stopped (its Lock Screen card, the bot's screen, its held reply and room asks), since Hermes'
+    gate skips concurrent turn-less on_session_end calls (issue 820,
+    upstream/test_session_close_hooks.py).
   Hermes version for Pulse's advice: >-
     pulse_host.hermes_version reads hermes_cli.__version__ (feature map: "Pulse"). When Hermes can't
     find Pulse's chat, a Hermes before 0.22.6 is told to update, since only 0.22.6 and newer hand a
@@ -82,6 +115,10 @@ notes:
     stops a chat's delegate agents only with its running turn, so a workstream stopped while it waits
     for them stops them itself. Without it they run on, and the turns their results start are
     stopped instead.
+  stopping a clarify the host couldn't show: >-
+    clarify_loop._interrupted calls tools.interrupt.is_interrupted on the agent's thread while the
+    device card waits for a question Hermes answered "undelivered" (a Bot Chat turn with nobody
+    looking). Without it /stop doesn't end that wait, which still ends at the 30-minute cap.
   old Bot Chat move: >-
     bot_chat_adopt.py moves a pre-gateway Bot Chat under its profile's gateway (feature map: "Bot
     mentions and teammate messages"): a child with that profile's HERMES_HOME calls
@@ -104,10 +141,22 @@ notes:
     Rooms"). The plugin's draft follows the room there (handed_room_ids), the gateway's process takes
     the Links' mailbox, and guests mint grants for the new epoch. A rename there leaves a moved room's
     guests without its new messages and its turns.
+  turning the plugin on for a bot: >-
+    POST /profiles/plugin (feature map: "Conduit plugin update", hermes-conduit#2803) links a fresh
+    profile's plugins/conduit_push to the main install, then runs `python -m hermes_cli.main -p
+    <name> plugins enable conduit_push` with HERMES_HOME at the root: Hermes' own enable writes the
+    profile's plugins.enabled and nudges a running gateway. upstream/test_profile_plugin_turn_on.py checks the
+    profile's plugin requests are served afterwards with no restart.
   plugin host flag: >-
     HERMES_PLUGIN_HOST_PROCESS=1 marks a plugin host. The self-update refuses there, and the
     Linked Rooms setup saves without restarting the gateway: a restart from a plugin host brings
     the gateway back with the host's environment, this flag among it.
+  execute_code's tool calls: >-
+    Hermes calls pre_tool_call for each tool an execute_code script calls with no session_id, only
+    the task_id of the execute_code call (its RPC and its session kernel both pass it). work_tool
+    takes that call's chat from the task, so a Bot Chat's script keeps to its turn's steps (feature
+    map: "Bot workstreams"; upstream/test_code_steps.py). Without the task_id, or with another one,
+    the script's calls run as from an agent with no session, outside the coordinator's limits.
   dashboard websocket auth: >-
     hermes_cli.web_server_chat._ws_auth_ok and _ws_request_is_allowed sign in every plugin socket;
     without them the sockets fail closed.
@@ -181,8 +230,9 @@ notes:
     Bot Chat with tools.bot_live_delivery._bot_chat_tip and goes in through
     gateway.session_cron.deliver_to_local_chat (owner_for_home first), as Hermes writes a cron
     result into a local chat: a note, no turn. Where the owner refuses (a desktop-made Bot Chat its
-    door hasn't adopted) or runs in another process, hermes_state's SessionDB.append_completion_note
-    writes it, once per run. gateway.session_cron is newer than v0.22.5, so it's reached by name
+    door hasn't adopted) or runs in another process, the session store's append_completion_note
+    (hermes_store.py: the storage interface's messages repository, or SessionDB on a release
+    before it) writes it, once per run. gateway.session_cron is newer than v0.22.5, so it's reached by name
     and checked first, and without it every job keeps Hermes' turn (the route's shows_reports is
     false). upstream/test_cron_bot_chat.py runs both jobs on the canary and checks the bot has the
     report on the user's next turn.
@@ -193,7 +243,7 @@ notes:
     that is draining. Without them it restarts at once and gives up after 180 s, so an update
     during a turn reports a failure while the gateway refuses new work (notifier #546).
     GET /self/gateway-work names that work for Conduit (each chat's session row by its key in
-    hermes_state, a cron job's name by hermes_cli.update_cmd_drain_report._cron_job_name) with the
+    the session store, a cron job's name by hermes_cli.update_cmd_drain_report._cron_job_name) with the
     gateway's own cap (gateway.restart's parse of agent.restart_after_turn_timeout), so the update
     says what it waits on and Restart now can stop it; without them it names only the kind. When
     it restarts anyway starts from hermes_cli.web_server's _LAST_GATEWAY_RESTART (the restart this
@@ -251,6 +301,22 @@ notes:
     memory_scan.py answers False for the plugin's own folders and leaves every other to Hermes.
     upstream/test_memory_scan.py checks Hermes alone (a known failure while it parses the
     plugin) and with the plugin loaded (none of its modules parsed).
+  a workstream's own model: >-
+    work_models.py checks the model work_start names for one workstream (app issue 2788) with
+    Hermes' /model pipeline in the bot's profile: hermes_cli.inventory.load_picker_context for its
+    providers, hermes_cli.providers.resolve_provider_full to take a leading provider name apart,
+    hermes_cli.model_switch.switch_model (nothing saved) and
+    models_validate.static_model_provider_conflict, session.create's own gate, said before a row is
+    kept. Without them the name goes to session.create as given. upstream/test_bot_work.py's
+    test_a_model_the_bot_names_is_checked_as_hermes_model_command_checks_it holds it.
+  a chat's model pick: >-
+    dashboard/api/session_route.py wraps tui_gateway.server._runtime_model_config, reached by name
+    through sys.modules (the split modules' functions are published onto the server and called
+    there), so the TUI's persist of a chat's live route writes it into model_config.gateway_runtime
+    too, which hermes_state's session_gateway_runtime reads before the top-level route (feature map:
+    "The Model sheet's settings"). Without it, a chat whose row has a gateway_runtime (a gateway or
+    fallback turn wrote one) rebuilds every pick on that old provider and snaps back.
+    upstream/test_session_route.py checks Hermes' own persist (a known failure) and the wrapped one.
   automation turns: >-
     _automation_turn in __init__.py keeps a turn in a session that isn't a conversation (a script's
     `hermes chat --source tool`, a one-shot `chat -q`/`-z`, a Kanban worker) from sending a reply or
@@ -261,18 +327,39 @@ notes:
 # A listed test xfails while it fails with this signature, and fails when it
 # passes (upstream fixed it: review the workaround) or fails differently.
 known_failures:
+  - test: test_concurrent_chat_closes_all_reach_on_session_end
+    signature: second close skipped
+    issue: kaishi00/hermes-conduit-notifier#820
+    upstream: NousResearch/hermes-agent#104865
+    since: v0.23.1
+    workaround: __init__.py _on_session_finalize ends a close's running turn (notifier #826)
   - test: test_upstream_profile_socket_reaches_profile
     signature: HTTP 501
     issue: kaishi00/hermes-conduit#1336
     upstream: NousResearch/hermes-agent#140051
     since: v0.22.3 (da01ee9c3)
     workaround: ?conduit_profile= on the dashboard-process routes (notifier #412)
+  - test: test_hermes_rebuilds_a_pick_on_its_own_provider
+    signature: stale gateway_runtime wins
+    issue: kaishi00/hermes-conduit-notifier (session_route, 2026-11-14)
+    upstream: tui_gateway/agent_factory.py _runtime_model_config leaves model_config.gateway_runtime, which session_gateway_runtime reads first
+    since: v0.22.5
+    # Hermes a04a835be9 ("a later Desktop/TUI pick replaces an older saved CLI route on reopen", canary
+    # 20261118); the workaround stays until a release carries it, then this entry and it get another look.
+    fixed_in: a04a835be9
+    workaround: dashboard/api/session_route.py writes the TUI's live route into gateway_runtime too
   - test: test_hermes_counts_a_hidden_ask_after_a_handoff
     signature: hidden ask skipped
     issue: kaishi00/hermes-conduit-notifier (compaction_skip, 2026-11-06)
     upstream: NousResearch/hermes-agent#80622's guard counts no display_kind row as an ask
     since: v0.22.3
     workaround: compaction_skip.py lets a hidden turn's own ask through Hermes' check
+  - test: test_hermes_keeps_a_notes_type_through_a_compaction
+    signature: folded note untyped
+    issue: kaishi00/hermes-conduit (cron report drawn as the user's bubble, 2026-11-15)
+    upstream: agent/compaction_display.py project_compaction_message_for_display drops the display_kind of a note whose row carries the summary
+    since: the canary with gateway/session_cron.py's local-chat note
+    workaround: Conduit reads the note by its metadata or first line (MessageNormalizer.isUntypedNote); artifacts_index.py _own_text reads the stored row
 
   - test: test_hermes_lists_memory_providers_without_parsing_the_plugin
     signature: plugin parsed
@@ -318,7 +405,7 @@ imports:
   gateway.platforms.base:
     optional: ["BasePlatformAdapter"]
   gateway.response_filters:
-    optional: ["is_autonomous_silence_response"]
+    optional: ["is_autonomous_silence_response", "is_intentional_silence_response", "strip_trailing_silence_marker"]
   gateway.restart:
     optional: ["DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT", "parse_restart_after_turn_timeout"]
   gateway.session_controls:
@@ -356,12 +443,20 @@ imports:
     optional: ["_candidate_homes", "live_work"]
   hermes_cli.gateway_runtime_start:
     optional: ["start_detached_replacement"]
+  hermes_cli.inventory:
+    optional: ["load_picker_context"]
+  hermes_cli.model_switch:
+    optional: ["switch_model"]
+  hermes_cli.models_validate:
+    optional: ["static_model_provider_conflict"]
   hermes_cli.plugins:
     required: ["invoke_hook"]
     optional: ["clear_thread_tool_whitelist", "set_thread_tool_whitelist"]
   hermes_cli.profiles:
     required: ["get_profile_dir"]
     optional: ["get_active_profile_name", "list_profile_names"]
+  hermes_cli.providers:
+    optional: ["resolve_provider_full"]
   hermes_cli.tools_config:
     optional: ["_get_platform_tools", "_get_plugin_toolset_keys"]
   hermes_cli.update_cmd_drain_report:
@@ -381,10 +476,6 @@ imports:
   hermes_constants:
     required: ["*", "get_hermes_home"]
     optional: ["get_default_hermes_root"]
-  hermes_state:
-    required: ["SessionDB"]
-  hermes_state_ids:
-    optional: ["new_session_id"]
   hermes_time:
     optional: ["now"]
   hermes_yaml:
@@ -411,6 +502,8 @@ imports:
     optional: ["cronjob"]
   tools.delegate_tool_registry:
     optional: ["interrupt_subagent"]
+  tools.interrupt:
+    optional: ["is_interrupted"]
   tools.memory_tool:
     required: ["MemoryStore", "get_builtin_memory_config", "get_builtin_memory_store_flags", "get_memory_dir"]
   tools.tool_backend_helpers:
@@ -464,8 +557,12 @@ module_paths:
   - hermes_cli/gateway
   - hermes_cli/gateway_lifecycle_guards
   - hermes_cli/gateway_runtime_start
+  - hermes_cli/inventory
+  - hermes_cli/model_switch
+  - hermes_cli/models_validate
   - hermes_cli/plugins
   - hermes_cli/profiles
+  - hermes_cli/providers
   - hermes_cli/tools_config
   - hermes_cli/update_cmd_drain_report
   - hermes_cli/web_routers
@@ -475,8 +572,6 @@ module_paths:
   - hermes_cli/web_server_files
   - hermes_cli/web_server_profiles
   - hermes_constants
-  - hermes_state
-  - hermes_state_ids
   - hermes_time
   - hermes_yaml
   - plugins/memory
@@ -489,6 +584,7 @@ module_paths:
   - tools/clarify_tool
   - tools/cronjob_tools
   - tools/delegate_tool_registry
+  - tools/interrupt
   - tools/memory_tool
   - tools/tool_backend_helpers
   - tools/voice_live
@@ -500,6 +596,9 @@ module_paths:
 # The plugin's routes under /api/plugins/conduit_push/, from dashboard/.
 routes:
   - GET /artifacts
+  - DELETE /artifacts/pins
+  - GET /artifacts/pins
+  - POST /artifacts/pins
   - GET /boards/checklists
   - POST /boards/checklists
   - GET /boards/desktop
@@ -513,12 +612,15 @@ routes:
   - PUT /calls
   - POST /calls/outcomes
   - PUT /calls/presence
+  - GET /calls/rings
   - GET /calls/waiting
   - POST /calls/waiting/answer
   - POST /calls/watches
   - DELETE /calls/watches/{watch_id}
   - PUT /calls/watches/{watch_id}
   - GET /capabilities
+  - GET /chats/done
+  - POST /chats/done
   - GET /conduit-prefs
   - PUT /conduit-prefs
   - GET /conduit-prefs/export
@@ -570,6 +672,8 @@ routes:
   - GET /notifications/reply-sources
   - PUT /notifications/reply-sources
   - POST /pair
+  - POST /pair/main
+  - POST /pair/remove
   - GET /personality
   - POST /phone/exchange
   - POST /phone/ingest
@@ -579,6 +683,8 @@ routes:
   - GET /predict
   - POST /predict
   - POST /present/exchange
+  - GET /profiles/plugin
+  - POST /profiles/plugin
   - GET /pulse
   - PUT /pulse
   - POST /pulse/acted
@@ -630,15 +736,18 @@ routes:
   - GET /rooms/identity
   - GET /rooms/invites
   - POST /rooms/invites/answer
+  - POST /rooms/invites/remove
   - POST /rooms/leave
   - DELETE /rooms/links
   - GET /rooms/links
   - POST /rooms/links
   - DELETE /rooms/links/invites
   - POST /rooms/links/invites
+  - PUT /rooms/links/own
   - POST /rooms/links/preview
   - GET /rooms/looks
   - PUT /rooms/looks
+  - GET /rooms/own-bots
   - GET /rooms/people
   - DELETE /rooms/sessions
   - GET /rooms/setup
@@ -651,7 +760,9 @@ routes:
   - GET /sessions/desktop-views
   - POST /sessions/history-page
   - POST /sessions/takeover
+  - GET /sessions/usage
   - POST /side-question
+  - GET /speech-server/presets
   - WS /speech-server/socket
   - GET /speech-server/status
   - POST /speech-server/test

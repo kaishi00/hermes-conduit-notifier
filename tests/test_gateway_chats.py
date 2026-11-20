@@ -7,6 +7,7 @@ import asyncio
 import pathlib
 import sys
 import threading
+import time
 import types
 
 import pytest
@@ -90,7 +91,8 @@ def test_a_create_takes_the_authoritys_shape_and_keeps_its_fences(gateway):
                     {"cols": 96, "source": "desktop", "title": "Job", "reasoning_effort": "low", "fast": True})
     assert created["result"]["session_id"] == "s1"
     sent = connections[0].requests[0]["params"]
-    assert sent == {"source": "gui", "title": "Job", "reasoning": "low", "service_tier": "fast"}
+    assert sent.pop("title").startswith("Job · ")  # issue 2521: never another chat's title
+    assert sent == {"source": "gui", "reasoning": "low", "service_tier": "fast"}
     assert chats._sessions.get("s1") == {"transport": transport}
     # A steer names the turn by its generation.
     _call(chats, transport, "session.steer", {"session_id": "s1", "text": "more"})
@@ -128,6 +130,21 @@ def test_a_refused_submit_leaves_no_surface_for_the_next_turn(gateway):
     answers["prompt.submit"] = {"result": {"status": "queued"}}
     _call(chats, transport, "prompt.submit", {"session_id": "drop-1", "text": "again"})
     assert turn_surface.note(False, "again", session_id="drop-1")
+
+
+def test_a_submit_the_owner_couldnt_confirm_keeps_its_surface(gateway):
+    """Issue 2522: SESSION_OWNER_UNCONFIRMED may already be queued, so its
+    turn keeps its surface line; a busy owner sent nothing, so it drops."""
+    chats, answers, _connections = gateway
+    transport = Transport()
+    answers["prompt.submit"] = {"error": {"code": 4090, "message": "may already be queued",
+                                          "data": {"reason": "SESSION_OWNER_UNCONFIRMED"}}}
+    assert _call(chats, transport, "prompt.submit", {"session_id": "unsure-1", "text": "maybe"})["error"]
+    assert turn_surface.note(False, "maybe", session_id="unsure-1")
+    answers["prompt.submit"] = {"error": {"code": 4090, "message": "mid-turn",
+                                          "data": {"reason": "SESSION_OWNER_BUSY"}}}
+    assert _call(chats, transport, "prompt.submit", {"session_id": "busy-1", "text": "later"})["error"]
+    assert turn_surface.note(False, "later", session_id="busy-1") is None
 
 
 def test_a_turn_the_authority_starts_at_once_keeps_its_surface(gateway):
@@ -552,6 +569,36 @@ def test_a_queue_read_hermes_refuses_is_read_again_at_the_next_send(gateway):
         "session.resume", "prompt.submit", "session.resume", "prompt.submit"]
 
 
+def test_a_titled_create_never_opens_another_chat_by_its_title(gateway):
+    """Issue 2521: the authority's titled create resolves an existing chat by
+    title (or its latest "<title> #N"), so two workstreams titled alike shared
+    one session. The plugin's creates ask for a title no other chat holds:
+    the request's tag at its end, the same on an exact retry."""
+    chats, answers, connections = gateway
+    answers["session.create"] = {"result": {"session_id": "w1", "subscription_id": "sub"}}
+    transport = Transport()
+    for _ in range(2):
+        _call(chats, transport, "session.create", {"title": "Login bug", "idempotency_key": "conduit-work-0a1b2c3d4e5f"})
+    first, retry = (request["params"] for request in connections[0].requests)
+    assert first["title"] == retry["title"] == "Login bug · 0a1b2c3d4e5f"
+    assert first["request_id"] == "conduit-work-0a1b2c3d4e5f"
+    # A create with no request id (a Watch call's) is tagged afresh each time.
+    _call(chats, transport, "session.create", {"title": "Watch call"})
+    _call(chats, transport, "session.create", {"title": "Watch call"})
+    calls = [request["params"]["title"] for request in connections[0].requests[2:]]
+    assert all(title.startswith("Watch call · ") and len(title) == len("Watch call · ") + 12 for title in calls)
+    assert calls[0] != calls[1]
+    # Within Hermes' 100 characters, the tag kept; the bot's one chat keeps its name.
+    assert len(gateway_chats.own_title("x" * 120, "k" * 10)) == 100
+    assert gateway_chats.own_title("x" * 120, "conduit-abcdef123456").endswith("x · abcdef123456")
+    # A long title is cut at its last whole word.
+    words = " ".join(["word"] * 30)
+    cut = gateway_chats.own_title(words, "conduit-abcdef123456")
+    assert len(cut) <= 100 and cut.endswith("word · abcdef123456") and "wor ·" not in cut
+    # Even "Bot Chat": no plugin create means the bot's one chat.
+    assert gateway_chats.own_title("Bot Chat", "conduit-abcdef123456") == "Bot Chat · abcdef123456"
+
+
 def test_a_sibling_profiles_chat_is_read_and_answered_by_its_profile(gateway):
     """On a gateway serving several profiles the authority finds a sibling's
     chat only by the profile a request names, so the link's own reads (its
@@ -653,6 +700,18 @@ def test_a_views_own_record_answers_which_approvals_a_chat_waits_on(gateway, mon
     fresh = Transport()
     _call(chats, fresh, "session.resume", {"session_id": "w2", "omit_messages": True})
     assert chats.seen_approvals(fresh, "/home", "w2") == []
+    # A settled record runs out (notifier 773): once older than SETTLED_KEPT_S it stops masking a
+    # snapshot that lists the prompt, and a settle heard later sweeps it without another read.
+    stale = time.monotonic() - gateway_chats.SETTLED_KEPT_S - 1
+    link.settled["p5"] = stale
+    link.settled["gone"] = stale
+    link.write(_event("w1", "approval.settled", {"prompt_id": "p6"}, generation=5))
+    assert "gone" not in link.settled and "p5" not in link.settled and "p6" in link.settled
+    answers["session.resume"] = lambda request: {"result": {
+        "session_id": "w1", "execution_generation": 5, "subscription_id": "sub",
+        "prompts": [{"kind": "approval", "prompt_id": "p5", "execution_generation": 5, "command": "new"}]}}
+    _call(chats, transport, "session.resume", {"session_id": "w1", "omit_messages": True})
+    assert [row["request_id"] for row in chats.seen_approvals(transport, "/home", "w1")] == ["p5"]
     # Closing the view forgets what it followed of the chat.
     _call(chats, transport, "session.close", {"session_id": "w1"})
     assert chats.seen_approvals(transport, "/home", "w1") is None

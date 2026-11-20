@@ -160,6 +160,226 @@ async def get_artifacts(response: Response, profile: Optional[str] = None, befor
     return {"ok": True, **page}
 
 
+# /artifacts/pins: the artifacts the user saved (artifact_pins.py in the
+# plugin's folder, hermes-conduit#2467), shared by every device signed in to
+# the profile. GET lists them, the one saved last first; POST saves one (its
+# row from /artifacts, as {"item": …, "note": …}) and keeps a copy of a file
+# so it opens after its chat or file is gone, or changes a saved one's note;
+# DELETE ?id=<path or URL> unsaves it and removes the copy.
+
+ARTIFACT_PINS_LIMIT = 60
+ARTIFACT_PINS_WINDOW_S = 60.0
+ARTIFACT_PINS_MAX_BODY_BYTES = 32 * 1024
+_artifact_pins_limiter = core._MintLimiter(ARTIFACT_PINS_LIMIT, ARTIFACT_PINS_WINDOW_S,
+                                           message="Too many saved-artifact requests; try again shortly")
+_artifact_pins_module: Any = None
+# Saves copy files: two at a time on workers of their own, so a slow copy
+# never holds the shared workers; a third is turned away rather than queued.
+_artifact_pins_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="conduit-artifact-pins")
+_artifact_pins_slots = threading.BoundedSemaphore(2)
+
+
+def _artifact_pins() -> Any:
+    """artifact_pins.py in the plugin's folder, loaded once."""
+    global _artifact_pins_module
+    with _artifacts_module_lock:
+        if _artifact_pins_module is None:
+            path = os.path.join(core._plugin_root(), "artifact_pins.py")
+            spec = importlib.util.spec_from_file_location("conduit_push_dashboard_artifact_pins", path)
+            if spec is None or spec.loader is None or not os.path.isfile(path):
+                raise core.TokenError(501, "This plugin install is missing artifact_pins.py; update the plugin")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _artifact_pins_module = module
+        return _artifact_pins_module
+
+
+def artifact_pins(action: str, body: Any = None, profile: Optional[str] = None) -> Dict[str, Any]:
+    """Runs inside the profile scope: the pins are the profile's."""
+    module = _artifact_pins()
+    store = module.PinStore(core._calls_home(), sensitive=_secret_path,
+                            source=_pin_source(profile) if action == "save" else (lambda path: (None, "unreadable")))
+    try:
+        if action == "save":
+            return store.save(body)
+        if action == "remove":
+            return store.remove(body)
+        return store.view()
+    except module.PinError as exc:
+        raise core.TokenError(409 if exc.code == "too_many" else 400, str(exc))
+
+
+
+class _BoundaryUnknown(Exception):
+    """Hermes has a managed-files policy but couldn't say what it is."""
+
+
+def _managed_boundary() -> Optional[str]:
+    """The one folder a hosted or locked install keeps its files under, as
+    Hermes' own file routes do there (its real path), or None on an install
+    with none: a personal one, or a Hermes from before the policy existed.
+    A policy Hermes has but can't read (an unreadable file, an upstream
+    change) raises _BoundaryUnknown: an unknown limit is never no limit
+    (notifier issue 834)."""
+    try:
+        from hermes_cli.web_server_files import _managed_files_policy
+    except ImportError:
+        return None
+    try:
+        locked = _managed_files_policy(None, create_root=False).locked_root
+        boundary = os.path.realpath(str(locked)) if locked is not None else None
+    except Exception as exc:
+        # On Conduit's plugin page too, until the policy reads again.
+        _note_degraded(True)
+        global _boundary_unknown_logged
+        if not _boundary_unknown_logged:
+            _boundary_unknown_logged = True
+            logger.warning("Conduit workspace files: Hermes' managed-files policy couldn't be read (%s); "
+                           "workspace files are refused until it can", type(exc).__name__)
+        raise _BoundaryUnknown() from exc
+    _note_degraded(False)
+    return boundary
+
+
+_boundary_unknown_logged = False
+
+
+def _note_degraded(unknown: bool) -> None:
+    """Whether the Folder is refusing for an unreadable files policy, for
+    the capabilities route's ``degraded`` (degraded.py); never fails a read."""
+    try:
+        module = core._plugin_package_module("degraded")
+        (module.note if unknown else module.clear)(module.WORKSPACE_FILES)
+    except Exception:  # noqa: BLE001 — a plugin folder without degraded.py
+        logger.debug("Conduit workspace files: couldn't note the Folder's state", exc_info=True)
+
+
+def _pin_source(profile: Optional[str]) -> Callable[[str], tuple]:
+    """Where on this host a saved file is read from for its copy: only a
+    file the Folder would open, as _host_file_check decides. A profile whose
+    files are on its SSH machine, or a path past a hosted install's folder,
+    is saved without a copy."""
+    try:
+        from hermes_cli.web_routers.files import _fs_backend, _fs_profile_home
+        remote = _fs_backend(profile) is not None
+        home = None if remote else _fs_profile_home(profile)
+    except Exception:
+        # Without Hermes' own routing an SSH profile's path would be read on
+        # this host: copy nothing.
+        return lambda path: (None, "unreadable")
+    if remote:
+        return lambda path: (None, "remote")
+    try:
+        from hermes_cli.web_server_files import _agent_fs_path
+    except Exception:
+        _agent_fs_path = None
+    try:
+        boundary = _managed_boundary()
+    except _BoundaryUnknown:
+        # Saved without a copy: where the copy may come from isn't known.
+        return lambda path: (None, "unreadable")
+
+    def source(path: str) -> tuple:
+        try:
+            target = str(_agent_fs_path(path, profile_home=home)) if _agent_fs_path is not None else path
+        except Exception:  # saved without a copy rather than not at all
+            return None, "unreadable"
+        if boundary is not None:
+            # A path that can't be resolved can't be shown to be inside the
+            # folder: it says so, rather than that it can't be read.
+            try:
+                real = os.path.realpath(target)
+            except (OSError, ValueError):
+                return None, "outside"
+            if real != boundary and not real.startswith(boundary.rstrip(os.sep) + os.sep):
+                return None, "outside"
+        return target, None
+
+    return source
+
+
+def _secret_path(path: str) -> bool:
+    """A file the Folder won't show (``.env``, keys, credentials): saved
+    without a copy, so its contents never sit under another name."""
+    try:
+        if _workspace_files().default_sensitive(path):
+            return True
+    except Exception:  # without the denylist, nothing is copied
+        return True
+    try:
+        from hermes_cli.web_routers.files import _is_sensitive_path
+    except Exception:
+        return False
+    try:
+        return bool(_is_sensitive_path(Path(path)))
+    except Exception:
+        return True
+
+
+async def _artifact_pins_route(profile: Optional[str], run: Callable[[], Dict[str, Any]],
+                               copies: bool = False) -> Dict[str, Any]:
+    job = core._limited(_artifact_pins_limiter, profile, run)
+    executor = None
+    # A save holds its slot until its copy ends, as /artifacts holds its
+    # reader: freed by the job once it started, else by this request.
+    state = {"started": False, "abandoned": False}
+    state_lock = threading.Lock()
+    if copies:
+        if not _artifact_pins_slots.acquire(blocking=False):
+            raise HTTPException(status_code=503, detail="Hermes is still saving artifacts; try again shortly",
+                                headers={"Cache-Control": "no-store"})
+        executor = _artifact_pins_executor
+        limited = job
+
+        def job() -> Dict[str, Any]:
+            with state_lock:
+                if state["abandoned"]:
+                    # Nobody awaits this answer any more: say so without
+                    # raising, so no unretrieved exception is logged.
+                    return {"cancelled": True}
+                state["started"] = True
+            try:
+                return limited()
+            finally:
+                _artifact_pins_slots.release()
+
+    try:
+        return {"ok": True, **(await core._run_scoped(profile, job, executor))}
+    except BaseException as exc:
+        if copies:
+            with state_lock:
+                if not state["started"]:
+                    state["abandoned"] = True
+                    _artifact_pins_slots.release()
+        if isinstance(exc, core.TokenError):
+            raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
+        if isinstance(exc, HTTPException):
+            exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+            raise
+        if isinstance(exc, Exception):
+            raise core._unexpected("pins", exc, feature="Saved artifacts")
+        raise
+
+
+@router.get("/artifacts/pins")
+async def get_artifact_pins(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _artifact_pins_route(profile, lambda: artifact_pins("view"))
+
+
+@router.post("/artifacts/pins")
+async def post_artifact_pin(request: Request, response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    body = await core._read_json_body(request, ARTIFACT_PINS_MAX_BODY_BYTES)
+    return await _artifact_pins_route(profile, lambda: artifact_pins("save", body, profile), copies=True)
+
+
+@router.delete("/artifacts/pins")
+async def delete_artifact_pin(response: Response, id: str, profile: Optional[str] = None) -> Dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await _artifact_pins_route(profile, lambda: artifact_pins("remove", id))
+
+
 
 # GET /workspace/resolve: where a file a chat's reply names by its name or a
 # relative path is (hermes-conduit#1809), from the chat's folder, its git
@@ -233,11 +453,12 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
     boundary = None
     if not remote:
         try:
-            from hermes_cli.web_server_files import _managed_files_policy
-            locked = _managed_files_policy(None, create_root=False).locked_root
-            boundary = os.path.realpath(str(locked)) if locked is not None else None
-        except Exception:
-            boundary = None
+            boundary = _managed_boundary()
+        except _BoundaryUnknown:
+            # No file is one the Folder would open while its limit is unknown.
+            unknown = lambda path: False
+            unknown.checks_host = True  # type: ignore[attr-defined]
+            return unknown
 
     def exists(path: str) -> bool:
         try:
@@ -383,15 +604,15 @@ def _workspace(profile: Optional[str]) -> Any:
     # A hosted or locked install keeps its files under one folder, as
     # Hermes' own file routes do there; a personal install has none.
     try:
-        from hermes_cli.web_server_files import _managed_files_policy
-        boundary = _managed_files_policy(None, create_root=False).locked_root
-    except Exception:
-        boundary = None
-    return module.LocalWorkspace(resolve, sensitive, boundary=str(boundary) if boundary is not None else None)
+        boundary = _managed_boundary()
+    except _BoundaryUnknown:
+        raise core.TokenError(503, "Hermes couldn't read which folder its files are kept in; "
+                                   "check the host's files settings and try again")
+    return module.LocalWorkspace(resolve, sensitive, boundary=boundary)
 
 
 async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, Any]], *, walks: bool = False,
-                          name: str = "request", limited: bool = False) -> Dict[str, Any]:
+                          name: str = "request", limited: bool = False, changes: bool = False) -> Dict[str, Any]:
     no_store = {"Cache-Control": "no-store"}
     if not limited:
         await core._scoped_acquire(_workspace_limiter, profile)
@@ -414,7 +635,14 @@ async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, 
                 _workspace_walks.release()
 
     try:
-        _workspace_files()  # loaded first, so its error type is known below
+        try:
+            _workspace_files()  # loaded first, so its error type is known below
+        except BaseException:
+            # No walk ran to free its slot: two such failures would
+            # otherwise refuse every search until the dashboard restarts.
+            if walks:
+                _workspace_walks.release()
+            raise
         try:
             result = await asyncio.wait_for(core._run_scoped(profile, job, _workspace_executor),
                                             timeout=WORKSPACE_TIMEOUT_S)
@@ -431,6 +659,13 @@ async def _workspace_call(profile: Optional[str], op: Callable[[Any], Dict[str, 
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers=no_store)
     except asyncio.TimeoutError:
+        # A change that started keeps running on its thread and may still
+        # land: the answer says so, and Conduit reads the folder again
+        # rather than repeating a change whose result it doesn't know
+        # (notifier issue 834).
+        if changes and state["started"]:
+            raise HTTPException(status_code=504, detail="That's taking too long and may still finish; "
+                                                        "check the folder before trying again", headers=no_store)
         raise HTTPException(status_code=504, detail="That took too long; try again", headers=no_store)
     except Exception as exc:
         workspace_error = getattr(_workspace_module, "WorkspaceError", None)
@@ -530,4 +765,4 @@ async def post_workspace(action: str, request: Request, response: Response,
         except (ValueError, binascii.Error):
             raise HTTPException(status_code=400, detail="data must be base64", headers=no_store)
         op = lambda ws: ws.upload(root, folder, name, data, overwrite)
-    return await _workspace_call(profile, op, name=action, limited=True)
+    return await _workspace_call(profile, op, name=action, limited=True, changes=True)

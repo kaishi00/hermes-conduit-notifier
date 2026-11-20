@@ -48,9 +48,20 @@ ROUTE_CAPABILITIES = (
     "turn-surface",
     # POST /turn-surface/discard: forgets a report whose send failed.
     "turn-surface-discard",
+    # POST /turn-surface takes `windows`: Conduit for desktop on a Windows PC.
+    "turn-surface-windows",
     # POST /sessions/history-page: Hermes' page of a chat's rows, the ones
     # Conduit holds sent as their fingerprints.
     "history-page",
+    # GET /sessions/usage: one chat's tokens and cost, its compressions and
+    # subagent runs included (hermes-conduit#2699).
+    "session-usage",
+    # GET/POST /chats/done: the chats the user or their agent marked done
+    # (chat_marks_store), and the conduit_chat_done tool.
+    "chat-done",
+    # GET/POST /profiles/plugin: whether a bot's profile has this plugin on,
+    # and turning it on there (New Bot and Edit Bot, hermes-conduit#2803).
+    "bot-plugin",
     "hermes-calls",
     "hermes-call-presence",
     "hermes-call-outcomes",
@@ -178,6 +189,10 @@ ROUTE_CAPABILITIES = (
     # /inbox: events the user's Shortcuts automations log (Log to Hermes).
     "shortcut-inbox",
     "pairing",
+    # POST /pair with "also", /pair/remove, /pair/main and GET /e2e's
+    # "devices": a profile paired with several devices, each notified
+    # (hermes-conduit#2758).
+    "pairing-devices",
     "self-restart",
     # POST /self/update runs the whole update on the host and notifies.
     "self-update",
@@ -211,6 +226,9 @@ ROUTE_CAPABILITIES = (
     "speech-server",
     "local-live-agent",
     "artifacts",
+    # /artifacts/pins: artifacts saved in Conduit, with a copy of each file
+    # kept on the host (hermes-conduit#2467).
+    "artifact-pins",
     # /workspace/*: the Folder tab's listings, search, recent files and file actions.
     "workspace-files",
     # GET /workspace/resolve: where a file a reply names by its name is, from
@@ -229,12 +247,22 @@ ROUTE_CAPABILITIES = (
     # /rooms/identity and /rooms/links: Links between this installation and
     # other people's, for Linked Rooms (no profile: they're the installation's).
     "room-links",
+    # PUT /rooms/links/own: a Link between your own Hermes; a room whose
+    # other installations all came over Links both sides marked runs without
+    # the owner's room rules (multi-instance plan, Rooms 1).
+    "room-own-links",
+    # GET /rooms/own-bots and /rooms/drafts' bring: your other Hermes' bots
+    # over an own Link, listed in New Group Chat and joining by themselves.
+    "room-own-bots",
     # GET/POST /rooms/setup: this Hermes' API server, a profile's room
     # ceiling and approvals, set up for Linked Rooms.
     "room-setup",
     # /rooms/drafts, /rooms/invites and /rooms/people: rooms with people
     # you've linked, from the draft to the start (Linked Rooms).
     "room-invites",
+    # POST /rooms/invites/remove: a finished invite taken off Group Chats on
+    # every phone, shown with removed true (hermes-conduit#2644).
+    "room-invites-remove",
     # ?conduit_profile= on the routes that need the dashboard process (Local
     # Live, the speech server and Grok Live sockets, Watch grants, chat
     # takeover, Desktop views, predictions): any profile's, on a Hermes that
@@ -296,6 +324,9 @@ ROUTE_CAPABILITIES = (
     # POST /workstreams/adopt: a voice call's job kept in its bot's registry,
     # in the Work panel marked as a call's (Bot workstreams M5).
     "work-adopt",
+    # GET /calls/rings: the calls that just went out, so Conduit on a
+    # computer rings for them beside the iPhone (Calls from Hermes).
+    "call-rings",
     # POST /workstreams/call-ended: a call kept with the Bot Chat ended in
     # any voice mode, so the updates its workstreams held go out.
     "work-call-ended",
@@ -380,7 +411,21 @@ async def get_capabilities(response: Response) -> Dict[str, Any]:
             body["managed_by"] = managed
     if _room_chats_kept():
         body["room_chats_kept"] = True
+    degraded = _degraded()
+    if degraded:
+        body["degraded"] = degraded
     return body
+
+
+def _degraded() -> list:
+    """What the plugin can't do on this Hermes right now (degraded.py's
+    codes: `workstream-recovery`, `workspace-files`), so Conduit's plugin
+    page says what otherwise only the host's log does. None when that
+    can't be read."""
+    try:
+        return [code for code in core._plugin_package_module("degraded").current() if isinstance(code, str)]
+    except Exception:  # noqa: BLE001 — the capabilities answer never fails for it
+        return []
 
 
 def _room_chats_kept() -> bool:

@@ -24,9 +24,12 @@ MODULES = (
     "local_live",
     "local_live_read_back",
     "local_live_agent",
+    "local_live_own_model",
     "voice_calls",
     "chats",
     "history",
+    "session_usage",
+    "chat_marks",
     "pairing",
     "notifications",
     "hermes_calls",
@@ -41,6 +44,7 @@ MODULES = (
     "watch_local_live",
     "link_status",
     "desktop_views",
+    "session_route",
     "rooms",
     "workspace",
     "workstreams",
@@ -48,6 +52,7 @@ MODULES = (
     "boards",
     "capabilities",
     "self_update",
+    "bot_plugin",
 )
 
 

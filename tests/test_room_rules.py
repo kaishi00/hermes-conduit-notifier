@@ -5,6 +5,7 @@ import json
 import logging
 import pathlib
 import sqlite3
+import time
 import sys
 import types
 
@@ -165,7 +166,7 @@ def test_a_room_session_with_others_is_told_apart_on_each_side(tmp_path):
     _room(home / "state.db", "room-b", [FURINA, LAIFU])
     _room_session(home, "s-home", "room-b")
     assert rules.room_turn("s-home", home) == rules.RoomTurn(
-        room_id="room-b", side="home", with_others=True, session_id="s-home", others=("laifu",))
+        room_id="room-b", side="home", with_others=True, session_id="s-home", others=("laifu",), peers=("mona",))
     # Only this host's own agents: today's rooms.
     _room(home / "state.db", "room-c", [FURINA, NAHIDA])
     _room_session(home, "s-local", "room-c")
@@ -199,7 +200,7 @@ def test_a_compacted_room_session_keeps_its_room(tmp_path):
     # Hermes titles the continuation after its parent's.
     _session(home, "s-child", source="bot_room", title="Group: room-b #2", parent="s-home")
     assert rules.room_turn("s-child", home) == rules.RoomTurn(
-        room_id="room-b", side="home", with_others=True, session_id="s-child", others=("laifu",))
+        room_id="room-b", side="home", with_others=True, session_id="s-child", others=("laifu",), peers=("mona",))
     _room_session(home, REMOTE, "room-a", end_reason="compression")
     _session(home, "s-remote-child", source="bot_room", title="Group: room-a #2", parent=REMOTE)
     assert rules.room_turn("s-remote-child", home) == rules.RoomTurn(
@@ -220,7 +221,7 @@ def test_a_room_session_keeps_its_room_when_compaction_moves_its_title(tmp_path)
     # The continuation holds the title now, and each session before it is untitled.
     for session_id in ("s-home-3", "s-home-2", "s-home"):
         assert rules.room_turn(session_id, home) == rules.RoomTurn(
-            room_id="room-b", side="home", with_others=True, session_id=session_id, others=("laifu",)), session_id
+            room_id="room-b", side="home", with_others=True, session_id=session_id, others=("laifu",), peers=("mona",)), session_id
     # A room hosted elsewhere: its own choices still apply after a compaction.
     _room_session(home, REMOTE, "room-a")
     _compact(home, REMOTE, "s-remote-2")
@@ -302,7 +303,7 @@ def test_a_room_session_is_read_again_until_it_has_its_title(tmp_path):
     _title(home, "s-home", "Group: room-b")
     _title(home, REMOTE, "Group: room-a")
     assert rules.room_turn("s-home", home) == rules.RoomTurn(
-        room_id="room-b", side="home", with_others=True, session_id="s-home", others=("laifu",))
+        room_id="room-b", side="home", with_others=True, session_id="s-home", others=("laifu",), peers=("mona",))
     assert rules.room_turn(REMOTE, home).room_id == "room-a"
     # A legacy Desktop group's title carries its display name: no room, so no others.
     _session(home, "s-desktop", source="bot_room", title="Group: Family chat")
@@ -449,6 +450,10 @@ def host(tmp_path, monkeypatch):
     _room_session(home, REMOTE, "room-a")
     _session(home, "s-chat")
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: home)
+    # The coordinator's checks read this host's home too, never the tests'
+    # shared HERMES_HOME, where another test's workstreams registry would
+    # hold this host's tools back (seen on CI with the workers' order).
+    monkeypatch.setattr(plugin.work_tool, "_pinned_home", home)
     return home
 
 
@@ -1269,10 +1274,17 @@ def test_conduit_rooms_only_leaves_other_rooms_turns_as_hermes_runs_them(tmp_pat
     assert rules.room_turn("s-desktop", home) is None
     assert rules.room_turn(REMOTE, home) is None
     assert rules.room_turn("s-conduit", home) == rules.RoomTurn(
-        room_id="conduit-0f8e", side="home", with_others=True, session_id="s-conduit", others=("laifu",))
+        room_id="conduit-0f8e", side="home", with_others=True, session_id="s-conduit", others=("laifu",), peers=("mona",))
     # A remote room's session not named yet still gets the rules.
     other = "room_" + "fedcba9876543210" * 2
     assert rules.room_turn(other, home).with_others
+
+    # Whether a session is in a room at all doesn't follow the setting
+    # (clarify_loop keeps every room's questions off the owner's card).
+    assert rules.in_a_room("s-desktop", home) and rules.in_a_room(REMOTE, home)
+    assert rules.in_a_room("s-conduit", home)
+    _session(home, "s-chat", source="cron", title="Daily digest")
+    assert not rules.in_a_room("s-chat", home)
 
     _conduit_rooms_only(home, False)
     assert rules.room_turn("s-desktop", home).with_others
@@ -1307,3 +1319,225 @@ def test_conduit_rooms_only_searches_a_left_out_room_whole(host):
     kept = json.loads(_search(found, query="x"))["results"]
     assert [entry["session_id"] for entry in kept] == ["s-chat"]
     assert json.loads(_search(read, session_id="s-home-2"))["success"] is False
+
+
+# --- Rooms of the owner's own Hermes (multi-instance plan, Rooms 1) -------------
+
+
+class _Rooms:
+    """rooms.json as room_rules reads it: the invites a member's Hermes joined from."""
+
+    def __init__(self, invites=None, drafts=None):
+        self.state = {"invites": invites or {}, "drafts": drafts or {}}
+
+    def __call__(self, root):
+        return self
+
+    def read(self):
+        return self.state
+
+
+def _seconds_later():
+    """OWN_VERDICT_TTL_S on: what _lifted kept for a room is read again."""
+    with rules._lock:
+        for key, (until, inputs, lifted, others) in list(rules._own_verdicts.items()):
+            rules._own_verdicts[key] = (until - rules.OWN_VERDICT_TTL_S - 1, inputs, lifted, others)
+
+
+def _own(monkeypatch, links, rooms=None, just_me=()):
+    from conduit_push import room_invites, room_links
+
+    monkeypatch.setattr(room_links, "own_links", lambda root: frozenset(links))
+    monkeypatch.setattr(room_invites, "Store", rooms or _Rooms())
+    monkeypatch.setattr(rules, "_just_me_links", lambda room_id, home: just_me)
+    # Marking or unmarking a Link writes links.json, which ends what _lifted
+    # kept; these stand-ins write nothing, so they end it here.
+    rules._own_verdicts.clear()
+    return room_invites.peer_id
+
+
+def test_a_room_whose_others_all_came_over_own_links_runs_as_your_own(tmp_path, monkeypatch):
+    peer_id = _own(monkeypatch, {"own-link"})
+    home = tmp_path / "hermes"
+    laifu = {**LAIFU, "target": {**LAIFU["target"], "peer_id": peer_id("own-link")}}
+    _room(home / "state.db", "room-own", [FURINA, laifu])
+    _room_session(home, "s-own", "room-own")
+    turn = rules.room_turn("s-own", home)
+    assert (turn.side, turn.with_others, turn.others) == ("home", False, ())
+    # Someone else's agent joining later brings the rules back, though the turn is remembered.
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("UPDATE hosted_rooms SET members_json = ? WHERE room_id = 'room-own'",
+                 (json.dumps([FURINA, laifu, LAIFU]),))
+    conn.commit()
+    conn.close()
+    _seconds_later()
+    assert rules.room_turn("s-own", home).with_others
+    # Another person's agent beside it keeps the rules.
+    _room(home / "state.db", "room-mixed", [FURINA, laifu, LAIFU])
+    _room_session(home, "s-mixed", "room-mixed")
+    assert rules.room_turn("s-mixed", home).with_others
+
+
+def test_unmarking_the_own_link_brings_the_rules_back_from_the_next_call(tmp_path, monkeypatch):
+    peer_id = _own(monkeypatch, {"own-link"})
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-own", [FURINA, {**LAIFU, "target": {**LAIFU["target"],
+                                                                       "peer_id": peer_id("own-link")}}])
+    _room_session(home, "s-own", "room-own")
+    assert not rules.room_turn("s-own", home).with_others
+    _own(monkeypatch, set())
+    assert rules.room_turn("s-own", home).with_others  # remembered, and still read each time
+
+
+def test_a_just_me_person_counts_only_over_an_own_link(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-c", [FURINA, NAHIDA])
+    _room_session(home, "s-local", "room-c")
+    _own(monkeypatch, {"own-link"}, just_me=("someone-else",))
+    assert rules.room_turn("s-local", home).with_others
+    rules.forget()
+    _own(monkeypatch, {"own-link"}, just_me=("own-link",))
+    assert not rules.room_turn("s-local", home).with_others
+    rules.forget()
+    _own(monkeypatch, {"own-link"}, just_me=None)  # rooms.json unreadable
+    assert rules.room_turn("s-local", home).with_others
+
+
+def test_a_members_hermes_runs_a_room_from_its_own_hermes_as_at_home(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    _room_session(home, REMOTE, "room-a")
+    _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    assert rules.room_turn(REMOTE, home) == rules.RoomTurn(
+        room_id="room-a", side="member", with_others=False, session_id=REMOTE, own=True)
+    assert rules.own_guest_room(tmp_path, "room-a", "own-link")
+    assert not rules.own_guest_room(tmp_path, "room-a", "another-link")
+    # Someone else invited too, even by a name: the rules hold.
+    _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": ["Mona"]}}))
+    assert rules.room_turn(REMOTE, home).with_others
+    # Hosted over a Link that isn't an own one.
+    _own(monkeypatch, {"own-link"}, _Rooms({"other/room-a": {"link": "other", "people": []}}))
+    assert rules.room_turn(REMOTE, home).with_others
+    # A session not titled with its room yet keeps the careful answer.
+    _session(home, "room_" + "f" * 32, source="bot_room")
+    assert rules.room_turn("room_" + "f" * 32, home).with_others
+
+
+def test_a_rooms_json_that_cant_be_read_keeps_the_rules(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    _room_session(home, REMOTE, "room-a")
+
+    class Broken(_Rooms):
+        def read(self):
+            raise OSError("no")
+
+    _own(monkeypatch, {"own-link"}, Broken())
+    assert rules.room_turn(REMOTE, home).with_others
+    assert not rules.own_guest_room(tmp_path, "room-a")
+
+
+def test_past_chat_search_finds_a_room_from_your_own_other_hermes_while_the_link_is_marked(host, monkeypatch):
+    found = {"success": True, "mode": "discover", "query": "otter", "detail": "adaptive", "results": [
+        _entry(REMOTE, "bot_room", "Group: room-a"), _entry("s-chat", "tui", "Bike plans")],
+        "count": 2, "sessions_searched": 2, "link_hint": "..."}
+    _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    assert _search(found, query="otter") is None  # nothing withheld
+    read = {"success": True, "mode": "read", "session_id": REMOTE, "link": f"@session:default/{REMOTE}",
+            "session_meta": {"source": "bot_room", "title": "Group: room-a"}, "messages": []}
+    assert _search(read, session_id=REMOTE) is None
+    _own(monkeypatch, set(), _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    assert [entry["session_id"] for entry in json.loads(_search(found, query="otter"))["results"]] == ["s-chat"]
+    assert json.loads(_search(read, session_id=REMOTE))["success"] is False
+
+
+def test_a_room_of_your_own_hermes_tells_its_turn_to_use_its_home_tools(host, notes, monkeypatch):
+    # Seen on .52/.58 (2026-11-14): a far bot whose earlier turns ran under the room's rules kept reaching for the
+    # room's tools instead of its terminal, so the turn is told the rules are off, beside its usual notes.
+    _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    assert rules.room_turn(REMOTE, host).own
+    context = _context(REMOTE)
+    assert rules.OWN_FRAMING in context and rules.FRAMING_HEAD not in context
+    assert NOTES["conduit_first"] in context
+    _own(monkeypatch, set(), _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    context = _context(REMOTE)
+    assert rules.FRAMING_HEAD in context and rules.OWN_FRAMING not in context
+    # The pictures its messages name still reach it, since the peer route carries none.
+    peer_id = _own(monkeypatch, {"own-link"}, _Rooms({"own-link/room-a": {"link": "own-link", "people": []}}))
+    picture = str(host / "conduit" / "room-files" / ("20261114-" + "a" * 32) / "shot.jpg")
+    result = plugin._pre_llm_call(session_id=REMOTE, turn_id="t2", platform="api_server",
+                                  user_message=f"look\n@file:{picture}", conversation_history=[])
+    assert rules.TURN_PICTURES_LINE.format(count="a picture", them="it") in result["context"]
+    # On the room's home too, when everyone from elsewhere came over an own Link.
+    laifu = {**LAIFU, "target": {**LAIFU["target"], "peer_id": peer_id("own-link")}}
+    _room(host / "state.db", "room-own", [FURINA, laifu])
+    _room_session(host, "s-own", "room-own")
+    context = _context("s-own")
+    assert rules.OWN_FRAMING in context and rules.FRAMING_HEAD not in context
+    # A home room with no one from another installation is no room of your own Hermes: no note.
+    assert rules.OWN_FRAMING not in _context("s-local") and rules.OWN_FRAMING not in _context("s-chat")
+
+
+def test_a_rooms_own_links_verdict_is_kept_until_links_json_changes_or_seconds_pass(tmp_path, monkeypatch):
+    # Notifier issue 821: every tool call in a group room read links.json and
+    # the room stores again. What _lifted found is kept while links.json and
+    # rooms.json are unchanged, for seconds at most.
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-b", [FURINA, LAIFU])
+    _room_session(home, "s-b", "room-b")
+    reads = []
+    real_members = rules._room_members
+    monkeypatch.setattr(rules, "_room_members", lambda room_id, at: reads.append(room_id) or real_members(room_id, at))
+    assert rules.room_turn("s-b", home).with_others
+    first = len(reads)
+    for _ in range(5):
+        assert rules.room_turn("s-b", home).with_others
+    assert len(reads) == first, "nothing read again while nothing changed"
+    links = home / "conduit-rooms" / "links.json"
+    links.parent.mkdir(parents=True, exist_ok=True)
+    links.write_text('{"links": {}}')
+    assert rules.room_turn("s-b", home).with_others
+    assert len(reads) == first + 1, "a write to links.json is seen on the next call"
+    _seconds_later()
+    rules.room_turn("s-b", home)
+    assert len(reads) == first + 2, "and the roster again seconds later"
+
+
+def test_a_room_in_use_keeps_its_verdict_at_the_cap(tmp_path, monkeypatch):
+    # The cap drops the room used longest ago, not the one written first.
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-h", [FURINA, LAIFU])
+    _room_session(home, "s-h", "room-h")
+    monkeypatch.setattr(rules, "MAX_OWN_VERDICTS", 2)
+    assert rules.room_turn("s-h", home).with_others
+    hot = (str(home), "room-h", "home")
+    inputs = rules._own_inputs(home)
+    far = time.monotonic() + 60
+    with rules._lock:
+        rules._own_verdicts[("x", "older", "home")] = (far, inputs, False, None)
+        rules._own_verdicts.move_to_end(hot, last=False)
+    reads = []
+    real_members = rules._room_members
+    monkeypatch.setattr(rules, "_room_members", lambda room_id, at: reads.append(room_id) or real_members(room_id, at))
+    rules.room_turn("s-h", home)
+    with rules._lock:
+        rules._own_verdicts[("x", "newer", "home")] = (far, inputs, False, None)
+        while len(rules._own_verdicts) > rules.MAX_OWN_VERDICTS:
+            rules._own_verdicts.popitem(last=False)
+        assert hot in rules._own_verdicts and ("x", "older", "home") not in rules._own_verdicts
+    assert reads == []
+
+
+def test_a_later_joiner_is_named_in_the_rooms_framing(tmp_path):
+    # Notifier issue 788: the remembered turn named the first roster's others.
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-j", [FURINA, LAIFU])
+    _room_session(home, "s-j", "room-j")
+    assert rules.room_turn("s-j", home).others == ("laifu",)
+    newcomer = {**LAIFU, "member_id": "kirara", "handle": "kirara", "display_name": "Kirara"}
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("UPDATE hosted_rooms SET members_json = ? WHERE room_id = 'room-j'",
+                 (json.dumps([FURINA, LAIFU, newcomer]),))
+    conn.commit()
+    conn.close()
+    _seconds_later()
+    turn = rules.room_turn("s-j", home)
+    assert turn.with_others and turn.others == ("laifu", "kirara")

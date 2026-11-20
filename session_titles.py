@@ -98,8 +98,15 @@ def _bot_name(home: Any) -> str:
     one. A name that is only the id names it no more than the id (Conduit's
     BotProfile.displayLabel). A name given the main bot in Conduit stays on
     the phone, so the push says Hermes and the phone swaps the name in."""
-    given = _given_name(home)
-    profile = _profile_of(home)
+    return shown_name(_given_name(home), _profile_of(home))
+
+
+def shown_name(given: str, profile: str) -> str:
+    """_bot_name's rule for a name already read (bot_name()) and its profile
+    id: the given name, else the id capitalized, and "Hermes" for the main
+    bot. Calls and the pairing's default name say it (issue 2540)."""
+    given = " ".join(str(given or "").split())
+    profile = str(profile or "").strip() or "default"
     if given and given != profile:
         return given
     if profile.lower() == "default":
@@ -181,19 +188,18 @@ def _read(home: Any, key: str) -> str:
 def read_or_raise(home: Any, key: str) -> str:
     """The session's title ("" when it has none), raising when the session
     store can't be read, for a caller that must tell the two apart."""
-    from hermes_state import SessionDB
+    from . import hermes_store
 
-    # Pin the path: hooks can run off the turn thread, where the ambient home
-    # lookup could fall back to the launch profile.
-    db = SessionDB(db_path=home / "state.db")
+    # Pinned to the profile: hooks can run off the turn thread, where the
+    # ambient home lookup could fall back to the launch profile.
+    db = hermes_store.open_store(home)
     try:
         # Older Hermes may lack the id lookup; the key lookup can still work.
         getter = getattr(db, "get_session_title", None)
         value = getter(key) if getter else None
         if not value and hasattr(db, "list_sessions_rich"):
             # Approval hooks carry the gateway session key, not the session id.
-            rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True)
-            value = rows[0].get("title") if rows else None
+            value = hermes_store.latest_row_of_key(db, key).get("title")
         return value.strip() if isinstance(value, str) else ""
     finally:
         try:

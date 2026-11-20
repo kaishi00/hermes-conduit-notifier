@@ -101,7 +101,9 @@ def _responder(fake: Any, profile: str):
         tools = [tool.get("function", {}).get("name") for tool in body.get("tools") or []]
         last = messages[-1] if messages else {}
         asked = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), -1)
-        if "PLEASE RUN MANY" in _text_of(messages[asked] if asked >= 0 else {}):
+        # The user's own ask only: the workstream the plugin hands the rest to,
+        # and the work update after it, quote it.
+        if _text_of(messages[asked] if asked >= 0 else {}).lstrip().startswith("PLEASE RUN MANY"):
             # One step after another in the same turn, past the quick budget.
             ran = sum(1 for m in messages[asked + 1:] if m.get("role") == "tool")
             if ran < STEPS_TRIED:
@@ -351,7 +353,7 @@ def coordinated(tmp_path_factory: pytest.TempPathFactory) -> Run:
 @pytest.mark.parametrize("profile", PROFILES)
 def test_a_bot_chat_starts_a_workstream_on_its_own_profile(coordinated: Run, profile: str) -> None:
     rows = [row for row in _work_store().Store(coordinated.profile_home(profile)).list(include_closed=True)
-            if row.kind == "workstream"]
+            if row.kind == "workstream" and not _handed_off(row)]
     assert [(row.ref, row.kind) for row in rows] == [("W1", "workstream")], rows
     row = rows[0]
     assert row.coordinator == coordinated.stored[profile]
@@ -437,6 +439,11 @@ def test_no_workstream_events_reach_the_apps_socket(coordinated: Run) -> None:
     assert foreign == set()
 
 
+def _handed_off(row: Any) -> bool:
+    """A workstream the plugin started for the rest of a quick turn."""
+    return "PLEASE RUN MANY" in (row.goal or "")
+
+
 def _tool_results(run: Run, profile: str) -> List[str]:
     return [m.get("content") or "" for m in run.messages(profile, run.stored[profile]) if m.get("role") == "tool"]
 
@@ -450,12 +457,18 @@ def test_a_coordinator_that_only_coordinates_keeps_to_its_policy(coordinated: Ru
 
 def test_a_quick_coordinator_runs_a_few_steps_of_a_turn_itself(coordinated: Run) -> None:
     # Hermes names every tool call of a turn by the same turn id, which the
-    # budget counts by: five of the turn's steps ran, the sixth was handed on.
+    # budget counts by: five of the turn's steps ran, and on the sixth the
+    # plugin started a workstream for the rest itself, with the user's ask
+    # and the steps already taken (Eric 2026-11-14).
     results = _tool_results(coordinated, "second")
     assert any("coordinator-ran-this" in t for t in results), results
     ran = [n for n in range(STEPS_TRIED) if any(f"quick-step-{n}" in t for t in results)]
     assert ran == list(range(STEPS_TRIED - 1)), results
-    assert any("turning into longer work" in t for t in results), results
+    assert any("turning into longer work" in t and "the plugin started workstream" in t for t in results), results
+    handed = [row for row in _work_store().Store(coordinated.profile_home("second")).list(include_closed=True)
+              if row.kind == "workstream" and _handed_off(row)]
+    assert len(handed) == 1 and "quick-step-4" in handed[0].goal, handed
+    assert handed[0].coordinator == coordinated.stored["second"]
 
 
 @pytest.mark.parametrize("profile", PROFILES)
@@ -463,7 +476,7 @@ def test_another_chat_on_the_profile_cant_start_work(coordinated: Run, profile: 
     answers = coordinated.completions(coordinated.others[profile])
     assert any("only work in this bot's Bot Chat" in t for t in answers), answers
     rows = _work_store().Store(coordinated.profile_home(profile)).list(include_closed=True)
-    assert len([row for row in rows if row.kind == "workstream"]) == 1
+    assert len([row for row in rows if row.kind == "workstream" and not _handed_off(row)]) == 1
 
 
 def test_one_bot_asks_another_and_the_answer_comes_back(coordinated: Run) -> None:
@@ -684,3 +697,52 @@ def test_a_workstreams_worktree_is_hermes_own(tmp_path: Path) -> None:
     assert json.loads(out.read_text()) == {
         "repo": True, "made": [True, True, True], "clean": True, "back": True, "kept": [False, True, True],
         "outside": True}
+
+
+MODEL_PROBE = r"""
+import importlib.util, json, sys
+from pathlib import Path
+
+root, home, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location("conduit_push", root / "__init__.py",
+                                              submodule_search_locations=[str(root)])
+package = importlib.util.module_from_spec(spec)
+sys.modules["conduit_push"] = package
+spec.loader.exec_module(package)
+from conduit_push import work_models
+
+seen = {}
+for name, asked in (("declared", {"model": "fake-big", "reasoning_effort": "high"}),
+                    ("prefixed", {"model": "custom:fake:fake-big"}),
+                    ("unknown_provider", {"model": "fake-big", "provider": "no-such-provider"})):
+    try:
+        seen[name] = work_models.check(home, "default", asked)
+    except work_models.Refused as error:
+        seen[name] = "refused: " + str(error)
+out.write_text(json.dumps(seen))
+"""
+
+
+def test_a_model_the_bot_names_is_checked_as_hermes_model_command_checks_it(tmp_path: Path) -> None:
+    """Issue 2788: work_start's model goes through Hermes' own /model resolver
+    (hermes_cli.model_switch.switch_model) in the bot's profile: a model its
+    provider declares comes back with that provider, a leading provider name is
+    taken apart as /model's --provider, and a provider Hermes doesn't have
+    refuses the start with Hermes' reason. Nothing reaches a network."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "model:\n  default: fake-default\n  provider: custom:fake\n"
+        "custom_providers:\n  - name: fake\n    base_url: http://127.0.0.1:9/v1\n    api_key: x\n"
+        "    models:\n      fake-default: {}\n      fake-big: {}\n")
+    python = Path(_hermes_bin()).with_name("python")
+    out = tmp_path / "seen.json"
+    done = subprocess.run([str(python), "-c", MODEL_PROBE, str(ROOT), str(home), str(out)], capture_output=True,
+                          text=True, timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(tmp_path))
+    assert done.returncode == 0 and out.is_file(), done.stderr[-2000:]
+    seen = json.loads(out.read_text())
+    assert seen["declared"] == {"model": "fake-big", "provider": "custom:fake", "reasoning_effort": "high"}
+    assert seen["prefixed"] == {"model": "fake-big", "provider": "custom:fake"}
+    assert seen["unknown_provider"].startswith("refused: Hermes can't run fake-big here: ")
+    assert "no-such-provider" in seen["unknown_provider"]
+

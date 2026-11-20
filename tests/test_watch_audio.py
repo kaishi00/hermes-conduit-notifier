@@ -129,6 +129,21 @@ def test_an_event_too_large_to_seal_goes_as_its_type():
     assert api.watch_audio._watch_audio_event_text('{"type":"a"}') == b'{"type":"a"}'
 
 
+def test_a_frame_too_deep_to_parse_is_unreadable_not_the_bridges_end():
+    # #902's rule on the Watch bridge too (notifier 903): RecursionError is
+    # an unreadable frame wherever the bridge reads one.
+    deep = '{"type":"session.update","x":' + "[" * 100000 + "]" * 100000 + "}"
+    assert json.loads(api.watch_audio._watch_audio_event_text(deep)) == {"type": "unknown", "conduit_truncated": True}
+    session = object.__new__(api.watch_audio._WatchAudioSession)
+    session.owed_since = None
+    session.bridge = types.SimpleNamespace(clock=lambda: 1.0)
+    session.asked(deep)
+    assert session.owed_event == "?" and session.owed_since == 1.0
+    # A Watch control message too deep to parse is ignored, not raised.
+    bridge = object.__new__(api.watch_audio._WatchAudioBridge)
+    assert asyncio.run(bridge._control(None, deep.encode())) is None
+
+
 # --- Pacing -------------------------------------------------------------------
 
 
@@ -1292,3 +1307,64 @@ def test_a_gpt_live_session_on_the_ga_endpoint_sends_the_watch_the_ga_marker():
     asyncio.run(session._started(None))
     assert sent == [(7, api.watch_audio._gpt_live_started("gpt_live", session.answer))]
     assert sent[0][1]["events"] == "ga" and session.live
+
+
+def test_a_gpt_live_call_that_never_connects_names_the_chosen_voice():
+    # Conduit issue 2388: Codex answers the offer for a voice the ChatGPT plan doesn't offer,
+    # then never connects the call.
+    session = api.watch_audio._GptLiveWatchSession.__new__(api.watch_audio._GptLiveWatchSession)
+    session.request = {"voice": "haetsal"}
+    failure = session._unreachable()
+    assert failure.code == "unreachable"
+    assert str(failure) == ("GPT-Live's audio connection didn't come up from the Hermes host. If your ChatGPT plan "
+                            "doesn't offer the voice Haetsal, pick another in GPT-Live's settings")
+    for request in ({}, {"voice": None}, {"voice": ""}, {"voice": "not a voice!"}):
+        session.request = request
+        assert str(session._unreachable()) == "GPT-Live's audio connection didn't come up from the Hermes host"
+
+
+def test_a_provider_or_helper_frame_too_deep_to_parse_is_dropped_and_the_session_goes_on():
+    # notifier 910 (#907 leftovers): the Grok session's provider reader and
+    # the GPT-Live helper's exit frame drop a frame nested past the parser's
+    # depth (notifier 903) instead of ending the relay on it.
+    deep = '{"type":"session.updated","x":' + "[" * 100000 + "]" * 100000 + "}"
+
+    class Pacer:
+        def __init__(self):
+            self.pcm, self.events = [], []
+
+        def audio(self, pcm):
+            self.pcm.append(pcm)
+
+        def event(self, message):
+            self.events.append(message)
+
+        def interrupt(self):
+            pass
+
+    async def provider():
+        for message in [deep, json.dumps({"type": "response.audio.delta", "delta": "AQA="})]:
+            yield message
+
+    grok = object.__new__(api.watch_audio._GrokWatchSession)
+    grok.owed_since = 1.0
+    pacer = Pacer()
+    asyncio.run(grok._read(provider(), pacer))
+    assert pacer.pcm == [b"\1\0"], "the frame after the deep one still plays"
+    assert pacer.events == []
+
+    async def helper_exit():
+        stdout = asyncio.StreamReader()
+        payload = ('{"reason":' + "[" * 100000 + "]" * 100000 + "}").encode()
+        stdout.feed_data(b"X" + len(payload).to_bytes(4, "big") + payload)
+        stdout.feed_eof()
+        helper = object.__new__(api.watch_audio._GptLiveHelper)
+        helper.process = types.SimpleNamespace(stdout=stdout)
+        helper.reason = None
+        helper.ended = asyncio.Event()
+        helper.offer = asyncio.get_running_loop().create_future()
+        await helper._read()
+        return helper
+
+    helper = asyncio.run(helper_exit())
+    assert helper.ended.is_set() and helper.reason == "GPT-Live ended the call"

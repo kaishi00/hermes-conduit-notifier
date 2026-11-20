@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import client
+from . import client, push_proxy
 
 APPLE = "https://maps-api.apple.com/v1"
 DAILY_CALLS = 200
@@ -150,6 +150,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _proxied_opener(proxy: urllib.request.ProxyHandler) -> Any:
+    return urllib.request.build_opener(_NoRedirect, proxy)
 MAX_ANSWER_BYTES = 512 * 1024
 
 
@@ -167,7 +171,7 @@ class Engine:
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}",
                                                        "Accept": "application/json"})
         # No redirects (the token stays with Apple) and a capped body.
-        with _OPENER.open(request, timeout=TIMEOUT_S) as response:
+        with push_proxy.opener(_OPENER, _proxied_opener).open(request, timeout=TIMEOUT_S) as response:
             body = response.read(MAX_ANSWER_BYTES + 1)
         if len(body) > MAX_ANSWER_BYTES:
             raise HostUnavailable("failed", "Apple Maps sent more than this host reads.")

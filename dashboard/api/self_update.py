@@ -35,19 +35,28 @@ router = core.router
 # and after an update pulls a new version, before the gateway restarts.
 
 
+def profile_copies_module() -> Optional[Any]:
+    """profile_copies.py from this install's folder, freshly loaded (an update
+    may have replaced it); None when the install has none."""
+    path = os.path.join(core._plugin_root(), "profile_copies.py")
+    spec = importlib.util.spec_from_file_location("conduit_push_dashboard_profile_copies", path)
+    if spec is None or spec.loader is None or not os.path.isfile(path):
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _point_profiles() -> List[str]:
     """profile_copies.sweep over this host's profiles; [] when it can't run."""
-    path = os.path.join(core._plugin_root(), "profile_copies.py")
     try:
         from hermes_constants import get_default_hermes_root
     except (ImportError, AttributeError):  # an older Hermes: one home, no profiles to point
         return []
     try:
-        spec = importlib.util.spec_from_file_location("conduit_push_dashboard_profile_copies", path)
-        if spec is None or spec.loader is None or not os.path.isfile(path):
+        module = profile_copies_module()
+        if module is None:
             return []
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
         return module.sweep_quietly(Path(get_default_hermes_root()), Path(core._plugin_root()))
     except Exception:  # noqa: BLE001 — a fault here mustn't stop the dashboard
         logger.warning("Conduit plugin: couldn't point profiles at the main install", exc_info=True)
@@ -63,10 +72,12 @@ threading.Thread(target=_point_profiles, name="conduit-profile-copies", daemon=T
 # for the gateway, but this dashboard keeps serving the routes (and the hooks of
 # the chats it runs) it imported at start. Conduit calls this last: the process
 # re-executes itself with the command line it started with, keeping its pid, so
-# systemd, launchd and a terminal launch all carry on. Refused while a chat turn
+# systemd, launchd and a terminal launch all carry on. On Windows, where exec
+# spawns a new process instead of replacing this one, a detached helper
+# (windows_relaunch.py) starts the same command line once this process has
+# exited, in the background (issue notifier 774). Refused while a chat turn
 # this process runs is still going, for the Desktop app's own backend (it
-# supervises and re-ports its child), inside a plugin host, and on Windows,
-# where exec spawns a new process instead of replacing this one.
+# supervises and re-ports its child), and inside a plugin host.
 
 SELF_RESTART_DELAY_S = 1.0
 SELF_RESTART_RECHECK_S = 2.0
@@ -153,8 +164,6 @@ def _running_turns(pid: int, homes: List[Path], start_time: Optional[float] = No
 
 
 def _self_restart_refusal() -> Optional[Tuple[int, str]]:
-    if sys.platform == "win32":
-        return 501, "Restart the Hermes dashboard on this host to finish the update"
     if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
         return 501, "This plugin runs in a Hermes plugin host; restart Hermes to finish the update"
     try:
@@ -180,7 +189,49 @@ def _reexec() -> None:
     with contextlib.suppress(Exception):
         sys.stdout.flush()
         sys.stderr.flush()
-    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+    command = [sys.executable, *sys.orig_argv[1:]]
+    if sys.platform == "win32":
+        _relaunch_on_windows(command)
+        os._exit(0)  # exec skips atexit too; the relauncher starts the new process once this one is gone
+    else:
+        os.execv(sys.executable, command)
+
+
+WINDOWS_RELAUNCH_LOG = "dashboard-restart.log"
+
+
+def _relaunch_on_windows(command: List[str]) -> None:
+    """Hands `command` to windows_relaunch.py, which starts it once this process has exited.
+
+    The helper is detached (its own process group and hidden console, out of the job object
+    when that's allowed), so it outlives this process and whatever started it. The restarted
+    dashboard runs in the background: its output goes to logs/dashboard-restart.log. Raises
+    when the helper can't start, so this process keeps serving and the restart can be asked
+    again."""
+    from hermes_constants import get_hermes_home
+    helper = os.path.join(core._plugin_root(), "windows_relaunch.py")
+    if not os.path.isfile(helper):  # a copy on disk without it: nothing would start the dashboard again
+        raise FileNotFoundError(helper)
+    logs = Path(get_hermes_home()) / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    log_path = logs / WINDOWS_RELAUNCH_LOG
+    argv = [sys.executable, "-I", helper, str(os.getpid()), json.dumps(command), str(log_path)]
+    detached = 0x00000200 | 0x08000000  # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+    # The helper's own errors go to the restart log too, so a restart that never came back says why.
+    try:
+        errors = open(log_path, "ab", buffering=0)
+    except OSError:
+        errors = subprocess.DEVNULL
+    try:
+        kwargs = dict(cwd=os.getcwd(), stdin=subprocess.DEVNULL, stdout=errors, stderr=errors, close_fds=True)
+        try:
+            subprocess.Popen(argv, creationflags=detached | 0x01000000, **kwargs)  # | CREATE_BREAKAWAY_FROM_JOB
+        except OSError:
+            # A job that forbids breakaway refuses the flag; the hidden console alone still detaches.
+            subprocess.Popen(argv, creationflags=detached, **kwargs)
+    finally:
+        if errors is not subprocess.DEVNULL:
+            errors.close()
 
 
 def _restart_when_idle(schedule: Callable[[float, Callable[[], None]], Any],
@@ -401,14 +452,14 @@ def _session_row(home: Optional[Path], key: str) -> Dict[str, Any]:
     if home is None:
         return {}
     try:
-        from hermes_state import SessionDB
-        db = SessionDB(db_path=home / "state.db")
+        store = core._hermes_store()
+        db = store.open_store(home)
     except Exception:  # noqa: BLE001 — a name is never worth failing the answer
         logger.debug("Conduit plugin: couldn't open a profile's sessions", exc_info=True)
         return {}
     try:
-        rows = db.list_sessions_rich(session_key=key, limit=1, order_by_last_active=True)
-        return rows[0] if rows and isinstance(rows[0], dict) else {}
+        # A Bot Chat's row is hidden (notifier#881).
+        return store.latest_row_of_key(db, key)
     except Exception:  # noqa: BLE001
         logger.debug("Conduit plugin: couldn't read a chat's session", exc_info=True)
         return {}

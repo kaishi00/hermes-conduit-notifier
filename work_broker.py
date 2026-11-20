@@ -47,8 +47,14 @@ logger = logging.getLogger(__name__)
 
 RPC_TIMEOUT_S = 30.0
 CALL_TIMEOUT_S = 45.0
-# Hermes answers a submit Desktop's chat owns with this code (SESSION_NOT_OWNED).
+# Hermes answers a submit another surface refused with this code, and says
+# why in data.reason: SESSION_NOT_OWNED (another window holds the chat),
+# SESSION_OWNER_BUSY (the window that holds it is mid-turn and sent nothing;
+# send it again when the turn ends) or SESSION_OWNER_UNCONFIRMED (it may
+# already be queued there, so it's never sent again). Issue 2522.
 NOT_OWNED = 4090
+OWNER_BUSY = "SESSION_OWNER_BUSY"
+OWNER_UNCONFIRMED = "SESSION_OWNER_UNCONFIRMED"
 # prompt.submit statuses that mean the wake went out (work_tool._send_wake counts the rest refused).
 # "started" is the session authority's word for a turn that runs now.
 WAKE_SENT = frozenset({"", "queued", "streaming", "accepted", "started"})
@@ -63,16 +69,36 @@ UNAVAILABLE_NO_API = ("Bot workstreams run next to the chats Conduit opens. This
 
 
 class BrokerError(Exception):
-    def __init__(self, message: str, code: Any = None, timed_out: bool = False) -> None:
+    def __init__(self, message: str, code: Any = None, timed_out: bool = False, reason: str = "") -> None:
         super().__init__(message)
         self.code = code
         # The call gave up waiting while its thread ran on: what it asked
         # Hermes for may still happen.
         self.timed_out = timed_out
+        # Hermes' data.reason, the refusal's machine-readable word.
+        self.reason = reason
+        # Raised while sending the words themselves (Broker.send), not while
+        # reopening the session before them.
+        self.submitted = False
 
     @property
     def not_owned(self) -> bool:
+        """Another window holds the session. A 4090 with another reason
+        isn't: Hermes words several refusals with that code."""
+        if self.reason:
+            return self.reason == "SESSION_NOT_OWNED"
         return self.code == NOT_OWNED or "SESSION_NOT_OWNED" in str(self)
+
+    @property
+    def owner_busy(self) -> bool:
+        """The window that holds the session is mid-turn: nothing was sent."""
+        return self.reason == OWNER_BUSY
+
+    @property
+    def uncertain(self) -> bool:
+        """What was asked may still happen (a call that gave up waiting, or
+        a send Hermes couldn't confirm), so it's never sent again."""
+        return self.timed_out or self.reason == OWNER_UNCONFIRMED
 
     @property
     def unsupported(self) -> bool:
@@ -219,11 +245,12 @@ def _answer(response: Any, method: str) -> dict:
         code = error.get("code") if isinstance(error, dict) else None
         data = error.get("data") if isinstance(error, dict) else None
         reason = data.get("reason") if isinstance(data, dict) else ""
+        reason = reason if isinstance(reason, str) else ""
         # gateway_chats answers a call that ran out of time this way: it may
         # still have reached Hermes, as a timed-out TUI call may.
         timed_out = isinstance(message, str) and message.endswith("timed out; it may still have started")
         raise BrokerError(f"{message or method + ' failed'}{f' ({reason})' if reason else ''}"[:300], code=code,
-                          timed_out=timed_out)
+                          timed_out=timed_out, reason=reason)
     result = response.get("result")
     return result if isinstance(result, dict) else {}
 
@@ -267,7 +294,7 @@ class Broker:
                 if response is None:
                     # A slow method answers from Hermes' worker pool.
                     if not done.wait(timeout):
-                        raise BrokerError(f"{method} timed out")
+                        raise BrokerError(f"{method} timed out", timed_out=True)
                     response = box[0]
                 return response
             finally:
@@ -447,6 +474,16 @@ class Broker:
         if running is None:
             found = self.live(tip) or self.live(session_id)
             running = bool(found and found[1].get("running"))
+        try:
+            return self._send_words(call, runtime_id, tip, text, how, running)
+        except BrokerError as error:
+            # Only now did the words go out: a timeout from here on may
+            # still have them queued, unlike one while reopening (issue 2522).
+            error.submitted = True
+            raise
+
+    def _send_words(self, call: Callable[..., dict], runtime_id: str, tip: str, text: str, how: str,
+                    running: bool) -> tuple[str, str]:
         if how == "after" or (running and how not in ("auto", "add")):
             status = call("prompt.submit", {"session_id": runtime_id, "text": text, "queued": True}).get("status")
             return ("started" if status in RUNNING_NOW else "queued"), tip
@@ -569,8 +606,11 @@ class Broker:
         elif found is not None:
             runtime_id = found[0]
         else:
+            # Bounded, as the authority's snapshot is: Hermes checks only the
+            # chat's tip against sessions.max_resume_messages, so a long Bot
+            # Chat a restart closed still takes its wake (issue 2395).
             resumed = self._unbound("session.resume", {"session_id": chat_id, "source": "desktop",
-                                                       **self._profile_params()})
+                                                       "omit_messages": True, **self._profile_params()})
             runtime_id = str(resumed.get("session_id") or "")
             if not runtime_id:
                 raise BrokerError("couldn't reopen the Bot Chat")
@@ -588,7 +628,7 @@ class Broker:
             # runs on): the mark stays so that turn counts as the plugin's,
             # as gateway_chats keeps its surface line (notifier#659). It
             # goes only when the send is known not to have gone out.
-            if not error.timed_out:
+            if not error.uncertain:
                 turn_surface.discard_wake(text, mark)
             raise
         except BaseException:

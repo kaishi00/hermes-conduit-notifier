@@ -4,7 +4,11 @@ on its profile strip and its in-app banner (hermes-conduit issue 1705).
 
 The waits are the ones the hooks keep in the profile's conduit-calls.json
 (calls_store.note_waiting), for every chat now, whether or not alert calls
-are on. The list only reads: an approval is answered on its chat's own card.
+are on. The list only reads: an approval is answered on its chat's own card,
+and a question on the card Conduit draws from the row's ``decision`` when
+Hermes drew none in the chat (hermes-conduit issue 2556). The list names the
+profile's relay gateway (``gateway_id``), so that card's answer is sealed for
+the pairing like a notification's (hermes-conduit issue 2683).
 """
 
 from __future__ import annotations
@@ -46,8 +50,8 @@ def _clarify_timeout() -> Optional[float]:
 
 
 def _workstream_sessions(home: Any) -> list:
-    """A bot's workstreams, which their Work panel shows; none when the
-    registry can't be read."""
+    """A bot's workstreams, whose Work panel answers their approvals; none
+    when the registry can't be read."""
     try:
         return core._plugin_package_module("work_store").Store(Path(home)).session_ids()
     except Exception:  # noqa: BLE001 — an unreadable registry leaves nothing out
@@ -61,7 +65,26 @@ def waiting_list() -> Dict[str, Any]:
     if clarify is not None:
         ages["question"] = clarify + WAITING_GRACE_S
     store = hermes_calls._calls_store().CallStore(home)
-    return {"waiting": store.waiting_list(max_age=ages, leave_out=_workstream_sessions(home))}
+    listed: Dict[str, Any] = {"waiting": store.waiting_list(max_age=ages, leave_out=_workstream_sessions(home))}
+    # The relay gateway this profile pairs through: a question's card drawn
+    # from its row answers through the relay, sealed for this gateway's key
+    # on an end-to-end encrypted pairing, and the card came from no push
+    # that would have named it (hermes-conduit#2683).
+    main = core._load_pairing_state(core._pairing_state_path()) or {}
+    gateway_id = main.get("gateway_id")
+    if isinstance(gateway_id, str) and gateway_id.strip():
+        listed["gateway_id"] = gateway_id.strip()
+        # Each device the profile is paired with answers through its own
+        # pairing's gateway (hermes-conduit#2758): the main one's above, every
+        # device's here by installation id.
+        gateways = {}
+        for state in (main, *(other for _key, other in core._device_pairings(main))):
+            key, gateway = core._installation_key(state.get("installation_id")), state.get("gateway_id")
+            if key and isinstance(gateway, str) and gateway.strip():
+                gateways[key] = gateway.strip()
+        if gateways:
+            listed["gateways"] = gateways
+    return listed
 
 
 @router.get("/waiting")

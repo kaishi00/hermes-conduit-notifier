@@ -2,6 +2,7 @@
 event id, and a relay 401 is recorded on the pairing for `status`."""
 
 import os
+import contextvars
 import http.server
 import importlib.util
 import json
@@ -645,3 +646,89 @@ def test_each_pairing_reads_what_its_relay_takes(paired):
 
     assert old.event_ids == [] and len(new.meta_reads) == 1
     assert new.event_ids == [_invite(2)["event_id"]]
+
+
+# --- Notifier issue 834 ----------------------------------------------------------
+
+
+def test_an_event_queued_under_one_pairing_never_goes_out_under_the_next(paired, monkeypatch):
+    relay = paired([503, 200])
+    real_request = client._request
+
+    def paired_again_after_first(url, **kwargs):
+        try:
+            return real_request(url, **kwargs)
+        finally:
+            state = client.load_state()
+            if state["credential"] == "inst.gw.secret":
+                client.save_state({**state, "credential": "inst2.gw2.secret", "installation_id": "inst2",
+                                   "gateway_id": "gw2"})
+
+    monkeypatch.setattr(client, "_request", paired_again_after_first)
+    _deliver(_event())
+
+    assert len(relay.event_ids) == 1, "the retry would have gone to the newly paired device"
+
+
+def test_a_key_rotation_keeps_the_pairing_a_queued_event_goes_out_under(paired, monkeypatch):
+    relay = paired([503, 200])
+    real_request = client._request
+
+    def rotated_after_first(url, **kwargs):
+        try:
+            return real_request(url, **kwargs)
+        finally:
+            client.update_state(lambda state: state.update(e2e={"kid": KID, "secret": e2e.b64u(SECRET)}))
+
+    monkeypatch.setattr(client, "_request", rotated_after_first)
+    _deliver(_event())
+
+    assert len(relay.event_ids) == 2
+
+
+def test_a_send_from_before_a_stop_never_retries_into_the_next_start(paired, monkeypatch):
+    relay = paired([503, 200])
+
+    def restarted(seconds):
+        client.stop(timeout=0)
+        client.start()
+
+    try:
+        assert client._deliver(_event(), sleep=restarted) is False
+        assert len(relay.event_ids) == 1
+    finally:
+        client.start()
+
+
+def test_a_stopped_plugin_never_accepts_an_event_or_leaves_one_queued(paired, monkeypatch):
+    paired([200])
+
+    def stopped_meanwhile():
+        client._stopped.set()  # stop() lands between enqueue's check and its insertion
+        return contextvars.copy_context()
+
+    monkeypatch.setattr(client, "contextvars", types.SimpleNamespace(copy_context=stopped_meanwhile))
+    try:
+        assert client.enqueue(_event()) is False
+        assert client._events.empty()
+    finally:
+        client.start()
+
+
+def test_an_approval_goes_out_ahead_of_finished_turn_notices_queued_before_it(paired, monkeypatch):
+    paired([200, 200, 200])
+    sent = []
+    monkeypatch.setattr(client, "_deliver", lambda event, **kwargs: sent.append(event["type"]) or True)
+    # No worker left running by an earlier test: this one starts once all
+    # three are queued.
+    client.stop()
+    client.start()
+    start_worker, held = client._start_worker_locked, [True]
+    monkeypatch.setattr(client, "_start_worker_locked", lambda: None if held[0] else start_worker())
+    for kind in ("response.ready", "response.ready", "approval.needed"):
+        assert client.enqueue({**_event(), "type": kind})
+    held[0] = False
+    client._start_worker()
+    client._events.join()
+
+    assert sent == ["approval.needed", "response.ready", "response.ready"]

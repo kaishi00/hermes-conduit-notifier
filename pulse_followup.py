@@ -140,7 +140,13 @@ EARLIER_TITLE = ("## Earlier lines from {chat} on the same subject\n(From before
 MAX_OUTCOMES = 30
 NEWS_LIMIT = 600
 WHY_LIMIT = 300
-Llm = Callable[[str, str], tuple[Any, int]]
+# (instructions, text, schema=the reply's shape) -> (the parsed reply, tokens).
+Llm = Callable[..., tuple[Any, int]]
+# The replies' shapes (pulse_memory.SCHEMA says why they're loose).
+CHECK_SCHEMA = {"type": "object", "properties": {
+    key: {} for key in ("decision", "news", "why", "check_again_hours", "when", "urgent")}}
+ACT_SCHEMA = {"type": "object", "properties": {"done": {}, "why": {}}}
+STALE_SCHEMA = {"type": "object", "properties": {"stale": {}, "why": {}}}
 
 # Every check reads Hermes's scheduled jobs (pulse_report.cron_jobs), each
 # with how it's been running: a failing one covers nothing.
@@ -550,7 +556,7 @@ def check(llm: Llm, text: str, *, skip_seen: bool = False, kind: str = PROMISE,
     parsed, tokens = llm(instructions + (SEEN_INSTRUCTION if skip_seen and kind != COMMITMENT else "")
                          + (PLACE_INSTRUCTION if place else "") + PICK_INSTRUCTION + pulse_picks.rules(drawn)
                          + report.note_block(note),
-                         f"<<<check {mark}\n{text}\ncheck {mark}>>>")
+                         f"<<<check {mark}\n{text}\ncheck {mark}>>>", schema=CHECK_SCHEMA)
     if not isinstance(parsed, dict) or parsed.get("decision") not in DECISIONS:
         return {"decision": "wait", "news": "", "why": "the check's reply was unusable", "hint": None,
                 "when": hours.ANY, "urgent": False, "pick": None}, tokens
@@ -728,7 +734,7 @@ def check_acts(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             mark = secrets.token_hex(4)
             while mark in text:
                 mark = secrets.token_hex(4)
-            parsed, tokens = llm(ACT_INSTRUCTIONS, f"<<<act {mark}\n{text}\nact {mark}>>>")
+            parsed, tokens = llm(ACT_INSTRUCTIONS, f"<<<act {mark}\n{text}\nact {mark}>>>", schema=ACT_SCHEMA)
         except Exception as error:  # noqa: BLE001 — a failed check tries again later
             logger.warning("conduit_push: Pulse Do it check failed", exc_info=True)
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
@@ -1012,7 +1018,7 @@ def check_rested(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: t
             while mark in text:
                 mark = secrets.token_hex(4)
             parsed, tokens = llm(RESTED_INSTRUCTIONS + report.note_block(report.note(pulse_store)),
-                                 f"<<<held {mark}\n{text}\nheld {mark}>>>")
+                                 f"<<<held {mark}\n{text}\nheld {mark}>>>", schema=STALE_SCHEMA)
         except Exception:  # noqa: BLE001 — back unchecked
             logger.warning("conduit_push: Pulse rested card check failed", exc_info=True)
             done["tokens"] = done.get("tokens", 0) + len(text) // 4
@@ -1076,7 +1082,7 @@ def check_held(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tzi
             while mark in text:
                 mark = secrets.token_hex(4)
             parsed, tokens = llm(HELD_INSTRUCTIONS + report.note_block(report.note(pulse_store)),
-                                 f"<<<held {mark}\n{text}\nheld {mark}>>>")
+                                 f"<<<held {mark}\n{text}\nheld {mark}>>>", schema=STALE_SCHEMA)
         except Exception:  # noqa: BLE001 — the brief tells it as it was
             logger.warning("conduit_push: Pulse held card check failed", exc_info=True)
             checked[str(card["id"])] = now - HELD_EVERY_S + HELD_RETRY_S  # a failed check tries again soon
@@ -1184,7 +1190,7 @@ def check_found(pulse_store: store.PulseStore, home: Path, llm: Llm, *, zone: tz
             while mark in text:
                 mark = secrets.token_hex(4)
             parsed, tokens = llm(FOUND_INSTRUCTIONS + report.note_block(report.note(pulse_store)),
-                                 f"<<<held {mark}\n{text}\nheld {mark}>>>")
+                                 f"<<<held {mark}\n{text}\nheld {mark}>>>", schema=STALE_SCHEMA)
         except Exception:  # noqa: BLE001 — it stays on the screen as it is
             logger.warning("conduit_push: Pulse found card check failed", exc_info=True)
             checked[str(card["id"])] = now - FOUND_EVERY_S + HELD_RETRY_S  # a failed check tries again soon

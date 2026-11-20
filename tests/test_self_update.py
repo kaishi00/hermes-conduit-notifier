@@ -517,7 +517,7 @@ def test_another_process_loading_the_file_leaves_a_live_job_alone(tmp_path):
 
 
 def test_a_dashboard_that_cant_restart_itself_refuses(monkeypatch, tmp_path):
-    monkeypatch.setattr(api.self_update.sys, "platform", "win32")
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
     with pytest.raises(api.core.TokenError) as raised:
         api.self_update.start_self_update(None, lambda *a: None, path=tmp_path / "job.json", steps=(dict, _restarted))
     assert raised.value.status == 501
@@ -872,6 +872,24 @@ def test_a_chat_on_another_platform_without_a_row_has_no_session_to_stop(monkeyp
     monkeypatch.setattr(api.self_update, "_session_row", lambda home, key: {})
     unit = api.self_update._named_work_unit({"kind": "chat", "session": "agent:main~:discord:group:9"})
     assert unit["profile"] == "main" and unit["session_id"] is None and unit["platform"] == "discord"
+
+
+def test_the_restart_names_a_hidden_bot_chat_by_its_row(monkeypatch, tmp_path):
+    """notifier#881: a Bot Chat's row is hidden, and a key listing leaves hidden rows out unless asked."""
+    real = api.core._hermes_store()
+
+    class DB:
+        def list_sessions_rich(self, session_key=None, limit=20, order_by_last_active=False, include_hidden=False):
+            row = {"id": "20261118_090000_aaaaaa", "title": "Bot Chat", "hidden": 1}
+            return [row] if session_key == "agent:main:api_server:dm:bot" and include_hidden else []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(api.core, "_hermes_store",
+                        lambda: types.SimpleNamespace(open_store=lambda home: DB(), latest_row_of_key=real.latest_row_of_key))
+    row = api.self_update._session_row(tmp_path, "agent:main:api_server:dm:bot")
+    assert (row["id"], row["title"]) == ("20261118_090000_aaaaaa", "Bot Chat")
 
 
 def test_a_cron_run_is_named_by_its_job(monkeypatch, tmp_path):

@@ -68,7 +68,7 @@ class Reader:
         self.replies = list(replies)
         self.asked = []
 
-    def __call__(self, instructions, text):
+    def __call__(self, instructions, text, schema=None):
         self.asked.append((instructions, text))
         reply = self.replies.pop(0) if self.replies else {"deadlines": [], "closed": []}
         if isinstance(reply, Exception):

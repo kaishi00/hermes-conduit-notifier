@@ -473,6 +473,22 @@ class Store:
                               "ORDER BY created_at LIMIT 1", (session_id,)).fetchone()
         return _work(row) if row else None
 
+    def titles(self, refs: Any) -> dict[str, str]:
+        """``{ref: title}`` for these refs, open or closed, reading only those
+        two columns of only those rows (the Work panel's poll names the work
+        its coordination items cite, notifier issue 822)."""
+        wanted = sorted({str(ref) for ref in refs if ref})
+        if not wanted or not self.path.is_file():
+            return {}
+        out: dict[str, str] = {}
+        with self._db(write=False) as con:
+            for start in range(0, len(wanted), 500):
+                chunk = wanted[start:start + 500]
+                for row in con.execute(f"SELECT ref, title FROM work WHERE ref IN ({', '.join('?' * len(chunk))})",
+                                       chunk):
+                    out[row["ref"]] = row["title"] or ""
+        return out
+
     def list(self, *, active_only: bool = False, include_closed: bool = False, limit: int = 50,
              active_or_changed: bool = False, changed_since: float | None = None,
              by_change: bool = False, calls: Optional[bool] = None) -> list[Work]:
@@ -746,6 +762,29 @@ class Store:
                           f"({', '.join('?' for _ in ids)})", tuple(ids))
         return {row["id"]: row for row in rows}
 
+    def outbox_refs_of(self, ids: list[str], kind: str) -> list[str]:
+        """The refs the rows with these ids and this kind were written for."""
+        ids = [item for item in dict.fromkeys(ids) if item][:500]
+        if not ids:
+            return []
+        rows = self._read(f"SELECT ref FROM outbox WHERE kind = ? AND ref != '' AND id IN "
+                          f"({', '.join('?' for _ in ids)}) ORDER BY created_at", (kind, *ids))
+        return [row["ref"] for row in rows]
+
+    def outbox_texts_of(self, ids: list[str], kind: str) -> list[tuple[str, str]]:
+        """(ref, text) of the rows with these ids and this kind."""
+        ids = [item for item in dict.fromkeys(ids) if item][:500]
+        if not ids:
+            return []
+        rows = self._read(f"SELECT ref, text FROM outbox WHERE kind = ? AND ref != '' AND id IN "
+                          f"({', '.join('?' for _ in ids)}) ORDER BY created_at", (kind, *ids))
+        return [(row["ref"], row["text"]) for row in rows]
+
+    def outbox_count_since(self, kind: str, target: str, since: float) -> int:
+        rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE kind = ? AND target = ? AND created_at >= ?",
+                          (kind, target, since))
+        return int(rows[0]["n"]) if rows else 0
+
     def own_sends_since(self, ref: str, since: float) -> int:
         rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE ref = ? AND kind = 'send' AND own = 1 AND "
                           "accepted_at > 0 AND created_at >= ?", (ref, since))
@@ -909,6 +948,13 @@ class Store:
         with self._db() as con:
             con.execute("UPDATE outbox SET accepted_at = ?, outcome = ? WHERE id = ?",
                         (time.time() if outcome in ("accepted", "queued") else 0.0, outcome, item))
+
+    def outbox_drop(self, item: str) -> None:
+        """Forgets a row that never went out and is tried again as a new one
+        (a work update held for a busy Bot Chat's turn), so the retries
+        leave no trail of refused copies."""
+        with self._db() as con:
+            con.execute("DELETE FROM outbox WHERE id = ? AND accepted_at = 0", (item,))
 
     def outbox_rows(self, ref: str, kind: str) -> list[dict]:
         if not self.path.is_file():

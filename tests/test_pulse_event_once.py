@@ -257,7 +257,7 @@ def test_an_entry_whose_card_was_put_away_stays_away(live, more):
 def test_the_list_asks_which_entry_each_is_about():
     seen = {}
 
-    def llm(instructions, text):
+    def llm(instructions, text, schema=None):
         seen.update(instructions=instructions)
         return {"remembered": [], "found": []}, 1
 
