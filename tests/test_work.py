@@ -653,6 +653,8 @@ def test_message_agent_is_held_when_the_registry_cant_be_read(bots, hermes, monk
     start()
     monkeypatch.setattr(store_mod.Store, "by_session", lambda self, session_id: (_ for _ in ()).throw(
         store_mod.sqlite3.OperationalError("database is locked")))
+    monkeypatch.setattr(store_mod.Store, "session_lookup", lambda self, session_id: (_ for _ in ()).throw(
+        store_mod.sqlite3.OperationalError("database is locked")))
     block = work.tool_block("20261031_work_1", "message_agent", {"agent": "nahida", "message": "hi"})
     assert block == {"action": "block", "message": work.CHECK_FAILED}
 
@@ -2680,6 +2682,31 @@ def test_a_write_that_fails_after_the_start_leaves_the_session_running(on, herme
     assert hermes.named("session.interrupt") == [] and hermes.named("session.close") == []
 
 
+def test_an_ordinary_chats_tool_calls_read_the_registry_only_when_it_changes(on, hermes, monkeypatch):
+    # Notifier issue 960: every tool call of every chat asked the registry
+    # twice, each a fresh connection, to learn the chat isn't a workstream.
+    stamps = sys.modules["conduit_push.stamps"]
+    monkeypatch.setattr(stamps, "SETTLED_NS", 0)  # any write counts as settled at once
+    work._not_work.clear()
+    reads = {"n": 0}
+    real = store_mod.Store.session_lookup
+
+    def counted(self, session_id):
+        reads["n"] += 1
+        return real(self, session_id)
+
+    monkeypatch.setattr(store_mod.Store, "session_lookup", counted)
+    for index in range(5):
+        work.step_started("ordinary-chat", "read_file", {"path": "a.log"}, tool_call_id=f"c{index}")
+        work.step_ended("ordinary-chat", "read_file", tool_call_id=f"c{index}", status="ok")
+    assert reads["n"] == 1
+    # The chat made a workstream (a write, from any process) is found on its next call.
+    ref = on.add("workstream", title="Promoted", status="running").ref
+    on.update(ref, session_id="ordinary-chat")
+    assert work._workstream("ordinary-chat")[1].ref == ref
+    work._not_work.clear()
+
+
 def test_an_unreadable_registry_keeps_a_turns_hooks_quiet_except_the_bot_chats(on, hermes, monkeypatch):
     start()
 
@@ -2687,6 +2714,7 @@ def test_an_unreadable_registry_keeps_a_turns_hooks_quiet_except_the_bot_chats(o
         raise OSError("database is locked")
 
     monkeypatch.setattr(store_mod.Store, "by_session", broken)
+    monkeypatch.setattr(store_mod.Store, "session_lookup", broken)
     assert work.turn_started("20261031_work_1") and work.turn_ended("20261031_work_1", "Done.")
     assert work.turn_finished("20261031_work_1", failed=True, interrupted=False)
     assert not work.turn_ended(BOT_CHAT, "Here's the plan.")
@@ -3611,6 +3639,8 @@ def test_a_ready_mark_alone_keeps_the_checklist(on, hermes):
 def test_a_checklist_when_the_registry_cant_be_read_says_to_try_again(on, hermes, monkeypatch):
     start()
     monkeypatch.setattr(store_mod.Store, "by_session", lambda self, session_id: (_ for _ in ()).throw(
+        store_mod.sqlite3.OperationalError("database is locked")))
+    monkeypatch.setattr(store_mod.Store, "session_lookup", lambda self, session_id: (_ for _ in ()).throw(
         store_mod.sqlite3.OperationalError("database is locked")))
     assert call("work_progress", {"steps": ["x"]}, session_id=WORKER)["error"] == "unavailable"
 
@@ -4614,6 +4644,18 @@ def test_a_turn_the_old_runner_stopped_stays_a_restart_after_an_in_process_swap(
     work._gateways.clear()
 
 
+def test_a_turn_that_ends_done_lets_go_of_its_runner(on, hermes):
+    # #963's review: every end takes the turn's runner, so a workstream that
+    # never turns again doesn't keep its old runner alive.
+    start()
+    before = set(work._turn_gateways)
+    work.turn_started(WORKER_1)
+    [key] = set(work._turn_gateways) - before
+    work.turn_ended(WORKER_1, "Done.")
+    work.turn_finished(WORKER_1, failed=False, interrupted=False)
+    assert key not in work._turn_gateways
+
+
 def test_a_restart_while_a_workstream_waits_for_its_agents_keeps_what_it_said(on, hermes, monkeypatch):
     # App issue 2206: the held reply is on disk, so the coordinator still hears it.
     start()
@@ -4743,6 +4785,8 @@ def test_a_workstream_cant_save_to_the_bots_memory(on, hermes):
 def test_memory_is_held_when_neither_the_registry_nor_the_title_can_be_read(on, hermes, monkeypatch):
     start()
     monkeypatch.setattr(store_mod.Store, "by_session", lambda self, session_id: (_ for _ in ()).throw(
+        store_mod.sqlite3.OperationalError("database is locked")))
+    monkeypatch.setattr(store_mod.Store, "session_lookup", lambda self, session_id: (_ for _ in ()).throw(
         store_mod.sqlite3.OperationalError("database is locked")))
     monkeypatch.setattr(work, "_titled_bot_chat", lambda session_id, home=None: None)
     assert work.tool_block(WORKER_1, "memory", {"action": "add"})["message"] == work.CHECK_FAILED

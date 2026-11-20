@@ -275,7 +275,55 @@ def test_a_room_of_your_own_agents_is_read_again_so_one_from_elsewhere_counts(tm
     _room_session(home, "s-local", "room-c")
     assert not rules.room_turn("s-local", home).with_others
     _members(home / "state.db", "room-c", [FURINA, NAHIDA, LAIFU])
+    _seconds_later()  # kept for OWN_VERDICT_TTL_S at most (notifier issue 961)
     assert rules.room_turn("s-local", home).with_others
+
+
+def test_a_room_of_your_own_agents_is_kept_for_seconds_while_its_files_are_unchanged(tmp_path, monkeypatch):
+    # Notifier issue 961: each tool, model call and reply of a turn in it read
+    # the session store, the room stores and rooms.json again.
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-c", [FURINA, NAHIDA])
+    _room_session(home, "s-local", "room-c")
+    finds = {"n": 0}
+    real_find = rules._find
+
+    def counted(*args):
+        finds["n"] += 1
+        return real_find(*args)
+
+    monkeypatch.setattr(rules, "_find", counted)
+    for _ in range(5):
+        assert not rules.room_turn("s-local", home).with_others
+    assert finds["n"] == 1
+    # A write to links.json or rooms.json (a join, a Just me change) reads it again at once.
+    monkeypatch.setattr(rules, "_own_inputs", lambda home: (("changed", 1), (None, None)))
+    assert not rules.room_turn("s-local", home).with_others
+    assert finds["n"] == 2
+    # So does a change to the room settings, from the next call.
+    monkeypatch.setattr(rules, "_applies", lambda room_id, home: False)
+    rules.room_turn("s-local", home)
+    assert finds["n"] == 3
+    # And the seconds running out.
+    _seconds_later()
+    rules.room_turn("s-local", home)
+    assert finds["n"] == 4
+
+
+def test_a_room_whose_store_cant_be_read_is_never_kept(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    _room_session(home, "s-home", "room-b")
+    calls = {"n": 0}
+
+    def unreadable(room_id, home):
+        calls["n"] += 1
+        raise rules.RoomStoreError("locked")
+
+    monkeypatch.setattr(rules, "_room_members", unreadable)
+    for _ in range(2):
+        with pytest.raises(rules.RoomStoreError):
+            rules.room_turn("s-home", home)
+    assert calls["n"] == 2
 
 
 def test_a_disbanded_room_keeps_its_rules(tmp_path):
@@ -368,8 +416,9 @@ def test_a_room_in_no_store_is_read_again_and_logged_once(tmp_path, caplog):
             turn = rules.room_turn("s-home", home)
             assert (turn.room_id, turn.with_others) == ("room-b", False)
     assert caplog.text.count("in any room store") == 1
-    # Not remembered: once the room is there, its others are found.
+    # Not remembered: once the room is there, its others are found (within seconds, notifier issue 961).
     _room(home / "state.db", "room-b", [FURINA, LAIFU])
+    _seconds_later()
     assert rules.room_turn("s-home", home).with_others
 
 
@@ -1338,10 +1387,13 @@ class _Rooms:
 
 
 def _seconds_later():
-    """OWN_VERDICT_TTL_S on: what _lifted kept for a room is read again."""
+    """OWN_VERDICT_TTL_S on: what _lifted kept for a room, and a room read
+    again each time kept for a moment, are read again."""
     with rules._lock:
         for key, (until, inputs, lifted, others) in list(rules._own_verdicts.items()):
             rules._own_verdicts[key] = (until - rules.OWN_VERDICT_TTL_S - 1, inputs, lifted, others)
+        for key, (until, inputs, turn, scope) in list(rules._brief.items()):
+            rules._brief[key] = (until - rules.OWN_VERDICT_TTL_S - 1, inputs, turn, scope)
 
 
 def _own(monkeypatch, links, rooms=None, just_me=()):

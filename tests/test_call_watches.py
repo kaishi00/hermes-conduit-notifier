@@ -374,6 +374,7 @@ def test_a_run_reports_and_the_plugin_calls_once_it_lasted(home, hermes, clock):
     clock.now[0] += 5 * 60
     calling = _report(job_id, True, saw="The homelab has been down for 10 minutes.")
     assert calling["status"] == "calling"
+    assert "they're already in a voice call with you" in calling["note"]  # as the call tool says (notifier 952)
     [watch] = _rang(home)
     assert watch["session_ids"] == [RUN.format(job_id)] and watch["asked"] is True
     assert watch["reason"] == "The homelab has been down for 10 minutes."

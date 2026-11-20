@@ -275,6 +275,15 @@ MAX_OWN_VERDICTS = 1024
 _own_verdicts: "OrderedDict[tuple[str, str, str], tuple[float, tuple, bool, Optional[tuple[str, ...]]]]" = OrderedDict()
 _MISSING = object()
 _warned: dict[str, int] = {}
+# A room ``_find`` reads again each time (one without other people's agents,
+# one the room settings leave out, one no store has), kept by home and session
+# while links.json and rooms.json are unchanged, the room settings say the
+# same, and for OWN_VERDICT_TTL_S at most, as ``_own_verdicts`` is: someone
+# joining counts within seconds, rather than every tool, model call and reply
+# of the turn reading the session store, the room stores and rooms.json
+# again (notifier issue 961). A read that fails is never kept.
+_BRIEF = "brief"
+_brief: "OrderedDict[tuple[str, str], tuple[float, tuple, Optional[RoomTurn], bool]]" = OrderedDict()
 
 
 def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
@@ -282,8 +291,9 @@ def room_turn(session_id: Any, home: Any = None) -> Optional[RoomTurn]:
     A session store that can't be read raises SessionStoreError (logged), and
     a room store that can't be read, or a room session not titled with its
     room yet, RoomStoreError. A room with other people's agents is remembered
-    per session; a room without them is read again each time (an agent from
-    elsewhere may join it), as is one no store has (logged). A room Conduit
+    per session; a room without them is read again once links.json or
+    rooms.json changes, or after OWN_VERDICT_TTL_S (an agent from elsewhere
+    may join it), as is one no store has (logged). A room Conduit
     didn't make on a host that keeps the plugin to Conduit's rooms
     (room_settings.conduit_rooms_only) runs as Hermes alone would: None."""
     home_path = Path(home) if home is not None else _hermes_home()
@@ -310,13 +320,32 @@ def _lookup(value: str, home_path: Optional[Path]) -> Optional[RoomTurn]:
         if known is not _MISSING:
             _remembered.move_to_end(key)
             return known  # type: ignore[return-value]
+        brief = _brief.get(key)
+    inputs = _own_inputs(home_path) if home_path is not None else ()
+    now = time.monotonic()
+    if (brief is not None and brief[0] > now and brief[1] == inputs
+            and brief[3] == _brief_scope(brief[2], home_path)):
+        return brief[2]
     turn, settled = _find(value, home_path)
-    if settled:
+    if settled is True:
         with _lock:
+            _brief.pop(key, None)
             _remembered[key] = turn
             while len(_remembered) > MAX_REMEMBERED:
                 _remembered.popitem(last=False)
+    elif settled == _BRIEF and home_path is not None:
+        with _lock:
+            _brief[key] = (now + OWN_VERDICT_TTL_S, inputs, turn, _brief_scope(turn, home_path))
+            _brief.move_to_end(key)
+            while len(_brief) > MAX_OWN_VERDICTS:
+                _brief.popitem(last=False)
     return turn
+
+
+def _brief_scope(turn: Optional[RoomTurn], home: Optional[Path]) -> bool:
+    """Whether the room settings reach the room a brief answer is about, so a
+    change to them holds from the next call."""
+    return bool(turn and turn.room_id) and _applies(turn.room_id, home)
 
 
 def _in_scope(turn: Optional[RoomTurn], home: Optional[Path]) -> Optional[RoomTurn]:
@@ -797,6 +826,7 @@ def forget() -> None:
     with _lock:
         _remembered.clear()
         _own_verdicts.clear()
+        _brief.clear()
         _warned.clear()
 
 
@@ -814,7 +844,8 @@ def warn_often(kind: str, message: str, *args: Any, exc_info: bool = True) -> No
 
 
 def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bool]:
-    """``(turn, settled)``: an answer that isn't settled is read again next time."""
+    """``(turn, settled)``: an answer that isn't settled is read again next
+    time; one that's ``_BRIEF`` is kept for a moment (``_brief``)."""
     remote = bool(ROOM_SESSION_ID.fullmatch(session_id))
     unnamed_member = RoomTurn(room_id="", side="member", with_others=True, session_id=session_id)
     if home is None:
@@ -850,7 +881,7 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
     if not _applies(room_id, home):
         # Left out by the room settings: its store isn't read, and the answer
         # isn't remembered, so a change to the setting holds from the next call.
-        return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), False
+        return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), _BRIEF
     members = _room_members(room_id, home)
     if members is None:
         # Kept where this plugin doesn't look: as Hermes alone would run it,
@@ -858,15 +889,15 @@ def _find(session_id: str, home: Optional[Path]) -> tuple[Optional[RoomTurn], bo
         # sessions keep what other people's agents said.)
         warn_often("room not found", "conduit_push: couldn't find room %s in any room store, so its turns run "
                    "without the owner's room rules", room_id, exc_info=False)
-        return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), False
+        return RoomTurn(room_id=room_id, side="home", with_others=False, session_id=session_id), _BRIEF
     others = _others(members)
     # Someone in it with none of their agents ("Just me", room_invites.PERSON) posts in it too: the owner's
     # room rules hold for them as for another person's agent.
     just_me = _just_me_links(room_id, home)
     with_others = bool(others) or just_me is None or bool(just_me)
-    # A room without other people is read again, so one who joins counts.
+    # A room without other people is read again within seconds, so one who joins counts.
     return RoomTurn(room_id=room_id, side="home", with_others=with_others, session_id=session_id,
-                    others=others, peers=_peer_ids(members), just_me=just_me), with_others
+                    others=others, peers=_peer_ids(members), just_me=just_me), (True if with_others else _BRIEF)
 
 
 def _lineage(path: Path, session_id: str) -> tuple[list[tuple[str, str]], str]:
