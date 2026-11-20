@@ -2343,15 +2343,20 @@ release helper use client-only cleanup too.
 
 ## Background review in Helper models (plugin 0.184+)
 
-After each turn Hermes runs a background review that decides what goes into
-memory and which skills to patch, on `auxiliary.background_review`
-(`provider`, `model`, `reasoning_effort`, and `enabled`, which turns the
-per-turn review off while `/refine` keeps working). Hermes' dashboard leaves
-the slot out of its list (NousResearch/hermes-agent#157839), so
+Hermes runs a background review that decides what goes into memory and
+which skills to patch, on `auxiliary.background_review` (`provider`,
+`model`, `reasoning_effort`, and `enabled`, which turns the automatic review
+off while `/refine` keeps working). It doesn't run after every turn: Hermes
+checks two counters after each turn and reviews only when one reaches its
+interval, `memory.nudge_interval` (user turns, for memory) or
+`skills.creation_nudge_interval` (tool-calling steps, for skills), both 10
+by default and 0 for off; Conduit shows both under the switch.
+
+Hermes' dashboard leaves the slot out of its list (NousResearch/hermes-agent#157839), so
 `/api/model/auxiliary` didn't show it and `/api/model/set` refused it. The
 plugin adds it to that list on the dashboard, after Hermes' own slots, so
 Conduit's Models & providers > Helper models and Hermes' Models page show and
-set it; Conduit sets `enabled` through `/api/config`. A Hermes that lists it
+set it; Conduit sets `enabled` and the intervals through `/api/config`. A Hermes that lists it
 already keeps its own list.
 
 ## Step summaries for Conduit (plugin 0.137.4+)

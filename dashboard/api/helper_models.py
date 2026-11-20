@@ -1,9 +1,9 @@
 """Helper models: the slots Hermes' runtime uses that its dashboard leaves
 out of its list (hermes-conduit#2871).
 
-Hermes runs a review after each turn (what goes into memory, which skills to
-patch) on its own `auxiliary.background_review` model, with an `enabled`
-switch. Its dashboard's slot list (``web_server_config._AUX_TASK_SLOTS``)
+Hermes runs a background review (what goes into memory, which skills to
+patch) when a memory or skill interval is reached, on its own
+`auxiliary.background_review` model, with an `enabled` switch. Its dashboard's slot list (``web_server_config._AUX_TASK_SLOTS``)
 doesn't name it, so `GET /api/model/auxiliary` doesn't list it and
 `POST /api/model/set` refuses it (NousResearch/hermes-agent#157839), and the
 model can only be changed in config.yaml. Until Hermes lists it, this adds
