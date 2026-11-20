@@ -2359,7 +2359,7 @@ Conduit's Models & providers > Helper models and Hermes' Models page show and
 set it; Conduit sets `enabled` and the intervals through `/api/config`. A Hermes that lists it
 already keeps its own list.
 
-## Group router in Helper models (plugin 0.186+)
+## Group router in Helper models (plugin 0.187+)
 
 A group room set to pick who answers automatically (Who answers > Pick who
 answers automatically) asks one quick model call who a message is for, on

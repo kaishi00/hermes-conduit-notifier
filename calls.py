@@ -98,7 +98,9 @@ def _note_ring(event: dict[str, Any]) -> None:
     """Keeps the call for Conduit on a computer (GET /calls/rings), which rings
     for it beside the iPhone: only once the relay says the iPhone rang, so a
     call that fell back to a push, or rang nowhere ("Ring like a phone call"
-    off), never rings a computer. Never stops the call itself."""
+    off), never rings a computer. With no iPhone paired, a computer asking
+    for rings rings on its own (_ring_computer_only). Never stops the call
+    itself."""
     try:
         _store(get_hermes_home()).add_ring(
             event.get("call"), name=event.get("profile_name", ""), title=event.get("title", ""), body=event.get("body", ""))
@@ -830,7 +832,36 @@ def call_delivery(answer: Any) -> str:
     return "rang the paired iPhone"
 
 
+def can_ring() -> bool:
+    """Whether a call from Hermes can ring anywhere: an iPhone is paired, or
+    Conduit on a computer asked for rings lately (a computer with no iPhone,
+    which rings by itself). Never raises."""
+    try:
+        if client.load_state() is not None:
+            return True
+        return _store(get_hermes_home()).computer_known()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ring_computer_only(event: dict[str, Any]) -> None:
+    """No iPhone is paired: the call rings Conduit on a computer that's
+    asking for rings, and goes nowhere else (no push has a phone to reach)."""
+    try:
+        listens = _store(get_hermes_home()).computer_listens()
+    except Exception:  # noqa: BLE001
+        listens = False
+    if listens:
+        logger.info("Conduit call request: rang Conduit on a computer (no iPhone is paired)")
+        _note_ring(event)
+    else:
+        logger.info("Conduit call request dropped: no iPhone is paired and no computer is asking for rings")
+
+
 def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
+    if client.load_state() is None:
+        _ring_computer_only(event)
+        return
     relay_failed = False
     for delay in DELIVERY_DELAYS_S:
         if delay:
