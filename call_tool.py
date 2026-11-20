@@ -33,8 +33,8 @@ SETTINGS_LINK = "[Calls from Hermes](conduit://settings/calls)"
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Phone the user through Conduit: their iPhone, or Conduit on their computer, rings when this turn ends. "
-        "When they answer, a live voice conversation opens in this chat. The call goes out when this turn "
+        "Phone the user through Conduit when this turn ends. Their iPhone or Conduit on their computer rings, "
+        "and when they answer, a live voice conversation opens in this chat. The call goes out when this turn "
         "ends, so finish the work first and end the turn with the result as your final reply; the call opens "
         "with your reason and that reply. Use it when the user asked to be called, phoned or rung about what "
         "this turn does (\"call me when it's done\"), with asked_by_user true. Without such a request, only "
