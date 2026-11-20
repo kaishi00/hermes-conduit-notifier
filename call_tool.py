@@ -140,7 +140,8 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
                          "when it's time and tells you what to reply.")}
     if not calls.can_ring():
         return {"ok": False, "error": "not_paired",
-                "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
+                "note": ("This Hermes profile isn't paired with the Conduit app on an iPhone, and Conduit on a computer "
+                         "hasn't asked for calls lately, so it can't call. Say so in your reply.")}
     if calls.in_call():
         # Already talking to Hermes (a phone, CarPlay or Apple Watch call):
         # nothing would ring, so the model mustn't promise that it will.

@@ -296,7 +296,8 @@ def _setup(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool
                 "note": "Only the main conversation can change call watches. Report back; the main agent can ask."}
     if not calls.can_ring():
         return {"ok": False, "error": "not_paired",
-                "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
+                "note": ("This Hermes profile isn't paired with the Conduit app on an iPhone, and Conduit on a computer "
+                         "hasn't asked for calls lately, so it can't call. Say so in your reply.")}
     cronjob = _cronjob()
     if cronjob is None:
         return {"ok": False, "error": "unavailable",
@@ -862,8 +863,8 @@ def _place_call(store: "WatchStore", job_id: str, session_id: Any, saw: str, *, 
         return {"ok": True, "status": "not_called", "note": (
             "It's time to call, but the call couldn't be set up. End with what you found in a few short lines.")}
     return {"ok": True, "status": "calling", "note": (
-        "The user's iPhone, or Conduit on their computer, rings when this run ends, unless their call limits hold it back. End with what you "
-        "found in a few short lines: the call opens on it. Don't say the phone is ringing.")}
+        "The user's iPhone, or Conduit on their computer, rings when this run ends, unless their call limits hold it back or, with no iPhone, Conduit isn't "
+        "open on their computer. End with what you found in a few short lines: the call opens on it. Don't say the phone is ringing.")}
 
 
 RUN_NOTE = (f"Report before you reply. If {REPORT_TOOL} isn't among your tools, call it through tool_call: "

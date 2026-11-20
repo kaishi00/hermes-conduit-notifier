@@ -156,6 +156,17 @@ def test_with_no_iphone_a_call_rings_a_computer_that_asks_for_rings(home, fake):
     assert ring["id"] == watch_id
 
 
+def test_with_no_iphone_a_call_delivered_after_the_unload_rings_no_computer(home, fake):
+    fake.state = None
+    CallStore(home).note_computer()
+    calls.stop()
+    try:
+        calls.deliver({"type": "call.requested", "call": {"id": "watch_abcdefgh", "session_ids": ["st-1"]}}, None)
+    finally:
+        calls.start()
+    assert fake.sent == [] and CallStore(home).rings()["rings"] == []
+
+
 def test_with_no_iphone_and_no_computer_asking_nothing_rings(home, fake, clock):
     fake.state = None
     _watch(home, "st-1")
