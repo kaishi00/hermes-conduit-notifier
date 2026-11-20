@@ -18,9 +18,9 @@ tool hands you that Markdown for your reply instead.
 
 - **Only when it helps.** Most answers are plain text. Draw a board when the
   user asks to see something or the answer would be hard to read without one
-  (a plan by day, places on a map, numbers to compare, a list to tick off, a
-  diff), never for an explanation, advice, a short answer or a few bullet
-  points. When the user has said how they want cards used, do as they say.
+  (the weather or a forecast, a plan by day, places on a map, numbers to
+  compare, a list to tick off, a diff), never for an explanation, advice, a
+  short answer or a few bullet points. When the user has said how they want cards used, do as they say.
 - **Real data only.** Numbers, prices, ratings, forecasts and photos come
   from a tool, a site or the user's files, and name their source. Never fill
   a table with guesses.

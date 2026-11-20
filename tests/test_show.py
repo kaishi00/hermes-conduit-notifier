@@ -858,4 +858,8 @@ def test_the_model_draws_cards_only_when_they_help():
     for text in (tool.BOARD_RULE, tool.SCHEMA["description"], skill):
         assert "most answers" in text.lower() and "how they want cards used, do as they say" in text
     assert "Prefer cards, which Conduit draws natively, on a call or in a typed chat" not in tool.SCHEMA["description"]
-    assert "At most one board a reply" in tool.BOARD_RULE and "the weather" in tool.BOARD_RULE
+    assert "At most one board a reply" in tool.BOARD_RULE
+    for text in (tool.BOARD_RULE, tool.SCHEMA["description"], skill):
+        assert "the weather" in text, "the three set the same bar"
+    # The user's wishes stand as their own sentence, not inside the "never" list.
+    assert "a few points. When the user has said how they want cards used" in tool.SCHEMA["description"]
