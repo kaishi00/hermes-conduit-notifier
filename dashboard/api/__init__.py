@@ -54,6 +54,7 @@ MODULES = (
     "self_update",
     "bot_plugin",
     "helper_models",
+    "hermes_update",
 )
 
 

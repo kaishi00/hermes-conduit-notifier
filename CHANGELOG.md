@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.6 (2026-11-20)
+
+### Fixes
+
+- Update Hermes from Conduit no longer stops partway on a host where systemd runs the dashboard: stopping the dashboard during the update could kill the update with it and leave Hermes offline. The update now runs on its own.
+
 ## 0.187.5 (2026-11-20)
 
 ### Fixes
