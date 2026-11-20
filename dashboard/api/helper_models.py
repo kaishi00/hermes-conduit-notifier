@@ -30,9 +30,12 @@ def _add_missing_slots() -> List[str]:
     try:
         from hermes_cli import web_server_config
     except ImportError:
+        logger.debug("conduit_push: no hermes_cli.web_server_config; helper model slots left as they are")
         return []
     slots = getattr(web_server_config, "_AUX_TASK_SLOTS", None)
     if not isinstance(slots, tuple):
+        logger.debug("conduit_push: Hermes' _AUX_TASK_SLOTS is %s, not a tuple; helper model slots left as they are",
+                     type(slots).__name__)
         return []
     missing = tuple(slot for slot in MISSING_SLOTS if slot not in slots)
     if not missing:
@@ -45,6 +48,10 @@ def _add_missing_slots() -> List[str]:
     models = sys.modules.get("hermes_cli.web_routers.models")
     if models is not None and getattr(models, "_AUX_TASK_SLOTS", None) is slots:
         models._AUX_TASK_SLOTS = widened
+    elif models is not None:
+        # Hermes' slot list route reads its own copy: it won't list them.
+        logger.debug("conduit_push: web_routers.models holds another slot list; GET /api/model/auxiliary won't "
+                     "list %s", ", ".join(missing))
     logger.info("conduit_push: listed Hermes' helper model slots %s on the dashboard", ", ".join(missing))
     return list(missing)
 
