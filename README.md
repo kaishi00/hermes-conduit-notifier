@@ -3139,8 +3139,11 @@ the schema's `board` section.
   all. Hermes hears a changed checklist once, at the chat's next turn.
 - **Recipes.** The `conduit_push:drawing-boards` skill holds the plans for a
   trip, a comparison, a dashboard from the user's data and a tracker. On a
-  turn from a Conduit that draws boards, Hermes gets a one-line rule on when
-  to draw one and never to draw data as an HTML `::preview` page.
+  turn from a Conduit that draws boards, Hermes gets a short rule on when to
+  draw one: only when the user asks to see something or the answer would be
+  hard to read without it, never for an explanation, advice or a short
+  answer, at most one a reply, the user's own wishes about cards first, and
+  never data as an HTML `::preview` page.
 - **Older Conduits.** A Conduit says `board-cards` in its exchange when it
   draws boards. Until every Conduit that draws cards does, the tool leaves
   the new kinds out, keeps the first four cards, drops `layout` and `next`,

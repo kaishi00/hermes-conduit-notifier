@@ -64,8 +64,11 @@ SCHEMA: dict[str, Any] = {
         "Show something on the user's phone screen in Conduit. On a voice call, use it for anything better seen "
         "than heard: tables, charts, forecasts, recipes and other step-by-step instructions, lists, comparisons, "
         "code, images and links, and whenever the user asks to see or show something. Never ask whether to show a "
-        "card: show it, or answer in text. Prefer cards, which Conduit "
-        "draws natively, on a call or in a typed chat: a map with pins and a route, one place in detail, several "
+        "card: show it, or answer in text. In a typed chat most answers need no card: use one only when the user "
+        "asks to see something or it shows what prose and a short list can't (several places, a plan by day, a "
+        "forecast, numbers to compare, a list to tick off, a diff), never for an explanation, advice, a short "
+        "answer or a few points, and when the user has said how they want cards used, do as they say. When you do "
+        "show something, prefer cards, which Conduit draws natively: a map with pins and a route, one place in detail, several "
         "places to swipe through, big numbers (stats), a line, bar or pie chart, a weather forecast, a comparison "
         "of two to four options, steps the user can tick off (with timers), photos, videos or audio to play, people "
         "to call, message or email, the status of something in progress (a delivery, a flight, a match, a job), "
@@ -196,11 +199,14 @@ REVIEW_ELSEWHERE_NOTE = ("cards[{index}].review: {id} belongs to {ref}, which ma
                          "with for {ref}, and send what the user says about it to {ref} with work_send")
 
 
-BOARD_RULE = ("[Conduit draws boards: when an answer reads better seen than read (the weather or a forecast, a "
-              "plan by day, a comparison, numbers or a trend, a ranking, a list to tick off, changes to code or a "
-              "config as a diff), show it with "
-              "conduit_show as cards (through tool_search and tool_call when it's deferred), with next for the "
-              "obvious follow-ups, and keep your reply to the gist. Never draw data as an HTML ::preview page.]")
+BOARD_RULE = ("[Conduit draws boards, but most answers read best as plain text: an explanation, advice, a short "
+              "answer, a few points or a conversation get no board. Draw one only when the user asks to see "
+              "something or the answer would be hard to read without it (the weather or a forecast, places on a map, a plan by "
+              "day, numbers to compare across options or over time, a list to tick off, changes to code or a "
+              "config as a diff): show it with conduit_show as cards (through tool_search and tool_call when it's "
+              "deferred), with next for the obvious follow-ups, and keep your reply to the gist. At most one "
+              "board a reply. When the user has said how they want cards used, do as they say. Never draw data "
+              "as an HTML ::preview page.]")
 TEMPLATES_RULE = "[Your saved card templates (conduit_show type template): {names}.]"
 
 
