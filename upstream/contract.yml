@@ -88,7 +88,10 @@ notes:
     hermes_store.py opens a profile's sessions through Hermes' storage interface
     (persistence_assembly.open_persistence / open_persistence_reader, the sessions, messages,
     maintenance and state_meta repositories, session_retention.after_sessions_removed, and
-    gateway.session_ingress_media.native_inputs_root for a delete's media root) since Hermes'
+    hermes_constants.get_hermes_dir for a delete's media root, the store's own profile's
+    cache/documents/native-inputs as gateway.session_ingress_media.native_inputs_root names it for
+    the ambient one: Hermes' hosted-document fence retires only files under the root a delete
+    names, issue 945) since Hermes'
     2026-11-18 canary removed SessionDB (issues 883-897), and SessionDB on a release before it. It
     feeds the session titles that tell a Bot Chat (its step budget, board and coordination), cron
     reports shown in a Bot Chat, voice calls' rows and tags, room chat cleanup and workstream
