@@ -681,9 +681,7 @@ def test_a_list_that_isnt_json_short_of_its_limit_is_asked_the_same_again(report
     with caplog.at_level(logging.INFO, logger=pulse.logger.name):
         assert listed(live)["state"] == pulse.RUN_READY
     first, second = live.llm.calls
-    # Asked the same, with the room every provider took before (a refusal of 8,000 gets its report).
-    assert (first["max_tokens"], second["max_tokens"]) == (candidates.REPLY_TOKENS,
-                                                          candidates.FALLBACK_REPLY_TOKENS)
+    assert first["max_tokens"] == second["max_tokens"] == candidates.REPLY_TOKENS
     assert first["instructions"] == second["instructions"]
     assert any(record.getMessage().endswith(f"wasn't the JSON asked for (model deepseek-v4.1-flash, 1200 of "
                                             f"{candidates.REPLY_TOKENS} reply tokens, 19 characters)")
@@ -703,6 +701,12 @@ def test_a_list_that_fails_once_is_asked_again(reporting):
     live = reporting
     live.llm.replies += [RuntimeError("the model is down"), {"remembered": [], "found": [FOUND]}]
     assert listed(live)["state"] == pulse.RUN_READY
+    # The call itself failed: asked again with the room every provider took before
+    # 0.187.2, so one that refuses 8,000 still gets its report.
+    first, second = live.llm.calls
+    assert (first["max_tokens"], second["max_tokens"]) == (candidates.REPLY_TOKENS,
+                                                          candidates.FALLBACK_REPLY_TOKENS)
+    assert f"up to {candidates.RETRY_FOUND} entries" in second["instructions"]  # so it fits
     pulse.tick()
     [sent] = live.sent()
     assert "1. [follow-up] Look at the flaky deploy (you asked in Deploy)" in sent
