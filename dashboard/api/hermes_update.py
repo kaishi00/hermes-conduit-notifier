@@ -76,19 +76,31 @@ def scope_prefix() -> Optional[List[str]]:
     if not systemd_run or manager is None:
         return None
     base = [*manager, systemd_run, *(["--user"] if manager else []), "--scope", "--quiet", "--collect"]
+    if tuple(base) not in _probed and not _probe(base):
+        return None
+    unit = f"hermes-update-{int(time.time())}-{os.getpid()}-{next(_units)}"
+    return [*base, f"--unit={unit}", "--"]
+
+
+# Managers that made a probe scope in this process. Only a success is kept, so
+# a manager that was busy once is asked again next time.
+_probed: set = set()
+
+
+def _probe(base: List[str]) -> bool:
     try:
         # A probe, so a systemd that refuses scopes never costs the update itself.
         probe = subprocess.run([*base, "--", "true"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=PROBE_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError):
         logger.info("conduit_push: systemd-run didn't answer; hermes update runs in the dashboard's cgroup")
-        return None
+        return False
     if probe.returncode != 0:
         logger.info("conduit_push: systemd-run refused a scope (%s); hermes update runs in the dashboard's cgroup",
                     probe.returncode)
-        return None
-    unit = f"hermes-update-{int(time.time())}-{os.getpid()}-{next(_units)}"
-    return [*base, f"--unit={unit}", "--"]
+        return False
+    _probed.add(tuple(base))
+    return True
 
 
 def _is_update(args: Any) -> bool:

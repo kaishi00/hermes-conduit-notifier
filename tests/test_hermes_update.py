@@ -54,6 +54,7 @@ def systemd(monkeypatch, tmp_path):
     monkeypatch.setattr(update.sys, "platform", "linux")
     monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/systemd-run" if name == "systemd-run" else None)
     monkeypatch.setattr(update.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(update, "_probed", set())
     probes = []
 
     def run(argv, **kwargs):
@@ -78,6 +79,18 @@ def test_hermes_update_from_the_dashboard_runs_in_its_own_scope(launchers, syste
     assert command[6:] == [*HERMES, "update"]
     # The probe asked for the same kind of scope first.
     assert systemd.probes == [["/usr/bin/systemd-run", "--scope", "--quiet", "--collect", "--", "true"]]
+    # A manager that made one scope isn't asked again, and each update gets a unit of its own.
+    again = _spawn_hermes_action(["update"])
+    assert len(systemd.probes) == 1 and again[4] != command[4]
+
+
+def test_a_refused_probe_is_asked_again_next_time(launchers, systemd, monkeypatch):
+    update.install()
+    answers = [1, 0]
+    monkeypatch.setattr(update.subprocess, "run",
+                        lambda argv, **kwargs: subprocess.CompletedProcess(argv, answers.pop(0)))
+    assert _spawn_hermes_action(["update"]) == [*HERMES, "update"]
+    assert _spawn_hermes_action(["update"])[0] == "/usr/bin/systemd-run"
 
 
 def test_other_actions_and_callers_run_as_hermes_starts_them(launchers, systemd):
