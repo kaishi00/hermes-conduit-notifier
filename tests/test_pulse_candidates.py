@@ -3,6 +3,7 @@ slice 1): a model call lists what the report could bring up, code picks
 what goes in, and every candidate is journaled with what became of it."""
 
 import json
+import logging
 import re
 import sqlite3
 import sys
@@ -476,7 +477,17 @@ class Llm:
         reply = self.replies.pop(0) if self.replies else {"remembered": [], "found": []}
         if isinstance(reply, Exception):
             raise reply
+        if isinstance(reply, types.SimpleNamespace):
+            return reply  # a whole result, its usage and text included
         return types.SimpleNamespace(parsed=reply, usage=types.SimpleNamespace(total_tokens=321))
+
+
+def unread(output_tokens, text="{\"remembered\": [{\"ref\": 1, \"line\": \"Renew"):
+    """A result whose reply wasn't JSON, ``output_tokens`` long (Hermes's
+    PluginLlmStructuredResult: ``parsed`` None, ``content_type`` text)."""
+    return types.SimpleNamespace(parsed=None, content_type="text", text=text, model="deepseek-v4.1-flash",
+                                 usage=types.SimpleNamespace(output_tokens=output_tokens, total_tokens=output_tokens
+                                                             + 5_409))
 
 
 @pytest.fixture
@@ -633,6 +644,48 @@ def test_a_list_that_fails_twice_skips_the_report(reporting, reply):
     assert run["state"] == pulse.RUN_SKIPPED and run["error"]
     [counts] = live.store.get(pulse.pulse_picks.PICK_COUNTS).values()
     assert counts["report_skipped"] == 1
+
+
+def test_a_list_cut_off_at_its_limit_is_asked_again_for_less_with_more_room(reporting, caplog):
+    # Notifier issue 947: a model that wrote long lists ran out of room every
+    # time, and asked the same again it ran out again, so no report came.
+    live = reporting
+    live.llm.replies += [unread(candidates.REPLY_TOKENS), {"remembered": [], "found": [FOUND]}]
+    with caplog.at_level(logging.INFO, logger=pulse.logger.name):
+        assert listed(live)["state"] == pulse.RUN_READY
+    first, second = live.llm.calls
+    assert (first["max_tokens"], second["max_tokens"]) == (candidates.REPLY_TOKENS, candidates.RETRY_REPLY_TOKENS)
+    assert f"up to {candidates.MAX_FOUND} entries" in first["instructions"]
+    assert f"up to {candidates.RETRY_FOUND} entries" in second["instructions"]
+    # Why it failed, from the log alone.
+    [line] = [record.getMessage() for record in caplog.records if "wasn't the JSON" in record.getMessage()]
+    assert line == (f"conduit_push: Pulse: the pulse report reply wasn't the JSON asked for, cut off at its limit "
+                    f"(model deepseek-v4.1-flash, {candidates.REPLY_TOKENS} of {candidates.REPLY_TOKENS} reply "
+                    f"tokens, 41 characters)")
+    pulse.tick()
+    [sent] = live.sent()
+    assert "1. [follow-up] Look at the flaky deploy (you asked in Deploy)" in sent
+
+
+def test_a_list_cut_off_twice_skips_the_report_and_says_so(reporting):
+    live = reporting
+    live.llm.replies += [unread(candidates.REPLY_TOKENS), unread(candidates.RETRY_REPLY_TOKENS)]
+    assert listed(live)["state"] == pulse.RUN_FAILED
+    pulse.tick()
+    assert live.sent() == [] and live.store.get(pulse.REPORT_RUN)["error"] == "CutOff"
+
+
+def test_a_list_that_isnt_json_short_of_its_limit_is_asked_the_same_again(reporting, caplog):
+    live = reporting
+    live.llm.replies += [unread(1_200, text="Here are the items."), {"remembered": [], "found": [FOUND]}]
+    with caplog.at_level(logging.INFO, logger=pulse.logger.name):
+        assert listed(live)["state"] == pulse.RUN_READY
+    first, second = live.llm.calls
+    assert first["max_tokens"] == second["max_tokens"] == candidates.REPLY_TOKENS
+    assert first["instructions"] == second["instructions"]
+    assert any(record.getMessage().endswith(f"wasn't the JSON asked for (model deepseek-v4.1-flash, 1200 of "
+                                            f"{candidates.REPLY_TOKENS} reply tokens, 19 characters)")
+               for record in caplog.records)
 
 
 def test_a_list_that_fails_once_is_asked_again(reporting):

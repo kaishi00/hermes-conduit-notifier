@@ -1139,18 +1139,22 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
         lessons = candidates.lessons_block(seen=learning.report_lessons(pulse_store, learning.SEEN),
                                            sooner=learning.report_lessons(pulse_store, learning.SOONER_LESSON))
         drawn = pulse_picks.drawn_types(home)
+        room, found = candidates.REPLY_TOKENS, candidates.MAX_FOUND
         for tries in range(REPORT_LIST_TRIES):
             # The report is made from this list only (no free text to read back):
             # a list that fails is asked for once more.
             try:
                 rows, tokens = candidates.ask(functools.partial(
-                    _memory_llm, purpose="pulse report", max_tokens=candidates.REPLY_TOKENS, route=route),
+                    _memory_llm, purpose="pulse report", max_tokens=room, route=route, cut_off=candidates.CutOff),
                     gathered, nudge=learning.nudge(pulse_store), note=report.note(pulse_store), lessons=lessons,
-                    drawn=drawn)
+                    drawn=drawn, found=found)
                 break
-            except Exception:  # noqa: BLE001 - the last try's error marks the run failed below
+            except Exception as error:  # noqa: BLE001 - the last try's error marks the run failed below
                 if tries + 1 == REPORT_LIST_TRIES:
                     raise
+                if isinstance(error, candidates.CutOff):
+                    # Asked the same, it overruns the same (notifier issue 947): less, with more room.
+                    room, found = candidates.RETRY_REPLY_TOKENS, candidates.RETRY_FOUND
                 logger.info("conduit_push: Pulse: the report's candidate list failed; asking once more",
                             exc_info=True)
         candidates.decide(pulse_store, rows, now=now, zone=zone)
@@ -1512,11 +1516,13 @@ def _leads(pulse_store: store.PulseStore) -> bool:
 
 def _memory_llm(instructions: str, text: str, purpose: str = "pulse memory",
                 max_tokens: int = memory.MAX_TOKENS, route: Optional[dict[str, str]] = None,
-                schema: Optional[dict] = None) -> tuple[Any, int]:
+                schema: Optional[dict] = None, cut_off: Optional[type[Exception]] = None) -> tuple[Any, int]:
     """One Pulse model call, on Hermes's "Pulse memory" slot. ``route`` is
     the Pulse chat's model (``lent_route``), which that slot left on "auto"
     then means, as Settings > Pulse's "Default" (and the model it names) says.
-    ``schema``: the reply's JSON schema, sent as its shape (structured_args)."""
+    ``schema``: the reply's JSON schema, sent as its shape (structured_args).
+    A reply that isn't JSON is logged with its size (``_log_unread``), and
+    ``cut_off``, when given, is raised for one that ran out of room."""
     llm = getattr(_ctx, "llm", None)
     if llm is None:
         raise RuntimeError("this Hermes gives plugins no model access")
@@ -1526,7 +1532,29 @@ def _memory_llm(instructions: str, text: str, purpose: str = "pulse memory",
             task=memory.TASK if _memory_task else None, purpose=purpose, timeout=memory.CALL_TIMEOUT_S,
             max_tokens=max_tokens)
     usage = getattr(result, "usage", None)
-    return getattr(result, "parsed", None), int(getattr(usage, "total_tokens", 0) or 0)
+    parsed = getattr(result, "parsed", None)
+    if parsed is None and _log_unread(result, purpose, max_tokens) and cut_off is not None:
+        raise cut_off(f"the reply ran out of room ({max_tokens} tokens)")
+    return parsed, int(getattr(usage, "total_tokens", 0) or 0)
+
+
+# A reply this close to its limit ran out of room: providers count to it exactly.
+CUT_OFF_SHARE = 0.98
+
+
+def _log_unread(result: Any, purpose: str, max_tokens: int) -> bool:
+    """Logs a Pulse call whose reply wasn't the JSON asked for, with what
+    tells why from the log alone: the model, the reply's tokens against its
+    limit and its length (Hermes gives plugins no finish reason). True when
+    it ran out of room (notifier issue 947)."""
+    output = int(getattr(getattr(result, "usage", None), "output_tokens", 0) or 0)
+    cut = max_tokens > 0 and output >= max_tokens * CUT_OFF_SHARE
+    text = getattr(result, "text", None)
+    logger.warning("conduit_push: Pulse: the %s reply wasn't the JSON asked for%s (model %s, %s of %d reply tokens, "
+                   "%s characters)", purpose, ", cut off at its limit" if cut else "",
+                   getattr(result, "model", None) or "unknown", output or "unknown", max_tokens,
+                   len(text) if isinstance(text, str) else "unknown")
+    return cut
 
 
 def structured_args(schema: Optional[dict]) -> dict[str, Any]:
