@@ -19,7 +19,9 @@ import types
 _HOLDER = "_conduit_push_degraded"
 
 # A workstream a clean restart stops is left interrupted, not recovered:
-# Hermes' turn stopper wasn't where work_tool wraps it.
+# work_tool can't tell Hermes' stop on its way out (the dashboard's turn
+# stopper wasn't where it wraps it, or the gateway running the workstreams
+# can't say it's stopping).
 WORKSTREAM_RECOVERY = "workstream-recovery"
 # The Folder's routes refuse: Hermes has a managed-files policy and couldn't
 # say which folder it keeps files in.
