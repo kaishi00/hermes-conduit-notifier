@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.0 (2026-11-20)
+
+### New and improved
+
+- Conduit's Helper models can show and change Group router, the model that picks who answers in group chats set to pick automatically. Hermes' own list leaves it out, so the plugin adds it until Hermes does.
+
 ## 0.186.0 (2026-11-20)
 
 ### New and improved
