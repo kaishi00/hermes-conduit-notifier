@@ -87,6 +87,17 @@ def test_a_computer_asking_for_rings_can_ring_with_no_iphone(home):
     assert response.status_code == 200, response.text
 
 
+def test_a_computer_with_no_iphone_tells_hermes_of_a_missed_call(home):
+    store = api.hermes_calls._calls_store().CallStore(home)
+    store.add_ring({"id": "watch_abcdefgh", "kind": "done", "title": "Deploy", "session_ids": ["s1"]}, name="Atlas")
+    http = _http()
+    assert http.get(f"{BASE}/calls/rings").json()["paired"] is False
+    response = http.post(f"{BASE}/calls/outcomes", json={
+        "call_id": "watch_abcdefgh", "session_ids": ["s1"], "outcome": "missed", "kind": "done", "title": "Deploy"})
+    assert response.status_code == 200, response.text
+    assert [entry["outcome"] for entry in store.take_outcomes("s1")] == ["missed"]
+
+
 def test_settings_change_and_persist(paired):
     http = _http()
     response = http.put(f"{BASE}/calls", json={"settings": {"enabled": True, "per_day": 40}})
@@ -398,6 +409,8 @@ def test_rings_list_the_calls_that_just_went_out(home):
     assert response.headers["cache-control"] == "no-store"
     body = response.json()
     assert body["ok"] is True and [ring["id"] for ring in body["rings"]] == ["watch_abcdefgh"]
+    # No iPhone paired: the computer that rang reports a miss itself.
+    assert body["paired"] is False
     assert _http().get(f"{BASE}/calls/rings", params={"after": body["now"]}).json()["rings"] == []
 
 
@@ -405,6 +418,8 @@ def test_rings_are_read_from_a_bucket_of_their_own(paired):
     http = _http()
     for _ in range(api.hermes_calls.CALLS_LIMIT + 5):
         assert http.get(f"{BASE}/calls/rings").status_code == 200
+    # The iPhone reports a miss, so the computer doesn't.
+    assert http.get(f"{BASE}/calls/rings").json()["paired"] is True
     # A computer's polling leaves presence and watches working.
     assert http.put(f"{BASE}/calls/presence", json={"hold_s": 0}).status_code == 200
     assert http.get(f"{BASE}/calls").status_code == 200

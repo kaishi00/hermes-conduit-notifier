@@ -82,7 +82,9 @@ def calls_status() -> Dict[str, Any]:
 def call_rings(after: Optional[float]) -> Dict[str, Any]:
     store = _calls_store().CallStore(core._calls_home())
     store.note_computer()
-    return store.rings(after)
+    # With no iPhone paired, nothing else reports a miss: the computer that
+    # rang tells Hermes it went unanswered, as the iPhone does.
+    return {**store.rings(after), "paired": core._load_pairing_state(core._pairing_state_path()) is not None}
 
 
 def update_call_settings(body: Any) -> Dict[str, Any]:
