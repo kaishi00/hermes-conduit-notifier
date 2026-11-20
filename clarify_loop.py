@@ -237,12 +237,20 @@ def _first_answer_wins(
     relay_won = False
     # The original came back undelivered: outcome["original"] is the fallback.
     unattended = False
+    # Set once the original returns, so the poll's backoff sleep ends within
+    # a second and a native answer drops the wait (and its card) from the Needs you
+    # list straight away. A Conduit on screen reading the list in the seconds
+    # a sleep would have left drew the answered question's card a second
+    # time (notifier#965).
+    original_done = threading.Event()
 
     def _run_original() -> None:
         try:
             outcome["original"] = next_call(args)
         except Exception as exc:  # pragma: no cover - mirrors tool error path
             outcome["original_error"] = exc
+        finally:
+            original_done.set()
 
     # Hermes invokes middleware synchronously inline (verified against
     # hermes_cli.middleware._run_execution_chain: plain calls, no event loop),
@@ -412,7 +420,10 @@ def _first_answer_wins(
             expired = True
             break
         unanswered_polls += 1
-        _sleep_until_call_answers(request_id, _poll_delay(unanswered_polls))
+        # An unattended wait already has the original (its fallback): only
+        # a call's answer ends its sleep early.
+        _sleep_until_call_answers(request_id, _poll_delay(unanswered_polls),
+                                  original_done=None if unattended else original_done)
 
     if last_look:
         # The wait had already run out when its one more poll stopped it:
@@ -467,14 +478,18 @@ REJECTED_SOME_ANSWERED_NOTICE = (
 CALL_ANSWER_POLL_SECONDS = 1.0
 
 
-def _sleep_until_call_answers(request_id: str, seconds: float) -> None:
+def _sleep_until_call_answers(request_id: str, seconds: float,
+                              original_done: threading.Event | None = None) -> None:
     """Sleeps ``seconds``, waking early once a call has answered the batch,
-    so the answer doesn't wait out the relay's poll backoff."""
+    so the answer doesn't wait out the relay's poll backoff, or once
+    ``original_done`` is set (the original clarify call returned)."""
     remaining = seconds
     while remaining > 0:
         step = min(CALL_ANSWER_POLL_SECONDS, remaining)
         time.sleep(step)
         remaining -= step
+        if remaining > 0 and original_done is not None and original_done.is_set():
+            return
         if remaining > 0 and calls.has_call_answers(request_id):
             return
 

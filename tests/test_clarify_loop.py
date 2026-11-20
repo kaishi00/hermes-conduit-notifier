@@ -299,6 +299,30 @@ def test_original_answer_wins_when_gateway_responds_first():
     assert json.loads(result)["user_response"] == "A"
 
 
+def test_a_native_answer_ends_the_poll_backoff_sleep_at_once(monkeypatch):
+    # Answered on Hermes' own card during a long backoff sleep: the wait
+    # (and its card on the Needs you list) must end within a step, not after
+    # the sleep, or a Conduit on screen reading the list meanwhile draws the
+    # answered question a second time (notifier#965).
+    fake = _FakeState([])
+    _install(fake)
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 30.0)
+    monkeypatch.setattr(loop, "CALL_ANSWER_POLL_SECONDS", 0.01)
+
+    def original(args):
+        time.sleep(0.1)
+        return json.dumps({"question": "Q", "choices_offered": ["A"], "user_response": "A"})
+
+    started = time.monotonic()
+    result = loop.middleware(**_kwargs(original, {"question": "Q"}))
+    assert json.loads(result)["user_response"] == "A"
+    assert time.monotonic() - started < 5
+    deadline = time.monotonic() + 2
+    while not fake.cancelled_ids and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.cancelled_ids == [fake.enqueued[0]["decision"]["request_id"]]
+
+
 def _blocking_original(unused_value="unused"):
     release = threading.Event()
     holder = {}

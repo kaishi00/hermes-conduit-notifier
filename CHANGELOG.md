@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.10 (2026-11-20)
+
+### Fixes
+
+- A question you answered on Hermes' own card could show up a second time in the open chat for a few seconds after your answer, and later read as timed out; the wait now ends as soon as Hermes takes the answer.
+
 ## 0.187.9 (2026-11-20)
 
 ### Fixes
