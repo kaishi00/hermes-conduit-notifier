@@ -807,7 +807,9 @@ in the Hermes log. The provider is started once per profile (as the
 `conduit_voice` platform, session `conduit-voice`) and restarted when
 `memory.provider` changes. Calls into it run one at a time. If one hangs, that
 profile's memory routes answer 503 at once until it returns, and other profiles
-are unaffected. `?profile=<name>`
+are unaffected. A voice-facts read that only runs past its 3 seconds isn't
+counted as hung: the call starts with the built-in notes, and a recall waits for
+that read to finish. `?profile=<name>`
 reads that profile's memory, as the other routes do.
 
 ## Personality for voice
