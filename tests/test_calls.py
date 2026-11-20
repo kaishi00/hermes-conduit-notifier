@@ -1729,3 +1729,10 @@ def test_a_turn_whose_start_was_forgotten_still_ends_on_its_close(home, fake, tu
     _watch(home, "rt-1")
     plugin._on_session_finalize(session_id="rt-1")
     assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_computer_never_heard_from_isnt_known_on_a_clock_near_the_epoch(home):
+    store = CallStore(home, clock=lambda: 50.0)
+    assert store.computer_listens() is False and store.computer_known() is False
+    store.note_computer()
+    assert store.computer_listens() is True and store.computer_known() is True
