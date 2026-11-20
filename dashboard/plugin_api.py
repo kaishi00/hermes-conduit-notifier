@@ -76,6 +76,8 @@ they run:
     helper_models         Helper models: the slots Hermes uses that its
                           dashboard doesn't list (Background review,
                           Group router)
+    hermes_update         Update Hermes: hermes update runs in a systemd
+                          scope of its own, so it outlives the dashboard
 
 A module takes what it uses from another by module (``core.TokenError``), never
 by name, so a test that replaces ``plugin_api.core._calls_home`` replaces it

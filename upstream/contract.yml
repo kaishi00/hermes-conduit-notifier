@@ -107,6 +107,13 @@ notes:
     find Pulse's chat, a Hermes before 0.22.6 is told to update, since only 0.22.6 and newer hand a
     chat Hermes Desktop made over to the gateway (issue 713). Without it, everyone gets the
     set-it-up-again advice.
+  hermes update scope: >-
+    dashboard/api/hermes_update.py wraps hermes_cli._launchers.runtime_command in the dashboard's
+    process: when web_server_gateway._spawn_hermes_action builds `hermes update` (POST
+    /api/hermes/update, Conduit's Update Hermes), it puts `systemd-run --scope` in front, so the
+    update leaves the dashboard unit's cgroup and stopping that unit can't kill it (a real host,
+    2026-11-20; feature map: "Settings connection page"). Without it the update runs as Hermes
+    starts it (upstream/test_hermes_update.py).
   helper model slots: >-
     dashboard/api/helper_models.py adds background_review and group_router to
     hermes_cli.web_server_config's _AUX_TASK_SLOTS (and hermes_cli.web_routers.models' copy) when
@@ -428,7 +435,7 @@ imports:
   gateway.warning_notifications:
     required: ["warning_notifications_enabled"]
   hermes_cli:
-    optional: ["__version__", "active_sessions", "lifecycle", "web_server_config"]
+    optional: ["__version__", "_launchers", "active_sessions", "lifecycle", "web_server_config"]
   hermes_cli._launchers:
     optional: ["runtime_command"]
   hermes_cli.active_sessions:
