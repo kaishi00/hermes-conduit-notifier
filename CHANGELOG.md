@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.185.2 (2026-11-20)
+
+### Fixes
+
+- When you've asked Hermes for more cards (or fewer), that wins over its own sense of when a card helps.
+
 ## 0.185.1 (2026-11-20)
 
 ### Fixes
