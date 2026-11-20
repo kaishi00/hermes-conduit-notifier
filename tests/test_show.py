@@ -849,3 +849,13 @@ def test_the_model_draws_cards_without_asking_first():
     assert "Never ask whether to show a card" in tool.SCHEMA["description"]
     skill = (pathlib.Path(tool.__file__).parent / "skills" / tool.SKILL_NAME / "SKILL.md").read_text(encoding="utf-8")
     assert "Never ask whether to show a card" in skill and "Ask first when" not in skill
+
+
+def test_the_model_draws_cards_only_when_they_help():
+    # Build 279: Hermes put a board in nearly every reply, even after the user asked for fewer.
+    # The rule beside every turn and the description set the bar; the user's own wishes come first.
+    skill = (pathlib.Path(tool.__file__).parent / "skills" / tool.SKILL_NAME / "SKILL.md").read_text(encoding="utf-8")
+    for text in (tool.BOARD_RULE, tool.SCHEMA["description"], skill):
+        assert "most answers" in text.lower() and "how they want cards used, do as they say" in text
+    assert "Prefer cards, which Conduit draws natively, on a call or in a typed chat" not in tool.SCHEMA["description"]
+    assert "At most one board a reply" in tool.BOARD_RULE and "the weather" in tool.BOARD_RULE

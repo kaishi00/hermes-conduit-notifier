@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.185.1 (2026-11-20)
+
+### Fixes
+
+- Hermes no longer puts cards in nearly every reply in Conduit. It draws a board only when you ask to see something or the answer would be hard to read without one, such as a plan by day, places on a map or numbers to compare, and follows what you've told it about cards.
+
 ## 0.185.0 (2026-11-20)
 
 ### New and improved
