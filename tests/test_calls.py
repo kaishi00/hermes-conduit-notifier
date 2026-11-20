@@ -68,6 +68,11 @@ class FakeClient:
         self.answers = []
         self.sent = []
         self.enqueued = []
+        # Paired unless a test unpairs it (None).
+        self.state = {"credential": "x"}
+
+    def load_state(self):
+        return self.state
 
     def send_now(self, event):
         self.sent.append(event)
@@ -136,6 +141,34 @@ def test_a_call_that_goes_out_rings_conduit_on_a_computer_too(home, fake):
     assert ring["session_ids"] == ["rt-1", "st-1"]
     assert ring["heading"] == "Hermes wants to talk"
     assert ring["body"] == "“Check the server” finished."
+
+
+def test_with_no_iphone_a_call_rings_a_computer_that_asks_for_rings(home, fake):
+    # Conduit on a computer stands alone: no iPhone is paired, so nothing goes
+    # to the relay and the computer asking for rings rings by itself.
+    fake.state = None
+    watch_id = _watch(home, "st-1")
+    CallStore(home).note_computer()
+    assert calls.can_ring() is True
+    assert calls.turn_ended("st-1", "done", profile="default", fallback=READY) is True
+    assert fake.sent == [] and fake.enqueued == []
+    [ring] = CallStore(home).rings()["rings"]
+    assert ring["id"] == watch_id
+
+
+def test_with_no_iphone_and_no_computer_asking_nothing_rings(home, fake, clock):
+    fake.state = None
+    _watch(home, "st-1")
+    calls._store(home).note_computer()
+    clock[0] += 5 * 60
+    assert calls.can_ring() is True
+    calls.turn_ended("st-1", "done", profile="default", fallback=READY)
+    assert fake.sent == [] and CallStore(home).rings()["rings"] == []
+
+
+def test_with_no_iphone_and_no_computer_ever_calls_cant_ring(home, fake):
+    fake.state = None
+    assert calls.can_ring() is False
 
 
 @pytest.mark.parametrize("answer", [
@@ -753,9 +786,9 @@ def test_calls_off_links_the_setting_for_a_call_the_user_asked_for(home, fake, p
 
 def test_the_tool_refuses_what_cannot_ring(home, fake, monkeypatch):
     _settings(home)
-    monkeypatch.setattr(call_tool.client, "load_state", lambda: None)
+    fake.state = None
     assert _tool({"reason": "Done.", "asked_by_user": True})["error"] == "not_paired"
-    monkeypatch.setattr(call_tool.client, "load_state", lambda: {"credential": "x"})
+    fake.state = {"credential": "x"}
     assert _tool({"reason": " ", "asked_by_user": True})["error"] == "no_reason"
     assert _tool({"reason": "Done.", "asked_by_user": True}, session_id=None)["error"] == "no_session"
     assert _tool({"reason": "Done.", "asked_by_user": True}, is_child=lambda s: s == "st-1")["error"] == "subagent"

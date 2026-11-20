@@ -221,17 +221,17 @@ def _report_handler(args: Any, session_id: Any = None, task_id: Any = None, **_:
 
 
 def setup_available() -> bool:
-    """For a paired profile on a Hermes with cron jobs."""
+    """For a profile whose calls can ring (calls.can_ring) on a Hermes with cron jobs."""
     try:
-        return client.load_state() is not None and _cronjob() is not None
+        return calls.can_ring() and _cronjob() is not None
     except Exception:  # noqa: BLE001
         return False
 
 
 def report_available() -> bool:
-    """For a paired profile."""
+    """For a profile whose calls can ring (calls.can_ring)."""
     try:
-        return client.load_state() is not None
+        return calls.can_ring()
     except Exception:  # noqa: BLE001
         return False
 
@@ -294,7 +294,7 @@ def _setup(args: dict[str, Any], session_id: Any, is_child: Callable[[Any], bool
     if action != "list" and is_child(session_id.strip() if isinstance(session_id, str) else ""):
         return {"ok": False, "error": "subagent",
                 "note": "Only the main conversation can change call watches. Report back; the main agent can ask."}
-    if client.load_state() is None:
+    if not calls.can_ring():
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
     cronjob = _cronjob()

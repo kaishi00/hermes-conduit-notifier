@@ -33,8 +33,8 @@ SETTINGS_LINK = "[Calls from Hermes](conduit://settings/calls)"
 SCHEMA: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
-        "Phone the user through Conduit: their iPhone rings when this turn ends. "
-        "When they answer, a live voice conversation opens in this chat. The call goes out when this turn "
+        "Phone the user through Conduit when this turn ends. Their iPhone or Conduit on their computer rings, "
+        "and when they answer, a live voice conversation opens in this chat. The call goes out when this turn "
         "ends, so finish the work first and end the turn with the result as your final reply; the call opens "
         "with your reason and that reply. Use it when the user asked to be called, phoned or rung about what "
         "this turn does (\"call me when it's done\"), with asked_by_user true. Without such a request, only "
@@ -99,16 +99,14 @@ def register(ctx: Any, *, is_child: Callable[[Any], bool], skill_path: Any) -> N
 
 
 def available() -> bool:
-    """Shown to the model whenever this profile is paired, calls off
+    """Shown to the model whenever a call can ring (an iPhone is paired, or
+    Conduit on a computer asked for rings in the last 30 days), calls off
     included: the handler then tells the user how to turn them on. Hidden
     while they were off, a model asked "call me" found only the call watch
     tool and set up a watch that "fires right away" instead. Hermes also
     caches a tool's availability for the whole process, across profiles, so
     it can't follow one profile's call settings (see call_watches)."""
-    try:
-        return client.load_state() is not None
-    except Exception:  # noqa: BLE001
-        return False
+    return calls.can_ring()
 
 
 def handle(args: Any, *, session_id: Any = None, task_id: Any = None,
@@ -140,7 +138,7 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
         return {"ok": False, "error": "use_report",
                 "note": (f"This is a run of a call watch: report with {call_watches.REPORT_TOOL} instead. It calls "
                          "when it's time and tells you what to reply.")}
-    if client.load_state() is None:
+    if not calls.can_ring():
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
     if calls.in_call():
