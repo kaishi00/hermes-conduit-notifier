@@ -211,7 +211,8 @@ def _work_shutdown_watch() -> Dict[str, Any]:
     """What work_tool asks once the session host is up: which host runs the
     workstreams here, and whether its stop can be told from a user's."""
     work_tool = _conduit(".work_tool", "_watch_shutdown")
-    return {"on_gateway": work_tool._on_gateway(), "watched": work_tool._watch_shutdown()}
+    return {"on_gateway": work_tool._on_gateway(), "watched": work_tool._watch_shutdown(),
+            "stopping": work_tool._is_shutting_down()}
 
 
 def _pulse_send(chat_id: str) -> Dict[str, Any]:

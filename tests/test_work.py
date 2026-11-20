@@ -4582,6 +4582,19 @@ def test_a_gateway_that_cant_say_its_stopping_is_said_on_the_plugin_page(on, her
     assert work._watch_shutdown() is True and work.degraded.current() == []
 
 
+def test_a_gateway_replaced_in_process_doesnt_keep_saying_its_stopping(on, hermes, monkeypatch):
+    monkeypatch.setattr(work, "_on_gateway", lambda: True)
+    stopped = types.SimpleNamespace(_stop_task=None)
+    monkeypatch.setitem(sys.modules, "gateway.run_api", types.SimpleNamespace(_ACTIVE_RUNNER=stopped))
+    work._watch_shutdown()
+    stopped._stop_task = object()
+    assert work._is_shutting_down()
+    sys.modules["gateway.run_api"]._ACTIVE_RUNNER = types.SimpleNamespace(_stop_task=None)
+    work._watch_shutdown()  # the next workstream turn, under the new runner
+    assert not work._is_shutting_down()
+    work._gateways.clear()
+
+
 def test_a_restart_while_a_workstream_waits_for_its_agents_keeps_what_it_said(on, hermes, monkeypatch):
     # App issue 2206: the held reply is on disk, so the coordinator still hears it.
     start()

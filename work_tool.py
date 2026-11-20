@@ -3394,7 +3394,8 @@ _SHUTDOWN_MODULES = ("tui_gateway.session_reaper", "tui_gateway.server")
 # Where the gateway's listener runs here, workstreams are its session
 # authority's turns, and the gateway stops them itself on its way out: its
 # stop() keeps the task it runs in until the process ends. Kept once seen,
-# since the gateway lets go of its runner before the last turn has unwound.
+# since the gateway lets go of its runner before the last turn has unwound,
+# until another runner serves.
 _GATEWAY_STOP = "_stop_task"
 _gateways: list = []
 
@@ -3405,12 +3406,13 @@ def _gateway_stopping(gateway: Any) -> bool:
 
 def _watch_gateway() -> bool:
     """True when the gateway running this process's chats can say it's
-    stopping (always the same runner, so one is enough)."""
+    stopping."""
     gateway = getattr(sys.modules.get("gateway.run_api"), "_ACTIVE_RUNNER", None)  # as gateway_chats.runner()
     if gateway is None or not hasattr(gateway, _GATEWAY_STOP):
         return False
-    if not any(seen is gateway for seen in _gateways):
-        _gateways.append(gateway)
+    # Only the runner serving now: one an in-process restart replaced may
+    # have stopped, and would take every later stop for a restart.
+    _gateways[:] = [gateway]
     return True
 
 

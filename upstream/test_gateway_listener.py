@@ -732,7 +732,8 @@ def test_a_workstream_runs_on_the_authority_so_the_phone_opens_it(listener, prof
     # loaded or not (Hermes v0.23.3 on a separate gateway unit): watched there,
     # so a workstream it stops is recovered, and the plugin page says nothing.
     status, watch = listener.plugin_call("work-shutdown-watch", plugin=DRIVER)
-    assert status == 200 and watch == {"on_gateway": True, "watched": True}, watch
+    # And a serving gateway isn't taken for a stopping one, or every user's stop would be.
+    assert status == 200 and watch == {"on_gateway": True, "watched": True, "stopping": False}, watch
     status, caps = listener.plugin_call("capabilities")
     assert status == 200 and "workstream-recovery" not in caps.get("degraded", []), caps
 
