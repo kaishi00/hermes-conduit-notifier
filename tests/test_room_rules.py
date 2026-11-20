@@ -279,6 +279,18 @@ def test_a_room_of_your_own_agents_is_read_again_so_one_from_elsewhere_counts(tm
     assert rules.room_turn("s-local", home).with_others
 
 
+def test_a_room_someone_just_joined_is_withheld_from_search_at_once(tmp_path):
+    # #964's review: past-chat search reads the room afresh, not the kept "no one else".
+    home = tmp_path / "hermes"
+    _room(home / "state.db", "room-c", [FURINA, NAHIDA])
+    _room_session(home, "s-local", "room-c")
+    assert not rules.room_turn("s-local", home).with_others
+    assert not rules._hidden_from_search(("s-local",), "bot_room", home)
+    _members(home / "state.db", "room-c", [FURINA, NAHIDA, LAIFU])
+    assert not rules.room_turn("s-local", home).with_others  # tool calls: kept for a moment
+    assert rules._hidden_from_search(("s-local",), "bot_room", home)  # search: at once
+
+
 def test_a_room_of_your_own_agents_is_kept_for_seconds_while_its_files_are_unchanged(tmp_path, monkeypatch):
     # Notifier issue 961: each tool, model call and reply of a turn in it read
     # the session store, the room stores and rooms.json again.

@@ -4794,7 +4794,9 @@ def _turn_finished(session_id: Any, *, failed: bool, interrupted: bool) -> bool:
         _finished.add(session_id)
         text = _replies.pop(session_id, "")
         # Taken on every way out, so a workstream that never turns again
-        # doesn't keep its last runner alive.
+        # doesn't keep its last runner alive. (An end whose session no
+        # longer resolves leaves it until that workstream's next turn: one
+        # entry per workstream at most.)
         turn_gateway = _turn_gateways.pop((str(home), work.ref), None)
     store = work_store.Store(home)
     if work.status == "stopped":
@@ -6882,6 +6884,9 @@ def stop() -> None:
         _wait_pushed.clear()
         _wait_wakes.clear()
         _wait_turns.clear()
+    with _not_work_lock:
+        # A reload starts from the registry again (#964's review).
+        _not_work.clear()
     with _wake_lock:
         pending = list(_wakes.values())
         _wakes.clear()
@@ -6900,6 +6905,7 @@ def stop() -> None:
         _unjournaled.clear()
         _turn_began.clear()
         _turn_gateways.clear()
+        _not_compacted.clear()
         _replies.clear()
         _redirecting.clear()
         _agents.clear()

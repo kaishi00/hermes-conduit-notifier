@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.9 (2026-11-20)
+
+### Fixes
+
+- For a couple of seconds after someone from another Hermes joined a room, its chats could still show up in your bot's past-chat search; search now checks the room again each time.
+
 ## 0.187.8 (2026-11-20)
 
 ### Fixes

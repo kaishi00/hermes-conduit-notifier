@@ -309,9 +309,11 @@ def in_a_room(session_id: Any, home: Any = None) -> bool:
     return _lookup(str(session_id or ""), home_path) is not None
 
 
-def _lookup(value: str, home_path: Optional[Path]) -> Optional[RoomTurn]:
+def _lookup(value: str, home_path: Optional[Path], *, fresh: bool = False) -> Optional[RoomTurn]:
     """room_turn before the room settings: a room they leave out comes back
-    unread (with_others False), never remembered."""
+    unread (with_others False), never remembered. ``fresh`` reads a room the
+    brief cache holds again, for a caller where a stale "no one else" would
+    leak (past-chat search)."""
     if not value:
         return None
     key = (str(home_path), value)
@@ -323,7 +325,7 @@ def _lookup(value: str, home_path: Optional[Path]) -> Optional[RoomTurn]:
         brief = _brief.get(key)
     inputs = _own_inputs(home_path) if home_path is not None else ()
     now = time.monotonic()
-    if (brief is not None and brief[0] > now and brief[1] == inputs
+    if (not fresh and brief is not None and brief[0] > now and brief[1] == inputs
             and brief[3] == _brief_scope(brief[2], home_path)):
         return brief[2]
     turn, settled = _find(value, home_path)
@@ -796,7 +798,9 @@ def _hidden_from_search(session_ids: tuple[str, ...], source: Any, home: Optiona
         if not session_id:
             continue
         try:
-            turn = _lookup(session_id, home)
+            # Read afresh: an agent from elsewhere who joined a moment ago
+            # withholds the room from search at once (#964's review).
+            turn = _lookup(session_id, home, fresh=True)
         except RoomStoreError:
             return True
         if turn is not None:
