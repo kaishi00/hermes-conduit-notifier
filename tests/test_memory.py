@@ -58,6 +58,19 @@ class FakeProvider:
         self.shut_down = True
 
 
+class VoiceProvider(FakeProvider):
+    def __init__(self, voice="[About the user]\n- Allergic to peanuts."):
+        super().__init__(name="nyx", block=RuntimeError("generic tool prompt must not be read"))
+        self.voice = voice
+        self.voice_reads = 0
+
+    def voice_prompt_block(self):
+        self.voice_reads += 1
+        if isinstance(self.voice, Exception):
+            raise self.voice
+        return self.voice
+
+
 @pytest.fixture
 def hermes(monkeypatch):
     """Stub the Hermes side: config, built-in snapshot, provider loader."""
@@ -164,6 +177,171 @@ def test_an_external_provider_alone_offers_recall_only(hermes):
     hermes.config = {"memory": {"provider": "honcho"}}
     hermes.providers["honcho"] = FakeProvider(block=RuntimeError("never called"))
     assert api.memory.memory_context() == {"available": True, "provider": "honcho", "recall": True, "context": ""}
+
+
+def test_voice_provider_supplies_startup_facts_without_a_recall_or_write(hermes):
+    hermes.config = {"memory": {"provider": "nyx"}}
+    provider = hermes.providers["nyx"] = VoiceProvider()
+    result = api.memory.memory_context()
+    assert result == {"available": True, "provider": "nyx", "recall": True,
+                      "context": "[About the user]\n- Allergic to peanuts."}
+    assert provider.voice_reads == 1
+    assert provider.prefetched == [] and not provider.synced
+
+
+def test_voice_facts_precede_builtin_notes_and_remain_fresh(hermes):
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.builtin = "Older builtin notes."
+    provider = hermes.providers["nyx"] = VoiceProvider("Current preference: tea.")
+    assert api.memory.memory_context()["context"] == "Current preference: tea.\n\nOlder builtin notes."
+    provider.voice = "Current preference: coffee."
+    assert api.memory.memory_context()["context"] == "Current preference: coffee.\n\nOlder builtin notes."
+
+
+def test_huge_builtin_notes_cannot_crowd_out_voice_constraints(hermes):
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.builtin = "x" * 20000
+    provider = hermes.providers["nyx"] = VoiceProvider("Do not serve peanuts.")
+    result = api.memory.memory_context()
+    assert result["context"] == provider.voice
+    assert len(result["context"]) <= api.memory.MEMORY_CONTEXT_MAX_CHARS
+
+
+def test_voice_context_budget_keeps_complete_evidence_lines(hermes, monkeypatch):
+    monkeypatch.setattr(api.memory, "MEMORY_CONTEXT_MAX_CHARS", 100)
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.builtin = "- I live in London.\n" + "x" * 200
+    provider = hermes.providers["nyx"] = VoiceProvider("- I can eat " + "x" * 100 + " but NOT peanuts.\n- I am allergic to peanuts.")
+    result = api.memory.memory_context()["context"]
+    assert len(result) <= 100
+    assert "- I am allergic to peanuts." in result
+    assert "- I live in London." in result
+    assert "I can eat" not in result  # The qualifying negation must not be cut off.
+
+
+@pytest.mark.parametrize("value", [None, 7, "not a callable"])
+def test_noncallable_voice_attribute_preserves_legacy_snapshot(hermes, value):
+    hermes.config = {"memory": {"provider": "honcho"}}
+    hermes.builtin = "x" * 20000
+    provider = hermes.providers["honcho"] = FakeProvider()
+    provider.voice_prompt_block = value
+    assert api.memory.memory_context()["context"] == api.memory._clip_block(hermes.builtin, 8000)
+    assert provider.prefetched == [] and not provider.synced
+
+
+def test_legacy_provider_properties_are_not_evaluated(hermes):
+    class Legacy(FakeProvider):
+        @property
+        def voice_prompt_block(self):
+            raise RuntimeError("an unrelated provider property must not execute")
+    hermes.config = {"memory": {"provider": "legacy"}}
+    hermes.builtin = "notes"
+    hermes.providers["legacy"] = Legacy()
+    assert api.memory.memory_context()["context"] == "notes"
+
+
+@pytest.mark.parametrize("value", [None, 123, {"facts": "not the agreed text contract"},
+                                  RuntimeError("GET https://private.host/?key=SECRET failed")])
+def test_bad_voice_context_falls_back_to_builtin_notes(hermes, value):
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.builtin = "Builtin notes."
+    hermes.providers["nyx"] = VoiceProvider(value)
+    assert api.memory.memory_context() == {"available": True, "provider": "nyx", "recall": True,
+                                           "context": "Builtin notes."}
+
+
+def test_empty_voice_capability_keeps_recall_available(hermes):
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.providers["nyx"] = VoiceProvider("  ")
+    assert api.memory.memory_context() == {"available": True, "provider": "nyx", "recall": True, "context": ""}
+    hermes.builtin = "x" * 20000
+    assert api.memory.memory_context()["context"] == api.memory._clip_block(hermes.builtin, 8000)
+
+
+def test_voice_context_runs_inside_its_profile_context(hermes):
+    import contextvars
+    current = contextvars.ContextVar("test_voice_profile", default="unexpected")
+    class Scoped(VoiceProvider):
+        def voice_prompt_block(self):
+            return "Owner: " + current.get()
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.providers["nyx"] = Scoped()
+    for name in ("Alice", "Bob"):
+        token = current.set(name)
+        try:
+            assert api.memory.memory_context(name)["context"] == "Owner: " + name
+        finally:
+            current.reset(token)
+
+
+def test_voice_context_and_recall_share_the_provider_lock(hermes):
+    active, peak = [0], [0]
+    lock = threading.Lock()
+    def guarded():
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.02)
+        with lock:
+            active[0] -= 1
+        return "facts"
+    provider = VoiceProvider()
+    provider.voice_prompt_block = guarded
+    provider.prefetch = lambda *a, **k: guarded()
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.providers["nyx"] = provider
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(api.memory.memory_context("a"))),
+               threading.Thread(target=lambda: results.append(api.memory.run_memory_recall("tea", "a")))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    assert len(results) == 2 and peak[0] == 1
+
+
+def test_a_hung_voice_context_falls_back_in_time_and_other_profiles_work(hermes, monkeypatch):
+    monkeypatch.setattr(api.memory, "MEMORY_VOICE_CONTEXT_TIMEOUT_S", 0.05)
+    release = threading.Event()
+    class Hanging(VoiceProvider):
+        def voice_prompt_block(self):
+            release.wait(2)
+            return "late"
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.builtin = "Builtin notes."
+    hermes.providers["nyx"] = Hanging()
+    try:
+        began = time.monotonic()
+        assert api.memory.memory_context("hung")["context"] == "Builtin notes."
+        assert time.monotonic() - began < 0.5
+        # Still running: the next call falls back at once (the provider is busy).
+        assert api.memory.memory_context("hung")["context"] == "Builtin notes."
+        hermes.providers["nyx"] = VoiceProvider("other profile")
+        assert api.memory.memory_context("other")["context"] == "other profile\n\nBuiltin notes."
+    finally:
+        release.set()
+
+
+def test_voice_context_route_remains_private_and_readonly(client, hermes):
+    hermes.config = {"memory": {"provider": "nyx"}}
+    provider = hermes.providers["nyx"] = VoiceProvider()
+    response = client.get(f"{BASE}/memory/context")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["context"] == provider.voice
+    assert provider.prefetched == [] and not provider.synced
+
+
+def test_voice_context_route_keeps_backend_errors_private(client, hermes):
+    hermes.config = {"memory": {"provider": "nyx"}}
+    hermes.builtin = "Builtin notes."
+    hermes.providers["nyx"] = VoiceProvider(RuntimeError("private.host key=SECRET"))
+    response = client.get(f"{BASE}/memory/context")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["context"] == "Builtin notes."
+    assert "private.host" not in response.text and "SECRET" not in response.text
 
 
 def test_provider_is_cached_per_profile_and_rebuilt_on_change(hermes):
@@ -473,3 +651,11 @@ def test_builtin_snapshot_against_stub_hermes(monkeypatch, tmp_path):
     assert api.memory._hermes_builtin_memory(config) == "MEMORY block"
     assert stores[0].args == (2200, 1375, True, False) and stores[0].loaded
     assert api.memory._hermes_builtin_memory({"memory": {}}) == "MEMORY block\n\nUSER block"
+
+
+def test_voice_packing_bounds_inspected_input():
+    cap = api.memory.MEMORY_CONTEXT_INPUT_MAX_CHARS
+    result = api.memory._complete_memory_lines(("x\n" * (cap * 4),), 8000)
+    assert len(result) <= 8000
+    assert api.memory._complete_memory_lines(("x" * cap + " NOT safe",), 8000) == ""
+    assert api.memory._complete_memory_lines(("- Safe complete fact.\n" + "x" * cap + " NOT safe",), 8000) == "- Safe complete fact."
