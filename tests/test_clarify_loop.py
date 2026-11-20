@@ -1314,6 +1314,22 @@ def test_an_unanswered_card_after_an_undelivered_original_times_out(monkeypatch)
     assert _wait_for_release(fake) == [fake.enqueued[0]["decision"]["request_id"]]
 
 
+def test_an_unattended_wait_keeps_its_backoff_once_the_original_returned(monkeypatch):
+    # The original came back undelivered, so it has returned: its done
+    # signal must not cut the unattended wait's sleeps short, or a 30 min
+    # wait would poll the relay every step instead of on its backoff
+    # (notifier#970 review).
+    fake = _FakeState([])  # pending forever
+    _install(fake)
+    monkeypatch.setattr(loop, "_clarify_poll_budget", lambda: 1.2)
+    monkeypatch.setattr(loop, "_poll_delay", lambda polls: 0.5)
+    monkeypatch.setattr(loop, "CALL_ANSWER_POLL_SECONDS", 0.05)
+    result = loop.middleware(**_kwargs(_undelivered_original(), _batch_args()))
+    assert json.loads(result)["outcome"] == "timed_out"
+    # About one poll per 0.5 s sleep, not one per 0.05 s step.
+    assert 2 <= len(fake.poll_ids) <= 6
+
+
 def test_the_timed_out_batch_is_built_by_hermes_clarify_result_when_it_exists(monkeypatch):
     seen = []
     monkeypatch.setattr(sys.modules["tools.clarify_tool"], "_result",
