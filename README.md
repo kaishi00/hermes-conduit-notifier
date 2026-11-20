@@ -2359,6 +2359,19 @@ Conduit's Models & providers > Helper models and Hermes' Models page show and
 set it; Conduit sets `enabled` and the intervals through `/api/config`. A Hermes that lists it
 already keeps its own list.
 
+## Group router in Helper models (plugin 0.186+)
+
+A group room set to pick who answers automatically (Who answers > Pick who
+answers automatically) asks one quick model call who a message is for, on
+`auxiliary.group_router` (`provider`, `model`, `reasoning_effort`, `timeout`,
+20 s by default). Hermes reads it from the install's default profile for
+every such room, whichever bots are in it; other profiles' `group_router`
+isn't read.
+
+Hermes' dashboard leaves this slot out of its list too, so the plugin adds it
+after Background review. Conduit shows it in the default profile's Helper
+models, and Group Settings links to it under Pick who answers automatically.
+
 ## Step summaries for Conduit (plugin 0.137.4+)
 
 Conduit's step summaries (Settings > Chat, and a run's Explain these steps)

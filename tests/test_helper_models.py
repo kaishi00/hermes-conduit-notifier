@@ -1,6 +1,6 @@
-"""Hermes' helper model slots its dashboard leaves out (hermes-conduit#2871):
-the plugin adds Background review to the dashboard's slot list, once, after
-the built-ins, and leaves a Hermes that lists it alone."""
+"""Hermes' helper model slots its dashboard leaves out (hermes-conduit#2871,
+#2909): the plugin adds Background review and Group router to the dashboard's
+slot list, once, after the built-ins, and leaves a slot Hermes lists alone."""
 
 import importlib.util
 import pathlib
@@ -42,10 +42,10 @@ def hermes(monkeypatch):
     return config, models
 
 
-def test_background_review_is_listed_after_the_built_ins_for_both_routes(hermes):
+def test_background_review_and_group_router_are_listed_after_the_built_ins_for_both_routes(hermes):
     config, models = hermes
-    assert api.helper_models._add_missing_slots() == ["background_review"]
-    assert config._AUX_TASK_SLOTS == BUILT_INS + ("background_review",)
+    assert api.helper_models._add_missing_slots() == ["background_review", "group_router"]
+    assert config._AUX_TASK_SLOTS == BUILT_INS + ("background_review", "group_router")
     assert models._AUX_TASK_SLOTS is config._AUX_TASK_SLOTS
 
 
@@ -54,11 +54,20 @@ def test_it_is_added_once(hermes):
     api.helper_models._add_missing_slots()
     assert api.helper_models._add_missing_slots() == []
     assert config._AUX_TASK_SLOTS.count("background_review") == 1
+    assert config._AUX_TASK_SLOTS.count("group_router") == 1
+
+
+def test_a_hermes_that_lists_one_gets_only_the_other(hermes):
+    config, models = hermes
+    own = BUILT_INS + ("group_router",)
+    config._AUX_TASK_SLOTS = models._AUX_TASK_SLOTS = own
+    assert api.helper_models._add_missing_slots() == ["background_review"]
+    assert config._AUX_TASK_SLOTS == own + ("background_review",)
 
 
 def test_a_hermes_that_lists_it_keeps_its_own_list(hermes):
     config, models = hermes
-    own = ("vision", "background_review", "curator")
+    own = ("vision", "background_review", "group_router", "curator")
     config._AUX_TASK_SLOTS = models._AUX_TASK_SLOTS = own
     assert api.helper_models._add_missing_slots() == []
     assert config._AUX_TASK_SLOTS is own and models._AUX_TASK_SLOTS is own

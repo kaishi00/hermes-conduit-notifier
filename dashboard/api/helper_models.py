@@ -1,15 +1,18 @@
 """Helper models: the slots Hermes' runtime uses that its dashboard leaves
-out of its list (hermes-conduit#2871).
+out of its list (hermes-conduit#2871, #2909).
 
 Hermes runs a background review (what goes into memory, which skills to
 patch) when a memory or skill interval is reached, on its own
 `auxiliary.background_review` model, with an `enabled` switch. Its dashboard's slot list (``web_server_config._AUX_TASK_SLOTS``)
 doesn't name it, so `GET /api/model/auxiliary` doesn't list it and
 `POST /api/model/set` refuses it (NousResearch/hermes-agent#157839), and the
-model can only be changed in config.yaml. Until Hermes lists it, this adds
-it to that list in the dashboard's process, after the built-ins, so both
-routes take it as Hermes' fix will: a built-in row, which Conduit names. A
-Hermes that lists it already is left as it is.
+model can only be changed in config.yaml. Group rooms set to pick who
+answers automatically ask `auxiliary.group_router` (`hosted_room_router_call`),
+left out the same way; Hermes reads it from the install's default profile for
+every room (hermes-conduit#2909). Until Hermes lists them, this adds
+them to that list in the dashboard's process, after the built-ins, so both
+routes take them as Hermes' fix will: built-in rows, which Conduit names. A
+Hermes that lists one already keeps its own row for it.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from . import core
 
 logger = core.logger
 
-MISSING_SLOTS = ("background_review",)
+MISSING_SLOTS = ("background_review", "group_router")
 
 
 def _add_missing_slots() -> List[str]:

@@ -2,8 +2,8 @@
 configuring Hermes from Conduit): the plugin registers `conduit_predict`, so
 Hermes' own model routes list it and set it in the profile the request
 names, where the plugin's predictions read it. Also Hermes' own Background
-review slot, which the plugin adds to the dashboard's list until Hermes lists
-it (hermes-conduit#2871)."""
+review and Group router slots, which the plugin adds to the dashboard's list
+until Hermes lists them (hermes-conduit#2871, #2909)."""
 
 from __future__ import annotations
 
@@ -112,3 +112,45 @@ def test_a_background_review_pick_lands_in_the_profile_named(dashboard):
     })
     assert status == 200, body
     assert review(second).get("model", "") == ""
+
+
+# Group router (hermes-conduit#2909): a group room set to pick who answers
+# automatically asks `auxiliary.group_router`, which Hermes' dashboard didn't
+# list either; Hermes reads it from the install's default profile for every
+# room (`HostedRoomService.root`), so Conduit sets it there.
+
+def _router_row(dashboard):
+    status, body = _hermes(dashboard, "GET", "/api/model/auxiliary")
+    assert status == 200, body
+    rows = [row for row in body["tasks"] if row["task"] == "group_router"]
+    assert len(rows) <= 1, "group_router is listed twice"
+    return rows[0] if rows else None
+
+
+def test_hermes_lists_group_router_as_a_built_in(dashboard):
+    row = _router_row(dashboard)
+    assert row is not None, "group_router isn't among the helper models"
+    assert "plugin" not in row, "group_router should be a built-in row, which Conduit names"
+
+
+def test_a_group_router_pick_lands_in_the_default_profile(dashboard):
+    def router(home):
+        path = home / "config.yaml"
+        config = (yaml.safe_load(path.read_text()) if path.exists() else None) or {}
+        return (config.get("auxiliary") or {}).get("group_router") or {}
+
+    status, body = _hermes(dashboard, "POST", "/api/model/set", body={
+        "scope": "auxiliary", "task": "group_router", "provider": "openrouter", "model": "router/model",
+        "confirm_expensive_model": True,
+    })
+    assert status == 200, body
+    assert router(dashboard.home).get("model") == "router/model"
+    assert router(dashboard.home / "profiles" / "second").get("model", "") == "", "Another profile kept its own"
+    row = _router_row(dashboard)
+    assert row["provider"] == "openrouter" and row["model"] == "router/model"
+
+    status, body = _hermes(dashboard, "POST", "/api/model/set", body={
+        "scope": "auxiliary", "task": "group_router", "provider": "auto", "model": "",
+    })
+    assert status == 200, body
+    assert router(dashboard.home).get("model", "") == ""
