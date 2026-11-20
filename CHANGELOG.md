@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.3 (2026-11-20)
+
+### Fixes
+
+- A Pulse report whose first ask fails for any reason other than running out of room is asked again with the room it had before 0.187.2, so a provider that refuses the larger request still sends its report.
+
 ## 0.187.2 (2026-11-20)
 
 ### Fixes
