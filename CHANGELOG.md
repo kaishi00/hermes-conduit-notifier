@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.185.3 (2026-11-20)
+
+### Fixes
+
+- On a Hermes preview build with several profiles, closing a group room no longer deletes pictures and documents that another profile's chats still show, and no longer leaves the room's own files behind.
+
 ## 0.185.2 (2026-11-20)
 
 ### Fixes

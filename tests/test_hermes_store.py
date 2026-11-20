@@ -245,7 +245,10 @@ def interface(monkeypatch, tmp_path):
     retention = types.ModuleType("session_retention")
     retention.after_sessions_removed = lambda store, home, ids, **kw: removed.append((home, ids, kw))
     media = types.ModuleType("gateway.session_ingress_media")
-    media.native_inputs_root = lambda: tmp_path / "media"
+    # The ambient profile's root: a delete in any store must not use it (notifier#945).
+    media.native_inputs_root = lambda: tmp_path / "ambient" / "cache" / "documents" / "native-inputs"
+    constants = types.ModuleType("hermes_constants")
+    constants.get_hermes_dir = lambda new_subpath, old_name, *, home=None: Path(home) / new_subpath
     rooms = types.ModuleType("gateway.hosted_rooms")
     rooms.default_db_path = lambda home: (Path(home).parent.parent if Path(home).parent.name == "profiles"
                                           else Path(home)) / "shared-state.db"
@@ -253,7 +256,8 @@ def interface(monkeypatch, tmp_path):
     ids.new_session_id = lambda: "20261118_120000_abcdef"
     for name, module in (("persistence_assembly", assembly), ("persistence.conversation.sessions", sessions),
                          ("persistence.conversation.messages", messages), ("session_retention", retention),
-                         ("gateway.session_ingress_media", media), ("gateway.hosted_rooms", rooms),
+                         ("gateway.session_ingress_media", media), ("hermes_constants", constants),
+                         ("gateway.hosted_rooms", rooms),
                          ("session_rules.session_ids", ids)):
         monkeypatch.setitem(sys.modules, name, module)
     return types.SimpleNamespace(opened=opened, removed=removed, stores=stores)
@@ -343,9 +347,30 @@ def test_deleting_runs_what_hermes_own_delete_runs_after_it(store_module, interf
                                      skipped_ids=skipped, include_compression_chain=True)
         assert db.delete_session("c")
     assert (deleted, skipped) == (1, ["b"])
-    assert ("delete_many", ("a", "b"), True, True, str(tmp_path / "media")) in interface.opened[-1].calls
+    root = str((tmp_path / "cache" / "documents" / "native-inputs").resolve())
+    assert ("delete_many", ("a", "b"), True, True, root) in interface.opened[-1].calls
+    assert ("delete", "c", root) in interface.opened[-1].calls
     assert [(ids, kw["sessions_dir"]) for _, ids, kw in interface.removed] == [
         (("a",), tmp_path / "sessions"), (("c",), tmp_path / "sessions")]
+
+
+def test_each_profiles_delete_hands_hermes_its_own_media_root_not_the_ambient_one(store_module, interface,
+                                                                                   tmp_path):
+    """A room's cleanup deletes hidden chats in every agent's home from one
+    process: each store's delete names its own profile's retained root, so
+    Hermes' hosted-document fence retires that profile's files and never
+    another's (notifier#945)."""
+    homes = [tmp_path / "root", tmp_path / "root" / "profiles" / "b"]
+    for home in homes:
+        with store_module.open_store(home) as db:
+            db.ensure_session("hidden", "api_server")
+            db.ensure_session("other", "api_server")
+            db.delete_sessions(["hidden"])
+            db.delete_session("other")
+    for home, store in zip(homes, interface.opened[-len(homes):]):
+        root = str((home / "cache" / "documents" / "native-inputs").resolve())
+        roots = {call[-1] for call in store.calls if call[0] in ("delete", "delete_many")}
+        assert roots == {root}
 
 
 def test_a_note_and_an_archive_go_through_the_stores_own_verbs(store_module, interface, tmp_path):

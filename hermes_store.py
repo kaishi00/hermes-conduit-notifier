@@ -165,9 +165,16 @@ def service_call(call: Callable[..., Any], target: Any, **fields: Any) -> Any:
     return room_call(call, target.db_path, **fields)
 
 
-def _media_root() -> str:
-    """The profile's retained media root, as Hermes' own delete resolves it."""
-    return str(_hermes("gateway.session_ingress_media").native_inputs_root())
+def _media_root(home: Path) -> str:
+    """The retained media root of the profile at ``home`` (``<documents
+    cache>/native-inputs``, resolved), as Hermes' ``native_inputs_root`` names
+    it for its own profile. A delete hands it to Hermes, whose hosted-document
+    fence retires only the files under it, so it must be the store's own
+    profile's: Hermes' resolver reads the ambient home, which off the turn
+    thread or in a cleanup over every agent's home is another profile's, and
+    that profile's files would go while its own leak (notifier#945)."""
+    cache = _hermes("hermes_constants").get_hermes_dir("cache/documents", "document_cache", home=Path(home))
+    return str((Path(cache) / "native-inputs").resolve())
 
 
 class _Store:
@@ -234,7 +241,7 @@ class _Store:
         return self._handle.sessions.set_hidden(session_id, hidden)
 
     def delete_session(self, session_id: str) -> bool:
-        return bool(self._removed(self._handle.sessions.delete(session_id, media_root=_media_root()),
+        return bool(self._removed(self._handle.sessions.delete(session_id, media_root=self._media_root()),
                                   primary=session_id))
 
     def delete_sessions(self, session_ids: list, sessions_dir: Optional[Path] = None,
@@ -242,11 +249,14 @@ class _Store:
                         include_compression_chain: bool = False) -> int:
         outcome = self._handle.sessions.delete_many(
             list(session_ids), skip_guarded=exclude_active_write_guards,
-            include_compression_chain=include_compression_chain, media_root=_media_root())
+            include_compression_chain=include_compression_chain, media_root=self._media_root())
         self._removed(outcome.removed_ids, sessions_dir=sessions_dir)
         if skipped_ids is not None:
             skipped_ids.extend(outcome.skipped_guarded)
         return outcome.deleted
+
+    def _media_root(self) -> str:
+        return _media_root(self._handle.scope.profile_dir)
 
     def _removed(self, removed_ids: Any, *, primary: Optional[str] = None,
                  sessions_dir: Optional[Path] = None) -> Any:
