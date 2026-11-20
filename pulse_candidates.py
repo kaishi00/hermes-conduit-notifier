@@ -77,8 +77,14 @@ ASKED_KINDS = ("watch",)
 SOURCES = ("chat", "calendar", "reminders", "notes", "jobs", "tools")
 AREAS = ("work", "personal", "health", "home", "money", "social", "travel", "other")
 # The model call's room: what it reads (about the report turn's), and its answer.
+# A verbose model, or one that thinks first (its thinking counts), overran
+# 6,000 and every report it made was cut off (notifier issue 947). A reply
+# cut off at its limit is asked once more for fewer found entries, with more
+# room (CutOff); a provider that refuses that much room fails only the retry.
 CONTEXT_BUDGET = 14_000
-REPLY_TOKENS = 6_000
+REPLY_TOKENS = 8_000
+RETRY_REPLY_TOKENS = 16_000
+RETRY_FOUND = 5
 JOURNAL_DAYS = 30
 # A floor comes up whatever learning says, at least on the screen: a promise
 # Hermes made that's overdue, or a commitment (or something the user asked
@@ -108,6 +114,12 @@ SCHEMA = {"type": "object", "properties": {"remembered": {}, "found": {}}}
 class BadReply(ValueError):
     """The model's answer isn't a candidate list (no JSON object, or cut
     off): asked once more, then that report is skipped."""
+
+
+class CutOff(BadReply):
+    """The model's answer ran out of room before its JSON closed: asked once
+    more for fewer found entries (RETRY_FOUND), with more room
+    (RETRY_REPLY_TOKENS)."""
 
 INSTRUCTIONS = """You pick what Pulse brings up. Pulse is the part of Hermes (an AI assistant) that speaks up on its own: a few times a day it sends the user a short report on what's worth their attention.
 
@@ -258,16 +270,18 @@ def _kinds(kinds: Sequence[str]) -> str:
 
 
 def ask(llm: Llm, gathered: report.Gathered, *, nudge: str, note: str = "",
-        lessons: str = "", drawn: Sequence[str] = ()) -> tuple[list[dict], int]:
+        lessons: str = "", drawn: Sequence[str] = (), found: int = MAX_FOUND) -> tuple[list[dict], int]:
     """A report's candidates (``parse``), from one model call on what
     ``gathered`` holds; and the tokens it used. BadReply when the answer
-    isn't a list. ``lessons``: ``lessons_block``'s paragraph."""
+    isn't a list (``llm`` raises CutOff for one cut off). ``lessons``:
+    ``lessons_block``'s paragraph. ``found``: how many found entries to ask
+    for, at most MAX_FOUND."""
     # A fresh marker per call, so text in the context can't close the fence.
     fence = secrets.token_hex(6)
     while fence in gathered.text:
         fence = secrets.token_hex(6)
     instructions = INSTRUCTIONS.format(bar=report.BARS.get(nudge, report.BARS["balanced"]), limit=MAX_ITEMS,
-                                       found=MAX_FOUND, kinds=", ".join(report.LIST_KINDS), areas=", ".join(AREAS),
+                                       found=min(found, MAX_FOUND), kinds=", ".join(report.LIST_KINDS), areas=", ".join(AREAS),
                                        next=MAX_NEXT, lessons=lessons, picks=pulse_picks.rules(drawn))
     reply, tokens = llm(instructions + report.note_block(note),
                         TEXT.format(since=gathered.since, fence=fence, context=gathered.text), schema=SCHEMA)

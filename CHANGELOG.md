@@ -13,6 +13,12 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.187.2 (2026-11-20)
+
+### Fixes
+
+- Pulse reports no longer go missing with a model that writes long lists or thinks before it answers: its list had too little room, was cut off, and was asked again the same way. It gets more room now, and a cut-off list is asked again for less.
+
 ## 0.187.1 (2026-11-20)
 
 ### Fixes
