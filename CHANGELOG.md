@@ -13,11 +13,17 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.187.4 (2026-11-20)
+## 0.187.5 (2026-11-20)
 
 ### Fixes
 
 - A workstream a Hermes restart stops picks up again on a Hermes whose gateway runs your chats (the Webapp, or one gateway serving every bot). It was left interrupted as if you had stopped it, and Conduit's plugin page said the plugin couldn't find how Hermes stops its turns.
+
+## 0.187.4 (2026-11-20)
+
+### Fixes
+
+- A Pulse report whose list comes back unreadable but not cut off is asked again with the same room, not less; only a failed model call is retried with the smaller room, for fewer items so the list fits.
 
 ## 0.187.3 (2026-11-20)
 

@@ -1155,8 +1155,10 @@ def _report_run(home: Path, chat_id: str, run: dict) -> None:
                 if isinstance(error, candidates.CutOff):
                     # Asked the same, it overruns the same (notifier issue 947): less, with more room.
                     room, found = candidates.RETRY_REPLY_TOKENS, candidates.RETRY_FOUND
-                else:
-                    room = candidates.FALLBACK_REPLY_TOKENS  # a provider that refused 8,000 took 6,000
+                elif not isinstance(error, candidates.BadReply):
+                    # The call itself failed (a provider that refused 8,000 took 6,000); a
+                    # reply short of its limit keeps its room.
+                    room, found = candidates.FALLBACK_REPLY_TOKENS, candidates.RETRY_FOUND
                 logger.info("conduit_push: Pulse: the report's candidate list failed; asking once more",
                             exc_info=True)
         candidates.decide(pulse_store, rows, now=now, zone=zone)
