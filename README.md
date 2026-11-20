@@ -2333,6 +2333,19 @@ release helper use client-only cleanup too.
 - The chat must be live in this dashboard (404 otherwise). On a Hermes without
   the fork's parts the route falls back to its plain side question.
 
+## Background review in Helper models (plugin 0.184+)
+
+After each turn Hermes runs a background review that decides what goes into
+memory and which skills to patch, on `auxiliary.background_review`
+(`provider`, `model`, `reasoning_effort`, and `enabled`, which turns the
+per-turn review off while `/refine` keeps working). Hermes' dashboard leaves
+the slot out of its list (NousResearch/hermes-agent#157839), so
+`/api/model/auxiliary` didn't show it and `/api/model/set` refused it. The
+plugin adds it to that list on the dashboard, after Hermes' own slots, so
+Conduit's Models & providers > Helper models and Hermes' Models page show and
+set it; Conduit sets `enabled` through `/api/config`. A Hermes that lists it
+already keeps its own list.
+
 ## Step summaries for Conduit (plugin 0.137.4+)
 
 Conduit's step summaries (Settings > Chat, and a run's Explain these steps)

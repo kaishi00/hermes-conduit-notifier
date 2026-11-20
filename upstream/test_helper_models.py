@@ -67,3 +67,46 @@ def test_a_pick_lands_in_the_profile_named(dashboard):
     })
     assert status == 200, body
     assert _aux_config(second).get("model", "") == ""
+
+
+# Background review (hermes-conduit#2871): Hermes runs it after each turn on
+# `auxiliary.background_review`, which its dashboard didn't list
+# (NousResearch/hermes-agent#157839); the plugin lists it (dashboard/api/helper_models.py).
+
+def _review_row(dashboard, profile):
+    status, body = _hermes(dashboard, "GET", "/api/model/auxiliary", profile=profile)
+    assert status == 200, body
+    rows = [row for row in body["tasks"] if row["task"] == "background_review"]
+    assert len(rows) <= 1, "background_review is listed twice"
+    return rows[0] if rows else None
+
+
+def test_hermes_lists_background_review_as_a_built_in(dashboard):
+    row = _review_row(dashboard, "second")
+    assert row is not None, "background_review isn't among the helper models"
+    assert "plugin" not in row, "background_review should be a built-in row, which Conduit names"
+
+
+def test_a_background_review_pick_lands_in_the_profile_named(dashboard):
+    second = dashboard.home / "profiles" / "second"
+
+    def review(home):
+        config = yaml.safe_load((home / "config.yaml").read_text()) or {}
+        return (config.get("auxiliary") or {}).get("background_review") or {}
+
+    status, body = _hermes(dashboard, "POST", "/api/model/set", profile="second", body={
+        "scope": "auxiliary", "task": "background_review", "provider": "openrouter", "model": "review/model",
+        "reasoning_effort": "low", "confirm_expensive_model": True, "profile": "second",
+    })
+    assert status == 200, body
+    assert review(second).get("model") == "review/model"
+    assert review(second).get("reasoning_effort") == "low"
+    assert review(dashboard.home).get("model", "") == "", "The launch profile kept its own"
+    row = _review_row(dashboard, "second")
+    assert row["provider"] == "openrouter" and row["model"] == "review/model"
+
+    status, body = _hermes(dashboard, "POST", "/api/model/set", profile="second", body={
+        "scope": "auxiliary", "task": "background_review", "provider": "auto", "model": "", "profile": "second",
+    })
+    assert status == 200, body
+    assert review(second).get("model", "") == ""
